@@ -1,11 +1,37 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../i18n";
 import { useNavigationStore } from "../stores/navigationStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
 import type { ProjectSummary } from "../types/project";
+import type { BackendTask } from "../types/task";
 import { App } from "./App";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+}));
+
+function mockTask(overrides: Partial<BackendTask> = {}): BackendTask {
+  return {
+    id: "task-1",
+    taskType: "import",
+    projectId: null,
+    title: "Default task",
+    status: "queued",
+    progress: null,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    completedAt: null,
+    cancellable: true,
+    logPath: null,
+    result: null,
+    error: null,
+    ...overrides,
+  };
+}
 
 const sampleProject = (overrides: Partial<ProjectSummary> = {}): ProjectSummary => ({
   projectId: "sample",
@@ -30,6 +56,7 @@ const sampleProject = (overrides: Partial<ProjectSummary> = {}): ProjectSummary 
 });
 
 beforeEach(() => {
+  invokeMock.mockReset();
   useNavigationStore.getState().setActiveView("dashboard");
   useProjectStore.getState().setCurrentProject(
     sampleProject({
@@ -38,11 +65,7 @@ beforeEach(() => {
     }),
   );
   useTaskStore.getState().setTasks([
-    {
-      id: "task-graph-refresh",
-      title: "Refreshing graph cache",
-      status: "running",
-    },
+    mockTask({ id: "task-graph-refresh", title: "Refreshing graph cache", status: "running" }),
   ]);
   void i18next.changeLanguage("en");
 });
@@ -70,7 +93,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Graph" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Dashboard" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
 
     expect(screen.getByRole("button", { name: "Import" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("heading", { name: "Import" })).toBeInTheDocument();
@@ -98,9 +121,9 @@ describe("App", () => {
       }),
     );
     useTaskStore.getState().setTasks([
-      { id: "task-import", title: "Parsing sources", status: "running" },
-      { id: "task-lint", title: "Running local lint", status: "running" },
-      { id: "task-export", title: "Export complete", status: "succeeded" },
+      mockTask({ id: "task-import", title: "Parsing sources", status: "running" }),
+      mockTask({ id: "task-lint", title: "Running local lint", status: "running" }),
+      mockTask({ id: "task-export", title: "Export complete", status: "succeeded" }),
     ]);
 
     render(<App />);
@@ -148,5 +171,89 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(useProjectStore.getState().pendingAction).toBeUndefined();
+  });
+
+  it("requests an import preview when files are selected in the import view", async () => {
+    const preview = {
+      files: [],
+      conflicts: [],
+      summary: {
+        totalFiles: 0,
+        archivedFiles: 0,
+        duplicateFiles: 0,
+        renamedFiles: 0,
+        failedFiles: 0,
+        conflictsCount: 0,
+      },
+    };
+    invokeMock.mockResolvedValueOnce(preview);
+
+    render(<App />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    Object.defineProperty(file, "path", {
+      value: "D:/tmp/sources/notes.md",
+    });
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("preview_import", {
+        request: {
+          projectId: "sample",
+          projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+          sourcePaths: ["D:/tmp/sources/notes.md"],
+          allowDuplicates: false,
+          linkDuplicates: false,
+        },
+      });
+    });
+  });
+
+  it("confirms the current import preview and clears it after success", async () => {
+    const preview = {
+      files: [],
+      conflicts: [],
+      summary: {
+        totalFiles: 1,
+        archivedFiles: 1,
+        duplicateFiles: 0,
+        renamedFiles: 0,
+        failedFiles: 0,
+        conflictsCount: 0,
+      },
+    };
+    invokeMock
+      .mockResolvedValueOnce(preview)
+      .mockResolvedValueOnce({
+        preview,
+        confirmedAt: new Date().toISOString(),
+      });
+
+    render(<App />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    Object.defineProperty(file, "path", {
+      value: "D:/tmp/sources/notes.md",
+    });
+
+    fireEvent.change(input, { target: { files: [file] } });
+    const confirmButton = await screen.findByRole("button", { name: "Confirm & Compile" });
+    fireEvent.click(confirmButton);
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenLastCalledWith("confirm_import_preview", {
+        request: {
+          projectId: "sample",
+          projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+          preview,
+        },
+      });
+      expect(screen.queryByRole("button", { name: "Confirm & Compile" })).not.toBeInTheDocument();
+    });
   });
 });

@@ -1,12 +1,16 @@
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import { ImportView } from "../../features/import/ImportView";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
+import type { ConfirmedImport, ImportPreview } from "../../types/import";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import { LeftSidebar } from "./LeftSidebar";
 import { RightContextPanel } from "./RightContextPanel";
+import { TaskLogDrawer } from "./TaskLogDrawer";
 import { TopBar } from "./TopBar";
 
 const viewSummaryKeys: Record<AppView, string> = {
@@ -66,6 +70,7 @@ export function AppShell() {
           }}
         />
       ) : null}
+      <TaskLogDrawer />
     </div>
   );
 }
@@ -78,6 +83,51 @@ interface WorkspaceViewProps {
 function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const { t } = useTranslation();
   const actions = viewActionKeys[activeView];
+  const currentProject = useProjectStore((state) => state.currentProject);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [isConfirmingImport, setIsConfirmingImport] = useState(false);
+
+  const requestImportPreview = useCallback(
+    (files: File[]) => {
+      const sourcePaths = files
+        .map((file) => (file as File & { path?: string }).path ?? "")
+        .filter((path) => path.trim().length > 0);
+
+      if (sourcePaths.length === 0) {
+        setImportPreview(null);
+        return;
+      }
+
+      void invoke<ImportPreview>("preview_import", {
+        request: {
+          projectId: currentProject.projectId,
+          projectRootPath: currentProject.rootPath,
+          sourcePaths,
+          allowDuplicates: false,
+          linkDuplicates: false,
+        },
+      }).then(setImportPreview);
+    },
+    [currentProject.projectId, currentProject.rootPath],
+  );
+
+  const confirmImportPreview = useCallback(() => {
+    if (!importPreview) return;
+    setIsConfirmingImport(true);
+    void invoke<ConfirmedImport>("confirm_import_preview", {
+      request: {
+        projectId: currentProject.projectId,
+        projectRootPath: currentProject.rootPath,
+        preview: importPreview,
+      },
+    })
+      .then(() => {
+        setImportPreview(null);
+      })
+      .finally(() => {
+        setIsConfirmingImport(false);
+      });
+  }, [currentProject.projectId, currentProject.rootPath, importPreview]);
 
   return (
     <section className="flex h-full flex-col">
@@ -106,10 +156,10 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           <DashboardView />
         ) : activeView === "import" ? (
           <ImportView
-            preview={null}
-            isConfirming={false}
-            onRequestPreview={() => {}}
-            onConfirm={() => {}}
+            preview={importPreview}
+            isConfirming={isConfirmingImport}
+            onRequestPreview={requestImportPreview}
+            onConfirm={confirmImportPreview}
           />
         ) : (
           <div className="grid gap-3">
