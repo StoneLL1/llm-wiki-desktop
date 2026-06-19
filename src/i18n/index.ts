@@ -8,7 +8,7 @@ void i18next.use(initReactI18next).init({
     en: { translation: en },
     "zh-CN": { translation: zhCN },
   },
-  lng: "zh-CN",
+  lng: "en",
   fallbackLng: "en",
   interpolation: {
     escapeValue: false,
@@ -16,4 +16,3 @@ void i18next.use(initReactI18next).init({
 });
 
 export { i18next };
-

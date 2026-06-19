@@ -4,6 +4,7 @@
 > 格式：[YYYY-MM-DD] 模块/任务 — 完成内容摘要 — 关键决策/遗留问题。
 
 ======================================================================
+[2026-06-19] Frontend shell / Task 2 - Built Codex-like desktop shell split into top bar, left navigation, workspace outlet, right context panel, and bottom status bar with i18n labels and mutable project/task status stores - Review findings fixed; npm test, lint, build, console-log scan, and diff check completed.
 [2026-06-19] Backend contracts / Task 1 — Added backend error model, ProjectContext path boundary, confirmation and task DTOs, missing service skeletons, and time utility — Full cargo tests remain blocked by Cargo dependency resolution timeout; lightweight Rust metadata/format checks pass.
 [2026-06-19] Implementation planning — Created root IMPLEMENTATION_PLAN.md from SPEC requirements — Plan decomposes MVP into agent-ready milestones with safety gates, file ownership, checks, and acceptance criteria.
 [2026-06-19] 应用脚手架 — 建立 React/Vite 前端目录、Tauri/Rust 后端模块骨架、基础测试与配置文件 — 仅搭建文件结构和占位边界，未实现真实业务流程。

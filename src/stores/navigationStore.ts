@@ -13,11 +13,14 @@ export type AppView =
 
 interface NavigationState {
   activeView: AppView;
+  rightPanelOpen: boolean;
   setActiveView: (view: AppView) => void;
+  setRightPanelOpen: (open: boolean) => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
   activeView: "dashboard",
+  rightPanelOpen: true,
   setActiveView: (activeView) => set({ activeView }),
+  setRightPanelOpen: (rightPanelOpen) => set({ rightPanelOpen }),
 }));
-
