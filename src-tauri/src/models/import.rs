@@ -20,6 +20,7 @@ pub struct ImportPreview {
 #[serde(rename_all = "camelCase")]
 pub struct ImportFileEntry {
     pub original_name: String,
+    pub source_path: String,
     pub archived_path: String,
     pub file_type: SourceFileType,
     pub size_bytes: u64,

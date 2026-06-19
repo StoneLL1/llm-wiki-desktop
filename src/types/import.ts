@@ -51,6 +51,7 @@ export interface ImportConflict {
 
 export interface ImportFileEntry {
   originalName: string;
+  sourcePath: string;
   archivedPath: string;
   fileType: SourceFileType;
   sizeBytes: number;

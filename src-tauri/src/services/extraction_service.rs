@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::errors::BackendError;
 use crate::models::import::{ExtractResult, ExtractionStatus, SourceFileType, SourceMetadata};
 use crate::models::paths::ProjectContext;
@@ -12,13 +14,13 @@ pub struct ExtractionService;
 impl ExtractionService {
     pub fn extract_text(
         &self,
-        _context: &ProjectContext,
-        _file_store: &FileStore,
+        context: &ProjectContext,
+        file_store: &FileStore,
         source_path: &Path,
-        _output_dir: &Path,
+        output_dir: &Path,
     ) -> Result<ExtractResult, BackendError> {
         let original_name = source_path.to_string_lossy().to_string();
-        let file_type = super::import_service::ImportService::classify_file(source_path);
+        let file_type = super::import_service::classify_file(source_path);
 
         if !source_path.exists() {
             return Ok(ExtractResult {
@@ -43,6 +45,8 @@ impl ExtractionService {
 
                 let word_count = count_words(&content);
                 let preview = take_preview(&content, 500);
+                let extracted_text_path =
+                    write_extracted_text(context, file_store, source_path, output_dir, &content)?;
 
                 Ok(ExtractResult {
                     original_name,
@@ -59,7 +63,7 @@ impl ExtractionService {
                         word_count: Some(word_count),
                         language: None,
                     }),
-                    extracted_text_path: None,
+                    extracted_text_path: Some(extracted_text_path),
                     extracted_assets: vec![],
                 })
             }
@@ -73,6 +77,8 @@ impl ExtractionService {
                 let text = strip_html_tags(&content);
                 let word_count = count_words(&text);
                 let preview = take_preview(&text, 500);
+                let extracted_text_path =
+                    write_extracted_text(context, file_store, source_path, output_dir, &text)?;
 
                 Ok(ExtractResult {
                     original_name,
@@ -89,7 +95,7 @@ impl ExtractionService {
                         word_count: Some(word_count),
                         language: None,
                     }),
-                    extracted_text_path: None,
+                    extracted_text_path: Some(extracted_text_path),
                     extracted_assets: vec![],
                 })
             }
@@ -159,15 +165,18 @@ impl ExtractionService {
             .map(|path_str| {
                 let path = Path::new(path_str);
                 self.extract_text(context, file_store, path, output_dir)
-                    .unwrap_or_else(|err| ExtractResult {
-                        original_name: path_str.clone(),
-                        file_type: SourceFileType::Unknown,
-                        status: ExtractionStatus::Failed,
-                        error: Some(format!("Extraction error: {}", err.message)),
-                        text_preview: None,
-                        metadata: None,
-                        extracted_text_path: None,
-                        extracted_assets: vec![],
+                    .unwrap_or_else(|err| {
+                        let ft = super::import_service::classify_file(path);
+                        ExtractResult {
+                            original_name: path_str.clone(),
+                            file_type: ft,
+                            status: ExtractionStatus::Failed,
+                            error: Some(format!("[{}] {}", err.code, err.message)),
+                            text_preview: None,
+                            metadata: None,
+                            extracted_text_path: None,
+                            extracted_assets: vec![],
+                        }
                     })
             })
             .collect()
@@ -216,13 +225,95 @@ pub fn strip_html_tags(html: &str) -> String {
 
 pub fn extract_html_title(html: &str) -> String {
     let lower = html.to_lowercase();
-    if let Some(start) = lower.find("<title>") {
-        let start_idx = start + 7;
-        if let Some(end) = lower[start_idx..].find("</title>") {
-            return html[start_idx..start_idx + end].trim().to_string();
+    // Find <title> or <title ...>, allowing attributes/whitespace inside the opening tag.
+    let tag_start = match lower.find("<title") {
+        Some(i) => i,
+        None => return String::new(),
+    };
+    let after_tag = &lower[tag_start + 6..]; // skip "<title"
+    let (content, content_start_offset) = if after_tag.starts_with('>') {
+        // Simple <title> — skip the '>' and use rest as content
+        (&after_tag[1..], 1)
+    } else if after_tag.starts_with(' ')
+        || after_tag.starts_with('\t')
+        || after_tag.starts_with('\n')
+    {
+        // <title lang="en"> — skip attributes until '>'
+        match after_tag.find('>') {
+            Some(end) => (&after_tag[end + 1..], end + 1),
+            None => return String::new(),
         }
+    } else {
+        return String::new();
+    };
+    let content_start = tag_start + 6 + content_start_offset;
+    if let Some(end) = content.find("</title>") {
+        return html[content_start..content_start + end].trim().to_string();
     }
     String::new()
+}
+
+fn write_extracted_text(
+    context: &ProjectContext,
+    file_store: &FileStore,
+    source_path: &Path,
+    output_dir: &Path,
+    text: &str,
+) -> Result<String, BackendError> {
+    file_store.ensure_absolute_dir(output_dir)?;
+
+    let stem = source_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("source");
+    let mut hasher = Sha256::new();
+    hasher.update(source_path.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(text.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let filename = format!("{}-{}.txt", sanitize_filename(stem), &hash[..8]);
+    let output_path = output_dir.join(filename);
+
+    let relative = output_path
+        .strip_prefix(&context.root)
+        .map_err(|_| {
+            BackendError::new(
+                "EXTRACT_OUTPUT_PATH_INVALID",
+                "Extracted text path must remain inside the project root.",
+                false,
+                true,
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    if !relative.starts_with("raw/extracted/") {
+        return Err(BackendError::new(
+            "EXTRACT_OUTPUT_PATH_INVALID",
+            "Extracted text must be written under raw/extracted.",
+            false,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": relative })));
+    }
+
+    file_store.write_text_absolute(&output_path, text)?;
+    Ok(relative)
+}
+
+fn sanitize_filename(stem: &str) -> String {
+    let sanitized: String = stem
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => ch,
+        })
+        .collect();
+    if sanitized.trim().is_empty() {
+        "source".to_string()
+    } else {
+        sanitized
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +350,9 @@ mod tests {
         assert_eq!(result.status, ExtractionStatus::Extracted);
         assert!(result.text_preview.unwrap().contains("Hello"));
         assert!(result.metadata.unwrap().word_count.unwrap() > 0);
+        let extracted_path = result.extracted_text_path.unwrap();
+        assert!(extracted_path.starts_with("raw/extracted/"));
+        assert!(root.join(extracted_path).exists());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -438,5 +532,17 @@ mod tests {
     #[test]
     fn extract_html_title_returns_empty_when_missing() {
         assert_eq!(extract_html_title("<html><body>No title</body></html>"), "");
+    }
+
+    #[test]
+    fn extract_html_title_handles_attributes() {
+        let html = r#"<html><head><title lang="en">My Page</title></head><body></body></html>"#;
+        assert_eq!(extract_html_title(html), "My Page");
+    }
+
+    #[test]
+    fn extract_html_title_handles_multiline_attributes() {
+        let html = "<html><head><title\n  data-page=\"home\"\n>My Page</title></head></html>";
+        assert_eq!(extract_html_title(html), "My Page");
     }
 }

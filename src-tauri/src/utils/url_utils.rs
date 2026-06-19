@@ -1,7 +1,10 @@
 use url::Url;
 
 pub fn is_valid_url(input: &str) -> bool {
-    Url::parse(input).is_ok()
+    match Url::parse(input) {
+        Ok(url) => matches!(url.scheme(), "http" | "https"),
+        Err(_) => false,
+    }
 }
 
 pub fn normalize_url(input: &str) -> Option<String> {
@@ -29,6 +32,15 @@ mod tests {
     fn rejects_invalid_urls() {
         assert!(!is_valid_url("not-a-url"));
         assert!(!is_valid_url(""));
+    }
+
+    #[test]
+    fn rejects_dangerous_url_schemes() {
+        // Only http and https are accepted.
+        assert!(!is_valid_url("file:///etc/passwd"));
+        assert!(!is_valid_url("javascript:alert(1)"));
+        assert!(!is_valid_url("data:text/html,<script>alert(1)</script>"));
+        assert!(!is_valid_url("ftp://example.com/file"));
     }
 
     #[test]

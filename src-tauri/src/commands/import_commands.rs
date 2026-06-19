@@ -84,15 +84,13 @@ pub fn confirm_import_preview(
         PathBuf::from(&request.project_root_path),
     );
 
-    // Write import-conflicts.json to record conflict resolutions.
-    // Actual file archiving (copying sources into raw/) happens at compile
-    // time, gated by this confirmation step.
+    state
+        .import_service
+        .confirm_import(&context, &state.file_store, &request.preview)?;
+
     state
         .file_store
-        .write_json_atomic_absolute(
-            &context.app_dir.join("import-conflicts.json"),
-            &request.preview.conflicts,
-        )
+        .write_json_atomic(&context, ".app/import-conflicts.json", &request.preview)
         .map_err(|err| {
             BackendError::new("IMPORT_CONFLICT_WRITE_FAILED", err.message, true, false)
         })?;
