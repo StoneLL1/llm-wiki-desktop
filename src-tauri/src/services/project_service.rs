@@ -3,29 +3,26 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::BackendError;
 use crate::models::confirmation::{
-    ActionPreview, PendingAction, PendingActionType, RiskLevel,
+    ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
 };
+use crate::models::git::CheckpointPurpose;
 use crate::models::paths::ProjectContext;
 use crate::models::project::{
     AgentRoute, GraphState, IndexState, OpenProjectResponse, ProjectHealthReport, ProjectSummary,
     ProjectTemplate, RecentProject,
 };
 use crate::services::file_store::FileStore;
+use crate::services::git_service::GitService;
 
-const GENERAL_PURPOSE: &str =
-    include_str!("../../templates/projects/general/purpose.md");
+const GENERAL_PURPOSE: &str = include_str!("../../templates/projects/general/purpose.md");
 const GENERAL_SCHEMA: &str = include_str!("../../templates/projects/general/schema.md");
-const RESEARCH_PURPOSE: &str =
-    include_str!("../../templates/projects/research/purpose.md");
+const RESEARCH_PURPOSE: &str = include_str!("../../templates/projects/research/purpose.md");
 const RESEARCH_SCHEMA: &str = include_str!("../../templates/projects/research/schema.md");
-const READING_PURPOSE: &str =
-    include_str!("../../templates/projects/reading/purpose.md");
+const READING_PURPOSE: &str = include_str!("../../templates/projects/reading/purpose.md");
 const READING_SCHEMA: &str = include_str!("../../templates/projects/reading/schema.md");
-const GROWTH_PURPOSE: &str =
-    include_str!("../../templates/projects/personal-growth/purpose.md");
+const GROWTH_PURPOSE: &str = include_str!("../../templates/projects/personal-growth/purpose.md");
 const GROWTH_SCHEMA: &str = include_str!("../../templates/projects/personal-growth/schema.md");
-const BUSINESS_PURPOSE: &str =
-    include_str!("../../templates/projects/business/purpose.md");
+const BUSINESS_PURPOSE: &str = include_str!("../../templates/projects/business/purpose.md");
 const BUSINESS_SCHEMA: &str = include_str!("../../templates/projects/business/schema.md");
 
 const RECENT_PROJECT_FILE: &str = "recent-projects.json";
@@ -63,11 +60,7 @@ impl ProjectService {
 
         store.write_markdown(&context, "purpose.md", template_purpose(template))?;
         store.write_markdown(&context, "schema.md", template_schema(template))?;
-        store.write_markdown(
-            &context,
-            "wiki/index.md",
-            &starter_index(name),
-        )?;
+        store.write_markdown(&context, "wiki/index.md", &starter_index(name))?;
         store.write_markdown(&context, "wiki/log.md", &starter_log(name))?;
         store.write_markdown(&context, "wiki/overview.md", &starter_overview(name))?;
 
@@ -89,6 +82,7 @@ impl ProjectService {
             ".app/import-conflicts.json",
             &serde_json::json!({ "conflicts": [] }),
         )?;
+        GitService.initialize_repository(&context, "Initial wiki project")?;
 
         let mut summary = self.scan_project(&context, Some(name));
         summary.template = template;
@@ -171,8 +165,8 @@ impl ProjectService {
             IndexState::Missing
         };
         let graph_state = match fs::read_to_string(context.app_dir.join("graph-cache.json")) {
-            Ok(contents) if !contents.trim().is_empty()
-                && contents != "{\"nodes\":[],\"edges\":[]}" =>
+            Ok(contents)
+                if !contents.trim().is_empty() && contents != "{\"nodes\":[],\"edges\":[]}" =>
             {
                 GraphState::Cached
             }
@@ -181,7 +175,12 @@ impl ProjectService {
 
         let name = name_override
             .map(str::to_string)
-            .or_else(|| context.root.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .or_else(|| {
+                context
+                    .root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| "Untitled".to_string());
 
         let template = self.read_project_template(context).unwrap_or_default();
@@ -240,10 +239,8 @@ impl ProjectService {
 
     pub fn plan_folder_initialization(&self, root: &Path) -> Result<PendingAction, BackendError> {
         let loose_files = loose_top_level_files(root);
-        let affected_paths: Vec<String> = loose_files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect();
+        let affected_paths: Vec<String> =
+            loose_files.iter().map(|(name, _)| name.clone()).collect();
 
         let summary = if loose_files.is_empty() {
             "Folder is empty; only the project structure will be created.".to_string()
@@ -275,6 +272,202 @@ impl ProjectService {
             }),
             expires_at: None,
         })
+    }
+
+    pub fn confirm_folder_initialization(
+        &self,
+        root: &Path,
+        pending_action: &PendingAction,
+        expected_hashes: &[(String, String)],
+    ) -> Result<(ProjectSummary, bool), BackendError> {
+        let current_files = loose_top_level_files(root);
+        let current_paths: Vec<String> =
+            current_files.iter().map(|(path, _)| path.clone()).collect();
+        let mut expected_paths = pending_action.affected_paths.clone();
+        let mut sorted_current = current_paths.clone();
+        expected_paths.sort();
+        sorted_current.sort();
+        if expected_paths != sorted_current {
+            return Err(BackendError::new(
+                "CONFIRMATION_STATE_MISMATCH",
+                "The folder changed after confirmation was requested. Review it again before continuing.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "expectedPaths": expected_paths,
+                "currentPaths": sorted_current,
+            })));
+        }
+
+        let context = ProjectContext::new(uuid::Uuid::new_v4().to_string(), root.to_path_buf());
+        self.verify_initialization_hashes(&context, expected_hashes)?;
+
+        let git = GitService;
+        let pre_state = git.initialize_repository(&context, "Before folder initialization")?;
+        if pre_state.has_changes {
+            let _ = git.create_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "Before folder initialization",
+            )?;
+        }
+        self.ensure_skeleton(&context, &FileStore)?;
+        self.write_missing_project_files(&context)?;
+        self.archive_loose_files(&context, &current_files)?;
+        let _ = git.create_checkpoint(
+            &context,
+            CheckpointPurpose::FinalResult,
+            "Initialize wiki project structure",
+        )?;
+
+        let mut summary = self.scan_project(&context, None);
+        summary.health.is_wiki_project = true;
+        let checkpoint_exists = git.repository_status(&context)?.head.is_some();
+        Ok((summary, checkpoint_exists))
+    }
+
+    pub fn folder_initialization_execution(
+        &self,
+        root: &Path,
+        pending_action: &PendingAction,
+    ) -> Result<ConfirmationExecution, BackendError> {
+        let context = ProjectContext::new(uuid::Uuid::new_v4().to_string(), root.to_path_buf());
+        let store = FileStore;
+        let mut file_hashes = Vec::new();
+        for relative_path in &pending_action.affected_paths {
+            file_hashes.push((
+                relative_path.clone(),
+                store.file_hash(&context, relative_path)?,
+            ));
+        }
+        Ok(ConfirmationExecution::InitializeFolder {
+            root_path: root.to_string_lossy().to_string(),
+            file_hashes,
+        })
+    }
+
+    fn verify_initialization_hashes(
+        &self,
+        context: &ProjectContext,
+        expected_hashes: &[(String, String)],
+    ) -> Result<(), BackendError> {
+        let store = FileStore;
+        for (relative_path, expected_hash) in expected_hashes {
+            let current_hash = store.file_hash(context, relative_path)?;
+            if &current_hash != expected_hash {
+                return Err(BackendError::new(
+                    "CONFIRMATION_STATE_MISMATCH",
+                    "A file changed after confirmation was requested. Review the action again.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "path": relative_path,
+                    "expectedHash": expected_hash,
+                    "currentHash": current_hash,
+                })));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_missing_project_files(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        let store = FileStore;
+        if !context.root.join("purpose.md").exists() {
+            store.write_markdown(
+                context,
+                "purpose.md",
+                template_purpose(ProjectTemplate::General),
+            )?;
+        }
+        if !context.root.join("schema.md").exists() {
+            store.write_markdown(
+                context,
+                "schema.md",
+                template_schema(ProjectTemplate::General),
+            )?;
+        }
+        for (path, contents) in [
+            ("wiki/index.md", starter_index("Wiki Project")),
+            ("wiki/log.md", starter_log("Wiki Project")),
+            ("wiki/overview.md", starter_overview("Wiki Project")),
+        ] {
+            if !context.resolve_project_path(path)?.exists() {
+                store.write_markdown(context, path, &contents)?;
+            }
+        }
+        store.write_json_atomic(
+            context,
+            ".app/settings.json",
+            &ProjectSettings {
+                template: ProjectTemplate::General,
+            },
+        )?;
+        store.write_json_atomic(context, ".app/agent-config.json", &serde_json::json!({}))?;
+        store.write_json_atomic(
+            context,
+            ".app/bookmarks.json",
+            &serde_json::json!({ "bookmarks": [] }),
+        )?;
+        store.write_json_atomic(
+            context,
+            ".app/graph-cache.json",
+            &serde_json::json!({ "nodes": [], "edges": [] }),
+        )?;
+        store.write_json_atomic(
+            context,
+            ".app/import-conflicts.json",
+            &serde_json::json!({ "conflicts": [] }),
+        )?;
+        Ok(())
+    }
+
+    fn archive_loose_files(
+        &self,
+        context: &ProjectContext,
+        files: &[(String, String)],
+    ) -> Result<(), BackendError> {
+        for (relative_source, target_dir) in files {
+            let source = context.resolve_project_path(relative_source)?;
+            if !source.exists() {
+                return Err(BackendError::new(
+                    "CONFIRMATION_STATE_MISMATCH",
+                    "A file listed in the pending action no longer exists.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": relative_source })));
+            }
+            let file_name = source
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "FILE_NAME_INVALID",
+                        "Cannot archive a path without a file name.",
+                        true,
+                        true,
+                    )
+                })?;
+            let target_relative = unique_archive_target(context, target_dir, &file_name)?;
+            let target = context.resolve_project_path(&target_relative)?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    BackendError::new("FILE_DIR_CREATE_FAILED", err.to_string(), true, false)
+                        .with_details(serde_json::json!({ "path": parent.to_string_lossy() }))
+                })?;
+            }
+            fs::rename(&source, &target).map_err(|err| {
+                BackendError::new("FILE_MOVE_FAILED", err.to_string(), true, false).with_details(
+                    serde_json::json!({
+                        "from": source.to_string_lossy(),
+                        "to": target.to_string_lossy(),
+                    }),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     fn recent_projects_path(&self) -> PathBuf {
@@ -365,9 +558,7 @@ fn starter_index(name: &str) -> String {
 }
 
 fn starter_log(name: &str) -> String {
-    format!(
-        "# Log\n\n> Append-only operation history for {name}.\n\n- Project initialized.\n"
-    )
+    format!("# Log\n\n> Append-only operation history for {name}.\n\n- Project initialized.\n")
 }
 
 fn starter_overview(name: &str) -> String {
@@ -386,7 +577,9 @@ fn validate_root_for_creation(root_path: &str) -> Result<PathBuf, BackendError> 
         ));
     }
     let root = PathBuf::from(root_path);
-    let parent = root.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
     if let Some(parent) = parent {
         if !parent.exists() {
             return Err(BackendError::new(
@@ -457,9 +650,9 @@ fn has_child_named(root: &Path, expected: &str) -> bool {
     let expected_lower = expected.to_ascii_lowercase();
     fs::read_dir(root)
         .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .any(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase() == expected_lower)
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.file_name().to_string_lossy().to_ascii_lowercase() == expected_lower
+            })
         })
         .unwrap_or(false)
 }
@@ -519,8 +712,47 @@ fn archive_target_for(path: &Path) -> String {
     }
 }
 
+fn unique_archive_target(
+    context: &ProjectContext,
+    target_dir: &str,
+    file_name: &str,
+) -> Result<String, BackendError> {
+    let clean_dir = target_dir.trim_end_matches('/');
+    let candidate = format!("{clean_dir}/{file_name}");
+    if !context.resolve_project_path(&candidate)?.exists() {
+        return Ok(candidate);
+    }
+
+    let source_name = Path::new(file_name);
+    let stem = source_name
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_name.to_string());
+    let extension = source_name
+        .extension()
+        .map(|value| format!(".{}", value.to_string_lossy()))
+        .unwrap_or_default();
+
+    for index in 1..1000 {
+        let candidate = format!("{clean_dir}/{stem}-{index}{extension}");
+        if !context.resolve_project_path(&candidate)?.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(BackendError::new(
+        "FILE_ARCHIVE_TARGET_UNAVAILABLE",
+        "Could not find a safe archive target for the file.",
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({ "fileName": file_name })))
+}
+
 fn normalize_root_key(path: &str) -> String {
-    path.trim_end_matches(['/', '\\']).replace('\\', "/").to_ascii_lowercase()
+    path.trim_end_matches(['/', '\\'])
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 fn default_config_dir() -> PathBuf {
@@ -539,8 +771,11 @@ fn default_config_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::ProjectService;
+    use crate::models::confirmation::ConfirmationExecution;
     use crate::models::confirmation::{PendingActionType, RiskLevel};
+    use crate::models::paths::ProjectContext;
     use crate::models::project::{IndexState, ProjectTemplate};
+    use crate::services::GitService;
     use std::fs;
     use std::path::PathBuf;
 
@@ -629,6 +864,10 @@ mod tests {
         assert_eq!(summary.template, ProjectTemplate::Research);
         assert_eq!(summary.wiki_page_count, 3); // index.md, log.md, overview.md
         assert!(summary.health.is_wiki_project);
+        assert!(
+            target.join(".git").exists(),
+            "new projects must initialize Git"
+        );
 
         let recents = service.list_recent_projects().unwrap_or_default();
         let _ = recents;
@@ -664,7 +903,9 @@ mod tests {
         fs::create_dir_all(root.join("concepts")).unwrap();
         fs::write(root.join("concepts").join("agent.md"), "# Agent").unwrap();
 
-        let outcome = service.open_project(root.to_string_lossy().as_ref()).unwrap();
+        let outcome = service
+            .open_project(root.to_string_lossy().as_ref())
+            .unwrap();
         match outcome {
             crate::models::project::OpenProjectResponse {
                 kind: crate::models::project::OpenProjectKind::Opened,
@@ -691,7 +932,9 @@ mod tests {
         fs::create_dir_all(root.join("notes")).unwrap();
         fs::write(root.join("notes").join("deep.docx"), "doc").unwrap();
 
-        let outcome = service.open_project(root.to_string_lossy().as_ref()).unwrap();
+        let outcome = service
+            .open_project(root.to_string_lossy().as_ref())
+            .unwrap();
         let pending = match outcome {
             crate::models::project::OpenProjectResponse {
                 kind: crate::models::project::OpenProjectKind::NeedsConfirmation,
@@ -707,11 +950,116 @@ mod tests {
         assert!(pending.affected_paths.contains(&"note.md".to_string()));
         // Nested files must appear so the preview never understates what a later
         // organize step would relocate.
-        assert!(pending.affected_paths.contains(&"notes/deep.docx".to_string()));
+        assert!(pending
+            .affected_paths
+            .contains(&"notes/deep.docx".to_string()));
         // Critical: nothing moved before confirmation.
         assert!(root.join("report.pdf").exists());
         assert!(root.join("note.md").exists());
         assert!(!root.join("raw").exists());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn confirm_folder_initialization_revalidates_state_and_initializes_git_project() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("confirm-ordinary");
+        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(root.join("notes").join("deep.docx"), "doc").unwrap();
+
+        let pending = service.plan_folder_initialization(&root).unwrap();
+        let execution = service
+            .folder_initialization_execution(&root, &pending)
+            .unwrap();
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        let (summary, checkpoint_exists) = service
+            .confirm_folder_initialization(&root, &pending, &file_hashes)
+            .expect("confirmation should initialize the folder");
+
+        assert!(checkpoint_exists);
+        assert!(root.join(".git").exists());
+        assert!(root.join("purpose.md").exists());
+        assert!(root.join("raw/sources/pdfs/report.pdf").exists());
+        assert!(root.join("raw/sources/docs/deep.docx").exists());
+        assert!(!root.join("report.pdf").exists());
+        assert!(summary.health.is_wiki_project);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn confirm_folder_initialization_rejects_state_mismatch() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("confirm-mismatch");
+        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
+        let pending = service.plan_folder_initialization(&root).unwrap();
+        let execution = service
+            .folder_initialization_execution(&root, &pending)
+            .unwrap();
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        fs::write(root.join("new.md"), "# new").unwrap();
+
+        let err = service
+            .confirm_folder_initialization(&root, &pending, &file_hashes)
+            .expect_err("changed folder state must fail safely");
+        assert_eq!(err.code, "CONFIRMATION_STATE_MISMATCH");
+        assert!(root.join("report.pdf").exists());
+        assert!(root.join("new.md").exists());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn confirm_folder_initialization_rejects_same_path_content_change() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("confirm-content-mismatch");
+        fs::write(root.join("report.pdf"), "first").unwrap();
+        let pending = service.plan_folder_initialization(&root).unwrap();
+        let execution = service
+            .folder_initialization_execution(&root, &pending)
+            .unwrap();
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        fs::write(root.join("report.pdf"), "changed").unwrap();
+
+        let err = service
+            .confirm_folder_initialization(&root, &pending, &file_hashes)
+            .expect_err("same-path content changes must fail safely");
+        assert_eq!(err.code, "CONFIRMATION_STATE_MISMATCH");
+        assert!(root.join("report.pdf").exists());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn confirm_folder_initialization_checkpoints_existing_dirty_repo_before_changes() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("confirm-dirty-repo");
+        fs::write(root.join("existing.md"), "# existing").unwrap();
+        let context = ProjectContext::new("project-1", root.clone());
+        GitService
+            .initialize_repository(&context, "Initial external repo")
+            .unwrap();
+        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
+
+        let pending = service.plan_folder_initialization(&root).unwrap();
+        let execution = service
+            .folder_initialization_execution(&root, &pending)
+            .unwrap();
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        service
+            .confirm_folder_initialization(&root, &pending, &file_hashes)
+            .unwrap();
+
+        let log = std::process::Command::new("git")
+            .args(["log", "--oneline", "--format=%s"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let subjects = String::from_utf8_lossy(&log.stdout);
+        assert!(subjects.contains("Before folder initialization"));
+        assert!(subjects.contains("Initialize wiki project structure"));
 
         fs::remove_dir_all(root).ok();
     }
@@ -774,7 +1122,9 @@ mod tests {
             return;
         }
         let (service, _config) = service_in_temp();
-        let outcome = service.open_project(sample.to_string_lossy().as_ref()).unwrap();
+        let outcome = service
+            .open_project(sample.to_string_lossy().as_ref())
+            .unwrap();
         match outcome {
             crate::models::project::OpenProjectResponse {
                 kind: crate::models::project::OpenProjectKind::Opened,
@@ -783,7 +1133,11 @@ mod tests {
             } => {
                 assert!(summary.health.is_wiki_project);
                 assert!(summary.health.has_obsidian);
-                assert!(summary.wiki_page_count > 100, "sample page count {}", summary.wiki_page_count);
+                assert!(
+                    summary.wiki_page_count > 100,
+                    "sample page count {}",
+                    summary.wiki_page_count
+                );
             }
             _ => panic!("sample wiki should open as a compatible project"),
         }

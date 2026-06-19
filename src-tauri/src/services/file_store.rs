@@ -1,21 +1,36 @@
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
+use crate::utils::path_utils::normalize_project_path;
 
 #[derive(Default)]
 pub struct FileStore;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "hash")]
+pub enum WriteMode {
+    CreateNew,
+    OverwriteIfHashMatches(String),
+}
+
 impl FileStore {
     pub fn exists(&self, context: &ProjectContext, relative_path: &str) -> bool {
-        context.resolve_project_path(relative_path)
+        context
+            .resolve_project_path(relative_path)
             .map(|path| path.exists())
             .unwrap_or(false)
     }
 
-    pub fn ensure_dir(&self, context: &ProjectContext, relative_path: &str) -> Result<(), BackendError> {
+    pub fn ensure_dir(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+    ) -> Result<(), BackendError> {
         let path = context.resolve_project_path(relative_path)?;
         fs::create_dir_all(&path).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, &path))
     }
@@ -24,7 +39,11 @@ impl FileStore {
         fs::create_dir_all(path).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, path))
     }
 
-    pub fn read_markdown(&self, context: &ProjectContext, relative_path: &str) -> Result<String, BackendError> {
+    pub fn read_markdown(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+    ) -> Result<String, BackendError> {
         let path = context.resolve_project_path(relative_path)?;
         fs::read_to_string(&path).map_err(|err| io_error("FILE_READ_FAILED", err, &path))
     }
@@ -39,6 +58,18 @@ impl FileStore {
         write_text(&path, contents)
     }
 
+    pub fn write_markdown_checked(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        contents: &str,
+        mode: WriteMode,
+    ) -> Result<(), BackendError> {
+        let path = context.resolve_project_path(relative_path)?;
+        self.verify_write_mode(&path, relative_path, mode)?;
+        write_text(&path, contents)
+    }
+
     pub fn write_text_absolute(&self, path: &Path, contents: &str) -> Result<(), BackendError> {
         write_text(path, contents)
     }
@@ -49,16 +80,22 @@ impl FileStore {
         relative_path: &str,
     ) -> Result<T, BackendError> {
         let raw = self.read_markdown(context, relative_path)?;
-        serde_json::from_str(&raw)
-            .map_err(|err| BackendError::new("JSON_PARSE_FAILED", err.to_string(), true, false)
-                .with_details(serde_json::json!({ "path": relative_path })))
+        serde_json::from_str(&raw).map_err(|err| {
+            BackendError::new("JSON_PARSE_FAILED", err.to_string(), true, false)
+                .with_details(serde_json::json!({ "path": relative_path }))
+        })
     }
 
-    pub fn read_json_file<T: serde::de::DeserializeOwned>(&self, path: &Path) -> Result<T, BackendError> {
-        let raw = fs::read_to_string(path).map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
-        serde_json::from_str(&raw)
-            .map_err(|err| BackendError::new("JSON_PARSE_FAILED", err.to_string(), true, false)
-                .with_details(serde_json::json!({ "path": path.to_string_lossy() })))
+    pub fn read_json_file<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &Path,
+    ) -> Result<T, BackendError> {
+        let raw =
+            fs::read_to_string(path).map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
+        serde_json::from_str(&raw).map_err(|err| {
+            BackendError::new("JSON_PARSE_FAILED", err.to_string(), true, false)
+                .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
+        })
     }
 
     pub fn write_json_atomic<T: serde::Serialize>(
@@ -68,8 +105,24 @@ impl FileStore {
         value: &T,
     ) -> Result<(), BackendError> {
         let path = context.resolve_project_path(relative_path)?;
-        let serialized = serde_json::to_string_pretty(value)
-            .map_err(|err| BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false))?;
+        let serialized = serde_json::to_string_pretty(value).map_err(|err| {
+            BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
+        })?;
+        write_atomic(&path, serialized.as_bytes())
+    }
+
+    pub fn write_json_atomic_checked<T: serde::Serialize>(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        value: &T,
+        mode: WriteMode,
+    ) -> Result<(), BackendError> {
+        let path = context.resolve_project_path(relative_path)?;
+        self.verify_write_mode(&path, relative_path, mode)?;
+        let serialized = serde_json::to_string_pretty(value).map_err(|err| {
+            BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
+        })?;
         write_atomic(&path, serialized.as_bytes())
     }
 
@@ -78,8 +131,9 @@ impl FileStore {
         path: &Path,
         value: &T,
     ) -> Result<(), BackendError> {
-        let serialized = serde_json::to_string_pretty(value)
-            .map_err(|err| BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false))?;
+        let serialized = serde_json::to_string_pretty(value).map_err(|err| {
+            BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
+        })?;
         write_atomic(path, serialized.as_bytes())
     }
 
@@ -93,18 +147,101 @@ impl FileStore {
         results.sort();
         Ok(results)
     }
+
+    pub fn file_hash(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+    ) -> Result<String, BackendError> {
+        let path = context.resolve_project_path(relative_path)?;
+        hash_file(&path)
+    }
+
+    pub fn assert_unique_project_paths(&self, paths: &[&str]) -> Result<(), BackendError> {
+        let mut seen = HashSet::new();
+        for path in paths {
+            let normalized = normalize_project_path(path).to_ascii_lowercase();
+            if !seen.insert(normalized.clone()) {
+                return Err(BackendError::new(
+                    "FILE_DUPLICATE_PATH",
+                    "The same project path was provided more than once.",
+                    false,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": normalized })));
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_write_mode(
+        &self,
+        path: &Path,
+        relative_path: &str,
+        mode: WriteMode,
+    ) -> Result<(), BackendError> {
+        match mode {
+            WriteMode::CreateNew if path.exists() => Err(BackendError::new(
+                "FILE_ALREADY_EXISTS",
+                "File already exists and cannot be overwritten without an explicit hash match.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": relative_path }))),
+            WriteMode::CreateNew => Ok(()),
+            WriteMode::OverwriteIfHashMatches(expected_hash) => {
+                if !path.exists() {
+                    return Err(BackendError::new(
+                        "FILE_NOT_FOUND",
+                        "Cannot overwrite a missing file.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "path": relative_path })));
+                }
+                let current_hash = hash_file(path)?;
+                if current_hash != expected_hash {
+                    return Err(BackendError::new(
+                        "FILE_HASH_MISMATCH",
+                        "File changed since it was last read. Reload before overwriting.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({
+                        "path": relative_path,
+                        "expectedHash": expected_hash,
+                        "currentHash": current_hash,
+                    })));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn hash_file(path: &Path) -> Result<String, BackendError> {
+    let bytes = fs::read(path).map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn write_text(path: &Path, contents: &str) -> Result<(), BackendError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
     }
     write_atomic(path, contents.as_bytes())
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
     let parent = path.parent().ok_or_else(|| {
-        BackendError::new("PATH_INVALID", "Cannot determine parent directory.", false, true)
+        BackendError::new(
+            "PATH_INVALID",
+            "Cannot determine parent directory.",
+            false,
+            true,
+        )
     })?;
     fs::create_dir_all(parent).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
 
@@ -157,7 +294,7 @@ fn io_error(code: &str, err: std::io::Error, path: &Path) -> BackendError {
 
 #[cfg(test)]
 mod tests {
-    use super::FileStore;
+    use super::{FileStore, WriteMode};
     use crate::models::paths::ProjectContext;
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
@@ -200,16 +337,33 @@ mod tests {
         let store = FileStore;
 
         store
-            .write_json_atomic(&context, ".app/settings.json", &Sample { name: "zh".into(), count: 7 })
+            .write_json_atomic(
+                &context,
+                ".app/settings.json",
+                &Sample {
+                    name: "zh".into(),
+                    count: 7,
+                },
+            )
             .unwrap();
 
         let back: Sample = store.read_json(&context, ".app/settings.json").unwrap();
-        assert_eq!(back, Sample { name: "zh".into(), count: 7 });
+        assert_eq!(
+            back,
+            Sample {
+                name: "zh".into(),
+                count: 7
+            }
+        );
         // No leftover temp files.
-        let entries = std::fs::read_dir(context.app_dir.join("settings.json").parent().unwrap()).unwrap();
+        let entries =
+            std::fs::read_dir(context.app_dir.join("settings.json").parent().unwrap()).unwrap();
         for entry in entries {
             let name = entry.unwrap().file_name();
-            assert!(!name.to_string_lossy().contains(".tmp"), "temp file leaked: {name:?}");
+            assert!(
+                !name.to_string_lossy().contains(".tmp"),
+                "temp file leaked: {name:?}"
+            );
         }
 
         std::fs::remove_dir_all(root).unwrap();
@@ -230,13 +384,124 @@ mod tests {
     }
 
     #[test]
+    fn safe_markdown_write_rejects_silent_overwrite_without_matching_hash() {
+        let (context, root) = tmp_context("overwrite-md");
+        let store = FileStore;
+
+        store
+            .write_markdown_checked(
+                &context,
+                "wiki/notes/agent.md",
+                "# First",
+                WriteMode::CreateNew,
+            )
+            .unwrap();
+
+        let err = store
+            .write_markdown_checked(
+                &context,
+                "wiki/notes/agent.md",
+                "# Second",
+                WriteMode::CreateNew,
+            )
+            .expect_err("existing files require an explicit overwrite mode");
+        assert_eq!(err.code, "FILE_ALREADY_EXISTS");
+        assert_eq!(
+            store
+                .read_markdown(&context, "wiki/notes/agent.md")
+                .unwrap(),
+            "# First"
+        );
+
+        let stale_hash = "stale-hash".to_string();
+        let err = store
+            .write_markdown_checked(
+                &context,
+                "wiki/notes/agent.md",
+                "# Second",
+                WriteMode::OverwriteIfHashMatches(stale_hash),
+            )
+            .expect_err("stale overwrite hashes must be rejected");
+        assert_eq!(err.code, "FILE_HASH_MISMATCH");
+
+        let current_hash = store.file_hash(&context, "wiki/notes/agent.md").unwrap();
+        store
+            .write_markdown_checked(
+                &context,
+                "wiki/notes/agent.md",
+                "# Second",
+                WriteMode::OverwriteIfHashMatches(current_hash),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .read_markdown(&context, "wiki/notes/agent.md")
+                .unwrap(),
+            "# Second"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn safe_json_write_rejects_duplicate_paths_after_normalization() {
+        let (context, root) = tmp_context("duplicate-json");
+        let store = FileStore;
+
+        let err = store
+            .assert_unique_project_paths(&[".app/settings.json", ".app\\settings.json"])
+            .expect_err("normalized duplicate paths must be rejected");
+        assert_eq!(err.code, "FILE_DUPLICATE_PATH");
+
+        store
+            .write_json_atomic_checked(
+                &context,
+                ".app/settings.json",
+                &Sample {
+                    name: "zh".into(),
+                    count: 1,
+                },
+                WriteMode::CreateNew,
+            )
+            .unwrap();
+        let current_hash = store.file_hash(&context, ".app/settings.json").unwrap();
+        store
+            .write_json_atomic_checked(
+                &context,
+                ".app/settings.json",
+                &Sample {
+                    name: "en".into(),
+                    count: 2,
+                },
+                WriteMode::OverwriteIfHashMatches(current_hash),
+            )
+            .unwrap();
+        let back: Sample = store.read_json(&context, ".app/settings.json").unwrap();
+        assert_eq!(
+            back,
+            Sample {
+                name: "en".into(),
+                count: 2
+            }
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn enumerates_markdown_skipping_obsidian_and_app_state() {
         let (context, root) = tmp_context("enum");
         let store = FileStore;
 
-        store.write_markdown(&context, "wiki/concepts/agent.md", "a").unwrap();
-        store.write_markdown(&context, "wiki/index.md", "i").unwrap();
-        store.write_markdown(&context, "wiki/.obsidian/app.md", "obsidian").unwrap();
+        store
+            .write_markdown(&context, "wiki/concepts/agent.md", "a")
+            .unwrap();
+        store
+            .write_markdown(&context, "wiki/index.md", "i")
+            .unwrap();
+        store
+            .write_markdown(&context, "wiki/.obsidian/app.md", "obsidian")
+            .unwrap();
         std::fs::create_dir_all(root.join("wiki/.obsidian")).ok();
         std::fs::write(root.join("wiki/.obsidian/app.md"), "obsidian").unwrap();
         std::fs::create_dir_all(context.app_dir.join("tasks")).unwrap();
@@ -245,7 +510,12 @@ mod tests {
         let files = store.list_markdown_files(&context.wiki_dir).unwrap();
         let relative: Vec<String> = files
             .iter()
-            .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"))
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
 
         assert!(relative.contains(&"wiki/concepts/agent.md".to_string()));

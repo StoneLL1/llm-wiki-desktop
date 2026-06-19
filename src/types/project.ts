@@ -1,3 +1,7 @@
+import type { PendingAction } from "./backend";
+
+export type { PendingAction };
+
 export type ProjectTemplate =
   | "general"
   | "research"
@@ -10,8 +14,6 @@ export type IndexState = "indexed" | "stale" | "missing";
 export type GraphState = "cached" | "stale" | "missing";
 
 export type AgentRoute = "agent" | "byok" | "unconfigured";
-
-export type RiskLevel = "low" | "medium" | "high" | "destructive";
 
 export interface ProjectHealthReport {
   isWikiProject: boolean;
@@ -42,24 +44,6 @@ export interface RecentProject {
   rootPath: string;
   template: ProjectTemplate;
   openedAt: string;
-}
-
-export interface ActionPreview {
-  summary: string;
-  before?: string | null;
-  after?: string | null;
-  diff?: string | null;
-}
-
-export interface PendingAction {
-  id: string;
-  actionType: string;
-  title: string;
-  message: string;
-  riskLevel: RiskLevel;
-  affectedPaths: string[];
-  preview?: ActionPreview | null;
-  expiresAt?: string | null;
 }
 
 export type OpenProjectKind = "opened" | "needs_confirmation";
