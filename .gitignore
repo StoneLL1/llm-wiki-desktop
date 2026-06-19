@@ -1,0 +1,13 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+*.tsbuildinfo
+.claude/settings.local.json
+.vscode/
+.idea/
+*.log
+.DS_Store
+__MACOSX/
+._*
+wiki/wiki/raw/GitHubDaily/
