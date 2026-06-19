@@ -1,8 +1,10 @@
 {
   "app.title": "LLM Wiki Desktop",
   "shell.context": "上下文",
-  "shell.mainViews": "主视图",
   "shell.primaryNavigation": "主导航",
+  "shell.mainViews": "主视图",
+  "shell.workflow": "工作流",
+  "shell.projectInfo": "项目信息",
   "shell.recentPages": "最近页面",
   "shell.search": "搜索当前 Wiki",
   "shell.searchPlaceholder": "按标题、标签、类型或来源搜索页面...",
@@ -125,5 +127,16 @@
   "dashboard.recentProjects.title": "最近项目",
   "dashboard.recentProjects.empty": "暂无最近项目。",
   "dashboard.recentTasks.title": "最近任务",
-  "dashboard.recentTasks.empty": "暂无任务活动。"
+  "dashboard.recentTasks.empty": "暂无任务活动。",
+  "rightpanel.section.paths": "路径",
+  "rightpanel.section.indexState": "索引状态",
+  "rightpanel.section.route": "执行路径",
+  "rightpanel.section.tasks": "背景任务",
+  "rightpanel.path.root": "项目根",
+  "rightpanel.path.schema": "Schema",
+  "rightpanel.path.purpose": "Purpose",
+  "rightpanel.index.pages": "页面",
+  "rightpanel.index.index": "索引",
+  "rightpanel.index.graphCache": "图谱缓存",
+  "rightpanel.tasks.none": "无运行中任务"
 }

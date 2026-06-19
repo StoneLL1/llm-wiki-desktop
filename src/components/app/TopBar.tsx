@@ -11,12 +11,12 @@ export function TopBar() {
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
 
   return (
-    <header className="flex h-12 items-center gap-3 border-b border-[var(--border)] bg-[var(--background)] px-4 text-sm">
+    <header className="flex h-12 items-center gap-3 border-b border-[var(--border)] bg-[var(--background)] px-4 text-[13px]">
       <div className="flex h-full items-center gap-2 border-r border-[var(--border-subtle)] pr-3">
-        <div className="grid h-[22px] w-[22px] place-items-center rounded-[var(--radius-sm)] bg-[var(--foreground)] font-mono text-[11px] font-semibold text-white">
+        <div className="grid h-[22px] w-[22px] place-items-center rounded-[var(--radius-sm)] bg-[var(--foreground)] font-mono text-[11px] font-semibold text-[var(--text-inverse)]">
           LW
         </div>
-        <strong className="text-sm font-semibold text-[var(--text-primary)]">{t("app.title")}</strong>
+        <strong className="text-[13px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{t("app.title")}</strong>
       </div>
 
       <button

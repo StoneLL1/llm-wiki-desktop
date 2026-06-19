@@ -11,7 +11,7 @@ export function BottomStatusBar() {
   });
 
   return (
-    <footer className="flex h-7 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-3 text-[11px] text-[var(--text-muted)]">
+    <footer className="flex h-7 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-3 font-mono text-[11px] text-[var(--text-secondary)]">
       <span className="truncate font-mono">{currentProject.rootPath}</span>
       <div className="flex items-center gap-3">
         <span>{t("status.route", { route: routeLabel })}</span>
