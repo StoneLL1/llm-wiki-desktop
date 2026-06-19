@@ -44,6 +44,13 @@ impl CancellationRegistry {
         tokens.remove(task_id);
     }
 
+    /// Drop every registered token. Used when the active project changes, since
+    /// cancellation tokens are project-scoped alongside the task cache.
+    pub fn clear(&self) {
+        let mut tokens = self.tokens.write().expect("lock poisoned");
+        tokens.clear();
+    }
+
     pub fn get(&self, task_id: &str) -> Option<CancellationToken> {
         let tokens = self.tokens.read().expect("lock poisoned");
         tokens.get(task_id).cloned()

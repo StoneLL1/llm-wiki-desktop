@@ -9,6 +9,9 @@ import {
 } from "../stores/taskStore";
 import type { BackendEvent } from "../types/task";
 
+const hasTauri = (): boolean =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 const TASK_EVENT_CHANNELS = [
   "task://updated",
   "task://log",
@@ -32,6 +35,8 @@ export function useTaskEvents(): void {
   const currentProject = useProjectStore((state) => state.currentProject);
 
   useEffect(() => {
+    if (!hasTauri()) return;
+
     const unlisteners: Array<() => void> = [];
     let cancelled = false;
 
