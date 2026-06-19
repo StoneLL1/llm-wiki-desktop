@@ -113,24 +113,24 @@ export function ImportView({
         {hasPreview && (
           <div className="mt-3 flex items-center gap-4 text-[12px]">
             <span className="font-medium text-[var(--text-primary)]">
-              {preview!.summary.totalFiles} files
+              {t("import.summary.files", { count: preview!.summary.totalFiles })}
             </span>
             <span className="text-[var(--text-muted)]">
-              {preview!.summary.archivedFiles} ready
+              {t("import.summary.ready", { count: preview!.summary.archivedFiles })}
             </span>
             {preview!.summary.duplicateFiles > 0 && (
               <span className="text-[var(--warning)]">
-                {preview!.summary.duplicateFiles} duplicates
+                {t("import.summary.duplicates", { count: preview!.summary.duplicateFiles })}
               </span>
             )}
             {preview!.summary.renamedFiles > 0 && (
               <span className="text-[var(--info)]">
-                {preview!.summary.renamedFiles} renamed
+                {t("import.summary.renamed", { count: preview!.summary.renamedFiles })}
               </span>
             )}
             {preview!.summary.failedFiles > 0 && (
               <span className="text-[var(--danger)]">
-                {preview!.summary.failedFiles} failed
+                {t("import.summary.failed", { count: preview!.summary.failedFiles })}
               </span>
             )}
             <button
@@ -144,17 +144,17 @@ export function ImportView({
               }`}
               title={
                 !hasPreview
-                  ? "Preview the import first before compiling."
+                  ? t("import.compileDisabled")
                   : isConfirming
-                    ? "Confirming..."
-                    : "Confirm and prepare for compile"
+                    ? t("import.compileConfirming")
+                    : t("import.compile")
               }
             >
               {isConfirming
-                ? "Confirming..."
+                ? t("import.compileConfirming")
                 : canCompile
-                  ? "Confirm & Compile"
-                  : "Confirm disabled"}
+                  ? t("import.compile")
+                  : t("import.compileDisabled")}
             </button>
           </div>
         )}
@@ -187,7 +187,7 @@ export function ImportView({
                       {file.originalName}
                       {file.renamedFrom && (
                         <span className="ml-1 text-[11px] text-[var(--text-muted)]">
-                          → renamed
+                          → {t("import.renamedBadge")}
                         </span>
                       )}
                     </div>
@@ -222,8 +222,8 @@ export function ImportView({
           {!selectedFile ? (
             <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
               {hasPreview
-                ? "Select a file to see details."
-                : "Import sources to begin."}
+                ? t("import.selectToPreview")
+                : t("import.importToBegin")}
             </div>
           ) : (
             <div className="flex flex-col gap-3 text-[13px]">
@@ -253,18 +253,18 @@ export function ImportView({
               {selectedFile.conflict && (
                 <div className="rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-[12px]">
                   <div className="font-medium text-[var(--warning)]">
-                    Conflict: {selectedFile.conflict.conflictType.replace("_", " ")}
+                    {t("import.conflictLabel")}: {selectedFile.conflict.conflictType.replace("_", " ")}
                   </div>
                   <div className="mt-1 text-[var(--text-secondary)]">
-                    Resolved path:{" "}
+                    {t("import.resolvedPath")}:{" "}
                     <span className="font-mono">{selectedFile.conflict.resolvedPath}</span>
                   </div>
                   <div className="mt-1 text-[var(--text-muted)]">
-                    Resolution: {selectedFile.conflict.resolution?.replace("_", " ") ?? "pending"}
+                    {t("import.resolution")}: {selectedFile.conflict.resolution?.replace("_", " ") ?? "pending"}
                   </div>
                   {selectedFile.renamedFrom && (
                     <div className="mt-1 text-[var(--text-muted)]">
-                      Renamed from:{" "}
+                      {t("import.renamedFrom")}:{" "}
                       <span className="font-mono">{selectedFile.renamedFrom}</span>
                     </div>
                   )}
@@ -275,7 +275,7 @@ export function ImportView({
               {selectedFile.textPreview && (
                 <div>
                   <h4 className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)] mb-1">
-                    Text Preview
+                    {t("import.previewSection")}
                   </h4>
                   <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-[var(--border)] bg-[var(--surface)] p-2 font-mono text-[11px] leading-relaxed text-[var(--text-secondary)]">
                     {selectedFile.textPreview}
@@ -287,30 +287,30 @@ export function ImportView({
               {selectedFile.metadata && (
                 <div>
                   <h4 className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)] mb-1">
-                    Metadata
+                    {t("import.metadataSection")}
                   </h4>
                   <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-[12px]">
                     {selectedFile.metadata.title && (
                       <>
-                        <dt className="text-[var(--text-muted)]">Title</dt>
+                        <dt className="text-[var(--text-muted)]">{t("import.metaTitle")}</dt>
                         <dd className="text-[var(--text-primary)]">{selectedFile.metadata.title}</dd>
                       </>
                     )}
                     {selectedFile.metadata.author && (
                       <>
-                        <dt className="text-[var(--text-muted)]">Author</dt>
+                        <dt className="text-[var(--text-muted)]">{t("import.metaAuthor")}</dt>
                         <dd className="text-[var(--text-primary)]">{selectedFile.metadata.author}</dd>
                       </>
                     )}
                     {selectedFile.wordCount != null && (
                       <>
-                        <dt className="text-[var(--text-muted)]">Words</dt>
+                        <dt className="text-[var(--text-muted)]">{t("import.metaWords")}</dt>
                         <dd className="text-[var(--text-primary)]">{selectedFile.wordCount}</dd>
                       </>
                     )}
                     {selectedFile.pageCount != null && (
                       <>
-                        <dt className="text-[var(--text-muted)]">Pages</dt>
+                        <dt className="text-[var(--text-muted)]">{t("import.metaPages")}</dt>
                         <dd className="text-[var(--text-primary)]">{selectedFile.pageCount}</dd>
                       </>
                     )}
@@ -321,7 +321,7 @@ export function ImportView({
               {/* Hash */}
               <div>
                 <h4 className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)] mb-1">
-                  Hash
+                  {t("import.hashSection")}
                 </h4>
                 <code className="text-[11px] font-mono text-[var(--text-muted)] break-all">
                   {selectedFile.hash}
