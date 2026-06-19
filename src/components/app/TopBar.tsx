@@ -26,7 +26,7 @@ export function TopBar() {
       >
         <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={16} />
         <span className="truncate text-[13px] font-medium">{currentProject.name}</span>
-        <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{currentProject.path}</span>
+        <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{currentProject.rootPath}</span>
       </button>
 
       <label className="flex h-[30px] max-w-[520px] flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--surface-muted)] px-3 text-[13px] text-[var(--text-muted)] focus-within:bg-[var(--background)] focus-within:shadow-[0_0_0_3px_rgba(16,163,127,0.12)]">

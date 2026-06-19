@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { DashboardView } from "../../features/dashboard/DashboardView";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { LeftSidebar } from "./LeftSidebar";
@@ -83,7 +84,10 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
       </header>
 
       <div className="min-h-0 flex-1 overflow-auto p-4">
-        <div className="grid gap-3">
+        {activeView === "dashboard" ? (
+          <DashboardView />
+        ) : (
+          <div className="grid gap-3">
           <div className="panel">
             <div className="panel-header">
               <span>{t(`view.${activeView}.paneTitle`)}</span>
@@ -108,6 +112,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
             </div>
           </div>
         </div>
+        )}
       </div>
     </section>
   );

@@ -4,18 +4,39 @@ import { i18next } from "../i18n";
 import { useNavigationStore } from "../stores/navigationStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
+import type { ProjectSummary } from "../types/project";
 import { App } from "./App";
+
+const sampleProject = (overrides: Partial<ProjectSummary> = {}): ProjectSummary => ({
+  projectId: "sample",
+  name: "Agent Knowledge Base",
+  rootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+  template: "general",
+  wikiPageCount: 237,
+  sourceCount: 18,
+  taskCount: 2,
+  indexState: "indexed",
+  graphState: "cached",
+  agentRoute: "agent",
+  health: {
+    isWikiProject: true,
+    hasPurpose: true,
+    hasSchema: true,
+    hasAppState: true,
+    hasObsidian: false,
+    missingPaths: [],
+  },
+  ...overrides,
+});
 
 beforeEach(() => {
   useNavigationStore.getState().setActiveView("dashboard");
-  useProjectStore.getState().setCurrentProject({
-    name: "Agent Knowledge Base",
-    path: "D:/Users/Aletta/Documents/wiki/agent-llm",
-    wikiPageCount: 237,
-    indexState: "indexed",
-    agentRoute: "Agent",
-    byokProvider: "Anthropic",
-  });
+  useProjectStore.getState().setCurrentProject(
+    sampleProject({
+      rootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+      agentRoute: "agent",
+    }),
+  );
   useTaskStore.getState().setTasks([
     {
       id: "task-graph-refresh",
@@ -68,14 +89,14 @@ describe("App", () => {
   });
 
   it("renders status from mutable project and task stores", () => {
-    useProjectStore.getState().setCurrentProject({
-      name: "Research Wiki",
-      path: "D:/tmp/research-wiki",
-      wikiPageCount: 42,
-      indexState: "stale",
-      agentRoute: "BYOK",
-      byokProvider: "OpenAI",
-    });
+    useProjectStore.getState().setCurrentProject(
+      sampleProject({
+        rootPath: "D:/tmp/research-wiki",
+        wikiPageCount: 42,
+        indexState: "stale",
+        agentRoute: "byok",
+      }),
+    );
     useTaskStore.getState().setTasks([
       { id: "task-import", title: "Parsing sources", status: "running" },
       { id: "task-lint", title: "Running local lint", status: "running" },

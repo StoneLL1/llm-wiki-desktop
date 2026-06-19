@@ -4,6 +4,11 @@
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
 ======================================================================
+serde tagged enum `#[serde(tag="kind")]` 不 camelCase 结构变体字段 — `rename_all` 作用在 enum 的变体名上，不会渗透到 struct-variant 内部字段，导致嵌套 `pending_action` 等字段以 snake_case 外泄，前端 TS 类型对不上 — 改用「struct + `kind` 鉴别字段」结构体，并在 struct 上单独加 `#[serde(rename_all="camelCase")]`，避免在 enum 上依赖 rename_all 渗透。
+`Err(...).with_details(...)` 闭包缺右括号导致 "mismatched closing delimiter" — 写多行 `return Err(BackendError::new(...).with_details(...));` 时容易漏掉最外层 `Err(` 的闭合 `)`，rustc 报「unclosed delimiter / mismatched closing delimiter」且行号指向文件末尾 — 计数好 `Err(` 的层数，`}));` 不够就补成 `})))`。
+`include_str!` 模板路径在 Windows 上以 `CARGO_MANIFEST_DIR` 为基准 — 模板必须放在 `src-tauri/templates/...` 并用 `../../templates/...` 相对路径，移动目录时要同步改 include 路径，否则编译期报文件找不到。
+`cargo test` 默认联网解析依赖在本机超时 — 依赖已缓存时加 `--offline` 即可跑通全套测试；不要把「联网超时」误判成「代码失败」。
+======================================================================
 `npm run lint` scans `UI-Frontend-design/assets/app.js` when the open-design reference folder is present - ESLint only ignored build and dependency folders, so reference prototype JavaScript was treated as source code - Keep `UI-Frontend-design` in `eslint.config.js` ignores unless the design folder is converted into app source.
 `cargo generate-lockfile --manifest-path src-tauri/Cargo.toml -vv` also times out with no output — Cargo hangs before producing a lockfile, so the blocker is dependency resolution or registry access rather than a specific Rust test — Use `cargo metadata --no-deps` and `cargo fmt --check` for lightweight validation, stop residual cargo processes, and do not treat full Rust tests as passed until dependency resolution is fixed.
 `cargo test --manifest-path src-tauri/Cargo.toml` times out with no output and can leave cargo processes running — Rust test execution hangs in this environment before returning diagnostics; exact toolchain cause still needs investigation — When running Rust verification, use an explicit timeout, inspect `cargo` / `rustc` / `rustup` processes after timeout, stop leftovers, and report timeout separately from pass/fail.

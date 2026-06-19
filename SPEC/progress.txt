@@ -4,6 +4,7 @@
 > 格式：[YYYY-MM-DD] 模块/任务 — 完成内容摘要 — 关键决策/遗留问题。
 
 ======================================================================
+[2026-06-19] Project lifecycle / Task 3 — 实现项目生命周期（create/open/scan/list-recent/remember-recent）、5 套模板（general/research/reading/personal-growth/business 的 purpose.md+schema.md）、FileStore 原子写、普通文件夹 PendingAction（确认前不移动文件）、Dashboard 项目摘要 UI（Task 3 范围）— 关键决策：open_project 宽松判定 wiki 项目以兼容样例库与 Obsidian（.obsidian 当外部目录）；RecentProjects 用原子写 + 规范化去重 + 上限 20；scan_project 命令对路径做 canonicalize。Review 修复：archive_target_for 补 links/、count_files 只计文件、PendingAction preview 递归枚举嵌套文件（避免低估后续迁移量）、scan_project 路径规范化。31 Rust + 6 前端测试全过，lint/build 通过。残留：RecentProjects 读错时静默降级（非关键状态）、GraphState 空缓存靠字符串哨兵判定、Agent 路线硬编码 Unconfigured（待 Task 5+）。
 [2026-06-19] Frontend shell / Task 2 - Built Codex-like desktop shell split into top bar, left navigation, workspace outlet, right context panel, and bottom status bar with i18n labels and mutable project/task status stores - Review findings fixed; npm test, lint, build, console-log scan, and diff check completed.
 [2026-06-19] Backend contracts / Task 1 — Added backend error model, ProjectContext path boundary, confirmation and task DTOs, missing service skeletons, and time utility — Full cargo tests remain blocked by Cargo dependency resolution timeout; lightweight Rust metadata/format checks pass.
 [2026-06-19] Implementation planning — Created root IMPLEMENTATION_PLAN.md from SPEC requirements — Plan decomposes MVP into agent-ready milestones with safety gates, file ownership, checks, and acceptance criteria.
