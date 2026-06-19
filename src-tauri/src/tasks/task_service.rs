@@ -47,12 +47,16 @@ impl TaskService {
 
     /// Set the active project root. When set, terminal task transitions auto-persist to
     /// `<root>/.app/tasks/<id>.json`, and any previously-persisted tasks are recovered.
-    /// Pass `None` when the project is closed.
+    /// Pass `None` when the project is closed. The in-memory task cache and cancellation
+    /// registry are cleared on every call, since tasks are project-scoped — switching
+    /// projects must not leak the previous project's tasks into `list_tasks`.
     pub fn set_project_root(&self, root: Option<PathBuf>) -> Result<Vec<BackendTask>, String> {
         {
             let mut guard = self.project_root.write().expect("lock poisoned");
             *guard = root.clone();
         }
+        self.tasks.write().expect("lock poisoned").clear();
+        self.cancellation.clear();
         match root {
             Some(root_path) => self.recover_tasks(&root_path),
             None => Ok(Vec::new()),
@@ -758,6 +762,58 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_set_project_root_clears_previous_tasks() {
+        // Tasks are project-scoped: switching the active project root must not leak the
+        // previous project's in-memory tasks (or cancellation tokens) into list_tasks.
+        let proj_a = std::env::temp_dir().join("llm-wiki-task-test-isolation-a");
+        let proj_b = std::env::temp_dir().join("llm-wiki-task-test-isolation-b");
+        let _ = std::fs::remove_dir_all(&proj_a);
+        let _ = std::fs::remove_dir_all(&proj_b);
+        std::fs::create_dir_all(&proj_a).unwrap();
+        std::fs::create_dir_all(&proj_b).unwrap();
+
+        let (service, _events) = make_service();
+
+        // Activate project A and create a task there.
+        let recovered_a = service.set_project_root(Some(proj_a.clone())).unwrap();
+        assert!(recovered_a.is_empty());
+        let task_a =
+            service.create_task(TaskType::Import, None, "Project A import".to_string(), true);
+        service
+            .transition_status(&task_a.id, TaskStatus::Running)
+            .unwrap();
+        // Register a cancellation token so we can assert it is cleared too.
+        let token_a = service.get_cancellation_token(&task_a.id).unwrap();
+        assert_eq!(service.list_tasks(None).len(), 1);
+
+        // Switch to project B: cache must be cleared, no A tasks visible.
+        let recovered_b = service.set_project_root(Some(proj_b.clone())).unwrap();
+        assert!(recovered_b.is_empty());
+        assert!(service.list_tasks(None).is_empty());
+        // The previous project's cancellation token must no longer be tracked.
+        assert!(service.get_cancellation_token(&task_a.id).is_none());
+        // The shared AtomicBool behind the stale token is unaffected (still readable),
+        // but it is no longer reachable through the registry — i.e. switching projects
+        // cannot cancel the previous project's still-running work.
+        assert!(!token_a.is_cancelled());
+
+        // Create a task in project B; it must coexist with neither A task.
+        let task_b =
+            service.create_task(TaskType::Export, None, "Project B export".to_string(), true);
+        let listed = service.list_tasks(None);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, task_b.id);
+
+        // Closing the project (None) must also clear the cache.
+        let recovered_none = service.set_project_root(None).unwrap();
+        assert!(recovered_none.is_empty());
+        assert!(service.list_tasks(None).is_empty());
+
+        let _ = std::fs::remove_dir_all(&proj_a);
+        let _ = std::fs::remove_dir_all(&proj_b);
     }
 
     #[test]
