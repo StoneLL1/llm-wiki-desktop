@@ -32,7 +32,7 @@ export function RightContextPanel({ activeView }: RightContextPanelProps) {
           <dl className="mt-2 space-y-2 text-xs">
             <div>
               <dt className="text-[var(--text-muted)]">{t("status.projectPath")}</dt>
-              <dd className="m-0 truncate font-mono text-[var(--text-secondary)]">{currentProject.path}</dd>
+              <dd className="m-0 truncate font-mono text-[var(--text-secondary)]">{currentProject.rootPath}</dd>
             </div>
             <div className="flex items-center justify-between">
               <dt className="text-[var(--text-muted)]">{t("status.index")}</dt>
