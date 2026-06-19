@@ -1,0 +1,8 @@
+# 踩坑清单 (gotchas.txt)
+
+> 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
+> 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
+
+======================================================================
+`cargo test --manifest-path src-tauri/Cargo.toml` times out with no output and can leave cargo processes running — Rust test execution hangs in this environment before returning diagnostics; exact toolchain cause still needs investigation — When running Rust verification, use an explicit timeout, inspect `cargo` / `rustc` / `rustup` processes after timeout, stop leftovers, and report timeout separately from pass/fail.
+（暂无）脚手架尚未建立，待代码落地后按实际情况追加。
