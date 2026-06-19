@@ -44,7 +44,7 @@ export function AppShell() {
         <main className="min-w-0 overflow-hidden bg-[var(--background)]">
           <WorkspaceView activeView={activeView} title={title} />
         </main>
-        <RightContextPanel activeView={activeView} />
+        <RightContextPanel />
       </div>
 
       <BottomStatusBar />
@@ -63,16 +63,16 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
 
   return (
     <section className="flex h-full flex-col">
-      <header className="flex h-11 items-center gap-3 border-b border-[var(--border)] px-5">
-        <h1 className="m-0 text-xl font-semibold">{title}</h1>
-        <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{t(viewSummaryKeys[activeView])}</span>
+      <header className="flex h-[52px] items-center gap-3 border-b border-[var(--border)] px-5">
+        <h1 className="m-0 text-[16px] font-semibold tracking-[-0.01em]">{title}</h1>
+        <span className="truncate font-mono text-xs text-[var(--text-muted)]">{t(viewSummaryKeys[activeView])}</span>
         <div className="ml-auto flex items-center gap-2">
           {actions.map((actionKey, index) => (
             <button
               key={actionKey}
-              className={`h-8 rounded-[var(--radius-md)] px-3 text-xs font-medium ${
+              className={`h-[30px] rounded-[var(--radius-md)] px-3 text-[13px] font-medium ${
                 index === 0
-                  ? "bg-[var(--foreground)] text-white hover:bg-[#1a1a1a]"
+                  ? "bg-[var(--foreground)] text-[var(--text-inverse)] hover:bg-[#1a1a1a]"
                   : "border border-[var(--border)] bg-[var(--surface-raised)] hover:bg-[var(--surface-muted)]"
               }`}
               type="button"

@@ -64,6 +64,22 @@ React UI  ->  Frontend State (Zustand stores)  ->  Tauri IPC Commands (薄层，
 - **图谱首版**：每页一节点，边统一表示"相关"，不实现复杂关系类型和证据系统。布局缓存到 `.app/graph-cache.json`。
 - **i18n**：Agent 生成内容按用户语言偏好输出。
 
+## 前端设计对齐原则
+
+**权威设计源是整个 `UI-Frontend-design/` 文件夹**（不要把它当应用源码，不修改、不纳入提交）。做任何 UI 工作前，必须先参考其中的设计文件，对齐应覆盖以下维度：
+
+1. **页面布局与组件结构** — `UI-Frontend-design/dashboard.html` 定义了完整页面结构：左侧边栏三区段（主视图/工作流/最近页面 + Agent 状态脚）、右侧面板（项目信息：路径/索引状态/执行路径/背景任务）、顶栏、状态栏。页面级组件拆分、DOM 层级、aria 角色以设计 HTML 为准。
+2. **CSS token 与视觉密度** — `UI-Frontend-design/assets/app.css` 是样式权威（token、字号、间距、组件尺寸、颜色）。当前应用用 Tailwind v4 + `src/styles.css` 实现：
+   - **字号用绝对 px**：UI 正文 13px，次要 12px，muted/mono 11px，小标签 10.5px，阅读区 14–15px，标题 16/18/22/28px。写 `text-[13px]` 而非 `text-sm`。
+   - **组件高度**：顶栏 48px、主区头 52px、右面板头 52px、状态栏 28px、导航项 30px（小号 26px）、面板头 44px。
+   - **section 标签**：10.5px、大写、`letter-spacing: 0.08em`、muted 色。
+   - **token 单一来源**：颜色/圆角/字体/间距 token 只在 `src/styles.css` `:root` 定义（含 `--sp-*` 间距、`--text-inverse`）；组件只引用 token。
+3. **字体** — UI: Inter，代码/路径: JetBrains Mono，阅读: Source Serif Pro（`--font-ui/display/mono`）。通过 @fontsource 打包，不走 CDN。
+4. **交互与 JS 行为** — 设计 HTML 中的交互（侧栏导航高亮 `aria-current`、语言切换、搜索快捷键提示）应反映到 React 组件实现。
+5. **图标** — 使用 Lucide React，尺寸与设计一致（导航图标 16px，文件图标 14px 等）。
+
+未推进到的 feature 视图可暂不做，但已实现的 shell/面板必须逐项对齐上述维度。
+
 ## 任务完成检查清单（每个功能完成后强制执行）
 
 应用脚手架建好（有 `package.json`、lint、test 脚本）后，**每个任务完成后自动运行以下检查**：

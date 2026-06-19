@@ -1,8 +1,10 @@
 {
   "app.title": "LLM Wiki Desktop",
   "shell.context": "Context",
-  "shell.mainViews": "Main views",
   "shell.primaryNavigation": "Primary",
+  "shell.mainViews": "Main views",
+  "shell.workflow": "Workflow",
+  "shell.projectInfo": "Project info",
   "shell.recentPages": "Recent pages",
   "shell.search": "Search current wiki",
   "shell.searchPlaceholder": "Search pages by title, tag, type, or source...",
@@ -125,5 +127,16 @@
   "dashboard.recentProjects.title": "Recent projects",
   "dashboard.recentProjects.empty": "No recent projects yet.",
   "dashboard.recentTasks.title": "Recent tasks",
-  "dashboard.recentTasks.empty": "No recent task activity."
+  "dashboard.recentTasks.empty": "No recent task activity.",
+  "rightpanel.section.paths": "Paths",
+  "rightpanel.section.indexState": "Index state",
+  "rightpanel.section.route": "Execution route",
+  "rightpanel.section.tasks": "Background tasks",
+  "rightpanel.path.root": "Project root",
+  "rightpanel.path.schema": "Schema",
+  "rightpanel.path.purpose": "Purpose",
+  "rightpanel.index.pages": "Pages",
+  "rightpanel.index.index": "Index",
+  "rightpanel.index.graphCache": "Graph cache",
+  "rightpanel.tasks.none": "No running tasks."
 }

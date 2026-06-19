@@ -46,6 +46,20 @@ Build the app to look and feel very close to Codex desktop:
 - Use Lucide icons for controls and tooltips for icon-only buttons.
 - All text must fit in Chinese and English.
 
+### Design alignment (authoritative source: `UI-Frontend-design/` folder)
+
+The entire `UI-Frontend-design/` folder is the design spec — not just `app.css`, but HTML structure, page components, and JS behavior. Do not treat it as app source; do not modify or commit it. Before any UI work, consult:
+
+1. **Page layout & component structure** — `dashboard.html` defines the full shell: left sidebar (3 labeled sections + agent foot), right panel (project info with paths/index/route/tasks), topbar, status bar. Match DOM hierarchy, section labels, and aria roles.
+2. **CSS tokens & visual density** — `assets/app.css` is the canonical style reference. Implement in Tailwind v4 + `src/styles.css`:
+   - Font sizes in absolute px: UI body 13px, secondary 12px, muted/mono 11px, micro-labels 10.5px, reading 14–15px. Write `text-[13px]`, not `text-sm`.
+   - Component heights: topbar 48px, main header 52px, right panel header 52px, status bar 28px, nav items 30px (small 26px), panel header 44px.
+   - Section labels: 10.5px, uppercase, `letter-spacing: 0.08em`, muted.
+   - Single token source: `src/styles.css` `:root` mirrors `app.css` `:root` (including `--sp-*` spacing, `--text-inverse`); components reference tokens, never hardcode hex.
+3. **Fonts** — Inter (UI), JetBrains Mono (code/paths), Source Serif Pro (reading). Bundled via @fontsource, no CDN.
+4. **Interaction & JS** — Sidebar nav `aria-current`, language switch, search shortcut hints from the design HTML should carry into React components.
+5. **Icons** — Lucide React, sizes matching the design (nav 16px, file 14px, etc.).
+
 ## Safety And UX Boundaries
 
 - Normal folder initialization, source replacement, destructive edits, conflict merges, and Agent-generated diffs require explicit user confirmation.
