@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "LLM Wiki Desktop",
         "width": 1280,
         "height": 820,
