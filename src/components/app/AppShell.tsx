@@ -1,7 +1,9 @@
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
+import { useProjectStore } from "../../stores/projectStore";
 import { BottomStatusBar } from "./BottomStatusBar";
+import { ConfirmationDialog } from "./ConfirmationDialog";
 import { LeftSidebar } from "./LeftSidebar";
 import { RightContextPanel } from "./RightContextPanel";
 import { TopBar } from "./TopBar";
@@ -33,6 +35,9 @@ const viewActionKeys: Record<AppView, string[]> = {
 export function AppShell() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
+  const pendingAction = useProjectStore((state) => state.pendingAction);
+  const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
+  const cancelPendingAction = useProjectStore((state) => state.cancelPendingAction);
   const title = t(`nav.${activeView}`);
 
   return (
@@ -48,6 +53,18 @@ export function AppShell() {
       </div>
 
       <BottomStatusBar />
+      {pendingAction ? (
+        <ConfirmationDialog
+          action={pendingAction}
+          checkpointExists={false}
+          onCancel={() => {
+            void cancelPendingAction();
+          }}
+          onConfirm={() => {
+            void confirmPendingAction();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

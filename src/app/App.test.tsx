@@ -127,4 +127,26 @@ describe("App", () => {
 
     expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
   });
+
+  it("shows and clears pending confirmation actions from the project store", () => {
+    useProjectStore.getState().setPendingAction({
+      id: "action-1",
+      actionType: "initialize_folder",
+      title: "Initialize folder as project",
+      message: "Create the project structure and organize files.",
+      riskLevel: "medium",
+      affectedPaths: ["report.pdf"],
+      preview: null,
+      expiresAt: null,
+    });
+
+    render(<App />);
+
+    expect(screen.getByRole("dialog", { name: "Initialize folder as project" })).toBeInTheDocument();
+    expect(screen.getByText("report.pdf")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(useProjectStore.getState().pendingAction).toBeUndefined();
+  });
 });

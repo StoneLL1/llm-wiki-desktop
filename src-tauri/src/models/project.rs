@@ -274,7 +274,10 @@ mod tests {
         });
         let pending_value = serde_json::to_value(&pending).unwrap();
         assert_eq!(pending_value["kind"], json!("needs_confirmation"));
-        assert_eq!(pending_value["pendingAction"]["actionType"], json!("initialize_folder"));
+        assert_eq!(
+            pending_value["pendingAction"]["actionType"],
+            json!("initialize_folder")
+        );
         let _ = OpenProjectKind::Opened;
     }
 }

@@ -1,3 +1,4 @@
+use crate::models::confirmation::ConfirmationRegistry;
 use crate::services::{
     AgentService, ExportService, ExtractionService, FileStore, GitService, GraphService,
     ImportService, LintService, LlmService, ProjectService, SearchService, SecretService,
@@ -21,4 +22,5 @@ pub struct AppState {
     pub settings_service: SettingsService,
     pub secret_service: SecretService,
     pub task_service: TaskService,
+    pub confirmation_registry: ConfirmationRegistry,
 }

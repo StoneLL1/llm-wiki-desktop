@@ -24,17 +24,21 @@ pub fn create_project(
     state: State<'_, AppState>,
     request: CreateProjectRequest,
 ) -> Result<ProjectSummary, BackendError> {
-    let summary = state
-        .project_service
-        .create_project(&request.root_path, &request.name, request.template)?;
+    let summary = state.project_service.create_project(
+        &request.root_path,
+        &request.name,
+        request.template,
+    )?;
 
-    let recents = state.project_service.remember_recent_project(RecentProject {
-        project_id: summary.project_id.clone(),
-        name: summary.name.clone(),
-        root_path: summary.root_path.clone(),
-        template: summary.template,
-        opened_at: now_rfc3339(),
-    })?;
+    let recents = state
+        .project_service
+        .remember_recent_project(RecentProject {
+            project_id: summary.project_id.clone(),
+            name: summary.name.clone(),
+            root_path: summary.root_path.clone(),
+            template: summary.template,
+            opened_at: now_rfc3339(),
+        })?;
     let _ = recents;
     Ok(summary)
 }
@@ -58,6 +62,14 @@ pub fn open_project(
                 })?;
         }
     }
+    if let Some(pending_action) = outcome.pending_action.as_ref() {
+        let execution = state
+            .project_service
+            .folder_initialization_execution(&PathBuf::from(&request.path), pending_action)?;
+        state
+            .confirmation_registry
+            .register_with_execution(pending_action.clone(), Some(execution))?;
+    }
     Ok(outcome)
 }
 
@@ -73,7 +85,10 @@ pub fn scan_project(path: String) -> Result<ProjectSummary, BackendError> {
         )
         .with_details(serde_json::json!({ "path": path })));
     }
-    let context = ProjectContext::new(uuid::Uuid::new_v4().to_string(), root.canonicalize().unwrap_or(root));
+    let context = ProjectContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        root.canonicalize().unwrap_or(root),
+    );
     let service = crate::services::ProjectService::default();
     Ok(service.scan_project(&context, None))
 }
@@ -90,11 +105,13 @@ pub fn remember_recent_project(
     state: State<'_, AppState>,
     request: RememberRecentProjectRequest,
 ) -> Result<Vec<RecentProject>, BackendError> {
-    state.project_service.remember_recent_project(RecentProject {
-        project_id: request.project_id,
-        name: request.name,
-        root_path: request.root_path,
-        template: request.template,
-        opened_at: now_rfc3339(),
-    })
+    state
+        .project_service
+        .remember_recent_project(RecentProject {
+            project_id: request.project_id,
+            name: request.name,
+            root_path: request.root_path,
+            template: request.template,
+            opened_at: now_rfc3339(),
+        })
 }

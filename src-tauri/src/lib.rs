@@ -17,6 +17,15 @@ pub fn run() {
             commands::project_commands::scan_project,
             commands::project_commands::list_recent_projects,
             commands::project_commands::remember_recent_project,
+            commands::file_commands::read_markdown_file,
+            commands::file_commands::write_markdown_file,
+            commands::file_commands::write_json_file,
+            commands::file_commands::get_file_hash,
+            commands::file_commands::confirm_pending_action,
+            commands::git_commands::git_status,
+            commands::git_commands::initialize_git_repository,
+            commands::git_commands::create_git_checkpoint,
+            commands::git_commands::git_diff_markdown,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");

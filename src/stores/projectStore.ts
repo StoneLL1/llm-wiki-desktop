@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
+import type { ConfirmedAction } from "../types/backend";
 import type {
   OpenProjectResponse,
   ProjectSummary,
@@ -24,6 +25,8 @@ interface ProjectState {
   loadRecentProjects: () => Promise<RecentProject[]>;
   createProject: (payload: CreateProjectPayload) => Promise<ProjectSummary>;
   openProject: (path: string) => Promise<OpenProjectResponse>;
+  confirmPendingAction: () => Promise<ConfirmedAction | undefined>;
+  cancelPendingAction: () => Promise<void>;
 }
 
 const hasTauri = (): boolean =>
@@ -60,7 +63,7 @@ export const defaultRecentProjects: RecentProject[] = [
   },
 ];
 
-export const useProjectStore = create<ProjectState>((set) => ({
+export const useProjectStore = create<ProjectState>((set, get) => ({
   currentProject: defaultProject,
   recentProjects: defaultRecentProjects,
   pendingAction: undefined,
@@ -92,5 +95,32 @@ export const useProjectStore = create<ProjectState>((set) => ({
     }
     set({ pendingAction: response.pendingAction });
     return response;
+  },
+  confirmPendingAction: async () => {
+    const action = get().pendingAction;
+    if (!action) {
+      return undefined;
+    }
+    if (!hasTauri()) {
+      set({ pendingAction: undefined });
+      return { action, status: "confirmed", checkpointExists: false, projectSummary: null };
+    }
+    const confirmed = await invoke<ConfirmedAction>("confirm_pending_action", {
+      request: { actionId: action.id, status: "confirmed" },
+    });
+    set({
+      currentProject: confirmed.projectSummary ?? get().currentProject,
+      pendingAction: undefined,
+    });
+    return confirmed;
+  },
+  cancelPendingAction: async () => {
+    const action = get().pendingAction;
+    if (action && hasTauri()) {
+      await invoke<ConfirmedAction>("confirm_pending_action", {
+        request: { actionId: action.id, status: "cancelled" },
+      });
+    }
+    set({ pendingAction: undefined });
   },
 }));

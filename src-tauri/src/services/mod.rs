@@ -15,7 +15,7 @@ mod settings_service;
 pub use agent_service::AgentService;
 pub use export_service::ExportService;
 pub use extraction_service::ExtractionService;
-pub use file_store::FileStore;
+pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
 pub use graph_service::GraphService;
 pub use import_service::ImportService;
