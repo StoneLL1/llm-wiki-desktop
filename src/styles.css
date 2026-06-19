@@ -6,19 +6,41 @@
   --surface: #fafafa;
   --surface-raised: #ffffff;
   --surface-muted: #f5f5f5;
+  --surface-hover: #f7f7f7;
   --border: #e5e5e5;
   --border-subtle: #ededed;
+  --border-strong: #d4d4d4;
   --text-primary: #0d0d0d;
   --text-secondary: #3c3c3c;
   --text-muted: #6e6e6e;
+  --text-disabled: #828282;
   --accent: #10a37f;
   --accent-hover: #0a7a5e;
   --accent-soft: #e8f5f0;
+  --accent-border: #b8dccd;
   --danger: #ef4146;
+  --danger-soft: #fde8e8;
   --warning: #f5a623;
-  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --warning-soft: #fdf2dd;
+  --info: #2563eb;
+  --info-soft: #e0e9fd;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 9999px;
+  --font-ui: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Source Serif Pro", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --topbar-h: 48px;
+  --statusbar-h: 28px;
+  --sidebar-w: 240px;
+  --sidebar-collapsed-w: 56px;
+  --rightpanel-w: 320px;
+  --rightpanel-wide-w: 380px;
+  font-family: var(--font-ui);
   color: var(--foreground);
   background: var(--background);
+  color-scheme: light;
 }
 
 * {
@@ -31,6 +53,7 @@ body,
   width: 100%;
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 button,
@@ -40,3 +63,47 @@ select {
   font: inherit;
 }
 
+button {
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.icon-button {
+  display: inline-flex;
+  height: 28px;
+  width: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+
+.icon-button:hover {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  padding: 12px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}

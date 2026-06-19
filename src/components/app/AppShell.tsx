@@ -1,87 +1,114 @@
-import {
-  Bot,
-  BookOpenText,
-  FileOutput,
-  LayoutDashboard,
-  MessageSquare,
-  Network,
-  Settings,
-  ShieldCheck,
-  Upload,
-} from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { useNavigationStore, type AppView } from "../../stores/navigationStore";
+import { BottomStatusBar } from "./BottomStatusBar";
+import { LeftSidebar } from "./LeftSidebar";
+import { RightContextPanel } from "./RightContextPanel";
+import { TopBar } from "./TopBar";
 
-const navItems = [
-  { label: "Dashboard", icon: LayoutDashboard },
-  { label: "Wiki", icon: BookOpenText },
-  { label: "Chat", icon: MessageSquare },
-  { label: "Graph", icon: Network },
-  { label: "Agent", icon: Bot },
-  { label: "Import", icon: Upload },
-  { label: "Lint", icon: ShieldCheck },
-  { label: "Exports", icon: FileOutput },
-  { label: "Settings", icon: Settings },
-];
+const viewSummaryKeys: Record<AppView, string> = {
+  dashboard: "view.dashboard.summary",
+  wiki: "view.wiki.summary",
+  chat: "view.chat.summary",
+  graph: "view.graph.summary",
+  agent: "view.agent.summary",
+  import: "view.import.summary",
+  lint: "view.lint.summary",
+  exports: "view.exports.summary",
+  settings: "view.settings.summary",
+};
+
+const viewActionKeys: Record<AppView, string[]> = {
+  dashboard: ["view.dashboard.actionPrimary", "view.dashboard.actionSecondary"],
+  wiki: ["view.wiki.actionPrimary", "view.wiki.actionSecondary"],
+  chat: ["view.chat.actionPrimary", "view.chat.actionSecondary"],
+  graph: ["view.graph.actionPrimary", "view.graph.actionSecondary"],
+  agent: ["view.agent.actionPrimary", "view.agent.actionSecondary"],
+  import: ["view.import.actionPrimary", "view.import.actionSecondary"],
+  lint: ["view.lint.actionPrimary", "view.lint.actionSecondary"],
+  exports: ["view.exports.actionPrimary", "view.exports.actionSecondary"],
+  settings: ["view.settings.actionPrimary", "view.settings.actionSecondary"],
+};
 
 export function AppShell() {
+  const { t } = useTranslation();
+  const activeView = useNavigationStore((state) => state.activeView);
+  const title = t(`nav.${activeView}`);
+
   return (
-    <div className="flex h-full min-w-[1120px] flex-col bg-[var(--background)] text-[var(--foreground)]">
-      <header className="flex h-12 items-center gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-4">
-        <strong className="text-sm font-semibold">LLM Wiki Desktop</strong>
-        <div className="h-7 flex-1 rounded-md border border-[var(--border)] bg-white px-3 text-sm leading-7 text-[var(--text-muted)]">
-          Search current wiki
-        </div>
-        <span className="rounded-full bg-[var(--accent-soft)] px-2 py-1 text-xs font-medium text-[var(--accent-hover)]">
-          Local
-        </span>
-      </header>
+    <div className="grid h-full min-w-[1120px] grid-rows-[var(--topbar-h)_1fr_var(--statusbar-h)] bg-[var(--background)] text-[var(--foreground)]">
+      <TopBar />
 
-      <div className="flex min-h-0 flex-1">
-        <aside className="w-60 border-r border-[var(--border)] bg-[var(--surface)] p-3">
-          <nav aria-label="Primary" className="space-y-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = item.label === "Dashboard";
-
-              return (
-                <button
-                  key={item.label}
-                  className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm ${
-                    active
-                      ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
-                  }`}
-                  type="button"
-                >
-                  <Icon aria-hidden="true" size={16} />
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </nav>
-        </aside>
-
-        <main className="min-w-0 flex-1 p-4">
-          <section className="h-full rounded-lg border border-[var(--border)] bg-[var(--surface-raised)] p-4">
-            <h1 className="m-0 text-xl font-semibold">Dashboard</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
-              Scaffold workspace for project health, recent wiki pages, imports, Agent state, and background tasks.
-            </p>
-          </section>
+      <div className="grid min-h-0 grid-cols-[var(--sidebar-w)_minmax(0,1fr)_var(--rightpanel-w)]">
+        <LeftSidebar />
+        <main className="min-w-0 overflow-hidden bg-[var(--background)]">
+          <WorkspaceView activeView={activeView} title={title} />
         </main>
-
-        <aside className="w-80 border-l border-[var(--border)] bg-[var(--surface)] p-3">
-          <h2 className="m-0 text-sm font-semibold">Context</h2>
-          <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
-            Metadata, citations, task logs, diffs, and export previews will live here.
-          </p>
-        </aside>
+        <RightContextPanel activeView={activeView} />
       </div>
 
-      <footer className="flex h-7 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-3 text-xs text-[var(--text-muted)]">
-        <span>No project open</span>
-        <span>Agent: not detected · Tasks: idle · Wiki pages: 0</span>
-      </footer>
+      <BottomStatusBar />
     </div>
   );
 }
 
+interface WorkspaceViewProps {
+  activeView: AppView;
+  title: string;
+}
+
+function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
+  const { t } = useTranslation();
+  const actions = viewActionKeys[activeView];
+
+  return (
+    <section className="flex h-full flex-col">
+      <header className="flex h-11 items-center gap-3 border-b border-[var(--border)] px-5">
+        <h1 className="m-0 text-xl font-semibold">{title}</h1>
+        <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{t(viewSummaryKeys[activeView])}</span>
+        <div className="ml-auto flex items-center gap-2">
+          {actions.map((actionKey, index) => (
+            <button
+              key={actionKey}
+              className={`h-8 rounded-[var(--radius-md)] px-3 text-xs font-medium ${
+                index === 0
+                  ? "bg-[var(--foreground)] text-white hover:bg-[#1a1a1a]"
+                  : "border border-[var(--border)] bg-[var(--surface-raised)] hover:bg-[var(--surface-muted)]"
+              }`}
+              type="button"
+            >
+              {t(actionKey)}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <div className="grid gap-3">
+          <div className="panel">
+            <div className="panel-header">
+              <span>{t(`view.${activeView}.paneTitle`)}</span>
+            </div>
+            <p className="m-0 mt-2 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
+              {t(`view.${activeView}.emptyState`)}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div className="panel">
+              <div className="panel-header">{t("view.shared.localFiles")}</div>
+              <p className="m-0 mt-2 text-xs leading-5 text-[var(--text-muted)]">{t("view.shared.localFilesCopy")}</p>
+            </div>
+            <div className="panel">
+              <div className="panel-header">{t("view.shared.taskState")}</div>
+              <p className="m-0 mt-2 text-xs leading-5 text-[var(--text-muted)]">{t("view.shared.taskStateCopy")}</p>
+            </div>
+            <div className="panel">
+              <div className="panel-header">{t("view.shared.gitSafety")}</div>
+              <p className="m-0 mt-2 text-xs leading-5 text-[var(--text-muted)]">{t("view.shared.gitSafetyCopy")}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
