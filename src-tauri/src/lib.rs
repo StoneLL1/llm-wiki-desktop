@@ -26,6 +26,10 @@ pub fn run() {
             commands::git_commands::initialize_git_repository,
             commands::git_commands::create_git_checkpoint,
             commands::git_commands::git_diff_markdown,
+            commands::import_commands::preview_import,
+            commands::import_commands::confirm_import_preview,
+            commands::import_commands::extract_text_preview,
+            commands::import_commands::validate_import_url,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");

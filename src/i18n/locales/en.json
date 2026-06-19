@@ -138,5 +138,20 @@
   "rightpanel.index.pages": "Pages",
   "rightpanel.index.index": "Index",
   "rightpanel.index.graphCache": "Graph cache",
-  "rightpanel.tasks.none": "No running tasks."
+  "rightpanel.tasks.none": "No running tasks.",
+  "import.dropZone": "Drop files here or click to select.",
+  "import.summary.files": "{{count}} files",
+  "import.summary.ready": "{{count}} ready",
+  "import.summary.duplicates": "{{count}} duplicates",
+  "import.summary.renamed": "{{count}} renamed",
+  "import.summary.failed": "{{count}} failed",
+  "import.compile": "Confirm & Compile",
+  "import.compileDisabled": "Review preview before compiling.",
+  "import.compileConfirming": "Confirming...",
+  "import.selectToPreview": "Select a file to see details.",
+  "import.importToBegin": "Import sources to begin.",
+  "import.conflictBanner": "{{count}} conflict(s) found. Duplicates are skipped; conflicting names are renamed deterministically.",
+  "import.previewSection": "Text Preview",
+  "import.metadataSection": "Metadata",
+  "import.hashSection": "Hash"
 }
