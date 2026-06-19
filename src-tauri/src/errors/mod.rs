@@ -1,17 +1,5 @@
-use serde::Serialize;
-use thiserror::Error;
+mod backend_error;
+mod error_codes;
 
-#[derive(Debug, Error)]
-pub enum BackendErrorKind {
-    #[error("{0}")]
-    Message(String),
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackendError {
-    pub code: String,
-    pub message: String,
-    pub recoverable: bool,
-    pub user_action_required: bool,
-}
+pub use backend_error::{BackendError, BackendErrorKind};
+pub use error_codes::*;

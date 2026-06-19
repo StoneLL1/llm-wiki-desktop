@@ -1,21 +1,27 @@
 mod agent_service;
 mod export_service;
+mod extraction_service;
 mod file_store;
 mod git_service;
 mod graph_service;
 mod import_service;
+mod lint_service;
 mod llm_service;
 mod project_service;
 mod search_service;
+mod secret_service;
 mod settings_service;
 
 pub use agent_service::AgentService;
 pub use export_service::ExportService;
+pub use extraction_service::ExtractionService;
 pub use file_store::FileStore;
 pub use git_service::GitService;
 pub use graph_service::GraphService;
 pub use import_service::ImportService;
+pub use lint_service::LintService;
 pub use llm_service::LlmService;
 pub use project_service::ProjectService;
 pub use search_service::SearchService;
+pub use secret_service::SecretService;
 pub use settings_service::SettingsService;
