@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
+import { ImportView } from "../../features/import/ImportView";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { BottomStatusBar } from "./BottomStatusBar";
@@ -103,6 +104,13 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
       <div className="min-h-0 flex-1 overflow-auto p-4">
         {activeView === "dashboard" ? (
           <DashboardView />
+        ) : activeView === "import" ? (
+          <ImportView
+            preview={null}
+            isConfirming={false}
+            onRequestPreview={() => {}}
+            onConfirm={() => {}}
+          />
         ) : (
           <div className="grid gap-3">
           <div className="panel">
