@@ -294,7 +294,7 @@ impl ChatService {
             markdown.push_str("[]\n");
         } else {
             for source in &sources {
-                markdown.push_str(&format!("  - {}\n", source));
+                markdown.push_str(&format!("  - {}\n", yaml_scalar(source)));
             }
         }
         markdown.push_str("---\n\n");
@@ -361,6 +361,10 @@ impl ChatService {
                     true,
                 )
             })?;
+            // The Git checkpoint is the data-safety boundary for an overwrite
+            // (CLAUDE.md hard rule). A checkpoint failure must not be swallowed:
+            // surface it so the user can resolve git state rather than losing
+            // the prior page to an un-checkpointed write.
             let checkpoint = git_service
                 .create_scoped_checkpoint(
                     context,
@@ -368,8 +372,19 @@ impl ChatService {
                     "Before overwriting saved chat answer",
                     std::slice::from_ref(&resolved),
                 )
-                .ok()
-                .and_then(|c| c.commit_hash);
+                .map_err(|err| {
+                    BackendError::new(
+                        "GIT_CHECKPOINT_FAILED",
+                        format!(
+                            "Could not create a Git checkpoint before overwriting: {}",
+                            err.message
+                        ),
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "path": resolved }))
+                })?
+                .commit_hash;
             (
                 WriteMode::OverwriteIfHashMatches(expected.to_string()),
                 checkpoint,

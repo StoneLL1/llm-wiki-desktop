@@ -4,6 +4,14 @@
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
 ----------------------------------------------------------------------
+[现象] 改了 trait 方法签名 `ProcessRunner::run_task_streaming` 的返回类型 `Result<(), _>` → `Result<String, _>`，`cargo build` 报「method has an incompatible type for trait」指向 `src-tauri/tests/task8_contracts.rs` 的 FakeProcessRunner 实现，而非真正的实现或调用点。
+[根因] 改 trait 方法签名会级联到所有实现者，包括仅用于测试桩的 FakeProcessRunner；编译器报错指向桩，容易误以为只要改真实现就够。同时调用点（compile_commands 用 `?` 丢弃返回值）不会报错，造成「只有测试炸」的错觉。
+[规避做法] 改 trait 方法返回类型时，全局搜该 trait 的所有 impl（含 tests/ 目录的桩），逐个同步签名；调用点用 `?` 丢弃返回值仍合法，但要在脑子里确认「丢弃是有意为之」而非忘了接。本次 chat 需要捕获 Agent stdout 作为答案文本，故改成 String，compile 主动丢弃——这是有意取舍。
+----------------------------------------------------------------------
+[现象] `slice.iter().take_while(pred).rev().find(...)` 编译报 `the trait DoubleEndedIterator is not implemented for TakeWhile<...>`。
+[根因] `TakeWhile` 不是 `DoubleEndedIterator`（无法从尾部反向，因为要从前缀判断），所以 `.rev()` 在它上面非法。`.iter().rev().take_while()` 顺序也不对（语义变了）。
+[规避做法] 要在「截至某元素的切片」里反查最近一项：先 `let v: Vec<&T> = iter.take_while(pred).collect();` 再 `v.iter().rev().find(...)`。chat 的 save_answer_to_wiki 找「消息 id 之前最近的 user 轮」就是这个模式。
+----------------------------------------------------------------------
 [现象] 任何 import 链路碰到 sigma.js（GraphView，进而 AppShell→App.test）的测试在 jsdom 下直接 ReferenceError: WebGL2RenderingContext is not defined，整个测试套件崩溃。
 [根因] sigma.js 在模块加载期就引用 WebGL2RenderingContext / WebGLRenderingContext 做能力探测，jsdom 不提供这两个全局。
 [规避做法] 在 src/test/setup.ts 顶部（任何 import 之前）给 globalThis 打 inert 桩：`WebGL2RenderingContext = class {}`、`WebGLRenderingContext = class {}`。真实 canvas 渲染另由 GraphView 的 try/catch 兜底（new Sigma 抛错时 setCanvasAvailable(false) 显示占位），桩只保证 import 不崩。
