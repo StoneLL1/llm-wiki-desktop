@@ -81,8 +81,15 @@ pub fn run() {
                 let window_clone = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = window_clone.hide();
+                        let close_behavior =
+                            crate::services::SettingsService::default().read_close_behavior();
+                        if matches!(
+                            close_behavior,
+                            crate::models::settings::CloseBehavior::MinimizeToTray
+                        ) {
+                            api.prevent_close();
+                            let _ = window_clone.hide();
+                        }
                     }
                 });
             }
@@ -131,6 +138,9 @@ pub fn run() {
             commands::wiki_commands::read_wiki_page,
             commands::wiki_commands::save_wiki_page,
             commands::search_commands::search_wiki,
+            commands::settings_commands::get_settings,
+            commands::settings_commands::save_settings,
+            commands::settings_commands::get_provider_secret_status,
             commands::graph_commands::get_graph,
             commands::graph_commands::build_graph,
             commands::graph_commands::save_graph_layout,

@@ -53,6 +53,52 @@
   color-scheme: light;
 }
 
+:root[data-theme="dark"] {
+  --background: #111315;
+  --foreground: #f5f7f8;
+  --surface: #15181b;
+  --surface-raised: #181c20;
+  --surface-muted: #20252a;
+  --surface-hover: #252a30;
+  --border: #2d3339;
+  --border-subtle: #252b31;
+  --border-strong: #3b4249;
+  --text-primary: #f5f7f8;
+  --text-secondary: #d3d7dc;
+  --text-muted: #a0a8b0;
+  --text-disabled: #7a838d;
+  --accent-soft: rgba(16, 163, 127, 0.18);
+  --accent-border: rgba(16, 163, 127, 0.36);
+  --danger-soft: rgba(239, 65, 70, 0.16);
+  --warning-soft: rgba(245, 166, 35, 0.16);
+  --info-soft: rgba(37, 99, 235, 0.16);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    --background: #111315;
+    --foreground: #f5f7f8;
+    --surface: #15181b;
+    --surface-raised: #181c20;
+    --surface-muted: #20252a;
+    --surface-hover: #252a30;
+    --border: #2d3339;
+    --border-subtle: #252b31;
+    --border-strong: #3b4249;
+    --text-primary: #f5f7f8;
+    --text-secondary: #d3d7dc;
+    --text-muted: #a0a8b0;
+    --text-disabled: #7a838d;
+    --accent-soft: rgba(16, 163, 127, 0.18);
+    --accent-border: rgba(16, 163, 127, 0.36);
+    --danger-soft: rgba(239, 65, 70, 0.16);
+    --warning-soft: rgba(245, 166, 35, 0.16);
+    --info-soft: rgba(37, 99, 235, 0.16);
+    color-scheme: dark;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -86,7 +132,8 @@ button {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -126,7 +173,50 @@ input:focus-visible {
   font-family: var(--font-mono);
 }
 
-/* Milkdown WYSIWYG editor — override the nord theme so the editing surface
+.settings-input,
+.input {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.settings-button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--foreground);
+  background: var(--foreground);
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--text-inverse);
+}
+
+.settings-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.settings-button--secondary {
+  border-color: var(--border);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.settings-button--danger {
+  border-color: var(--danger);
+  background: transparent;
+  color: var(--danger);
+}
+
+/* Milkdown WYSIWYG editor: override the nord theme so the editing surface
    matches the app token palette instead of shipping its own light card. */
 .wiki-editor .milkdown {
   background: transparent;
@@ -157,4 +247,3 @@ input:focus-visible {
   border-left-color: var(--accent);
   color: var(--text-secondary);
 }
-

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::errors::BackendError;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
-use crate::services::FileStore;
+use crate::services::SettingsService;
 
 #[derive(Debug, Clone)]
 pub struct ProviderHttpRequest {
@@ -19,17 +19,7 @@ impl LlmService {
     pub fn list_providers(
         context: &ProjectContext,
     ) -> Result<Vec<LlmProviderConfig>, BackendError> {
-        let path = context.resolve_project_path(".app/settings.json")?;
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let value: serde_json::Value = FileStore.read_json(context, ".app/settings.json")?;
-        match value.get("llmProviders") {
-            Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
-                BackendError::new("SETTINGS_INVALID", error.to_string(), true, true)
-            }),
-            None => Ok(Vec::new()),
-        }
+        SettingsService::default().list_providers(context)
     }
 
     pub fn save_provider(
@@ -37,20 +27,8 @@ impl LlmService {
         config: LlmProviderConfig,
     ) -> Result<(), BackendError> {
         Self::validate_config(&config)?;
-        let path = context.resolve_project_path(".app/settings.json")?;
-        let mut value: serde_json::Value = if path.exists() {
-            FileStore.read_json(context, ".app/settings.json")?
-        } else {
-            serde_json::json!({})
-        };
-        let mut providers = Self::list_providers(context)?;
-        providers.retain(|item| item.provider != config.provider);
-        providers.push(config);
-        providers.sort_by_key(|item| format!("{:?}", item.provider));
-        value["llmProviders"] = serde_json::to_value(providers).map_err(|error| {
-            BackendError::new("SETTINGS_SERIALIZE_FAILED", error.to_string(), false, false)
-        })?;
-        FileStore.write_json_atomic(context, ".app/settings.json", &value)
+        SettingsService::default().save_provider(context, config)?;
+        Ok(())
     }
 
     pub fn validate_config(config: &LlmProviderConfig) -> Result<(), BackendError> {

@@ -10,8 +10,10 @@ import "@fontsource/source-serif-4/400.css";
 import "@fontsource/source-serif-4/600.css";
 
 import "./styles.css";
-import "./i18n";
+import { i18nReady } from "./i18n";
 import { App } from "./app/App";
+
+await i18nReady;
 
 const root = document.getElementById("root");
 
@@ -24,4 +26,3 @@ createRoot(root).render(
     <App />
   </StrictMode>,
 );
-
