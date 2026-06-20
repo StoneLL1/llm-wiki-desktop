@@ -4,6 +4,10 @@
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
 ----------------------------------------------------------------------
+[现象] 同一 Vitest 文件内后一个 React Testing Library 用例能查询到前一个用例的 DOM，出现重复按钮歧义。
+[根因] Vitest 未启用 globals 时 Testing Library 未自动注册 cleanup；setup.ts 只加载 jest-dom matcher。
+[规避做法] 在 src/test/setup.ts 显式 afterEach(cleanup)，保证每个用例卸载 React 树并清空 DOM。
+
 [现象] Milkdown React 编辑器每次按键都丢光标、ProseMirror 重建闪烁，输入几乎不可用。
 [根因] useEditor 的 deps 里挂了 live draft；store 在每次 markdownUpdated 回调里 setDraft，draft 变 → 父重渲染 → initialMarkdown 变 → useEditor deps 变 → 整个 Editor.make() 重建。
 [规避做法] 编辑器非受控：用 `const [seed] = useState(draft)` 只在挂载时取一次种子值，把 seed 传给 defaultValueCtx + useEditor deps；live markdown 只通过 listener.markdownUpdated 单向流出 store，绝不回灌 initialMarkdown。切页靠父组件给编辑器加 `key={path}` 触发 remount 重置 seed，而不是靠改 seed prop。

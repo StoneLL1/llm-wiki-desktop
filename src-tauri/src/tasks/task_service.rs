@@ -310,6 +310,20 @@ impl TaskService {
         Ok(task)
     }
 
+    pub fn set_error(
+        &self,
+        id: &str,
+        error: crate::errors::BackendError,
+    ) -> Result<BackendTask, String> {
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {}", id))?;
+        entry.task.error = Some(error);
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        Ok(entry.task.clone())
+    }
+
     pub fn get_cancellation_token(&self, id: &str) -> Option<CancellationToken> {
         self.cancellation.get(id)
     }
@@ -655,6 +669,7 @@ mod tests {
         let result = TaskResult {
             summary: "Compiled 10 pages".to_string(),
             affected_paths: vec!["wiki/index.md".to_string(), "wiki/overview.md".to_string()],
+            pending_action: None,
         };
 
         service.set_result(&task.id, result.clone()).unwrap();
@@ -722,6 +737,7 @@ mod tests {
                     TaskResult {
                         summary: "Done".to_string(),
                         affected_paths: vec![],
+                        pending_action: None,
                     },
                 )
                 .unwrap();

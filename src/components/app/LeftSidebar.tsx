@@ -79,7 +79,9 @@ export function LeftSidebar() {
       <div className="flex items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
         <span className="flex min-w-0 flex-1 items-center gap-2">
           <span className="h-[7px] w-[7px] shrink-0 rounded-full bg-[var(--accent)] shadow-[0_0_0_2px_var(--accent-soft)]" aria-hidden="true" />
-          <span className="truncate font-mono text-[var(--text-secondary)]">{t("status.agentDetected")}</span>
+          <span className="truncate font-mono text-[var(--text-secondary)]">
+            {t(`status.routeLabel.${currentProject.agentRoute}`)}
+          </span>
         </span>
       </div>
     </aside>

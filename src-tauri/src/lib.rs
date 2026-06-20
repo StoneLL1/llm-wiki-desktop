@@ -90,6 +90,17 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::agent_commands::detect_agents,
+            commands::agent_commands::get_agent_config,
+            commands::agent_commands::set_default_agent,
+            commands::llm_commands::list_llm_providers,
+            commands::llm_commands::save_llm_provider,
+            commands::llm_commands::store_provider_secret,
+            commands::llm_commands::delete_provider_secret,
+            commands::llm_commands::provider_secret_status,
+            commands::llm_commands::test_llm_provider,
+            commands::compile_commands::start_wiki_compile,
+            commands::compile_commands::confirm_compile_action,
             commands::project_commands::get_app_summary,
             commands::project_commands::create_project,
             commands::project_commands::open_project,

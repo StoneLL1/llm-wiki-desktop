@@ -84,6 +84,15 @@ pub enum ConfirmationExecution {
         root_path: String,
         file_hashes: Vec<(String, String)>,
     },
+    CompileMerge {
+        project_id: String,
+        root_path: String,
+        task_id: String,
+        route: crate::models::compile::CompileRoute,
+        manifest: crate::models::compile::CompileManifest,
+        current_hashes: Vec<(String, String)>,
+        checkpoint_hash: Option<String>,
+    },
 }
 
 impl ConfirmationRegistry {

@@ -95,6 +95,60 @@ impl GitService {
         })
     }
 
+    pub fn unstage_paths(
+        &self,
+        context: &ProjectContext,
+        paths: &[String],
+    ) -> Result<(), BackendError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["reset", "-q", "HEAD", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        run_git(context, &args).map(|_| ())
+    }
+
+    pub fn create_scoped_checkpoint(
+        &self,
+        context: &ProjectContext,
+        purpose: CheckpointPurpose,
+        message: &str,
+        paths: &[String],
+    ) -> Result<GitCheckpoint, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before creating a checkpoint.",
+                true,
+                true,
+            ));
+        }
+        let affected_paths: Vec<String> = status_paths(context)?
+            .into_iter()
+            .filter(|changed| paths.iter().any(|path| path == changed))
+            .collect();
+        if affected_paths.is_empty() {
+            return Ok(GitCheckpoint {
+                created: false,
+                commit_hash: self.repository_status(context)?.head,
+                message: message.to_string(),
+                purpose,
+                affected_paths,
+            });
+        }
+        let mut args = vec!["add", "--"];
+        args.extend(affected_paths.iter().map(String::as_str));
+        run_git(context, &args)?;
+        let commit_hash = commit_paths_with_message(context, message, &affected_paths)?;
+        Ok(GitCheckpoint {
+            created: true,
+            commit_hash: Some(commit_hash),
+            message: message.to_string(),
+            purpose,
+            affected_paths,
+        })
+    }
+
     pub fn diff_markdown(&self, context: &ProjectContext) -> Result<GitDiff, BackendError> {
         if !self.repository_status(context)?.is_repository {
             return Err(BackendError::new(
@@ -180,6 +234,26 @@ fn commit_with_message(
     }
     args.push("-m");
     args.push(message);
+    run_git(context, &args)?;
+    run_git(context, &["rev-parse", "--short", "HEAD"]).map(|value| value.trim().to_string())
+}
+
+fn commit_paths_with_message(
+    context: &ProjectContext,
+    message: &str,
+    paths: &[String],
+) -> Result<String, BackendError> {
+    let mut args = vec![
+        "-c",
+        "user.name=LLM Wiki Desktop",
+        "-c",
+        "user.email=llm-wiki-desktop@example.local",
+        "commit",
+        "-m",
+        message,
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
     run_git(context, &args)?;
     run_git(context, &["rev-parse", "--short", "HEAD"]).map(|value| value.trim().to_string())
 }

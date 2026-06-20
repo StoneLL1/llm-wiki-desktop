@@ -973,7 +973,9 @@ mod tests {
         let execution = service
             .folder_initialization_execution(&root, &pending)
             .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
+            unreachable!()
+        };
         let (summary, checkpoint_exists) = service
             .confirm_folder_initialization(&root, &pending, &file_hashes)
             .expect("confirmation should initialize the folder");
@@ -998,7 +1000,9 @@ mod tests {
         let execution = service
             .folder_initialization_execution(&root, &pending)
             .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
+            unreachable!()
+        };
         fs::write(root.join("new.md"), "# new").unwrap();
 
         let err = service
@@ -1020,7 +1024,9 @@ mod tests {
         let execution = service
             .folder_initialization_execution(&root, &pending)
             .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
+            unreachable!()
+        };
         fs::write(root.join("report.pdf"), "changed").unwrap();
 
         let err = service
@@ -1047,7 +1053,9 @@ mod tests {
         let execution = service
             .folder_initialization_execution(&root, &pending)
             .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution;
+        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
+            unreachable!()
+        };
         service
             .confirm_folder_initialization(&root, &pending, &file_hashes)
             .unwrap();
