@@ -2,16 +2,28 @@ import { FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useToastStore } from "../../stores/toastStore";
+import { useWikiStore } from "../../features/wiki/wikiStore";
 import type { NavigationItem } from "./shellNavigation";
 import { mainViews, workflowViews } from "./shellNavigation";
-
-const recentPages = ["Agent Memory Model", "Tool Selection Heuristics", "ReAct Pattern", "Plan-and-Execute"];
 
 export function LeftSidebar() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const currentProject = useProjectStore((state) => state.currentProject);
+  const recentPages = useWikiStore((state) => state.recentPages);
+  const openPage = useWikiStore((state) => state.openPage);
+  const pushToast = useToastStore((state) => state.pushToast);
+
+  const openRecentPage = (path: string) => {
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+      pushToast("warning", t("shell.browserUnavailable"));
+      return;
+    }
+    setActiveView("wiki");
+    void openPage(currentProject.projectId, currentProject.rootPath, path);
+  };
 
   const renderNavGroup = (items: NavigationItem[]) =>
     items.map((item) => {
@@ -63,16 +75,24 @@ export function LeftSidebar() {
           <span>{t("shell.recentPages")}</span>
         </div>
         <div className="flex flex-col gap-[1px] px-2">
-          {recentPages.map((page, index) => (
-            <button
-              key={page}
-              className="flex h-[26px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
-              type="button"
-            >
-              <FileText aria-hidden="true" className={index === 0 ? "text-[var(--accent)]" : "text-[var(--text-muted)]"} size={14} />
-              <span className="truncate">{page}</span>
-            </button>
-          ))}
+          {recentPages.length === 0 ? (
+            <p className="m-0 px-2 text-[11.5px] leading-5 text-[var(--text-muted)]">
+              {t("shell.recentPages.empty")}
+            </p>
+          ) : (
+            recentPages.map((page, index) => (
+              <button
+                key={page.path}
+                onClick={() => openRecentPage(page.path)}
+                className="flex h-[26px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+                title={page.path}
+                type="button"
+              >
+                <FileText aria-hidden="true" className={index === 0 ? "text-[var(--accent)]" : "text-[var(--text-muted)]"} size={14} />
+                <span className="truncate">{page.title}</span>
+              </button>
+            ))
+          )}
         </div>
       </div>
 

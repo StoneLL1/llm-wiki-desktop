@@ -5,5 +5,7 @@ fn main() {
 
 #[cfg(not(feature = "gui"))]
 fn main() {
-    panic!("GUI feature must be enabled to run the desktop application. Use: cargo run --features gui");
+    panic!(
+        "GUI feature must be enabled to run the desktop application. Use: cargo run --features gui"
+    );
 }

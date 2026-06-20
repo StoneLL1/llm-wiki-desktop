@@ -606,9 +606,10 @@ mod tests {
     /// the checked-in skills folder.
     #[test]
     fn templates_carry_no_schema_or_lint_directives() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
         for export_type in ExportType::ALL {
             let folder = export_type.skill_folder();
-            let template_path = format!("src-tauri/templates/skills/{folder}/template.html");
+            let template_path = format!("{manifest_dir}/templates/skills/{folder}/template.html");
             let template = std::fs::read_to_string(&template_path)
                 .unwrap_or_else(|err| panic!("missing template {template_path}: {err}"));
             let lower = template.to_ascii_lowercase();

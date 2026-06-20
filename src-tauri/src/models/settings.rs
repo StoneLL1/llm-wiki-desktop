@@ -88,7 +88,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalSettingsFile {
     #[serde(default = "default_language")]
@@ -99,6 +99,17 @@ pub struct GlobalSettingsFile {
     pub close_behavior: CloseBehavior,
     #[serde(default = "default_check_updates")]
     pub check_updates: bool,
+}
+
+impl Default for GlobalSettingsFile {
+    fn default() -> Self {
+        Self {
+            language: default_language(),
+            theme: ThemePreference::default(),
+            close_behavior: CloseBehavior::default(),
+            check_updates: default_check_updates(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

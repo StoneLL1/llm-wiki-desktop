@@ -385,7 +385,7 @@ impl ProcessRunner for SystemProcessRunner {
     }
 
     fn run_capture(&self, invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
-        let mut child = Command::new(&invocation.program)
+        let mut child = Command::new(resolve_program(&invocation.program))
             .args(&invocation.args)
             .current_dir(&invocation.cwd)
             .stdin(if invocation.stdin.is_some() {
@@ -432,7 +432,7 @@ impl ProcessRunner for SystemProcessRunner {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError> {
-        let mut child = Command::new(&invocation.program)
+        let mut child = Command::new(resolve_program(&invocation.program))
             .args(&invocation.args)
             .current_dir(&invocation.cwd)
             .stdin(if invocation.stdin.is_some() {
@@ -552,19 +552,79 @@ fn invocation_supported(runner: &dyn ProcessRunner, kind: AgentKind, command: &s
 }
 
 fn find_executable(command: &str) -> Option<PathBuf> {
+    // 1. `where` / `which` against the App process's PATH.
     let lookup = if cfg!(windows) {
         ("where", vec![command])
     } else {
         ("which", vec![command])
     };
-    let output = Command::new(lookup.0).args(lookup.1).output().ok()?;
-    if !output.status.success() {
-        return None;
+    if let Ok(output) = Command::new(lookup.0).args(lookup.1).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect();
+            // On Windows `where claude` lists the extensionless bash shim
+            // FIRST and `claude.cmd` later. CreateProcess cannot run the
+            // extensionless shim, so prefer a `.cmd`/`.bat`/`.exe` line.
+            #[cfg(windows)]
+            if let Some(preferred) = lines.iter().find(|line| {
+                Path::new(line)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| {
+                        matches!(
+                            ext.to_ascii_lowercase().as_str(),
+                            "cmd" | "bat" | "exe"
+                        )
+                    })
+                    .unwrap_or(false)
+            }) {
+                return Some(PathBuf::from(preferred));
+            }
+            if let Some(first) = lines.first() {
+                return Some(PathBuf::from(first));
+            }
+        }
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(|line| PathBuf::from(line.trim()))
+
+    // 2. Fallback: npm's global bin dir (`%APPDATA%\npm` on Windows). GUI
+    //    launches and some IDE shells inherit a PATH that does not include
+    //    the npm global dir even though the CLI is installed there, so the
+    //    `where` lookup above fails inside the App while succeeding in a
+    //    fresh terminal. Check the well-known location directly.
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let base = PathBuf::from(appdata).join("npm");
+            for ext in ["cmd", "bat", "exe"] {
+                let candidate = base.join(format!("{command}.{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Resolve a bare program name to a spawnable path. On Windows, `CreateProcess`
+/// (and therefore `Command::new`) will not find a `.cmd` shim via PATH in
+/// processes whose PATH lacks the npm global dir; resolving to the full path
+/// first lets `Command` run the `.cmd` (std internally routes `.cmd` through
+/// `cmd.exe`). On non-Windows, or when the program is already a path, it is
+/// returned unchanged.
+fn resolve_program(program: &str) -> String {
+    if cfg!(not(windows)) || program.contains('/') || program.contains('\\') {
+        return program.to_string();
+    }
+    match find_executable(program) {
+        Some(resolved) => resolved.to_string_lossy().into_owned(),
+        None => program.to_string(),
+    }
 }
 
 fn run_with_timeout(
@@ -572,7 +632,7 @@ fn run_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, BackendError> {
-    let mut child = Command::new(command)
+    let mut child = Command::new(resolve_program(command))
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -694,5 +754,53 @@ mod tests {
             AgentService::html_export_invocation(AgentKind::Codex, &workspace, "build html")
                 .unwrap();
         assert_eq!(codex.stdin.as_deref(), Some("build html"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_executable_falls_back_to_npm_global_dir_off_path() {
+        // Simulate a process whose PATH lacks the npm global dir but whose
+        // APPDATA points at a temp dir with a `claude.cmd` shim installed
+        // there. `where` should not find it (nothing on PATH), so the
+        // %APPDATA%\npm fallback must resolve the `.cmd`.
+        let dir = std::env::temp_dir().join(format!(
+            "llm-wiki-desktop/agent-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let npm = dir.join("npm");
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::write(npm.join("claude.cmd"), "@echo off\n").unwrap();
+
+        let prior = std::env::var("APPDATA").ok();
+        std::env::set_var("APPDATA", &dir);
+        let resolved = find_executable("claude");
+        if let Some(p) = prior {
+            std::env::set_var("APPDATA", p);
+        } else {
+            std::env::remove_var("APPDATA");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let resolved =
+            resolved.expect("fallback must find claude.cmd off-PATH via %APPDATA%\\npm");
+        assert!(
+            resolved.to_string_lossy().ends_with("claude.cmd"),
+            "fallback must resolve the .cmd shim, got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_program_passes_through_paths_and_non_windows_bare_names() {
+        // Already-qualified paths are returned unchanged on every platform...
+        assert_eq!(resolve_program("/usr/bin/claude"), "/usr/bin/claude");
+        assert_eq!(resolve_program("./local/agent"), "./local/agent");
+        // ...and bare names are left as-is when nothing is resolvable, so the
+        // caller (e.g. `Command::new`) still gets the original input rather
+        // than an empty string.
+        let bare = resolve_program("definitely-not-installed-cli-xyz");
+        assert!(
+            bare == "definitely-not-installed-cli-xyz",
+            "unresolvable bare name should pass through unchanged, got {bare:?}"
+        );
     }
 }

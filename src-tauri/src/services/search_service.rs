@@ -113,6 +113,65 @@ impl SearchService {
         })
     }
 
+    /// Toggle the bookmark state for a wiki page. Bookmarks are stored as a JSON
+    /// array of project-relative paths in `.app/bookmarks.json`. Only pages that
+    /// actually exist under `wiki/` can be bookmarked — the path is resolved via
+    /// `resolve_wiki_path` (rejects traversal / out-of-project paths) and the
+    /// file must exist on disk. Returns the page's new bookmarked state.
+    pub fn toggle_bookmark(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+    ) -> Result<crate::models::wiki::ToggleBookmarkResponse, BackendError> {
+        let absolute = context.resolve_project_path(relative_path)?;
+        if !absolute.exists() || !absolute.is_file() {
+            return Err(BackendError::new(
+                "FILE_NOT_FOUND",
+                "Wiki page does not exist.".to_string(),
+                false,
+                true,
+            ));
+        }
+        // Defense-in-depth: bookmarks are only meaningful for wiki pages, so
+        // reject anything that resolves outside `wiki/`.
+        if absolute.strip_prefix(&context.wiki_dir).is_err() {
+            return Err(BackendError::new(
+                "PATH_OUTSIDE_PROJECT",
+                "Only wiki pages can be bookmarked.".to_string(),
+                false,
+                true,
+            ));
+        }
+
+        let project_relative = context.to_project_relative(&absolute)?;
+        let mut bookmarks = self
+            .load_bookmarks(context)
+            .into_iter()
+            .collect::<Vec<String>>();
+        let dominated = bookmarks
+            .iter()
+            .position(|entry| entry == &project_relative);
+        let now_bookmarked = match dominated {
+            Some(idx) => {
+                bookmarks.remove(idx);
+                false
+            }
+            None => {
+                bookmarks.push(project_relative.clone());
+                true
+            }
+        };
+        bookmarks.sort();
+
+        self.file_store
+            .write_json_atomic(context, ".app/bookmarks.json", &bookmarks)?;
+
+        Ok(crate::models::wiki::ToggleBookmarkResponse {
+            relative_path: project_relative,
+            bookmarked: now_bookmarked,
+        })
+    }
+
     /// Local keyword/tag/type/source search.
     pub fn search(
         &self,
@@ -622,6 +681,65 @@ mod tests {
             .find(|p| p.path == "wiki/concepts/react-pattern.md")
             .unwrap();
         assert!(react.bookmarked);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn toggle_bookmark_persists_and_round_trips() {
+        let (context, root) = tmp_context("toggle-bookmark");
+        std::fs::create_dir_all(context.app_dir.clone()).unwrap();
+        seed_sample_vault(&context);
+        let service = SearchService::default();
+
+        // Adding a bookmark writes the path into .app/bookmarks.json.
+        let added = service
+            .toggle_bookmark(&context, "wiki/concepts/agent-memory.md")
+            .unwrap();
+        assert!(added.bookmarked);
+        assert_eq!(added.relative_path, "wiki/concepts/agent-memory.md");
+
+        // The persisted array is a JSON list of project-relative paths.
+        let on_disk = std::fs::read_to_string(context.app_dir.join("bookmarks.json")).unwrap();
+        let parsed: Vec<String> = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(parsed, vec!["wiki/concepts/agent-memory.md".to_string()]);
+
+        // A scan reflects the bookmarked flag.
+        let tree = service.scan_wiki(&context).unwrap();
+        let agent = tree
+            .pages
+            .iter()
+            .find(|p| p.path == "wiki/concepts/agent-memory.md")
+            .unwrap();
+        assert!(agent.bookmarked);
+
+        // Toggling again removes it.
+        let removed = service
+            .toggle_bookmark(&context, "wiki/concepts/agent-memory.md")
+            .unwrap();
+        assert!(!removed.bookmarked);
+        let after: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(context.app_dir.join("bookmarks.json")).unwrap())
+                .unwrap();
+        assert!(after.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn toggle_bookmark_rejects_missing_and_non_wiki_paths() {
+        let (context, root) = tmp_context("toggle-bookmark-reject");
+        std::fs::create_dir_all(context.app_dir.clone()).unwrap();
+        seed_sample_vault(&context);
+        let service = SearchService::default();
+
+        // Missing page.
+        let missing = service.toggle_bookmark(&context, "wiki/concepts/nope.md");
+        assert!(missing.is_err());
+
+        // Path traversal is rejected by the path resolver.
+        let traversal = service.toggle_bookmark(&context, "wiki/../../purpose.md");
+        assert!(traversal.is_err());
 
         std::fs::remove_dir_all(root).unwrap();
     }

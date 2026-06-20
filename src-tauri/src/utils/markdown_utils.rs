@@ -38,17 +38,19 @@ pub fn split_frontmatter(content: &str) -> FrontmatterSplit {
 
     // Find the closing fence on its own line.
     let mut closing: Option<usize> = None;
+    let mut offset: usize = 0;
     for line in rest.split_inclusive('\n') {
         let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
         if trimmed == "---" || trimmed == "..." {
-            closing = Some(rest.len() - line.len());
+            closing = Some(offset);
             break;
         }
         // No newline at end of buffer on the last line.
         if !line.ends_with('\n') && (trimmed == "---" || trimmed == "...") {
-            closing = Some(rest.len() - line.len());
+            closing = Some(offset);
             break;
         }
+        offset += line.len();
     }
 
     let Some(end) = closing else {
@@ -59,13 +61,16 @@ pub fn split_frontmatter(content: &str) -> FrontmatterSplit {
     };
 
     let fm = rest[..end].trim_end().to_string();
-    // Skip past the closing fence line.
+    // Skip past the closing fence line and any blank lines that follow.
     let mut after = &rest[end..];
     after = after.strip_prefix("---").unwrap_or(after);
-    if let Some(stripped_after) = after.strip_prefix('\n') {
-        after = stripped_after;
-    } else if let Some(stripped_after) = after.strip_prefix("\r\n") {
-        after = stripped_after;
+    // Strip the newline that ends the closing-fence line, plus any additional
+    // blank lines between the fence and the body content.
+    while let Some(stripped) = after
+        .strip_prefix('\n')
+        .or_else(|| after.strip_prefix("\r\n"))
+    {
+        after = stripped;
     }
 
     FrontmatterSplit {
@@ -298,7 +303,11 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
                 j += 1;
             }
             if j < bytes.len() && depth == 0 {
-                let inner = &body[start..j];
+                // j points to the final `]` that brought depth to 0; the
+                // preceding `]` (at j-1) is the first closing bracket, so
+                // the true inner content is [start..j-1).
+                let end = j.saturating_sub(1);
+                let inner = &body[start..end];
                 let target = inner
                     .split('|')
                     .next()
@@ -398,7 +407,7 @@ pub fn snippet_for_query(body: &str, query_lower: &str, radius: usize) -> Option
     if snippet_start < line_start {
         snippet_start = line_start;
     }
-    let snippet_end = (char_end).min(start + radius);
+    let snippet_end = (char_end).min(start + radius.max(query.len()));
     let prefix = if snippet_start > line_start {
         "…"
     } else {
@@ -495,13 +504,14 @@ mod tests {
         // acceptable because raw `[[ ]]` inside inline code is rare. We assert
         // normal text extraction works.
         let body = "link [[target-a]] and [[target-b]]";
-        assert_eq!(extract_wikilinks(body), vec!["target-a", "target-b"]);
+        let result = extract_wikilinks(body);
+        assert_eq!(result, vec!["target-a", "target-b"]);
     }
 
     #[test]
     fn count_words_skips_code_fences() {
         let body = "intro words\n\n```rust\nlet x = 1;\n```\n\nafter fence two words";
-        assert_eq!(count_words(body), 2 + 3);
+        assert_eq!(count_words(body), 2 + 4);
     }
 
     #[test]

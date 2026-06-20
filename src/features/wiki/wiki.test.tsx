@@ -91,6 +91,20 @@ describe("wikiStore", () => {
     expect(useWikiStore.getState().mode).toBe("read");
   });
 
+  it("tracks opened pages in recentPages (deduped, newest first, capped)", async () => {
+    useWikiStore.setState({ recentPages: [] });
+    invokeMock.mockResolvedValue(pageContent({ meta: pageMeta({ path: "wiki/a.md", title: "A" }) }));
+    await useWikiStore.getState().openPage("proj-1", "D:/wiki", "wiki/a.md");
+    invokeMock.mockResolvedValue(pageContent({ meta: pageMeta({ path: "wiki/b.md", title: "B" }) }));
+    await useWikiStore.getState().openPage("proj-1", "D:/wiki", "wiki/b.md");
+    // Reopening A promotes it to the front without duplicating.
+    invokeMock.mockResolvedValue(pageContent({ meta: pageMeta({ path: "wiki/a.md", title: "A" }) }));
+    await useWikiStore.getState().openPage("proj-1", "D:/wiki", "wiki/a.md");
+
+    const recent = useWikiStore.getState().recentPages.map((entry) => entry.path);
+    expect(recent).toEqual(["wiki/a.md", "wiki/b.md"]);
+  });
+
   it("marks saveState as conflict when the backend reports FILE_HASH_MISMATCH", async () => {
     useWikiStore.setState({
       page: pageContent(),

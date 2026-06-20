@@ -339,12 +339,13 @@ mod tests {
     fn extracts_markdown_text() {
         let (context, root) = tmp_context("md-extract");
         let store = FileStore;
+        let out_dir = root.join("raw/extracted");
         let source = root.join("test.md");
         fs::write(&source, "# Hello\n\nThis is a **markdown** file.\n").unwrap();
 
         let service = ExtractionService;
         let result = service
-            .extract_text(&context, &store, &source, &root)
+            .extract_text(&context, &store, &source, &out_dir)
             .unwrap();
 
         assert_eq!(result.status, ExtractionStatus::Extracted);
@@ -361,12 +362,13 @@ mod tests {
     fn extracts_txt_text() {
         let (context, root) = tmp_context("txt-extract");
         let store = FileStore;
+        let out_dir = root.join("raw/extracted");
         let source = root.join("notes.txt");
         fs::write(&source, "Plain text content\nwith multiple lines.\n").unwrap();
 
         let service = ExtractionService;
         let result = service
-            .extract_text(&context, &store, &source, &root)
+            .extract_text(&context, &store, &source, &out_dir)
             .unwrap();
 
         assert_eq!(result.status, ExtractionStatus::Extracted);
@@ -379,12 +381,13 @@ mod tests {
     fn extracts_csv_text() {
         let (context, root) = tmp_context("csv-extract");
         let store = FileStore;
+        let out_dir = root.join("raw/extracted");
         let source = root.join("data.csv");
         fs::write(&source, "name,age,city\nAlice,30,NYC\nBob,25,LA\n").unwrap();
 
         let service = ExtractionService;
         let result = service
-            .extract_text(&context, &store, &source, &root)
+            .extract_text(&context, &store, &source, &out_dir)
             .unwrap();
 
         assert_eq!(result.status, ExtractionStatus::Extracted);
@@ -397,6 +400,7 @@ mod tests {
     fn extracts_html_stripping_tags() {
         let (context, root) = tmp_context("html-extract");
         let store = FileStore;
+        let out_dir = root.join("raw/extracted");
         let source = root.join("page.html");
         fs::write(
             &source,
@@ -406,7 +410,7 @@ mod tests {
 
         let service = ExtractionService;
         let result = service
-            .extract_text(&context, &store, &source, &root)
+            .extract_text(&context, &store, &source, &out_dir)
             .unwrap();
 
         assert_eq!(result.status, ExtractionStatus::Extracted);
@@ -465,6 +469,7 @@ mod tests {
     fn batch_extraction_continues_on_failure() {
         let (context, root) = tmp_context("batch-extract");
         let store = FileStore;
+        let out_dir = root.join("raw/extracted");
 
         let good = root.join("good.md");
         let bad = PathBuf::from("/nonexistent/file.pdf");
@@ -479,7 +484,7 @@ mod tests {
                 good.to_string_lossy().to_string(),
                 bad.to_string_lossy().to_string(),
             ],
-            &root,
+            &out_dir,
         );
 
         assert_eq!(results.len(), 2);

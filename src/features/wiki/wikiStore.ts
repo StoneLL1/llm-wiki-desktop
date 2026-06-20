@@ -10,6 +10,11 @@ import type {
 export type WikiMode = "read" | "edit";
 export type SaveState = "idle" | "saving" | "saved" | "conflict" | "error";
 
+export interface RecentPageEntry {
+  path: string;
+  title: string;
+}
+
 interface BackendLikeError {
   code?: string;
   message?: string;
@@ -19,6 +24,8 @@ function isConflictError(error: unknown): boolean {
   const code = (error as BackendLikeError | null | undefined)?.code;
   return code === "FILE_HASH_MISMATCH";
 }
+
+const RECENT_PAGE_LIMIT = 8;
 
 interface WikiState {
   tree: WikiTree | null;
@@ -31,6 +38,7 @@ interface WikiState {
   loadingTree: boolean;
   loadingPage: boolean;
   error: string | null;
+  recentPages: RecentPageEntry[];
   scan: (projectId: string, rootPath: string) => Promise<void>;
   openPage: (projectId: string, rootPath: string, path: string) => Promise<void>;
   setMode: (mode: WikiMode) => void;
@@ -39,6 +47,7 @@ interface WikiState {
   setDraft: (draft: string) => void;
   save: (projectId: string, rootPath: string) => Promise<void>;
   reload: (projectId: string, rootPath: string) => Promise<void>;
+  toggleBookmark: (projectId: string, rootPath: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -52,6 +61,7 @@ const initial = {
   loadingTree: false,
   loadingPage: false,
   error: null as string | null,
+  recentPages: [] as RecentPageEntry[],
 };
 
 export const useWikiStore = create<WikiState>((set, get) => ({
@@ -77,7 +87,16 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       const page = await invoke<WikiPageContent>("read_wiki_page", {
         request: { projectId, projectRootPath: rootPath, relativePath: path },
       });
-      set({ page, draft: page.rawMarkdown, loadingPage: false });
+      set((state) => {
+        const entry: RecentPageEntry = { path: page.meta.path, title: page.meta.title };
+        const rest = state.recentPages.filter((p) => p.path !== entry.path);
+        return {
+          page,
+          draft: page.rawMarkdown,
+          loadingPage: false,
+          recentPages: [entry, ...rest].slice(0, RECENT_PAGE_LIMIT),
+        };
+      });
     } catch (error) {
       set({ loadingPage: false, error: errorMessage(error) });
     }
@@ -159,6 +178,33 @@ export const useWikiStore = create<WikiState>((set, get) => ({
     await get().scan(projectId, rootPath);
     if (selected) {
       await get().openPage(projectId, rootPath, selected);
+    }
+  },
+  toggleBookmark: async (projectId, rootPath) => {
+    const { page } = get();
+    if (!page) return;
+    try {
+      const result = await invoke<{ relativePath: string; bookmarked: boolean }>(
+        "toggle_bookmark",
+        { request: { projectId, projectRootPath: rootPath, relativePath: page.meta.path } },
+      );
+      set((state) => {
+        if (!state.page) return {};
+        const nextMeta = { ...state.page.meta, bookmarked: result.bookmarked };
+        return {
+          page: { ...state.page, meta: nextMeta },
+          tree: state.tree
+            ? {
+                ...state.tree,
+                pages: state.tree.pages.map((p) =>
+                  p.path === nextMeta.path ? { ...p, bookmarked: result.bookmarked } : p,
+                ),
+              }
+            : state.tree,
+        };
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
     }
   },
   reset: () => set({ ...initial }),

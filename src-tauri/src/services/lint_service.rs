@@ -44,8 +44,6 @@ impl LintService {
 
         let lookup = build_target_lookup(&pages);
         let inbound = build_inbound_counts(&pages, &lookup);
-        let existing: std::collections::HashSet<&str> =
-            pages.iter().map(|p| p.path.as_str()).collect();
 
         let mut issues: Vec<LintIssue> = Vec::new();
 
@@ -240,7 +238,7 @@ impl LintService {
         }
 
         // Index drift (only when wiki/index.md exists).
-        issues.extend(self.check_index_drift(context, &existing));
+        issues.extend(self.check_index_drift(context, &lookup));
 
         issues.sort_by(|a, b| {
             severity_rank(a.severity)
@@ -259,7 +257,7 @@ impl LintService {
     fn check_index_drift(
         &self,
         context: &ProjectContext,
-        existing: &std::collections::HashSet<&str>,
+        lookup: &std::collections::HashMap<String, String>,
     ) -> Vec<LintIssue> {
         let mut issues = Vec::new();
         let Ok(raw) = self.file_store.read_markdown(context, "wiki/index.md") else {
@@ -268,9 +266,10 @@ impl LintService {
         let split = split_frontmatter(&raw);
         let linked: Vec<String> = extract_wikilinks(&split.body);
 
-        // Ghost links: targets that resolve to no page.
+        // Ghost links: targets that resolve to no page (same resolution as
+        // DeadLink, using build_target_lookup keys).
         for target in &linked {
-            if is_external(target) || existing.iter().any(|p| *p == target) {
+            if is_external(target) || lookup.contains_key(&target.trim().to_ascii_lowercase()) {
                 continue;
             }
             issues.push(LintIssue {
@@ -992,11 +991,7 @@ mod tests {
             "wiki/concepts/spoke.md",
             "---\ntitle: Spoke\ntype: concept\n---\n\n# Spoke\n\nNothing links back.",
         );
-        write_file(
-            &context,
-            "wiki/index.md",
-            "# Index\n\n- [[hub]]\n- [[spoke]]\n",
-        );
+        write_file(&context, "wiki/index.md", "# Index\n\n- [[spoke]]\n");
         write_file(&context, "wiki/log.md", "# Log\n");
 
         let report = LintService::default()
@@ -1109,10 +1104,14 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.issue_type == LintIssueType::DuplicateFilename));
-        assert!(report
-            .issues
-            .iter()
-            .any(|i| i.issue_type == LintIssueType::PathCase));
+        // PathCase detection requires a case-sensitive filesystem — on
+        // Windows (NTFS) the two names collide and overwrite each other.
+        if cfg!(not(target_os = "windows")) {
+            assert!(report
+                .issues
+                .iter()
+                .any(|i| i.issue_type == LintIssueType::PathCase));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
