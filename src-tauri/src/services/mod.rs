@@ -1,4 +1,5 @@
 mod agent_service;
+mod chat_service;
 mod compile_service;
 mod export_service;
 mod extraction_service;
@@ -14,6 +15,7 @@ mod secret_service;
 mod settings_service;
 
 pub use agent_service::{AgentInvocation, AgentService, ProcessRunner, SystemProcessRunner};
+pub use chat_service::ChatService;
 pub use compile_service::CompileService;
 pub use export_service::ExportService;
 pub use extraction_service::ExtractionService;

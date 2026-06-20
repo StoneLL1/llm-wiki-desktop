@@ -337,6 +337,34 @@ pub fn count_words(body: &str) -> usize {
     count
 }
 
+/// Slugify a chat question into a filesystem-safe `wiki/queries/` filename stem.
+/// Keeps lowercase ASCII alphanumerics and CJK/code-point letters, collapses
+/// other separators to `-`, trims to a bounded length, and falls back to
+/// `query-<suffix>` when nothing usable remains (so a pure-punctuation or empty
+/// question still yields a unique, valid filename).
+pub fn slugify_query(query: &str, fallback_suffix: &str) -> String {
+    const MAX_LEN: usize = 60;
+    let mut out = String::new();
+    let mut prev_dash = true;
+    for ch in query.trim().chars() {
+        let keep = ch.is_alphanumeric() && (ch.is_ascii() || (ch as u32) >= 0x4E00); // ASCII alnum or non-ASCII (CJK etc.)
+        if keep {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    let mut stem: String = trimmed.chars().take(MAX_LEN).collect();
+    stem = stem.trim_matches('-').to_string();
+    if stem.is_empty() {
+        stem = format!("query-{fallback_suffix}");
+    }
+    stem
+}
+
 /// Build a short snippet around the first case-insensitive match of any query
 /// term, for search result previews. Returns `None` if no term matches.
 pub fn snippet_for_query(body: &str, query_lower: &str, radius: usize) -> Option<String> {
@@ -486,5 +514,23 @@ mod tests {
     #[test]
     fn snippet_returns_none_when_no_match() {
         assert!(snippet_for_query("nothing here", "missing", 5).is_none());
+    }
+
+    #[test]
+    fn slugify_query_keeps_alnum_cjk_and_collapses_separators() {
+        assert_eq!(
+            slugify_query("What is the ReAct pattern?", "1"),
+            "what-is-the-react-pattern"
+        );
+        // CJK is preserved (non-ASCII code points kept).
+        assert_eq!(slugify_query("什么是 Agent？", "1"), "什么是-agent");
+        // Punctuation/empty collapses to the fallback stem.
+        assert_eq!(slugify_query("??? !!!", "42"), "query-42");
+        assert_eq!(slugify_query("", "7"), "query-7");
+        // Long queries are truncated to a bounded length.
+        let long = "a".repeat(200);
+        let slug = slugify_query(&long, "1");
+        assert!(slug.len() <= 60);
+        assert!(slug.starts_with('a'));
     }
 }
