@@ -1,4 +1,5 @@
 pub mod app_state;
+#[cfg(feature = "gui")]
 pub mod commands;
 pub mod errors;
 pub mod models;
@@ -6,10 +7,14 @@ pub mod services;
 pub mod tasks;
 pub mod utils;
 
+#[cfg(feature = "gui")]
 use tasks::task_events::EventBus;
+#[cfg(feature = "gui")]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+#[cfg(feature = "gui")]
 use tauri::Manager;
 
+#[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

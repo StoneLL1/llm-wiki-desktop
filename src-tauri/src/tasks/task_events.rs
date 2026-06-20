@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "gui")]
 use tauri::Emitter;
 use uuid::Uuid;
 
@@ -7,6 +8,7 @@ use crate::models::task::{BackendEvent, BackendEventType};
 
 #[derive(Clone)]
 pub enum EventBus {
+    #[cfg(feature = "gui")]
     Tauri(Arc<tauri::AppHandle>),
     Noop,
     #[doc(hidden)]
@@ -21,6 +23,7 @@ pub struct CapturedEvent {
 }
 
 impl EventBus {
+    #[cfg(feature = "gui")]
     pub fn new_tauri(app_handle: tauri::AppHandle) -> Self {
         EventBus::Tauri(Arc::new(app_handle))
     }
@@ -50,6 +53,7 @@ impl EventBus {
             payload,
         };
         match self {
+            #[cfg(feature = "gui")]
             EventBus::Tauri(app_handle) => {
                 let event_name = event_type_to_tauri_name(&event.event_type);
                 let _ = app_handle.emit(&event_name, event);
@@ -66,6 +70,7 @@ impl EventBus {
     }
 }
 
+#[cfg(feature = "gui")]
 fn event_type_to_tauri_name(event_type: &BackendEventType) -> String {
     use BackendEventType::*;
     match event_type {
