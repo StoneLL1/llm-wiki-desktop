@@ -145,6 +145,11 @@ pub fn run() {
             commands::lint_commands::start_deep_lint,
             commands::lint_commands::get_deep_lint_report,
             commands::lint_commands::apply_lint_fix,
+            commands::export_commands::start_export,
+            commands::export_commands::regenerate_export,
+            commands::export_commands::list_exports,
+            commands::export_commands::read_export_preview,
+            commands::export_commands::open_export_folder,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");

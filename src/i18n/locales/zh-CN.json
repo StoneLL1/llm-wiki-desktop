@@ -354,5 +354,20 @@
   "lint.issueType.missing_source": "缺失来源",
   "lint.issueType.schema_mismatch": "Schema 不符",
   "lint.issueType.outdated_content": "内容过时",
-  "lint.issueType.contradiction": "矛盾"
+  "lint.issueType.contradiction": "矛盾",
+  "exports.type.beautiful_read": "精读",
+  "exports.type.knowledge_card": "卡片",
+  "exports.type.concept_map": "概念图",
+  "exports.type.project_report": "报告",
+  "exports.sourcePlaceholder": "wiki/concepts/page.md",
+  "exports.actions.generate": "生成",
+  "exports.actions.cancel": "取消",
+  "exports.actions.preview": "预览",
+  "exports.actions.regenerate": "重新生成",
+  "exports.actions.openFolder": "打开文件夹",
+  "exports.actions.clearPreview": "关闭",
+  "exports.list.empty": "运行一次导出即可在此查看生成的 HTML、卡片、概念图与报告。",
+  "exports.list.loading": "正在刷新导出…",
+  "exports.preview.title": "预览",
+  "exports.preview.empty": "选择一个导出以在此预览。"
 }

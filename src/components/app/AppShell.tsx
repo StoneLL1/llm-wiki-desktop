@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
+import { ExportsView } from "../../features/exports/ExportsView";
 import { ImportView } from "../../features/import/ImportView";
 import { AgentView } from "../../features/agent/AgentView";
 import { ChatView } from "../../features/chat/ChatView";
@@ -254,7 +255,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         </div>
       </header>
 
-      <div className={activeView === "wiki" || activeView === "graph" || activeView === "chat" || activeView === "lint" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
+      <div className={activeView === "wiki" || activeView === "graph" || activeView === "chat" || activeView === "lint" || activeView === "exports" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
         {activeView === "dashboard" ? (
           <DashboardView />
         ) : activeView === "wiki" ? (
@@ -265,6 +266,8 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           <GraphView />
         ) : activeView === "lint" ? (
           <LintView />
+        ) : activeView === "exports" ? (
+          <ExportsView />
         ) : activeView === "import" ? (
           <ImportView
             preview={importPreview}
@@ -288,10 +291,10 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           <div className="grid gap-3">
           <div className="panel">
             <div className="panel-header">
-              <span>{t(`view.${activeView}.paneTitle`)}</span>
+              <span>{t(`view.${activeView as string}.paneTitle`)}</span>
             </div>
             <p className="m-0 mt-2 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
-              {t(`view.${activeView}.emptyState`)}
+              {t(`view.${activeView as string}.emptyState`)}
             </p>
           </div>
 

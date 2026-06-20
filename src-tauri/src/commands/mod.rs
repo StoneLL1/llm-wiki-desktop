@@ -1,6 +1,7 @@
 pub mod agent_commands;
 pub mod chat_commands;
 pub mod compile_commands;
+pub mod export_commands;
 pub mod file_commands;
 pub mod git_commands;
 pub mod graph_commands;
