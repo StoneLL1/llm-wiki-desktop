@@ -1,5 +1,14 @@
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LoaderCircle, Save } from "lucide-react";
+import { Editor, rootCtx, defaultValueCtx } from "@milkdown/kit/core";
+import { commonmark } from "@milkdown/kit/preset/commonmark";
+import { gfm } from "@milkdown/kit/preset/gfm";
+import { history } from "@milkdown/kit/plugin/history";
+import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
+import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
+import { nord } from "@milkdown/theme-nord";
+import "@milkdown/theme-nord/style.css";
 
 import type { SaveState } from "./wikiStore";
 
@@ -12,6 +21,53 @@ interface WikiEditorProps {
   onReload: () => void;
 }
 
+/**
+ * WYSIWYG Markdown editor backed by Milkdown (ProseMirror).
+ *
+ * The editor is uncontrolled: `draft` seeds the initial document on mount, and
+ * Milkdown emits the serialized markdown back through `onDraftChange` on every
+ * change. The parent remounts this component (via a path key) when the page
+ * switches, so each page starts from a clean editor state.
+ *
+ * Wikilinks `[[Target]]` are not first-class Markdown, so they render as
+ * literal bracketed text in the WYSIWYG view but roundtrip losslessly to the
+ * stored bytes — the reader (MarkdownReader) is responsible for resolving them
+ * into clickable links.
+ */
+function MilkdownEditor({
+  initialMarkdown,
+  onChange,
+}: {
+  initialMarkdown: string;
+  onChange: (markdown: string) => void;
+}) {
+  // Keep the latest onChange without churning the editor's deps array.
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEditor(
+    (root) =>
+      Editor.make()
+        .config((ctx) => {
+          ctx.set(rootCtx, root);
+          ctx.set(defaultValueCtx, initialMarkdown);
+          ctx.get(listenerCtx).markdownUpdated((_, markdown) => {
+            onChangeRef.current(markdown);
+          });
+        })
+        .config(nord)
+        .use(commonmark)
+        .use(gfm)
+        .use(history)
+        .use(listener),
+    // Re-create the editor only when the seed markdown changes (i.e. a new
+    // page). Normal edits flow through the listener, not through here.
+    [initialMarkdown],
+  );
+
+  return null;
+}
+
 export function WikiEditor({
   draft,
   saveState,
@@ -22,6 +78,11 @@ export function WikiEditor({
 }: WikiEditorProps) {
   const { t } = useTranslation();
   const saving = saveState === "saving";
+  // Seed the WYSIWYG doc once per mount; the parent remounts us (keyed by page
+  // path) when the page changes. Live edits flow out via onDraftChange and must
+  // NOT feed back into initialMarkdown, or the editor re-creates itself on
+  // every keystroke and loses the cursor.
+  const [seed] = useState(draft);
 
   return (
     <div className="flex h-full flex-col">
@@ -84,12 +145,20 @@ export function WikiEditor({
           {t("wiki.editor.conflictCopy")}
         </div>
       ) : null}
-      <textarea
-        className="min-h-0 flex-1 resize-none border-none bg-transparent p-2 font-mono text-[13px] leading-[1.7] text-[var(--text-primary)] outline-none"
-        spellCheck={false}
-        value={draft}
-        onChange={(event) => onDraftChange(event.target.value)}
-      />
+      <div
+        className="wiki-editor min-h-0 flex-1 overflow-y-auto p-2 text-[13px] leading-[1.7] text-[var(--text-primary)]"
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+            event.preventDefault();
+            if (!saving) onSave();
+          }
+        }}
+      >
+        <MilkdownProvider>
+          <MilkdownEditor initialMarkdown={seed} onChange={onDraftChange} />
+          <Milkdown />
+        </MilkdownProvider>
+      </div>
     </div>
   );
 }

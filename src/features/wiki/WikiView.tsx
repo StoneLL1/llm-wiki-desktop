@@ -150,6 +150,7 @@ export function WikiView() {
           ) : mode === "edit" ? (
             <div className="mx-auto flex h-full max-w-[760px] flex-col px-8 py-6">
               <WikiEditor
+                key={selectedPath ?? undefined}
                 draft={draft}
                 saveState={saveState}
                 onDraftChange={setDraft}
