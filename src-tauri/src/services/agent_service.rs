@@ -250,6 +250,52 @@ impl AgentService {
         Ok(invocation)
     }
 
+    /// Build a plain-text Agent invocation for the `wiki-lint` deep-lint run.
+    /// The captured stdout is the structured lint report (a fenced JSON block),
+    /// so this reuses the chat text-output profile rather than the stream-json
+    /// compile profile. The BYOK route remains the guaranteed fallback.
+    pub fn lint_invocation(
+        kind: AgentKind,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<AgentInvocation, BackendError> {
+        validate_candidate_workspace(workspace)?;
+        let cwd = workspace.to_path_buf();
+        let prompt_owned = prompt.to_string();
+        let invocation = match kind {
+            AgentKind::Claude => AgentInvocation {
+                program: "claude".into(),
+                args: vec![
+                    "--print".into(),
+                    "--output-format".into(),
+                    "text".into(),
+                    prompt_owned,
+                ],
+                stdin: None,
+                cwd,
+            },
+            AgentKind::Codex => AgentInvocation {
+                program: "codex".into(),
+                args: vec!["exec".into(), "-".into()],
+                stdin: Some(prompt_owned),
+                cwd,
+            },
+            AgentKind::Openclaw => AgentInvocation {
+                program: "openclaw".into(),
+                args: vec!["agent".into(), "--message".into(), prompt_owned],
+                stdin: None,
+                cwd,
+            },
+            AgentKind::Hermes => AgentInvocation {
+                program: "hermes".into(),
+                args: vec!["--prompt".into(), prompt_owned],
+                stdin: None,
+                cwd,
+            },
+        };
+        Ok(invocation)
+    }
+
     pub fn install_guidance(kind: AgentKind) -> &'static str {
         match kind {
             AgentKind::Claude => "npm install -g @anthropic-ai/claude-code",

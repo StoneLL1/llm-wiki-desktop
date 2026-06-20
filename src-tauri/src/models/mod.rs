@@ -5,6 +5,7 @@ pub mod confirmation;
 pub mod git;
 pub mod graph;
 pub mod import;
+pub mod lint;
 pub mod llm;
 pub mod paths;
 pub mod project;

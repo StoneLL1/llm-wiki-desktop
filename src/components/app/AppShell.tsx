@@ -6,6 +6,7 @@ import { ImportView } from "../../features/import/ImportView";
 import { AgentView } from "../../features/agent/AgentView";
 import { ChatView } from "../../features/chat/ChatView";
 import { GraphView } from "../../features/graph/GraphView";
+import { LintView } from "../../features/lint/LintView";
 import { LlmProviderSettings } from "../../features/settings/LlmProviderSettings";
 import { WikiView } from "../../features/wiki/WikiView";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
@@ -253,7 +254,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         </div>
       </header>
 
-      <div className={activeView === "wiki" || activeView === "graph" || activeView === "chat" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
+      <div className={activeView === "wiki" || activeView === "graph" || activeView === "chat" || activeView === "lint" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
         {activeView === "dashboard" ? (
           <DashboardView />
         ) : activeView === "wiki" ? (
@@ -262,6 +263,8 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           <ChatView />
         ) : activeView === "graph" ? (
           <GraphView />
+        ) : activeView === "lint" ? (
+          <LintView />
         ) : activeView === "import" ? (
           <ImportView
             preview={importPreview}

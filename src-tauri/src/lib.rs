@@ -141,6 +141,10 @@ pub fn run() {
             commands::chat_commands::delete_chat_session,
             commands::chat_commands::send_chat_message,
             commands::chat_commands::save_answer_to_wiki,
+            commands::lint_commands::run_local_lint,
+            commands::lint_commands::start_deep_lint,
+            commands::lint_commands::get_deep_lint_report,
+            commands::lint_commands::apply_lint_fix,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");
