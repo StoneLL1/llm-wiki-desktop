@@ -28,6 +28,8 @@ export function TopBar() {
       <button
         aria-label={t("shell.switchProject")}
         className="flex h-[30px] min-w-0 max-w-[360px] items-center gap-2 rounded-[var(--radius-md)] px-2 text-left hover:bg-[var(--surface-muted)]"
+        onClick={() => setActiveView("dashboard")}
+        title={t("shell.switchProject")}
         type="button"
       >
         <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={16} />

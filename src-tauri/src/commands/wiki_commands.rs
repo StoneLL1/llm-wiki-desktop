@@ -6,7 +6,8 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{
-    ReadWikiPageRequest, SaveWikiPageRequest, SaveWikiPageResponse, WikiPageContent, WikiTree,
+    ReadWikiPageRequest, SaveWikiPageRequest, SaveWikiPageResponse, ToggleBookmarkRequest,
+    ToggleBookmarkResponse, WikiPageContent, WikiTree,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -52,4 +53,15 @@ pub fn save_wiki_page(
 
 fn context_from_request(project_id: &str, root_path: &str) -> ProjectContext {
     ProjectContext::new(project_id.to_string(), PathBuf::from(root_path))
+}
+
+#[tauri::command]
+pub fn toggle_bookmark(
+    state: State<'_, AppState>,
+    request: ToggleBookmarkRequest,
+) -> Result<ToggleBookmarkResponse, BackendError> {
+    let context = context_from_request(&request.project_id, &request.project_root_path);
+    state
+        .search_service
+        .toggle_bookmark(&context, &request.relative_path)
 }

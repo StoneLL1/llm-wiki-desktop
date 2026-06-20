@@ -29,6 +29,7 @@ export function WikiView() {
   const save = useWikiStore((state) => state.save);
   const cancelEdit = useWikiStore((state) => state.cancelEdit);
   const reload = useWikiStore((state) => state.reload);
+  const toggleBookmark = useWikiStore((state) => state.toggleBookmark);
 
   const { projectId, rootPath } = currentProject;
 
@@ -123,13 +124,18 @@ export function WikiView() {
             </div>
             <button
               type="button"
+              disabled={!page}
+              onClick={() => {
+                if (page) void toggleBookmark(projectId, rootPath);
+              }}
               title={t("wiki.content.star")}
-              className="grid h-[28px] w-[28px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+              aria-pressed={page?.meta.bookmarked ?? false}
+              className="grid h-[28px] w-[28px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
             >
               <Star
                 size={14}
                 className={
-                  page?.meta.starred
+                  page?.meta.bookmarked
                     ? "fill-[var(--accent)] text-[var(--accent)]"
                     : ""
                 }

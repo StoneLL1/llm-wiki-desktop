@@ -70,7 +70,7 @@ impl ProjectService {
         store.write_json_atomic(
             &context,
             ".app/bookmarks.json",
-            &serde_json::json!({ "bookmarks": [] }),
+            &serde_json::json!([]),
         )?;
         store.write_json_atomic(
             &context,
@@ -408,7 +408,7 @@ impl ProjectService {
         store.write_json_atomic(
             context,
             ".app/bookmarks.json",
-            &serde_json::json!({ "bookmarks": [] }),
+            &serde_json::json!([]),
         )?;
         store.write_json_atomic(
             context,

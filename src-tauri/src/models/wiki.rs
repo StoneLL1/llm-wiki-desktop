@@ -188,6 +188,21 @@ pub struct SaveWikiPageResponse {
     pub graph_cache_invalidated: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleBookmarkRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleBookmarkResponse {
+    pub relative_path: String,
+    pub bookmarked: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::WikiPageType;

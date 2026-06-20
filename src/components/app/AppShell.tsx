@@ -10,9 +10,15 @@ import { GraphView } from "../../features/graph/GraphView";
 import { LintView } from "../../features/lint/LintView";
 import { SettingsView } from "../../features/settings/SettingsView";
 import { WikiView } from "../../features/wiki/WikiView";
+import { useChatStore } from "../../stores/chatStore";
+import { useExportStore } from "../../stores/exportStore";
+import { useGraphStore } from "../../stores/graphStore";
+import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useToastStore } from "../../stores/toastStore";
+import { useWikiStore } from "../../features/wiki/wikiStore";
 import type { AgentInfo } from "../../types/agent";
 import type { AgentKind } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
@@ -23,6 +29,7 @@ import { ConfirmationDialog } from "./ConfirmationDialog";
 import { LeftSidebar } from "./LeftSidebar";
 import { RightContextPanel } from "./RightContextPanel";
 import { TaskLogDrawer } from "./TaskLogDrawer";
+import { Toaster } from "./Toaster";
 import { TopBar } from "./TopBar";
 
 const viewSummaryKeys: Record<AppView, string> = {
@@ -74,6 +81,7 @@ export function AppShell() {
       </div>
 
       <BottomStatusBar />
+      <Toaster />
       {displayedPendingAction ? (
         <ConfirmationDialog
           action={displayedPendingAction}
@@ -109,6 +117,8 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const actions = viewActionKeys[activeView];
   const currentProject = useProjectStore((state) => state.currentProject);
   const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
+  const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const pushToast = useToastStore((state) => state.pushToast);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [isConfirmingImport, setIsConfirmingImport] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -227,6 +237,124 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     return invoke<ProviderTestResult>("test_llm_provider", { request: { ...projectRequest, config } });
   }, [currentProject.projectId, currentProject.rootPath, hasTauri]);
 
+  const requireTauri = useCallback(
+    (): boolean => {
+      if (!hasTauri) {
+        pushToast("warning", t("shell.browserUnavailable"));
+        return false;
+      }
+      return true;
+    },
+    [pushToast, t],
+  );
+
+  // Per-view header action dispatcher. Each view exposes a primary and a
+  // secondary action (see viewActionKeys). The header buttons are the always-
+  // visible entry points; they delegate to the same store actions the in-view
+  // toolbars use. Actions that genuinely live inside a view's own controls
+  // (graph fit-to-view, import file dialog, settings form) redirect there.
+  const runViewAction = useCallback(
+    (slot: "primary" | "secondary") => {
+      const { projectId, rootPath } = currentProject;
+      switch (activeView) {
+        case "dashboard":
+          if (slot === "primary") {
+            setActiveView("import");
+          } else {
+            setActiveView("lint");
+            if (requireTauri()) void useLintStore.getState().runLocalLint(projectId, rootPath);
+          }
+          break;
+        case "wiki": {
+          const wiki = useWikiStore.getState();
+          if (slot === "primary") {
+            if (!wiki.page) return;
+            wiki.startEdit();
+          } else {
+            void wiki.reload(projectId, rootPath);
+          }
+          break;
+        }
+        case "chat": {
+          const chat = useChatStore.getState();
+          if (slot === "primary") {
+            if (!requireTauri()) return;
+            void chat.createSession(projectId, rootPath);
+          } else {
+            const session = chat.activeSession;
+            const lastAssistant = [...(session?.messages ?? [])]
+              .reverse()
+              .find((message) => message.role === "assistant");
+            if (!session || !lastAssistant) {
+              pushToast("info", t("view.chat.actionSecondary"));
+              return;
+            }
+            if (!requireTauri()) return;
+            void chat.saveAnswer(projectId, rootPath, session.id, lastAssistant.id);
+          }
+          break;
+        }
+        case "graph": {
+          const graph = useGraphStore.getState();
+          if (slot === "primary") {
+            if (!requireTauri()) return;
+            void graph.rebuild(projectId, rootPath);
+          } else {
+            void graph.load(projectId, rootPath);
+          }
+          break;
+        }
+        case "agent":
+          if (slot === "primary") {
+            void refreshCapabilities();
+          } else {
+            const last = tasks.find((task) => task.status === "running" || task.status === "queued");
+            if (last) openTaskDrawer(last.id);
+            else pushToast("info", t("view.agent.actionSecondary"));
+          }
+          break;
+        case "import":
+          // Add-sources / preview both need the in-view file dialog and auto
+          // preview; send the user there rather than duplicating the picker.
+          setActiveView("import");
+          pushToast("info", t("view.import.actionPrimary"));
+          break;
+        case "lint": {
+          const lint = useLintStore.getState();
+          if (slot === "primary") {
+            if (!requireTauri()) return;
+            void lint.runLocalLint(projectId, rootPath);
+          } else {
+            if (!requireTauri()) return;
+            void lint.startDeepLint(projectId, rootPath, "auto", null, null);
+          }
+          break;
+        }
+        case "exports": {
+          const exportStore = useExportStore.getState();
+          if (slot === "primary") {
+            if (!requireTauri()) return;
+            void exportStore.startExport(projectId, rootPath, exportStore.selectedType, exportStore.sourcePath);
+          } else {
+            const latest = exportStore.records[0];
+            if (!latest) {
+              pushToast("info", t("view.exports.actionSecondary"));
+              return;
+            }
+            if (!requireTauri()) return;
+            void exportStore.openFolder({ projectId, projectRootPath: rootPath, outputPath: latest.outputPath });
+          }
+          break;
+        }
+        case "settings":
+          // Save / test provider are owned by the settings form; point the user there.
+          pushToast("info", slot === "primary" ? t("view.settings.actionPrimary") : t("view.settings.actionSecondary"));
+          break;
+      }
+    },
+    [activeView, currentProject, openTaskDrawer, pushToast, refreshCapabilities, requireTauri, setActiveView, t, tasks],
+  );
+
   return (
     <section className="flex h-full flex-col">
       <header className="flex h-[52px] items-center gap-3 border-b border-[var(--border)] px-5">
@@ -241,6 +369,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
                   ? "bg-[var(--foreground)] text-[var(--text-inverse)] hover:bg-[#1a1a1a]"
                   : "border border-[var(--border)] bg-[var(--surface-raised)] hover:bg-[var(--surface-muted)]"
               }`}
+              onClick={() => runViewAction(index === 0 ? "primary" : "secondary")}
               type="button"
             >
               {t(actionKey)}

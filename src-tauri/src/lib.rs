@@ -142,6 +142,7 @@ pub fn run() {
             commands::wiki_commands::scan_wiki,
             commands::wiki_commands::read_wiki_page,
             commands::wiki_commands::save_wiki_page,
+            commands::wiki_commands::toggle_bookmark,
             commands::search_commands::search_wiki,
             commands::settings_commands::get_settings,
             commands::settings_commands::save_settings,

@@ -729,6 +729,9 @@ mod tests {
                 true,
             );
             service
+                .transition_status(&t2.id, TaskStatus::Running)
+                .unwrap();
+            service
                 .transition_status(&t2.id, TaskStatus::Succeeded)
                 .unwrap();
             service
