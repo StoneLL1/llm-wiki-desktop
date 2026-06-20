@@ -2,6 +2,7 @@ pub mod agent;
 pub mod chat;
 pub mod compile;
 pub mod confirmation;
+pub mod export;
 pub mod git;
 pub mod graph;
 pub mod import;

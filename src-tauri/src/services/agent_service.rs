@@ -296,6 +296,52 @@ impl AgentService {
         Ok(invocation)
     }
 
+    /// Build a plain-text Agent invocation for the `html-*` export skills. The
+    /// captured stdout is the standalone HTML document, so this reuses the
+    /// chat/lint text-output profile rather than the stream-json compile
+    /// profile. The BYOK route remains the guaranteed fallback.
+    pub fn html_export_invocation(
+        kind: AgentKind,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<AgentInvocation, BackendError> {
+        validate_candidate_workspace(workspace)?;
+        let cwd = workspace.to_path_buf();
+        let prompt_owned = prompt.to_string();
+        let invocation = match kind {
+            AgentKind::Claude => AgentInvocation {
+                program: "claude".into(),
+                args: vec![
+                    "--print".into(),
+                    "--output-format".into(),
+                    "text".into(),
+                    prompt_owned,
+                ],
+                stdin: None,
+                cwd,
+            },
+            AgentKind::Codex => AgentInvocation {
+                program: "codex".into(),
+                args: vec!["exec".into(), "-".into()],
+                stdin: Some(prompt_owned),
+                cwd,
+            },
+            AgentKind::Openclaw => AgentInvocation {
+                program: "openclaw".into(),
+                args: vec!["agent".into(), "--message".into(), prompt_owned],
+                stdin: None,
+                cwd,
+            },
+            AgentKind::Hermes => AgentInvocation {
+                program: "hermes".into(),
+                args: vec!["--prompt".into(), prompt_owned],
+                stdin: None,
+                cwd,
+            },
+        };
+        Ok(invocation)
+    }
+
     pub fn install_guidance(kind: AgentKind) -> &'static str {
         match kind {
             AgentKind::Claude => "npm install -g @anthropic-ai/claude-code",
@@ -629,5 +675,24 @@ mod tests {
             let guidance = AgentService::install_guidance(kind);
             assert!(!guidance.trim().is_empty());
         }
+    }
+
+    #[test]
+    fn html_export_invocation_uses_text_profile() {
+        let workspace = std::env::temp_dir().join("llm-wiki-desktop/export-invocation-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let claude =
+            AgentService::html_export_invocation(AgentKind::Claude, &workspace, "build html")
+                .unwrap();
+        assert_eq!(claude.program, "claude");
+        assert!(claude.args.contains(&"--output-format".to_string()));
+        assert!(claude.args.contains(&"text".to_string()));
+        assert!(!claude.args.contains(&"stream-json".to_string()));
+        assert!(claude.stdin.is_none());
+
+        let codex =
+            AgentService::html_export_invocation(AgentKind::Codex, &workspace, "build html")
+                .unwrap();
+        assert_eq!(codex.stdin.as_deref(), Some("build html"));
     }
 }

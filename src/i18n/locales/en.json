@@ -353,5 +353,20 @@
   "lint.issueType.missing_source": "Missing source",
   "lint.issueType.schema_mismatch": "Schema mismatch",
   "lint.issueType.outdated_content": "Outdated content",
-  "lint.issueType.contradiction": "Contradiction"
+  "lint.issueType.contradiction": "Contradiction",
+  "exports.type.beautiful_read": "Beautiful read",
+  "exports.type.knowledge_card": "Card",
+  "exports.type.concept_map": "Concept map",
+  "exports.type.project_report": "Report",
+  "exports.sourcePlaceholder": "wiki/concepts/page.md",
+  "exports.actions.generate": "Generate",
+  "exports.actions.cancel": "Cancel",
+  "exports.actions.preview": "Preview",
+  "exports.actions.regenerate": "Regenerate",
+  "exports.actions.openFolder": "Open folder",
+  "exports.actions.clearPreview": "Close",
+  "exports.list.empty": "Run an export to see generated HTML, cards, maps, and reports here.",
+  "exports.list.loading": "Refreshing exports…",
+  "exports.preview.title": "Preview",
+  "exports.preview.empty": "Select an export to preview it here."
 }

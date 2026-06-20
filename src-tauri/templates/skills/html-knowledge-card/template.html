@@ -1,0 +1,87 @@
+<!doctype html>
+<!--
+  html-knowledge-card — styling reference only.
+  Defines the compact card visual treatment. No schema/lint/agent behavior.
+-->
+<html lang="">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{title}}</title>
+    <style>
+      :root {
+        --bg: #f7f7f8;
+        --card: #ffffff;
+        --ink: #1a1a1a;
+        --muted: #6b7280;
+        --hairline: #e5e7eb;
+        --accent: #0d9488;
+      }
+      body {
+        margin: 0;
+        padding: 40px 20px;
+        background: var(--bg);
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        color: var(--ink);
+      }
+      .card {
+        max-width: 520px;
+        margin: 0 auto;
+        background: var(--card);
+        border: 1px solid var(--hairline);
+        border-radius: 12px;
+        padding: 24px 24px 20px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+      }
+      .card h1 {
+        font-size: 20px;
+        line-height: 1.25;
+        margin: 0 0 8px;
+      }
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 16px;
+      }
+      .pill {
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+        border: 1px solid var(--hairline);
+        border-radius: 999px;
+        padding: 2px 8px;
+      }
+      ul {
+        margin: 0 0 16px;
+        padding-left: 18px;
+      }
+      li {
+        font-size: 14px;
+        line-height: 1.6;
+        margin-bottom: 4px;
+      }
+      .source {
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        border-top: 1px solid var(--hairline);
+        padding-top: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>{{title}}</h1>
+      <div class="meta">
+        <span class="pill">{{type}}</span>
+        {{tags}}
+      </div>
+      <ul>
+        {{facts}}
+      </ul>
+      <div class="source">{{sourcePath}}</div>
+    </div>
+  </body>
+</html>
