@@ -125,3 +125,36 @@ input:focus-visible {
 .font-mono {
   font-family: var(--font-mono);
 }
+
+/* Milkdown WYSIWYG editor — override the nord theme so the editing surface
+   matches the app token palette instead of shipping its own light card. */
+.wiki-editor .milkdown {
+  background: transparent;
+  color: var(--text-primary);
+  min-height: 100%;
+}
+
+.wiki-editor .milkdown .editor {
+  padding: 4px 0;
+}
+
+.wiki-editor .milkdown h1,
+.wiki-editor .milkdown h2,
+.wiki-editor .milkdown h3 {
+  color: var(--text-primary);
+}
+
+.wiki-editor .milkdown a {
+  color: var(--accent-hover);
+}
+
+.wiki-editor .milkdown code,
+.wiki-editor .milkdown pre {
+  font-family: var(--font-mono);
+}
+
+.wiki-editor .milkdown blockquote {
+  border-left-color: var(--accent);
+  color: var(--text-secondary);
+}
+

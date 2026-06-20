@@ -4,6 +4,21 @@
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
 ----------------------------------------------------------------------
+[现象] Milkdown React 编辑器每次按键都丢光标、ProseMirror 重建闪烁，输入几乎不可用。
+[根因] useEditor 的 deps 里挂了 live draft；store 在每次 markdownUpdated 回调里 setDraft，draft 变 → 父重渲染 → initialMarkdown 变 → useEditor deps 变 → 整个 Editor.make() 重建。
+[规避做法] 编辑器非受控：用 `const [seed] = useState(draft)` 只在挂载时取一次种子值，把 seed 传给 defaultValueCtx + useEditor deps；live markdown 只通过 listener.markdownUpdated 单向流出 store，绝不回灌 initialMarkdown。切页靠父组件给编辑器加 `key={path}` 触发 remount 重置 seed，而不是靠改 seed prop。
+
+----------------------------------------------------------------------
+[现象] `Editor.make().use([commonmark, gfm, history, listener])` 报 "Type 'MilkdownPlugin[]' is not assignable to type 'MilkdownPlugin'"（对 commonmark/gfm/history 各报一次）。
+[根因] `.use()` 签名是 `MilkdownPlugin | MilkdownPlugin[]`（一个插件或一个插件数组）；但 @milkdown/kit 导出的每个 preset（commonmark/gfm/history/listener）本身已经是 `MilkdownPlugin[]`。把它们再包一层 `[a, b, c, d]` 就成了 `MilkdownPlugin[][]`，数组元素类型不匹配。
+[规避做法] 链式分别注册：`.use(commonmark).use(gfm).use(history).use(listener)`，每个调用吃一个 preset 数组，命中 `MilkdownPlugin[]` 重载。
+
+----------------------------------------------------------------------
+[现象] `import "@milkdown/theme-nord/lib/style.css"` 被 vite/rolldown 拒绝："./lib/style.css" is not exported ... (see exports field)。
+[根因] 包的 exports map 只暴露 `"./style.css": "./lib/style.css"`，深路径 `/lib/style.css` 被封闭。
+[规避做法] 用包根相对 specifier `@milkdown/theme-nord/style.css`，不要写 `/lib/...` 子路径。
+
+----------------------------------------------------------------------
 [现象] react-markdown 把自定义 `wikilink://target` 链接的 href 清成空串，自定义 `a` 组件的 `href.startsWith(WIKILINK_SCHEME)` 判断永远 false，所有 wikilink 落到外链 fallback 分支（target=_blank）。
 [根因] react-markdown v9 默认 `urlTransform`（`defaultUrlTransform`）只放行 http/https/mailto 等已知安全 scheme，未知 scheme 被剥离成 ""。
 [规避做法] 显式传 `urlTransform={(url) => url.startsWith(WIKILINK_SCHEME) ? url : defaultUrlTransform(url)}`，对 wikilink scheme 透传、其余走默认安全过滤。从 'react-markdown' 导入 defaultUrlTransform，不要写成恒等函数（会丢 javascript: 等防护）。

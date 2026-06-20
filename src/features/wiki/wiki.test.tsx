@@ -8,6 +8,7 @@ import type {
   WikiTree,
 } from "../../types/wiki";
 import { MarkdownReader } from "./MarkdownReader";
+import { WikiEditor } from "./WikiEditor";
 import { useWikiStore } from "./wikiStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -275,5 +276,29 @@ describe("MarkdownReader", () => {
     const link = await screen.findByText("TF architecture");
     fireEvent.click(link);
     await waitFor(() => expect(onOpenPage).toHaveBeenCalledWith("wiki/concepts/transformer.md"));
+  });
+});
+
+describe("WikiEditor (Milkdown)", () => {
+  it("mounts the WYSIWYG surface and renders the save toolbar", async () => {
+    const onDraftChange = vi.fn();
+    const onSave = vi.fn();
+    render(
+      <WikiEditor
+        draft={"# Hello\n\nworld"}
+        saveState="idle"
+        onDraftChange={onDraftChange}
+        onSave={onSave}
+        onCancel={vi.fn()}
+        onReload={vi.fn()}
+      />,
+    );
+
+    // The Milkdown container mounts a ProseMirror editor under .milkdown.
+    // jsdom cannot fully boot ProseMirror, so we assert the stable toolbar
+    // surface + the editor mount point render without throwing.
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+    const mount = document.querySelector(".wiki-editor");
+    expect(mount).not.toBeNull();
   });
 });
