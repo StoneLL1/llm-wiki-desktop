@@ -227,6 +227,17 @@ async fn run_chat_send(
         route: Some(route),
         task_id: Some(task_id.to_string()),
     };
+    // Re-check cancellation immediately before persisting: there is a window
+    // between the post-generation check above and the write below where the
+    // user may have pressed cancel. Don't save an answer the user abandoned.
+    if state.task_service.is_cancelled(task_id) {
+        return Err(BackendError::new(
+            "CHAT_CANCELLED",
+            "Chat was cancelled.",
+            true,
+            false,
+        ));
+    }
     state
         .chat_service
         .append_message(&context, &mut session, assistant_message)?;

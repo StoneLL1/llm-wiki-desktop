@@ -62,7 +62,9 @@ export function ChatComposer({
           value={value}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            // Guard IME composition (CJK input): Enter confirms the candidate,
+            // it must not also send the message mid-composition.
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               submit();
             }

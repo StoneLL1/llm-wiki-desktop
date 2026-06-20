@@ -51,6 +51,9 @@ interface ChatState {
   activeSession: ChatSession | null;
   /** Task id of the in-flight send, if any. The view watches taskStore for terminal status. */
   sendTaskId: string | null;
+  /** Session the in-flight send targeted, so a terminal-status reload only
+   *  refreshes that session — not whatever the user switched to mid-send. */
+  sendSessionId: string | null;
   /** Per-message save status keyed by message id. */
   saveStatus: Record<string, "idle" | "saving" | "saved" | "exists" | "error">;
   overwriteRequest: ChatOverwriteRequest | null;
@@ -101,6 +104,7 @@ const initial = {
   activeSessionId: null as string | null,
   activeSession: null as ChatSession | null,
   sendTaskId: null as string | null,
+  sendSessionId: null as string | null,
   saveStatus: {} as ChatState["saveStatus"],
   overwriteRequest: null as ChatOverwriteRequest | null,
   error: null as string | null,
@@ -200,7 +204,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           provider: provider ?? null,
         },
       });
-      set({ sendTaskId: task.id });
+      set({ sendTaskId: task.id, sendSessionId: sessionId });
       return task.id;
     } catch (error) {
       set({ error: errorMessage(error) });
@@ -208,10 +212,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  clearSendTask: () => set({ sendTaskId: null }),
+  clearSendTask: () => set({ sendTaskId: null, sendSessionId: null }),
 
   reloadActive: async (projectId, rootPath) => {
-    const sessionId = get().activeSessionId;
+    // Only reload the session the send targeted; if the user switched away
+    // mid-send, leave their current view alone rather than yanking it.
+    const sessionId = get().sendSessionId;
     if (!sessionId) return;
     await get().selectSession(projectId, rootPath, sessionId);
   },
@@ -270,7 +276,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           projectRootPath: rootPath,
           sessionId,
           messageId,
-          targetPath: null,
+          // Re-target the exact page the first attempt collided on, rather
+          // than falling back to the regenerated slug (a different file).
+          targetPath: request.path,
           expectedHash: request.currentHash,
           allowOverwrite: true,
         },
