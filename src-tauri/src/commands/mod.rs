@@ -10,5 +10,6 @@ pub mod lint_commands;
 pub mod llm_commands;
 pub mod project_commands;
 pub mod search_commands;
+pub mod settings_commands;
 pub mod task_commands;
 pub mod wiki_commands;

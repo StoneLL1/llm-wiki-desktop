@@ -2,13 +2,19 @@ import { FolderOpen, Search, Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { TaskActivityButton } from "./TaskActivityButton";
 
 export function TopBar() {
   const { i18n, t } = useTranslation();
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const currentProject = useProjectStore((state) => state.currentProject);
+  const persistPatch = useSettingsStore((state) => state.persistPatch);
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
+
+  const setLanguage = (language: "en" | "zh-CN") => {
+    void persistPatch(currentProject.projectId, currentProject.rootPath, { language });
+  };
 
   return (
     <header className="flex h-12 items-center gap-3 border-b border-[var(--border)] bg-[var(--background)] px-4 text-[13px]">
@@ -50,7 +56,7 @@ export function TopBar() {
             className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
               activeLanguage === "en" ? "bg-[var(--background)] font-medium" : "text-[var(--text-muted)]"
             }`}
-            onClick={() => void i18n.changeLanguage("en")}
+            onClick={() => setLanguage("en")}
             type="button"
           >
             {t("language.en")}
@@ -60,7 +66,7 @@ export function TopBar() {
             className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
               activeLanguage === "zh-CN" ? "bg-[var(--background)] font-medium" : "text-[var(--text-muted)]"
             }`}
-            onClick={() => void i18n.changeLanguage("zh-CN")}
+            onClick={() => setLanguage("zh-CN")}
             type="button"
           >
             {t("language.zhCN")}

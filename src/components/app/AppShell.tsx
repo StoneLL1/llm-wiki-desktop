@@ -8,7 +8,7 @@ import { AgentView } from "../../features/agent/AgentView";
 import { ChatView } from "../../features/chat/ChatView";
 import { GraphView } from "../../features/graph/GraphView";
 import { LintView } from "../../features/lint/LintView";
-import { LlmProviderSettings } from "../../features/settings/LlmProviderSettings";
+import { SettingsView } from "../../features/settings/SettingsView";
 import { WikiView } from "../../features/wiki/WikiView";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -124,12 +124,6 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     projectRootPath: currentProject.rootPath,
   };
 
-  const loadProviders = useCallback(async () => {
-    if (!hasTauri) return;
-    const statuses = await invoke<ProviderStatus[]>("list_llm_providers", { request: projectRequest });
-    setProviders(statuses);
-  }, [currentProject.projectId, currentProject.rootPath, hasTauri]);
-
   const refreshCapabilities = useCallback(async () => {
     if (!hasTauri) return;
     const [detected, statuses] = await Promise.all([
@@ -148,9 +142,9 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     if (activeView === "agent") {
       void refreshCapabilities();
     } else if (activeView === "settings") {
-      void loadProviders();
+      void refreshCapabilities();
     }
-  }, [activeView, loadProviders, refreshCapabilities]);
+  }, [activeView, refreshCapabilities]);
 
   const startCompile = useCallback(async () => {
     if (!hasTauri) return;
@@ -286,7 +280,16 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
             onSetDefault={(agent) => { void setDefaultAgent(agent); }}
           />
         ) : activeView === "settings" ? (
-          <LlmProviderSettings providers={providers} onSaveProvider={saveProvider} onSaveSecret={saveProviderSecret} onDeleteSecret={deleteProviderSecret} onTestProvider={testProvider} />
+          <SettingsView
+            project={currentProject}
+            providers={providers}
+            agents={agents}
+            onRefreshCapabilities={refreshCapabilities}
+            onSaveProvider={saveProvider}
+            onSaveSecret={saveProviderSecret}
+            onDeleteSecret={deleteProviderSecret}
+            onTestProvider={testProvider}
+          />
         ) : (
           <div className="grid gap-3">
           <div className="panel">

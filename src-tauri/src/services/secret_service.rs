@@ -78,7 +78,7 @@ impl SecretService {
                 .chars()
                 .rev()
                 .collect();
-            format!("••••{suffix}")
+            format!("\u{2022}\u{2022}\u{2022}\u{2022}{suffix}")
         }))
     }
 }
