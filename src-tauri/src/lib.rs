@@ -131,6 +131,9 @@ pub fn run() {
             commands::wiki_commands::read_wiki_page,
             commands::wiki_commands::save_wiki_page,
             commands::search_commands::search_wiki,
+            commands::graph_commands::get_graph,
+            commands::graph_commands::build_graph,
+            commands::graph_commands::save_graph_layout,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");

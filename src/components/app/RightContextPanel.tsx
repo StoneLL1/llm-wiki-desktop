@@ -1,7 +1,9 @@
 import { useTranslation } from "react-i18next";
+import { GraphInspector } from "../../features/graph/GraphInspector";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { useNavigationStore } from "../../stores/navigationStore";
+import { useGraphStore } from "../../stores/graphStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import type { GraphState, IndexState } from "../../types/project";
@@ -9,11 +11,14 @@ import type { GraphState, IndexState } from "../../types/project";
 export function RightContextPanel() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
+  const setActiveView = useNavigationStore((state) => state.setActiveView);
   const currentProject = useProjectStore((state) => state.currentProject);
   const tasks = useTaskStore((state) => state.tasks);
   const wikiPage = useWikiStore((state) => state.page?.meta ?? null);
   const wikiTree = useWikiStore((state) => state.tree);
   const openWikiPage = useWikiStore((state) => state.openPage);
+  const graphData = useGraphStore((state) => state.data);
+  const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
 
   const openPage = (path: string) => {
     void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
@@ -35,6 +40,50 @@ export function RightContextPanel() {
             page={wikiPage}
             pages={wikiTree?.pages ?? []}
             onOpenPage={openPage}
+          />
+        </div>
+      </aside>
+    );
+  }
+
+  if (activeView === "graph") {
+    const selectedNode = graphData?.nodes.find((node) => node.id === graphSelectedId) ?? null;
+    const neighborCount = (() => {
+      // Distinct neighbor count from cached topology edges (no sigma needed).
+      // Edges are deduped to undirected pairs in the backend, but count via a Set
+      // so the number stays correct if a future schema allows parallel edges.
+      if (!graphData || !selectedNode) return 0;
+      const id = selectedNode.id;
+      const neighbors = new Set<string>();
+      for (const edge of graphData.edges) {
+        if (edge.source === id) neighbors.add(edge.target);
+        else if (edge.target === id) neighbors.add(edge.source);
+      }
+      return neighbors.size;
+    })();
+    return (
+      <aside
+        aria-label={t("graph.inspector.title")}
+        className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+      >
+        <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
+          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+            {t("graph.inspector.title")}
+          </span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <GraphInspector
+            node={selectedNode}
+            neighborCount={neighborCount}
+            onOpenPage={() => {
+              if (!selectedNode) return;
+              setActiveView("wiki");
+              void openWikiPage(
+                currentProject.projectId,
+                currentProject.rootPath,
+                selectedNode.path,
+              );
+            }}
           />
         </div>
       </aside>

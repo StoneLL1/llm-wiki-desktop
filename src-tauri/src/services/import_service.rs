@@ -895,7 +895,7 @@ mod tests {
         fs::write(source_dir.join("图片.jpg"), b"JPEG fake").unwrap();
         fs::write(source_dir.join("未知文件.xyz"), b"unknown").unwrap();
 
-        let paths: Vec<String> = vec![
+        let paths: Vec<String> = [
             "报告.pdf",
             "数据.xlsx",
             "幻灯片.pptx",
