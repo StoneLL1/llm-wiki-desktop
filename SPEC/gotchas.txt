@@ -3,6 +3,26 @@
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
+----------------------------------------------------------------------
+[现象] react-markdown 把自定义 `wikilink://target` 链接的 href 清成空串，自定义 `a` 组件的 `href.startsWith(WIKILINK_SCHEME)` 判断永远 false，所有 wikilink 落到外链 fallback 分支（target=_blank）。
+[根因] react-markdown v9 默认 `urlTransform`（`defaultUrlTransform`）只放行 http/https/mailto 等已知安全 scheme，未知 scheme 被剥离成 ""。
+[规避做法] 显式传 `urlTransform={(url) => url.startsWith(WIKILINK_SCHEME) ? url : defaultUrlTransform(url)}`，对 wikilink scheme 透传、其余走默认安全过滤。从 'react-markdown' 导入 defaultUrlTransform，不要写成恒等函数（会丢 javascript: 等防护）。
+
+----------------------------------------------------------------------
+[现象] Rust 手写 frontmatter 解析器里 `let key = ...;` 在某分支 `entries.push((key.clone(), Scalar(...)))` 后循环末尾又 `entries.push((key, ...))`，编译报 "key moved twice / borrow after move"。
+[根因] 同一个所有权变量在多个分支被消费；clone 掩盖一处，末尾再 move 必然报错。
+[规避做法] 每轮迭代一次性算出 `(value, next_i)` 元组，循环体里 push 恰好一次；把 block-list 收集抽成 `collect_block_list(lines, start)` helper，避免在主循环里嵌套 push。解析器无外部 YAML 依赖（样本库只用 scalar + inline/block list），别为兼容性引 crate。
+
+----------------------------------------------------------------------
+[现象] `chrono::Utc.timestamp_opt(sec, 0).map(...)` 编译报 LocalResult 没有 map。
+[根因] `LocalResult<T>` 不是 Iterator/Option，没有 map；`timestamp_opt` 返回 `LocalResult<DateTime>`，需要转 Option。
+[规避做法] 用 `.single()`（返回 Option<DateTime>）再 `.map(|dt| dt.to_rfc3339())`。chrono 新 API 一律走 timestamp_opt + .single()，别再碰已弃用的 `.timestamp()`（panic 风险）。
+
+----------------------------------------------------------------------
+[现象] 前端乐观并发保存：后端写盘成功但紧跟的 read_wiki_page 失败时，store 把 saveState 标成 "error"，用户以为没存；或用户保存中途点开另一页，保存回调的 set({page: refreshed}) 覆盖了新打开的页面。
+[根因] 把"保存"和"重读刷新"耦合在同一个 try/catch；重读失败回退到 error 状态；未捕获保存期间的导航事件。
+[规避做法] 写盘成功后单独 try/catch 包住重读：重读失败→仍 saveState "saved"（不掩盖成功）；应用 refreshed 前判 `stillViewing = selectedPath === null || === savedPath`，只有用户没导航到别的页才覆盖。expectedHash 取自当前 page.meta.hash，None→CreateNew，Some→OverwriteIfHashMatches，FILE_HASH_MISMATCH→saveState "conflict"。
+
 ======================================================================
 serde tagged enum `#[serde(tag="kind")]` 不 camelCase 结构变体字段 — `rename_all` 作用在 enum 的变体名上，不会渗透到 struct-variant 内部字段，导致嵌套 `pending_action` 等字段以 snake_case 外泄，前端 TS 类型对不上 — 改用「struct + `kind` 鉴别字段」结构体，并在 struct 上单独加 `#[serde(rename_all="camelCase")]`，避免在 enum 上依赖 rename_all 渗透。
 `Err(...).with_details(...)` 闭包缺右括号导致 "mismatched closing delimiter" — 写多行 `return Err(BackendError::new(...).with_details(...));` 时容易漏掉最外层 `Err(` 的闭合 `)`，rustc 报「unclosed delimiter / mismatched closing delimiter」且行号指向文件末尾 — 计数好 `Err(` 的层数，`}));` 不够就补成 `})))`。

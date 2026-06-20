@@ -1,12 +1,46 @@
 import { useTranslation } from "react-i18next";
+import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
+import { useWikiStore } from "../../features/wiki/wikiStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import type { GraphState, IndexState } from "../../types/project";
 
 export function RightContextPanel() {
   const { t } = useTranslation();
+  const activeView = useNavigationStore((state) => state.activeView);
   const currentProject = useProjectStore((state) => state.currentProject);
   const tasks = useTaskStore((state) => state.tasks);
+  const wikiPage = useWikiStore((state) => state.page?.meta ?? null);
+  const wikiTree = useWikiStore((state) => state.tree);
+  const openWikiPage = useWikiStore((state) => state.openPage);
+
+  const openPage = (path: string) => {
+    void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
+  };
+
+  if (activeView === "wiki") {
+    return (
+      <aside
+        aria-label={t("wiki.related.title")}
+        className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+      >
+        <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
+          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+            {t("wiki.related.title")}
+          </span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <RelatedPagesPanel
+            page={wikiPage}
+            pages={wikiTree?.pages ?? []}
+            onOpenPage={openPage}
+          />
+        </div>
+      </aside>
+    );
+  }
+
   const health = currentProject.health;
   const routeLabel = t(`status.routeLabel.${currentProject.agentRoute}`, { defaultValue: currentProject.agentRoute });
 
