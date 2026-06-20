@@ -116,6 +116,10 @@ pub fn run() {
             commands::task_commands::get_task_logs,
             commands::task_commands::remove_completed_tasks,
             commands::task_commands::set_active_project,
+            commands::wiki_commands::scan_wiki,
+            commands::wiki_commands::read_wiki_page,
+            commands::wiki_commands::save_wiki_page,
+            commands::search_commands::search_wiki,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");
