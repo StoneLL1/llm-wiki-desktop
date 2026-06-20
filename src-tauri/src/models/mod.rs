@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod chat;
 pub mod compile;
 pub mod confirmation;
 pub mod git;

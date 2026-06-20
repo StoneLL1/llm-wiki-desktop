@@ -1,8 +1,8 @@
 use crate::models::confirmation::ConfirmationRegistry;
 use crate::services::{
-    AgentService, ExportService, ExtractionService, FileStore, GitService, GraphService,
-    ImportService, LintService, LlmService, ProjectService, SearchService, SecretService,
-    SettingsService,
+    AgentService, ChatService, ExportService, ExtractionService, FileStore, GitService,
+    GraphService, ImportService, LintService, LlmService, ProjectService, SearchService,
+    SecretService, SettingsService,
 };
 use crate::tasks::TaskService;
 
@@ -14,6 +14,7 @@ pub struct AppState {
     pub extraction_service: ExtractionService,
     pub git_service: GitService,
     pub agent_service: AgentService,
+    pub chat_service: ChatService,
     pub llm_service: LlmService,
     pub search_service: SearchService,
     pub graph_service: GraphService,

@@ -35,7 +35,7 @@ pub trait ProcessRunner: Send + Sync {
         invocation: &AgentInvocation,
         tasks: &TaskService,
         task_id: &str,
-    ) -> Result<(), BackendError>;
+    ) -> Result<String, BackendError>;
 }
 
 #[derive(Default)]
@@ -202,6 +202,54 @@ impl AgentService {
         Ok(invocation)
     }
 
+    /// Build a plain-text-oriented Agent invocation for chat Q&A. Unlike
+    /// [`invocation`] (which uses stream-json so compile can diff a workspace),
+    /// chat wants the captured stdout to be the answer text itself, so the
+    /// Claude profile uses `--output-format text`. Other CLIs reuse best-effort
+    /// non-interactive args; the BYOK route is the guaranteed path, so this is
+    /// an enhancement when an Agent is installed.
+    pub fn chat_invocation(
+        kind: AgentKind,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<AgentInvocation, BackendError> {
+        validate_candidate_workspace(workspace)?;
+        let cwd = workspace.to_path_buf();
+        let prompt_owned = prompt.to_string();
+        let invocation = match kind {
+            AgentKind::Claude => AgentInvocation {
+                program: "claude".into(),
+                args: vec![
+                    "--print".into(),
+                    "--output-format".into(),
+                    "text".into(),
+                    prompt_owned,
+                ],
+                stdin: None,
+                cwd,
+            },
+            AgentKind::Codex => AgentInvocation {
+                program: "codex".into(),
+                args: vec!["exec".into(), "-".into()],
+                stdin: Some(prompt_owned),
+                cwd,
+            },
+            AgentKind::Openclaw => AgentInvocation {
+                program: "openclaw".into(),
+                args: vec!["agent".into(), "--message".into(), prompt_owned],
+                stdin: None,
+                cwd,
+            },
+            AgentKind::Hermes => AgentInvocation {
+                program: "hermes".into(),
+                args: vec!["--prompt".into(), prompt_owned],
+                stdin: None,
+                cwd,
+            },
+        };
+        Ok(invocation)
+    }
+
     pub fn install_guidance(kind: AgentKind) -> &'static str {
         match kind {
             AgentKind::Claude => "npm install -g @anthropic-ai/claude-code",
@@ -225,7 +273,7 @@ impl AgentService {
         invocation: &AgentInvocation,
         tasks: &TaskService,
         task_id: &str,
-    ) -> Result<(), BackendError> {
+    ) -> Result<String, BackendError> {
         self.runner.run_task_streaming(invocation, tasks, task_id)
     }
 }
@@ -291,7 +339,7 @@ impl ProcessRunner for SystemProcessRunner {
         invocation: &AgentInvocation,
         tasks: &TaskService,
         task_id: &str,
-    ) -> Result<(), BackendError> {
+    ) -> Result<String, BackendError> {
         let mut child = Command::new(&invocation.program)
             .args(&invocation.args)
             .current_dir(&invocation.cwd)
@@ -331,8 +379,15 @@ impl ProcessRunner for SystemProcessRunner {
             });
         }
         drop(sender);
+        // Stdout (Info) lines are captured as the answer payload for the chat
+        // route, while still being streamed to the task drawer as logs. Compile
+        // discards this value and reads workspace files instead.
+        let mut stdout_lines: Vec<String> = Vec::new();
         loop {
             while let Ok((level, line)) = receiver.try_recv() {
+                if level == LogLevel::Info {
+                    stdout_lines.push(line.clone());
+                }
                 let _ = tasks.append_log(task_id, level, line);
             }
             if tasks.is_cancelled(task_id) {
@@ -348,10 +403,13 @@ impl ProcessRunner for SystemProcessRunner {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     for (level, line) in receiver.try_iter() {
+                        if level == LogLevel::Info {
+                            stdout_lines.push(line.clone());
+                        }
                         let _ = tasks.append_log(task_id, level, line);
                     }
                     if status.success() {
-                        return Ok(());
+                        return Ok(stdout_lines.join("\n"));
                     }
                     return Err(BackendError::new(
                         "AGENT_EXIT_FAILED",

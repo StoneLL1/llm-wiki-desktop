@@ -134,6 +134,13 @@ pub fn run() {
             commands::graph_commands::get_graph,
             commands::graph_commands::build_graph,
             commands::graph_commands::save_graph_layout,
+            commands::chat_commands::create_chat_session,
+            commands::chat_commands::list_chat_sessions,
+            commands::chat_commands::load_chat_session,
+            commands::chat_commands::rename_chat_session,
+            commands::chat_commands::delete_chat_session,
+            commands::chat_commands::send_chat_message,
+            commands::chat_commands::save_answer_to_wiki,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");

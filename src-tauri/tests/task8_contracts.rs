@@ -43,8 +43,8 @@ impl ProcessRunner for FakeProcessRunner {
         _invocation: &AgentInvocation,
         _tasks: &TaskService,
         _task_id: &str,
-    ) -> Result<(), llm_wiki_desktop_lib::errors::BackendError> {
-        Ok(())
+    ) -> Result<String, llm_wiki_desktop_lib::errors::BackendError> {
+        Ok(String::new())
     }
 }
 

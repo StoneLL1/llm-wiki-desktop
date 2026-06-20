@@ -4,6 +4,7 @@ use std::path::Path;
 use chrono::TimeZone;
 
 use crate::errors::BackendError;
+use crate::models::chat::ChatRetrievalHit;
 use crate::models::paths::ProjectContext;
 use crate::models::search::{SearchRequest, SearchResponse, SearchResult};
 use crate::models::wiki::{
@@ -243,6 +244,45 @@ impl SearchService {
         Ok(SearchResponse { results, total })
     }
 
+    /// Retrieve the top wiki pages for a natural-language chat question, each
+    /// with a bounded body excerpt for the model prompt. Reuses the keyword
+    /// `search` index (no model is called) and `read_page` for excerpts. This is
+    /// the chat-retrieval entry point; the global search command stays
+    /// keyword-only and never calls this for autocomplete.
+    pub fn retrieve_with_excerpts(
+        &self,
+        context: &ProjectContext,
+        query: &str,
+        limit: usize,
+        excerpt_chars: usize,
+    ) -> Result<Vec<ChatRetrievalHit>, BackendError> {
+        let request = SearchRequest {
+            project_id: context.project_id.clone(),
+            project_root_path: context.root.to_string_lossy().to_string(),
+            query: Some(query.to_string()),
+            page_types: Vec::new(),
+            tags: Vec::new(),
+            source: None,
+            limit: Some(limit),
+        };
+        let response = self.search(context, &request)?;
+        let mut hits = Vec::with_capacity(response.results.len());
+        for result in response.results {
+            let excerpt = self
+                .read_page(context, &result.path)
+                .ok()
+                .map(|page| truncate_excerpt(&page.body_markdown, excerpt_chars));
+            hits.push(ChatRetrievalHit {
+                path: result.path,
+                title: result.title,
+                snippet: result.snippet,
+                score: result.score,
+                excerpt,
+            });
+        }
+        Ok(hits)
+    }
+
     fn load_page(
         &self,
         context: &ProjectContext,
@@ -454,6 +494,18 @@ fn mtime_rfc3339(path: &Path) -> String {
 fn file_read_error(err: std::io::Error, path: &Path) -> BackendError {
     BackendError::new("FILE_READ_FAILED", err.to_string(), true, false)
         .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
+}
+
+/// Bound a page body excerpt to keep chat prompts within a sane token budget.
+fn truncate_excerpt(body: &str, max_chars: usize) -> String {
+    let trimmed = body.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let taken: String = trimmed.chars().take(max_chars).collect();
+    let cut = taken.trim_end();
+    let nearest_break = cut.rfind(['\n', '.']).map(|i| &cut[..=i]).unwrap_or(cut);
+    format!("{}…", nearest_break.trim_end())
 }
 
 #[cfg(test)]
