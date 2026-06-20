@@ -142,7 +142,7 @@ impl FileStore {
         if !root.exists() {
             return Ok(results);
         }
-        walk_markdown(root, root, &mut results)
+        walk_markdown(root, &mut results)
             .map_err(|err| io_error("FILE_ENUMERATE_FAILED", err, root))?;
         results.sort();
         Ok(results)
@@ -266,7 +266,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
     })
 }
 
-fn walk_markdown(base: &Path, current: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn walk_markdown(current: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
@@ -277,11 +277,10 @@ fn walk_markdown(base: &Path, current: &Path, results: &mut Vec<PathBuf>) -> std
             if name == ".obsidian" || name == ".git" || name == ".app" {
                 continue;
             }
-            walk_markdown(base, &path, results)?;
-        } else if file_type.is_file() {
-            if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-                results.push(path);
-            }
+            walk_markdown(&path, results)?;
+        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+        {
+            results.push(path);
         }
     }
     Ok(())

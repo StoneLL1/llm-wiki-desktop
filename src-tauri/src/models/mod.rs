@@ -2,6 +2,7 @@ pub mod agent;
 pub mod compile;
 pub mod confirmation;
 pub mod git;
+pub mod graph;
 pub mod import;
 pub mod llm;
 pub mod paths;

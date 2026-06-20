@@ -133,7 +133,7 @@ fn services_expose_replaceable_test_boundaries() {
     assert!(detected[1..]
         .iter()
         .all(|info| info.state == AgentDetectionState::Missing));
-    let _llm = LlmService::default();
+    let _llm = LlmService;
     let _secret = SecretService::memory();
 }
 

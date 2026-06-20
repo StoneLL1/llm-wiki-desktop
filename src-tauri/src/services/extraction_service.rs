@@ -231,9 +231,9 @@ pub fn extract_html_title(html: &str) -> String {
         None => return String::new(),
     };
     let after_tag = &lower[tag_start + 6..]; // skip "<title"
-    let (content, content_start_offset) = if after_tag.starts_with('>') {
+    let (content, content_start_offset) = if let Some(rest) = after_tag.strip_prefix('>') {
         // Simple <title> — skip the '>' and use rest as content
-        (&after_tag[1..], 1)
+        (rest, 1)
     } else if after_tag.starts_with(' ')
         || after_tag.starts_with('\t')
         || after_tag.starts_with('\n')

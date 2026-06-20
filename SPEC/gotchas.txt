@@ -4,6 +4,14 @@
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
 ----------------------------------------------------------------------
+[现象] 任何 import 链路碰到 sigma.js（GraphView，进而 AppShell→App.test）的测试在 jsdom 下直接 ReferenceError: WebGL2RenderingContext is not defined，整个测试套件崩溃。
+[根因] sigma.js 在模块加载期就引用 WebGL2RenderingContext / WebGLRenderingContext 做能力探测，jsdom 不提供这两个全局。
+[规避做法] 在 src/test/setup.ts 顶部（任何 import 之前）给 globalThis 打 inert 桩：`WebGL2RenderingContext = class {}`、`WebGLRenderingContext = class {}`。真实 canvas 渲染另由 GraphView 的 try/catch 兜底（new Sigma 抛错时 setCanvasAvailable(false) 显示占位），桩只保证 import 不崩。
+----------------------------------------------------------------------
+[现象] ForceAtlas2 在退化图（单个孤立节点、两个重合随机坐标点）上产出 NaN/Infinity 坐标，写回 .app/graph-cache.json 后下次加载节点位置变 null，sigma 渲染错乱。
+[根因] Number(NaN) !== 0；JSON.stringify(NaN/Infinity) === "null"；缓存反序列化后 pos[0] 为 null 直接塞进 graphology 属性。
+[规避做法] persistLayout 落盘前用 Number.isFinite 过滤，非有限值回退 0；读取缓存坐标处也保留兜底。任何把数值坐标序列化进持久层的路径都要做有限性校验。
+----------------------------------------------------------------------
 [现象] 同一 Vitest 文件内后一个 React Testing Library 用例能查询到前一个用例的 DOM，出现重复按钮歧义。
 [根因] Vitest 未启用 globals 时 Testing Library 未自动注册 cleanup；setup.ts 只加载 jest-dom matcher。
 [规避做法] 在 src/test/setup.ts 显式 afterEach(cleanup)，保证每个用例卸载 React 树并清空 DOM。

@@ -629,7 +629,7 @@ fn canonicalize_root(path: &str) -> Result<PathBuf, BackendError> {
         .with_details(serde_json::json!({ "path": path })));
     }
     raw.canonicalize()
-        .or_else(|_| Ok(raw))
+        .or(Ok(raw))
         .map_err(|err: std::io::Error| {
             BackendError::new("PROJECT_PATH_INVALID", err.to_string(), true, true)
         })
