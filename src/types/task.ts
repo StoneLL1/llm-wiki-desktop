@@ -40,6 +40,7 @@ export interface TaskProgress {
 export interface TaskResult {
   summary: string;
   affectedPaths: string[];
+  pendingAction?: import("./backend").PendingAction;
 }
 
 export interface BackendError {

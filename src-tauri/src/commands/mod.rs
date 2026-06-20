@@ -1,6 +1,9 @@
+pub mod agent_commands;
+pub mod compile_commands;
 pub mod file_commands;
 pub mod git_commands;
 pub mod import_commands;
+pub mod llm_commands;
 pub mod project_commands;
 pub mod search_commands;
 pub mod task_commands;

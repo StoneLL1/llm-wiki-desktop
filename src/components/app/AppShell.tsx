@@ -1,11 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import { ImportView } from "../../features/import/ImportView";
+import { AgentView } from "../../features/agent/AgentView";
+import { LlmProviderSettings } from "../../features/settings/LlmProviderSettings";
 import { WikiView } from "../../features/wiki/WikiView";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useTaskStore } from "../../stores/taskStore";
+import type { AgentInfo } from "../../types/agent";
+import type { AgentKind } from "../../types/agent";
+import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
+import type { BackendTask } from "../../types/task";
 import type { ConfirmedImport, ImportPreview } from "../../types/import";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { ConfirmationDialog } from "./ConfirmationDialog";
@@ -44,6 +51,10 @@ export function AppShell() {
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
   const cancelPendingAction = useProjectStore((state) => state.cancelPendingAction);
+  const tasks = useTaskStore((state) => state.tasks);
+  const upsertTask = useTaskStore((state) => state.upsertTask);
+  const compilePendingAction = tasks.find((task) => task.status === "waiting_for_confirmation" && task.result?.pendingAction)?.result?.pendingAction;
+  const displayedPendingAction = pendingAction ?? compilePendingAction;
   const title = t(`nav.${activeView}`);
 
   return (
@@ -59,15 +70,23 @@ export function AppShell() {
       </div>
 
       <BottomStatusBar />
-      {pendingAction ? (
+      {displayedPendingAction ? (
         <ConfirmationDialog
-          action={pendingAction}
+          action={displayedPendingAction}
           checkpointExists={false}
           onCancel={() => {
-            void cancelPendingAction();
+            if (pendingAction) {
+              void cancelPendingAction();
+            } else {
+              void invoke<BackendTask>("confirm_compile_action", { request: { actionId: displayedPendingAction.id, confirmed: false } }).then(upsertTask);
+            }
           }}
           onConfirm={() => {
-            void confirmPendingAction();
+            if (pendingAction) {
+              void confirmPendingAction();
+            } else {
+              void invoke<BackendTask>("confirm_compile_action", { request: { actionId: displayedPendingAction.id, confirmed: true } }).then(upsertTask);
+            }
           }}
         />
       ) : null}
@@ -85,8 +104,58 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const { t } = useTranslation();
   const actions = viewActionKeys[activeView];
   const currentProject = useProjectStore((state) => state.currentProject);
+  const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [isConfirmingImport, setIsConfirmingImport] = useState(false);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const upsertTask = useTaskStore((state) => state.upsertTask);
+  const openTaskDrawer = useTaskStore((state) => state.openDrawer);
+  const tasks = useTaskStore((state) => state.tasks);
+
+  const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+  const projectRequest = {
+    projectId: currentProject.projectId,
+    projectRootPath: currentProject.rootPath,
+  };
+
+  const loadProviders = useCallback(async () => {
+    if (!hasTauri) return;
+    const statuses = await invoke<ProviderStatus[]>("list_llm_providers", { request: projectRequest });
+    setProviders(statuses);
+  }, [currentProject.projectId, currentProject.rootPath, hasTauri]);
+
+  const refreshCapabilities = useCallback(async () => {
+    if (!hasTauri) return;
+    const [detected, statuses] = await Promise.all([
+      invoke<AgentInfo[]>("detect_agents", { request: projectRequest }),
+      invoke<ProviderStatus[]>("list_llm_providers", { request: projectRequest }),
+    ]);
+    setAgents(detected);
+    setProviders(statuses);
+    const agentReady = detected.some((agent) => agent.isDefault && agent.state === "installed");
+    const byokReady = statuses.some((provider) => provider.config.enabled && (provider.hasSecret || provider.config.provider === "ollama"));
+    const latest = useProjectStore.getState().currentProject;
+    setCurrentProject({ ...latest, agentRoute: agentReady ? "agent" : byokReady ? "byok" : "unconfigured" });
+  }, [currentProject.projectId, currentProject.rootPath, hasTauri, setCurrentProject]);
+
+  useEffect(() => {
+    if (activeView === "agent") {
+      void refreshCapabilities();
+    } else if (activeView === "settings") {
+      void loadProviders();
+    }
+  }, [activeView, loadProviders, refreshCapabilities]);
+
+  const startCompile = useCallback(async () => {
+    if (!hasTauri) return;
+    const task = await invoke<BackendTask>("start_wiki_compile", {
+      request: { ...projectRequest, route: "auto", agent: null, provider: null },
+    });
+    upsertTask(task);
+    openTaskDrawer(task.id);
+  }, [currentProject.projectId, currentProject.rootPath, hasTauri, openTaskDrawer, upsertTask]);
 
   const requestImportPreview = useCallback(
     (files: File[]) => {
@@ -122,13 +191,43 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         preview: importPreview,
       },
     })
-      .then(() => {
+      .then(async () => {
         setImportPreview(null);
+        await startCompile();
       })
       .finally(() => {
         setIsConfirmingImport(false);
       });
-  }, [currentProject.projectId, currentProject.rootPath, importPreview]);
+  }, [currentProject.projectId, currentProject.rootPath, importPreview, startCompile]);
+
+  const saveProvider = useCallback(async (config: LlmProviderConfig) => {
+    if (!hasTauri) return;
+    await invoke("save_llm_provider", { request: { ...projectRequest, config } });
+    await refreshCapabilities();
+  }, [currentProject.projectId, currentProject.rootPath, hasTauri, refreshCapabilities]);
+
+  const saveProviderSecret = useCallback(async (provider: LlmProviderKind, secret: string) => {
+    if (!hasTauri) return;
+    await invoke("store_provider_secret", { request: { provider, secret } });
+    await refreshCapabilities();
+  }, [hasTauri, refreshCapabilities]);
+
+  const setDefaultAgent = useCallback(async (agent: AgentKind) => {
+    if (!hasTauri) return;
+    await invoke("set_default_agent", { request: { ...projectRequest, agent } });
+    await refreshCapabilities();
+  }, [currentProject.projectId, currentProject.rootPath, hasTauri, refreshCapabilities]);
+
+  const deleteProviderSecret = useCallback(async (provider: LlmProviderKind) => {
+    if (!hasTauri) return;
+    await invoke("delete_provider_secret", { request: { provider, secret: null } });
+    await refreshCapabilities();
+  }, [hasTauri, refreshCapabilities]);
+
+  const testProvider = useCallback(async (config: LlmProviderConfig) => {
+    if (!hasTauri) return { ok: false, message: t("provider.testUnavailable") };
+    return invoke<ProviderTestResult>("test_llm_provider", { request: { ...projectRequest, config } });
+  }, [currentProject.projectId, currentProject.rootPath, hasTauri]);
 
   return (
     <section className="flex h-full flex-col">
@@ -164,6 +263,18 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
             onRequestPreview={requestImportPreview}
             onConfirm={confirmImportPreview}
           />
+        ) : activeView === "agent" ? (
+          <AgentView
+            agents={agents}
+            providerCount={providers.filter((provider) => provider.config.enabled).length}
+            tasks={tasks.filter((task) => task.taskType === "wiki_compile" || task.taskType === "agent_run" || task.taskType === "llm_request")}
+            onOpenTask={openTaskDrawer}
+            onDetect={() => { void refreshCapabilities(); }}
+            onCompile={() => { void startCompile(); }}
+            onSetDefault={(agent) => { void setDefaultAgent(agent); }}
+          />
+        ) : activeView === "settings" ? (
+          <LlmProviderSettings providers={providers} onSaveProvider={saveProvider} onSaveSecret={saveProviderSecret} onDeleteSecret={deleteProviderSecret} onTestProvider={testProvider} />
         ) : (
           <div className="grid gap-3">
           <div className="panel">

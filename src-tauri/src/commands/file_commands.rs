@@ -155,6 +155,12 @@ pub fn confirm_pending_action(
                 project_summary: Some(project_summary),
             })
         }
+        Some(ConfirmationExecution::CompileMerge { .. }) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "Compile conflicts must be handled by confirm_compile_action.",
+            true,
+            true,
+        )),
         None => Err(BackendError::new(
             "CONFIRMATION_EXECUTION_MISSING",
             "The pending action has no backend execution plan.",
