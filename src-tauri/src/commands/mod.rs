@@ -5,6 +5,7 @@ pub mod file_commands;
 pub mod git_commands;
 pub mod graph_commands;
 pub mod import_commands;
+pub mod lint_commands;
 pub mod llm_commands;
 pub mod project_commands;
 pub mod search_commands;
