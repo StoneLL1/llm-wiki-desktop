@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import { ImportView } from "../../features/import/ImportView";
 import { AgentView } from "../../features/agent/AgentView";
+import { ChatView } from "../../features/chat/ChatView";
 import { GraphView } from "../../features/graph/GraphView";
 import { LlmProviderSettings } from "../../features/settings/LlmProviderSettings";
 import { WikiView } from "../../features/wiki/WikiView";
@@ -252,11 +253,13 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         </div>
       </header>
 
-      <div className={activeView === "wiki" || activeView === "graph" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
+      <div className={activeView === "wiki" || activeView === "graph" || activeView === "chat" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
         {activeView === "dashboard" ? (
           <DashboardView />
         ) : activeView === "wiki" ? (
           <WikiView />
+        ) : activeView === "chat" ? (
+          <ChatView />
         ) : activeView === "graph" ? (
           <GraphView />
         ) : activeView === "import" ? (

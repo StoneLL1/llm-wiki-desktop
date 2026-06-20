@@ -1,7 +1,9 @@
 import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
+import { CitationPanel } from "../../features/chat/CitationPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
+import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useGraphStore } from "../../stores/graphStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -19,10 +21,37 @@ export function RightContextPanel() {
   const openWikiPage = useWikiStore((state) => state.openPage);
   const graphData = useGraphStore((state) => state.data);
   const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
+  const chatSession = useChatStore((state) => state.activeSession);
 
   const openPage = (path: string) => {
     void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
   };
+
+  if (activeView === "chat") {
+    const latestAssistant = latestAssistantMessage(chatSession);
+    const citations = latestAssistant?.citations ?? [];
+    return (
+      <aside
+        aria-label={t("chat.citations.title")}
+        className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+      >
+        <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
+          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+            {t("chat.citations.title")}
+          </span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <CitationPanel
+            citations={citations}
+            onOpenPage={(path) => {
+              setActiveView("wiki");
+              void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
+            }}
+          />
+        </div>
+      </aside>
+    );
+  }
 
   if (activeView === "wiki") {
     return (

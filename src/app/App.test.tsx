@@ -104,7 +104,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Chat" }));
 
-    expect(screen.getByRole("complementary", { name: "Project info" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Sources" })).toBeInTheDocument();
     expect(screen.getAllByText("D:/Users/Aletta/Documents/wiki/agent-llm").length).toBeGreaterThan(0);
     expect(screen.getByText("Route: Agent")).toBeInTheDocument();
     expect(screen.getByText("Tasks: 1 running")).toBeInTheDocument();
