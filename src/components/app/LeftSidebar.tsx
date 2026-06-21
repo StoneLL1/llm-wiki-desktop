@@ -1,5 +1,7 @@
-import { FileText } from "lucide-react";
+import { ChevronRight, FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useProjectStatus } from "../../hooks/useProjectStatus";
+import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useToastStore } from "../../stores/toastStore";
@@ -15,6 +17,15 @@ export function LeftSidebar() {
   const recentPages = useWikiStore((state) => state.recentPages);
   const openPage = useWikiStore((state) => state.openPage);
   const pushToast = useToastStore((state) => state.pushToast);
+  const localReport = useLintStore((state) => state.localReport);
+  const lintIssueCount = localReport?.summary.totalIssues ?? 0;
+  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
+
+  const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? status?.agents?.find((a) => a.state === "installed") ?? null;
+  const agentLabel = defaultAgent
+    ? `${defaultAgent.kind} · ${defaultAgent.version ?? "—"}`
+    : t("shell.agentUnconfigured");
+  const agentDot = defaultAgent ? "bg-[var(--accent)] shadow-[0_0_0_2px_var(--accent-soft)]" : "bg-[var(--text-disabled)]";
 
   const openRecentPage = (path: string) => {
     if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
@@ -45,6 +56,9 @@ export function LeftSidebar() {
           <span className="truncate">{t(item.labelKey)}</span>
           {item.view === "wiki" ? (
             <span className={`ml-auto font-mono text-[10.5px] ${active ? "text-[var(--accent-hover)]" : "text-[var(--text-muted)]"}`}>{currentProject.wikiPageCount}</span>
+          ) : null}
+          {item.view === "lint" && lintIssueCount > 0 ? (
+            <span className="ml-auto inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-[var(--radius-pill)] bg-[#e0550a] px-[5px] text-[9.5px] font-semibold text-white" aria-label={`${lintIssueCount} lint issues`}>{lintIssueCount}</span>
           ) : null}
         </button>
       );
@@ -98,11 +112,18 @@ export function LeftSidebar() {
 
       <div className="flex items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
         <span className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="h-[7px] w-[7px] shrink-0 rounded-full bg-[var(--accent)] shadow-[0_0_0_2px_var(--accent-soft)]" aria-hidden="true" />
-          <span className="truncate font-mono text-[var(--text-secondary)]">
-            {t(`status.routeLabel.${currentProject.agentRoute}`)}
-          </span>
+          <span className={`inline-block h-[7px] w-[7px] shrink-0 rounded-full ${agentDot}`} aria-hidden="true" />
+          <span className="truncate font-mono text-[var(--text-secondary)]">{agentLabel}</span>
         </span>
+        <button
+          aria-label={t("shell.agentTooltip")}
+          className="btn btn--ghost btn--icon btn--sm shrink-0"
+          onClick={() => setActiveView("agent")}
+          title={t("shell.agentTooltip")}
+          type="button"
+        >
+          <ChevronRight aria-hidden="true" size={14} />
+        </button>
       </div>
     </aside>
   );

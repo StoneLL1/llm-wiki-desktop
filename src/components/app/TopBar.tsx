@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { FolderOpen, Search, Settings } from "lucide-react";
+import { ChevronDown, FolderOpen, LayoutDashboard, Search, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -14,6 +14,8 @@ export function TopBar() {
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const clearCurrentProject = useProjectStore((state) => state.clearCurrentProject);
   const currentProject = useProjectStore((state) => state.currentProject);
+  const openProject = useProjectStore((state) => state.openProject);
+  const recentProjects = useProjectStore((state) => state.recentProjects);
   const persistPatch = useSettingsStore((state) => state.persistPatch);
   const openPage = useWikiStore((state) => state.openPage);
   const [query, setQuery] = useState("");
@@ -21,9 +23,14 @@ export function TopBar() {
   const [searching, setSearching] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchError, setSearchError] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const searchInput = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const requestSequence = useRef(0);
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
+
+  const isMac = typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
+  const kbdLabel = isMac ? "⌘K" : "Ctrl K";
 
   const setLanguage = (language: "en" | "zh-CN") => {
     void persistPatch(currentProject.projectId, currentProject.rootPath, { language });
@@ -39,6 +46,17 @@ export function TopBar() {
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
   }, []);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleClick = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handleClick);
+    return () => window.removeEventListener("mousedown", handleClick);
+  }, [menuOpen]);
 
   const runSearch = async () => {
     const keyword = query.trim();
@@ -89,17 +107,54 @@ export function TopBar() {
         <strong className="text-[13px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{t("app.title")}</strong>
       </div>
 
-      <button
-        aria-label={t("shell.switchProject")}
-        className="flex h-[30px] min-w-0 max-w-[360px] items-center gap-2 rounded-[var(--radius-md)] px-2 text-left hover:bg-[var(--surface-muted)]"
-        onClick={clearCurrentProject}
-        title={t("shell.switchProject")}
-        type="button"
-      >
-        <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={16} />
-        <span className="truncate text-[13px] font-medium">{currentProject.name}</span>
-        <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{currentProject.rootPath}</span>
-      </button>
+      <div className="relative" ref={menuRef}>
+        <button
+          aria-label={t("shell.switchProject")}
+          aria-expanded={menuOpen}
+          className="flex h-[30px] min-w-0 max-w-[360px] items-center gap-2 rounded-[var(--radius-md)] px-2 text-left hover:bg-[var(--surface-muted)]"
+          onClick={() => setMenuOpen((v) => !v)}
+          title={t("shell.switchProject")}
+          type="button"
+        >
+          <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={16} />
+          <span className="truncate text-[13px] font-medium">{currentProject.name}</span>
+          <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{currentProject.rootPath}</span>
+          <ChevronDown aria-hidden="true" className="shrink-0 text-[var(--text-muted)]" size={12} />
+        </button>
+        {menuOpen ? (
+          <div className="absolute left-0 top-full z-50 mt-1 w-[360px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] p-1 shadow-lg" role="menu">
+            <div className="px-3 py-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+              {t("shell.projectMenu.recent")}
+            </div>
+            {recentProjects.map((rp) => (
+              <button
+                key={rp.projectId}
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-3 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]"
+                onClick={() => { setMenuOpen(false); void openProject(rp.rootPath); }}
+                type="button"
+              >
+                <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={14} />
+                <span className="truncate font-medium">{rp.name}</span>
+                <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{rp.rootPath}</span>
+                {rp.projectId === currentProject.projectId ? (
+                  <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-1.5 py-px text-[10px] font-medium text-[var(--accent-hover)]">{t("shell.current")}</span>
+                ) : null}
+              </button>
+            ))}
+            <div className="my-1 border-t border-[var(--border-subtle)]" />
+            <button
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-3 py-1.5 text-left text-[13px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+              onClick={() => { setMenuOpen(false); clearCurrentProject(); }}
+              type="button"
+            >
+              <LayoutDashboard aria-hidden="true" className="text-[var(--text-muted)]" size={14} />
+              {t("shell.backToLaunch")}
+            </button>
+          </div>
+        ) : null}
+      </div>
 
       <div className="relative flex max-w-[520px] flex-1">
         <label className="flex h-[30px] w-full items-center gap-2 rounded-[var(--radius-md)] bg-[var(--surface-muted)] px-3 text-[13px] text-[var(--text-muted)] focus-within:bg-[var(--background)] focus-within:shadow-[0_0_0_3px_rgba(16,163,127,0.12)]">
@@ -118,7 +173,7 @@ export function TopBar() {
             }}
           />
           <kbd className="rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">
-            {t("shell.searchShortcut")}
+            {kbdLabel}
           </kbd>
         </label>
         {searchOpen ? (
@@ -137,16 +192,6 @@ export function TopBar() {
         <TaskActivityButton />
         <div className="flex h-[26px] items-center rounded-[var(--radius-md)] bg-[var(--surface-muted)] p-0.5 text-[11px]">
           <button
-            aria-pressed={activeLanguage === "en"}
-            className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
-              activeLanguage === "en" ? "bg-[var(--background)] font-medium" : "text-[var(--text-muted)]"
-            }`}
-            onClick={() => setLanguage("en")}
-            type="button"
-          >
-            {t("language.en")}
-          </button>
-          <button
             aria-pressed={activeLanguage === "zh-CN"}
             className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
               activeLanguage === "zh-CN" ? "bg-[var(--background)] font-medium" : "text-[var(--text-muted)]"
@@ -155,6 +200,16 @@ export function TopBar() {
             type="button"
           >
             {t("language.zhCN")}
+          </button>
+          <button
+            aria-pressed={activeLanguage === "en"}
+            className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
+              activeLanguage === "en" ? "bg-[var(--background)] font-medium" : "text-[var(--text-muted)]"
+            }`}
+            onClick={() => setLanguage("en")}
+            type="button"
+          >
+            {t("language.en")}
           </button>
         </div>
         <button
@@ -165,6 +220,15 @@ export function TopBar() {
           type="button"
         >
           <Settings aria-hidden="true" size={16} />
+        </button>
+        <button
+          aria-label={t("shell.backToLaunch")}
+          className="icon-button"
+          onClick={clearCurrentProject}
+          title={t("shell.backToLaunch")}
+          type="button"
+        >
+          <LayoutDashboard aria-hidden="true" size={16} />
         </button>
       </div>
     </header>

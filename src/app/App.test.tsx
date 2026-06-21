@@ -97,9 +97,9 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Open or create a wiki project" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Choose a project to start working" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New project" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open folder" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create project" })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Primary" })).not.toBeInTheDocument();
   });
 
@@ -108,8 +108,9 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Switch project" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Back to launch" }));
 
-    expect(screen.getByRole("heading", { name: "Open or create a wiki project" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Choose a project to start working" })).toBeInTheDocument();
     expect(useWikiStore.getState().selectedPath).toBeNull();
     expect(useNavigationStore.getState().activeView).toBe("dashboard");
   });
@@ -145,9 +146,8 @@ describe("App", () => {
 
     expect(screen.getByRole("complementary", { name: "Sources" })).toBeInTheDocument();
     expect(screen.getAllByText("D:/Users/Aletta/Documents/wiki/agent-llm").length).toBeGreaterThan(0);
-    expect(screen.getByText("Route: Agent")).toBeInTheDocument();
-    expect(screen.getByText("Tasks: 1 running")).toBeInTheDocument();
     expect(screen.getByText("Wiki pages: 237")).toBeInTheDocument();
+    expect(screen.getByText("Tasks: 1 running")).toBeInTheDocument();
   });
 
   it("renders status from mutable project and task stores", () => {
@@ -168,7 +168,6 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getAllByText("D:/tmp/research-wiki").length).toBeGreaterThan(0);
-    expect(screen.getByText("Route: BYOK")).toBeInTheDocument();
     expect(screen.getByText("Tasks: 2 running")).toBeInTheDocument();
     expect(screen.getByText("Wiki pages: 42")).toBeInTheDocument();
   });
@@ -179,7 +178,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "中文" }));
 
     expect(await screen.findByRole("button", { name: "图谱" })).toBeInTheDocument();
-    expect(screen.getByText("路线: Agent")).toBeInTheDocument();
+    expect(screen.getByText("Wiki 页面: 237")).toBeInTheDocument();
   });
 
   it("opens settings from the top bar settings button", () => {
