@@ -206,12 +206,13 @@ impl FileStore {
                     // instead of forcing a blind reload. Both the wiki save and
                     // compile conflict paths flow through here, so this one
                     // change covers PRD-READ-004 (external edits) and
-                    // PRD-WIKI-004 (compile merge conflicts). Read is
-                    // lossy-best-effort: a binary/non-UTF-8 file still yields
-                    // the mismatch error, just without a baseline.
+                    // PRD-WIKI-004 (compile merge conflicts). Only include the
+                    // baseline when the file is valid UTF-8: from_utf8_lossy
+                    // would otherwise produce U+FFFD garbage for binary files,
+                    // mislead the diff, and possibly crash the editor.
                     let baseline_content = fs::read(path)
                         .ok()
-                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                        .and_then(|bytes| String::from_utf8(bytes).ok());
                     let mut details = serde_json::json!({
                         "path": relative_path,
                         "expectedHash": expected_hash,
