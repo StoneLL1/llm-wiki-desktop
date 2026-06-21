@@ -135,6 +135,11 @@ pub struct ExtractResult {
 pub struct ConfirmedImport {
     pub preview: ImportPreview,
     pub confirmed_at: String,
+    /// Commit hash of the scoped Git checkpoint created when the caller
+    /// requested `create_checkpoint: true` on confirm. `None` when no
+    /// checkpoint was requested or the repository had no changes to commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

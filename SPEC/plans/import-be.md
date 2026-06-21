@@ -33,15 +33,18 @@
 - 验收：✅ 命令存在、注册；普通文件夹返回 NeedsConfirmation 且 pending action 已注册可确认（`peek` 验证）；已有 wiki 文件夹返回 Opened 且无 pending action 注册；CJK 文件名安全。3 新测试通过；288 lib + 7 task8_contracts + 90 FE + lint + clippy(--no-default-features, -D warnings) 全绿；GUI feature 编译通过。（注：gui-feature clippy 有 21 个预存错误在其它命令模块，非本 loop 范围，基线 stash 验证一致。）
 
 ### [P0-3] 导入后触发 Wiki 编译的 hook + confirm_import_preview 支持 Git 检查点参数
-- status: pending
+- status: verified
 - 意图：PRD §8.3 step6「用户确认后触发编译」；roadmap「导入后编译链路 P0：confirm_import_preview 接受 createCheckpoint 参数」。设计稿底部条有「Git 检查点 checkbox」「导入后触发编译 checkbox」。
 - 现状：`confirm_import_preview`（import_commands.rs:591-613）只做 confirm + 写 import-conflicts.json，不创建 checkpoint，不触发编译。
 - 决策：
-  - (a) `ConfirmImportRequest` 增 `create_checkpoint: bool`。为 true 时在归档成功后用 `git_service.create_scoped_checkpoint`（paths = 归档文件 + source-index.json + import-conflicts.json）创建检查点，返回值带 `checkpoint_hash`。
-  - (b) 「导入后触发编译」的链路：后端不强行串接编译（编译是独立长任务，前端 checkbox 勾选时前端依次调 confirm → start_wiki_compile）。本 loop 确保命令链路通 = `confirm_import_preview` 成功后前端能拿到 confirmed 结果再调 `start_wiki_compile`。后端无需新增串接命令（避免把两个长任务耦合）。但需在 `ConfirmedImport` 暴露 checkpoint_hash 供前端展示。
-  - (c) `ConfirmedImport` 增 `checkpoint_hash: Option<String>`。
-- 涉及文件：`src-tauri/src/commands/import_commands.rs`、`src-tauri/src/models/import.rs`、`src-tauri/tests/`（若需）
-- 验收：create_checkpoint=true 时项目有可回滚提交；ConfirmedImport 带 checkpoint_hash；cargo test 覆盖。
+  - (a) `ConfirmImportRequest` 增 `create_checkpoint: bool`（`#[serde(default)]` 向后兼容）。为 true 时在归档 + 写 import-conflicts 后用 `git_service.create_scoped_checkpoint`（paths = 归档文件[排除 Skip/LinkToExisting] + `.app/source-index.json` + `.app/import-conflicts.json`）创建 scoped 提交，返回 commit hash。
+  - (b) 「导入后触发编译」链路：后端不串接编译（编译是独立长任务，前端 checkbox 勾选时依次调 `confirm_import_preview` → `start_wiki_compile`）。后端确保 `ConfirmedImport` 暴露 `checkpoint_hash` 供前端展示。无新增串接命令。
+  - (c) `ConfirmedImport` 增 `checkpoint_hash: Option<String>`（`skip_serializing_if = "Option::is_none"`）。
+  - 关键边界处理：仓库未初始化时先 `initialize_repository`（新建仓库的初始提交已含归档文件，返回该 hash）；已有仓库且有新归档→scoped 提交；无变更→None。避免「scoped 找不到变更」误返回 None。
+  - 核心逻辑放 `AppState::create_import_checkpoint`（非 gui-gate 可测），命令层薄包装。
+- 涉及文件：`src-tauri/src/commands/import_commands.rs`、`src-tauri/src/models/import.rs`、`src-tauri/src/app_state.rs`
+- 落地位置：`import_commands.rs:595-640`（命令 + createCheckpoint 分支）、`import.rs:135-144`（ConfirmedImport.checkpoint_hash）、`app_state.rs:152-213`（`create_import_checkpoint` 方法 + `import_checkpoint_tests` 模块 4 测试）。
+- 验收：✅ create_checkpoint=true 时项目有可回滚提交（新仓库→初始提交含归档；已有仓库→scoped 提交含归档+index；无变更→None）；ConfirmedImport 带 checkpoint_hash；create_checkpoint=false 默认不创建。4 新测试通过；292 lib + 7 task8_contracts + 90 FE + lint + clippy(--no-default-features, -D warnings) 全绿；GUI 编译通过，我的文件无 clippy 告警。
 
 ---
 

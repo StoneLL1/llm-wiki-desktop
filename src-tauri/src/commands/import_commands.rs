@@ -29,6 +29,12 @@ pub struct ConfirmImportRequest {
     pub project_id: String,
     pub project_root_path: String,
     pub preview: ImportPreview,
+    /// When true, create a scoped Git checkpoint of the archived files plus
+    /// `.app/source-index.json` and `.app/import-conflicts.json` after the
+    /// import is confirmed, and return its hash in `ConfirmedImport`.
+    /// Defaults to false for backward compatibility with existing callers.
+    #[serde(default)]
+    pub create_checkpoint: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -605,10 +611,17 @@ pub fn confirm_import_preview(
             BackendError::new("IMPORT_CONFLICT_WRITE_FAILED", err.message, true, false)
         })?;
 
+    let checkpoint_hash = if request.create_checkpoint {
+        state.create_import_checkpoint(&context, &request.preview)?
+    } else {
+        None
+    };
+
     let confirmed_at = chrono::Utc::now().to_rfc3339();
     Ok(ConfirmedImport {
         preview: request.preview,
         confirmed_at,
+        checkpoint_hash,
     })
 }
 
