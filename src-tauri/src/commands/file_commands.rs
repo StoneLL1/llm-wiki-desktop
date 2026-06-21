@@ -207,6 +207,19 @@ pub fn confirm_pending_action(
             &target_hash,
             &artifacts,
         ),
+        Some(ConfirmationExecution::DeleteWikiPage {
+            project_id,
+            root_path,
+            target_path,
+            target_hash,
+        }) => execute_wiki_page_delete(
+            &state,
+            stored.action,
+            &project_id,
+            &root_path,
+            &target_path,
+            &target_hash,
+        ),
         Some(ConfirmationExecution::ReplaceSource {
             project_id,
             root_path,
@@ -255,6 +268,36 @@ fn execute_source_delete(
         target_path,
         target_hash,
         artifacts,
+    )?;
+    Ok(ConfirmedAction {
+        action,
+        status: ConfirmationStatus::Confirmed,
+        checkpoint_exists,
+        project_summary: Some(state.project_service.scan_project(&context, None)),
+    })
+}
+
+/// Execute a confirmed wiki page deletion: resolve the project context and
+/// delegate to `SearchService::apply_page_delete`, which re-verifies the hash,
+/// creates a scoped Git checkpoint, removes the file, and invalidates the graph
+/// cache. The destructive logic lives in the (lib-available) service so it can
+/// be unit-tested without the GUI feature; this wrapper only adapts the stored
+/// confirmation execution to the service signature and assembles the
+/// `ConfirmedAction`.
+fn execute_wiki_page_delete(
+    state: &AppState,
+    action: crate::models::confirmation::PendingAction,
+    project_id: &str,
+    root_path: &str,
+    target_path: &str,
+    target_hash: &str,
+) -> Result<ConfirmedAction, BackendError> {
+    let context = state.resolve_project_context(project_id, root_path)?;
+    let checkpoint_exists = state.search_service.apply_page_delete(
+        &context,
+        &state.git_service,
+        target_path,
+        target_hash,
     )?;
     Ok(ConfirmedAction {
         action,

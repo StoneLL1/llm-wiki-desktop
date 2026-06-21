@@ -123,6 +123,12 @@ pub enum ConfirmationExecution {
         target_hash: String,
         artifacts: Vec<String>,
     },
+    DeleteWikiPage {
+        project_id: String,
+        root_path: String,
+        target_path: String,
+        target_hash: String,
+    },
     ReplaceSource {
         project_id: String,
         root_path: String,

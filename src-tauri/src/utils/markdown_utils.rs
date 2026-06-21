@@ -276,6 +276,84 @@ pub fn extract_title(body: &str, frontmatter: &Frontmatter, file_name: &str) -> 
         .to_string()
 }
 
+/// Rewrite every `[[target...]]` wikilink whose target matches `old_stem`
+/// (case-insensitive, comparing the part before `|` or `#`) so the target
+/// becomes `new_stem`, preserving any alias, anchor, and surrounding text.
+///
+/// This is the rename-referential-integrity path: when a page `old.md` is
+/// renamed to `new.md`, every other page that links `[[old]]`, `[[old|Alias]]`,
+/// `[[old#Section]]`, or `[[old#Section|Alias]]` must be updated so the link
+/// still resolves. Matching is on the link *target* (the file stem), the same
+/// field `extract_wikilinks` produces, so the two stay consistent. Returns the
+/// rewritten body and the number of links replaced (0 ⇒ nothing to do).
+///
+/// The replacement preserves the original alias and anchor exactly: only the
+/// target segment is swapped. `new_stem` is inserted verbatim (callers pass the
+/// already-lowercased-or-not stem they want shown).
+pub fn rewrite_wikilinks(body: &str, old_stem: &str, new_stem: &str) -> (String, usize) {
+    let old_lower = old_stem.to_ascii_lowercase();
+    if old_lower.is_empty() || old_lower == new_stem.to_ascii_lowercase() {
+        return (body.to_string(), 0);
+    }
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut replaced = 0usize;
+    let mut i = 0usize;
+    out.push_str(&body[..0]);
+    let mut last_copy_end = 0usize;
+
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            let start = i + 2;
+            let mut depth = 2;
+            let mut j = start;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if j < bytes.len() && depth == 0 {
+                // j points to the final `]` that brought depth to 0; the inner
+                // content is [start..j-1) (the preceding `]` is at j-1).
+                let end = j.saturating_sub(1);
+                let inner = &body[start..end];
+                // Split target from alias/anchor the same way extract_wikilinks
+                // does: target = before first `|` or `#`.
+                let target_end = inner
+                    .find(|c: char| c == '|' || c == '#')
+                    .unwrap_or(inner.len());
+                let target = inner[..target_end].trim();
+                if target.to_ascii_lowercase() == old_lower {
+                    // Flush text before this link, then re-emit with new target.
+                    out.push_str(&body[last_copy_end..i]);
+                    out.push_str("[[");
+                    out.push_str(new_stem);
+                    out.push_str(&inner[target_end..]);
+                    out.push_str("]]");
+                    replaced += 1;
+                    last_copy_end = j + 1;
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if replaced == 0 {
+        return (body.to_string(), 0);
+    }
+    out.push_str(&body[last_copy_end..]);
+    (out, replaced)
+}
+
 /// Extract `[[target]]` and `[[target|alias]]` wikilink targets from the body,
 /// deduplicated, order preserved. Heading anchors (`[[#section]]`) yield the
 /// empty string and are skipped.
@@ -507,6 +585,69 @@ mod tests {
         let result = extract_wikilinks(body);
         assert_eq!(result, vec!["target-a", "target-b"]);
     }
+
+    #[test]
+    fn rewrite_wikilinks_replaces_plain_target_case_insensitively() {
+        let body = "see [[react-pattern]] and [[React-Pattern]] here";
+        let (out, n) = rewrite_wikilinks(body, "react-pattern", "reasoning-loop");
+        assert_eq!(n, 2);
+        assert_eq!(
+            out,
+            "see [[reasoning-loop]] and [[reasoning-loop]] here"
+        );
+    }
+
+    #[test]
+    fn rewrite_wikilinks_preserves_alias_and_anchor() {
+        let body = "[[old|My Alias]] then [[old#Section]] and [[old#Section|Alias]]";
+        let (out, n) = rewrite_wikilinks(body, "old", "new");
+        assert_eq!(n, 3);
+        assert_eq!(out, "[[new|My Alias]] then [[new#Section]] and [[new#Section|Alias]]");
+    }
+
+    #[test]
+    fn rewrite_wikilinks_leaves_non_matching_links_untouched() {
+        let body = "[[other]] and [[old]] and [[also-old]] text";
+        let (out, n) = rewrite_wikilinks(body, "old", "new");
+        // `also-old` is a different target stem, must not be touched.
+        assert_eq!(n, 1);
+        assert_eq!(out, "[[other]] and [[new]] and [[also-old]] text");
+    }
+
+    #[test]
+    fn rewrite_wikilinks_returns_zero_when_no_match_and_preserves_cjk() {
+        let body = "正文 [[概念甲]] 与 [[agent]]";
+        let (out, n) = rewrite_wikilinks(body, "missing", "x");
+        assert_eq!(n, 0);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn rewrite_wikilinks_rewrites_cjk_targets() {
+        let body = "链接 [[智能体]] 及 [[智能体|AI]]";
+        let (out, n) = rewrite_wikilinks(body, "智能体", "代理");
+        assert_eq!(n, 2);
+        assert_eq!(out, "链接 [[代理]] 及 [[代理|AI]]");
+    }
+
+    #[test]
+    fn rewrite_wikilinks_is_noop_when_old_equals_new() {
+        let body = "[[old]]";
+        let (out, n) = rewrite_wikilinks(body, "old", "old");
+        assert_eq!(n, 0);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn rewrite_wikilinks_handles_nested_brackets_inside_alias() {
+        // An alias containing `]` is unusual but the depth counter must keep
+        // the link intact until the true closing `]]`.
+        let body = "see [[old|cite [1]]] next";
+        let (out, n) = rewrite_wikilinks(body, "old", "new");
+        assert_eq!(n, 1);
+        assert_eq!(out, "see [[new|cite [1]]] next");
+    }
+
 
     #[test]
     fn count_words_skips_code_fences() {

@@ -203,6 +203,58 @@ pub struct ToggleBookmarkResponse {
     pub bookmarked: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWikiPageRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    /// Project-relative path under `wiki/` for the new page, e.g.
+    /// `wiki/concepts/agent-memory.md`. Must not already exist.
+    pub relative_path: String,
+    /// Optional title; defaults to the filename stem when omitted. Used both in
+    /// the seeded frontmatter `title` field and the `# {title}` H1.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Optional page type written into frontmatter `type`. When omitted the
+    /// frontmatter omits `type` and `WikiPageType::infer` falls back to the
+    /// `wiki/` subdirectory.
+    #[serde(default)]
+    pub page_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameWikiPageRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    /// Project-relative path of the existing page to rename.
+    pub relative_path: String,
+    /// New project-relative path under `wiki/`, e.g.
+    /// `wiki/concepts/reasoning-loop.md`. Must not already exist.
+    pub new_relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameWikiPageResponse {
+    /// The new project-relative path of the renamed page.
+    pub relative_path: String,
+    pub hash: String,
+    pub saved_at: String,
+    /// Other wiki pages whose `[[old]]` wikilinks were rewritten to `[[new]]`.
+    pub updated_references: Vec<String>,
+    /// True when a pre-existing graph cache was invalidated by this rename.
+    pub graph_cache_invalidated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWikiPageRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub relative_path: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::WikiPageType;
