@@ -111,6 +111,9 @@ export interface ConfirmImportRequest {
   projectId: string;
   projectRootPath: string;
   preview: ImportPreview;
+  /** When true, the backend creates a scoped Git checkpoint of the archived
+   * files plus source/conflict indices. Backward-compatible default: false. */
+  createCheckpoint?: boolean;
 }
 
 export interface ExtractTextRequest {
