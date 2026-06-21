@@ -122,6 +122,15 @@ impl SettingsService {
             .unwrap_or_default()
     }
 
+    /// Read the user's UI/content language preference from global settings.
+    /// Used by the tray menu (no project context available at tray-build
+    /// time) and anywhere else that needs the language without a project.
+    pub fn read_language(&self) -> String {
+        self.read_global_settings()
+            .map(|settings| settings.language)
+            .unwrap_or_else(|_| "en".to_string())
+    }
+
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
     }
@@ -258,5 +267,36 @@ mod tests {
         assert_eq!(service.read_close_behavior(), CloseBehavior::Quit);
 
         std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn read_language_returns_global_preference_or_english_default() {
+        // The tray menu reads language through read_language() with no project
+        // context, so it must reflect the global settings file.
+        let (_context, _root, config_dir) = tmp_paths("language");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        let store = FileStore;
+        store.ensure_absolute_dir(&config_dir).unwrap();
+        store
+            .write_json_atomic_absolute(
+                &config_dir.join("settings.json"),
+                &GlobalSettingsFile {
+                    language: "zh-CN".into(),
+                    ..GlobalSettingsFile::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(service.read_language(), "zh-CN");
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn read_language_defaults_to_english_when_settings_missing() {
+        let (_context, _root, config_dir) = tmp_paths("language-default");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        // No settings file written.
+        assert_eq!(service.read_language(), "en");
     }
 }

@@ -161,6 +161,7 @@ pub fn request_delete_source(
             diff: None,
         }),
         expires_at: None,
+        checkpoint_hash: None,
     };
     state.confirmation_registry.register_with_execution(
         action.clone(),
@@ -249,6 +250,7 @@ pub fn request_replace_source(
             diff: None,
         }),
         expires_at: None,
+        checkpoint_hash: None,
     };
     let registration = state.confirmation_registry.register_with_execution(
         action.clone(),

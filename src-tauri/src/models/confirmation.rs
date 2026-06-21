@@ -16,6 +16,16 @@ pub struct PendingAction {
     pub affected_paths: Vec<String>,
     pub preview: Option<ActionPreview>,
     pub expires_at: Option<String>,
+    /// Git checkpoint commit hash that already protects this action, if the
+    /// backend created one before surfacing the confirmation (e.g. a wiki
+    /// compile checkpoint created before the conflict manifest is generated).
+    /// `None` for actions that only create their checkpoint *after* the user
+    /// confirms (lint high-risk fixes, chat overwrite). The frontend uses this
+    /// to render an honest "Checkpoint: available / not created yet" state
+    /// (`checkpointExists = action.checkpointHash !== null`), so `None` must
+    /// serialize to JSON `null` rather than being omitted.
+    #[serde(default)]
+    pub checkpoint_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,6 +267,7 @@ mod tests {
                 diff: Some("-current\n+generated".to_string()),
             }),
             expires_at: Some("2026-06-19T00:00:00Z".to_string()),
+            checkpoint_hash: Some("abc123".to_string()),
         };
 
         let value = serde_json::to_value(action).unwrap();
@@ -266,7 +277,34 @@ mod tests {
         assert_eq!(value["affectedPaths"][0], json!("wiki/concepts/agent.md"));
         assert_eq!(value["expiresAt"], json!("2026-06-19T00:00:00Z"));
         assert_eq!(value["preview"]["summary"], json!("One conflicting file"));
+        assert_eq!(value["checkpointHash"], json!("abc123"));
         assert!(value.get("action_type").is_none());
+    }
+
+    #[test]
+    fn pending_action_serializes_absent_checkpoint_hash_as_null() {
+        // The frontend renders "Checkpoint: available" when checkpointHash is
+        // non-null and "not created yet" when null. A None must therefore
+        // serialize to JSON null (not be omitted), or the !== null check would
+        // misfire on undefined.
+        let action = PendingAction {
+            id: "action-2".to_string(),
+            action_type: PendingActionType::OverwriteFile,
+            title: "Overwrite".to_string(),
+            message: "Overwrite later.".to_string(),
+            risk_level: RiskLevel::High,
+            affected_paths: Vec::new(),
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: None,
+        };
+        let value = serde_json::to_value(&action).unwrap();
+        assert!(value.get("checkpointHash").is_some(), "field must be present");
+        assert!(value["checkpointHash"].is_null());
+
+        // Round-trips back to None.
+        let restored: PendingAction = serde_json::from_value(value).unwrap();
+        assert!(restored.checkpoint_hash.is_none());
     }
 
     #[test]
@@ -281,6 +319,7 @@ mod tests {
             affected_paths: vec!["wiki/concepts/agent.md".to_string()],
             preview: None,
             expires_at: None,
+            checkpoint_hash: None,
         };
 
         registry.register(action.clone()).unwrap();
@@ -308,6 +347,7 @@ mod tests {
             affected_paths: vec!["wiki/page.md".to_string()],
             preview: None,
             expires_at: Some("2000-01-01T00:00:00Z".to_string()),
+            checkpoint_hash: None,
         };
         registry.register(action).unwrap();
 

@@ -1,3 +1,4 @@
+pub mod byok_progress;
 pub mod cancellation;
 pub mod task_events;
 pub mod task_model;

@@ -135,6 +135,10 @@ async fn run_compile(
                 affected_paths: applied.conflicts.clone(),
                 preview: Some(ActionPreview { summary: format!("{} conflicting path(s)", applied.conflicts.len()), before: None, after: None, diff: Some(CompileService::candidate_diff(&manifest)) }),
                 expires_at: None,
+                // The compile checkpoint was created before the manifest was
+                // generated; surface its hash so the frontend can show an
+                // honest "Checkpoint: available" state for this conflict.
+                checkpoint_hash: checkpoint.commit_hash.clone(),
             };
             state.confirmation_registry.register_with_execution(action.clone(), Some(ConfirmationExecution::CompileMerge {
                 project_id: request.project_id.clone(), root_path: request.project_root_path.clone(), task_id: task_id.into(), route,
@@ -176,6 +180,11 @@ async fn generate_manifest(
             .any(|info| info.kind == *agent && info.state == AgentDetectionState::Installed)
     });
     let selected_provider = select_provider(request.provider, &providers, &state.secret_service)?;
+    let language = state
+        .settings_service
+        .read_settings(context)
+        .map(|settings| settings.language)
+        .unwrap_or_else(|_| "en".to_string());
     let route = match request.route {
         CompileRoutePreference::Agent => CompileRoute::Agent,
         CompileRoutePreference::Byok => CompileRoute::Byok,
@@ -203,7 +212,7 @@ async fn generate_manifest(
             let invocation = AgentService::invocation(
                 agent,
                 workspace,
-                &CompileService::compile_prompt(workspace),
+                &CompileService::compile_prompt(workspace, &language),
             )?;
             state
                 .agent_service
@@ -231,26 +240,23 @@ async fn generate_manifest(
                     format!("Calling {:?}", provider.provider),
                 )
                 .map_err(task_error)?;
-            let prompt = provider_prompt(workspace)?;
+            let prompt = provider_prompt(workspace, &language)?;
             let completion = state
                 .llm_service
                 .complete(&provider, secret.as_deref(), &prompt);
-            tokio::pin!(completion);
-            let raw = loop {
-                tokio::select! {
-                    result = &mut completion => break result?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        if state.task_service.is_cancelled(task_id) {
-                            return Err(BackendError::new(
-                                "COMPILE_CANCELLED",
-                                "Wiki compile was cancelled.",
-                                true,
-                                false,
-                            ));
-                        }
-                    }
-                }
-            };
+            let raw = crate::tasks::byok_progress::poll_with_progress(
+                &state.task_service,
+                task_id,
+                "Generating",
+                completion,
+            )
+            .await
+            .map_err(|_| {
+                crate::tasks::byok_progress::cancelled_error(
+                    "COMPILE_CANCELLED",
+                    "Wiki compile was cancelled.",
+                )
+            })??;
             Ok((route, CompileService::parse_manifest(&raw)?))
         }
     }
@@ -292,8 +298,12 @@ fn select_provider(
     Ok(None)
 }
 
-fn provider_prompt(workspace: &std::path::Path) -> Result<String, BackendError> {
+fn provider_prompt(workspace: &std::path::Path, language: &str) -> Result<String, BackendError> {
     let mut prompt = String::from("Return only JSON matching {files:[{path,content}],deletions:[],summary}. Paths must be wiki/*.md and include wiki/index.md, wiki/overview.md, wiki/log.md. Never delete pages.\n");
+    // The JSON schema/path contract above stays English so parsing is stable;
+    // only the generated page *content* prose follows the user's language.
+    prompt.push_str(&crate::utils::i18n::language_instruction(language));
+    prompt.push_str(" Write each page's prose body in that language; keep frontmatter keys, paths, and this JSON structure in English.\n");
     for name in ["purpose.md", "schema.md"] {
         let content = std::fs::read_to_string(workspace.join(name)).map_err(|error| {
             BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)

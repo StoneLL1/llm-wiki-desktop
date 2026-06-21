@@ -34,9 +34,15 @@ impl ExportService {
         export_type: ExportType,
         source_path: Option<&str>,
         search_service: &SearchService,
+        language: &str,
     ) -> Result<String, BackendError> {
         let skill = export_type.skill_folder();
         let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
+        // `language` is read by the command layer from SettingsService so this
+        // service stays host-state-free and testable. Generated HTML prose
+        // (article text, card bullets, report sections) follows it; the
+        // structural HTML contract (single doctype, inlined CSS, no external
+        // resources) is language-independent and stays as written below.
 
         let mut prompt = String::new();
         prompt.push_str(&format!(
@@ -47,6 +53,8 @@ impl ExportService {
              files. You may wrap the whole document in a fenced ```html block; everything else will \
              be discarded.\n",
         ));
+        prompt.push_str(&crate::utils::i18n::language_instruction(language));
+        prompt.push_str(" Write the visible document text in that language.\n");
 
         if let Some(purpose) = &purpose {
             prompt.push_str("\n--- Wiki purpose ---\n");
@@ -544,11 +552,13 @@ mod tests {
                 ExportType::BeautifulRead,
                 Some("wiki/concepts/agent.md"),
                 &SearchService::default(),
+                "en",
             )
             .unwrap();
         assert!(prompt.contains("html-beautiful-read"));
         assert!(prompt.contains("An agent acts."));
         assert!(prompt.contains("Explain agents."));
+        assert!(prompt.contains("Respond in English."));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -563,6 +573,7 @@ mod tests {
                 ExportType::KnowledgeCard,
                 None,
                 &SearchService::default(),
+                "en",
             )
             .expect_err("source required");
         assert_eq!(err.code, "EXPORT_SOURCE_REQUIRED");
@@ -591,6 +602,7 @@ mod tests {
                 ExportType::ProjectReport,
                 None,
                 &SearchService::default(),
+                "en",
             )
             .unwrap();
         assert!(prompt.contains("html-project-report"));
@@ -598,6 +610,47 @@ mod tests {
         assert!(prompt.contains("wiki/concepts/react.md"));
         // log.md summaries are skipped.
         assert!(!prompt.contains("path: wiki/log.md"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_prompt_injects_user_language_preference() {
+        let (context, root) = tmp_context("prompt-i18n");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nAn agent acts.",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        write_file(&context, "purpose.md", "# Purpose\n\nExplain agents.");
+
+        let service = ExportService::default();
+        // zh-CN produces a Simplified Chinese instruction.
+        let zh_prompt = service
+            .build_export_prompt(
+                &context,
+                ExportType::BeautifulRead,
+                Some("wiki/concepts/agent.md"),
+                &SearchService::default(),
+                "zh-CN",
+            )
+            .unwrap();
+        assert!(zh_prompt.contains("Respond in Simplified Chinese."));
+        assert!(zh_prompt.contains("Write the visible document text"));
+        // Structural HTML contract is language-independent and still present.
+        assert!(zh_prompt.contains("html-beautiful-read"));
+        // English produces an English instruction.
+        let en_prompt = service
+            .build_export_prompt(
+                &context,
+                ExportType::BeautifulRead,
+                Some("wiki/concepts/agent.md"),
+                &SearchService::default(),
+                "en",
+            )
+            .unwrap();
+        assert!(en_prompt.contains("Respond in English."));
         std::fs::remove_dir_all(root).unwrap();
     }
 

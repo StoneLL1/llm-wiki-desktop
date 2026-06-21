@@ -204,11 +204,18 @@ impl CompileService {
         Ok(manifest)
     }
 
-    pub fn compile_prompt(workspace: &Path) -> String {
-        format!(
+    pub fn compile_prompt(workspace: &Path, language: &str) -> String {
+        let mut prompt = format!(
             "Compile this local Markdown wiki in {}. Read purpose.md, schema.md, raw/extracted/, existing wiki/, and skills/wiki-ingest/SKILL.md. Update wiki/index.md, wiki/overview.md, and wiki/log.md. Do not access or modify anything outside this workspace.",
             workspace.to_string_lossy()
-        )
+        );
+        // Steer generated wiki page prose to the user's language; structural
+        // fields (frontmatter keys, file paths, section headings used by
+        // lint/graph parsing) stay English so schema is unaffected.
+        prompt.push('\n');
+        prompt.push_str(&crate::utils::i18n::language_instruction(language));
+        prompt.push_str(" Write each page's prose body in that language; keep frontmatter keys, file paths, and section headings in English.");
+        prompt
     }
 
     pub fn validate_manifest(manifest: &CompileManifest) -> Result<(), BackendError> {

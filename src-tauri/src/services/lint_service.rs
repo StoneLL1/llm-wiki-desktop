@@ -296,10 +296,15 @@ impl LintService {
         &self,
         context: &ProjectContext,
         search_service: &SearchService,
+        language: &str,
     ) -> Result<String, BackendError> {
         let tree = search_service.scan_wiki(context)?;
         let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
         let schema = self.file_store.read_markdown(context, "schema.md").ok();
+        // `language` is read by the command layer from SettingsService so this
+        // service stays host-state-free and testable. The suggestion prose
+        // follows the user's language; the JSON contract (issueType enum,
+        // ```json fence) stays English so parsing is stable.
 
         let mut prompt = String::new();
         prompt.push_str(
@@ -310,6 +315,11 @@ impl LintService {
              containing an array of objects with fields: issueType (one of the six above), \
              severity (error|warning|info), path, message, evidence, suggestion. If there \
              are no issues, respond with an empty array.\n",
+        );
+        prompt.push_str(&crate::utils::i18n::language_instruction(language));
+        prompt.push_str(
+            " Write the `message` and `suggestion` text in that language; keep issueType, \
+             severity, path, and the JSON structure in English.\n",
         );
         if let Some(purpose) = &purpose {
             prompt.push_str("\n--- Purpose ---\n");
@@ -682,6 +692,9 @@ fn dead_link_pending_action(path: &str, target: &str) -> PendingAction {
             diff: None,
         }),
         expires_at: None,
+        // Lint high-risk fixes create their scoped checkpoint only after the
+        // user confirms; no hash exists to surface at confirmation time.
+        checkpoint_hash: None,
     }
 }
 
@@ -702,6 +715,7 @@ fn index_drift_pending_action(path: &str, message: &str) -> PendingAction {
             diff: None,
         }),
         expires_at: None,
+        checkpoint_hash: None,
     }
 }
 
@@ -1165,13 +1179,14 @@ mod tests {
         write_file(&context, "schema.md", "# Schema\n\nPages need a type.");
 
         let prompt = LintService::default()
-            .build_deep_lint_prompt(&context, &SearchService::default())
+            .build_deep_lint_prompt(&context, &SearchService::default(), "en")
             .unwrap();
         assert!(prompt.contains("Purpose"));
         assert!(prompt.contains("Explain agents."));
         assert!(prompt.contains("Schema"));
         assert!(prompt.contains("wiki/concepts/agent.md"));
         assert!(prompt.contains("```json"));
+        assert!(prompt.contains("Respond in English."));
         std::fs::remove_dir_all(root).unwrap();
     }
 

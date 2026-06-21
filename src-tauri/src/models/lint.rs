@@ -253,6 +253,7 @@ mod tests {
                 affected_paths: vec!["wiki/a.md".into()],
                 preview: None,
                 expires_at: None,
+                checkpoint_hash: None,
             }),
         };
         let value = serde_json::to_value(&needs).unwrap();

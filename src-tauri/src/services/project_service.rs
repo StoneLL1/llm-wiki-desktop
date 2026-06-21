@@ -267,6 +267,7 @@ impl ProjectService {
                 diff: None,
             }),
             expires_at: None,
+            checkpoint_hash: None,
         })
     }
 

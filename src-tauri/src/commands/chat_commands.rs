@@ -145,11 +145,17 @@ async fn run_chat_send(
         .task_service
         .append_log(task_id, LogLevel::Info, "Retrieving local context".into())
         .map_err(task_error)?;
+    let language = state
+        .settings_service
+        .read_settings(&context)
+        .map(|settings| settings.language)
+        .unwrap_or_else(|_| "en".to_string());
     let retrieval = state.chat_service.build_retrieval_context(
         &context,
         &state.search_service,
         &request.content,
         &session,
+        &language,
     )?;
     let citations = retrieval.citations.clone();
 
@@ -193,22 +199,19 @@ async fn run_chat_send(
                 state
                     .llm_service
                     .complete(&provider, secret.as_deref(), &retrieval.prompt);
-            tokio::pin!(completion);
-            let raw = loop {
-                tokio::select! {
-                    result = &mut completion => break result?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        if state.task_service.is_cancelled(task_id) {
-                            return Err(BackendError::new(
-                                "CHAT_CANCELLED",
-                                "Chat was cancelled.",
-                                true,
-                                false,
-                            ));
-                        }
-                    }
-                }
-            };
+            let raw = crate::tasks::byok_progress::poll_with_progress(
+                &state.task_service,
+                task_id,
+                "Answering",
+                completion,
+            )
+            .await
+            .map_err(|_| {
+                crate::tasks::byok_progress::cancelled_error(
+                    "CHAT_CANCELLED",
+                    "Chat was cancelled.",
+                )
+            })??;
             (ChatRoute::Byok, raw.trim().to_string())
         }
     };
@@ -500,6 +503,9 @@ pub fn save_answer_to_wiki(
                     diff: None,
                 }),
                 expires_at: None,
+                // The checkpoint is created only after the user confirms the
+                // overwrite, so there is no hash to surface yet.
+                checkpoint_hash: None,
             };
             state.confirmation_registry.register_with_execution(
                 action.clone(),
