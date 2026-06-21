@@ -28,15 +28,23 @@ pub fn run() {
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
 
-            // Build tray menu: Show / Hide / Quit. The notification plugin is registered
-            // above so the frontend can surface task completion/failure/confirmation
-            // notifications via OS notification APIs; the backend surfaces state changes
-            // through the typed event bus (BackendEventType).
+            // Build tray menu: Show / Hide / Quit. Labels + tooltip are
+            // localized to the user's UI language preference (CLAUDE.md: i18n
+            // is a hard boundary, including OS-facing surfaces). The menu is
+            // built once at startup; changing the language takes effect on the
+            // next app launch (Tauri does not rebuild an existing tray menu
+            // in-place). The notification plugin is registered above so the
+            // frontend can surface task completion/failure/confirmation
+            // notifications via OS notification APIs; the backend surfaces
+            // state changes through the typed event bus (BackendEventType).
+            let language = crate::services::SettingsService::default().read_language();
+            let (show_label, hide_label, quit_label, tooltip) =
+                crate::utils::i18n::tray_labels(&language);
             let menu = tauri::menu::MenuBuilder::new(app)
-                .item(&tauri::menu::MenuItemBuilder::with_id("show", "Show").build(app)?)
-                .item(&tauri::menu::MenuItemBuilder::with_id("hide", "Hide").build(app)?)
+                .item(&tauri::menu::MenuItemBuilder::with_id("show", show_label).build(app)?)
+                .item(&tauri::menu::MenuItemBuilder::with_id("hide", hide_label).build(app)?)
                 .separator()
-                .item(&tauri::menu::MenuItemBuilder::with_id("quit", "Quit").build(app)?)
+                .item(&tauri::menu::MenuItemBuilder::with_id("quit", quit_label).build(app)?)
                 .build()?;
 
             let tray_icon = app
@@ -45,7 +53,7 @@ pub fn run() {
                 .ok_or_else(|| "default window icon missing; cannot build tray icon".to_string())?;
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
-                .tooltip("LLM Wiki Desktop")
+                .tooltip(tooltip)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app_handle, event| match event.id().as_ref() {

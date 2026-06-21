@@ -266,6 +266,7 @@ mod tests {
             affected_paths: vec!["report.pdf".to_string()],
             preview: None,
             expires_at: None,
+            checkpoint_hash: None,
         });
         let pending_value = serde_json::to_value(&pending).unwrap();
         assert_eq!(pending_value["kind"], json!("needs_confirmation"));

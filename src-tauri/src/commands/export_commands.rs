@@ -170,11 +170,17 @@ async fn run_export(
             format!("Building {} prompt", directive.export_type.skill_folder()),
         )
         .map_err(task_error)?;
+    let language = state
+        .settings_service
+        .read_settings(&context)
+        .map(|settings| settings.language)
+        .unwrap_or_else(|_| "en".to_string());
     let prompt = state.export_service.build_export_prompt(
         &context,
         directive.export_type,
         directive.source_path.as_deref(),
         &state.search_service,
+        &language,
     )?;
 
     let (route, raw_html) = match resolve_route(
@@ -220,22 +226,19 @@ async fn run_export(
             let completion = state
                 .llm_service
                 .complete(&provider, secret.as_deref(), &prompt);
-            tokio::pin!(completion);
-            let raw = loop {
-                tokio::select! {
-                    result = &mut completion => break result?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        if state.task_service.is_cancelled(task_id) {
-                            return Err(BackendError::new(
-                                "EXPORT_CANCELLED",
-                                "Export was cancelled.",
-                                true,
-                                false,
-                            ));
-                        }
-                    }
-                }
-            };
+            let raw = crate::tasks::byok_progress::poll_with_progress(
+                &state.task_service,
+                task_id,
+                "Exporting",
+                completion,
+            )
+            .await
+            .map_err(|_| {
+                crate::tasks::byok_progress::cancelled_error(
+                    "EXPORT_CANCELLED",
+                    "Export was cancelled.",
+                )
+            })??;
             for line in raw.lines() {
                 let _ = state
                     .task_service

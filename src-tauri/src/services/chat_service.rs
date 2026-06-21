@@ -181,13 +181,16 @@ impl ChatService {
     /// Local retrieval: keyword search → top pages + bounded excerpts, plus
     /// `purpose.md`. Returns both the typed citations (for the UI) and the
     /// single assembled prompt string (for the Agent/BYOK backend). No model is
-    /// called here.
+    /// called here. The prompt carries a natural-language instruction telling
+    /// the model to answer in `language` (CLAUDE.md: "Agent 生成内容按用户
+    /// 语言偏好输出").
     pub fn build_retrieval_context(
         &self,
         context: &ProjectContext,
         search_service: &SearchService,
         query: &str,
         session: &ChatSession,
+        language: &str,
     ) -> Result<RetrievalContext, BackendError> {
         let hits = search_service.retrieve_with_excerpts(
             context,
@@ -205,7 +208,7 @@ impl ChatService {
             })
             .collect();
         let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
-        let prompt = self.assemble_prompt(query, session, &hits, purpose.as_deref());
+        let prompt = self.assemble_prompt(query, session, &hits, purpose.as_deref(), language);
         Ok(RetrievalContext { citations, prompt })
     }
 
@@ -215,6 +218,7 @@ impl ChatService {
         session: &ChatSession,
         hits: &[ChatRetrievalHit],
         purpose: Option<&str>,
+        language: &str,
     ) -> String {
         let mut prompt = String::new();
         prompt.push_str(
@@ -222,6 +226,10 @@ impl ChatService {
              provided context. Cite sources by their page path in parentheses. If the context is \
              insufficient, say so explicitly.\n",
         );
+        // Steer the generated answer's language to the user's preference. Page
+        // paths and the structural sections below stay as-is (paths, headings).
+        prompt.push_str(&crate::utils::i18n::language_instruction(language));
+        prompt.push('\n');
         if let Some(purpose) = purpose {
             prompt.push_str("\n--- Wiki purpose ---\n");
             prompt.push_str(purpose.trim());
@@ -675,7 +683,7 @@ mod tests {
         }
 
         let ctx = service
-            .build_retrieval_context(&context, &search, "react pattern", &session)
+            .build_retrieval_context(&context, &search, "react pattern", &session, "en")
             .unwrap();
 
         // Top citation is the title-matching page (title scores 100).
@@ -686,9 +694,13 @@ mod tests {
         assert!(ctx.prompt.contains("ReAct Pattern"));
         assert!(ctx.prompt.contains("Latest question"));
         assert!(ctx.prompt.contains("react pattern"));
+        // Language preference is injected into the prompt.
+        assert!(ctx.prompt.contains("Respond in English."));
         // Only the last HISTORY_TURNS turns appear in the prompt.
+        // 15 messages (0..14) → last 8 are turns 7..=14.
         assert!(ctx.prompt.contains("ancient turn number 14"));
-        assert!(!ctx.prompt.contains("ancient turn number 0"));
+        assert!(ctx.prompt.contains("ancient turn number 7"));
+        assert!(!ctx.prompt.contains("ancient turn number 6"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

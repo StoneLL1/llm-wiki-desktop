@@ -87,9 +87,14 @@ async fn run_deep_lint(
         .task_service
         .append_log(task_id, LogLevel::Info, "Building deep-lint prompt".into())
         .map_err(task_error)?;
+    let language = state
+        .settings_service
+        .read_settings(context)
+        .map(|settings| settings.language)
+        .unwrap_or_else(|_| "en".to_string());
     let prompt = state
         .lint_service
-        .build_deep_lint_prompt(context, &state.search_service)?;
+        .build_deep_lint_prompt(context, &state.search_service, &language)?;
 
     let raw = match resolve_route(
         state,
@@ -128,22 +133,19 @@ async fn run_deep_lint(
             let completion = state
                 .llm_service
                 .complete(&provider, secret.as_deref(), &prompt);
-            tokio::pin!(completion);
-            let raw = loop {
-                tokio::select! {
-                    result = &mut completion => break result?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        if state.task_service.is_cancelled(task_id) {
-                            return Err(BackendError::new(
-                                "LINT_CANCELLED",
-                                "Deep lint was cancelled.",
-                                true,
-                                false,
-                            ));
-                        }
-                    }
-                }
-            };
+            let raw = crate::tasks::byok_progress::poll_with_progress(
+                &state.task_service,
+                task_id,
+                "Linting",
+                completion,
+            )
+            .await
+            .map_err(|_| {
+                crate::tasks::byok_progress::cancelled_error(
+                    "LINT_CANCELLED",
+                    "Deep lint was cancelled.",
+                )
+            })??;
             // Mirror agent stdout into the task drawer so BYOK runs show output too.
             for line in raw.lines() {
                 let _ = state
