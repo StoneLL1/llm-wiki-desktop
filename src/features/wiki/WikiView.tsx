@@ -1,17 +1,28 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Book, Edit2, LoaderCircle, Star } from "lucide-react";
 
 import { useProjectStore } from "../../stores/projectStore";
-import type { WikiPageContent, WikiPageMeta } from "../../types/wiki";
+import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
+import type { PendingAction } from "../../types/backend";
+import type { CreateWikiPageInput, WikiPageContent, WikiPageMeta } from "../../types/wiki";
 import { MarkdownReader } from "./MarkdownReader";
 import { WikiEditor } from "./WikiEditor";
+import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
 import { useWikiStore } from "./wikiStore";
 
 export function WikiView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
+  const [pageForm, setPageForm] = useState<
+    { mode: "create" | "rename"; path: string } | null
+  >(null);
+  const [pendingLifecycle, setPendingLifecycle] = useState<
+    | { kind: "rename"; action: PendingAction; oldPath: string; newPath: string }
+    | { kind: "delete"; action: PendingAction }
+    | null
+  >(null);
 
   const tree = useWikiStore((state) => state.tree);
   const loadingTree = useWikiStore((state) => state.loadingTree);
@@ -30,6 +41,11 @@ export function WikiView() {
   const cancelEdit = useWikiStore((state) => state.cancelEdit);
   const reload = useWikiStore((state) => state.reload);
   const toggleBookmark = useWikiStore((state) => state.toggleBookmark);
+  const createPage = useWikiStore((state) => state.createPage);
+  const renamePage = useWikiStore((state) => state.renamePage);
+  const requestDeletePage = useWikiStore((state) => state.requestDeletePage);
+  const confirmDeletePage = useWikiStore((state) => state.confirmDeletePage);
+  const cancelPendingAction = useWikiStore((state) => state.cancelPendingAction);
 
   const { projectId, rootPath } = currentProject;
 
@@ -43,6 +59,67 @@ export function WikiView() {
 
   const breadcrumbs = selectedPath ? selectedPath.split("/") : [];
 
+  const handlePageFormSubmit = (input: CreateWikiPageInput) => {
+    if (pageForm?.mode === "create") {
+      setPageForm(null);
+      void createPage(projectId, rootPath, input);
+      return;
+    }
+    if (pageForm?.mode !== "rename") return;
+    const oldPath = pageForm.path;
+    const action: PendingAction = {
+      id: `rename-${oldPath}`,
+      actionType: "batch_rewrite",
+      title: t("wiki.rename.confirmTitle"),
+      message: t("wiki.rename.confirmMessage", {
+        oldPath,
+        newPath: input.relativePath,
+      }),
+      riskLevel: "high",
+      affectedPaths: [oldPath, input.relativePath],
+      preview: {
+        summary: t("wiki.rename.confirmSummary"),
+        before: oldPath,
+        after: input.relativePath,
+        diff: null,
+      },
+      expiresAt: null,
+      checkpointHash: null,
+    };
+    setPageForm(null);
+    setPendingLifecycle({
+      kind: "rename",
+      action,
+      oldPath,
+      newPath: input.relativePath,
+    });
+  };
+
+  const handleDeleteRequest = (path: string) => {
+    void requestDeletePage(projectId, rootPath, path).then((action) => {
+      if (action) setPendingLifecycle({ kind: "delete", action });
+    });
+  };
+
+  const handleLifecycleCancel = () => {
+    const pending = pendingLifecycle;
+    setPendingLifecycle(null);
+    if (pending?.kind === "delete") {
+      void cancelPendingAction(pending.action);
+    }
+  };
+
+  const handleLifecycleConfirm = () => {
+    const pending = pendingLifecycle;
+    if (!pending) return;
+    setPendingLifecycle(null);
+    if (pending.kind === "delete") {
+      void confirmDeletePage(projectId, rootPath, pending.action);
+    } else {
+      void renamePage(projectId, rootPath, pending.oldPath, pending.newPath);
+    }
+  };
+
   return (
     <div className="flex h-full min-h-0">
       {tree ? (
@@ -52,6 +129,9 @@ export function WikiView() {
           selectedPath={selectedPath}
           onSelect={handleOpen}
           onRefresh={() => void reload(projectId, rootPath)}
+          onCreate={() => setPageForm({ mode: "create", path: "wiki/" })}
+          onRename={(path) => setPageForm({ mode: "rename", path })}
+          onDelete={handleDeleteRequest}
         />
       ) : (
         <div className="flex w-[260px] flex-col items-center justify-center border-r border-[var(--border)] bg-[var(--surface)] text-[12px] text-[var(--text-muted)]">
@@ -174,6 +254,22 @@ export function WikiView() {
           )}
         </div>
       </div>
+      {pageForm ? (
+        <WikiPageFormDialog
+          mode={pageForm.mode}
+          initialPath={pageForm.path}
+          onCancel={() => setPageForm(null)}
+          onSubmit={handlePageFormSubmit}
+        />
+      ) : null}
+      {pendingLifecycle ? (
+        <ConfirmationDialog
+          action={pendingLifecycle.action}
+          checkpointExists={pendingLifecycle.action.checkpointHash != null}
+          onCancel={handleLifecycleCancel}
+          onConfirm={handleLifecycleConfirm}
+        />
+      ) : null}
     </div>
   );
 }
