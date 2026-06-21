@@ -250,6 +250,46 @@ select:focus-visible {
   color: var(--text-secondary);
 }
 
+.editor__toolbar {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+  margin-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--sp-2) 0 var(--sp-3);
+}
+
+.editor__toolbar button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+
+.editor__toolbar button:hover:not(:disabled) {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.editor__toolbar button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.editor__toolbar button:disabled {
+  cursor: not-allowed;
+  color: var(--text-disabled);
+}
+
+.editor__toolbar .sep {
+  width: 1px;
+  height: 18px;
+  margin: 5px 4px;
+  background: var(--border);
+}
+
 /* ---------- Wiki reading surface (ported from app.css .prose) ---------- */
 .wiki-prose {
   max-width: 760px;
