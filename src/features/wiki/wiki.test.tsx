@@ -351,6 +351,32 @@ describe("MarkdownReader", () => {
 });
 
 describe("WikiEditor (Milkdown)", () => {
+  it("renders the complete Milkdown formatting toolbar", () => {
+    render(
+      <WikiEditor
+        draft="Select me"
+        saveState="idle"
+        onDraftChange={vi.fn()}
+        onSave={vi.fn()}
+        onCancel={vi.fn()}
+        onReload={vi.fn()}
+      />,
+    );
+
+    for (const name of [
+      "Bold",
+      "Italic",
+      "Heading",
+      "Link",
+      "Inline code",
+      "Blockquote",
+      "Undo",
+      "Redo",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+  });
+
   it("mounts the WYSIWYG surface and renders the save toolbar", async () => {
     const onDraftChange = vi.fn();
     const onSave = vi.fn();

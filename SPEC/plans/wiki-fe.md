@@ -1,12 +1,12 @@
 # Wiki 前端壳 P0 + P1 修复账本
 
-> 执行日期：2026-06-21  
-> 唯一范围：Wiki 前端壳 P0 + P1。实现文件仅限 `src/` 与 `src/styles.css`；账本、roadmap 与 progress 仅用于过程记录。  
+> 执行日期：2026-06-21
+> 唯一范围：Wiki 前端壳 P0 + P1。实现文件仅限 `src/` 与 `src/styles.css`；账本、roadmap 与 progress 仅用于过程记录。
 > 对照优先级：`SPEC/PRD.md` → `UI-Frontend-design/wiki.html` + `assets/app.css` → `SPEC/roadmap/wiki.md`。
 
 ## 状态摘要
 
-- P0：3 项 pending，1 项 verified，0 项 blocked
+- P0：2 项 pending，2 项 verified，0 项 blocked
 - P1：2 项 pending，0 项 verified，0 项 blocked
 - blocked：无
 
@@ -23,12 +23,12 @@
 
 ### WIKI-FE-02 — P0 Milkdown 格式工具条
 
-- status: pending
+- status: verified
 - 意图：增加 28px 工具条：加粗、斜体、标题、链接、代码、引用、撤销、重做。
 - 决策：通过 Milkdown editor action/command 接口执行，不绕过 Milkdown 直接改 DOM；按钮提供 tooltip、aria-label 与正确禁用态。
 - 验收：各按钮可触发对应 Milkdown command；editor 未就绪或命令不可用时禁用；保存/取消状态保持现状。
 - 预计文件：`src/features/wiki/WikiEditor.tsx`、`src/features/wiki/wiki.test.tsx`、`src/styles.css`、`src/i18n/locales/*.json`
-- 完成位置：待记录
+- 完成位置：`src/features/wiki/WikiEditor.tsx:37-184,263-279`；`src/styles.css:253-291`；`src/features/wiki/wiki.test.tsx:354-378`；`src/i18n/locales/en.json:355-363`；`src/i18n/locales/zh-CN.json:373-381`
 
 ### WIKI-FE-03 — P0 页面新建、重命名、删除入口
 

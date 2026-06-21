@@ -1,10 +1,29 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { LoaderCircle, Save } from "lucide-react";
-import { Editor, rootCtx, defaultValueCtx } from "@milkdown/kit/core";
-import { commonmark } from "@milkdown/kit/preset/commonmark";
+import {
+  Bold,
+  Code2,
+  Heading2,
+  Italic,
+  Link2,
+  LoaderCircle,
+  Quote,
+  Redo2,
+  Save,
+  Undo2,
+} from "lucide-react";
+import { commandsCtx, defaultValueCtx, Editor, rootCtx } from "@milkdown/kit/core";
+import {
+  commonmark,
+  toggleEmphasisCommand,
+  toggleInlineCodeCommand,
+  toggleLinkCommand,
+  toggleStrongCommand,
+  wrapInBlockquoteCommand,
+  wrapInHeadingCommand,
+} from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
-import { history } from "@milkdown/kit/plugin/history";
+import { history, redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
 import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import { nord } from "@milkdown/theme-nord";
@@ -45,7 +64,7 @@ function MilkdownEditor({
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
-  useEditor(
+  const { loading, get } = useEditor(
     (root) =>
       Editor.make()
         .config((ctx) => {
@@ -65,7 +84,100 @@ function MilkdownEditor({
     [initialMarkdown],
   );
 
-  return null;
+  const call = (
+    command:
+      | typeof toggleStrongCommand
+      | typeof toggleEmphasisCommand
+      | typeof wrapInHeadingCommand
+      | typeof toggleLinkCommand
+      | typeof toggleInlineCodeCommand
+      | typeof wrapInBlockquoteCommand
+      | typeof undoCommand
+      | typeof redoCommand,
+    payload?: unknown,
+  ) => {
+    const editor = get();
+    if (!editor) return;
+    editor.action((ctx) => {
+      const commands = ctx.get(commandsCtx);
+      commands.call(command.key, payload as never);
+    });
+  };
+
+  const requestLink = () => {
+    const href = window.prompt("https://");
+    if (href?.trim()) call(toggleLinkCommand, { href: href.trim() });
+  };
+
+  return (
+    <>
+      <EditorToolbar
+        disabled={loading}
+        onBold={() => call(toggleStrongCommand)}
+        onItalic={() => call(toggleEmphasisCommand)}
+        onHeading={() => call(wrapInHeadingCommand, 2)}
+        onLink={requestLink}
+        onCode={() => call(toggleInlineCodeCommand)}
+        onQuote={() => call(wrapInBlockquoteCommand)}
+        onUndo={() => call(undoCommand)}
+        onRedo={() => call(redoCommand)}
+      />
+      <Milkdown />
+    </>
+  );
+}
+
+interface EditorToolbarProps {
+  disabled: boolean;
+  onBold: () => void;
+  onItalic: () => void;
+  onHeading: () => void;
+  onLink: () => void;
+  onCode: () => void;
+  onQuote: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+}
+
+function EditorToolbar(props: EditorToolbarProps) {
+  const { t } = useTranslation();
+  const actions = [
+    ["bold", Bold, props.onBold],
+    ["italic", Italic, props.onItalic],
+    ["heading", Heading2, props.onHeading],
+    ["separator"],
+    ["link", Link2, props.onLink],
+    ["code", Code2, props.onCode],
+    ["quote", Quote, props.onQuote],
+    ["separator"],
+    ["undo", Undo2, props.onUndo],
+    ["redo", Redo2, props.onRedo],
+  ] as const;
+
+  return (
+    <div className="editor__toolbar" role="toolbar" aria-label={t("wiki.editor.toolbar.label")}>
+      {actions.map((action, index) => {
+        if (action[0] === "separator") {
+          return <span className="sep" role="separator" key={`separator-${index}`} />;
+        }
+        const [name, Icon, onClick] = action;
+        const label = t(`wiki.editor.toolbar.${name}`);
+        return (
+          <button
+            type="button"
+            key={name}
+            aria-label={label}
+            title={label}
+            disabled={props.disabled}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onClick}
+          >
+            <Icon size={14} strokeWidth={1.7} />
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export function WikiEditor({
@@ -146,7 +258,7 @@ export function WikiEditor({
         </div>
       ) : null}
       <div
-        className="wiki-editor min-h-0 flex-1 overflow-y-auto p-2 text-[13px] leading-[1.7] text-[var(--text-primary)]"
+        className="wiki-editor min-h-0 flex-1 overflow-y-auto px-2 pb-2 text-[13px] leading-[1.7] text-[var(--text-primary)]"
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
             event.preventDefault();
@@ -156,7 +268,6 @@ export function WikiEditor({
       >
         <MilkdownProvider>
           <MilkdownEditor initialMarkdown={seed} onChange={onDraftChange} />
-          <Milkdown />
         </MilkdownProvider>
       </div>
     </div>

@@ -3,6 +3,8 @@
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
+[2026-06-21] 现象 — Wiki 前端局部 test/lint 全绿，但 `npm run build` 仍在 `LeftSidebar.tsx` / `RightContextPanel.tsx` 报 `LintReport.summary`、`ProviderStatus.configured/kind/label`、`TaskProgress` 类型错误。 — 根因 — 当前分支已有跨板块 DTO 与消费端不同步，错误不来自 wiki P0/P1 改动。 — 规避做法 — wiki loop 保留完整构建错误证据且不越界修改其它板块；由对应 cross-cutting 前端任务统一修复后再把 build 纳入绿色基线。
+
 [2026-06-21] 现象 — `cargo test --lib --no-default-features` 显示 0 tests 或无法覆盖新增 Tauri command，容易把未编译的命令误报为已验证。 — 根因 — `commands` 模块整体受 `#[cfg(feature = "gui")]` 保护，无 GUI 的强制清单只编译 service/model/utils。 — 规避做法 — 可测试逻辑下沉到无 GUI service/utils 并由 lib tests 覆盖；每次新增 command 额外运行默认 feature 的 `cargo check --offline` 验证 IPC 层可编译。
 
 ----------------------------------------------------------------------
