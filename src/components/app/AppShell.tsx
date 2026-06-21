@@ -13,6 +13,7 @@ import { WikiView } from "../../features/wiki/WikiView";
 import { useChatStore } from "../../stores/chatStore";
 import { useExportStore } from "../../stores/exportStore";
 import { useGraphStore } from "../../stores/graphStore";
+import { useImportStore } from "../../stores/importStore";
 import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -185,16 +186,24 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const setPendingAction = useProjectStore((state) => state.setPendingAction);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const pushToast = useToastStore((state) => state.pushToast);
-  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
-  const [isConfirmingImport, setIsConfirmingImport] = useState(false);
+  const setImportPreview = useImportStore((state) => state.setPreview);
+  const setIsConfirmingImport = useImportStore((state) => state.setIsConfirming);
+  const isConfirmingImport = useImportStore((state) => state.isConfirming);
+  const setImportedSources = useImportStore((state) => state.setImportedSources);
+  const importedSources = useImportStore((state) => state.importedSources);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
-  const [importedSources, setImportedSources] = useState<ImportedSource[]>([]);
   const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const tasks = useTaskStore((state) => state.tasks);
 
   const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+  useEffect(() => {
+    // Clear stale import staging state when the active project changes so a
+    // previously-selected file / preview from another project does not leak.
+    useImportStore.getState().reset();
+  }, [currentProject.projectId]);
 
   useEffect(() => {
     if (!hasTauri || activeView !== "import" || !currentProject.projectId) return;
@@ -371,27 +380,34 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     [currentProject.projectId, currentProject.rootPath, pushToast, setPendingAction, t],
   );
 
-  const confirmImportPreview = useCallback(() => {
-    if (!importPreview) return;
-    setIsConfirmingImport(true);
-    void invoke<ConfirmedImport>("confirm_import_preview", {
-      request: {
-        projectId: currentProject.projectId,
-        projectRootPath: currentProject.rootPath,
-        preview: importPreview,
-      },
-    })
-      .then(async () => {
-        setImportPreview(null);
-        await startCompile();
+  const confirmImportPreview = useCallback(
+    (opts: { createCheckpoint: boolean; compileAfterImport: boolean }) => {
+      const preview = useImportStore.getState().preview;
+      if (!preview) return;
+      setIsConfirmingImport(true);
+      void invoke<ConfirmedImport>("confirm_import_preview", {
+        request: {
+          projectId: currentProject.projectId,
+          projectRootPath: currentProject.rootPath,
+          preview,
+          createCheckpoint: opts.createCheckpoint,
+        },
       })
-      .catch((error) => {
-        pushToast("error", t("import.confirmError", { message: errorMessage(error) }));
-      })
-      .finally(() => {
-        setIsConfirmingImport(false);
-      });
-  }, [currentProject.projectId, currentProject.rootPath, importPreview, pushToast, startCompile, t]);
+        .then(async () => {
+          setImportPreview(null);
+          if (opts.compileAfterImport) {
+            await startCompile();
+          }
+        })
+        .catch((error) => {
+          pushToast("error", t("import.confirmError", { message: errorMessage(error) }));
+        })
+        .finally(() => {
+          setIsConfirmingImport(false);
+        });
+    },
+    [currentProject.projectId, currentProject.rootPath, pushToast, setIsConfirmingImport, setImportPreview, startCompile, t],
+  );
 
   const saveProvider = useCallback(async (config: LlmProviderConfig) => {
     if (!hasTauri) return;
@@ -578,7 +594,6 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           <ExportsView />
         ) : activeView === "import" ? (
           <ImportView
-            preview={importPreview}
             isConfirming={isConfirmingImport}
             onRequestPreview={requestImportPreview}
             onRequestClipboard={(content) => { void requestTextImportPreview("clipboard", content); }}

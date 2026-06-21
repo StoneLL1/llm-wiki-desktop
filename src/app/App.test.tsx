@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../i18n";
 import { useWikiStore } from "../features/wiki/wikiStore";
@@ -301,11 +301,11 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
-    const sourcePathInput = screen.getByRole("textbox", { name: "File or folder path" });
+    const sourcePathInput = screen.getByRole("textbox", { name: "Local file or folder paths" });
     fireEvent.change(sourcePathInput, {
       target: { value: "D:/tmp/sources/notes.md" },
     });
-    fireEvent.submit(sourcePathInput.closest("form")!);
+    fireEvent.click(screen.getByRole("button", { name: "Add to preview" }));
 
     await vi.waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("preview_import", {
@@ -328,10 +328,10 @@ describe("App", () => {
     });
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
-    fireEvent.click(screen.getByRole("tab", { name: "Clipboard" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clipboard" }));
     const input = screen.getByRole("textbox", { name: "Clipboard Markdown" });
     fireEvent.change(input, { target: { value: "# Pasted notes\n\nUseful text." } });
-    fireEvent.submit(input.closest("form")!);
+    fireEvent.click(within(input.closest(".import-paths")!).getByRole("button", { name: "Add to preview" }));
 
     await vi.waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("preview_text_import", {
@@ -363,10 +363,10 @@ describe("App", () => {
     });
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
-    fireEvent.click(screen.getByRole("tab", { name: "URL" }));
-    const input = screen.getByRole("textbox", { name: "Article URL" });
+    fireEvent.click(screen.getByRole("button", { name: "URL / link" }));
+    const input = await screen.findByRole("textbox", { name: "Link" });
     fireEvent.change(input, { target: { value: "https://example.com/article" } });
-    fireEvent.submit(input.closest("form")!);
+    fireEvent.click(screen.getByRole("button", { name: "Fetch & preview" }));
 
     await vi.waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("fetch_import_url", {
@@ -390,16 +390,35 @@ describe("App", () => {
     invokeMock.mockRejectedValueOnce({ message: "source missing" });
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
-    const sourcePathInput = screen.getByRole("textbox", { name: "File or folder path" });
+    const sourcePathInput = screen.getByRole("textbox", { name: "Local file or folder paths" });
     fireEvent.change(sourcePathInput, { target: { value: "D:/missing" } });
-    fireEvent.submit(sourcePathInput.closest("form")!);
+    fireEvent.click(screen.getByRole("button", { name: "Add to preview" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent("Could not preview sources");
   });
 
   it("confirms the current import preview and clears it after success", async () => {
     const preview = {
-      files: [],
+      files: [
+        {
+          originalName: "notes.md",
+          sourcePath: "D:/tmp/sources/notes.md",
+          archivedPath: "raw/sources/markdown/notes.md",
+          fileType: "markdown",
+          sizeBytes: 48,
+          hash: "abc",
+          extractionStatus: "extracted",
+          extractionError: null,
+          textPreview: null,
+          pageCount: null,
+          wordCount: 6820,
+          metadata: null,
+          extractedTextPath: null,
+          extractedAssets: [],
+          conflict: null,
+          renamedFrom: null,
+        },
+      ],
       conflicts: [],
       summary: {
         totalFiles: 1,
@@ -424,12 +443,12 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
-    const sourcePathInput = screen.getByRole("textbox", { name: "File or folder path" });
-    fireEvent.change(sourcePathInput, {
-      target: { value: "D:/tmp/sources/notes.md" },
-    });
-    fireEvent.submit(sourcePathInput.closest("form")!);
-    const confirmButton = await screen.findByRole("button", { name: "Confirm & Compile" });
+    const sourcePathInput = screen.getByRole("textbox", { name: "Local file or folder paths" });
+    fireEvent.change(sourcePathInput, { target: { value: "D:/tmp/sources/notes.md" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to preview" }));
+    const confirmButton = await screen.findByRole("button", { name: "Confirm import & compile" });
+    // Skip the compile step so the last backend call stays the confirm itself.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Trigger Wiki compile after import" }));
     fireEvent.click(confirmButton);
 
     await vi.waitFor(() => {
@@ -438,9 +457,10 @@ describe("App", () => {
           projectId: "sample",
           projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
           preview,
+          createCheckpoint: true,
         },
       });
-      expect(screen.queryByRole("button", { name: "Confirm & Compile" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Confirm import & compile" })).not.toBeInTheDocument();
     });
   });
 
