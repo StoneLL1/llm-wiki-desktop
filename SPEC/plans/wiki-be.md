@@ -46,11 +46,14 @@ W1/W2/W4 同属"新建/重命名/删除页面生命周期"，实现上高度耦�
     - `commands/file_commands.rs:210-222, 280-308`：confirm_pending_action `DeleteWikiPage` 分支 → `execute_wiki_page_delete` 薄包装调 service（Windows GUI 模块不能跑单测，逻辑下沉 service）。
     - `lib.rs:161-163`：invoke_handler 注册 3 命令。
   - 验收：275 backend tests green（含 21 search_service + 20 markdown_utils 新测）；npm test 72/72 green；npm lint clean；无 console.log/println!/dbg!。create CreateNew 拒已存在；rename 移动+全仓引用重写（含 alias/anchor/CJK/嵌套括号）+前置 checkpoint；delete PendingAction(referenced_by 预览)→confirm 后 pre-delete+post-delete 双 checkpoint+删除；全部经 ProjectContext 路径安全；CJK（`wiki/概念/智能体.md`）路径通。
-- [ ] **W3 FILE_HASH_MISMATCH 返回 baseline 文本**（roadmap §2 PRD-WIKI-004）— status: pending
+- [x] **W3 FILE_HASH_MISMATCH 返回 baseline 文本**（roadmap §2 PRD-WIKI-004）— status: verified
   - 涉及：`src-tauri/src/services/file_store.rs`（`verify_write_mode` mismatch 分支读磁盘内容塞 details.baselineContent）
-  - 验收：wiki save_page 与 compile 冲突路径的 FILE_HASH_MISMATCH error.details 含 `baselineContent`（磁盘当前文本）；前端可据此做三路 diff。补 file_store mismatch 测试断言 baselineContent 存在且等于磁盘内容。
+  - 改动：`file_store.rs:203-227` OverwriteIfHashMatches mismatch 分支：在 hash 不匹配时 `fs::read(path)` 读磁盘内容，`String::from_utf8_lossy` 转字符串，塞入 `details["baselineContent"]`（binary/非 UTF-8 文件读失败则省略 baseline，mismatch 错误仍正常返回）。
+  - 覆盖面确认：`OverwriteIfHashMatches` 全部 6 处调用（compile_service.rs:300,378 编译合并；chat_service.rs:397 聊天覆盖；lint_service.rs:502,560,597 lint 修复；search_service.rs:98 wiki 保存）都经 `verify_write_mode`，改一处全受益——wiki save_page（PRD-READ-004 外部编辑）+ compile 合并冲突（PRD-WIKI-004）两条路径均覆盖。
+  - 验收：新增 `file_hash_mismatch_surfaces_disk_baseline_for_three_way_diff` 测试，断言 `details["baselineContent"]` 等于磁盘文本 + `currentHash` 仍在。276 backend tests + 72 npm tests + lint 全绿。
 
 ## 进度日志
 
+- 2026-06-21 W3 verified：`file_store::verify_write_mode` OverwriteIfHashMatches mismatch 分支新增 `baselineContent`（`fs::read` + `from_utf8_lossy`，binary/非 UTF-8 省略）。改一处，6 个调用点（compile×2 / chat / lint×3 / wiki save）全受益。新增 `file_hash_mismatch_surfaces_disk_baseline_for_three_way_diff` 测试。276 backend + 72 npm + lint 全绿。
 - 2026-06-21 建账本；读 roadmap wiki.md + PRD + wiki_commands/search_service/file_store/git_service/markdown_utils/confirmation/chat_service/import_commands/file_commands/compile_commands/lib.rs/errors/paths/path_utils/i18n，确认 4 项范围与实现路径。
 - 2026-06-21 W1+W2+W4 verified：create/rename/delete_wiki_page 三命令 + `rewrite_wikilinks` + `apply_page_delete`（pre-delete HighRiskOperation + post-delete FinalResult 双 checkpoint，镜像 import_service）+ `find_pages_referencing` + 路径安全/CJK 测试。275 backend tests + 72 npm tests + lint 全绿。关键修正：apply_page_delete 原"checkpoint-before-remove"对已跟踪干净文件 created=false（无变更可提交）；改为镜像 import_service 的两段契约——pre-delete checkpoint（安全网，HEAD 保护 before 态）→ remove → post-delete FinalResult checkpoint（捕获删除为真实变更）。Windows GUI 命令模块 #[cfg(feature="gui")] 跑单测会 STATUS_ENTRYPOINT_NOT_FOUND 崩溃，delete 逻辑下沉到 lib-available 的 SearchService::apply_page_delete，命令层 execute_wiki_page_delete 仅薄包装。
