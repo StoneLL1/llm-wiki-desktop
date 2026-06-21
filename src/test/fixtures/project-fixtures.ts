@@ -177,6 +177,8 @@ export function fixtureImportPreview(): ImportPreview {
     pageCount: f.metadata?.pageCount ?? null,
     wordCount: f.metadata?.wordCount ?? null,
     metadata: f.metadata,
+    extractedTextPath: f.status === "extracted" ? `raw/extracted/${f.originalName}.txt` : null,
+    extractedAssets: [],
     conflict: null,
     renamedFrom: null,
   }));

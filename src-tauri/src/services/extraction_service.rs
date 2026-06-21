@@ -36,7 +36,10 @@ impl ExtractionService {
         }
 
         match &file_type {
-            SourceFileType::Markdown | SourceFileType::Text | SourceFileType::Csv => {
+            SourceFileType::Markdown
+            | SourceFileType::Text
+            | SourceFileType::Csv
+            | SourceFileType::Url => {
                 // Direct text extraction
                 let content = fs::read_to_string(source_path).map_err(|err| {
                     BackendError::new("EXTRACT_READ_FAILED", err.to_string(), true, false)

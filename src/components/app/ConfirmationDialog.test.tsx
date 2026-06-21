@@ -3,6 +3,23 @@ import { describe, expect, it, vi } from "vitest";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
 
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key: string, values?: Record<string, string>) => {
+      const labels: Record<string, string> = {
+        "confirmation.risk": `Risk: ${values?.risk ?? ""}`,
+        "confirmation.checkpoint.available": "Checkpoint: available",
+        "confirmation.checkpoint.missing": "Checkpoint: not created yet",
+        "confirmation.preview": "Preview",
+        "confirmation.affectedPaths": "Affected paths",
+        "confirmation.cancel": "Cancel",
+        "confirmation.confirm.overwrite_file": "Confirm overwrite",
+      };
+      return labels[key] ?? key;
+    },
+  }),
+}));
+
 const pendingAction: PendingAction = {
   id: "action-1",
   actionType: "overwrite_file",

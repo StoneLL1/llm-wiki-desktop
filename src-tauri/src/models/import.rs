@@ -31,6 +31,10 @@ pub struct ImportFileEntry {
     pub page_count: Option<u32>,
     pub word_count: Option<u32>,
     pub metadata: Option<SourceMetadata>,
+    #[serde(default)]
+    pub extracted_text_path: Option<String>,
+    #[serde(default)]
+    pub extracted_assets: Vec<String>,
     pub conflict: Option<ImportConflict>,
     pub renamed_from: Option<String>,
 }
@@ -131,4 +135,19 @@ pub struct ExtractResult {
 pub struct ConfirmedImport {
     pub preview: ImportPreview,
     pub confirmed_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceArtifactIndex {
+    #[serde(default)]
+    pub sources: std::collections::HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedSource {
+    pub path: String,
+    pub size_bytes: u64,
+    pub file_type: SourceFileType,
 }

@@ -62,6 +62,8 @@ export interface ImportFileEntry {
   pageCount: number | null;
   wordCount: number | null;
   metadata: SourceMetadata | null;
+  extractedTextPath: string | null;
+  extractedAssets: string[];
   conflict: ImportConflict | null;
   renamedFrom: string | null;
 }
@@ -119,6 +121,27 @@ export interface ExtractTextRequest {
 
 export interface ValidateUrlRequest {
   url: string;
+}
+
+export interface PreviewTextImportRequest {
+  projectId: string;
+  projectRootPath: string;
+  kind: "clipboard" | "url";
+  sourceName: string;
+  content: string;
+  title: string | null;
+  author: string | null;
+}
+
+export interface FetchedImportUrl {
+  url: string;
+  html: string;
+}
+
+export interface ImportedSource {
+  path: string;
+  sizeBytes: number;
+  fileType: SourceFileType;
 }
 
 export const FILE_TYPE_LABELS: Record<SourceFileType, string> = {

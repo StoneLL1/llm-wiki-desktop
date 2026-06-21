@@ -1,6 +1,7 @@
 import Graph from "graphology";
 import louvain from "graphology-communities-louvain";
 import forceAtlas2 from "graphology-layout-forceatlas2";
+import FA2LayoutSupervisor from "graphology-layout-forceatlas2/worker";
 import Sigma from "sigma";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -38,6 +39,9 @@ interface NodeShape {
 interface RenderRefs {
   graph: Graph | null;
   renderer: Sigma | null;
+  layout: FA2LayoutSupervisor | null;
+  layoutTimer: ReturnType<typeof setTimeout> | null;
+  refreshTimer: ReturnType<typeof setInterval> | null;
 }
 
 /**
@@ -66,7 +70,7 @@ export function GraphView() {
   const openWikiPage = useWikiStore((state) => state.openPage);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const refs = useRef<RenderRefs>({ graph: null, renderer: null });
+  const refs = useRef<RenderRefs>({ graph: null, renderer: null, layout: null, layoutTimer: null, refreshTimer: null });
   const stateRef = useRef({ hovered: null as string | null, selected: selectedNodeId, search });
   const [canvasAvailable, setCanvasAvailable] = useState(true);
 
@@ -116,7 +120,10 @@ export function GraphView() {
     refresh(renderer);
 
     if (computed) {
-      void persistLayout(graph, data, projectId, rootPath, saveLayout);
+      startBackgroundLayout(refs.current, graph, () => {
+        refresh(renderer);
+        void persistLayout(graph, data, projectId, rootPath, saveLayout);
+      });
     }
 
     const onClick = ({ node }: { node: string }) => setSelectedNode(node);
@@ -163,9 +170,10 @@ export function GraphView() {
     const graph = refs.current.graph;
     if (!graph) return;
     seedRandomPositions(graph);
-    forceAtlas2.assign(graph, { iterations: FA2_ITERATIONS });
-    refresh(refs.current.renderer);
-    void persistLayout(graph, data, projectId, rootPath, saveLayout);
+    startBackgroundLayout(refs.current, graph, () => {
+      refresh(refs.current.renderer);
+      void persistLayout(graph, data, projectId, rootPath, saveLayout);
+    });
   };
   const handleRebuild = () => {
     if (projectId && rootPath) void rebuild(projectId, rootPath);
@@ -257,7 +265,6 @@ function buildGraph(data: GraphData): { graph: Graph; computed: boolean } {
     } catch {
       graph.forEachNode((id) => graph.setNodeAttribute(id, "community", 0));
     }
-    forceAtlas2.assign(graph, { iterations: FA2_ITERATIONS });
     computed = true;
   }
   return { graph, computed };
@@ -348,9 +355,46 @@ function refresh(renderer: Sigma | null): void {
 }
 
 function disposeRenderer(refs: RenderRefs): void {
+  refs.layout?.kill();
+  refs.layout = null;
+  if (refs.layoutTimer) clearTimeout(refs.layoutTimer);
+  if (refs.refreshTimer) clearInterval(refs.refreshTimer);
+  refs.layoutTimer = null;
+  refs.refreshTimer = null;
   refs.renderer?.kill();
   refs.renderer = null;
   refs.graph = null;
+}
+
+function startBackgroundLayout(
+  refs: RenderRefs,
+  graph: Graph,
+  onComplete: () => void,
+): void {
+  refs.layout?.kill();
+  if (refs.layoutTimer) clearTimeout(refs.layoutTimer);
+  if (refs.refreshTimer) clearInterval(refs.refreshTimer);
+
+  if (typeof Worker === "undefined") {
+    forceAtlas2.assign(graph, { iterations: FA2_ITERATIONS });
+    onComplete();
+    return;
+  }
+  const layout = new FA2LayoutSupervisor(graph, {
+    settings: forceAtlas2.inferSettings(graph),
+  });
+  refs.layout = layout;
+  layout.start();
+  refs.refreshTimer = setInterval(() => refresh(refs.renderer), 50);
+  refs.layoutTimer = setTimeout(() => {
+    layout.stop();
+    layout.kill();
+    refs.layout = null;
+    if (refs.refreshTimer) clearInterval(refs.refreshTimer);
+    refs.refreshTimer = null;
+    refs.layoutTimer = null;
+    onComplete();
+  }, 1000);
 }
 
 async function persistLayout(

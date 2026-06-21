@@ -68,6 +68,7 @@ beforeEach(() => {
       agentRoute: "agent",
     }),
   );
+  useProjectStore.getState().setPendingAction(undefined);
   useTaskStore.getState().setTasks([
     mockTask({ id: "task-graph-refresh", title: "Refreshing graph cache", status: "running" }),
   ]);
@@ -290,7 +291,13 @@ describe("App", () => {
         conflictsCount: 0,
       },
     };
-    invokeMock.mockResolvedValueOnce(preview);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "preview_import") {
+        return Promise.resolve(mockTask({ id: "import-preview", projectId: "sample", status: "succeeded" }));
+      }
+      if (command === "get_import_preview") return Promise.resolve(preview);
+      return Promise.resolve(null);
+    });
 
     render(<App />);
 
@@ -310,6 +317,72 @@ describe("App", () => {
           allowDuplicates: false,
           linkDuplicates: false,
         },
+      });
+    });
+  });
+
+  it("stages pasted Markdown through the backend import preview", async () => {
+    invokeMock.mockResolvedValueOnce({
+      files: [],
+      conflicts: [],
+      summary: { totalFiles: 1, archivedFiles: 1, duplicateFiles: 0, renamedFiles: 0, failedFiles: 0, conflictsCount: 0 },
+    });
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
+    fireEvent.click(screen.getByRole("tab", { name: "Clipboard" }));
+    const input = screen.getByRole("textbox", { name: "Clipboard Markdown" });
+    fireEvent.change(input, { target: { value: "# Pasted notes\n\nUseful text." } });
+    fireEvent.submit(input.closest("form")!);
+
+    await vi.waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("preview_text_import", {
+        request: {
+          projectId: "sample",
+          projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+          kind: "clipboard",
+          sourceName: "clipboard-import",
+          content: "# Pasted notes\n\nUseful text.",
+          title: null,
+          author: null,
+        },
+      }),
+    );
+  });
+
+  it("fetches URL content in the backend then stages Readability Markdown", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "fetch_import_url") {
+        return Promise.resolve({
+          url: "https://example.com/article",
+          html: "<!doctype html><html><head><title>URL note</title></head><body><article><h1>URL note</h1><p>Useful article body with enough words for extraction.</p></article></body></html>",
+        });
+      }
+      if (command === "preview_text_import") {
+        return Promise.resolve({ files: [], conflicts: [], summary: { totalFiles: 1, archivedFiles: 1, duplicateFiles: 0, renamedFiles: 0, failedFiles: 0, conflictsCount: 0 } });
+      }
+      return Promise.resolve(null);
+    });
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
+    fireEvent.click(screen.getByRole("tab", { name: "URL" }));
+    const input = screen.getByRole("textbox", { name: "Article URL" });
+    fireEvent.change(input, { target: { value: "https://example.com/article" } });
+    fireEvent.submit(input.closest("form")!);
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("fetch_import_url", {
+        request: {
+          projectId: "sample",
+          projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+          url: "https://example.com/article",
+        },
+      });
+      expect(invokeMock).toHaveBeenCalledWith("preview_text_import", {
+        request: expect.objectContaining({
+          kind: "url",
+          title: "URL note",
+          content: expect.stringContaining("source_url: \"https://example.com/article\""),
+        }),
       });
     });
   });
@@ -338,12 +411,16 @@ describe("App", () => {
         conflictsCount: 0,
       },
     };
-    invokeMock
-      .mockResolvedValueOnce(preview)
-      .mockResolvedValueOnce({
-        preview,
-        confirmedAt: new Date().toISOString(),
-      });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "preview_import") {
+        return Promise.resolve(mockTask({ id: "import-preview", projectId: "sample", status: "succeeded" }));
+      }
+      if (command === "get_import_preview") return Promise.resolve(preview);
+      if (command === "confirm_import_preview") {
+        return Promise.resolve({ preview, confirmedAt: new Date().toISOString() });
+      }
+      return Promise.resolve(null);
+    });
 
     render(<App />);
 
@@ -366,5 +443,72 @@ describe("App", () => {
       });
       expect(screen.queryByRole("button", { name: "Confirm & Compile" })).not.toBeInTheDocument();
     });
+  });
+
+  it("loads indexed sources and requests backend confirmation before deleting one", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+    const pendingAction = {
+      id: "delete-source-1",
+      actionType: "delete_source" as const,
+      title: "Delete original source",
+      message: "Checkpoint first.",
+      riskLevel: "destructive" as const,
+      affectedPaths: ["raw/sources/markdown/notes.md"],
+      preview: null,
+      expiresAt: null,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_imported_sources") {
+        return Promise.resolve([
+          {
+            path: "raw/sources/markdown/notes.md",
+            sizeBytes: 42,
+            fileType: "markdown",
+          },
+        ]);
+      }
+      if (command === "request_delete_source") return Promise.resolve(pendingAction);
+      if (command === "confirm_pending_action") {
+        return Promise.resolve({
+          action: pendingAction,
+          status: "confirmed",
+          checkpointExists: true,
+          projectSummary: null,
+        });
+      }
+      if (command === "start_wiki_compile") {
+        return Promise.resolve(mockTask({ id: "source-follow-up-compile", projectId: "sample" }));
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
+    fireEvent.click(await screen.findByText("Manage imported sources (1)"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("request_delete_source", {
+        request: {
+          projectId: "sample",
+          projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+          targetPath: "raw/sources/markdown/notes.md",
+        },
+      });
+      expect(screen.getByRole("dialog", { name: "Delete original source" })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm source deletion" }));
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("start_wiki_compile", {
+        request: {
+          projectId: "sample",
+          projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
+          route: "auto",
+          agent: null,
+          provider: null,
+        },
+      });
+    });
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   });
 });

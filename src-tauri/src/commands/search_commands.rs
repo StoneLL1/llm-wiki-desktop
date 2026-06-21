@@ -8,9 +8,8 @@ use crate::models::search::{SearchRequest, SearchResponse};
 ///
 /// This is the backend for the shell-level global search (top-bar searchbar,
 /// ⌘K). The wiki view's tree filter is a separate, client-side filter over the
-/// already-scanned page list and does not call this command. UI wiring for the
-/// global search is deferred to the dedicated search task; the command is
-/// exposed now so the backend contract is stable.
+/// already-scanned page list and does not call this command. The top bar calls
+/// this command directly and opens the selected result in the wiki view.
 #[tauri::command]
 pub fn search_wiki(
     state: State<'_, AppState>,

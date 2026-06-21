@@ -6,7 +6,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { recoverTasksForProject, useTaskStore } from "./taskStore";
+import { fetchTasks, recoverTasksForProject, useTaskStore } from "./taskStore";
 
 function task(id: string, projectId: string): BackendTask {
   return {
@@ -43,5 +43,15 @@ describe("recoverTasksForProject", () => {
       request: { projectId: "project-b", rootPath: "D:/project-b" },
     });
     expect(useTaskStore.getState().tasks).toEqual(tasks);
+  });
+
+  it("propagates task list and recovery failures so the UI can report them", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("task registry unavailable"));
+    await expect(fetchTasks()).rejects.toThrow("task registry unavailable");
+
+    invokeMock.mockRejectedValueOnce(new Error("recovery failed"));
+    await expect(recoverTasksForProject("project-b", "D:/project-b")).rejects.toThrow(
+      "recovery failed",
+    );
   });
 });

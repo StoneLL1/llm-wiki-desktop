@@ -106,6 +106,23 @@ pub enum ConfirmationExecution {
         target_path: String,
         current_hash: String,
     },
+    DeleteSource {
+        project_id: String,
+        root_path: String,
+        target_path: String,
+        target_hash: String,
+        artifacts: Vec<String>,
+    },
+    ReplaceSource {
+        project_id: String,
+        root_path: String,
+        target_path: String,
+        target_hash: String,
+        replacement_path: String,
+        replacement_hash: String,
+        old_artifacts: Vec<String>,
+        new_artifacts: Vec<String>,
+    },
 }
 
 impl ConfirmationRegistry {
@@ -159,6 +176,27 @@ impl ConfirmationRegistry {
             return Ok(stored);
         }
 
+        Ok(stored)
+    }
+
+    pub fn peek(&self, action_id: &str) -> Result<StoredPendingAction, BackendError> {
+        let actions = self.actions.lock().map_err(|_| {
+            BackendError::new(
+                "CONFIRMATION_REGISTRY_LOCKED",
+                "Confirmation registry is unavailable.",
+                true,
+                false,
+            )
+        })?;
+        let stored = actions.get(action_id).cloned().ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_NOT_FOUND",
+                "The pending action was not found or has already been handled.",
+                true,
+                true,
+            )
+        })?;
+        reject_if_expired(&stored.action)?;
         Ok(stored)
     }
 }

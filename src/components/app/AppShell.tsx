@@ -20,12 +20,16 @@ import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import type { AgentInfo } from "../../types/agent";
+import type { PendingAction } from "../../types/backend";
 import type { AgentKind } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
 import type { BackendTask } from "../../types/task";
-import type { ConfirmedImport, ImportPreview } from "../../types/import";
+import type { ConfirmedImport, ImportedSource, ImportPreview } from "../../types/import";
+import type { FetchedImportUrl } from "../../types/import";
+import { articleToMarkdown, extractArticleFromHtml } from "../../lib/readability";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { ConfirmationDialog } from "./ConfirmationDialog";
+import { CompileConflictDialog } from "./CompileConflictDialog";
 import { LeftSidebar } from "./LeftSidebar";
 import { RightContextPanel } from "./RightContextPanel";
 import { TaskLogDrawer } from "./TaskLogDrawer";
@@ -64,17 +68,60 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function isTerminalTask(task: BackendTask): boolean {
+  return task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
+}
+
 export function AppShell() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
   const cancelPendingAction = useProjectStore((state) => state.cancelPendingAction);
+  const currentProject = useProjectStore((state) => state.currentProject);
   const tasks = useTaskStore((state) => state.tasks);
   const upsertTask = useTaskStore((state) => state.upsertTask);
+  const openTaskDrawer = useTaskStore((state) => state.openDrawer);
+  const pushToast = useToastStore((state) => state.pushToast);
   const compilePendingAction = tasks.find((task) => task.status === "waiting_for_confirmation" && task.result?.pendingAction)?.result?.pendingAction;
   const displayedPendingAction = pendingAction ?? compilePendingAction;
   const title = t(`nav.${activeView}`);
+
+  const confirmProjectAction = useCallback(async () => {
+    const action = pendingAction;
+    const confirmed = await confirmPendingAction();
+    if (
+      !confirmed ||
+      !action ||
+      (action.actionType !== "delete_source" && action.actionType !== "replace_source")
+    ) {
+      return;
+    }
+    try {
+      const task = await invoke<BackendTask>("start_wiki_compile", {
+        request: {
+          projectId: currentProject.projectId,
+          projectRootPath: currentProject.rootPath,
+          route: "auto",
+          agent: null,
+          provider: null,
+        },
+      });
+      upsertTask(task);
+      openTaskDrawer(task.id);
+    } catch (error) {
+      pushToast("error", t("import.sourceCompileError", { message: errorMessage(error) }));
+    }
+  }, [
+    confirmPendingAction,
+    currentProject.projectId,
+    currentProject.rootPath,
+    openTaskDrawer,
+    pendingAction,
+    pushToast,
+    t,
+    upsertTask,
+  ]);
 
   return (
     <div className="grid h-full min-w-[1120px] grid-rows-[var(--topbar-h)_1fr_var(--statusbar-h)] bg-[var(--background)] text-[var(--foreground)]">
@@ -90,7 +137,17 @@ export function AppShell() {
 
       <BottomStatusBar />
       <Toaster />
-      {displayedPendingAction ? (
+      {displayedPendingAction?.actionType === "merge_conflict" && compilePendingAction ? (
+        <CompileConflictDialog
+          action={displayedPendingAction}
+          onCancel={() => {
+            void invoke<BackendTask>("confirm_compile_action", {
+              request: { actionId: displayedPendingAction.id, confirmed: false },
+            }).then(upsertTask);
+          }}
+          onResolved={upsertTask}
+        />
+      ) : displayedPendingAction ? (
         <ConfirmationDialog
           action={displayedPendingAction}
           checkpointExists={false}
@@ -103,7 +160,7 @@ export function AppShell() {
           }}
           onConfirm={() => {
             if (pendingAction) {
-              void confirmPendingAction();
+              void confirmProjectAction();
             } else {
               void invoke<BackendTask>("confirm_compile_action", { request: { actionId: displayedPendingAction.id, confirmed: true } }).then(upsertTask);
             }
@@ -125,17 +182,39 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const actions = viewActionKeys[activeView];
   const currentProject = useProjectStore((state) => state.currentProject);
   const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
+  const setPendingAction = useProjectStore((state) => state.setPendingAction);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const pushToast = useToastStore((state) => state.pushToast);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [isConfirmingImport, setIsConfirmingImport] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [importedSources, setImportedSources] = useState<ImportedSource[]>([]);
   const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const tasks = useTaskStore((state) => state.tasks);
 
   const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+  useEffect(() => {
+    if (!hasTauri || activeView !== "import" || !currentProject.projectId) return;
+    let active = true;
+    void invoke<ImportedSource[]>("list_imported_sources", {
+      request: {
+        projectId: currentProject.projectId,
+        projectRootPath: currentProject.rootPath,
+      },
+    })
+      .then((sources) => {
+        if (active) setImportedSources(sources);
+      })
+      .catch((error) => {
+        if (active) pushToast("error", t("import.sourceListError", { message: errorMessage(error) }));
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, currentProject.projectId, currentProject.rootPath, currentProject.sourceCount, hasTauri, pushToast, t]);
 
   const projectRequest = {
     projectId: currentProject.projectId,
@@ -184,7 +263,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         return;
       }
 
-      void invoke<ImportPreview>("preview_import", {
+      void invoke<BackendTask>("preview_import", {
         request: {
           projectId: currentProject.projectId,
           projectRootPath: currentProject.rootPath,
@@ -193,13 +272,103 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           linkDuplicates: false,
         },
       })
-        .then(setImportPreview)
+        .then(async (started) => {
+          let task = started;
+          upsertTask(task);
+          openTaskDrawer(task.id);
+          while (!isTerminalTask(task)) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            task = await invoke<BackendTask>("get_task", { request: { taskId: task.id } });
+            upsertTask(task);
+          }
+          if (task.status !== "succeeded") {
+            throw new Error(task.error?.message ?? `Import preview ${task.status}.`);
+          }
+          const preview = await invoke<ImportPreview>("get_import_preview", {
+            request: {
+              projectId: currentProject.projectId,
+              projectRootPath: currentProject.rootPath,
+              taskId: task.id,
+            },
+          });
+          const active = useProjectStore.getState().currentProject;
+          if (
+            active.projectId === currentProject.projectId &&
+            active.rootPath === currentProject.rootPath
+          ) {
+            setImportPreview(preview);
+          }
+        })
         .catch((error) => {
           setImportPreview(null);
           pushToast("error", t("import.previewError", { message: errorMessage(error) }));
         });
     },
+    [currentProject.projectId, currentProject.rootPath, openTaskDrawer, pushToast, t, upsertTask],
+  );
+
+  const requestTextImportPreview = useCallback(
+    async (kind: "clipboard" | "url", value: string) => {
+      try {
+        let content = value;
+        let sourceName = "clipboard-import";
+        let title: string | null = null;
+        let author: string | null = null;
+        if (kind === "url") {
+          const fetched = await invoke<FetchedImportUrl>("fetch_import_url", {
+            request: {
+              projectId: currentProject.projectId,
+              projectRootPath: currentProject.rootPath,
+              url: value,
+            },
+          });
+          const article = extractArticleFromHtml(fetched.html, fetched.url);
+          if (!article) throw new Error(t("import.readabilityError"));
+          content = articleToMarkdown(article, fetched.url);
+          sourceName = article.title || new URL(fetched.url).hostname;
+          title = article.title || null;
+          author = article.byline;
+        }
+        const preview = await invoke<ImportPreview>("preview_text_import", {
+          request: {
+            projectId: currentProject.projectId,
+            projectRootPath: currentProject.rootPath,
+            kind,
+            sourceName,
+            content,
+            title,
+            author,
+          },
+        });
+        setImportPreview(preview);
+      } catch (error) {
+        setImportPreview(null);
+        pushToast("error", t("import.previewError", { message: errorMessage(error) }));
+      }
+    },
     [currentProject.projectId, currentProject.rootPath, pushToast, t],
+  );
+
+  const requestSourceAction = useCallback(
+    async (kind: "delete" | "replace", targetPath: string, replacementPath?: string) => {
+      try {
+        const action = await invoke<PendingAction>(
+          kind === "delete" ? "request_delete_source" : "request_replace_source",
+          {
+            request: {
+              projectId: currentProject.projectId,
+              projectRootPath: currentProject.rootPath,
+              targetPath,
+              ...(kind === "replace" ? { replacementPath } : {}),
+            },
+          },
+        );
+        setPendingAction(action);
+      } catch (error) {
+        pushToast("error", t("import.sourceActionError", { message: errorMessage(error) }));
+      }
+    },
+    [currentProject.projectId, currentProject.rootPath, pushToast, setPendingAction, t],
   );
 
   const confirmImportPreview = useCallback(() => {
@@ -412,6 +581,11 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
             preview={importPreview}
             isConfirming={isConfirmingImport}
             onRequestPreview={requestImportPreview}
+            onRequestClipboard={(content) => { void requestTextImportPreview("clipboard", content); }}
+            onRequestUrl={(url) => { void requestTextImportPreview("url", url); }}
+            importedSources={importedSources}
+            onDeleteSource={(path) => { void requestSourceAction("delete", path); }}
+            onReplaceSource={(path, replacementPath) => { void requestSourceAction("replace", path, replacementPath); }}
             onConfirm={confirmImportPreview}
           />
         ) : activeView === "agent" ? (

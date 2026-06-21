@@ -17,6 +17,14 @@ pub enum CompileRoute {
     Byok,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompileConflictResolution {
+    KeepCurrent,
+    UseGenerated,
+    ManualMerge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompileFile {
