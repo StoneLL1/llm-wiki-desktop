@@ -3,6 +3,8 @@
 > 每完成一个重要进度节点，按时间倒序在此追加一条记录（最新在上）。
 > 格式：[YYYY-MM-DD] 模块/任务 — 完成内容摘要 — 关键决策/遗留问题。
 
+[2026-06-21] wiki-fe WIKI-FE-04 — `FILE_HASH_MISMATCH.details.baselineContent/currentHash` 接入三路 Markdown Diff（打开时 baseline / 磁盘 current / editor-Agent incoming），提供保留当前、使用传入、手动合并三选项；覆盖写前调用既有 `create_git_checkpoint`，再用 currentHash 乐观锁保存。commit `9279f0b`；全量 82 tests + lint 通过。— 关键决策：不新增后端命令；若磁盘再次变化则保留 dialog 并刷新 current/hash，绝不静默覆盖。
+
 [2026-06-21] wiki-fe WIKI-FE-03 — 接通 wiki-BE `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page` / `confirm_pending_action`；树顶栏新增创建入口，文件行新增重命名/删除菜单，创建/重命名表单支持 CJK 与路径标准化，重命名和删除均经 ConfirmationDialog。commit `b551aa8`；全量 80 tests + lint 通过。— 关键决策：前端不写文件或伪造 checkpoint；rename 确认后由后端创建检查点并批量重写 wikilink，delete 直接展示后端 PendingAction，取消也回传 registry。
 
 [2026-06-21] wiki-fe WIKI-FE-02 — Milkdown 增加 28px 格式工具条：加粗/斜体/H2/链接/行内代码/引用/撤销/重做，全部调用本地 7.21.2 command API，带 tooltip、aria-label、focus-visible 与 editor loading 禁用态。commit `e619637`；全量 75 tests + lint 通过。— 关键决策：工具条与 `useEditor` 放在同一 MilkdownProvider 上下文，`onMouseDown` 保留编辑器选区；额外 `npm run build` 暴露现有跨板块 DTO 类型错误，已记 gotchas，本 loop 不越界修复。

@@ -318,6 +318,122 @@ select:focus-visible {
 .wiki-diff--current .wiki-diff__line { background: var(--warning-soft); }
 .wiki-diff--incoming .wiki-diff__line { background: var(--accent-soft); }
 
+.tmpl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-3);
+}
+
+.tmpl-card {
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  padding: 14px;
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.tmpl-card:hover { border-color: var(--border-strong); }
+.tmpl-card.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.tmpl-card__thumb {
+  display: grid;
+  height: 96px;
+  margin-bottom: 10px;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.tmpl-card.is-selected .tmpl-card__thumb {
+  border-color: var(--accent-border);
+  background: var(--background);
+  color: var(--accent-hover);
+}
+
+.tmpl-card__title { color: var(--text-primary); font-size: 13px; font-weight: 600; }
+.tmpl-card__desc { margin-top: 2px; color: var(--text-muted); font-size: 11.5px; line-height: 1.5; }
+.tmpl-card__skill { margin-top: 6px; color: var(--accent-hover); font-family: var(--font-mono); font-size: 10.5px; }
+
+.html-preview {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--surface);
+}
+
+.html-preview__bar {
+  display: flex;
+  min-height: 44px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  padding: 0 var(--sp-3);
+}
+
+.html-preview__button,
+.html-preview__icon-button {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--sp-2);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.html-preview__icon-button { width: 28px; padding: 0; }
+.html-preview__button:hover:not(:disabled),
+.html-preview__icon-button:hover:not(:disabled) { background: var(--surface-muted); color: var(--text-primary); }
+.html-preview__button:disabled,
+.html-preview__icon-button:disabled { cursor: not-allowed; opacity: 0.45; }
+.html-preview__separator { width: 1px; height: 18px; background: var(--border); }
+
+.html-preview__frame-wrap {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  margin: var(--sp-3);
+}
+
+.html-preview__chrome {
+  display: flex;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 0 var(--sp-3);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.html-preview__dot { width: 8px; height: 8px; border-radius: 50%; }
+.html-preview__dot--danger { background: var(--danger); }
+.html-preview__dot--warning { background: var(--warning); }
+.html-preview__dot--success { background: var(--accent); }
+.html-preview__iframe { width: 100%; min-height: 0; flex: 1; border: 0; background: white; }
+
 /* ---------- Wiki reading surface (ported from app.css .prose) ---------- */
 .wiki-prose {
   max-width: 760px;

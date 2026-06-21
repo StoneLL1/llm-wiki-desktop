@@ -11,7 +11,7 @@ import type {
   WikiTree,
 } from "../../types/wiki";
 
-export type WikiMode = "read" | "edit";
+export type WikiMode = "read" | "edit" | "preview";
 export type SaveState = "idle" | "saving" | "saved" | "conflict" | "error";
 
 export interface RecentPageEntry {
