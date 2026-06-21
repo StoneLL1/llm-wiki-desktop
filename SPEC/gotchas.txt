@@ -11,6 +11,10 @@
 
 [2026-06-21] 现象 — `cargo test --lib --no-default-features` 显示 0 tests 或无法覆盖新增 Tauri command，容易把未编译的命令误报为已验证。 — 根因 — `commands` 模块整体受 `#[cfg(feature = "gui")]` 保护，无 GUI 的强制清单只编译 service/model/utils。 — 规避做法 — 可测试逻辑下沉到无 GUI service/utils 并由 lib tests 覆盖；每次新增 command 额外运行默认 feature 的 `cargo check --offline` 验证 IPC 层可编译。
 
+[2026-06-21] 现象 — XLSX 数值单元格被错误输出为某个共享字符串（如 3 个 shared 时数值 `1` 变成第 2 个 shared "World"）。 — 根因 — `<v>` 的值是否是 shared-string 索引取决于所在 `<c>` 单元格的 `t="s"` 属性，不是值本身能否 parse 成 usize；无条件 parse+查表会把合法索引范围内的数值误当索引。 — 规避做法 — 解析 worksheet 时在 `<c>` start 事件上记录 `t` 属性，仅 `t="s"` 才按索引解析 shared，否则输出字面值；回归测试必须让数值落在 shared 数组范围内（否则越界返回 None 假阳性通过）。同源陷阱：inline string `t="inlineStr"` 的 `<is><t>` 文本要用元素栈识别 enclosing element，不能只看 `<v>`。
+
+[2026-06-21] 现象 — `trim_end_matches('s')` 把 `xls` 截成 `xl`，导致 `.xls` 转换提示拼成 `.xlx`。 — 根因 — 用「去尾 s」当通用复数还原规则，但 `xls` 以 s 结尾且不是复数后缀。 — 规避做法 — 格式后缀映射用显式 match（doc→docx / ppt→pptx / xls→xlsx），不用字符串截尾；测试必须覆盖三种后缀并断言目标后缀精确值。
+
 ----------------------------------------------------------------------
 [2026-06-21] 现象 — 切换项目后旧长任务从任务中心消失且无法取消，但 worker 仍继续运行；终态还可能被写进新项目的 `.app/tasks/`。 — 根因 — `set_project_root` 把全局 task cache 与 CancellationRegistry 全清，并且 terminal persistence 读取“当前项目 root”而非“任务启动时 root”；token 缺失时 `is_cancelled` 返回 false，恰好让旧 worker 更难停止。 — 规避做法 — 项目切换不清运行任务/token；创建任务时固定 taskId→root，所有状态与日志按该 root 持久化；UI 新命令 capability 与已启动 worker context 分离，测试必须覆盖 A 运行→切 B→A 仍可见可取消且只写 A。
 [2026-06-21] 现象 — PowerShell 用分号串行执行多项检查时，前面的 `cargo fmt --check` 已失败，但后续 clippy 成功让整条命令最终返回 0，造成检查清单假绿。 — 根因 — PowerShell 默认只以最后一个外部程序的退出码作为脚本退出码，不会自动在非零退出码时终止。 — 规避做法 — 各检查独立运行并分别采集退出码，或每项后显式判断 `$LASTEXITCODE` 并 `exit`；任一失败后必须从清单第一项重跑。
