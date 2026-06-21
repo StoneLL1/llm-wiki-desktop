@@ -6,6 +6,7 @@ import type { ExportType } from "../../types/export";
 
 interface GenerateHtmlDialogProps {
   pagePath: string;
+  initialType?: ExportType;
   onCancel: () => void;
   onGenerate: (type: ExportType) => void;
 }
@@ -19,11 +20,12 @@ const templates = [
 
 export function GenerateHtmlDialog({
   pagePath,
+  initialType = "beautiful_read",
   onCancel,
   onGenerate,
 }: GenerateHtmlDialogProps) {
   const { t } = useTranslation();
-  const [selected, setSelected] = useState<ExportType>("beautiful_read");
+  const [selected, setSelected] = useState<ExportType>(initialType);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="generate-html-title">

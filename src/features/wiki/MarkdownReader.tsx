@@ -16,6 +16,7 @@ interface MarkdownReaderProps {
 }
 
 const WIKILINK_SCHEME = "wikilink://";
+const CITATION_SCHEME = "citation://";
 
 interface FrontmatterRow {
   key: string;
@@ -79,6 +80,17 @@ function preprocessWikilinks(body: string): string {
   });
 }
 
+/** Convert simple numeric source markers (`[1]`) into reader-owned anchors. */
+function preprocessCitations(body: string): string {
+  return body
+    .replace(/\[\^(\d+)\](?!\s*:)/g, (_match, index: string) => {
+      return `[${index}](${CITATION_SCHEME}${index})`;
+    })
+    .replace(/\[(\d+)\](?!\()/g, (_match, index: string) => {
+      return `[${index}](${CITATION_SCHEME}${index})`;
+    });
+}
+
 export function MarkdownReader({
   bodyMarkdown,
   frontmatterYaml,
@@ -87,7 +99,10 @@ export function MarkdownReader({
 }: MarkdownReaderProps) {
   const { t } = useTranslation();
   const resolver = useMemo(() => buildResolver(pages), [pages]);
-  const processed = useMemo(() => preprocessWikilinks(bodyMarkdown), [bodyMarkdown]);
+  const processed = useMemo(
+    () => preprocessCitations(preprocessWikilinks(bodyMarkdown)),
+    [bodyMarkdown],
+  );
   const frontmatterRows = useMemo(
     () => (frontmatterYaml ? parseFrontmatterRows(frontmatterYaml) : []),
     [frontmatterYaml],
@@ -108,9 +123,32 @@ export function MarkdownReader({
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
-        urlTransform={(url) => (url.startsWith(WIKILINK_SCHEME) ? url : defaultUrlTransform(url))}
+        urlTransform={(url) =>
+          url.startsWith(WIKILINK_SCHEME) || url.startsWith(CITATION_SCHEME)
+            ? url
+            : defaultUrlTransform(url)
+        }
         components={{
           a({ href, children, ...props }) {
+            if (href?.startsWith(CITATION_SCHEME)) {
+              const index = href.slice(CITATION_SCHEME.length);
+              return (
+                <a
+                  href={`#citation-${index}`}
+                  className="citation-ref"
+                  aria-label={t("wiki.reader.citation", { index })}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    document.getElementById(`citation-${index}`)?.scrollIntoView({
+                      behavior: "smooth",
+                      block: "center",
+                    });
+                  }}
+                >
+                  {index}
+                </a>
+              );
+            }
             if (href && href.startsWith(WIKILINK_SCHEME)) {
               const target = decodeURIComponent(href.slice(WIKILINK_SCHEME.length));
               const resolved = resolver.get(target.toLowerCase());

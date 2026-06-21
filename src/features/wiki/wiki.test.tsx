@@ -14,6 +14,7 @@ import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { ConflictDiffDialog } from "./ConflictDiffDialog";
 import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
 import { HtmlPreviewPane as WikiHtmlPreviewPane } from "./HtmlPreviewPane";
+import { RelatedPagesPanel } from "./RelatedPagesPanel";
 import { useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
 
@@ -65,6 +66,13 @@ afterEach(() => {
 });
 
 describe("wikiStore", () => {
+  it("queues a requested Wiki export for the active view", () => {
+    useWikiStore.getState().requestExport("knowledge_card");
+    expect(useWikiStore.getState().requestedExportType).toBe("knowledge_card");
+    useWikiStore.getState().consumeExportRequest();
+    expect(useWikiStore.getState().requestedExportType).toBeNull();
+  });
+
   it("ignores a page response that arrives after the project scope changed", async () => {
     let resolvePage!: (value: WikiPageContent) => void;
     invokeMock.mockReturnValueOnce(
@@ -519,6 +527,21 @@ describe("MarkdownReader", () => {
     fireEvent.click(link);
     await waitFor(() => expect(onOpenPage).toHaveBeenCalledWith("wiki/concepts/transformer.md"));
   });
+
+  it("renders numbered citations as linked circular references", () => {
+    const { container } = render(
+      <MarkdownReader
+        bodyMarkdown="Evidence [1] and [^2]."
+        frontmatterYaml={null}
+        pages={[]}
+        onOpenPage={vi.fn()}
+      />,
+    );
+
+    const citations = container.querySelectorAll(".citation-ref");
+    expect(citations).toHaveLength(2);
+    expect(citations[0]).toHaveAttribute("href", "#citation-1");
+  });
 });
 
 describe("WikiTree page lifecycle actions", () => {
@@ -660,6 +683,49 @@ describe("Wiki HTML preview", () => {
     expect(frame).toHaveAttribute("sandbox", "");
     expect(frame).toHaveAttribute("srcdoc", "<h1>Preview</h1>");
     expect(screen.getAllByText("exports/html/agent.html")).toHaveLength(2);
+  });
+});
+
+describe("RelatedPagesPanel P1 details", () => {
+  it("numbers citations, counts backlinks, and exposes page actions", () => {
+    const page = pageMeta({ sources: ["source-a", "source-b"] });
+    const backlink = pageMeta({
+      path: "wiki/concepts/attention.md",
+      title: "Attention",
+      aliases: [],
+      wikilinks: ["transformer", "Transformers"],
+    });
+    const onViewAllBacklinks = vi.fn();
+    const onGenerateHtml = vi.fn();
+    const onGenerateCard = vi.fn();
+    const onViewInGraph = vi.fn();
+    const onCopyWikilink = vi.fn();
+    const { container } = render(
+      <RelatedPagesPanel
+        page={page}
+        pages={[page, backlink]}
+        onOpenPage={vi.fn()}
+        onViewAllBacklinks={onViewAllBacklinks}
+        onGenerateHtml={onGenerateHtml}
+        onGenerateCard={onGenerateCard}
+        onViewInGraph={onViewInGraph}
+        onCopyWikilink={onCopyWikilink}
+      />,
+    );
+
+    expect(container.querySelectorAll(".citation__idx")).toHaveLength(2);
+    expect(container.querySelector(".relpage__count")).toHaveTextContent("2");
+    fireEvent.click(screen.getByRole("button", { name: "View all 2 backlinks" }));
+    expect(onViewAllBacklinks).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate HTML reading page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate knowledge card" }));
+    fireEvent.click(screen.getByRole("button", { name: "View in graph" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy wikilink" }));
+    expect(onGenerateHtml).toHaveBeenCalledOnce();
+    expect(onGenerateCard).toHaveBeenCalledOnce();
+    expect(onViewInGraph).toHaveBeenCalledOnce();
+    expect(onCopyWikilink).toHaveBeenCalledOnce();
   });
 });
 
