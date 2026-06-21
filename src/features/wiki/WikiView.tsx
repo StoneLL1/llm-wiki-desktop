@@ -7,6 +7,7 @@ import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
 import type { CreateWikiPageInput, WikiPageContent, WikiPageMeta } from "../../types/wiki";
 import { MarkdownReader } from "./MarkdownReader";
+import { ConflictDiffDialog } from "./ConflictDiffDialog";
 import { WikiEditor } from "./WikiEditor";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
@@ -31,6 +32,7 @@ export function WikiView() {
   const mode = useWikiStore((state) => state.mode);
   const draft = useWikiStore((state) => state.draft);
   const saveState = useWikiStore((state) => state.saveState);
+  const conflict = useWikiStore((state) => state.conflict);
   const loadingPage = useWikiStore((state) => state.loadingPage);
   const scan = useWikiStore((state) => state.scan);
   const openPage = useWikiStore((state) => state.openPage);
@@ -38,6 +40,7 @@ export function WikiView() {
   const setMode = useWikiStore((state) => state.setMode);
   const setDraft = useWikiStore((state) => state.setDraft);
   const save = useWikiStore((state) => state.save);
+  const resolveConflict = useWikiStore((state) => state.resolveConflict);
   const cancelEdit = useWikiStore((state) => state.cancelEdit);
   const reload = useWikiStore((state) => state.reload);
   const toggleBookmark = useWikiStore((state) => state.toggleBookmark);
@@ -268,6 +271,17 @@ export function WikiView() {
           checkpointExists={pendingLifecycle.action.checkpointHash != null}
           onCancel={handleLifecycleCancel}
           onConfirm={handleLifecycleConfirm}
+        />
+      ) : null}
+      {conflict ? (
+        <ConflictDiffDialog
+          conflict={conflict}
+          onCancel={() => void resolveConflict(projectId, rootPath, "keep_current")}
+          onKeepCurrent={() => void resolveConflict(projectId, rootPath, "keep_current")}
+          onUseIncoming={() => void resolveConflict(projectId, rootPath, "use_incoming")}
+          onManualMerge={(content) =>
+            void resolveConflict(projectId, rootPath, "manual_merge", content)
+          }
         />
       ) : null}
     </div>

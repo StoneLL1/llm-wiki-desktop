@@ -290,6 +290,34 @@ select:focus-visible {
   background: var(--border);
 }
 
+.wiki-diff {
+  max-height: 320px;
+  overflow: auto;
+  background: var(--background);
+  padding: var(--sp-2) 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.wiki-diff__line {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  padding-right: var(--sp-2);
+}
+
+.wiki-diff__number {
+  padding-right: var(--sp-2);
+  color: var(--text-disabled);
+  text-align: right;
+  user-select: none;
+}
+
+.wiki-diff--current .wiki-diff__line { background: var(--warning-soft); }
+.wiki-diff--incoming .wiki-diff__line { background: var(--accent-soft); }
+
 /* ---------- Wiki reading surface (ported from app.css .prose) ---------- */
 .wiki-prose {
   max-width: 760px;

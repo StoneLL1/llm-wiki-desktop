@@ -19,9 +19,21 @@ export interface RecentPageEntry {
   title: string;
 }
 
+export interface WikiSaveConflict {
+  path: string;
+  originalContent: string;
+  currentContent: string;
+  incomingContent: string;
+  currentHash: string;
+}
+
 interface BackendLikeError {
   code?: string;
   message?: string;
+  details?: {
+    baselineContent?: string;
+    currentHash?: string;
+  };
 }
 
 function isConflictError(error: unknown): boolean {
@@ -37,6 +49,7 @@ interface WikiState {
   page: WikiPageContent | null;
   mode: WikiMode;
   saveState: SaveState;
+  conflict: WikiSaveConflict | null;
   /** Live editor contents (raw markdown including frontmatter). */
   draft: string;
   loadingTree: boolean;
@@ -50,6 +63,12 @@ interface WikiState {
   cancelEdit: () => void;
   setDraft: (draft: string) => void;
   save: (projectId: string, rootPath: string) => Promise<void>;
+  resolveConflict: (
+    projectId: string,
+    rootPath: string,
+    resolution: "keep_current" | "use_incoming" | "manual_merge",
+    manualContent?: string,
+  ) => Promise<void>;
   reload: (projectId: string, rootPath: string) => Promise<void>;
   toggleBookmark: (projectId: string, rootPath: string) => Promise<void>;
   createPage: (
@@ -83,6 +102,7 @@ const initial = {
   page: null as WikiPageContent | null,
   mode: "read" as WikiMode,
   saveState: "idle" as SaveState,
+  conflict: null as WikiSaveConflict | null,
   draft: "",
   loadingTree: false,
   loadingPage: false,
@@ -112,7 +132,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
   },
   openPage: async (projectId, rootPath, path) => {
     const scope = captureProjectScope();
-    set({ loadingPage: true, selectedPath: path, mode: "read", saveState: "idle", error: null });
+    set({ loadingPage: true, selectedPath: path, mode: "read", saveState: "idle", conflict: null, error: null });
     try {
       const page = await invoke<WikiPageContent>("read_wiki_page", {
         request: { projectId, projectRootPath: rootPath, relativePath: path },
@@ -136,7 +156,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
   setMode: (mode) => set({ mode }),
   startEdit: () => {
     const page = get().page;
-    if (page) set({ mode: "edit", draft: page.rawMarkdown, saveState: "idle" });
+    if (page) set({ mode: "edit", draft: page.rawMarkdown, saveState: "idle", conflict: null });
   },
   cancelEdit: () => {
     const page = get().page;
@@ -144,6 +164,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       mode: "read",
       draft: page?.rawMarkdown ?? "",
       saveState: "idle",
+      conflict: null,
     });
   },
   setDraft: (draft) => set({ draft, saveState: "idle" }),
@@ -204,7 +225,97 @@ export const useWikiStore = create<WikiState>((set, get) => ({
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       if (isConflictError(error)) {
-        set({ saveState: "conflict" });
+        const details = (error as BackendLikeError).details;
+        set({
+          saveState: "conflict",
+          conflict:
+            details?.baselineContent != null && details.currentHash
+              ? {
+                  path: savedPath,
+                  originalContent: page.rawMarkdown,
+                  currentContent: details.baselineContent,
+                  incomingContent: draft,
+                  currentHash: details.currentHash,
+                }
+              : null,
+        });
+      } else {
+        set({ saveState: "error", error: errorMessage(error) });
+      }
+    }
+  },
+  resolveConflict: async (projectId, rootPath, resolution, manualContent) => {
+    const scope = captureProjectScope();
+    const conflict = get().conflict;
+    if (!conflict) return;
+
+    if (resolution === "keep_current") {
+      await get().openPage(projectId, rootPath, conflict.path);
+      return;
+    }
+
+    const contents =
+      resolution === "manual_merge" ? (manualContent ?? "") : conflict.incomingContent;
+    set({ saveState: "saving", error: null });
+    try {
+      await invoke("create_git_checkpoint", {
+        request: {
+          projectId,
+          projectRootPath: rootPath,
+          purpose: "high_risk_operation",
+          message: `Before resolving wiki conflict: ${conflict.path}`,
+        },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      const response = await invoke<SaveWikiPageResponse>("save_wiki_page", {
+        request: {
+          projectId,
+          projectRootPath: rootPath,
+          relativePath: conflict.path,
+          contents,
+          expectedHash: conflict.currentHash,
+        },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      const refreshed = await invoke<WikiPageContent>("read_wiki_page", {
+        request: {
+          projectId,
+          projectRootPath: rootPath,
+          relativePath: response.relativePath,
+        },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      set((state) => ({
+        page: refreshed,
+        draft: refreshed.rawMarkdown,
+        mode: "read",
+        saveState: "saved",
+        conflict: null,
+        tree: state.tree
+          ? {
+              ...state.tree,
+              pages: state.tree.pages.map((item) =>
+                item.path === refreshed.meta.path ? refreshed.meta : item,
+              ),
+            }
+          : state.tree,
+      }));
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      if (isConflictError(error)) {
+        const details = (error as BackendLikeError).details;
+        set({
+          saveState: "conflict",
+          conflict:
+            details?.baselineContent != null && details.currentHash
+              ? {
+                  ...conflict,
+                  currentContent: details.baselineContent,
+                  incomingContent: contents,
+                  currentHash: details.currentHash,
+                }
+              : conflict,
+        });
       } else {
         set({ saveState: "error", error: errorMessage(error) });
       }
