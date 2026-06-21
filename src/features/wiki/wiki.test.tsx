@@ -11,6 +11,7 @@ import { MarkdownReader } from "./MarkdownReader";
 import { WikiEditor } from "./WikiEditor";
 import { WikiTree as WikiTreeView } from "./WikiTree";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
+import { ConflictDiffDialog } from "./ConflictDiffDialog";
 import { useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
 
@@ -132,11 +133,67 @@ describe("wikiStore", () => {
       draft: "# Edited",
       mode: "edit",
     });
-    invokeMock.mockRejectedValueOnce({ code: "FILE_HASH_MISMATCH", message: "changed" });
+    invokeMock.mockRejectedValueOnce({
+      code: "FILE_HASH_MISMATCH",
+      message: "changed",
+      details: {
+        baselineContent: "# External edit",
+        currentHash: "hash-external",
+      },
+    });
 
     await useWikiStore.getState().save("proj-1", "D:/wiki");
 
     expect(useWikiStore.getState().saveState).toBe("conflict");
+    expect(useWikiStore.getState().conflict).toEqual({
+      path: "wiki/concepts/transformer.md",
+      originalContent: "# Transformer\n\nSee [[attention]].",
+      currentContent: "# External edit",
+      incomingContent: "# Edited",
+      currentHash: "hash-external",
+    });
+  });
+
+  it("resolves a conflict with the current backend hash", async () => {
+    useWikiStore.setState({
+      page: pageContent(),
+      draft: "# Incoming",
+      mode: "edit",
+      saveState: "conflict",
+      conflict: {
+        path: "wiki/concepts/transformer.md",
+        originalContent: "# Original",
+        currentContent: "# External",
+        incomingContent: "# Incoming",
+        currentHash: "hash-external",
+      },
+    });
+    invokeMock
+      .mockResolvedValueOnce({ created: true, commitHash: "checkpoint-1", message: "Before conflict merge", purpose: "high_risk_operation", affectedPaths: ["wiki/concepts/transformer.md"] })
+      .mockResolvedValueOnce({ relativePath: "wiki/concepts/transformer.md", hash: "hash-3", savedAt: "2026-06-21", graphCacheInvalidated: true })
+      .mockResolvedValueOnce(pageContent({ rawMarkdown: "# Incoming", bodyMarkdown: "# Incoming", meta: pageMeta({ hash: "hash-3" }) }));
+
+    await useWikiStore.getState().resolveConflict("proj-1", "D:/wiki", "use_incoming");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "create_git_checkpoint", {
+      request: {
+        projectId: "proj-1",
+        projectRootPath: "D:/wiki",
+        purpose: "high_risk_operation",
+        message: "Before resolving wiki conflict: wiki/concepts/transformer.md",
+      },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "save_wiki_page", {
+      request: {
+        projectId: "proj-1",
+        projectRootPath: "D:/wiki",
+        relativePath: "wiki/concepts/transformer.md",
+        contents: "# Incoming",
+        expectedHash: "hash-external",
+      },
+    });
+    expect(useWikiStore.getState().saveState).toBe("saved");
+    expect(useWikiStore.getState().conflict).toBeNull();
   });
 
   it("marks saveState as error for generic backend failures and keeps the draft", async () => {
@@ -537,6 +594,33 @@ describe("WikiPageFormDialog", () => {
       title: "Agent Memory",
       pageType: "concept",
     });
+  });
+});
+
+describe("ConflictDiffDialog", () => {
+  it("shows all three versions and exposes the three resolution choices", () => {
+    render(
+      <ConflictDiffDialog
+        conflict={{
+          path: "wiki/concepts/agent.md",
+          originalContent: "baseline text",
+          currentContent: "external text",
+          incomingContent: "agent text",
+          currentHash: "hash-current",
+        }}
+        onKeepCurrent={vi.fn()}
+        onUseIncoming={vi.fn()}
+        onManualMerge={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("baseline text")).toBeInTheDocument();
+    expect(screen.getByText("external text")).toBeInTheDocument();
+    expect(screen.getByText("agent text")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Keep current" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use incoming" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manual merge" })).toBeInTheDocument();
   });
 });
 

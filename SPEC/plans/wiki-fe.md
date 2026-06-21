@@ -6,7 +6,7 @@
 
 ## 状态摘要
 
-- P0：1 项 pending，3 项 verified，0 项 blocked
+- P0：4 项 verified，0 项 blocked
 - P1：2 项 pending，0 项 verified，0 项 blocked
 - blocked：无
 
@@ -41,12 +41,12 @@
 
 ### WIKI-FE-04 — P0 编译/保存冲突三路 Markdown Diff
 
-- status: pending
+- status: verified
 - 意图：消费 `FILE_HASH_MISMATCH.details.baselineContent`，展示 original（打开时版本）/ current（磁盘外部版本）/ agent-editor（当前 draft）三路内容与差异，提供保留 current、使用 draft、手动合并三种选择。
 - 决策：`baselineContent` 按 wiki-BE 实际契约视为当前磁盘文本；原始打开版本来自 `page.rawMarkdown`，待写版本来自 `draft`。覆盖外部版本必须再次通过后端安全写入路径，不在前端直接落盘。
 - 验收：冲突 dialog 有 `role=dialog` / `aria-modal`；三路文本清晰；保留 current 会重载，使用 draft 与手动合并均经过明确确认/安全写入。
 - 预计文件：`src/features/wiki/ConflictDiffDialog.tsx`、`src/features/wiki/WikiEditor.tsx`、`src/features/wiki/WikiView.tsx`、`src/features/wiki/wikiStore.ts`、`src/features/wiki/wiki.test.tsx`、`src/i18n/locales/*.json`、`src/styles.css`
-- 完成位置：待记录
+- 完成位置：`src/features/wiki/ConflictDiffDialog.tsx:1-140`；`src/features/wiki/wikiStore.ts:17-33,48-69,222-327`；`src/features/wiki/WikiView.tsx:8-9,34,53,277-288`；`src/features/wiki/wiki.test.tsx:130-199,600-627`；`src/styles.css:293-323`
 
 ### WIKI-FE-05 — P1 HTML 预览第三态
 
