@@ -103,7 +103,9 @@ impl SettingsService {
         secret_service: &SecretService,
         provider: LlmProviderKind,
     ) -> Result<Option<String>, BackendError> {
-        secret_service.mask(provider)
+        Ok(secret_service
+            .get(provider)?
+            .map(|_| "configured".to_string()))
     }
 
     pub fn read_global_settings(&self) -> Result<GlobalSettingsFile, BackendError> {
@@ -222,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_secret_status_returns_masked_value_only() {
+    fn provider_secret_status_never_reveals_any_secret_characters() {
         let service = SettingsService::default();
         let secrets = SecretService::memory();
         secrets
@@ -233,10 +235,8 @@ mod tests {
             .get_provider_secret_status(&secrets, LlmProviderKind::Anthropic)
             .unwrap();
 
-        assert_eq!(
-            status.as_deref(),
-            Some("\u{2022}\u{2022}\u{2022}\u{2022}9876")
-        );
+        assert_eq!(status.as_deref(), Some("configured"));
+        assert!(!status.unwrap().contains("9876"));
     }
 
     #[test]

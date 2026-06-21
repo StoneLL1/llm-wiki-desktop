@@ -12,6 +12,49 @@ use crate::services::file_store::FileStore;
 
 // ── Free functions: usable from other services without coupling ──
 
+fn collect_source_files(
+    path: &Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> Result<(), BackendError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Err(BackendError::new(
+                "IMPORT_SOURCE_NOT_FOUND",
+                "The selected import source does not exist or cannot be read.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "path": path.to_string_lossy(),
+                "error": error.to_string(),
+            })));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_file() {
+        files.push(path.to_path_buf());
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| {
+                BackendError::new("FILE_ENUMERATE_FAILED", error.to_string(), true, false)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                BackendError::new("FILE_ENUMERATE_FAILED", error.to_string(), true, false)
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            collect_source_files(&entry.path(), files)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn classify_file(path: &Path) -> SourceFileType {
     let ext = path
         .extension()
@@ -91,8 +134,13 @@ impl ImportService {
         // Build a set of known hashes from existing files in raw/
         let known = self.scan_existing(context)?;
 
-        for source_path_str in &request.source_paths {
-            let source_path = Path::new(source_path_str);
+        let mut source_paths = Vec::new();
+        for source_path in &request.source_paths {
+            collect_source_files(Path::new(source_path), &mut source_paths)?;
+        }
+
+        for source_path in &source_paths {
+            let source_path_str = source_path.to_string_lossy().to_string();
             let file_name = source_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -105,7 +153,7 @@ impl ImportService {
                 .unwrap_or_else(|_| format!("!nohash:{}", source_path_str));
             let size_bytes = source_path.metadata().map(|m| m.len()).unwrap_or(0);
 
-            let extract = extract_map.get(source_path_str);
+            let extract = extract_map.get(&source_path_str);
 
             let mut entry = ImportFileEntry {
                 original_name: file_name.to_string(),
@@ -183,7 +231,7 @@ impl ImportService {
         }
 
         let summary = ImportSummary {
-            total_files: request.source_paths.len() as u32,
+            total_files: source_paths.len() as u32,
             archived_files,
             duplicate_files,
             renamed_files,
@@ -894,21 +942,12 @@ mod tests {
         fs::write(source_dir.join("笔记.md"), b"# notes").unwrap();
         fs::write(source_dir.join("图片.jpg"), b"JPEG fake").unwrap();
         fs::write(source_dir.join("未知文件.xyz"), b"unknown").unwrap();
-
-        let paths: Vec<String> = [
-            "报告.pdf",
-            "数据.xlsx",
-            "幻灯片.pptx",
-            "笔记.md",
-            "图片.jpg",
-            "未知文件.xyz",
-        ]
-        .iter()
-        .map(|n| source_dir.join(n).to_string_lossy().to_string())
-        .collect();
+        let nested = source_dir.join("子目录");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("嵌套.txt"), b"nested").unwrap();
 
         let request = ImportRequest {
-            source_paths: paths,
+            source_paths: vec![source_dir.to_string_lossy().to_string()],
             allow_duplicates: false,
             link_duplicates: false,
         };
@@ -918,8 +957,12 @@ mod tests {
             .preview_import(&context, &store, &request, &[])
             .unwrap();
 
-        assert_eq!(preview.summary.total_files, 6);
-        assert_eq!(preview.summary.archived_files, 6);
+        assert_eq!(preview.summary.total_files, 7);
+        assert_eq!(preview.summary.archived_files, 7);
+        assert!(preview
+            .files
+            .iter()
+            .any(|file| file.original_name == "嵌套.txt"));
 
         // Check each file went to the correct directory
         let pdf_entry = preview
@@ -967,6 +1010,24 @@ mod tests {
             "raw/sources/other/未知文件.xyz"
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preview_rejects_a_missing_source_instead_of_marking_it_ready() {
+        let (context, root) = tmp_context("missing-source");
+        let missing = root.join("does-not-exist").join("资料.md");
+        let request = ImportRequest {
+            source_paths: vec![missing.to_string_lossy().to_string()],
+            allow_duplicates: false,
+            link_duplicates: false,
+        };
+
+        let error = ImportService
+            .preview_import(&context, &FileStore, &request, &[])
+            .expect_err("a missing path must not appear as an archive-ready source");
+
+        assert_eq!(error.code, "IMPORT_SOURCE_NOT_FOUND");
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -67,11 +67,7 @@ impl ProjectService {
         let project_settings = ProjectSettings { template };
         store.write_json_atomic(&context, ".app/settings.json", &project_settings)?;
         store.write_json_atomic(&context, ".app/agent-config.json", &serde_json::json!({}))?;
-        store.write_json_atomic(
-            &context,
-            ".app/bookmarks.json",
-            &serde_json::json!([]),
-        )?;
+        store.write_json_atomic(&context, ".app/bookmarks.json", &serde_json::json!([]))?;
         store.write_json_atomic(
             &context,
             ".app/graph-cache.json",
@@ -405,11 +401,7 @@ impl ProjectService {
             },
         )?;
         store.write_json_atomic(context, ".app/agent-config.json", &serde_json::json!({}))?;
-        store.write_json_atomic(
-            context,
-            ".app/bookmarks.json",
-            &serde_json::json!([]),
-        )?;
+        store.write_json_atomic(context, ".app/bookmarks.json", &serde_json::json!([]))?;
         store.write_json_atomic(
             context,
             ".app/graph-cache.json",

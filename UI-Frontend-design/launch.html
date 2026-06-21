@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>项目选择 — LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  body { overflow: hidden; }
+  .launch {
+    display: grid;
+    grid-template-rows: 56px 1fr 36px;
+    height: 100vh;
+  }
+  .launch__top {
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .launch__brand {
+    display: flex; align-items: center; gap: 10px;
+    padding-right: 16px; border-right: 1px solid var(--border-subtle);
+    height: 100%;
+  }
+  .launch__mark {
+    width: 26px; height: 26px;
+    border-radius: var(--radius-md);
+    background: var(--foreground); color: var(--text-inverse);
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    letter-spacing: -0.04em;
+  }
+  .launch__brand-name { font-weight: 600; font-size: 13px; }
+  .launch__brand-sub { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+
+  .launch__nav { display: flex; gap: 4px; margin-left: 12px; }
+  .launch__nav button {
+    height: 28px; padding: 0 12px;
+    border-radius: var(--radius-sm);
+    font-size: 12.5px; font-weight: 500;
+    color: var(--text-muted);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .launch__nav button:hover { background: var(--surface-muted); color: var(--text-primary); }
+  .launch__nav button.is-active { background: var(--surface-muted); color: var(--text-primary); }
+
+  .launch__top-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .launch__langswitch { display: inline-flex; align-items: center; background: var(--surface-muted); border-radius: var(--radius-pill); padding: 2px; height: 26px; }
+  .launch__langswitch button { padding: 0 10px; height: 22px; border-radius: var(--radius-pill); font-size: 11px; font-weight: 500; color: var(--text-muted); }
+  .launch__langswitch button.is-active { background: var(--background); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+  .launch__body {
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 1fr 360px;
+  }
+  .launch__main {
+    overflow-y: auto;
+    padding: 32px 40px 48px;
+  }
+  .launch__side {
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    overflow-y: auto;
+    padding: 24px;
+  }
+  .launch__hero {
+    max-width: 920px;
+    margin-bottom: 24px;
+  }
+  .launch__hero-title {
+    font-size: 22px; font-weight: 600; letter-spacing: -0.015em;
+    margin: 0 0 4px;
+  }
+  .launch__hero-sub { font-size: 13px; color: var(--text-muted); margin: 0; }
+
+  .launch__filterbar {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 16px;
+    max-width: 920px;
+  }
+  .launch__search {
+    flex: 1;
+    display: flex; align-items: center; gap: 8px;
+    height: 36px; padding: 0 12px;
+    background: var(--background); border: 1px solid var(--border); border-radius: var(--radius-md);
+  }
+  .launch__search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(16,163,127,0.12); }
+  .launch__search input {
+    flex: 1; background: transparent; border: none; outline: none;
+    font-size: 13px; color: var(--text-primary);
+  }
+  .launch__search input::placeholder { color: var(--text-muted); }
+  .launch__filter-pills { display: flex; gap: 6px; }
+
+  .projgrid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    max-width: 920px;
+  }
+
+  .quickaction {
+    display: flex; flex-direction: column;
+    padding: 14px 16px;
+    background: var(--background);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-lg);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+  }
+  .quickaction:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-hover); }
+  .quickaction__icon { margin-bottom: 8px; }
+  .quickaction__title { font-size: 13px; font-weight: 600; margin: 0; color: inherit; }
+  .quickaction__desc { font-size: 11.5px; margin: 2px 0 0; color: inherit; opacity: 0.7; }
+
+  .launch__side h3 {
+    font-size: 10.5px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--text-muted);
+    margin: 0 0 10px;
+  }
+  .agentmini {
+    padding: 12px; background: var(--background);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+    margin-bottom: 8px;
+  }
+  .agentmini__row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .agentmini__name { font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+  .agentmini__ver { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
+  .agentmini__hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+  .templateside {
+    padding: 12px; background: var(--background);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+    margin-bottom: 8px; cursor: pointer;
+  }
+  .templateside:hover { border-color: var(--border-strong); }
+  .templateside__title { font-size: 12.5px; font-weight: 600; }
+  .templateside__desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+  .launch__bottom {
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 24px;
+    background: var(--surface); border-top: 1px solid var(--border);
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+  }
+</style>
+</head>
+<body>
+<div class="launch">
+  <header class="launch__top">
+    <div class="launch__brand">
+      <div class="launch__mark">LW</div>
+      <div>
+        <div class="launch__brand-name">LLM Wiki Desktop</div>
+        <div class="launch__brand-sub">v0.1.0 · zh-CN</div>
+      </div>
+    </div>
+    <nav class="launch__nav">
+      <button class="is-active" id="__nav_recent">最近项目</button>
+      <button id="__nav_new">新建项目</button>
+      <button id="__nav_open">打开文件夹</button>
+      <button id="__nav_templates">项目模板</button>
+    </nav>
+    <div class="launch__top-actions">
+      <div class="launch__langswitch">
+        <button class="is-active">中</button>
+        <button>EN</button>
+      </div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="帮助"><svg class="ico"><use href="#i-help"/></svg></button>
+    </div>
+  </header>
+
+  <div class="launch__body">
+    <main class="launch__main">
+      <div class="launch__hero">
+        <h1 class="launch__hero-title">选择一个项目开始工作</h1>
+        <p class="launch__hero-sub">本地优先的 Markdown 知识库。所有内容保存在你的文件夹中，可用 Git、Obsidian、外部编辑器直接访问。</p>
+      </div>
+
+      <div class="launch__filterbar">
+        <div class="launch__search">
+          <svg class="ico" style="color:var(--text-muted);"><use href="#i-search"/></svg>
+          <input data-search-input="#proj-list" placeholder="按名称、路径或模板搜索项目…" />
+          <span class="kbd">⌘K</span>
+        </div>
+        <div class="launch__filter-pills">
+          <span class="pill pill--active" data-group="filter">全部</span>
+          <span class="pill" data-group="filter">研究</span>
+          <span class="pill" data-group="filter">读书</span>
+          <span class="pill" data-group="filter">个人成长</span>
+          <span class="pill" data-group="filter">商业</span>
+          <span class="pill" data-group="filter">通用</span>
+        </div>
+      </div>
+
+      <div class="projgrid" id="proj-list">
+        <!-- New project quick actions -->
+        <div class="quickaction" onclick="location.href='dashboard.html'">
+          <div class="quickaction__icon" id="__qa_new"></div>
+          <h3 class="quickaction__title">新建空项目</h3>
+          <p class="quickaction__desc">选择保存位置，生成 purpose.md / schema.md / 标准目录结构</p>
+        </div>
+        <div class="quickaction" onclick="window.__toast('请选择文件夹', 'info')">
+          <div class="quickaction__icon" id="__qa_open"></div>
+          <h3 class="quickaction__title">打开文件夹为项目</h3>
+          <p class="quickaction__desc">把普通资料文件夹初始化为 LLM Wiki 项目，按类型自动归档</p>
+        </div>
+        <div class="quickaction" onclick="window.__toast('导入到当前项目前请先选择项目', 'info')">
+          <div class="quickaction__icon" id="__qa_import"></div>
+          <h3 class="quickaction__title">导入资料到已有项目</h3>
+          <p class="quickaction__desc">先进入项目，再通过 Import 视图拖拽资料</p>
+        </div>
+
+        <!-- Recent projects -->
+        <a class="projcard" href="dashboard.html" data-search-row data-search-text="Agent Knowledge Base 研究 agent-llm 通用">
+          <div class="projcard__head">
+            <div class="projcard__mark" id="__pc1"></div>
+            <div style="flex:1;min-width:0;">
+              <h3 class="projcard__title">Agent Knowledge Base</h3>
+              <div class="projcard__path">~/Documents/wiki/agent-llm</div>
+            </div>
+            <span class="badge badge--accent"><span class="dot"></span>当前</span>
+          </div>
+          <div class="projcard__meta">
+            <span class="pill pill--active">研究</span>
+            <span>·</span>
+            <span>237 页</span>
+            <span>·</span>
+            <span>2 分钟前</span>
+          </div>
+        </a>
+
+        <a class="projcard" href="dashboard.html" data-search-row data-search-text="深度学习入门 reading-ml 读书 机器学习">
+          <div class="projcard__head">
+            <div class="projcard__mark" id="__pc2"></div>
+            <div style="flex:1;min-width:0;">
+              <h3 class="projcard__title">深度学习入门 · Reading</h3>
+              <div class="projcard__path">~/Documents/wiki/reading-ml</div>
+            </div>
+          </div>
+          <div class="projcard__meta">
+            <span class="pill">读书</span>
+            <span>·</span>
+            <span>148 页</span>
+            <span>·</span>
+            <span>昨天</span>
+          </div>
+        </a>
+
+        <a class="projcard" href="dashboard.html" data-search-row data-search-text="2025 季度阅读笔记 reading-2025 个人成长">
+          <div class="projcard__head">
+            <div class="projcard__mark" id="__pc3"></div>
+            <div style="flex:1;min-width:0;">
+              <h3 class="projcard__title">2025 季度阅读笔记</h3>
+              <div class="projcard__path">~/Documents/wiki/reading-2025</div>
+            </div>
+          </div>
+          <div class="projcard__meta">
+            <span class="pill">个人成长</span>
+            <span>·</span>
+            <span>64 页</span>
+            <span>·</span>
+            <span>3 天前</span>
+          </div>
+        </a>
+
+        <a class="projcard" href="dashboard.html" data-search-row data-search-text="产品研究 · SaaS Tools saas-research 商业">
+          <div class="projcard__head">
+            <div class="projcard__mark" id="__pc4"></div>
+            <div style="flex:1;min-width:0;">
+              <h3 class="projcard__title">产品研究 · SaaS Tools</h3>
+              <div class="projcard__path">~/Documents/wiki/saas-research</div>
+            </div>
+          </div>
+          <div class="projcard__meta">
+            <span class="pill">商业</span>
+            <span>·</span>
+            <span>312 页</span>
+            <span>·</span>
+            <span>上周</span>
+          </div>
+        </a>
+
+        <a class="projcard" href="dashboard.html" data-search-row data-search-text="论文阅读 · Multimodal LLM papers-mm 研究">
+          <div class="projcard__head">
+            <div class="projcard__mark" id="__pc5"></div>
+            <div style="flex:1;min-width:0;">
+              <h3 class="projcard__title">论文阅读 · Multimodal LLM</h3>
+              <div class="projcard__path">~/Documents/wiki/papers-mm</div>
+            </div>
+          </div>
+          <div class="projcard__meta">
+            <span class="pill">研究</span>
+            <span>·</span>
+            <span>89 页</span>
+            <span>·</span>
+            <span>2 周前</span>
+          </div>
+        </a>
+
+        <a class="projcard" href="dashboard.html" data-search-row data-search-text="人生设计 · Career Notes life-design 个人成长">
+          <div class="projcard__head">
+            <div class="projcard__mark" id="__pc6"></div>
+            <div style="flex:1;min-width:0;">
+              <h3 class="projcard__title">人生设计 · Career Notes</h3>
+              <div class="projcard__path">~/Documents/wiki/life-design</div>
+            </div>
+          </div>
+          <div class="projcard__meta">
+            <span class="pill">个人成长</span>
+            <span>·</span>
+            <span>42 页</span>
+            <span>·</span>
+            <span>1 个月前</span>
+          </div>
+        </a>
+
+        <div data-search-empty style="display:none;grid-column:1/-1;" class="empty">
+          <div class="empty__icon" id="__empty_icon"></div>
+          <div class="empty__title">没有匹配的项目</div>
+          <div class="empty__desc">尝试调整关键词或筛选条件，或者新建一个项目。</div>
+        </div>
+      </div>
+    </main>
+
+    <aside class="launch__side">
+      <h3>已检测的 Agent CLI</h3>
+      <div class="agentmini">
+        <div class="agentmini__row">
+          <span class="dotstatus dotstatus--ok"></span>
+          <span class="agentmini__name">claude</span>
+          <span class="agentmini__ver">v1.0.23</span>
+          <span class="badge badge--accent" style="margin-left:auto;">默认</span>
+        </div>
+        <div class="agentmini__hint">/Users/you/.local/bin/claude</div>
+      </div>
+      <div class="agentmini">
+        <div class="agentmini__row">
+          <span class="dotstatus dotstatus--ok"></span>
+          <span class="agentmini__name">codex</span>
+          <span class="agentmini__ver">v0.8.1</span>
+        </div>
+        <div class="agentmini__hint">/opt/homebrew/bin/codex</div>
+      </div>
+      <div class="agentmini">
+        <div class="agentmini__row">
+          <span class="dotstatus dotstatus--err"></span>
+          <span class="agentmini__name">openclaw</span>
+          <span class="agentmini__ver">未检测到</span>
+        </div>
+        <div class="agentmini__hint">在 Settings → Agent 中查看安装引导</div>
+      </div>
+      <div class="agentmini">
+        <div class="agentmini__row">
+          <span class="dotstatus dotstatus--err"></span>
+          <span class="agentmini__name">hermes</span>
+          <span class="agentmini__ver">未检测到</span>
+        </div>
+      </div>
+
+      <h3 style="margin-top:24px;">BYOK 后备路径</h3>
+      <div class="agentmini">
+        <div class="agentmini__row">
+          <span class="dotstatus dotstatus--ok"></span>
+          <span class="agentmini__name">Anthropic</span>
+          <span class="agentmini__ver">claude-sonnet-4-6</span>
+        </div>
+        <div class="agentmini__hint">Key 已配置 · 钥匙串中保存</div>
+      </div>
+      <div class="agentmini">
+        <div class="agentmini__row">
+          <span class="dotstatus dotstatus--busy"></span>
+          <span class="agentmini__name">OpenAI</span>
+          <span class="agentmini__ver">未配置</span>
+        </div>
+        <div class="agentmini__hint">未配置 Agent 时作为后备路径</div>
+      </div>
+
+      <h3 style="margin-top:24px;">项目模板</h3>
+      <div class="templateside">
+        <div class="templateside__title">通用</div>
+        <div class="templateside__desc">空白 purpose.md + 基础 schema.md</div>
+      </div>
+      <div class="templateside">
+        <div class="templateside__title">研究</div>
+        <div class="templateside__desc">实体 / 概念 / 综合页面结构，强调引用溯源</div>
+      </div>
+      <div class="templateside">
+        <div class="templateside__title">读书</div>
+        <div class="templateside__desc">章节笔记、概念图、引用整理</div>
+      </div>
+      <div class="templateside">
+        <div class="templateside__title">个人成长</div>
+        <div class="templateside__desc">日记、目标、复盘、回顾</div>
+      </div>
+      <div class="templateside">
+        <div class="templateside__title">商业</div>
+        <div class="templateside__desc">竞品、客户、市场、决策记录</div>
+      </div>
+
+      <div style="margin-top:24px;padding:12px;background:var(--surface-muted);border-radius:var(--radius-md);font-size:11.5px;color:var(--text-muted);line-height:1.6;">
+        <strong style="color:var(--text-secondary);">提示</strong> · 普通文件夹可"打开为项目"，应用会按类型自动归档到 raw/sources/，并初始化 Git。
+      </div>
+    </aside>
+  </div>
+
+  <footer class="launch__bottom">
+    <span class="dotstatus dotstatus--ok"></span>
+    <span>应用就绪</span>
+    <span>·</span>
+    <span>2 个 Agent 可用</span>
+    <span>·</span>
+    <span>BYOK · Anthropic</span>
+    <span style="margin-left:auto;" id="__back_link"><a href="index.html" style="color:var(--text-muted);text-decoration:underline;text-underline-offset:2px;">← 返回设计预览总览</a></span>
+  </footer>
+</div>
+
+<!-- New project dialog -->
+<div class="dialog-overlay hidden" id="dlg-new">
+  <div class="dialog dialog--wide" role="dialog" aria-labelledby="dlg-new-title">
+    <div class="dialog__head">
+      <h2 class="dialog__title" id="dlg-new-title">新建项目</h2>
+      <button class="btn btn--ghost btn--icon btn--sm" data-dialog-close><svg class="ico"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dialog__body">
+      <div class="formrow">
+        <div>
+          <div class="formrow__label">项目名称</div>
+          <div class="formrow__hint">用于侧栏与最近列表</div>
+        </div>
+        <div class="formrow__control">
+          <input class="input" value="Agent Knowledge Base" />
+        </div>
+      </div>
+      <div class="formrow">
+        <div>
+          <div class="formrow__label">保存位置</div>
+          <div class="formrow__hint">应用会在此路径创建完整目录结构</div>
+        </div>
+        <div class="formrow__control">
+          <div class="input-group">
+            <span class="input-group__lead"><svg class="ico" style="width:14px;height:14px;"><use href="#i-folder"/></svg></span>
+            <input class="input input--mono" value="~/Documents/wiki/agent-llm" />
+            <span class="input-group__trail"><button class="btn btn--sm btn--ghost">选择…</button></span>
+          </div>
+        </div>
+      </div>
+      <div class="formrow">
+        <div>
+          <div class="formrow__label">项目模板</div>
+          <div class="formrow__hint">只影响 purpose.md / schema.md 的初始内容</div>
+        </div>
+        <div class="formrow__control">
+          <div class="seg" data-seg="tmpl">
+            <button class="is-active" data-key="research">研究</button>
+            <button data-key="reading">读书</button>
+            <button data-key="personal">个人成长</button>
+            <button data-key="business">商业</button>
+            <button data-key="general">通用</button>
+          </div>
+        </div>
+      </div>
+      <div class="formrow">
+        <div>
+          <div class="formrow__label">初始化 Git</div>
+          <div class="formrow__hint">创建首个检查点，便于后续回滚</div>
+        </div>
+        <div class="formrow__control">
+          <label class="checkbox"><input type="checkbox" checked /> 初始化 Git 仓库并创建初始提交</label>
+        </div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn" data-dialog-close>取消</button>
+      <button class="btn btn--primary" data-dialog-close onclick="location.href='dashboard.html'"><svg class="ico"><use href="#i-plus"/></svg>创建项目</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+<script>
+  // Brand marks for project cards (varied)
+  function mark(id, letter) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = letter;
+  }
+  mark('__pc1', 'A'); mark('__pc2', '深'); mark('__pc3', '2'); mark('__pc4', 'S'); mark('__pc5', '论'); mark('__pc6', '人');
+
+  // Quick action icons
+  document.getElementById('__qa_new').innerHTML = window.__icon('folder-add', 20);
+  document.getElementById('__qa_open').innerHTML = window.__icon('folder-open', 20);
+  document.getElementById('__qa_import').innerHTML = window.__icon('upload', 20);
+  document.getElementById('__empty_icon').innerHTML = window.__icon('search', 20);
+
+  // Nav buttons trigger dialog or alert
+  document.getElementById('__nav_new').addEventListener('click', function () {
+    document.getElementById('dlg-new').classList.remove('hidden');
+  });
+  document.getElementById('__nav_open').addEventListener('click', function () {
+    window.__toast('请选择文件夹', 'info');
+  });
+  document.getElementById('__nav_templates').addEventListener('click', function () {
+    window.__toast('模板已展开在右侧', 'info');
+  });
+</script>
+</body>
+</html>

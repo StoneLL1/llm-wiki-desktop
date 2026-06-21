@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 export interface ProviderSecretRow {
   provider: LlmProviderKind;
   hasSecret: boolean;
-  secretMask: string | null;
 }
 
 interface SecuritySettingsProps {
@@ -31,7 +30,7 @@ export function SecuritySettings({ providers, onDeleteSecret }: SecuritySettings
             <div>
               <div className="text-[13px] font-medium">{provider.provider}</div>
               <div className="mt-1 font-mono text-[11px] text-[var(--text-muted)]">
-                {provider.secretMask ?? t("settings.security.notConfigured")}
+                {provider.hasSecret ? t("provider.configured") : t("settings.security.notConfigured")}
               </div>
             </div>
             <button

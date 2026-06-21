@@ -1,27 +1,16 @@
-import { invoke } from "@tauri-apps/api/core";
 import i18next from "i18next";
 import { initReactI18next } from "react-i18next";
 
-import { defaultProject } from "../stores/projectStore";
 import type { Settings } from "../types/settings";
 import en from "./locales/en.json";
 import zhCN from "./locales/zh-CN.json";
 
-const hasTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const LANGUAGE_STORAGE_KEY = "llm-wiki-desktop.language";
 
 async function detectInitialLanguage(): Promise<Settings["language"]> {
-  if (!hasTauri()) {
-    return "en";
-  }
   try {
-    const settings = await invoke<Settings>("get_settings", {
-      request: {
-        projectId: defaultProject.projectId,
-        projectRootPath: defaultProject.rootPath,
-      },
-    });
-    return settings.language;
+    const language = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    return language === "zh-CN" ? "zh-CN" : "en";
   } catch {
     return "en";
   }

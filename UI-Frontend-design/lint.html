@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>Lint — LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .lint-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    height: 100%;
+    overflow: hidden;
+  }
+  .lint-list {
+    overflow-y: auto;
+    padding: 0;
+  }
+  .lint-detail {
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    overflow-y: auto;
+    padding: var(--sp-4);
+  }
+
+  .issue-card {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+    cursor: pointer;
+    transition: background var(--dur-fast) var(--ease);
+  }
+  .issue-card:hover { background: var(--surface-hover); }
+  .issue-card.is-selected { background: var(--accent-soft); border-left: 2px solid var(--accent); padding-left: 18px; }
+  .issue-card__icon {
+    display: grid; place-items: center;
+    color: var(--text-muted);
+  }
+  .issue-card__icon.is-err { color: var(--danger); }
+  .issue-card__icon.is-warn { color: var(--warning); }
+  .issue-card__icon.is-info { color: var(--info); }
+  .issue-card__icon.is-ok { color: var(--accent-hover); }
+  .issue-card__title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .issue-card__sub { font-size: 11.5px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px; }
+  .issue-card__tags { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--background);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="app no-right">
+  <header class="topbar">
+    <div class="topbar__brand"><div class="topbar__brand-mark">LW</div><div class="topbar__brand-name">LLM Wiki Desktop</div></div>
+    <button class="projswitch">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="按名称、标签、类型或来源搜索页面…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch"><button class="is-active">中</button><button>EN</button></div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span></a>
+        <a class="navitem" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span></a>
+        <a class="navitem is-active" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main__header">
+      <h1 class="main__title">Lint <span class="main__title-sub">· 4 个问题 · 1 待确认</span></h1>
+      <div class="main__toolbar">
+        <div class="seg" data-seg="lintmode">
+          <button class="is-active" data-key="all">全部 4</button>
+          <button data-key="local">本地 3</button>
+          <button data-key="deep">Agent 深度 1</button>
+        </div>
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-refresh"/></svg>重新检查</button>
+        <button class="btn btn--sm btn--primary"><svg class="ico-sm"><use href="#i-play"/></svg>自动修复 (3)</button>
+      </div>
+    </div>
+    <div class="main__body">
+      <div class="lint-layout">
+        <!-- Issue list -->
+        <div class="lint-list">
+          <!-- Summary cards -->
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;padding:16px 20px;border-bottom:1px solid var(--border-subtle);background:var(--surface);">
+            <div class="sumcard" style="padding:12px;">
+              <div class="sumcard__label">错误</div>
+              <div class="sumcard__value" style="color:var(--danger);font-size:22px;">2</div>
+              <div class="sumcard__hint">死链 · 必修</div>
+            </div>
+            <div class="sumcard" style="padding:12px;">
+              <div class="sumcard__label">警告</div>
+              <div class="sumcard__value" style="color:var(--warning);font-size:22px;">1</div>
+              <div class="sumcard__hint">待 Agent 确认</div>
+            </div>
+            <div class="sumcard" style="padding:12px;">
+              <div class="sumcard__label">建议</div>
+              <div class="sumcard__value" style="color:var(--info);font-size:22px;">1</div>
+              <div class="sumcard__hint">弱关联</div>
+            </div>
+            <div class="sumcard" style="padding:12px;">
+              <div class="sumcard__label">已通过</div>
+              <div class="sumcard__value" style="color:var(--accent-hover);font-size:22px;">5</div>
+              <div class="sumcard__hint">frontmatter · index · 路径</div>
+            </div>
+          </div>
+
+          <!-- Issue list -->
+          <div class="issue-card">
+            <div class="issue-card__icon is-err"><svg class="ico"><use href="#i-err"/></svg></div>
+            <div>
+              <div class="issue-card__title">死链 · missing.md</div>
+              <div class="issue-card__sub">wiki/entities/agent.md · 第 23 行 → [[missing]]</div>
+              <div class="issue-card__tags">
+                <span class="badge badge--danger">error</span>
+                <span class="badge">dead-link</span>
+                <span class="badge">local</span>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+              <span class="badge badge--outline">可自动</span>
+              <button class="btn btn--sm">修复</button>
+            </div>
+          </div>
+
+          <div class="issue-card">
+            <div class="issue-card__icon is-err"><svg class="ico"><use href="#i-err"/></svg></div>
+            <div>
+              <div class="issue-card__title">死链 · old-term.md</div>
+              <div class="issue-card__sub">wiki/concepts/deprecated.md · 第 47 行 → [[old-term]]</div>
+              <div class="issue-card__tags">
+                <span class="badge badge--danger">error</span>
+                <span class="badge">dead-link</span>
+                <span class="badge">local</span>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+              <span class="badge badge--outline">可自动</span>
+              <button class="btn btn--sm">修复</button>
+            </div>
+          </div>
+
+          <div class="issue-card is-selected">
+            <div class="issue-card__icon is-warn"><svg class="ico"><use href="#i-warn"/></svg></div>
+            <div>
+              <div class="issue-card__title">重复主题 · react-pattern ↔ react-looping</div>
+              <div class="issue-card__sub">相似度 0.91 · Agent 判定 · 建议合并或加 cross-ref</div>
+              <div class="issue-card__tags">
+                <span class="badge badge--warn">warning</span>
+                <span class="badge">duplicate-topic</span>
+                <span class="badge">agent-deep</span>
+                <span class="badge badge--danger">需确认</span>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+              <span class="badge badge--warn">高风险</span>
+              <button class="btn btn--sm">查看详情</button>
+            </div>
+          </div>
+
+          <div class="issue-card">
+            <div class="issue-card__icon is-info"><svg class="ico"><use href="#i-info"/></svg></div>
+            <div>
+              <div class="issue-card__title">弱交叉引用 · agent-memory ↔ tool-selection</div>
+              <div class="issue-card__sub">相似度 0.58 · Agent 建议增加 wikilink</div>
+              <div class="issue-card__tags">
+                <span class="badge badge--info">info</span>
+                <span class="badge">weak-link</span>
+                <span class="badge">agent-deep</span>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+              <span class="badge badge--outline">可自动</span>
+              <button class="btn btn--sm">修复</button>
+            </div>
+          </div>
+
+          <!-- Passed section -->
+          <div style="padding:12px 20px;background:var(--accent-soft);border-top:1px solid var(--accent-border);">
+            <div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--accent-hover);margin-bottom:8px;">已通过检查</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              <span class="badge badge--success"><svg class="ico-sm" style="width:11px;height:11px;"><use href="#i-check"/></svg>frontmatter 完整 · 237/237</span>
+              <span class="badge badge--success"><svg class="ico-sm" style="width:11px;height:11px;"><use href="#i-check"/></svg>index.md 与实际一致</span>
+              <span class="badge badge--success"><svg class="ico-sm" style="width:11px;height:11px;"><use href="#i-check"/></svg>无重复文件名</span>
+              <span class="badge badge--success"><svg class="ico-sm" style="width:11px;height:11px;"><use href="#i-check"/></svg>资源文件齐全</span>
+              <span class="badge badge--success"><svg class="ico-sm" style="width:11px;height:11px;"><use href="#i-check"/></svg>路径大小写一致</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detail panel -->
+        <div class="lint-detail">
+          <div class="rightpanel__section" style="padding-top:0;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+              <svg class="ico-xl" style="color:var(--warning);"><use href="#i-warn"/></svg>
+              <div>
+                <div style="font-size:14px;font-weight:600;">重复主题 · 需确认</div>
+                <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">react-pattern ↔ react-looping</div>
+              </div>
+            </div>
+            <dl class="rightpanel__meta">
+              <dt>类型</dt><dd style="color:var(--warning);">duplicate-topic</dd>
+              <dt>检测层</dt><dd>Agent 深度 Lint</dd>
+              <dt>相似度</dt><dd>0.91</dd>
+              <dt>建议</dt><dd>合并或加 cross-ref</dd>
+              <dt>风险</dt><dd style="color:var(--danger);">高 · 涉及删除</dd>
+            </dl>
+          </div>
+
+          <div class="rightpanel__section">
+            <h4 class="rightpanel__section-title">差异预览</h4>
+            <div class="diff" style="font-size:11px;">
+              <div class="diff__head">
+                <span>react-pattern.md</span>
+                <span style="margin-left:auto;">vs</span>
+                <span>react-looping.md</span>
+              </div>
+              <div class="diff__line diff__line--ctx"><span class="diff__line-no">1</span><span># ReAct Pattern</span></div>
+              <div class="diff__line diff__line--add"><span class="diff__line-no">1</span><span># React Looping</span></div>
+              <div class="diff__line diff__line--ctx"><span class="diff__line-no">3</span><span>ReAct = Reason + Act</span></div>
+              <div class="diff__line diff__line--del"><span class="diff__line-no">5</span><span>由 Yao et al. 2022 提出</span></div>
+              <div class="diff__line diff__line--add"><span class="diff__line-no">5</span><span>循环式推理与行动交替</span></div>
+              <div class="diff__line diff__line--ctx"><span class="diff__line-no">8</span><span>适用于工具调用密集任务</span></div>
+            </div>
+          </div>
+
+          <div class="rightpanel__section">
+            <h4 class="rightpanel__section-title">Agent 建议</h4>
+            <div style="padding:10px;background:var(--background);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary);line-height:1.6;">
+              两篇页面描述同一概念，<strong>建议合并到 react-pattern.md</strong>，将 react-looping.md 改为 cross-reference。如需保留独立页面，请在两篇中互相加 wikilink。
+            </div>
+          </div>
+
+          <div class="rightpanel__section">
+            <h4 class="rightpanel__section-title">修复方案</h4>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              <label class="check-row" style="cursor:pointer;background:var(--accent-soft);border-color:var(--accent-border);">
+                <input type="radio" name="fix" checked />
+                <div style="flex:1;">
+                  <div style="font-weight:500;color:var(--text-primary);">合并 · 删除 react-looping.md</div>
+                  <div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">+ 8 行迁移 · -1 文件 · cross-ref 添加</div>
+                </div>
+                <span class="badge badge--danger">高风险</span>
+              </label>
+              <label class="check-row" style="cursor:pointer;">
+                <input type="radio" name="fix" />
+                <div style="flex:1;">
+                  <div style="font-weight:500;">保留两篇 · 加 cross-ref</div>
+                  <div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">+ 2 wikilinks · 不删除</div>
+                </div>
+                <span class="badge badge--success">安全</span>
+              </label>
+              <label class="check-row" style="cursor:pointer;">
+                <input type="radio" name="fix" />
+                <div style="flex:1;">
+                  <div style="font-weight:500;">忽略本次</div>
+                  <div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">写入 lint-ignore · 后续不再报告</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="rightpanel__section">
+            <h4 class="rightpanel__section-title">安全检查</h4>
+            <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
+              <label class="checkbox"><input type="checkbox" checked /> 修复前创建 Git 检查点</label>
+              <label class="checkbox"><input type="checkbox" checked /> 修复后立即提交</label>
+              <label class="checkbox"><input type="checkbox" /> 完成后运行 Agent 重新编译相关页面</label>
+            </div>
+          </div>
+
+          <div class="rightpanel__section">
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn--sm btn--block">取消</button>
+              <button class="btn btn--sm btn--primary btn--block" onclick="window.__toast('修复已应用 · Git 已提交', 'ok')">应用修复</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--ok"></span>claude · 1.0.23</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">Lint · 4 问题 · 1 待确认</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">上次检查 2 分钟前</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">main · 3f8a9c2 · Git 已检查点</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">中文</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>知识图谱 — LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .main__body { padding: 0 !important; overflow: hidden; }
+  .graph-wrap {
+    height: 100%;
+    padding: var(--sp-4);
+    overflow: hidden;
+  }
+  .graph-canvas { height: 100%; }
+  .graph-svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  .graph-svg:active { cursor: grabbing; }
+  .graph-node {
+    cursor: pointer;
+    transition: r var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+  }
+  .graph-node-label {
+    font-family: var(--font-ui);
+    font-size: 10px;
+    fill: var(--text-secondary);
+    pointer-events: none;
+    user-select: none;
+    text-anchor: middle;
+  }
+  .graph-node-label.is-active { fill: var(--accent-hover); font-weight: 600; }
+  .graph-edge {
+    stroke: var(--border);
+    stroke-width: 0.5;
+    transition: stroke var(--dur-fast) var(--ease), stroke-width var(--dur-fast) var(--ease);
+  }
+  .graph-edge.is-active { stroke: var(--accent); stroke-width: 1.2; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar__brand"><div class="topbar__brand-mark">LW</div><div class="topbar__brand-name">LLM Wiki Desktop</div></div>
+    <button class="projswitch">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="搜索节点…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch"><button class="is-active">中</button><button>EN</button></div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem is-active" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span></a>
+        <a class="navitem" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span></a>
+        <a class="navitem" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main__header">
+      <h1 class="main__title">知识图谱 <span class="main__title-sub">· 237 节点 · 1,284 边 · ForceAtlas2</span></h1>
+      <div class="main__toolbar">
+        <div class="seg" data-seg="graphmode">
+          <button class="is-active" data-key="type">类型着色</button>
+          <button data-key="community">社区着色</button>
+          <button data-key="plain">单色</button>
+        </div>
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-refresh"/></svg>重新布局</button>
+        <button class="btn btn--sm btn--primary"><svg class="ico-sm"><use href="#i-export"/></svg>导出 SVG</button>
+      </div>
+    </div>
+    <div class="main__body">
+      <div class="graph-wrap">
+        <div class="graph-canvas">
+          <!-- Floating controls -->
+          <div class="graph-controls">
+            <button data-tip="放大"><svg class="ico"><use href="#i-plus"/></svg></button>
+            <button data-tip="缩小"><svg class="ico"><use href="#i-minus"/></svg></button>
+            <button data-tip="适配窗口"><svg class="ico"><use href="#i-grid"/></svg></button>
+            <button data-tip="重置布局"><svg class="ico"><use href="#i-refresh"/></svg></button>
+            <button data-tip="筛选" class="is-active"><svg class="ico"><use href="#i-filter"/></svg></button>
+          </div>
+
+          <!-- Info panel -->
+          <div class="graph-info">
+            <div>缩放 · 1.0×</div>
+            <div>选中 · Agent Memory Model</div>
+            <div>度数 · 12</div>
+          </div>
+
+          <!-- Legend -->
+          <div class="graph-legend">
+            <div class="graph-legend__title">类型</div>
+            <div class="graph-legend__row"><span class="swatch" style="background:#0d0d0d;"></span>Entity · 86</div>
+            <div class="graph-legend__row"><span class="swatch" style="background:#10a37f;"></span>Concept · 94</div>
+            <div class="graph-legend__row"><span class="swatch" style="background:#2563eb;"></span>Source · 142</div>
+            <div class="graph-legend__row"><span class="swatch" style="background:#f5a623;"></span>Synthesis · 15</div>
+            <div class="graph-legend__row"><span class="swatch" style="background:#9b9b9b;"></span>Comparison · 8</div>
+            <div class="graph-legend__row"><span class="swatch" style="background:#c4c4c4;"></span>Query · 12</div>
+          </div>
+
+          <!-- The graph itself (illustrative SVG) -->
+          <svg class="graph-svg" viewBox="0 0 1200 700" preserveAspectRatio="xMidYMid meet">
+            <!-- Edges -->
+            <g>
+              <!-- center node connects to many -->
+              <line class="graph-edge is-active" x1="600" y1="350" x2="430" y2="220"/>
+              <line class="graph-edge is-active" x1="600" y1="350" x2="780" y2="240"/>
+              <line class="graph-edge is-active" x1="600" y1="350" x2="460" y2="500"/>
+              <line class="graph-edge is-active" x1="600" y1="350" x2="760" y2="500"/>
+              <line class="graph-edge is-active" x1="600" y1="350" x2="600" y2="180"/>
+              <line class="graph-edge is-active" x1="600" y1="350" x2="280" y2="350"/>
+              <line class="graph-edge is-active" x1="600" y1="350" x2="920" y2="350"/>
+              <line class="graph-edge is-active" x1="600" y1="350" x2="600" y2="540"/>
+
+              <!-- between secondary nodes -->
+              <line class="graph-edge" x1="430" y1="220" x2="600" y2="180"/>
+              <line class="graph-edge" x1="430" y1="220" x2="280" y2="350"/>
+              <line class="graph-edge" x1="780" y1="240" x2="600" y2="180"/>
+              <line class="graph-edge" x1="780" y1="240" x2="920" y2="350"/>
+              <line class="graph-edge" x1="460" y1="500" x2="280" y2="350"/>
+              <line class="graph-edge" x1="460" y1="500" x2="600" y2="540"/>
+              <line class="graph-edge" x1="760" y1="500" x2="920" y2="350"/>
+              <line class="graph-edge" x1="760" y1="500" x2="600" y2="540"/>
+
+              <!-- tertiary -->
+              <line class="graph-edge" x1="430" y1="220" x2="320" y2="130"/>
+              <line class="graph-edge" x1="430" y1="220" x2="540" y2="80"/>
+              <line class="graph-edge" x1="780" y1="240" x2="660" y2="80"/>
+              <line class="graph-edge" x1="780" y1="240" x2="880" y2="140"/>
+              <line class="graph-edge" x1="280" y1="350" x2="160" y2="280"/>
+              <line class="graph-edge" x1="280" y1="350" x2="180" y2="440"/>
+              <line class="graph-edge" x1="920" y1="350" x2="1040" y2="280"/>
+              <line class="graph-edge" x1="920" y1="350" x2="1020" y2="440"/>
+              <line class="graph-edge" x1="460" y1="500" x2="320" y2="620"/>
+              <line class="graph-edge" x1="460" y1="500" x2="540" y2="650"/>
+              <line class="graph-edge" x1="760" y1="500" x2="660" y2="650"/>
+              <line class="graph-edge" x1="760" y1="500" x2="880" y2="620"/>
+              <line class="graph-edge" x1="600" y1="540" x2="540" y2="650"/>
+              <line class="graph-edge" x1="600" y1="540" x2="660" y2="650"/>
+
+              <!-- within community -->
+              <line class="graph-edge" x1="160" y1="280" x2="180" y2="440"/>
+              <line class="graph-edge" x1="1040" y1="280" x2="1020" y2="440"/>
+              <line class="graph-edge" x1="320" y1="620" x2="540" y2="650"/>
+              <line class="graph-edge" x1="660" y1="650" x2="880" y2="620"/>
+              <line class="graph-edge" x1="320" y1="130" x2="540" y2="80"/>
+              <line class="graph-edge" x1="660" y1="80" x2="880" y2="140"/>
+
+              <!-- cross links -->
+              <line class="graph-edge" x1="280" y1="350" x2="600" y2="540"/>
+              <line class="graph-edge" x1="920" y1="350" x2="600" y2="180"/>
+              <line class="graph-edge" x1="780" y1="240" x2="760" y2="500"/>
+              <line class="graph-edge" x1="430" y1="220" x2="460" y2="500"/>
+            </g>
+
+            <!-- Nodes -->
+            <g>
+              <!-- center: Agent Memory Model -->
+              <circle class="graph-node" cx="600" cy="350" r="14" fill="#10a37f" stroke="#0a7a5e" stroke-width="2"/>
+              <text class="graph-node-label is-active" x="600" y="380">Agent Memory Model</text>
+
+              <!-- level 1 -->
+              <circle class="graph-node" cx="430" cy="220" r="9" fill="#10a37f"/>
+              <text class="graph-node-label" x="430" y="240">ReAct Pattern</text>
+
+              <circle class="graph-node" cx="780" cy="240" r="9" fill="#10a37f"/>
+              <text class="graph-node-label" x="780" y="260">Plan-and-Execute</text>
+
+              <circle class="graph-node" cx="460" cy="500" r="9" fill="#10a37f"/>
+              <text class="graph-node-label" x="460" y="520">Reflection</text>
+
+              <circle class="graph-node" cx="760" cy="500" r="9" fill="#10a37f"/>
+              <text class="graph-node-label" x="760" y="520">RAG</text>
+
+              <circle class="graph-node" cx="600" cy="180" r="8" fill="#10a37f"/>
+              <text class="graph-node-label" x="600" y="166">Tool Selection</text>
+
+              <circle class="graph-node" cx="280" cy="350" r="10" fill="#0d0d0d"/>
+              <text class="graph-node-label" x="280" y="370">Anthropic Claude</text>
+
+              <circle class="graph-node" cx="920" cy="350" r="10" fill="#0d0d0d"/>
+              <text class="graph-node-label" x="920" y="370">OpenAI GPT</text>
+
+              <circle class="graph-node" cx="600" cy="540" r="8" fill="#f5a623"/>
+              <text class="graph-node-label" x="600" y="560">Memory Landscape</text>
+
+              <!-- level 2 -->
+              <circle class="graph-node" cx="320" cy="130" r="6" fill="#10a37f"/>
+              <circle class="graph-node" cx="540" cy="80" r="5" fill="#10a37f"/>
+              <circle class="graph-node" cx="660" cy="80" r="5" fill="#10a37f"/>
+              <circle class="graph-node" cx="880" cy="140" r="6" fill="#10a37f"/>
+              <circle class="graph-node" cx="160" cy="280" r="6" fill="#0d0d0d"/>
+              <circle class="graph-node" cx="180" cy="440" r="6" fill="#0d0d0d"/>
+              <circle class="graph-node" cx="1040" cy="280" r="6" fill="#0d0d0d"/>
+              <circle class="graph-node" cx="1020" cy="440" r="6" fill="#0d0d0d"/>
+              <circle class="graph-node" cx="320" cy="620" r="5" fill="#2563eb"/>
+              <circle class="graph-node" cx="540" cy="650" r="5" fill="#2563eb"/>
+              <circle class="graph-node" cx="660" cy="650" r="5" fill="#2563eb"/>
+              <circle class="graph-node" cx="880" cy="620" r="5" fill="#2563eb"/>
+
+              <!-- scattered smaller -->
+              <circle class="graph-node" cx="80" cy="180" r="3" fill="#c4c4c4"/>
+              <circle class="graph-node" cx="1100" cy="180" r="3" fill="#c4c4c4"/>
+              <circle class="graph-node" cx="100" cy="540" r="3" fill="#c4c4c4"/>
+              <circle class="graph-node" cx="1080" cy="540" r="3" fill="#c4c4c4"/>
+              <circle class="graph-node" cx="220" cy="80" r="4" fill="#9b9b9b"/>
+              <circle class="graph-node" cx="980" cy="80" r="4" fill="#9b9b9b"/>
+              <circle class="graph-node" cx="240" cy="620" r="4" fill="#9b9b9b"/>
+              <circle class="graph-node" cx="960" cy="620" r="4" fill="#9b9b9b"/>
+            </g>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="rightpanel">
+    <div class="rightpanel__header">
+      <span class="rightpanel__title">选中节点</span>
+      <button class="btn btn--ghost btn--icon btn--sm" data-right-toggle data-tip="折叠"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+    <div class="rightpanel__body">
+      <div class="rightpanel__section">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+          <div style="width:28px;height:28px;border-radius:var(--radius-md);background:var(--accent-soft);color:var(--accent-hover);display:grid;place-items:center;">
+            <svg class="ico"><use href="#i-file-md"/></svg>
+          </div>
+          <div>
+            <div style="font-size:14px;font-weight:600;">Agent Memory Model</div>
+            <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">wiki/concepts/agent-memory.md</div>
+          </div>
+        </div>
+        <dl class="rightpanel__meta">
+          <dt>类型</dt><dd style="color:var(--accent-hover);">concept</dd>
+          <dt>度数</dt><dd>12 反链</dd>
+          <dt>社区</dt><dd>Community #3 · 24 节点</dd>
+          <dt>中心度</dt><dd>0.084 · Top 5%</dd>
+          <dt>更新</dt><dd>2 分钟前</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">相邻节点 <span style="font-family:var(--font-mono);color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;margin-left:4px;">12</span></h4>
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <a class="relpage" href="wiki.html"><svg class="relpage__icon"><use href="#i-file-md"/></svg><span class="relpage__title">ReAct Pattern</span><span class="badge" style="height:14px;padding:0 5px;font-size:9.5px;">concept</span></a>
+          <a class="relpage" href="wiki.html"><svg class="relpage__icon"><use href="#i-file-md"/></svg><span class="relpage__title">Plan-and-Execute</span><span class="badge" style="height:14px;padding:0 5px;font-size:9.5px;">concept</span></a>
+          <a class="relpage" href="wiki.html"><svg class="relpage__icon"><use href="#i-file-md"/></svg><span class="relpage__title">Reflection</span><span class="badge" style="height:14px;padding:0 5px;font-size:9.5px;">concept</span></a>
+          <a class="relpage" href="wiki.html"><svg class="relpage__icon"><use href="#i-file-md"/></svg><span class="relpage__title">RAG</span><span class="badge" style="height:14px;padding:0 5px;font-size:9.5px;">concept</span></a>
+          <a class="relpage" href="wiki.html"><svg class="relpage__icon"><use href="#i-file-md"/></svg><span class="relpage__title">Anthropic Claude</span><span class="badge badge--dark" style="height:14px;padding:0 5px;font-size:9.5px;">entity</span></a>
+          <a class="relpage" href="wiki.html"><svg class="relpage__icon"><use href="#i-file-md"/></svg><span class="relpage__title">OpenAI GPT</span><span class="badge badge--dark" style="height:14px;padding:0 5px;font-size:9.5px;">entity</span></a>
+          <a class="relpage" href="wiki.html"><svg class="relpage__icon"><use href="#i-file-md"/></svg><span class="relpage__title">Memory Landscape</span><span class="badge badge--warn" style="height:14px;padding:0 5px;font-size:9.5px;">synthesis</span></a>
+        </div>
+        <a href="wiki.html" style="display:block;text-align:center;padding:8px;font-size:11.5px;color:var(--accent-hover);">查看全部 12 个 →</a>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">图谱状态</h4>
+        <dl class="rightpanel__meta">
+          <dt>节点</dt><dd>237</dd>
+          <dt>边</dt><dd>1,284</dd>
+          <dt>社区</dt><dd>18 (Louvain)</dd>
+          <dt>布局</dt><dd>ForceAtlas2 · 已缓存</dd>
+          <dt>缓存</dt><dd>.app/graph-cache.json</dd>
+          <dt>构建耗时</dt><dd>1.4s</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">筛选</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <label class="checkbox"><input type="checkbox" checked /> 显示实体节点 (86)</label>
+          <label class="checkbox"><input type="checkbox" checked /> 显示概念节点 (94)</label>
+          <label class="checkbox"><input type="checkbox" checked /> 显示来源节点 (142)</label>
+          <label class="checkbox"><input type="checkbox" /> 显示综合节点 (15)</label>
+          <label class="checkbox"><input type="checkbox" /> 显示对比节点 (8)</label>
+          <label class="checkbox"><input type="checkbox" /> 显示查询节点 (12)</label>
+        </div>
+        <div style="margin-top:10px;font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">
+          隐藏度数 ≤ <input type="range" min="0" max="20" value="0" style="vertical-align:middle;width:80px;" />
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">操作</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <a href="wiki.html" class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-arrow-r"/></svg>打开页面</a>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-export"/></svg>导出 SVG / PNG</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-refresh"/></svg>重新计算布局</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--ok"></span>图谱已缓存</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">类型着色 · ForceAtlas2</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">237 节点 · 1,284 边 · 18 社区</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">main · 3f8a9c2</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">中文</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

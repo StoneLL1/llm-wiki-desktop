@@ -6,17 +6,27 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::models::task::{BackendTask, TaskProgress, TaskResult, TaskStatus, TaskType};
+use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
 use crate::tasks::task_events::EventBus;
 use crate::tasks::task_model::{
     validate_transition, CancellationToken, LogLevel, LogLine, TaskEntry,
 };
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedTaskEntry {
+    task: BackendTask,
+    #[serde(default)]
+    log_lines: Vec<LogLine>,
+}
+
 pub struct TaskService {
     tasks: RwLock<HashMap<String, TaskEntry>>,
     cancellation: CancellationRegistry,
     event_bus: RwLock<EventBus>,
     project_root: RwLock<Option<PathBuf>>,
+    task_roots: RwLock<HashMap<String, PathBuf>>,
 }
 
 impl Default for TaskService {
@@ -26,6 +36,7 @@ impl Default for TaskService {
             cancellation: CancellationRegistry::new(),
             event_bus: RwLock::new(EventBus::new_noop()),
             project_root: RwLock::new(None),
+            task_roots: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -37,6 +48,7 @@ impl TaskService {
             cancellation: CancellationRegistry::new(),
             event_bus: RwLock::new(event_bus),
             project_root: RwLock::new(None),
+            task_roots: RwLock::new(HashMap::new()),
         }
     }
 
@@ -47,20 +59,18 @@ impl TaskService {
 
     /// Set the active project root. When set, terminal task transitions auto-persist to
     /// `<root>/.app/tasks/<id>.json`, and any previously-persisted tasks are recovered.
-    /// Pass `None` when the project is closed. The in-memory task cache and cancellation
-    /// registry are cleared on every call, since tasks are project-scoped — switching
-    /// projects must not leak the previous project's tasks into `list_tasks`.
+    /// Pass `None` when the project is closed. In-memory tasks and cancellation tokens
+    /// remain global for the process so work from a previous project stays visible and
+    /// cancellable while the user switches projects.
     pub fn set_project_root(&self, root: Option<PathBuf>) -> Result<Vec<BackendTask>, String> {
         {
             let mut guard = self.project_root.write().expect("lock poisoned");
             *guard = root.clone();
         }
-        self.tasks.write().expect("lock poisoned").clear();
-        self.cancellation.clear();
-        match root {
-            Some(root_path) => self.recover_tasks(&root_path),
-            None => Ok(Vec::new()),
+        if let Some(root_path) = root {
+            self.recover_tasks(&root_path)?;
         }
+        Ok(self.list_tasks(None))
     }
 
     pub fn current_project_root(&self) -> Option<PathBuf> {
@@ -87,6 +97,44 @@ impl TaskService {
         title: String,
         cancellable: bool,
     ) -> BackendTask {
+        self.create_task_internal(
+            task_type,
+            project_id,
+            self.current_project_root(),
+            title,
+            cancellable,
+            false,
+        )
+        .expect("non-project task creation cannot require persistence")
+    }
+
+    pub fn create_project_task(
+        &self,
+        task_type: TaskType,
+        project_id: String,
+        project_root: PathBuf,
+        title: String,
+        cancellable: bool,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            task_type,
+            Some(project_id),
+            Some(project_root),
+            title,
+            cancellable,
+            true,
+        )
+    }
+
+    fn create_task_internal(
+        &self,
+        task_type: TaskType,
+        project_id: Option<String>,
+        project_root: Option<PathBuf>,
+        title: String,
+        cancellable: bool,
+        require_persistence: bool,
+    ) -> Result<BackendTask, String> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let token = self.cancellation.register(&id);
@@ -118,11 +166,26 @@ impl TaskService {
             .write()
             .expect("lock poisoned")
             .insert(id.clone(), entry);
+        if let Some(root) = project_root {
+            self.task_roots
+                .write()
+                .expect("lock poisoned")
+                .insert(id.clone(), root);
+        }
+        if let Err(error) = self.persist_current_task(&id) {
+            if require_persistence {
+                self.tasks.write().expect("lock poisoned").remove(&id);
+                self.task_roots.write().expect("lock poisoned").remove(&id);
+                self.cancellation.remove(&id);
+                return Err(error);
+            }
+            eprintln!("Failed to persist new task {}: {}", id, error);
+        }
 
         use crate::models::task::BackendEventType::TaskUpdated;
         self.emit(TaskUpdated, project_id, Some(id.clone()), task.clone());
 
-        task
+        Ok(task)
     }
 
     pub fn get_task(&self, id: &str) -> Option<BackendTask> {
@@ -182,17 +245,7 @@ impl TaskService {
         drop(tasks);
         self.emit(event_type, pid.clone(), Some(tid.clone()), task.clone());
 
-        // Auto-persist on terminal transitions when a project root is bound.
-        if matches!(
-            new_status,
-            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
-        ) {
-            if let Some(root) = self.current_project_root() {
-                if let Err(e) = self.persist_task(&tid, &root) {
-                    eprintln!("Failed to auto-persist task {}: {}", tid, e);
-                }
-            }
-        }
+        self.persist_current_task(&tid)?;
 
         Ok(task)
     }
@@ -223,6 +276,7 @@ impl TaskService {
         drop(tasks);
         use crate::models::task::BackendEventType::TaskUpdated;
         self.emit(TaskUpdated, pid, Some(tid), task.clone());
+        self.persist_current_task(id)?;
 
         Ok(task)
     }
@@ -247,6 +301,7 @@ impl TaskService {
         drop(tasks);
         use crate::models::task::BackendEventType::TaskLog;
         self.emit(TaskLog, pid, Some(tid), line);
+        self.persist_current_task(id)?;
 
         Ok(())
     }
@@ -307,6 +362,7 @@ impl TaskService {
             Some(tid),
             task.clone(),
         );
+        self.persist_current_task(id)?;
         Ok(task)
     }
 
@@ -321,7 +377,10 @@ impl TaskService {
             .ok_or_else(|| format!("Task not found: {}", id))?;
         entry.task.error = Some(error);
         entry.task.updated_at = Utc::now().to_rfc3339();
-        Ok(entry.task.clone())
+        let task = entry.task.clone();
+        drop(tasks);
+        self.persist_current_task(id)?;
+        Ok(task)
     }
 
     pub fn get_cancellation_token(&self, id: &str) -> Option<CancellationToken> {
@@ -336,6 +395,7 @@ impl TaskService {
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let before = tasks.len();
         let mut removed_ids = Vec::new();
+        let mut removed_paths = Vec::new();
         tasks.retain(|id, entry| {
             let is_terminal = matches!(
                 entry.task.status,
@@ -343,6 +403,9 @@ impl TaskService {
             );
             if is_terminal {
                 removed_ids.push(id.clone());
+                if let Some(path) = &entry.persisted_path {
+                    removed_paths.push(path.clone());
+                }
             }
             !is_terminal
         });
@@ -351,12 +414,12 @@ impl TaskService {
         for id in &removed_ids {
             self.cancellation.remove(id);
         }
-        if let Some(root) = self.current_project_root() {
-            let tasks_dir = root.join(".app").join("tasks");
-            for id in &removed_ids {
-                let path = tasks_dir.join(format!("{}.json", id));
-                let _ = std::fs::remove_file(&path);
-            }
+        self.task_roots
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !removed_ids.contains(id));
+        for path in removed_paths {
+            let _ = std::fs::remove_file(path);
         }
 
         before - tasks.len()
@@ -373,9 +436,13 @@ impl TaskService {
             .map_err(|e| format!("Failed to create tasks dir: {}", e))?;
 
         let path = tasks_dir.join(format!("{}.json", id));
-        let json = serde_json::to_string_pretty(&entry.task)
-            .map_err(|e| format!("Failed to serialize task: {}", e))?;
-        std::fs::write(&path, json).map_err(|e| format!("Failed to write task file: {}", e))?;
+        let persisted = PersistedTaskEntry {
+            task: entry.task.clone(),
+            log_lines: entry.log_lines.clone(),
+        };
+        FileStore
+            .write_json_atomic_absolute(&path, &persisted)
+            .map_err(|error| format!("Failed to write task file: {}", error.message))?;
 
         drop(tasks);
         let mut tasks = self.tasks.write().expect("lock poisoned");
@@ -384,6 +451,20 @@ impl TaskService {
         }
 
         Ok(())
+    }
+
+    fn persist_current_task(&self, id: &str) -> Result<(), String> {
+        let root = self
+            .task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned()
+            .or_else(|| self.current_project_root());
+        match root {
+            Some(root) => self.persist_task(id, &root),
+            None => Ok(()),
+        }
     }
 
     pub fn recover_tasks(&self, project_root: &Path) -> Result<Vec<BackendTask>, String> {
@@ -401,44 +482,60 @@ impl TaskService {
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 match std::fs::read_to_string(&path) {
-                    Ok(json) => match serde_json::from_str::<BackendTask>(&json) {
-                        Ok(mut task) => {
-                            let token = self.cancellation.register(&task.id);
-                            if matches!(
-                                task.status,
-                                TaskStatus::Running
-                                    | TaskStatus::Queued
-                                    | TaskStatus::Cancelling
-                                    | TaskStatus::WaitingForConfirmation
-                            ) {
-                                task.status = TaskStatus::Failed;
-                                task.error = Some(crate::errors::BackendError::new(
-                                    "TASK_RECOVERY",
-                                    "Task was interrupted by application restart",
-                                    true,
-                                    false,
-                                ));
-                                task.completed_at = Some(Utc::now().to_rfc3339());
-                                task.updated_at = Utc::now().to_rfc3339();
+                    Ok(json) => {
+                        let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
+                            .map(|entry| (entry.task, entry.log_lines))
+                            .or_else(|_| {
+                                serde_json::from_str::<BackendTask>(&json)
+                                    .map(|task| (task, Vec::new()))
+                            });
+                        match parsed {
+                            Ok((mut task, log_lines)) => {
+                                if let Some(existing) = self.get_task(&task.id) {
+                                    recovered.push(existing);
+                                    continue;
+                                }
+                                let token = self.cancellation.register(&task.id);
+                                if matches!(
+                                    task.status,
+                                    TaskStatus::Running
+                                        | TaskStatus::Queued
+                                        | TaskStatus::Cancelling
+                                        | TaskStatus::WaitingForConfirmation
+                                ) {
+                                    task.status = TaskStatus::Failed;
+                                    task.error = Some(crate::errors::BackendError::new(
+                                        "TASK_RECOVERY",
+                                        "Task was interrupted by application restart",
+                                        true,
+                                        false,
+                                    ));
+                                    task.completed_at = Some(Utc::now().to_rfc3339());
+                                    task.updated_at = Utc::now().to_rfc3339();
+                                }
+
+                                let task_entry = TaskEntry {
+                                    task: task.clone(),
+                                    cancellation: token,
+                                    log_lines,
+                                    persisted_path: Some(path),
+                                };
+
+                                self.tasks
+                                    .write()
+                                    .expect("lock poisoned")
+                                    .insert(task.id.clone(), task_entry);
+                                self.task_roots
+                                    .write()
+                                    .expect("lock poisoned")
+                                    .insert(task.id.clone(), project_root.to_path_buf());
+                                recovered.push(task);
                             }
-
-                            let task_entry = TaskEntry {
-                                task: task.clone(),
-                                cancellation: token,
-                                log_lines: Vec::new(),
-                                persisted_path: Some(path),
-                            };
-
-                            self.tasks
-                                .write()
-                                .expect("lock poisoned")
-                                .insert(task.id.clone(), task_entry);
-                            recovered.push(task);
+                            Err(e) => {
+                                eprintln!("Failed to parse task file {}: {}", path.display(), e);
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Failed to parse task file {}: {}", path.display(), e);
-                        }
-                    },
+                    }
                     Err(e) => {
                         eprintln!("Failed to read task file {}: {}", path.display(), e);
                     }
@@ -720,6 +817,9 @@ mod tests {
             service
                 .transition_status(&t1.id, TaskStatus::Running)
                 .unwrap();
+            service
+                .append_log(&t1.id, LogLevel::Info, "started import".to_string())
+                .unwrap();
             service.persist_task(&t1.id, &temp).unwrap();
 
             let t2 = service.create_task(
@@ -765,6 +865,10 @@ mod tests {
                 .unwrap();
             assert_eq!(r1.status, TaskStatus::Failed);
             assert!(r1.error.is_some());
+            assert_eq!(
+                service2.get_logs(&r1.id).unwrap()[0].message,
+                "started import"
+            );
 
             // Succeeded task should stay Succeeded
             let r2 = service2
@@ -784,9 +888,79 @@ mod tests {
     }
 
     #[test]
-    fn test_set_project_root_clears_previous_tasks() {
-        // Tasks are project-scoped: switching the active project root must not leak the
-        // previous project's in-memory tasks (or cancellation tokens) into list_tasks.
+    fn test_running_task_state_and_logs_persist_before_terminal_status() {
+        let temp =
+            std::env::temp_dir().join(format!("llm-wiki-task-test-live-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let (service, _events) = make_service();
+        service.set_project_root(Some(temp.clone())).unwrap();
+        let task = service.create_task(
+            TaskType::Import,
+            Some("project-live".to_string()),
+            "Live import".to_string(),
+            true,
+        );
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .append_log(&task.id, LogLevel::Info, "copying sources".to_string())
+            .unwrap();
+
+        let persisted = temp.join(".app/tasks").join(format!("{}.json", task.id));
+        assert!(
+            persisted.exists(),
+            "running tasks must be durable before completion"
+        );
+
+        let (restarted, _events) = make_service();
+        restarted.recover_tasks(&temp).unwrap();
+        assert_eq!(
+            restarted.get_task(&task.id).unwrap().status,
+            TaskStatus::Failed
+        );
+        assert_eq!(
+            restarted.get_logs(&task.id).unwrap()[0].message,
+            "copying sources"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_project_task_root_is_bound_explicitly_not_from_ambient_active_project() {
+        let project_a = std::env::temp_dir().join(format!("task-root-a-{}", Uuid::new_v4()));
+        let project_b = std::env::temp_dir().join(format!("task-root-b-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        let (service, _events) = make_service();
+        service.set_project_root(Some(project_a.clone())).unwrap();
+
+        let task = service
+            .create_project_task(
+                TaskType::Export,
+                "project-b".to_string(),
+                project_b.clone(),
+                "B export".to_string(),
+                true,
+            )
+            .unwrap();
+
+        assert!(project_b
+            .join(".app/tasks")
+            .join(format!("{}.json", task.id))
+            .exists());
+        assert!(!project_a
+            .join(".app/tasks")
+            .join(format!("{}.json", task.id))
+            .exists());
+        let _ = std::fs::remove_dir_all(project_a);
+        let _ = std::fs::remove_dir_all(project_b);
+    }
+
+    #[test]
+    fn test_switching_project_keeps_running_tasks_visible_cancellable_and_scoped() {
         let proj_a = std::env::temp_dir().join("llm-wiki-task-test-isolation-a");
         let proj_b = std::env::temp_dir().join("llm-wiki-task-test-isolation-b");
         let _ = std::fs::remove_dir_all(&proj_a);
@@ -808,28 +982,41 @@ mod tests {
         let token_a = service.get_cancellation_token(&task_a.id).unwrap();
         assert_eq!(service.list_tasks(None).len(), 1);
 
-        // Switch to project B: cache must be cleared, no A tasks visible.
+        // Switch to project B: A keeps running in the background and must remain
+        // visible and cancellable from the global task center.
         let recovered_b = service.set_project_root(Some(proj_b.clone())).unwrap();
-        assert!(recovered_b.is_empty());
-        assert!(service.list_tasks(None).is_empty());
-        // The previous project's cancellation token must no longer be tracked.
-        assert!(service.get_cancellation_token(&task_a.id).is_none());
-        // The shared AtomicBool behind the stale token is unaffected (still readable),
-        // but it is no longer reachable through the registry — i.e. switching projects
-        // cannot cancel the previous project's still-running work.
-        assert!(!token_a.is_cancelled());
+        assert_eq!(recovered_b.len(), 1);
+        assert_eq!(service.list_tasks(None).len(), 1);
+        assert!(service.get_cancellation_token(&task_a.id).is_some());
+        let returned_to_a = service.set_project_root(Some(proj_a.clone())).unwrap();
+        assert_eq!(returned_to_a.len(), 1);
+        assert_eq!(
+            service.get_task(&task_a.id).unwrap().status,
+            TaskStatus::Running
+        );
+        assert!(service.cancel_task(&task_a.id).is_ok());
+        assert!(token_a.is_cancelled());
+        assert!(proj_a
+            .join(".app/tasks")
+            .join(format!("{}.json", task_a.id))
+            .exists());
+        assert!(!proj_b
+            .join(".app/tasks")
+            .join(format!("{}.json", task_a.id))
+            .exists());
 
-        // Create a task in project B; it must coexist with neither A task.
+        // Project B tasks coexist with A tasks.
         let task_b =
             service.create_task(TaskType::Export, None, "Project B export".to_string(), true);
         let listed = service.list_tasks(None);
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, task_b.id);
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|task| task.id == task_b.id));
+        assert!(listed.iter().any(|task| task.id == task_a.id));
 
-        // Closing the project (None) must also clear the cache.
+        // Closing the workspace must not make background work disappear.
         let recovered_none = service.set_project_root(None).unwrap();
-        assert!(recovered_none.is_empty());
-        assert!(service.list_tasks(None).is_empty());
+        assert_eq!(recovered_none.len(), 2);
+        assert_eq!(service.list_tasks(None).len(), 2);
 
         let _ = std::fs::remove_dir_all(&proj_a);
         let _ = std::fs::remove_dir_all(&proj_b);

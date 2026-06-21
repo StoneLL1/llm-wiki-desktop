@@ -88,6 +88,7 @@ export interface ApplyLintFixRequest {
   issue: LintIssue;
   confirmHighRisk: boolean;
   expectedHash?: string | null;
+  actionId?: string | null;
 }
 
 /** Inline high-risk confirm surfaced when a fix returns needs_confirmation. */

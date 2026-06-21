@@ -20,6 +20,22 @@ const pendingAction: PendingAction = {
 };
 
 describe("ConfirmationDialog", () => {
+  it("moves focus into the modal and lets Escape cancel", () => {
+    const onCancel = vi.fn();
+    render(
+      <ConfirmationDialog
+        action={pendingAction}
+        checkpointExists={false}
+        onCancel={onCancel}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("shows risk, checkpoint state, affected paths, and keeps cancel available", () => {
     const onCancel = vi.fn();
     const onConfirm = vi.fn();

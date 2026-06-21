@@ -1,10 +1,7 @@
-use std::path::PathBuf;
-
 use tauri::State;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::paths::ProjectContext;
 use crate::models::search::{SearchRequest, SearchResponse};
 
 /// Full-text wiki search (keyword + type/tag/source filters, scoring, snippet).
@@ -19,10 +16,6 @@ pub fn search_wiki(
     state: State<'_, AppState>,
     request: SearchRequest,
 ) -> Result<SearchResponse, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.search_service.search(&context, &request)
-}
-
-fn context_from_request(project_id: &str, root_path: &str) -> ProjectContext {
-    ProjectContext::new(project_id.to_string(), PathBuf::from(root_path))
 }

@@ -62,7 +62,7 @@ export function LlmProviderSettings({ providers, onSaveProvider, onSaveSecret, o
           {providerKinds.map((kind) => {
             const status = providers.find((item) => item.config.provider === kind);
             return <button key={kind} type="button" onClick={() => selectProvider(kind)} className="grid min-h-[44px] grid-cols-[120px_1fr_auto] items-center gap-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] px-3 text-left text-[12px]">
-              <span className="font-semibold">{kind}</span><span className="font-mono text-[11px] text-[var(--text-muted)]">{status?.config.model || t("provider.notConfigured")}</span><span>{status?.secretMask || (status?.hasSecret ? t("provider.configured") : t("provider.noKey"))}</span>
+              <span className="font-semibold">{kind}</span><span className="font-mono text-[11px] text-[var(--text-muted)]">{status?.config.model || t("provider.notConfigured")}</span><span>{status?.hasSecret ? t("provider.configured") : t("provider.noKey")}</span>
             </button>;
           })}
         </div>

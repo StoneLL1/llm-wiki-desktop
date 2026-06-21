@@ -16,10 +16,6 @@ use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::{AgentService, ExportService, LlmService};
 use crate::tasks::task_model::LogLevel;
 
-fn context_for(project_id: &str, root_path: &str) -> ProjectContext {
-    ProjectContext::new(project_id, PathBuf::from(root_path))
-}
-
 /// Derive a human title for the record from the source page (or the export
 /// type when project-wide). Kept tiny so the record stays meaningful in the UI
 /// list without an extra model round-trip.
@@ -66,7 +62,8 @@ pub fn start_export(
     state: State<'_, AppState>,
     request: StartExportRequest,
 ) -> Result<BackendTask, BackendError> {
-    run_export_task(app, state, request.into())
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    run_export_task(app, state, request.into(), context)
 }
 
 /// Regenerate an export from an existing record's type + source.
@@ -76,25 +73,31 @@ pub fn regenerate_export(
     state: State<'_, AppState>,
     request: RegenerateExportRequest,
 ) -> Result<BackendTask, BackendError> {
-    run_export_task(app, state, request.into_directive())
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    run_export_task(app, state, request.into_directive(), context)
 }
 
 fn run_export_task(
     app: AppHandle,
     state: State<'_, AppState>,
     directive: ExportDirective,
+    context: ProjectContext,
 ) -> Result<BackendTask, BackendError> {
     let project_id = directive.project_id.clone();
-    let task = state.task_service.create_task(
-        TaskType::Export,
-        Some(project_id.clone()),
-        format!("{:?} export", directive.export_type),
-        true,
-    );
+    let task = state
+        .task_service
+        .create_project_task(
+            TaskType::Export,
+            project_id.clone(),
+            context.root.clone(),
+            format!("{:?} export", directive.export_type),
+            true,
+        )
+        .map_err(task_error)?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if let Err(error) = run_export(&state, directive, &task_id).await {
+        if let Err(error) = run_export(&state, directive, &context, &task_id).await {
             let _ = state
                 .task_service
                 .append_log(&task_id, LogLevel::Error, error.message.clone());
@@ -116,7 +119,6 @@ fn run_export_task(
 /// share one task body.
 struct ExportDirective {
     project_id: String,
-    project_root_path: String,
     export_type: ExportType,
     source_path: Option<String>,
     route: ExportRoutePreference,
@@ -128,7 +130,6 @@ impl From<StartExportRequest> for ExportDirective {
     fn from(value: StartExportRequest) -> Self {
         Self {
             project_id: value.project_id,
-            project_root_path: value.project_root_path,
             export_type: value.export_type,
             source_path: value.source_path,
             route: value.route,
@@ -142,7 +143,6 @@ impl RegenerateExportRequest {
     fn into_directive(self) -> ExportDirective {
         ExportDirective {
             project_id: self.project_id,
-            project_root_path: self.project_root_path,
             export_type: self.export_type,
             source_path: self.source_path,
             route: self.route,
@@ -155,14 +155,13 @@ impl RegenerateExportRequest {
 async fn run_export(
     state: &AppState,
     directive: ExportDirective,
+    context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
         .map_err(task_error)?;
-    let context = context_for(&directive.project_id, &directive.project_root_path);
-
     state
         .task_service
         .append_log(
@@ -314,7 +313,7 @@ pub fn list_exports(
     state: State<'_, AppState>,
     request: ListExportsRequest,
 ) -> Result<Vec<ExportRecord>, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.export_service.list_records(&context)
 }
 
@@ -334,14 +333,17 @@ pub fn read_export_preview(
             true,
         ));
     }
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.file_store.read_markdown(&context, path)
 }
 
 /// Reveal an exported file in the OS file manager. Backend-owned so the UI never
 /// spawns processes directly.
 #[tauri::command]
-pub fn open_export_folder(request: OpenExportFolderRequest) -> Result<(), BackendError> {
+pub fn open_export_folder(
+    state: State<'_, AppState>,
+    request: OpenExportFolderRequest,
+) -> Result<(), BackendError> {
     let path = &request.output_path;
     if !path.starts_with("exports/html/") || path.contains("..") {
         return Err(BackendError::new(
@@ -351,7 +353,7 @@ pub fn open_export_folder(request: OpenExportFolderRequest) -> Result<(), Backen
             true,
         ));
     }
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let absolute = context.resolve_project_path(path)?;
     reveal_in_file_manager(&absolute)
 }

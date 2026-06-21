@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use tauri::State;
 
 use crate::app_state::AppState;
@@ -8,25 +6,20 @@ use crate::models::llm::{
     LlmProviderKind, ProviderProjectRequest, ProviderSecretRequest, ProviderStatus,
     ProviderTestResult, SaveProviderRequest,
 };
-use crate::models::paths::ProjectContext;
-
-fn context(project_id: &str, root: &str) -> ProjectContext {
-    ProjectContext::new(project_id.to_string(), PathBuf::from(root))
-}
 
 #[tauri::command]
 pub fn list_llm_providers(
     state: State<'_, AppState>,
     request: ProviderProjectRequest,
 ) -> Result<Vec<ProviderStatus>, BackendError> {
-    let context = context(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     crate::services::LlmService::list_providers(&context)?
         .into_iter()
         .map(|config| {
-            let secret_mask = state.secret_service.mask(config.provider)?;
+            let has_secret = state.secret_service.get(config.provider)?.is_some();
             Ok(ProviderStatus {
-                has_secret: secret_mask.is_some(),
-                secret_mask,
+                has_secret,
+                secret_mask: None,
                 config,
             })
         })
@@ -34,8 +27,11 @@ pub fn list_llm_providers(
 }
 
 #[tauri::command]
-pub fn save_llm_provider(request: SaveProviderRequest) -> Result<ProviderStatus, BackendError> {
-    let context = context(&request.project_id, &request.project_root_path);
+pub fn save_llm_provider(
+    state: State<'_, AppState>,
+    request: SaveProviderRequest,
+) -> Result<ProviderStatus, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     crate::services::LlmService::save_provider(&context, request.config.clone())?;
     Ok(ProviderStatus {
         config: request.config,
@@ -53,11 +49,10 @@ pub fn store_provider_secret(
         BackendError::new("SECRET_EMPTY", "Provider secret is required.", true, true)
     })?;
     state.secret_service.set(request.provider, secret)?;
-    let mask = state.secret_service.mask(request.provider)?;
     Ok(ProviderStatus {
         config: default_config(request.provider),
         has_secret: true,
-        secret_mask: mask,
+        secret_mask: None,
     })
 }
 
@@ -74,7 +69,10 @@ pub fn provider_secret_status(
     state: State<'_, AppState>,
     request: ProviderSecretRequest,
 ) -> Result<Option<String>, BackendError> {
-    state.secret_service.mask(request.provider)
+    Ok(state
+        .secret_service
+        .get(request.provider)?
+        .map(|_| "configured".to_string()))
 }
 
 #[tauri::command]
@@ -82,6 +80,7 @@ pub async fn test_llm_provider(
     state: State<'_, AppState>,
     request: SaveProviderRequest,
 ) -> Result<ProviderTestResult, BackendError> {
+    state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let secret = state.secret_service.get(request.config.provider)?;
     let response = state
         .llm_service

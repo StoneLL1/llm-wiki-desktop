@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "lint.html",
+  "entry": "lint.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-06-19T05:38:22.712Z",
+  "updatedAt": "2026-06-19T05:38:22.712Z",
+  "metadata": {
+    "inferred": true,
+    "reconciled": true
+  }
+}

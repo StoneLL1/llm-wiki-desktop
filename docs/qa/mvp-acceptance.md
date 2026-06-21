@@ -13,7 +13,7 @@ to skip the GUI/Tauri feature (Windows Insider WebView2 DLL blocker — see
 ### Frontend
 
 ```
-npm run test    # 14 files, 52 tests, all passed
+npm run test    # 16 files, 60 tests, all passed
 npm run lint    # eslint . --max-warnings=0 → 0 problems
 npm run build   # tsc -b && vite build → built in ~2s
 ```
@@ -25,17 +25,17 @@ Includes the new fixture-matrix test (`src/test/fixtures/project-fixtures.test.t
 
 ```
 cargo test --manifest-path src-tauri/Cargo.toml --test mvp_flow --no-default-features --offline
-# test result: ok. 8 passed; 0 failed
+# test result: ok. 9 passed; 0 failed
 
 cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features --offline
-# test result: ok. 227 passed; 0 failed
+# test result: ok. 235 passed; 0 failed
 ```
 
 ## MVP loops covered (`src-tauri/tests/mvp_flow.rs`)
 
 | Loop | Test | What it verifies |
 | --- | --- | --- |
-| 1. Project → wiki | `project_to_wiki_loop_creates_imports_compiles_searches_and_graphs` | create project (index/overview/log skeleton present) → import MD+CSV (preview archives ≥1, CSV surfaces as explicit `unsupported` partial result) → compile a 4-page manifest incl. all core pages via `apply_confirmed_manifest` → concept page lands on disk → keyword search finds it → graph `resolve()` builds then reuses cache (`.app/graph-cache.json` written) |
+| 1. Project → wiki | `project_to_wiki_loop_creates_imports_compiles_searches_and_graphs` | create project (index/overview/log skeleton present) → import MD+CSV (preview archives ≥1; CSV extracts as raw text through the shared text branch) → compile a 4-page manifest incl. all core pages via `apply_confirmed_manifest` → concept page lands on disk → keyword search finds it → graph `resolve()` builds then reuses cache (`.app/graph-cache.json` written) |
 | 2. Sample wiki | `sample_wiki_loop_scans_searches_and_caches_graph` | copies a ≤50-page slice of `wiki/wiki/` into a temp project (never tests in place, per CLAUDE.md) → `scan_wiki` covers every copied page → graph builds non-empty node set and writes cache. Skips gracefully if the sample is absent. |
 | 3. AI-assisted (fakes) | `ai_assisted_loop_fake_agent_detected_and_byok_runs` | fake `ProcessRunner` → Claude detected `Installed` → BYOK provider persists without secret material (`sk-ant` absent) → real local retrieval cites the relevant page → fake assistant answer saved as `wiki/queries/{slug}.md` with `[[wikilinks]]` citations → deep-lint JSON parsed (`duplicate_topic`) → export prompt built + HTML record persisted under `exports/html/` |
 | 4. Safety | `safety_loop_compile_conflict_does_not_mutate_without_confirmation` | externally-edited index surfaces as a conflict; original edit survives |

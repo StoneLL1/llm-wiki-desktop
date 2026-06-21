@@ -1,0 +1,1203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>Wiki — Agent Memory Model · LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  /* Wiki three-pane inside main */
+  .wiki-layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr);
+    height: 100%;
+    overflow: hidden;
+  }
+  .wiki-tree {
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .wiki-tree__head {
+    padding: var(--sp-2) var(--sp-3);
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex; gap: 6px; align-items: center;
+  }
+  .wiki-tree__search {
+    flex: 1;
+    display: flex; align-items: center; gap: 6px;
+    height: 26px;
+    padding: 0 var(--sp-2);
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .wiki-tree__search input {
+    flex: 1; background: transparent; border: none; outline: none;
+    font-size: 12px; color: var(--text-primary);
+  }
+  .wiki-tree__search input::placeholder { color: var(--text-muted); }
+  .wiki-tree__filters {
+    display: flex; gap: 4px; padding: var(--sp-2) var(--sp-3);
+    border-bottom: 1px solid var(--border-subtle);
+    overflow-x: auto;
+  }
+  .wiki-tree__body { flex: 1; overflow-y: auto; padding: var(--sp-2); }
+
+  .wiki-content {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: var(--background);
+  }
+  .wiki-content__head {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: 0 var(--sp-5);
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .wiki-content__head .breadcrumbs {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+  .wiki-content__head .breadcrumbs .sep { color: var(--text-disabled); }
+  .wiki-content__head .breadcrumbs .cur { color: var(--text-primary); font-weight: 500; }
+  .wiki-content__body {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--sp-6) var(--sp-8);
+    display: flex;
+    justify-content: center;
+  }
+  .wiki-content__inner {
+    max-width: 760px;
+    width: 100%;
+  }
+
+  /* Tree section labels */
+  .wiki-section-label {
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: var(--sp-2) var(--sp-2) var(--sp-1);
+  }
+
+  /* Edit mode styling */
+  .wiki-content.is-editing .prose { display: none; }
+  .wiki-content.is-editing .editor { display: block; }
+  .wiki-content.is-editing .html-preview { display: none; }
+  .wiki-content.is-previewing .prose { display: none; }
+  .wiki-content.is-previewing .editor { display: none; }
+  .wiki-content.is-previewing .html-preview { display: flex; }
+  .editor { display: none; }
+  .html-preview { display: none; flex-direction: column; gap: 0; max-width: none !important; width: 100%; height: 100%; }
+  .html-preview__bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    margin-bottom: 12px;
+  }
+  .html-preview__title { font-size: 13px; font-weight: 600; }
+  .html-preview__sub { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+  .html-preview__frame-wrap {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--surface);
+    min-height: 480px;
+    display: flex;
+    flex-direction: column;
+  }
+  .html-preview__chrome {
+    height: 30px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+  }
+  .html-preview__chrome .dot-r { width: 8px; height: 8px; border-radius: 50%; background: #ef4146; }
+  .html-preview__chrome .dot-y { width: 8px; height: 8px; border-radius: 50%; background: #f5a623; }
+  .html-preview__chrome .dot-g { width: 8px; height: 8px; border-radius: 50%; background: #10a37f; }
+  .html-preview__iframe { flex: 1; width: 100%; border: none; background: #ffffff; }
+
+  /* Template picker dialog */
+  .tmpl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 4px; }
+  .tmpl-card {
+    display: flex; flex-direction: column;
+    padding: 14px;
+    background: var(--background);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+    text-align: left;
+  }
+  .tmpl-card:hover { border-color: var(--border-strong); }
+  .tmpl-card.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+  .tmpl-card__thumb {
+    height: 96px;
+    background: var(--surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    margin-bottom: 10px;
+    display: grid; place-items: center;
+    color: var(--text-muted);
+  }
+  .tmpl-card.is-selected .tmpl-card__thumb { background: var(--background); border-color: var(--accent-border); }
+  .tmpl-card__title { font-size: 13px; font-weight: 600; margin: 0; color: var(--text-primary); }
+  .tmpl-card__desc { font-size: 11.5px; color: var(--text-muted); margin: 2px 0 0; line-height: 1.5; }
+  .tmpl-card__skill { font-family: var(--font-mono); font-size: 10.5px; color: var(--accent-hover); margin-top: 6px; }
+  .tmpl-card.is-selected .tmpl-card__skill { color: var(--accent-hover); }
+  .editor__toolbar {
+    display: flex; gap: 4px;
+    padding: var(--sp-2) 0 var(--sp-3);
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: var(--sp-3);
+  }
+  .editor__toolbar button {
+    width: 28px; height: 28px;
+    border-radius: var(--radius-sm);
+    display: grid; place-items: center;
+    color: var(--text-secondary);
+  }
+  .editor__toolbar button:hover { background: var(--surface-muted); color: var(--text-primary); }
+  .editor__toolbar .sep { width: 1px; height: 18px; background: var(--border); margin: 5px 4px; }
+  .editor__textarea {
+    width: 100%;
+    min-height: 480px;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    resize: none;
+  }
+
+  .citation-ref {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+    font-size: 9.5px;
+    font-weight: 600;
+    margin-left: 2px;
+    vertical-align: super;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    border: 1px solid var(--accent-border);
+  }
+
+  .relpage {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: var(--radius-sm);
+    font-size: 12.5px; color: var(--text-primary);
+    cursor: pointer;
+  }
+  .relpage:hover { background: var(--surface-muted); }
+  .relpage__icon { color: var(--text-muted); flex: none; }
+  .relpage__title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .relpage__count { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="topbar__brand">
+      <div class="topbar__brand-mark">LW</div>
+      <div class="topbar__brand-name">LLM Wiki Desktop</div>
+    </div>
+    <button class="projswitch">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="按名称、标签、类型或来源搜索页面…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch"><button class="is-active">中</button><button>EN</button></div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem is-active" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span><span class="navitem__badge"></span></a>
+        <a class="navitem" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span></a>
+        <a class="navitem" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="wiki-layout">
+      <!-- File tree -->
+      <div class="wiki-tree">
+        <div class="wiki-tree__head">
+          <div class="wiki-tree__search">
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-search"/></svg>
+            <input data-search-input="#tree-list" placeholder="筛选页面…" />
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm" data-tip="新建页面"><svg class="ico-sm"><use href="#i-plus"/></svg></button>
+        </div>
+        <div class="wiki-tree__filters">
+          <span class="pill pill--active" style="height:20px;font-size:10.5px;">全部</span>
+          <span class="pill" style="height:20px;font-size:10.5px;">实体</span>
+          <span class="pill" style="height:20px;font-size:10.5px;">概念</span>
+          <span class="pill" style="height:20px;font-size:10.5px;">来源</span>
+          <span class="pill" style="height:20px;font-size:10.5px;">综合</span>
+        </div>
+        <div class="wiki-tree__body" id="tree-list">
+          <div class="wiki-section-label">wiki/</div>
+          <div class="tree">
+            <div class="tree__row" data-toggle>
+              <span class="tree__chevron"><svg class="ico-sm"><use href="#i-chev-r"/></svg></span>
+              <svg class="tree__icon"><use href="#i-folder"/></svg>
+              <span class="tree__label">entities</span>
+              <span class="tree__meta">86</span>
+            </div>
+            <div class="tree__children">
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">anthropic-claude.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">openai-gpt.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">google-gemini.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">meta-llama.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">mistral.md</span>
+              </a>
+            </div>
+
+            <div class="tree__row is-open" data-toggle>
+              <span class="tree__chevron"><svg class="ico-sm"><use href="#i-chev-r"/></svg></span>
+              <svg class="tree__icon"><use href="#i-folder-open"/></svg>
+              <span class="tree__label">concepts</span>
+              <span class="tree__meta">94</span>
+            </div>
+            <div class="tree__children">
+              <a class="tree__row is-selected" href="wiki.html" data-search-row data-search-text="Agent Memory Model agent memory 上下文 记忆">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label is-active-marker">agent-memory.md</span>
+                <svg class="ico-sm" style="color:var(--accent);margin-left:4px;" data-tip="星标"><use href="#i-star-fill"/></svg>
+              </a>
+              <a class="tree__row" href="wiki.html" data-search-row data-search-text="Tool Selection 工具选择 heuristics">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">tool-selection.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html" data-search-row data-search-text="ReAct Pattern">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">react-pattern.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html" data-search-row data-search-text="Plan-and-Execute">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">plan-and-execute.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html" data-search-row data-search-text="Reflection 自我反思">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">reflection.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html" data-search-row data-search-text="Retrieval Augmented Generation RAG">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">rag.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html" data-search-row data-search-text="Multimodal Fusion">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">multimodal-fusion.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html" data-search-row data-search-text="Chain-of-Thought CoT 思维链">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">chain-of-thought.md</span>
+              </a>
+            </div>
+
+            <div class="tree__row" data-toggle>
+              <span class="tree__chevron"><svg class="ico-sm"><use href="#i-chev-r"/></svg></span>
+              <svg class="tree__icon"><use href="#i-folder"/></svg>
+              <span class="tree__label">sources</span>
+              <span class="tree__meta">142</span>
+            </div>
+            <div class="tree__children">
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-pdf"/></svg>
+                <span class="tree__label">anthropic-memory-paper.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-link-ext"/></svg>
+                <span class="tree__label">openai-cookbook-memory.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-doc"/></svg>
+                <span class="tree__label">langchain-memory-docs.md</span>
+              </a>
+            </div>
+
+            <div class="tree__row" data-toggle>
+              <span class="tree__chevron"><svg class="ico-sm"><use href="#i-chev-r"/></svg></span>
+              <svg class="tree__icon"><use href="#i-folder"/></svg>
+              <span class="tree__label">synthesis</span>
+              <span class="tree__meta">15</span>
+            </div>
+            <div class="tree__children">
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">memory-landscape.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">agent-architecture.md</span>
+              </a>
+            </div>
+
+            <div class="tree__row" data-toggle>
+              <span class="tree__chevron"><svg class="ico-sm"><use href="#i-chev-r"/></svg></span>
+              <svg class="tree__icon"><use href="#i-folder"/></svg>
+              <span class="tree__label">comparisons</span>
+              <span class="tree__meta">8</span>
+            </div>
+            <div class="tree__children">
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">claude-vs-gpt-memory.md</span>
+              </a>
+            </div>
+
+            <div class="tree__row" data-toggle>
+              <span class="tree__chevron"><svg class="ico-sm"><use href="#i-chev-r"/></svg></span>
+              <svg class="tree__icon"><use href="#i-folder"/></svg>
+              <span class="tree__label">queries</span>
+              <span class="tree__meta">12</span>
+            </div>
+            <div class="tree__children">
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">2026-06-15-long-context.md</span>
+              </a>
+            </div>
+
+            <div style="margin-top:8px;border-top:1px solid var(--border-subtle);padding-top:8px;">
+              <div class="wiki-section-label">索引</div>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon" style="color:var(--accent);"><use href="#i-list"/></svg>
+                <span class="tree__label">index.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-file-md"/></svg>
+                <span class="tree__label">overview.md</span>
+              </a>
+              <a class="tree__row" href="wiki.html">
+                <span class="tree__chevron" style="visibility:hidden;"></span>
+                <svg class="tree__icon"><use href="#i-history"/></svg>
+                <span class="tree__label">log.md</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reading surface -->
+      <div class="wiki-content">
+        <div class="wiki-content__head">
+          <div class="breadcrumbs">
+            <span>wiki</span><span class="sep">/</span>
+            <span>concepts</span><span class="sep">/</span>
+            <span class="cur">agent-memory.md</span>
+          </div>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+            <span class="badge"><span class="dot" style="background:var(--accent);"></span>已保存</span>
+            <span style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">2 分钟前 · 你</span>
+            <div class="seg" data-seg="wikimode">
+              <button class="is-active" data-key="read" id="__mode_read"><svg class="ico-sm"><use href="#i-book"/></svg>阅读</button>
+              <button data-key="edit" id="__mode_edit"><svg class="ico-sm"><use href="#i-edit"/></svg>编辑</button>
+              <button data-key="preview" id="__mode_preview"><svg class="ico-sm"><use href="#i-export"/></svg>HTML 预览</button>
+            </div>
+            <button class="btn btn--sm btn--primary" id="__open_gen_html" data-tip="生成 HTML / 卡片 / 报告"><svg class="ico-sm"><use href="#i-export"/></svg>生成 HTML</button>
+            <button class="btn btn--sm btn--ghost btn--icon" data-tip="星标" onclick="this.querySelector('svg').classList.toggle('ico-star-fill')"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-star-fill"/></svg></button>
+            <button class="btn btn--sm btn--ghost btn--icon" data-tip="复制路径"><svg class="ico-sm"><use href="#i-copy"/></svg></button>
+            <button class="btn btn--sm btn--ghost btn--icon" data-tip="更多"><svg class="ico-sm"><use href="#i-more"/></svg></button>
+          </div>
+        </div>
+
+        <div class="wiki-content__body" id="wiki-area">
+          <div class="wiki-content__inner">
+            <!-- Reading mode -->
+            <article class="prose" id="reading-pane">
+              <h1>Agent Memory Model</h1>
+              <p class="text-muted text-sm" style="margin-top:-8px;margin-bottom:24px;font-family:var(--font-mono);">
+                Agent 如何在工作过程中保留与唤起上下文。涵盖短上下文窗口、长上下文检索、外部记忆与多模态记忆。
+              </p>
+
+              <div class="frontmatter">
+                <div class="frontmatter__row"><span class="frontmatter__k">type:</span><span class="frontmatter__v">concept</span></div>
+                <div class="frontmatter__row"><span class="frontmatter__k">tags:</span><span class="frontmatter__v">[memory, context, retrieval, long-context]</span></div>
+                <div class="frontmatter__row"><span class="frontmatter__k">aliases:</span><span class="frontmatter__v">[Memory, Agent Memory, Context Retention]</span></div>
+                <div class="frontmatter__row"><span class="frontmatter__k">created:</span><span class="frontmatter__v">2026-05-12</span></div>
+                <div class="frontmatter__row"><span class="frontmatter__k">updated:</span><span class="frontmatter__v">2026-06-19</span></div>
+                <div class="frontmatter__row"><span class="frontmatter__k">schema_version:</span><span class="frontmatter__v">3</span></div>
+                <div class="frontmatter__row"><span class="frontmatter__k">sources:</span><span class="frontmatter__v">[anthropic-memory-paper, openai-cookbook-memory]</span></div>
+              </div>
+
+              <p>
+                <strong>Agent Memory</strong> 指代理在执行任务过程中保留、组织和唤起信息的能力。与一次性的 LLM 调用不同，Agent 需要在多轮交互、长时间任务和跨会话场景下保持对上下文的连贯理解<span class="citation-ref">1</span>。
+                本质上，所有 Agent Memory 都在回答同一个问题：<em>"我之前见过什么？哪些需要被记住？"</em>
+              </p>
+
+              <p>
+                主流实现可分为四类：<a href="wiki.html" class="wikilink">短上下文窗口</a>、
+                <a href="wiki.html" class="wikilink">长上下文检索</a>、
+                <a href="wiki.html" class="wikilink">外部记忆系统</a>、
+                以及多模态记忆<span class="citation-ref">2</span>。它们并非互斥，而是常被组合使用。
+              </p>
+
+              <h2 id="categories">四类记忆模型</h2>
+              <p>下表对比了主流 Agent Memory 实现的特征、典型容量与适用场景。</p>
+              <table>
+                <thead>
+                  <tr><th>类型</th><th>典型容量</th><th>读写延迟</th><th>适用场景</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>短上下文窗口</td><td>8K – 32K tokens</td><td>0</td><td>单轮任务、即时响应</td></tr>
+                  <tr><td>长上下文检索</td><td>128K – 1M tokens</td><td>低</td><td>多文档分析、长任务</td></tr>
+                  <tr><td>外部记忆系统</td><td>无界</td><td>中</td><td>跨会话、长期项目</td></tr>
+                  <tr><td>多模态记忆</td><td>视实现</td><td>中–高</td><td>视觉 / 音频任务</td></tr>
+                </tbody>
+              </table>
+
+              <h2 id="short-window">短上下文窗口</h2>
+              <p>
+                最直接的形式：把最近的对话或文档内容完整保留在模型上下文窗口中。
+                <a href="wiki.html" class="wikilink">Anthropic Claude</a> 4.x 系列与
+                <a href="wiki.html" class="wikilink">OpenAI GPT</a> 4.x 系列均提供 128K–200K 的窗口。
+                优点是无须外部组件；缺点是成本随长度线性上升，且超出窗口的内容会被截断。
+              </p>
+
+              <blockquote>
+                <p>对单次任务而言，短上下文窗口通常足够；问题出现在跨会话或长流程中。</p>
+              </blockquote>
+
+              <h2 id="retrieval">长上下文检索（RAG）</h2>
+              <p>
+                把资料持久化到向量数据库或文档存储，每次提问时检索相关片段注入上下文。
+                这是 <a href="wiki.html" class="wikilink">Retrieval Augmented Generation</a> 的核心思路<span class="citation-ref">3</span>。
+                与之相对的 LLM Wiki 模式不依赖即时检索，而是预先把资料编译成结构化页面。
+              </p>
+
+              <h3 id="tradeoffs">权衡</h3>
+              <ul>
+                <li><strong>覆盖广度</strong>：RAG 可覆盖百万级文档，但每次只能"瞥见"若干片段。</li>
+                <li><strong>结构化程度</strong>：Wiki 模型把资料整理成稳定结构，但需要预先编译成本。</li>
+                <li><strong>可维护性</strong>：结构化内容更易 Lint、对比、合并；RAG 索引则更难审计。</li>
+              </ul>
+
+              <h2 id="external">外部记忆系统</h2>
+              <p>
+                复杂 Agent（如 <a href="wiki.html" class="wikilink">Plan-and-Execute</a> 架构）通常配备独立记忆模块：
+                存储中间结果、目标栈、工具调用历史。代表性实现包括 MemGPT、LangGraph State、Letta 等。
+              </p>
+
+              <pre><code># 伪代码示例
+class AgentMemory:
+    def __init__(self):
+        self.episodes = []     # 事件流
+        self.goals = Stack()   # 目标栈
+        self.skills = KV()     # 已掌握工具/技能
+
+    def observe(self, event):
+        self.episodes.append(event)
+        if event.has_skill:
+            self.skills[event.name] = event.handler</code></pre>
+
+              <p>
+                这类系统的核心挑战是 <em>遗忘策略</em>：保留过多会污染上下文；保留过少则丢失关键决策依据。
+                参见 <a href="wiki.html" class="wikilink">Reflection</a> 模式了解如何用自我反思维护记忆质量。
+              </p>
+
+              <h2 id="multimodal">多模态记忆</h2>
+              <p>
+                视觉与音频模态需要专门的编码器。常见做法是把图像 / 音频嵌入到与文本相同的高维空间，
+                以便统一检索。具体细节参见 <a href="wiki.html" class="wikilink">Multimodal Fusion</a>。
+              </p>
+
+              <h2 id="references">参考资料</h2>
+              <ol style="padding-left:20px;">
+                <li>Anthropic · <em>Building Effective Agents</em> · 2024-12 · <a href="wiki.html">sources/anthropic-memory-paper.md</a></li>
+                <li>OpenAI · <em>Cookbook: Memory in Chat Completions</em> · <a href="wiki.html">sources/openai-cookbook-memory.md</a></li>
+                <li>LangChain · <em>Memory Modules Documentation</em> · v0.3 · <a href="wiki.html">sources/langchain-memory-docs.md</a></li>
+              </ol>
+
+              <hr/>
+
+              <p class="text-muted text-sm" style="font-family:var(--font-mono);">
+                上次编译 · 2026-06-19 14:30 · claude · ingest · 修改 12 处 · Git 已提交
+              </p>
+            </article>
+
+            <!-- Edit mode -->
+            <div class="editor" id="editor-pane">
+              <div class="editor__toolbar">
+                <button data-tip="加粗"><svg class="ico-sm"><use href="#i-edit"/></svg></button>
+                <button data-tip="斜体"><svg class="ico-sm"><use href="#i-edit"/></svg></button>
+                <button data-tip="标题"><svg class="ico-sm"><use href="#i-edit"/></svg></button>
+                <div class="sep"></div>
+                <button data-tip="链接"><svg class="ico-sm"><use href="#i-link"/></svg></button>
+                <button data-tip="代码"><svg class="ico-sm"><use href="#i-doc"/></svg></button>
+                <button data-tip="引用"><svg class="ico-sm"><use href="#i-list"/></svg></button>
+                <div class="sep"></div>
+                <button data-tip="撤销"><svg class="ico-sm"><use href="#i-chev-l"/></svg></button>
+                <button data-tip="重做"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+                <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
+                  <span class="badge"><span class="dot" style="background:var(--warning);"></span>未保存</span>
+                  <button class="btn btn--sm" id="__cancel_edit">取消</button>
+                  <button class="btn btn--sm btn--primary" id="__save"><svg class="ico-sm"><use href="#i-save"/></svg>保存</button>
+                </div>
+              </div>
+              <textarea class="editor__textarea" spellcheck="false">---
+type: concept
+tags: [memory, context, retrieval, long-context]
+aliases: [Memory, Agent Memory, Context Retention]
+created: 2026-05-12
+updated: 2026-06-19
+schema_version: 3
+sources: [anthropic-memory-paper, openai-cookbook-memory]
+---
+
+# Agent Memory Model
+
+Agent 在工作过程中保留与唤起上下文的方式。涵盖短上下文窗口、长上下文检索、外部记忆与多模态记忆。
+
+**Agent Memory** 指代理在执行任务过程中保留、组织和唤起信息的能力。与一次性的 LLM 调用不同，Agent 需要在多轮交互、长时间任务和跨会话场景下保持对上下文的连贯理解[1]。
+
+本质上，所有 Agent Memory 都在回答同一个问题：_"我之前见过什么？哪些需要被记住？"_
+
+## 四类记忆模型
+
+| 类型 | 典型容量 | 读写延迟 | 适用场景 |
+|---|---|---|---|
+| 短上下文窗口 | 8K – 32K tokens | 0 | 单轮任务、即时响应 |
+| 长上下文检索 | 128K – 1M tokens | 低 | 多文档分析、长任务 |
+| 外部记忆系统 | 无界 | 中 | 跨会话、长期项目 |
+| 多模态记忆 | 视实现 | 中–高 | 视觉 / 音频任务 |
+</textarea>
+            </div>
+            <!-- HTML preview pane (hidden until a template is generated) -->
+            <div class="html-preview" id="preview-pane">
+              <div class="html-preview__bar">
+                <button class="btn btn--sm" id="__back_to_read"><svg class="ico-sm"><use href="#i-chev-l"/></svg>返回阅读</button>
+                <div style="width:1px;height:18px;background:var(--border);"></div>
+                <span class="html-preview__title" id="__preview_tmpl_name">美化阅读页</span>
+                <span class="html-preview__sub" id="__preview_tmpl_meta">html-beautiful-read · 48 KB · 2 秒前生成</span>
+                <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
+                  <span class="badge badge--success"><span class="dot"></span>已生成</span>
+                  <button class="btn btn--sm" id="__regen_html"><svg class="ico-sm"><use href="#i-refresh"/></svg>重新生成</button>
+                  <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-folder-open"/></svg>打开位置</button>
+                  <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-external"/></svg>外部浏览器</button>
+                  <button class="btn btn--sm btn--ghost btn--icon" data-tip="复制路径" id="__copy_html_path"><svg class="ico-sm"><use href="#i-copy"/></svg></button>
+                </div>
+              </div>
+              <div class="html-preview__frame-wrap">
+                <div class="html-preview__chrome">
+                  <span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span>
+                  <span style="margin-left:8px;" id="__preview_path">exports/html/agent-memory-beautiful-read.html</span>
+                  <span style="margin-left:auto;"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-refresh"/></svg></span>
+                </div>
+                <iframe class="html-preview__iframe" id="__preview_frame" title="HTML 预览"></iframe>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- RIGHT PANEL -->
+  <aside class="rightpanel">
+    <div class="rightpanel__header">
+      <span class="rightpanel__title">页面信息</span>
+      <button class="btn btn--ghost btn--icon btn--sm" data-right-toggle data-tip="折叠"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+    <div class="rightpanel__body">
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">元数据</h4>
+        <dl class="rightpanel__meta">
+          <dt>路径</dt><dd>wiki/concepts/agent-memory.md</dd>
+          <dt>类型</dt><dd>concept</dd>
+          <dt>创建</dt><dd>2026-05-12</dd>
+          <dt>更新</dt><dd>2026-06-19 14:30</dd>
+          <dt>字数</dt><dd>1,284</dd>
+          <dt>引用</dt><dd>3</dd>
+          <dt>反链</dt><dd>12</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">标签</h4>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          <span class="pill" style="height:20px;font-size:10.5px;">memory</span>
+          <span class="pill" style="height:20px;font-size:10.5px;">context</span>
+          <span class="pill" style="height:20px;font-size:10.5px;">retrieval</span>
+          <span class="pill" style="height:20px;font-size:10.5px;">long-context</span>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">引用来源 <span style="font-family:var(--font-mono);color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;margin-left:4px;">3</span></h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <div class="citation">
+            <span class="citation__idx">1</span>
+            <span class="citation__title truncate">Building Effective Agents</span>
+          </div>
+          <div class="citation">
+            <span class="citation__idx">2</span>
+            <span class="citation__title truncate">OpenAI Cookbook · Memory</span>
+          </div>
+          <div class="citation">
+            <span class="citation__idx">3</span>
+            <span class="citation__title truncate">LangChain Memory Modules</span>
+          </div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">相关页面 <span style="font-family:var(--font-mono);color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;margin-left:4px;">12 反链</span></h4>
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <a class="relpage" href="wiki.html">
+            <svg class="relpage__icon"><use href="#i-file-md"/></svg>
+            <span class="relpage__title">ReAct Pattern</span>
+            <span class="relpage__count">4</span>
+          </a>
+          <a class="relpage" href="wiki.html">
+            <svg class="relpage__icon"><use href="#i-file-md"/></svg>
+            <span class="relpage__title">Plan-and-Execute</span>
+            <span class="relpage__count">3</span>
+          </a>
+          <a class="relpage" href="wiki.html">
+            <svg class="relpage__icon"><use href="#i-file-md"/></svg>
+            <span class="relpage__title">Reflection</span>
+            <span class="relpage__count">2</span>
+          </a>
+          <a class="relpage" href="wiki.html">
+            <svg class="relpage__icon"><use href="#i-file-md"/></svg>
+            <span class="relpage__title">RAG</span>
+            <span class="relpage__count">2</span>
+          </a>
+          <a class="relpage" href="wiki.html">
+            <svg class="relpage__icon"><use href="#i-file-md"/></svg>
+            <span class="relpage__title">Anthropic Claude</span>
+            <span class="relpage__count">1</span>
+          </a>
+        </div>
+        <a href="wiki.html" style="display:block;text-align:center;padding:8px;font-size:11.5px;color:var(--accent-hover);">查看全部 12 个反链 →</a>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">编辑历史</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:11.5px;">
+          <div style="display:flex;gap:8px;align-items:flex-start;">
+            <span style="font-family:var(--font-mono);color:var(--text-muted);width:60px;flex:none;">14:30</span>
+            <div>
+              <div style="color:var(--text-primary);">claude · ingest</div>
+              <div style="color:var(--text-muted);">修改 12 处 · +86 / -24</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:flex-start;">
+            <span style="font-family:var(--font-mono);color:var(--text-muted);width:60px;flex:none;">昨天</span>
+            <div>
+              <div style="color:var(--text-primary);">你 · 手动编辑</div>
+              <div style="color:var(--text-muted);">补充"多模态记忆"段</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:flex-start;">
+            <span style="font-family:var(--font-mono);color:var(--text-muted);width:60px;flex:none;">06-12</span>
+            <div>
+              <div style="color:var(--text-primary);">claude · 创建页面</div>
+              <div style="color:var(--text-muted);">从 anthropic-memory-paper 提取</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">操作</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-export"/></svg>生成 HTML 阅读页</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-img"/></svg>生成知识卡片</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-graph"/></svg>在图谱中查看</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-link"/></svg>复制 wikilink</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- STATUS BAR -->
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--ok"></span>claude · 1.0.23</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">wiki/concepts/agent-memory.md · 1,284 字</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">已保存 · main</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">237 页 · 1,284 链接</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">中文</span>
+  </footer>
+</div>
+
+<!-- Conflict dialog (preview only) -->
+<div class="dialog-overlay hidden" id="dlg-conflict">
+  <div class="dialog dialog--wide">
+    <div class="dialog__head">
+      <svg class="ico" style="color:var(--warning);"><use href="#i-warn"/></svg>
+      <h2 class="dialog__title">检测到外部修改 · agent-memory.md</h2>
+      <button class="btn btn--ghost btn--icon btn--sm" data-dialog-close><svg class="ico"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dialog__body">
+      <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px;">在应用之外（Obsidian / 外部编辑器）该页面被修改过。请选择如何合并本次编译结果。</p>
+      <div class="diff">
+        <div class="diff__head">
+          <span>baseline</span><span>→</span><span>current · edited in Obsidian</span><span>→</span><span>agent · ingest</span>
+        </div>
+        <div class="diff__line diff__line--ctx"><span class="diff__line-no">42</span><span>外部记忆系统通常配备独立模块。</span></div>
+        <div class="diff__line diff__line--del"><span class="diff__line-no">43</span><span>这类系统的核心挑战是 **遗忘策略**。</span></div>
+        <div class="diff__line diff__line--add"><span class="diff__line-no">43</span><span>这类系统的核心挑战是 _遗忘策略_：保留过多会污染上下文。</span></div>
+        <div class="diff__line diff__line--ctx"><span class="diff__line-no">44</span><span>参见 Reflection 模式了解如何用自我反思维护记忆质量。</span></div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn" data-dialog-close>保留当前版本</button>
+      <button class="btn" data-dialog-close>使用 Agent 版本</button>
+      <button class="btn btn--primary" data-dialog-close>手动合并</button>
+    </div>
+  </div>
+</div>
+
+<!-- Generate HTML — template picker -->
+<div class="dialog-overlay hidden" id="dlg-gen-html">
+  <div class="dialog dialog--wide">
+    <div class="dialog__head">
+      <svg class="ico" style="color:var(--accent-hover);"><use href="#i-export"/></svg>
+      <h2 class="dialog__title">生成 HTML · agent-memory.md</h2>
+      <button class="btn btn--ghost btn--icon btn--sm" data-dialog-close><svg class="ico"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dialog__body">
+      <p style="font-size:12.5px;color:var(--text-muted);margin:0 0 12px;">选择输出模板 · HTML 模板只影响输出样式，不影响 Wiki schema、Lint 规则或 Agent 行为。</p>
+      <div class="tmpl-grid" id="__tmpl_grid">
+        <button class="tmpl-card is-selected" data-tmpl="beautiful-read" data-name="美化阅读页" data-skill="html-beautiful-read">
+          <div class="tmpl-card__thumb">
+            <svg viewBox="0 0 120 70" style="width:88%;height:88%;">
+              <rect x="12" y="8" width="96" height="6" fill="#0d0d0d" rx="1"/>
+              <rect x="12" y="20" width="70" height="3" fill="#6e6e6e" rx="1"/>
+              <rect x="12" y="28" width="96" height="2.5" fill="#c4c4c4" rx="1"/>
+              <rect x="12" y="34" width="90" height="2.5" fill="#c4c4c4" rx="1"/>
+              <rect x="12" y="40" width="80" height="2.5" fill="#c4c4c4" rx="1"/>
+              <rect x="12" y="50" width="36" height="10" fill="#10a37f" rx="1"/>
+            </svg>
+          </div>
+          <h3 class="tmpl-card__title">美化阅读页</h3>
+          <p class="tmpl-card__desc">单篇文章 · 衬线排版 · 适合分享与归档</p>
+          <div class="tmpl-card__skill">html-beautiful-read →</div>
+        </button>
+        <button class="tmpl-card" data-tmpl="knowledge-card" data-name="知识卡片" data-skill="html-knowledge-card">
+          <div class="tmpl-card__thumb">
+            <svg viewBox="0 0 120 70" style="width:88%;height:88%;">
+              <rect x="14" y="10" width="40" height="50" fill="#ffffff" stroke="#e5e5e5" rx="3"/>
+              <rect x="66" y="10" width="40" height="50" fill="#ffffff" stroke="#e5e5e5" rx="3"/>
+              <circle cx="34" cy="24" r="7" fill="#10a37f"/>
+              <rect x="24" y="36" width="20" height="2.5" fill="#0d0d0d"/>
+              <rect x="22" y="42" width="24" height="2" fill="#9b9b9b"/>
+              <circle cx="86" cy="24" r="7" fill="#0d0d0d"/>
+              <rect x="76" y="36" width="20" height="2.5" fill="#0d0d0d"/>
+              <rect x="74" y="42" width="24" height="2" fill="#9b9b9b"/>
+            </svg>
+          </div>
+          <h3 class="tmpl-card__title">知识卡片</h3>
+          <p class="tmpl-card__desc">实体 / 概念 · 摘要式 · 双面卡片</p>
+          <div class="tmpl-card__skill">html-knowledge-card →</div>
+        </button>
+        <button class="tmpl-card" data-tmpl="concept-map" data-name="概念关系图" data-skill="html-concept-map">
+          <div class="tmpl-card__thumb">
+            <svg viewBox="0 0 120 70" style="width:88%;height:88%;">
+              <g stroke="#c4c4c4" stroke-width="0.7" fill="none">
+                <line x1="22" y1="22" x2="60" y2="14"/>
+                <line x1="60" y1="14" x2="96" y2="24"/>
+                <line x1="22" y1="22" x2="38" y2="52"/>
+                <line x1="96" y1="24" x2="82" y2="54"/>
+                <line x1="38" y1="52" x2="60" y2="14"/>
+                <line x1="60" y1="14" x2="82" y2="54"/>
+              </g>
+              <circle cx="22" cy="22" r="5" fill="#10a37f"/>
+              <circle cx="60" cy="14" r="7" fill="#0d0d0d"/>
+              <circle cx="96" cy="24" r="5" fill="#2563eb"/>
+              <circle cx="38" cy="52" r="4" fill="#f5a623"/>
+              <circle cx="82" cy="54" r="4" fill="#9b9b9b"/>
+            </svg>
+          </div>
+          <h3 class="tmpl-card__title">概念关系图</h3>
+          <p class="tmpl-card__desc">单页面相关节点 · 可交互 · 力导向布局</p>
+          <div class="tmpl-card__skill">html-concept-map →</div>
+        </button>
+        <button class="tmpl-card" data-tmpl="project-report" data-name="项目报告" data-skill="html-project-report">
+          <div class="tmpl-card__thumb">
+            <svg viewBox="0 0 120 70" style="width:88%;height:88%;">
+              <rect x="10" y="8" width="100" height="54" fill="#ffffff" stroke="#e5e5e5" rx="2"/>
+              <rect x="18" y="14" width="60" height="5" fill="#0d0d0d"/>
+              <rect x="18" y="24" width="84" height="2" fill="#e5e5e5"/>
+              <rect x="18" y="28" width="84" height="2" fill="#e5e5e5"/>
+              <rect x="18" y="32" width="70" height="2" fill="#e5e5e5"/>
+              <rect x="18" y="42" width="24" height="12" fill="#10a37f" rx="1"/>
+              <rect x="48" y="42" width="24" height="12" fill="#e5e5e5" rx="1"/>
+              <rect x="78" y="42" width="24" height="12" fill="#e5e5e5" rx="1"/>
+            </svg>
+          </div>
+          <h3 class="tmpl-card__title">项目报告</h3>
+          <p class="tmpl-card__desc">整个 Wiki · 可浏览目录 · 可打印 PDF</p>
+          <div class="tmpl-card__skill">html-project-report →</div>
+        </button>
+      </div>
+      <div style="margin-top:16px;padding:12px;background:var(--surface);border:1px solid var(--border-subtle);border-radius:var(--radius-md);font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">
+        <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-info"/></svg>
+        <span>执行路径：<strong style="color:var(--text-primary);font-family:var(--font-mono);">claude · 1.0.23</strong>（默认） · 输出位置：<code style="font-family:var(--font-mono);font-size:11.5px;">exports/html/agent-memory-&lt;tmpl&gt;.html</code></span>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn" data-dialog-close>取消</button>
+      <button class="btn btn--primary" id="__confirm_gen_html"><svg class="ico"><use href="#i-play"/></svg>生成并预览</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+<script>
+  // Toggle edit/read mode
+  const wikiArea = document.getElementById('wiki-area');
+  const content = wikiArea.querySelector('.wiki-content') || document.querySelector('.wiki-content');
+  document.getElementById('__mode_edit').addEventListener('click', function () {
+    content.classList.add('is-editing');
+  });
+  document.getElementById('__mode_read').addEventListener('click', function () {
+    content.classList.remove('is-editing');
+  });
+  document.getElementById('__cancel_edit').addEventListener('click', function () {
+    content.classList.remove('is-editing');
+    document.querySelector('[data-seg="wikimode"] button[data-key="read"]').click();
+  });
+  document.getElementById('__save').addEventListener('click', function () {
+    content.classList.remove('is-editing');
+    document.querySelector('[data-seg="wikimode"] button[data-key="read"]').click();
+    window.__toast('已保存 · Git 已提交', 'ok');
+  });
+
+  // ---------- Generate HTML flow ----------
+  let selectedTmpl = { tmpl: 'beautiful-read', name: '美化阅读页', skill: 'html-beautiful-read' };
+
+  // Template card selection (radio behavior)
+  document.getElementById('__tmpl_grid').addEventListener('click', function (e) {
+    const card = e.target.closest('.tmpl-card');
+    if (!card) return;
+    document.querySelectorAll('.tmpl-card').forEach(function (c) { c.classList.remove('is-selected'); });
+    card.classList.add('is-selected');
+    selectedTmpl = {
+      tmpl: card.getAttribute('data-tmpl'),
+      name: card.getAttribute('data-name'),
+      skill: card.getAttribute('data-skill')
+    };
+  });
+
+  // Open dialog
+  document.getElementById('__open_gen_html').addEventListener('click', function () {
+    document.getElementById('dlg-gen-html').classList.remove('hidden');
+  });
+
+  // Per-template iframe content
+  function buildPreviewDoc(tmpl) {
+    const common = '<meta charset="utf-8"><style>*{box-sizing:border-box}body{margin:0;font-family:-apple-system,Inter,system-ui,sans-serif;color:#0d0d0d;background:#ffffff;}</style>';
+    const article = {
+      'beautiful-read': `<!doctype html><html><head>${common}<style>
+        body{padding:64px 48px;display:flex;justify-content:center;}
+        .wrap{max-width:680px;font-family:'Source Serif Pro',Georgia,serif;line-height:1.75;font-size:18px;color:#1a1a1a;}
+        h1{font-size:36px;font-weight:600;letter-spacing:-0.02em;margin:0 0 8px;font-family:Inter,system-ui,sans-serif;}
+        .sub{font-family:JetBrains Mono,Menlo,monospace;font-size:12px;color:#6e6e6e;margin-bottom:32px;}
+        .fm{background:#fafafa;border:1px solid #ededed;border-radius:6px;padding:14px 18px;font-family:JetBrains Mono,monospace;font-size:12px;color:#3c3c3c;margin-bottom:32px;line-height:1.8;}
+        p{margin:0 0 18px;} strong{color:#0d0d0d;} em{color:#3c3c3c;}
+        a{color:#0a7a5e;text-decoration:underline;text-underline-offset:2px;text-decoration-color:#b8dccd;}
+        blockquote{margin:24px 0;padding:8px 18px;border-left:3px solid #10a37f;background:#e8f5f0;color:#3c3c3c;border-radius:0 4px 4px 0;}
+        code{font-family:JetBrains Mono,monospace;font-size:14px;background:#f5f5f5;border:1px solid #ededed;padding:1px 6px;border-radius:3px;}
+        h2{font-size:24px;font-weight:600;margin:36px 0 12px;font-family:Inter,system-ui,sans-serif;letter-spacing:-0.01em;padding-bottom:6px;border-bottom:1px solid #ededed;}
+        table{width:100%;border-collapse:collapse;margin:18px 0;font-family:Inter,system-ui,sans-serif;font-size:14px;}
+        th,td{border:1px solid #e5e5e5;padding:6px 10px;text-align:left;}
+        th{background:#fafafa;font-weight:600;}
+      </style></head><body><div class="wrap">
+        <h1>Agent Memory Model</h1>
+        <div class="sub">concept · 2026-06-19 · 1,284 字</div>
+        <div class="fm">type: concept<br>tags: [memory, context, retrieval, long-context]<br>sources: [anthropic-memory-paper, openai-cookbook-memory]</div>
+        <p><strong>Agent Memory</strong> 指代理在执行任务过程中保留、组织和唤起信息的能力。与一次性的 LLM 调用不同，Agent 需要在多轮交互、长时间任务和跨会话场景下保持对上下文的连贯理解。</p>
+        <p>主流实现可分为四类：<a href="#">短上下文窗口</a>、<a href="#">长上下文检索</a>、<a href="#">外部记忆系统</a>、以及多模态记忆。</p>
+        <blockquote>对单次任务而言，短上下文窗口通常足够；问题出现在跨会话或长流程中。</blockquote>
+        <h2>四类记忆模型</h2>
+        <table><thead><tr><th>类型</th><th>典型容量</th><th>适用场景</th></tr></thead>
+        <tbody><tr><td>短上下文窗口</td><td>8K – 32K</td><td>单轮任务</td></tr>
+        <tr><td>长上下文检索</td><td>128K – 1M</td><td>多文档分析</td></tr>
+        <tr><td>外部记忆系统</td><td>无界</td><td>跨会话</td></tr></tbody></table>
+        <p>本应用采用的 LLM Wiki 模式属于 <em>预先结构化</em> 路线 — 把资料编译成稳定 Markdown，而不是即时拼接。</p>
+      </div></body></html>`,
+
+      'knowledge-card': `<!doctype html><html><head>${common}<style>
+        body{padding:48px;display:grid;place-items:center;background:#fafafa;}
+        .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:720px;}
+        .card{background:#ffffff;border:1px solid #ededed;border-radius:12px;padding:24px;font-family:Inter,system-ui,sans-serif;}
+        .card__icon{width:40px;height:40px;border-radius:8px;background:#e8f5f0;color:#0a7a5e;display:grid;place-items:center;font-weight:600;font-size:18px;margin-bottom:14px;}
+        .card__title{font-size:18px;font-weight:600;margin:0 0 4px;letter-spacing:-0.01em;}
+        .card__sub{font-size:11px;color:#6e6e6e;font-family:JetBrains Mono,monospace;margin-bottom:14px;}
+        .card__body{font-size:13px;color:#3c3c3c;line-height:1.6;}
+        .card__row{display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-top:1px solid #ededed;color:#6e6e6e;font-family:JetBrains Mono,monospace;}
+        .card__row strong{color:#0d0d0d;font-weight:500;}
+        .pill{display:inline-block;font-size:10px;padding:2px 8px;background:#f5f5f5;color:#3c3c3c;border-radius:9999px;margin:0 3px 3px 0;font-family:JetBrains Mono,monospace;}
+      </style></head><body><div class="grid">
+        <div class="card">
+          <div class="card__icon">A</div>
+          <div class="card__title">Agent Memory Model</div>
+          <div class="card__sub">concept · 2026-06-19</div>
+          <div class="card__body">Agent 在工作过程中保留与唤起上下文的方式。涵盖短上下文窗口、长上下文检索、外部记忆与多模态记忆。</div>
+          <div style="margin-top:10px;"><span class="pill">memory</span><span class="pill">context</span><span class="pill">retrieval</span></div>
+          <div class="card__row"><span>反链</span><strong>12</strong></div>
+          <div class="card__row"><span>引用</span><strong>3</strong></div>
+          <div class="card__row"><span>更新</span><strong>2 分钟前</strong></div>
+        </div>
+        <div class="card">
+          <div class="card__icon" style="background:#0d0d0d;color:#fff;">R</div>
+          <div class="card__title">ReAct Pattern</div>
+          <div class="card__sub">concept · 2026-06-15</div>
+          <div class="card__body">Reason + Act 交替循环的 Agent 推理模式，适用于工具调用密集任务。</div>
+          <div style="margin-top:10px;"><span class="pill">agent</span><span class="pill">reasoning</span><span class="pill">tools</span></div>
+          <div class="card__row"><span>反链</span><strong>8</strong></div>
+          <div class="card__row"><span>引用</span><strong>2</strong></div>
+          <div class="card__row"><span>更新</span><strong>昨天</strong></div>
+        </div>
+      </div></body></html>`,
+
+      'concept-map': `<!doctype html><html><head>${common}<style>
+        body{margin:0;height:100vh;background:#ffffff;background-image:linear-gradient(to right,rgba(0,0,0,0.03) 1px,transparent 1px),linear-gradient(to bottom,rgba(0,0,0,0.03) 1px,transparent 1px);background-size:32px 32px;font-family:Inter,system-ui,sans-serif;overflow:hidden;}
+        svg{width:100%;height:100%;}
+        .node-label{font-size:11px;fill:#3c3c3c;text-anchor:middle;}
+        .edge{stroke:#d4d4d4;stroke-width:0.7;fill:none;}
+        .edge-active{stroke:#10a37f;stroke-width:1.4;}
+      </style></head><body>
+      <svg viewBox="0 0 800 500">
+        <g>
+          <line class="edge edge-active" x1="400" y1="250" x2="260" y2="150"/>
+          <line class="edge edge-active" x1="400" y1="250" x2="540" y2="150"/>
+          <line class="edge edge-active" x1="400" y1="250" x2="280" y2="360"/>
+          <line class="edge edge-active" x1="400" y1="250" x2="560" y2="360"/>
+          <line class="edge" x1="260" y1="150" x2="540" y2="150"/>
+          <line class="edge" x1="280" y1="360" x2="560" y2="360"/>
+          <line class="edge" x1="260" y1="150" x2="180" y2="80"/>
+          <line class="edge" x1="540" y1="150" x2="620" y2="80"/>
+          <line class="edge" x1="280" y1="360" x2="200" y2="430"/>
+          <line class="edge" x1="560" y1="360" x2="640" y2="430"/>
+        </g>
+        <g>
+          <circle cx="400" cy="250" r="14" fill="#10a37f" stroke="#0a7a5e" stroke-width="2"/>
+          <text class="node-label" x="400" y="280" font-weight="600">Agent Memory Model</text>
+          <circle cx="260" cy="150" r="9" fill="#10a37f"/>
+          <text class="node-label" x="260" y="172">ReAct Pattern</text>
+          <circle cx="540" cy="150" r="9" fill="#10a37f"/>
+          <text class="node-label" x="540" y="172">Plan-and-Execute</text>
+          <circle cx="280" cy="360" r="9" fill="#10a37f"/>
+          <text class="node-label" x="280" y="382">Reflection</text>
+          <circle cx="560" cy="360" r="9" fill="#10a37f"/>
+          <text class="node-label" x="560" y="382">RAG</text>
+          <circle cx="180" cy="80" r="6" fill="#0d0d0d"/>
+          <circle cx="620" cy="80" r="6" fill="#0d0d0d"/>
+          <circle cx="200" cy="430" r="5" fill="#2563eb"/>
+          <circle cx="640" cy="430" r="5" fill="#2563eb"/>
+        </g>
+      </svg></body></html>`,
+
+      'project-report': `<!doctype html><html><head>${common}<style>
+        body{margin:0;font-family:Inter,system-ui,sans-serif;font-size:14px;color:#1a1a1a;}
+        .cover{padding:80px 64px;background:linear-gradient(180deg,#ffffff,#fafafa);border-bottom:1px solid #ededed;}
+        .cover h1{font-size:42px;font-weight:600;letter-spacing:-0.02em;margin:0;font-family:'Source Serif Pro',Georgia,serif;}
+        .cover p{color:#6e6e6e;margin:8px 0 0;}
+        .cover .meta{font-family:JetBrains Mono,monospace;font-size:12px;margin-top:24px;color:#3c3c3c;}
+        .toc{padding:32px 64px;border-bottom:1px solid #ededed;background:#fafafa;}
+        .toc h2{font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#6e6e6e;margin:0 0 14px;}
+        .toc ol{padding-left:20px;font-size:13px;line-height:2;color:#3c3c3c;}
+        .section{padding:32px 64px;border-bottom:1px solid #ededed;max-width:none;}
+        .section h2{font-size:22px;font-weight:600;letter-spacing:-0.01em;margin:0 0 12px;}
+        .section p{color:#3c3c3c;line-height:1.7;margin:0 0 10px;}
+        .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px;}
+        .stat{padding:14px;background:#fafafa;border:1px solid #ededed;border-radius:6px;}
+        .stat__num{font-family:JetBrains Mono,monospace;font-size:22px;font-weight:500;color:#0d0d0d;letter-spacing:-0.02em;}
+        .stat__label{font-size:10.5px;color:#6e6e6e;text-transform:uppercase;letter-spacing:0.06em;margin-top:2px;}
+      </style></head><body>
+        <div class="cover">
+          <h1>Agent Knowledge Base · 项目报告</h1>
+          <p>LLM Wiki Desktop 自动编译 · 基于 237 个页面 · 1,284 条 wikilinks</p>
+          <div class="meta">generated 2026-06-19 14:32 · claude · html-project-report · exports/html/project-report-2026-06-19.html</div>
+        </div>
+        <div class="toc">
+          <h2>目录</h2>
+          <ol>
+            <li>项目概览</li>
+            <li>核心概念</li>
+            <li>Agent 实体</li>
+            <li>来源资料</li>
+            <li>综合分析</li>
+          </ol>
+        </div>
+        <div class="section">
+          <h2>项目概览</h2>
+          <p>本报告汇总 Agent Knowledge Base 项目的全部 Wiki 页面，覆盖 Agent Memory、ReAct、Plan-and-Execute、Reflection 等核心概念。</p>
+          <div class="stats">
+            <div class="stat"><div class="stat__num">237</div><div class="stat__label">总页面</div></div>
+            <div class="stat"><div class="stat__num">86</div><div class="stat__label">实体</div></div>
+            <div class="stat"><div class="stat__num">94</div><div class="stat__label">概念</div></div>
+            <div class="stat"><div class="stat__num">1,284</div><div class="stat__label">链接</div></div>
+          </div>
+        </div>
+        <div class="section">
+          <h2>核心概念</h2>
+          <p>Agent Memory 是项目中心节点，反链 12 篇页面。ReAct Pattern 与 Plan-and-Execute 是两个最常被引用的执行范式。</p>
+        </div>
+      </body></html>`
+    };
+    return article[tmpl] || article['beautiful-read'];
+  }
+
+  // Confirm generation
+  document.getElementById('__confirm_gen_html').addEventListener('click', function () {
+    document.getElementById('dlg-gen-html').classList.add('hidden');
+    // Show toast
+    window.__toast('Agent 生成中… · ' + selectedTmpl.skill, 'info');
+    // Update preview metadata
+    document.getElementById('__preview_tmpl_name').textContent = selectedTmpl.name;
+    const sizeMap = { 'beautiful-read': '48 KB', 'knowledge-card': '22 KB', 'concept-map': '128 KB', 'project-report': '312 KB' };
+    document.getElementById('__preview_tmpl_meta').textContent =
+      selectedTmpl.skill + ' · ' + (sizeMap[selectedTmpl.tmpl] || '—') + ' · 刚刚生成';
+    document.getElementById('__preview_path').textContent =
+      'exports/html/agent-memory-' + selectedTmpl.tmpl + '.html';
+
+    // Simulate generation delay, then populate iframe and switch mode
+    const frame = document.getElementById('__preview_frame');
+    frame.srcdoc = '<!doctype html><html><body style="font-family:Inter,sans-serif;padding:48px;text-align:center;color:#6e6e6e;"><div style="margin-top:80px;"><svg style="width:32px;height:32px;color:#10a37f;animation:spin 1s linear infinite;" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none" d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg><div style="margin-top:12px;font-family:JetBrains Mono,monospace;font-size:12px;">claude · ' + selectedTmpl.skill + ' · 生成中…</div></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></body></html>';
+    content.classList.add('is-previewing');
+    content.classList.remove('is-editing');
+    // Sync mode seg
+    const segBtn = document.querySelector('[data-seg="wikimode"] button[data-key="preview"]');
+    if (segBtn) {
+      document.querySelectorAll('[data-seg="wikimode"] button').forEach(function (b) { b.classList.remove('is-active'); });
+      segBtn.classList.add('is-active');
+    }
+    setTimeout(function () {
+      frame.srcdoc = buildPreviewDoc(selectedTmpl.tmpl);
+      window.__toast('已生成 · ' + selectedTmpl.name, 'ok');
+    }, 700);
+  });
+
+  // Back to read mode
+  document.getElementById('__back_to_read').addEventListener('click', function () {
+    content.classList.remove('is-previewing');
+    document.querySelectorAll('[data-seg="wikimode"] button').forEach(function (b) { b.classList.remove('is-active'); });
+    document.querySelector('[data-seg="wikimode"] button[data-key="read"]').classList.add('is-active');
+  });
+
+  // Regenerate
+  document.getElementById('__regen_html').addEventListener('click', function () {
+    const frame = document.getElementById('__preview_frame');
+    frame.srcdoc = '<!doctype html><html><body style="font-family:Inter,sans-serif;padding:48px;text-align:center;color:#6e6e6e;"><div style="margin-top:80px;"><svg style="width:32px;height:32px;color:#10a37f;animation:spin 1s linear infinite;" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none" d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg><div style="margin-top:12px;font-family:JetBrains Mono,monospace;font-size:12px;">claude · ' + selectedTmpl.skill + ' · 重新生成…</div></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></body></html>';
+    setTimeout(function () {
+      frame.srcdoc = buildPreviewDoc(selectedTmpl.tmpl);
+      window.__toast('已重新生成', 'ok');
+    }, 600);
+  });
+
+  // Copy HTML path
+  document.getElementById('__copy_html_path').addEventListener('click', function () {
+    if (navigator.clipboard) navigator.clipboard.writeText('~/Documents/wiki/agent-llm/' + document.getElementById('__preview_path').textContent);
+    window.__toast('已复制到剪贴板', 'ok');
+  });
+
+  // Preview seg button (in case user clicks HTML 预览 tab without generating)
+  document.getElementById('__mode_preview').addEventListener('click', function () {
+    if (!content.classList.contains('is-previewing')) {
+      // Show template dialog instead
+      document.getElementById('dlg-gen-html').classList.remove('hidden');
+    }
+  });
+</script>
+</body>
+</html>

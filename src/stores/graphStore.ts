@@ -8,6 +8,7 @@ import type {
   GraphStatus,
   SaveGraphLayoutRequest,
 } from "../types/graph";
+import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 
 interface GraphState {
   data: GraphData | null;
@@ -46,11 +47,13 @@ const initial = {
 export const useGraphStore = create<GraphState>((set, get) => ({
   ...initial,
   load: async (projectId, rootPath) => {
+    const scope = captureProjectScope();
     set({ status: "loading", error: null });
     try {
       const result = await invoke<GraphBuildResult>("get_graph", {
         request: { projectId, projectRootPath: rootPath },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       set({
         data: result.data,
         cached: result.cached,
@@ -58,15 +61,18 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         status: "ready",
       });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ status: "error", error: errorMessage(error) });
     }
   },
   rebuild: async (projectId, rootPath) => {
+    const scope = captureProjectScope();
     set({ status: "loading", error: null });
     try {
       const result = await invoke<GraphBuildResult>("build_graph", {
         request: { projectId, projectRootPath: rootPath },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       set({
         data: result.data,
         cached: false,
@@ -74,10 +80,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         status: "ready",
       });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ status: "error", error: errorMessage(error) });
     }
   },
   saveLayout: async (projectId, rootPath, positions, communities) => {
+    const scope = captureProjectScope();
     const data = get().data;
     if (!data) return;
     const request: SaveGraphLayoutRequest = {
@@ -89,6 +97,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     };
     try {
       const updated = await invoke<GraphData | null>("save_graph_layout", { request });
+      if (!isProjectScopeCurrent(scope)) return;
       if (updated) {
         set({ data: updated, layoutStale: false });
       }

@@ -69,7 +69,7 @@ export function useTaskEvents(): void {
   // Recover persisted tasks whenever the active project root changes.
   useEffect(() => {
     if (currentProject.rootPath) {
-      recoverTasksForProject(currentProject.rootPath).catch(() => {});
+      recoverTasksForProject(currentProject.projectId, currentProject.rootPath).catch(() => {});
     }
-  }, [currentProject.rootPath]);
+  }, [currentProject.projectId, currentProject.rootPath]);
 }

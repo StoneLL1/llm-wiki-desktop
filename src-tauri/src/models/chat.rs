@@ -157,6 +157,8 @@ pub struct SaveAnswerToWikiRequest {
     pub expected_hash: Option<String>,
     #[serde(default)]
     pub allow_overwrite: bool,
+    #[serde(default)]
+    pub action_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

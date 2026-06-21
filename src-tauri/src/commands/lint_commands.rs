@@ -6,6 +6,7 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
+use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus};
 use crate::models::lint::{
     ApplyLintFixRequest, DeepLintReport, GetDeepLintReportRequest, LintFixOutcome, LintReport,
     RunLocalLintRequest, StartDeepLintRequest,
@@ -18,10 +19,6 @@ use crate::tasks::task_model::LogLevel;
 
 const LINT_REPORTS_DIR: &str = ".app/lint-reports";
 
-fn context_for(project_id: &str, root_path: &str) -> ProjectContext {
-    ProjectContext::new(project_id, PathBuf::from(root_path))
-}
-
 /// Run the deterministic local lint pass. Synchronous — it never calls a
 /// model and completes in a single wiki scan.
 #[tauri::command]
@@ -29,7 +26,7 @@ pub fn run_local_lint(
     state: State<'_, AppState>,
     request: RunLocalLintRequest,
 ) -> Result<LintReport, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .lint_service
         .run_local_lint(&context, &state.search_service)
@@ -44,16 +41,21 @@ pub fn start_deep_lint(
     state: State<'_, AppState>,
     request: StartDeepLintRequest,
 ) -> Result<BackendTask, BackendError> {
-    let task = state.task_service.create_task(
-        TaskType::DeepLint,
-        Some(request.project_id.clone()),
-        "Deep wiki lint".to_string(),
-        true,
-    );
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let task = state
+        .task_service
+        .create_project_task(
+            TaskType::DeepLint,
+            request.project_id.clone(),
+            context.root.clone(),
+            "Deep wiki lint".to_string(),
+            true,
+        )
+        .map_err(task_error)?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if let Err(error) = run_deep_lint(&state, request, &task_id).await {
+        if let Err(error) = run_deep_lint(&state, request, &context, &task_id).await {
             let _ = state
                 .task_service
                 .append_log(&task_id, LogLevel::Error, error.message.clone());
@@ -74,21 +76,20 @@ pub fn start_deep_lint(
 async fn run_deep_lint(
     state: &AppState,
     request: StartDeepLintRequest,
+    context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
         .map_err(task_error)?;
-    let context = context_for(&request.project_id, &request.project_root_path);
-
     state
         .task_service
         .append_log(task_id, LogLevel::Info, "Building deep-lint prompt".into())
         .map_err(task_error)?;
     let prompt = state
         .lint_service
-        .build_deep_lint_prompt(&context, &state.search_service)?;
+        .build_deep_lint_prompt(context, &state.search_service)?;
 
     let raw = match resolve_route(
         state,
@@ -199,7 +200,7 @@ pub fn get_deep_lint_report(
     state: State<'_, AppState>,
     request: GetDeepLintReportRequest,
 ) -> Result<DeepLintReport, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let path = format!("{LINT_REPORTS_DIR}/{}.json", request.task_id);
     state.file_store.read_json(&context, &path)
 }
@@ -211,14 +212,67 @@ pub fn apply_lint_fix(
     state: State<'_, AppState>,
     request: ApplyLintFixRequest,
 ) -> Result<LintFixOutcome, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
-    state.lint_service.apply_fix(
+    if request.confirm_high_risk {
+        let action_id = request.action_id.as_deref().ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_REQUIRED",
+                "A backend-issued lint confirmation action is required.",
+                true,
+                true,
+            )
+        })?;
+        let stored = state
+            .confirmation_registry
+            .confirm(action_id, ConfirmationStatus::Confirmed)?;
+        let ConfirmationExecution::LintFix {
+            project_id,
+            root_path,
+            issue,
+        } = stored.execution.ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_EXECUTION_MISSING",
+                "Lint confirmation has no execution plan.",
+                false,
+                true,
+            )
+        })?
+        else {
+            return Err(BackendError::new(
+                "CONFIRMATION_TYPE_MISMATCH",
+                "The pending action is not a lint fix.",
+                false,
+                true,
+            ));
+        };
+        let context = state.resolve_project_context(&project_id, &root_path)?;
+        return state.lint_service.apply_fix(
+            &context,
+            &state.git_service,
+            &issue,
+            true,
+            request.expected_hash.as_deref(),
+        );
+    }
+
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let outcome = state.lint_service.apply_fix(
         &context,
         &state.git_service,
         &request.issue,
-        request.confirm_high_risk,
+        false,
         request.expected_hash.as_deref(),
-    )
+    )?;
+    if let Some(action) = outcome.pending_action.clone() {
+        state.confirmation_registry.register_with_execution(
+            action,
+            Some(ConfirmationExecution::LintFix {
+                project_id: request.project_id,
+                root_path: request.project_root_path,
+                issue: request.issue,
+            }),
+        )?;
+    }
+    Ok(outcome)
 }
 
 enum ResolvedRoute {

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>Import — LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .import-layout { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+  .import-section { padding: var(--sp-5) var(--sp-6); border-bottom: 1px solid var(--border-subtle); }
+  .import-actions {
+    padding: var(--sp-3) var(--sp-6);
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    display: flex; gap: var(--sp-3); align-items: center;
+  }
+  .import-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .import-source {
+    padding: 16px;
+    border: 1.5px dashed var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--background);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease);
+  }
+  .import-source:hover { border-color: var(--accent); }
+  .import-source__icon {
+    width: 32px; height: 32px;
+    border-radius: var(--radius-md);
+    background: var(--surface-muted);
+    color: var(--text-secondary);
+    display: grid; place-items: center;
+    margin-bottom: 10px;
+  }
+  .import-source__title { font-size: 13px; font-weight: 600; margin: 0; }
+  .import-source__desc { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+
+  .file-table-wrap {
+    flex: 1;
+    overflow: auto;
+    padding: 0;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar__brand"><div class="topbar__brand-mark">LW</div><div class="topbar__brand-name">LLM Wiki Desktop</div></div>
+    <button class="projswitch">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="按名称、标签、类型或来源搜索页面…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch"><button class="is-active">中</button><button>EN</button></div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span></a>
+        <a class="navitem is-active" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span><span class="badge badge--accent" style="height:16px;padding:0 5px;font-size:9.5px;">7</span></a>
+        <a class="navitem" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main__header">
+      <h1 class="main__title">Import <span class="main__title-sub">· 解析预览 · 7 个文件 · 1 URL · 0 冲突</span></h1>
+      <div class="main__toolbar">
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-trash"/></svg>清空</button>
+        <button class="btn btn--sm" data-dialog-open="dlg-folder">打开文件夹为项目</button>
+      </div>
+    </div>
+    <div class="main__body">
+      <div class="import-layout">
+        <!-- Source selection -->
+        <div class="import-section">
+          <h2 style="font-size:11px;font-weight:500;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin:0 0 12px;">选择资料来源</h2>
+          <div class="import-grid">
+            <div class="import-source" onclick="window.__toast('请选择文件', 'info')">
+              <div class="import-source__icon"><svg class="ico-xl"><use href="#i-file"/></svg></div>
+              <h3 class="import-source__title">本地文件</h3>
+              <p class="import-source__desc">PDF · DOCX · PPTX · XLSX/CSV · MD · TXT · HTML</p>
+            </div>
+            <div class="import-source" onclick="window.__toast('请选择文件夹', 'info')">
+              <div class="import-source__icon"><svg class="ico-xl"><use href="#i-folder-open"/></svg></div>
+              <h3 class="import-source__title">文件夹</h3>
+              <p class="import-source__desc">导入到当前项目，或打开为项目</p>
+            </div>
+            <div class="import-source" data-dialog-open="dlg-url">
+              <div class="import-source__icon"><svg class="ico-xl"><use href="#i-link-ext"/></svg></div>
+              <h3 class="import-source__title">URL / 链接</h3>
+              <p class="import-source__desc">Readability.js 提取正文到 Markdown</p>
+            </div>
+            <div class="import-source" onclick="window.__toast('剪贴板为空', 'info')">
+              <div class="import-source__icon"><svg class="ico-xl"><use href="#i-clipboard"/></svg></div>
+              <h3 class="import-source__title">剪贴板</h3>
+              <p class="import-source__desc">粘贴文本 / Markdown 直接导入</p>
+            </div>
+            <div class="import-source" style="opacity:0.5;cursor:not-allowed;">
+              <div class="import-source__icon"><svg class="ico-xl"><use href="#i-globe"/></svg></div>
+              <h3 class="import-source__title">浏览器扩展</h3>
+              <p class="import-source__desc">非首版 · 后续扩展</p>
+            </div>
+            <div class="import-source" style="opacity:0.5;cursor:not-allowed;">
+              <div class="import-source__icon"><svg class="ico-xl"><use href="#i-bot"/></svg></div>
+              <h3 class="import-source__title">GitHub / RSS / 音视频</h3>
+              <p class="import-source__desc">非首版 · 后续扩展</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- File table -->
+        <div class="file-table-wrap">
+          <div class="toolbar" style="padding:8px 24px;background:var(--surface);border-bottom:1px solid var(--border-subtle);">
+            <span style="font-size:11px;font-weight:500;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);">待确认 · 7 个文件 · 1 URL</span>
+            <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+              <span class="badge badge--success"><span class="dot"></span>7 解析成功</span>
+              <span class="badge badge--warn"><span class="dot"></span>0 部分失败</span>
+              <span class="badge badge--danger"><span class="dot"></span>0 失败</span>
+              <span style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">总大小 38.4 MB</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th style="width:30px;"><input type="checkbox" checked /></th>
+                <th style="width:24px;"></th>
+                <th>文件名</th>
+                <th>类型</th>
+                <th>大小</th>
+                <th>页数/字数</th>
+                <th>目标路径</th>
+                <th>状态</th>
+                <th style="width:60px;"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm" style="color:var(--danger);"><use href="#i-pdf"/></svg></td>
+                <td>
+                  <div class="primary">anthropic-building-effective-agents.pdf</div>
+                  <div class="secondary truncate" style="max-width:340px;">…Anthropic 发布的 Agent 设计指南，覆盖 ReAct、Plan-and-Execute、Memory 等模式</div>
+                </td>
+                <td><span class="badge">PDF</span></td>
+                <td class="col-num">2.4 MB</td>
+                <td class="col-num">18 页</td>
+                <td class="col-path">raw/sources/pdfs/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>解析成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm" style="color:var(--danger);"><use href="#i-pdf"/></svg></td>
+                <td>
+                  <div class="primary">openai-cookbook-memory.pdf</div>
+                  <div class="secondary truncate" style="max-width:340px;">…OpenAI Cookbook 中关于 Chat Memory 实现的章节</div>
+                </td>
+                <td><span class="badge">PDF</span></td>
+                <td class="col-num">1.8 MB</td>
+                <td class="col-num">12 页</td>
+                <td class="col-path">raw/sources/pdfs/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>解析成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm"><use href="#i-pdf"/></svg></td>
+                <td>
+                  <div class="primary">react-pattern-survey.pdf</div>
+                  <div class="secondary truncate" style="max-width:340px;">…ReAct 与 Plan-and-Execute 模式综述论文</div>
+                </td>
+                <td><span class="badge">PDF</span></td>
+                <td class="col-num">3.1 MB</td>
+                <td class="col-num">24 页</td>
+                <td class="col-path">raw/sources/pdfs/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>解析成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm"><use href="#i-doc"/></svg></td>
+                <td>
+                  <div class="primary">langchain-memory-modules.docx</div>
+                  <div class="secondary truncate" style="max-width:340px;">…LangChain Memory 模块离线文档</div>
+                </td>
+                <td><span class="badge">DOCX</span></td>
+                <td class="col-num">320 KB</td>
+                <td class="col-num">8,420 字</td>
+                <td class="col-path">raw/sources/docs/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>解析成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm"><use href="#i-slide"/></svg></td>
+                <td>
+                  <div class="primary">agent-architecture-talk.pptx</div>
+                  <div class="secondary truncate" style="max-width:340px;">…Agent 架构分享会幻灯片 · 32 张</div>
+                </td>
+                <td><span class="badge">PPTX</span></td>
+                <td class="col-num">12.6 MB</td>
+                <td class="col-num">32 页</td>
+                <td class="col-path">raw/sources/slides/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>解析成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm"><use href="#i-sheet"/></svg></td>
+                <td>
+                  <div class="primary">model-context-windows.csv</div>
+                  <div class="secondary truncate" style="max-width:340px;">…主流模型上下文窗口 / 价格对比表</div>
+                </td>
+                <td><span class="badge">CSV</span></td>
+                <td class="col-num">12 KB</td>
+                <td class="col-num">42 行</td>
+                <td class="col-path">raw/sources/sheets/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>解析成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm"><use href="#i-file-md"/></svg></td>
+                <td>
+                  <div class="primary">personal-notes-on-agents.md</div>
+                  <div class="secondary truncate" style="max-width:340px;">…个人 Agent 笔记 · Markdown</div>
+                </td>
+                <td><span class="badge">MD</span></td>
+                <td class="col-num">48 KB</td>
+                <td class="col-num">6,820 字</td>
+                <td class="col-path">raw/sources/markdown/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>解析成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" checked /></td>
+                <td class="col-icon"><svg class="ico-sm"><use href="#i-link-ext"/></svg></td>
+                <td>
+                  <div class="primary">Letta (MemGPT) documentation</div>
+                  <div class="secondary truncate" style="max-width:340px;">https://docs.letta.com/guides/agents/memory · 提取正文 8,124 字</div>
+                </td>
+                <td><span class="badge">URL</span></td>
+                <td class="col-num">—</td>
+                <td class="col-num">8,124 字</td>
+                <td class="col-path">raw/sources/links/</td>
+                <td><span class="badge badge--success"><span class="dot"></span>抓取成功</span></td>
+                <td><button class="btn btn--ghost btn--icon btn--sm" data-tip="预览"><svg class="ico-sm"><use href="#i-eye"/></svg></button></td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="import-actions">
+          <div style="font-size:12.5px;color:var(--text-secondary);">
+            <strong style="color:var(--text-primary);">导入层只负责无损保留</strong> · 原文件 / 提取文本 / 提取图片 / 来源元数据 · OCR 与视觉理解交给编译 Agent
+          </div>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+            <label class="checkbox"><input type="checkbox" checked /> 创建 Git 检查点</label>
+            <label class="checkbox"><input type="checkbox" checked /> 导入后触发 Wiki 编译</label>
+            <button class="btn">取消</button>
+            <button class="btn btn--primary" onclick="location.href='agent.html'"><svg class="ico-sm"><use href="#i-upload"/></svg>确认导入并编译</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="rightpanel">
+    <div class="rightpanel__header">
+      <span class="rightpanel__title">解析预览</span>
+      <button class="btn btn--ghost btn--icon btn--sm" data-right-toggle data-tip="折叠"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+    <div class="rightpanel__body">
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">选中文件</h4>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+          <svg class="ico" style="color:var(--danger);"><use href="#i-pdf"/></svg>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">anthropic-building-effective-agents.pdf</div>
+            <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">2.4 MB · 18 页</div>
+          </div>
+        </div>
+        <dl class="rightpanel__meta">
+          <dt>类型</dt><dd>PDF · v1.7</dd>
+          <dt>页数</dt><dd>18</dd>
+          <dt>字数</dt><dd>12,486</dd>
+          <dt>图片</dt><dd>4 张</dd>
+          <dt>表格</dt><dd>2 个</dd>
+          <dt>语言</dt><dd>en-US</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">提取预览（首页）</h4>
+        <div style="background:var(--surface);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:12px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-secondary);line-height:1.65;max-height:240px;overflow-y:auto;">
+Building Effective Agents
+Anthropic · 2024-12
+
+This post explains how to build effective agents
+using LLMs. We break down workflows and patterns
+that work well, and provide code examples.
+
+What are agents? In this post, we use "agent" to
+refer to systems where LLMs dynamically direct
+their own processes and tool usage, maintaining
+control over how they accomplish tasks...
+
+<span style="color:var(--text-muted);">… 后续 17 页</span>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">归档规则</h4>
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--text-secondary);font-family:var(--font-mono);">
+          <div>PDF → raw/sources/pdfs/</div>
+          <div>DOCX → raw/sources/docs/</div>
+          <div>PPTX → raw/sources/slides/</div>
+          <div>XLSX/CSV → raw/sources/sheets/</div>
+          <div>MD/TXT → raw/sources/markdown/</div>
+          <div>图片 → raw/assets/</div>
+          <div>URL → raw/sources/links/</div>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text-muted);">
+          原文件默认不可变 · 提取文本存入 raw/extracted/
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">冲突记录</h4>
+        <div style="padding:10px;background:var(--accent-soft);border:1px solid var(--accent-border);border-radius:var(--radius-md);font-size:11.5px;color:var(--accent-hover);">
+          <svg class="ico-sm" style="vertical-align:middle;"><use href="#i-check-circle"/></svg>
+          无冲突 · .app/import-conflicts.json 为空
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">导入历史</h4>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:11.5px;">
+          <div style="display:flex;gap:8px;">
+            <span style="font-family:var(--font-mono);color:var(--text-muted);width:60px;flex:none;">14 分钟前</span>
+            <div>
+              <div>6 PDF + 1 URL · 共 7 项</div>
+              <div style="color:var(--text-muted);font-family:var(--font-mono);font-size:10.5px;">0 冲突 · 已编译</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <span style="font-family:var(--font-mono);color:var(--text-muted);width:60px;flex:none;">昨天</span>
+            <div>
+              <div>3 MD · 个人笔记</div>
+              <div style="color:var(--text-muted);font-family:var(--font-mono);font-size:10.5px;">0 冲突</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <span style="font-family:var(--font-mono);color:var(--text-muted);width:60px;flex:none;">06-12</span>
+            <div>
+              <div>项目初始化 · 38 个原始文件</div>
+              <div style="color:var(--text-muted);font-family:var(--font-mono);font-size:10.5px;">2 自动重命名 · 0 失败</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--ok"></span>claude · 1.0.23</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">待确认 · 8 项 · 38.4 MB</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">main · 3f8a9c2</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">中文</span>
+  </footer>
+</div>
+
+<!-- URL dialog -->
+<div class="dialog-overlay hidden" id="dlg-url">
+  <div class="dialog">
+    <div class="dialog__head">
+      <h2 class="dialog__title">导入 URL</h2>
+      <button class="btn btn--ghost btn--icon btn--sm" data-dialog-close><svg class="ico"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dialog__body">
+      <div class="formrow" style="grid-template-columns:1fr;">
+        <div>
+          <div class="formrow__label" style="margin-bottom:6px;">链接</div>
+          <div class="input-group">
+            <span class="input-group__lead"><svg class="ico-sm"><use href="#i-link-ext"/></svg></span>
+            <input class="input input--mono" placeholder="https://" value="https://docs.letta.com/guides/agents/memory" />
+          </div>
+          <div class="formrow__hint" style="margin-top:6px;">Readability.js 提取正文 / 图片 / 元数据</div>
+        </div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn" data-dialog-close>取消</button>
+      <button class="btn btn--primary" data-dialog-close onclick="window.__toast('URL 已加入预览列表', 'ok')"><svg class="ico"><use href="#i-plus"/></svg>抓取并预览</button>
+    </div>
+  </div>
+</div>
+
+<!-- Folder dialog -->
+<div class="dialog-overlay hidden" id="dlg-folder">
+  <div class="dialog dialog--wide">
+    <div class="dialog__head">
+      <h2 class="dialog__title">打开文件夹为项目</h2>
+      <button class="btn btn--ghost btn--icon btn--sm" data-dialog-close><svg class="ico"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dialog__body">
+      <div style="padding:12px;background:var(--warning-soft);border:1px solid var(--warning);border-radius:var(--radius-md);font-size:12.5px;color:#a06a00;margin-bottom:16px;">
+        <strong>注意</strong> · 此操作会移动文件并初始化项目结构。建议先创建 Git 检查点。
+      </div>
+      <div class="formrow">
+        <div><div class="formrow__label">文件夹路径</div></div>
+        <div class="formrow__control">
+          <div class="input-group">
+            <span class="input-group__lead"><svg class="ico-sm"><use href="#i-folder"/></svg></span>
+            <input class="input input--mono" value="~/Documents/sources/agent-papers" />
+            <span class="input-group__trail"><button class="btn btn--sm">选择…</button></span>
+          </div>
+        </div>
+      </div>
+      <div class="formrow">
+        <div><div class="formrow__label">项目模板</div></div>
+        <div class="formrow__control">
+          <select class="select" style="max-width:240px;"><option>研究</option><option>通用</option><option>读书</option></select>
+        </div>
+      </div>
+      <div class="formrow">
+        <div><div class="formrow__label">归档策略</div></div>
+        <div class="formrow__control">
+          <label class="checkbox"><input type="checkbox" checked /> 按类型自动归档到 raw/sources/</label>
+          <div style="margin-top:4px;"><label class="checkbox"><input type="checkbox" checked /> 同名冲突自动重命名</label></div>
+          <div style="margin-top:4px;"><label class="checkbox"><input type="checkbox" checked /> 初始化 Git 仓库</label></div>
+        </div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn" data-dialog-close>取消</button>
+      <button class="btn btn--primary" data-dialog-close onclick="location.href='import.html'"><svg class="ico"><use href="#i-folder-open"/></svg>初始化为项目</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

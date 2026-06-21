@@ -10,6 +10,7 @@ import type {
 import { MarkdownReader } from "./MarkdownReader";
 import { WikiEditor } from "./WikiEditor";
 import { useWikiStore } from "./wikiStore";
+import { invalidateProjectScope } from "../../stores/projectScope";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -59,6 +60,24 @@ afterEach(() => {
 });
 
 describe("wikiStore", () => {
+  it("ignores a page response that arrives after the project scope changed", async () => {
+    let resolvePage!: (value: WikiPageContent) => void;
+    invokeMock.mockReturnValueOnce(
+      new Promise<WikiPageContent>((resolve) => {
+        resolvePage = resolve;
+      }),
+    );
+
+    const opening = useWikiStore.getState().openPage("project-a", "D:/a", "wiki/a.md");
+    invalidateProjectScope();
+    useWikiStore.getState().reset();
+    resolvePage(pageContent());
+    await opening;
+
+    expect(useWikiStore.getState().page).toBeNull();
+    expect(useWikiStore.getState().selectedPath).toBeNull();
+  });
+
   it("scans the tree and opens the first page by default", async () => {
     const tree: WikiTree = {
       root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },

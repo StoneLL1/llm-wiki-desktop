@@ -4,7 +4,7 @@ import "../../i18n";
 import { LlmProviderSettings } from "./LlmProviderSettings";
 
 describe("LlmProviderSettings", () => {
-  it("clears the secret field after saving and only shows the backend mask", async () => {
+  it("clears the secret field after saving and never echoes secret material", async () => {
     const saveSecret = vi.fn().mockResolvedValue(undefined);
     render(<LlmProviderSettings providers={[]} onSaveProvider={vi.fn()} onSaveSecret={saveSecret} />);
     const input = screen.getByLabelText(/API key/i) as HTMLInputElement;

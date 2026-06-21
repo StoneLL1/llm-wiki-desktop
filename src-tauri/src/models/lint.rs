@@ -167,6 +167,8 @@ pub struct ApplyLintFixRequest {
     pub confirm_high_risk: bool,
     #[serde(default)]
     pub expected_hash: Option<String>,
+    #[serde(default)]
+    pub action_id: Option<String>,
 }
 
 /// Result of an apply attempt. Kept as a struct with a discriminator field

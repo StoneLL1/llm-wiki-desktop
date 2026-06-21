@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "wiki.html",
+  "entry": "wiki.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-06-19T05:32:05.074Z",
+  "updatedAt": "2026-06-19T05:32:05.074Z",
+  "metadata": {
+    "inferred": true,
+    "reconciled": true
+  }
+}
