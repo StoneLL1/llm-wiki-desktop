@@ -8,6 +8,7 @@ import { useNavigationStore } from "../../stores/navigationStore";
 import { useGraphStore } from "../../stores/graphStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useProjectStatus } from "../../hooks/useProjectStatus";
 import type { GraphState, IndexState } from "../../types/project";
 
 export function RightContextPanel() {
@@ -15,6 +16,7 @@ export function RightContextPanel() {
   const activeView = useNavigationStore((state) => state.activeView);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const currentProject = useProjectStore((state) => state.currentProject);
+  const pendingAction = useProjectStore((state) => state.pendingAction);
   const tasks = useTaskStore((state) => state.tasks);
   const wikiPage = useWikiStore((state) => state.page?.meta ?? null);
   const wikiTree = useWikiStore((state) => state.tree);
@@ -22,6 +24,8 @@ export function RightContextPanel() {
   const graphData = useGraphStore((state) => state.data);
   const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
   const chatSession = useChatStore((state) => state.activeSession);
+
+  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
   const openPage = (path: string) => {
     void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
@@ -120,7 +124,12 @@ export function RightContextPanel() {
   }
 
   const health = currentProject.health;
-  const routeLabel = t(`status.routeLabel.${currentProject.agentRoute}`, { defaultValue: currentProject.agentRoute });
+  const pendingCount = pendingAction ? 1 : 0;
+
+  const gitBranch = status?.git?.branch ?? null;
+  const gitHead = status?.git?.head ?? null;
+  const installedAgents = (status?.agents ?? []).filter((a) => a.state === "installed");
+  const configuredProviders = (status?.providers ?? []).filter((p) => p.configured);
 
   return (
     <aside
@@ -142,6 +151,10 @@ export function RightContextPanel() {
             <dd className="m-0 font-mono text-[11.5px]">{health.hasSchema ? "schema.md" : "—"}</dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.purpose")}</dt>
             <dd className="m-0 font-mono text-[11.5px]">{health.hasPurpose ? "purpose.md" : "—"}</dd>
+            <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.gitBranch")}</dt>
+            <dd className="m-0 font-mono text-[11.5px]">{gitBranch ?? "—"}</dd>
+            <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.gitHead")}</dt>
+            <dd className="m-0 font-mono text-[11.5px]">{gitHead ?? "—"}</dd>
           </dl>
         </div>
 
@@ -157,6 +170,12 @@ export function RightContextPanel() {
             </dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.graphCache")}</dt>
             <dd className="m-0 font-mono text-[11.5px]">{t(`dashboard.graph.state.${currentProject.graphState as GraphState}`)}</dd>
+            <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.lastCompile")}</dt>
+            <dd className="m-0 font-mono text-[11.5px] text-[var(--text-muted)]">—</dd>
+            <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.pending")}</dt>
+            <dd className="m-0 font-mono text-[11.5px]" style={{ color: pendingCount > 0 ? "var(--warning)" : "var(--text-secondary)" }}>
+              {pendingCount > 0 ? t("rightpanel.pending.count", { count: pendingCount }) : t("rightpanel.pending.none")}
+            </dd>
           </dl>
         </div>
 
@@ -164,32 +183,70 @@ export function RightContextPanel() {
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.route")}</h4>
           <div className="flex flex-col gap-2 text-xs">
-            <div className="flex items-center gap-2">
-              <span className={`inline-block h-2 w-2 rounded-full ${currentProject.agentRoute === "unconfigured" ? "bg-[var(--text-disabled)]" : "bg-[var(--accent)] shadow-[0_0_0_2px_var(--accent-soft)]"}`} aria-hidden="true" />
-              <span className="font-mono">{routeLabel}</span>
-              {currentProject.agentRoute !== "unconfigured" && (
-                <span className="ml-auto inline-flex h-[18px] items-center rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-[7px] text-[10.5px] font-medium text-[var(--accent-hover)]">默认</span>
-              )}
-            </div>
+            {installedAgents.length === 0 && configuredProviders.length === 0 ? (
+              <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.route.noAgents")}</p>
+            ) : (
+              <>
+                {installedAgents.map((agent) => (
+                  <div key={agent.kind} className="flex items-center gap-2">
+                    <span className="dotstatus dotstatus--ok" aria-hidden="true" />
+                    <span className="font-mono">{agent.kind}</span>
+                    <span className="ml-auto font-mono text-[11px] text-[var(--text-muted)]">{agent.version ?? "—"}</span>
+                    {agent.isDefault ? (
+                      <span className="inline-flex h-[18px] items-center rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-[7px] text-[10.5px] font-medium text-[var(--accent-hover)]">{t("rightpanel.route.default")}</span>
+                    ) : null}
+                  </div>
+                ))}
+                {configuredProviders.map((p) => (
+                  <div key={p.kind} className="flex items-center gap-2">
+                    <span className="dotstatus dotstatus--ok" aria-hidden="true" />
+                    <span className="font-mono">{t("rightpanel.route.byokLabel", { provider: p.label ?? p.kind })}</span>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </div>
 
         {/* 背景任务 */}
-        <div className="py-3">
+        <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.tasks")}</h4>
           <div className="flex flex-col gap-2 text-xs">
-            {tasks.length === 0 ? (
-              <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.tasks.none")}</p>
+            {tasks.filter((t) => t.status === "running").length === 0 ? (
+              tasks.filter((t) => t.status === "queued").length === 0 ? (
+                <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.tasks.none")}</p>
+              ) : (
+                tasks.filter((t) => t.status === "queued").map((task) => (
+                  <div key={task.id} className="flex items-center gap-2">
+                    <span className="dotstatus dotstatus--ok" aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate">{task.title}</span>
+                    <span className="shrink-0 text-[var(--text-muted)]">{t(`task.status.${task.status}`)}</span>
+                  </div>
+                ))
+              )
             ) : (
-              tasks.map((task) => (
+              tasks.filter((t) => t.status === "running" || t.status === "queued").slice(0, 5).map((task) => (
                 <div key={task.id} className="flex items-center gap-2">
-                  <span className={`h-2 w-2 shrink-0 rounded-full ${task.status === "running" ? "bg-[var(--warning)] shadow-[0_0_0_2px_var(--warning-soft)]" : "bg-[var(--accent)] shadow-[0_0_0_2px_var(--accent-soft)]"}`} aria-hidden="true" />
+                  <span className={`dotstatus ${task.status === "running" ? "dotstatus--busy" : "dotstatus--ok"}`} aria-hidden="true" />
                   <span className="min-w-0 flex-1 truncate">{task.title}</span>
-                  <span className="shrink-0 text-[var(--text-muted)]">{t(`task.status.${task.status}`)}</span>
+                  {task.progress != null ? (
+                    <span className="shrink-0 font-mono text-[var(--text-muted)]">{task.progress}%</span>
+                  ) : (
+                    <span className="shrink-0 text-[var(--text-muted)]">{t(`task.status.${task.status}`)}</span>
+                  )}
                 </div>
               ))
             )}
+            {tasks.filter((t) => t.status === "succeeded" || t.status === "failed").length > 0 && tasks.filter((t) => t.status === "running" || t.status === "queued").length === 0 ? (
+              <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.tasks.noOthers")}</p>
+            ) : null}
           </div>
+        </div>
+
+        {/* 磁盘占用 */}
+        <div className="py-3">
+          <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.disk")}</h4>
+          <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.disk.unavailable")}</p>
         </div>
       </div>
     </aside>
