@@ -6,7 +6,7 @@
 
 ## 状态摘要
 
-- P0：2 项 pending，2 项 verified，0 项 blocked
+- P0：1 项 pending，3 项 verified，0 项 blocked
 - P1：2 项 pending，0 项 verified，0 项 blocked
 - blocked：无
 
@@ -32,12 +32,12 @@
 
 ### WIKI-FE-03 — P0 页面新建、重命名、删除入口
 
-- status: pending
+- status: verified
 - 意图：树顶栏增加新建入口，文件行提供重命名/删除入口；调用 wiki-BE 已交付命令；重命名和删除都经过 `ConfirmationDialog`，删除确认沿用后端 PendingAction 与 Git checkpoint。
 - 决策：前端不自行写文件或创建 checkpoint；所有生命周期动作由 Zustand store 调用 typed Tauri IPC，成功后重扫并保持合理选中态。
 - 验收：可新建空页面；重命名确认后刷新到新路径；删除先展示后端影响范围与 checkpoint 状态，再确认执行；取消不写入。
 - 预计文件：`src/features/wiki/WikiTree.tsx`、`src/features/wiki/WikiView.tsx`、`src/features/wiki/wikiStore.ts`、`src/features/wiki/wiki.test.tsx`、`src/types/wiki.ts`、`src/types/backend.ts`、`src/i18n/locales/*.json`
-- 完成位置：待记录
+- 完成位置：`src/features/wiki/wikiStore.ts:250-337`；`src/features/wiki/WikiTree.tsx:35-328`；`src/features/wiki/WikiPageFormDialog.tsx:1-139`；`src/features/wiki/WikiView.tsx:16-123,143-151,255-274`；`src/features/wiki/wiki.test.tsx:257-361,461-540`；`src/types/wiki.ts:84-97`；`src/types/backend.ts:31`
 
 ### WIKI-FE-04 — P0 编译/保存冲突三路 Markdown Diff
 

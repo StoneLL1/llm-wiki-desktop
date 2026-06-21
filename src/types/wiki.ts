@@ -81,6 +81,20 @@ export interface SaveWikiPageResponse {
   graphCacheInvalidated: boolean;
 }
 
+export interface CreateWikiPageInput {
+  relativePath: string;
+  title: string | null;
+  pageType: WikiPageType | null;
+}
+
+export interface RenameWikiPageResponse {
+  relativePath: string;
+  hash: string;
+  savedAt: string;
+  updatedReferences: string[];
+  graphCacheInvalidated: boolean;
+}
+
 export interface SearchRequest {
   projectId: string;
   projectRootPath: string;

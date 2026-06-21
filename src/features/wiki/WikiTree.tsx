@@ -8,9 +8,13 @@ import {
   FolderOpen,
   History,
   List,
+  MoreHorizontal,
+  Pencil,
+  Plus,
   RefreshCw,
   Search,
   Star,
+  Trash2,
 } from "lucide-react";
 
 import type { WikiPageMeta, WikiPageType, WikiTreeNode } from "../../types/wiki";
@@ -34,11 +38,23 @@ interface WikiTreeProps {
   selectedPath: string | null;
   onSelect: (path: string) => void;
   onRefresh: () => void;
+  onCreate: () => void;
+  onRename: (path: string) => void;
+  onDelete: (path: string) => void;
 }
 
 type TypeFilter = WikiPageType | "all";
 
-export function WikiTree({ root, pages, selectedPath, onSelect, onRefresh }: WikiTreeProps) {
+export function WikiTree({
+  root,
+  pages,
+  selectedPath,
+  onSelect,
+  onRefresh,
+  onCreate,
+  onRename,
+  onDelete,
+}: WikiTreeProps) {
   const { t } = useTranslation();
   const [filterText, setFilterText] = useState("");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
@@ -79,6 +95,15 @@ export function WikiTree({ root, pages, selectedPath, onSelect, onRefresh }: Wik
         </div>
         <button
           type="button"
+          title={t("wiki.tree.newPage")}
+          aria-label={t("wiki.tree.newPage")}
+          onClick={onCreate}
+          className="grid h-[26px] w-[26px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+        >
+          <Plus size={14} />
+        </button>
+        <button
+          type="button"
           title={t("wiki.tree.refresh")}
           onClick={onRefresh}
           className="grid h-[26px] w-[26px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
@@ -117,6 +142,8 @@ export function WikiTree({ root, pages, selectedPath, onSelect, onRefresh }: Wik
             allowedPaths={allowedPaths}
             selectedPath={selectedPath}
             onSelect={onSelect}
+            onRename={onRename}
+            onDelete={onDelete}
             depth={0}
           />
         )}
@@ -154,12 +181,16 @@ function TreeChildren({
   allowedPaths,
   selectedPath,
   onSelect,
+  onRename,
+  onDelete,
   depth,
 }: {
   node: WikiTreeNode;
   allowedPaths: Set<string>;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onRename: (path: string) => void;
+  onDelete: (path: string) => void;
   depth: number;
 }) {
   return (
@@ -171,6 +202,8 @@ function TreeChildren({
           allowedPaths={allowedPaths}
           selectedPath={selectedPath}
           onSelect={onSelect}
+          onRename={onRename}
+          onDelete={onDelete}
           depth={depth}
         />
       ))}
@@ -183,38 +216,82 @@ function TreeRow({
   allowedPaths,
   selectedPath,
   onSelect,
+  onRename,
+  onDelete,
   depth,
 }: {
   node: WikiTreeNode;
   allowedPaths: Set<string>;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onRename: (path: string) => void;
+  onDelete: (path: string) => void;
   depth: number;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(depth < 1);
+  const [menuOpen, setMenuOpen] = useState(false);
   const isFile = node.kind === "file";
 
   if (isFile) {
     if (!allowedPaths.has(node.path)) return null;
     const selected = node.path === selectedPath;
     return (
-      <button
-        type="button"
-        onClick={() => onSelect(node.path)}
-        className={`flex w-full items-center gap-1.5 rounded-[var(--radius-sm)] py-[3px] pr-2 text-left text-[12.5px] transition-colors ${
-          selected
-            ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]"
-            : "text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
-        }`}
-        style={{ paddingLeft: depth * 12 + 8 }}
-      >
-        <span className="w-[14px] shrink-0" />
-        {fileIconFor(node)}
-        <span className="flex-1 truncate">{node.name}</span>
-        {node.starred ? (
-          <Star size={11} className="shrink-0 fill-[var(--accent)] text-[var(--accent)]" />
+      <div className="group relative flex items-center">
+        <button
+          type="button"
+          onClick={() => onSelect(node.path)}
+          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--radius-sm)] py-[3px] pr-7 text-left text-[12.5px] transition-colors ${
+            selected
+              ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]"
+              : "text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+          }`}
+          style={{ paddingLeft: depth * 12 + 8 }}
+        >
+          <span className="w-[14px] shrink-0" />
+          {fileIconFor(node)}
+          <span className="flex-1 truncate">{node.name}</span>
+          {node.starred ? (
+            <Star size={11} className="shrink-0 fill-[var(--accent)] text-[var(--accent)]" />
+          ) : null}
+        </button>
+        <button
+          type="button"
+          aria-label={t("wiki.tree.pageActions", { name: node.name })}
+          title={t("wiki.tree.pageActions", { name: node.name })}
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((value) => !value)}
+          className="absolute right-0.5 grid h-[24px] w-[24px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] opacity-0 hover:bg-[var(--surface-muted)] group-hover:opacity-100 focus:opacity-100"
+        >
+          <MoreHorizontal size={13} />
+        </button>
+        {menuOpen ? (
+          <div className="absolute right-0 top-[26px] z-20 min-w-[132px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] p-1 shadow-lg">
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onRename(node.path);
+              }}
+              className="flex h-[28px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+            >
+              <Pencil size={13} />
+              {t("wiki.tree.rename")}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onDelete(node.path);
+              }}
+              className="flex h-[28px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12px] text-[var(--danger)] hover:bg-[var(--surface-muted)]"
+            >
+              <Trash2 size={13} />
+              {t("wiki.tree.delete")}
+            </button>
+          </div>
         ) : null}
-      </button>
+      </div>
     );
   }
 
@@ -250,6 +327,8 @@ function TreeRow({
           allowedPaths={allowedPaths}
           selectedPath={selectedPath}
           onSelect={onSelect}
+          onRename={onRename}
+          onDelete={onDelete}
           depth={depth + 1}
         />
       ) : null}

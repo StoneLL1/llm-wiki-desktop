@@ -28,6 +28,7 @@ export interface PendingAction {
   affectedPaths: string[];
   preview: ActionPreview | null;
   expiresAt: string | null;
+  checkpointHash?: string | null;
 }
 
 export type ConfirmationStatus = "confirmed" | "cancelled";

@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
+import type { ConfirmedAction, PendingAction } from "../../types/backend";
 
 import type {
+  CreateWikiPageInput,
+  RenameWikiPageResponse,
   SaveWikiPageResponse,
   WikiPageContent,
   WikiTree,
@@ -49,6 +52,28 @@ interface WikiState {
   save: (projectId: string, rootPath: string) => Promise<void>;
   reload: (projectId: string, rootPath: string) => Promise<void>;
   toggleBookmark: (projectId: string, rootPath: string) => Promise<void>;
+  createPage: (
+    projectId: string,
+    rootPath: string,
+    input: CreateWikiPageInput,
+  ) => Promise<void>;
+  renamePage: (
+    projectId: string,
+    rootPath: string,
+    relativePath: string,
+    newRelativePath: string,
+  ) => Promise<void>;
+  requestDeletePage: (
+    projectId: string,
+    rootPath: string,
+    relativePath: string,
+  ) => Promise<PendingAction | null>;
+  confirmDeletePage: (
+    projectId: string,
+    rootPath: string,
+    action: PendingAction,
+  ) => Promise<void>;
+  cancelPendingAction: (action: PendingAction) => Promise<void>;
   reset: () => void;
 }
 
@@ -219,6 +244,90 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       });
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
+  createPage: async (projectId, rootPath, input) => {
+    const scope = captureProjectScope();
+    set({ error: null });
+    try {
+      const response = await invoke<SaveWikiPageResponse>("create_wiki_page", {
+        request: {
+          projectId,
+          projectRootPath: rootPath,
+          relativePath: input.relativePath,
+          title: input.title,
+          pageType: input.pageType,
+        },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ selectedPath: response.relativePath });
+      await get().scan(projectId, rootPath);
+      if (!isProjectScopeCurrent(scope)) return;
+      await get().openPage(projectId, rootPath, response.relativePath);
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
+  renamePage: async (projectId, rootPath, relativePath, newRelativePath) => {
+    const scope = captureProjectScope();
+    set({ error: null });
+    try {
+      const response = await invoke<RenameWikiPageResponse>("rename_wiki_page", {
+        request: {
+          projectId,
+          projectRootPath: rootPath,
+          relativePath,
+          newRelativePath,
+        },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ selectedPath: response.relativePath });
+      await get().scan(projectId, rootPath);
+      if (!isProjectScopeCurrent(scope)) return;
+      await get().openPage(projectId, rootPath, response.relativePath);
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
+  requestDeletePage: async (projectId, rootPath, relativePath) => {
+    const scope = captureProjectScope();
+    set({ error: null });
+    try {
+      const action = await invoke<PendingAction>("request_delete_wiki_page", {
+        request: { projectId, projectRootPath: rootPath, relativePath },
+      });
+      if (!isProjectScopeCurrent(scope)) return null;
+      return action;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
+      set({ error: errorMessage(error) });
+      return null;
+    }
+  },
+  confirmDeletePage: async (projectId, rootPath, action) => {
+    const scope = captureProjectScope();
+    set({ error: null });
+    try {
+      await invoke<ConfirmedAction>("confirm_pending_action", {
+        request: { actionId: action.id, status: "confirmed" },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ selectedPath: null, page: null, draft: "", mode: "read" });
+      await get().scan(projectId, rootPath);
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
+  cancelPendingAction: async (action) => {
+    try {
+      await invoke<ConfirmedAction>("confirm_pending_action", {
+        request: { actionId: action.id, status: "cancelled" },
+      });
+    } catch (error) {
       set({ error: errorMessage(error) });
     }
   },
