@@ -1,5 +1,30 @@
 # Wiki 前端壳 P0 + P1 修复账本
 
+## ✅ 本轮完成 @ 2026-06-21
+
+- 摘要：Wiki 前端壳 4 个 P0 + 2 个 P1 全部 verified；HTML 外部浏览器打开因缺少已交付后端命令单独 blocked，其余 preview 第三态不受影响。
+- 验证：`npm run test` 90/90；`npm run lint` 通过；`src/` 无 `console.log`；新增 import 均由 Vitest/Vite 成功解析。
+- 提交：`84bf074`、`e619637`、`b551aa8`、`9279f0b`、`8ebd007`、`0150c8b`、`45babcc`。
+- 实现文件：
+  - `src/features/wiki/MarkdownReader.tsx`
+  - `src/features/wiki/WikiEditor.tsx`
+  - `src/features/wiki/WikiTree.tsx`
+  - `src/features/wiki/WikiPageFormDialog.tsx`
+  - `src/features/wiki/wikiStore.ts`
+  - `src/features/wiki/WikiView.tsx`
+  - `src/features/wiki/ConflictDiffDialog.tsx`
+  - `src/features/wiki/GenerateHtmlDialog.tsx`
+  - `src/features/wiki/HtmlPreviewPane.tsx`
+  - `src/features/wiki/RelatedPagesPanel.tsx`
+  - `src/features/wiki/wiki.test.tsx`
+  - `src/components/app/RightContextPanel.tsx`
+  - `src/types/wiki.ts`
+  - `src/types/backend.ts`
+  - `src/i18n/locales/en.json`
+  - `src/i18n/locales/zh-CN.json`
+  - `src/styles.css`
+- 过程文件：`SPEC/plans/wiki-fe.md`、`SPEC/roadmap/wiki.md`、`SPEC/progress.txt`、`SPEC/gotchas.txt`。
+
 > 执行日期：2026-06-21
 > 唯一范围：Wiki 前端壳 P0 + P1。实现文件仅限 `src/` 与 `src/styles.css`；账本、roadmap 与 progress 仅用于过程记录。
 > 对照优先级：`SPEC/PRD.md` → `UI-Frontend-design/wiki.html` + `assets/app.css` → `SPEC/roadmap/wiki.md`。
@@ -79,11 +104,11 @@
 
 ## 收敛清单
 
-- [ ] 所有非 blocked P0/P1 项为 verified
-- [ ] `npm run test` 全绿
-- [ ] `npm run lint` 全绿
-- [ ] `src/` 无非预期 `console.log`
-- [ ] import 路径解析通过
-- [ ] 双重代码审查完成且有效问题已修复
-- [ ] `SPEC/progress.txt` 有最终里程碑
-- [ ] 顶部写入 `✅ 本轮完成 @ 2026-06-21`、摘要与文件清单
+- [x] 所有非 blocked P0/P1 项为 verified
+- [x] `npm run test` 全绿
+- [x] `npm run lint` 全绿
+- [x] `src/` 无非预期 `console.log`
+- [x] import 路径解析通过
+- [x] 双重代码审查完成且有效问题已修复
+- [x] `SPEC/progress.txt` 有最终里程碑
+- [x] 顶部写入 `✅ 本轮完成 @ 2026-06-21`、摘要与文件清单
