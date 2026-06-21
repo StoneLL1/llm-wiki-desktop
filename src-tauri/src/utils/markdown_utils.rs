@@ -327,7 +327,7 @@ pub fn rewrite_wikilinks(body: &str, old_stem: &str, new_stem: &str) -> (String,
                 // Split target from alias/anchor the same way extract_wikilinks
                 // does: target = before first `|` or `#`.
                 let target_end = inner
-                    .find(|c: char| c == '|' || c == '#')
+                    .find(['|', '#'])
                     .unwrap_or(inner.len());
                 let target = inner[..target_end].trim();
                 if target.to_ascii_lowercase() == old_lower {

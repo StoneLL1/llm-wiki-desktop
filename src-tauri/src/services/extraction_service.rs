@@ -1,7 +1,11 @@
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::Path;
 
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use sha2::{Digest, Sha256};
+use zip::ZipArchive;
 
 use crate::errors::BackendError;
 use crate::models::import::{ExtractResult, ExtractionStatus, SourceFileType, SourceMetadata};
@@ -102,35 +106,30 @@ impl ExtractionService {
                     extracted_assets: vec![],
                 })
             }
-            SourceFileType::Pdf
-            | SourceFileType::Document
+            SourceFileType::Pdf => {
+                // PDF text extraction via a pure-Rust parser. OCR / visual
+                // understanding of scanned or image-only PDFs is handled later
+                // by the compile Agent/Skill — the import layer only preserves
+                // the original file plus any extractable text layer.
+                extract_pdf(context, file_store, source_path, output_dir, &original_name)
+            }
+            SourceFileType::Document
             | SourceFileType::Presentation
             | SourceFileType::Spreadsheet => {
-                // These formats require external parser adapters.
-                // MVP: report unsupported with clear status — per-file failure,
-                // batch must continue.
-                let ft = file_type.clone();
-                Ok(ExtractResult {
-                    original_name,
-                    file_type: file_type.clone(),
-                    status: ExtractionStatus::Unsupported,
-                    error: Some(format!(
-                        "Parser adapter not yet available for {:?}. Install a parser adapter or re-import after adapter support lands.",
-                        ft
-                    )),
-                    text_preview: None,
-                    metadata: Some(SourceMetadata {
-                        title: None,
-                        author: None,
-                        created: None,
-                        modified: None,
-                        page_count: None,
-                        word_count: None,
-                        language: None,
-                    }),
-                    extracted_text_path: None,
-                    extracted_assets: vec![],
-                })
+                // DOCX/PPTX/XLSX (and legacy .doc/.ppt/.xls when they slip
+                // through classification) are OOXML zip containers; we extract
+                // the text-bearing XML parts. Legacy binary formats have no
+                // pure-Rust reader in scope and degrade to Failed with a clear
+                // reason rather than Unsupported, so the preview still shows
+                // the file was attempted.
+                extract_ooxml(
+                    context,
+                    file_store,
+                    source_path,
+                    output_dir,
+                    &original_name,
+                    &file_type,
+                )
             }
             _ => {
                 // Images, unknown: nothing to extract in MVP
@@ -254,6 +253,438 @@ pub fn extract_html_title(html: &str) -> String {
         return html[content_start..content_start + end].trim().to_string();
     }
     String::new()
+}
+
+/// Extract a PDF's text layer via the pure-Rust `pdf-extract` parser.
+///
+/// The import layer only preserves the extractable text — OCR / visual
+/// understanding of scanned or image-only PDFs is the compile Agent's job, so a
+/// PDF with no text layer is surfaced as `Failed` with a clear reason (still
+/// distinct from `Unsupported`).
+fn extract_pdf(
+    context: &ProjectContext,
+    file_store: &FileStore,
+    source_path: &Path,
+    output_dir: &Path,
+    original_name: &str,
+) -> Result<ExtractResult, BackendError> {
+    let pages = pdf_extract::extract_text_by_pages(source_path);
+    match pages {
+        Ok(pages) if !pages.is_empty() && pages.iter().any(|p| !p.trim().is_empty()) => {
+            let page_count = pages.len() as u32;
+            let text = pages
+                .iter()
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            build_text_result(
+                context,
+                file_store,
+                source_path,
+                output_dir,
+                original_name,
+                SourceFileType::Pdf,
+                &text,
+                Some(page_count),
+            )
+        }
+        Ok(_) => {
+            // Empty vector or all-blank pages: the file has no extractable
+            // text layer (likely scanned). Not a parse failure — OCR belongs
+            // to the compile step.
+            Ok(no_text_layer_result(original_name, SourceFileType::Pdf))
+        }
+        Err(error) => Ok(ExtractResult {
+            original_name: original_name.to_string(),
+            file_type: SourceFileType::Pdf,
+            status: ExtractionStatus::Failed,
+            error: Some(format!("PDF parsing failed: {error}")),
+            text_preview: None,
+            metadata: None,
+            extracted_text_path: None,
+            extracted_assets: vec![],
+        }),
+    }
+}
+
+/// Extract text from OOXML containers (DOCX/PPTX/XLSX), which are zip archives
+/// of XML parts. Legacy binary `.doc/.ppt/.xls` have no in-scope pure-Rust
+/// reader and degrade to `Failed` with a clear reason.
+fn extract_ooxml(
+    context: &ProjectContext,
+    file_store: &FileStore,
+    source_path: &Path,
+    output_dir: &Path,
+    original_name: &str,
+    file_type: &SourceFileType,
+) -> Result<ExtractResult, BackendError> {
+    let bytes = match fs::read(source_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(ExtractResult {
+                original_name: original_name.to_string(),
+                file_type: file_type.clone(),
+                status: ExtractionStatus::Failed,
+                error: Some(format!("Failed to read file: {error}")),
+                text_preview: None,
+                metadata: None,
+                extracted_text_path: None,
+                extracted_assets: vec![],
+            });
+        }
+    };
+
+    let ext = source_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    // Legacy binary Office formats (.doc/.ppt/.xls) are OLE compound files,
+    // not zip containers — the OOXML reader below would reject them. Surface a
+    // clear failure instead of Unsupported so the preview shows an attempt.
+    if matches!(ext.as_str(), "doc" | "ppt" | "xls") {
+        return Ok(ExtractResult {
+            original_name: original_name.to_string(),
+            file_type: file_type.clone(),
+            status: ExtractionStatus::Failed,
+            error: Some(format!(
+                "Legacy binary .{ext} is not supported by the OOXML text adapter. Convert to .{}x for text extraction.",
+                ext.trim_end_matches('s')
+            )),
+            text_preview: None,
+            metadata: None,
+            extracted_text_path: None,
+            extracted_assets: vec![],
+        });
+    }
+
+    let cursor = Cursor::new(bytes);
+    let mut archive = match ZipArchive::new(cursor) {
+        Ok(archive) => archive,
+        Err(error) => {
+            return Ok(ExtractResult {
+                original_name: original_name.to_string(),
+                file_type: file_type.clone(),
+                status: ExtractionStatus::Failed,
+                error: Some(format!("Not a valid Office (zip) container: {error}")),
+                text_preview: None,
+                metadata: None,
+                extracted_text_path: None,
+                extracted_assets: vec![],
+            });
+        }
+    };
+
+    let (text, page_count) = match file_type {
+        SourceFileType::Document => (read_docx_text(&mut archive)?, None),
+        SourceFileType::Presentation => {
+            let (text, slide_count) = read_pptx_text(&mut archive)?;
+            (text, Some(slide_count))
+        }
+        SourceFileType::Spreadsheet => (read_xlsx_text(&mut archive)?, None),
+        other => {
+            return Ok(ExtractResult {
+                original_name: original_name.to_string(),
+                file_type: other.clone(),
+                status: ExtractionStatus::Unsupported,
+                error: Some("No OOXML text adapter for this file type.".to_string()),
+                text_preview: None,
+                metadata: None,
+                extracted_text_path: None,
+                extracted_assets: vec![],
+            });
+        }
+    };
+
+    if text.trim().is_empty() {
+        return Ok(no_text_layer_result(original_name, file_type.clone()));
+    }
+
+    build_text_result(
+        context,
+        file_store,
+        source_path,
+        output_dir,
+        original_name,
+        file_type.clone(),
+        &text,
+        page_count,
+    )
+}
+
+/// Collect text runs from `word/document.xml` (DOCX): `<w:t>` element bodies.
+fn read_docx_text<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<String, BackendError> {
+    let mut buf = String::new();
+    for name in ["word/document.xml", "word/footnotes.xml", "word/endnotes.xml"] {
+        if let Ok(mut entry) = archive.by_name(name) {
+            let mut xml = String::new();
+            entry.read_to_string(&mut xml).map_err(io_read_err)?;
+            buf.push_str(&collect_element_text(&xml, &["w:t"]));
+            buf.push('\n');
+        }
+    }
+    Ok(buf)
+}
+
+/// Collect slide text from `ppt/slides/slideN.xml` (PPTX): `<a:t>` bodies.
+/// Returns the joined text and the slide count (used as the page count).
+fn read_pptx_text<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<(String, u32), BackendError> {
+    let names = archive_names(archive);
+    let mut slides: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            let n = n.as_str();
+            n.starts_with("ppt/slides/slide") && n.ends_with(".xml")
+        })
+        .collect();
+    slides.sort_by_key(|a| slide_index(a));
+    let slide_count = slides.len() as u32;
+    let mut buf = String::new();
+    for name in slides {
+        if let Ok(mut entry) = archive.by_name(name) {
+            let mut xml = String::new();
+            entry.read_to_string(&mut xml).map_err(io_read_err)?;
+            let slide_text = collect_element_text(&xml, &["a:t"]);
+            if !slide_text.trim().is_empty() {
+                buf.push_str(&slide_text);
+                buf.push_str("\n\n");
+            }
+        }
+    }
+    Ok((buf, slide_count))
+}
+
+/// Collect cell values from an XLSX: shared strings (`xl/sharedStrings.xml`,
+/// `<t>` bodies) plus inline worksheet strings (`xl/worksheets/sheetN.xml`,
+/// `<v>` numeric/string bodies and `<is><t>` inline strings).
+fn read_xlsx_text<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<String, BackendError> {
+    let mut shared: Vec<String> = Vec::new();
+    if let Ok(mut entry) = archive.by_name("xl/sharedStrings.xml") {
+        let mut xml = String::new();
+        entry.read_to_string(&mut xml).map_err(io_read_err)?;
+        shared = collect_element_text_split(&xml, &["t"]);
+    }
+
+    let names = archive_names(archive);
+    let mut sheets: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            let n = n.as_str();
+            n.starts_with("xl/worksheets/sheet") && n.ends_with(".xml")
+        })
+        .collect();
+    sheets.sort_by_key(|a| sheet_index(a));
+
+    let mut buf = String::new();
+    for name in sheets {
+        let Ok(mut entry) = archive.by_name(name) else {
+            continue;
+        };
+        let mut xml = String::new();
+        entry.read_to_string(&mut xml).map_err(io_read_err)?;
+
+        let mut reader = Reader::from_str(&xml);
+        reader.config_mut().trim_text(true);
+        let mut events = Vec::new();
+        let mut buf_small = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf_small) {
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    let is_value = e.name().as_ref() == b"v";
+                    let is_inline = e.name().as_ref() == b"is";
+                    events.push((is_value, is_inline));
+                }
+                Ok(Event::Text(t)) => {
+                    let text = t.unescape().map_err(xml_err)?.into_owned();
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(&(is_value, _)) = events.last() {
+                        if is_value {
+                            // Numeric or shared-string-index cell value. If it
+                            // parses as a shared-string index, resolve it;
+                            // otherwise emit the literal value.
+                            if let Ok(idx) = text.trim().parse::<usize>() {
+                                if let Some(shared) = shared.get(idx) {
+                                    buf.push_str(shared);
+                                    buf.push('\t');
+                                    continue;
+                                }
+                            }
+                            buf.push_str(&text);
+                            buf.push('\t');
+                        }
+                    }
+                }
+                Ok(Event::End(_)) => {
+                    events.pop();
+                }
+                Ok(Event::Eof) => break,
+                Err(error) => return Err(xml_err(error)),
+                _ => {}
+            }
+        }
+        if !buf.is_empty() && !buf.ends_with('\n') {
+            buf.push('\n');
+        }
+    }
+    Ok(buf)
+}
+
+/// Collect the inner text of every occurrence of the given element names,
+/// joined with a space per element to keep words separable.
+fn collect_element_text(xml: &str, names: &[&str]) -> String {
+    let parts = collect_element_text_split(xml, names);
+    parts.join(" ")
+}
+
+/// Collect the inner text of the given elements, one String per occurrence.
+fn collect_element_text_split(xml: &str, names: &[&str]) -> Vec<String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut depth_in_target = 0u32;
+    let mut current = String::new();
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if depth_in_target > 0 || names_contains(names, e.name().as_ref()) {
+                    if depth_in_target == 0 {
+                        depth_in_target = 1;
+                    } else {
+                        depth_in_target += 1;
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if depth_in_target == 0 && names_contains(names, e.name().as_ref()) {
+                    out.push(String::new());
+                }
+            }
+            Ok(Event::Text(t)) if depth_in_target > 0 => {
+                if let Ok(text) = t.unescape() {
+                    if !current.is_empty() && !text.trim().is_empty() {
+                        current.push(' ');
+                    }
+                    current.push_str(text.trim());
+                }
+            }
+            Ok(Event::End(_)) if depth_in_target > 0 => {
+                depth_in_target -= 1;
+                if depth_in_target == 0
+                    && !current.is_empty() {
+                        out.push(std::mem::take(&mut current));
+                    }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+fn names_contains(names: &[&str], local: &[u8]) -> bool {
+    names.iter().any(|n| {
+        let n = n.as_bytes();
+        // Match the local name even when namespaced (e.g. "w:t" vs bare "t").
+        local.ends_with(n)
+            && (local.len() == n.len() || local.get(local.len() - n.len() - 1) == Some(&b':'))
+    })
+}
+
+fn archive_names<R: Read + std::io::Seek>(archive: &mut ZipArchive<R>) -> Vec<String> {
+    (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
+        .collect()
+}
+
+fn slide_index(name: &str) -> u32 {
+    let trimmed = name
+        .trim_start_matches("ppt/slides/slide")
+        .trim_end_matches(".xml");
+    trimmed.parse().unwrap_or(0)
+}
+
+fn sheet_index(name: &str) -> u32 {
+    let trimmed = name
+        .trim_start_matches("xl/worksheets/sheet")
+        .trim_end_matches(".xml");
+    trimmed.parse().unwrap_or(0)
+}
+
+fn io_read_err(error: std::io::Error) -> BackendError {
+    BackendError::new("EXTRACT_READ_FAILED", error.to_string(), true, false)
+}
+
+fn xml_err(error: quick_xml::Error) -> BackendError {
+    BackendError::new("EXTRACT_XML_PARSE_FAILED", error.to_string(), true, false)
+}
+
+/// Build the standard `Extracted` result from a fully-extracted text buffer,
+/// writing the text to `raw/extracted/` and counting words.
+#[allow(clippy::too_many_arguments)]
+fn build_text_result(
+    context: &ProjectContext,
+    file_store: &FileStore,
+    source_path: &Path,
+    output_dir: &Path,
+    original_name: &str,
+    file_type: SourceFileType,
+    text: &str,
+    page_count: Option<u32>,
+) -> Result<ExtractResult, BackendError> {
+    let word_count = count_words(text);
+    let preview = take_preview(text, 500);
+    let extracted_text_path =
+        write_extracted_text(context, file_store, source_path, output_dir, text)?;
+    Ok(ExtractResult {
+        original_name: original_name.to_string(),
+        file_type,
+        status: ExtractionStatus::Extracted,
+        error: None,
+        text_preview: Some(preview),
+        metadata: Some(SourceMetadata {
+            title: None,
+            author: None,
+            created: None,
+            modified: None,
+            page_count,
+            word_count: Some(word_count),
+            language: None,
+        }),
+        extracted_text_path: Some(extracted_text_path),
+        extracted_assets: vec![],
+    })
+}
+
+/// A file with no extractable text layer (scanned PDF, image-only Office
+/// doc). Surfaced as `Failed` with an explicit reason pointing to the compile
+/// Agent — distinct from `Unsupported`, so the preview reflects that the file
+/// was parsed and simply has no text, not that no adapter exists.
+fn no_text_layer_result(original_name: &str, file_type: SourceFileType) -> ExtractResult {
+    ExtractResult {
+        original_name: original_name.to_string(),
+        file_type,
+        status: ExtractionStatus::Failed,
+        error: Some(
+            "No extractable text layer found. OCR / visual understanding is handled by the compile Agent."
+                .to_string(),
+        ),
+        text_preview: None,
+        metadata: None,
+        extracted_text_path: None,
+        extracted_assets: vec![],
+    }
 }
 
 fn write_extracted_text(
@@ -429,29 +860,35 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    // ── Unsupported format tests ──
+    // ── PDF / Office adapter tests ──
 
     #[test]
-    fn pdf_extraction_returns_unsupported_in_mvp() {
-        let (context, root) = tmp_context("pdf-extract");
+    fn corrupt_pdf_extraction_fails_with_a_clear_reason_not_unsupported() {
+        // A non-PDF byte payload cannot be parsed by the PDF adapter. It must
+        // surface as Failed (an explicit parse attempt), never Unsupported —
+        // PRD-IMP-001 requires the preview to distinguish "tried and failed"
+        // from "no adapter".
+        let (context, root) = tmp_context("pdf-corrupt");
         let store = FileStore;
         let source = root.join("doc.pdf");
-        fs::write(&source, b"%PDF-1.4 fake pdf content").unwrap();
+        fs::write(&source, b"not actually a pdf").unwrap();
 
         let service = ExtractionService;
         let result = service
             .extract_text(&context, &store, &source, &root)
             .unwrap();
 
-        assert_eq!(result.status, ExtractionStatus::Unsupported);
-        assert!(result.error.unwrap().contains("adapter"));
+        assert_eq!(result.status, ExtractionStatus::Failed);
+        assert_ne!(result.status, ExtractionStatus::Unsupported);
+        assert!(result.error.unwrap().to_lowercase().contains("pdf"));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn docx_extraction_returns_unsupported_in_mvp() {
-        let (context, root) = tmp_context("docx-extract");
+    fn invalid_docx_extraction_fails_not_unsupported() {
+        // Bytes that are not a zip container cannot be an OOXML document.
+        let (context, root) = tmp_context("docx-invalid");
         let store = FileStore;
         let source = root.join("report.docx");
         fs::write(&source, b"fake docx content").unwrap();
@@ -461,9 +898,126 @@ mod tests {
             .extract_text(&context, &store, &source, &root)
             .unwrap();
 
-        assert_eq!(result.status, ExtractionStatus::Unsupported);
+        assert_eq!(result.status, ExtractionStatus::Failed);
+        assert_ne!(result.status, ExtractionStatus::Unsupported);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_binary_office_formats_fail_with_conversion_hint() {
+        let (context, root) = tmp_context("legacy-doc");
+        let store = FileStore;
+        let source = root.join("legacy.doc");
+        fs::write(&source, b"D0CF11E0A1B11AE1 legacy ole bytes").unwrap();
+
+        let service = ExtractionService;
+        let result = service
+            .extract_text(&context, &store, &source, &root)
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Failed);
+        assert!(result.error.unwrap().contains("Convert to"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn docx_text_is_extracted_to_raw_extracted() {
+        let (context, root) = tmp_context("docx-real");
+        let store = FileStore;
+        let out_dir = root.join("raw/extracted");
+        let source = root.join("report.docx");
+        fs::write(&source, sample_docx("Hello Wiki", "Second paragraph here.")).unwrap();
+
+        let service = ExtractionService;
+        let result = service
+            .extract_text(&context, &store, &source, &out_dir)
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Extracted);
+        let preview = result.text_preview.unwrap();
+        assert!(preview.contains("Hello Wiki"));
+        assert!(preview.contains("Second paragraph"));
+        let meta = result.metadata.unwrap();
+        assert!(meta.word_count.unwrap() >= 4);
+        // DOCX page count is unreliable — None per PRD-IMP-004 "pages or words".
+        assert_eq!(meta.page_count, None);
+        let extracted_path = result.extracted_text_path.unwrap();
+        assert!(extracted_path.starts_with("raw/extracted/"));
+        assert!(root.join(&extracted_path).exists());
+        let on_disk = fs::read_to_string(root.join(extracted_path)).unwrap();
+        assert!(on_disk.contains("Hello Wiki"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pptx_text_is_extracted_with_slide_count_as_page_count() {
+        let (context, root) = tmp_context("pptx-real");
+        let store = FileStore;
+        let out_dir = root.join("raw/extracted");
+        let source = root.join("deck.pptx");
+        let slides = vec!["Intro slide".to_string(), "Details slide".to_string()];
+        fs::write(&source, sample_pptx(&slides)).unwrap();
+
+        let service = ExtractionService;
+        let result = service
+            .extract_text(&context, &store, &source, &out_dir)
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Extracted);
+        let preview = result.text_preview.unwrap();
+        assert!(preview.contains("Intro slide"));
+        assert!(preview.contains("Details slide"));
+        let meta = result.metadata.unwrap();
+        // Slide count is a meaningful "page" surrogate for presentations.
+        assert_eq!(meta.page_count, Some(2));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xlsx_cell_values_are_extracted_including_shared_strings() {
+        let (context, root) = tmp_context("xlsx-real");
+        let store = FileStore;
+        let out_dir = root.join("raw/extracted");
+        let source = root.join("data.xlsx");
+        // Two shared strings; sheet1 references index 0 (Hello) and a numeric 42.
+        let shared = vec!["Hello".to_string(), "World".to_string()];
+        let sheet = r#"<?xml version="1.0"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row>
+</sheetData>
+</worksheet>"#;
+        fs::write(&source, sample_xlsx(&shared, sheet)).unwrap();
+
+        let service = ExtractionService;
+        let result = service
+            .extract_text(&context, &store, &source, &out_dir)
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Extracted);
+        let preview = result.text_preview.unwrap();
+        assert!(preview.contains("Hello"));
+        assert!(preview.contains("42"));
+        let meta = result.metadata.unwrap();
+        assert!(meta.word_count.unwrap() >= 2);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_text_layer_result_routes_ocr_to_compile_agent() {
+        // Directly exercises the empty-text-layer branch: a PDF/Office doc that
+        // parses but yields no text must surface Failed (not Unsupported) with
+        // a reason pointing OCR to the compile Agent.
+        let result = no_text_layer_result("scan.pdf", SourceFileType::Pdf);
+        assert_eq!(result.status, ExtractionStatus::Failed);
+        assert_ne!(result.status, ExtractionStatus::Unsupported);
+        assert_eq!(result.file_type, SourceFileType::Pdf);
+        assert!(result.error.unwrap().contains("compile Agent"));
     }
 
     // ── Batch extraction tests ──
@@ -552,5 +1106,88 @@ mod tests {
     fn extract_html_title_handles_multiline_attributes() {
         let html = "<html><head><title\n  data-page=\"home\"\n>My Page</title></head></html>";
         assert_eq!(extract_html_title(html), "My Page");
+    }
+
+    // ── Sample file generators (minimal valid OOXML / PDF fixtures) ──
+
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    fn zip_to_bytes(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for (name, content) in entries {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(content.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    /// Build a minimal valid DOCX with the given paragraphs as `word/document.xml`.
+    fn sample_docx(first: &str, second: &str) -> Vec<u8> {
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:p><w:r><w:t>{first}</w:t></w:r></w:p>
+<w:p><w:r><w:t>{second}</w:t></w:r></w:p>
+</w:body>
+</w:document>"#
+        );
+        zip_to_bytes(&[
+            ("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>"),
+            ("word/document.xml", &document),
+        ])
+    }
+
+    /// Build a minimal valid PPTX with one slide per text entry.
+    fn sample_pptx(slides: &[String]) -> Vec<u8> {
+        let mut owned_names: Vec<String> = Vec::new();
+        let mut entries: Vec<(String, String)> = Vec::new();
+        entries.push(
+            (
+                "[Content_Types].xml".to_string(),
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>".to_string(),
+            ),
+        );
+        for (i, text) in slides.iter().enumerate() {
+            let name = format!("ppt/slides/slide{}.xml", i + 1);
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+</p:sld>"#
+            );
+            owned_names.push(name.clone());
+            entries.push((name, xml));
+        }
+        let refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(name, content)| (name.as_str(), content.as_str()))
+            .collect();
+        zip_to_bytes(&refs)
+    }
+
+    /// Build a minimal valid XLSX with shared strings and one worksheet.
+    fn sample_xlsx(shared: &[String], sheet_xml: &str) -> Vec<u8> {
+        let count = shared.len();
+        let mut sst = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"{count}\" uniqueCount=\"{count}\">"
+        );
+        for s in shared {
+            sst.push_str(&format!("<si><t>{s}</t></si>"));
+        }
+        sst.push_str("</sst>");
+        zip_to_bytes(&[
+            ("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>"),
+            ("xl/sharedStrings.xml", &sst),
+            ("xl/worksheets/sheet1.xml", sheet_xml),
+        ])
     }
 }
