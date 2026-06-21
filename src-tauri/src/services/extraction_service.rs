@@ -345,13 +345,18 @@ fn extract_ooxml(
     // not zip containers — the OOXML reader below would reject them. Surface a
     // clear failure instead of Unsupported so the preview shows an attempt.
     if matches!(ext.as_str(), "doc" | "ppt" | "xls") {
+        let target = match ext.as_str() {
+            "doc" => "docx",
+            "ppt" => "pptx",
+            "xls" => "xlsx",
+            other => other,
+        };
         return Ok(ExtractResult {
             original_name: original_name.to_string(),
             file_type: file_type.clone(),
             status: ExtractionStatus::Failed,
             error: Some(format!(
-                "Legacy binary .{ext} is not supported by the OOXML text adapter. Convert to .{}x for text extraction.",
-                ext.trim_end_matches('s')
+                "Legacy binary .{ext} is not supported by the OOXML text adapter. Convert to .{target} for text extraction."
             )),
             text_preview: None,
             metadata: None,
@@ -421,6 +426,7 @@ fn read_docx_text<R: Read + std::io::Seek>(
     let mut buf = String::new();
     for name in ["word/document.xml", "word/footnotes.xml", "word/endnotes.xml"] {
         if let Ok(mut entry) = archive.by_name(name) {
+            ensure_entry_size(&entry)?;
             let mut xml = String::new();
             entry.read_to_string(&mut xml).map_err(io_read_err)?;
             buf.push_str(&collect_element_text(&xml, &["w:t"]));
@@ -448,6 +454,7 @@ fn read_pptx_text<R: Read + std::io::Seek>(
     let mut buf = String::new();
     for name in slides {
         if let Ok(mut entry) = archive.by_name(name) {
+            ensure_entry_size(&entry)?;
             let mut xml = String::new();
             entry.read_to_string(&mut xml).map_err(io_read_err)?;
             let slide_text = collect_element_text(&xml, &["a:t"]);
@@ -468,6 +475,7 @@ fn read_xlsx_text<R: Read + std::io::Seek>(
 ) -> Result<String, BackendError> {
     let mut shared: Vec<String> = Vec::new();
     if let Ok(mut entry) = archive.by_name("xl/sharedStrings.xml") {
+        ensure_entry_size(&entry)?;
         let mut xml = String::new();
         entry.read_to_string(&mut xml).map_err(io_read_err)?;
         shared = collect_element_text_split(&xml, &["t"]);
@@ -488,30 +496,54 @@ fn read_xlsx_text<R: Read + std::io::Seek>(
         let Ok(mut entry) = archive.by_name(name) else {
             continue;
         };
+        ensure_entry_size(&entry)?;
         let mut xml = String::new();
         entry.read_to_string(&mut xml).map_err(io_read_err)?;
 
         let mut reader = Reader::from_str(&xml);
         reader.config_mut().trim_text(true);
-        let mut events = Vec::new();
+        // Stack of element local names (owned bytes, because the reader reuses
+        // its read buffer) so Text events know their enclosing element. A
+        // separate `cell_shared` flag tracks whether the current `<c>` cell is
+        // `t="s"` (shared-string index): `<v>` bodies are only resolved against
+        // `shared` when this is true, otherwise the literal value is emitted.
+        // Without this check a numeric cell whose value happens to be a valid
+        // shared-string index would be mis-emitted.
+        let mut element_stack: Vec<Vec<u8>> = Vec::new();
+        let mut cell_shared = false;
         let mut buf_small = Vec::new();
         loop {
             match reader.read_event_into(&mut buf_small) {
-                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                    let is_value = e.name().as_ref() == b"v";
-                    let is_inline = e.name().as_ref() == b"is";
-                    events.push((is_value, is_inline));
+                Ok(Event::Start(e)) => {
+                    let local = e.name().as_ref().to_vec();
+                    if local == b"c" {
+                        // Cell type lives on the <c> element's `t` attribute.
+                        cell_shared = e.attributes().flatten().any(|attr| {
+                            attr.key.as_ref() == b"t" && attr.value.as_ref() == b"s"
+                        });
+                    }
+                    element_stack.push(local);
+                }
+                Ok(Event::Empty(e)) => {
+                    if e.name().as_ref() == b"c" {
+                        cell_shared = false;
+                    }
                 }
                 Ok(Event::Text(t)) => {
                     let text = t.unescape().map_err(xml_err)?.into_owned();
                     if text.trim().is_empty() {
                         continue;
                     }
-                    if let Some(&(is_value, _)) = events.last() {
-                        if is_value {
-                            // Numeric or shared-string-index cell value. If it
-                            // parses as a shared-string index, resolve it;
-                            // otherwise emit the literal value.
+                    let inside_v = element_stack
+                        .last()
+                        .map(|n| n.as_slice() == b"v")
+                        .unwrap_or(false);
+                    let inside_t = element_stack
+                        .last()
+                        .map(|n| n.as_slice() == b"t")
+                        .unwrap_or(false);
+                    if inside_v {
+                        if cell_shared {
                             if let Ok(idx) = text.trim().parse::<usize>() {
                                 if let Some(shared) = shared.get(idx) {
                                     buf.push_str(shared);
@@ -519,13 +551,25 @@ fn read_xlsx_text<R: Read + std::io::Seek>(
                                     continue;
                                 }
                             }
-                            buf.push_str(&text);
-                            buf.push('\t');
+                            // Shared-string index out of range: emit nothing
+                            // rather than a misleading raw index.
+                            continue;
                         }
+                        // Numeric (or t="str"/t="e") cell: emit the literal.
+                        buf.push_str(&text);
+                        buf.push('\t');
+                    } else if inside_t {
+                        // <is><t>...</t></is> inline string, or stray <t>: emit
+                        // the text so inline-string cells are not dropped.
+                        buf.push_str(&text);
+                        buf.push('\t');
                     }
                 }
-                Ok(Event::End(_)) => {
-                    events.pop();
+                Ok(Event::End(e)) => {
+                    if e.name().as_ref() == b"c" {
+                        cell_shared = false;
+                    }
+                    element_stack.pop();
                 }
                 Ok(Event::Eof) => break,
                 Err(error) => return Err(xml_err(error)),
@@ -628,6 +672,24 @@ fn io_read_err(error: std::io::Error) -> BackendError {
 
 fn xml_err(error: quick_xml::Error) -> BackendError {
     BackendError::new("EXTRACT_XML_PARSE_FAILED", error.to_string(), true, false)
+}
+
+/// Upper bound on a single decompressed OOXML entry. Guards against zip bombs
+/// (a tiny compressed entry decompressing to gigabytes) by refusing to buffer
+/// an entry larger than this into memory before parsing.
+const MAX_OOXML_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Reject a zip entry whose declared uncompressed size exceeds the safety cap.
+fn ensure_entry_size(entry: &zip::read::ZipFile<'_>) -> Result<(), BackendError> {
+    if entry.size() > MAX_OOXML_ENTRY_BYTES {
+        return Err(BackendError::new(
+            "EXTRACT_ENTRY_TOO_LARGE",
+            "An Office XML part is too large to extract safely.",
+            true,
+            false,
+        ));
+    }
+    Ok(())
 }
 
 /// Build the standard `Extracted` result from a fully-extracted text buffer,
@@ -917,8 +979,102 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, ExtractionStatus::Failed);
-        assert!(result.error.unwrap().contains("Convert to"));
+        let error = result.error.unwrap();
+        assert!(error.contains("Convert to .docx"), "error was: {error}");
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_xls_hint_targets_xlsx_not_xlx() {
+        // Regression: a naive `trim_end_matches('s')` produced ".xlx" for the
+        // .xls case. Each legacy extension must map to its real OOXML target.
+        let (context, root) = tmp_context("legacy-xls");
+        let store = FileStore;
+        for (ext, target) in [("doc", "docx"), ("ppt", "pptx"), ("xls", "xlsx")] {
+            let source = root.join(format!("legacy.{ext}"));
+            fs::write(&source, b"legacy ole bytes").unwrap();
+            let result = ExtractionService
+                .extract_text(&context, &store, &source, &root)
+                .unwrap();
+            assert_eq!(result.status, ExtractionStatus::Failed);
+            let error = result.error.unwrap();
+            assert!(
+                error.contains(&format!("Convert to .{target}")),
+                "{ext} hint should target .{target}, error was: {error}"
+            );
+            assert!(!error.contains(".xlx"), ".xls must not produce .xlx");
+            let _ = fs::remove_file(&source);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xlsx_numeric_cell_is_not_misread_as_a_shared_string() {
+        // Regression (BLOCKER): a numeric cell whose <v> value happens to be a
+        // valid shared-string index must emit the literal number, not the
+        // shared string. With 3 shared strings, a numeric cell <v>1</v> would
+        // have been mis-emitted as the 2nd shared string ("World") before the
+        // cell-type-aware fix.
+        let (context, root) = tmp_context("xlsx-numeric");
+        let store = FileStore;
+        let out_dir = root.join("raw/extracted");
+        let source = root.join("data.xlsx");
+        let shared = vec![
+            "Hello".to_string(),
+            "World".to_string(),
+            "Pi".to_string(),
+        ];
+        // A1: shared string index 1 -> "World". B1: numeric 1 (NOT shared).
+        let sheet = r#"<?xml version="1.0"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>
+<row r="1"><c r="A1" t="s"><v>1</v></c><c r="B1"><v>1</v></c></row>
+</sheetData>
+</worksheet>"#;
+        fs::write(&source, sample_xlsx(&shared, sheet)).unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &store, &source, &out_dir)
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Extracted);
+        let preview = result.text_preview.unwrap();
+        // Shared-string cell resolved to "World".
+        assert!(preview.contains("World"));
+        // Numeric cell "1" must appear literally; the preview must NOT contain
+        // a second "World" (which the buggy version would have emitted).
+        assert_eq!(preview.matches("World").count(), 1);
+        assert!(preview.contains('1'));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xlsx_inline_string_cells_are_extracted() {
+        // Regression: inline-string cells (t="inlineStr", <is><t>...</t></is>)
+        // were silently dropped because <is> was not <v>. They must now emit
+        // their text alongside shared-string and numeric cells.
+        let (context, root) = tmp_context("xlsx-inline");
+        let store = FileStore;
+        let out_dir = root.join("raw/extracted");
+        let source = root.join("data.xlsx");
+        let shared = vec!["Shared".to_string()];
+        let sheet = r#"<?xml version="1.0"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="inlineStr"><is><t>Inline</t></is></c></row>
+</sheetData>
+</worksheet>"#;
+        fs::write(&source, sample_xlsx(&shared, sheet)).unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &store, &source, &out_dir)
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Extracted);
+        let preview = result.text_preview.unwrap();
+        assert!(preview.contains("Shared"));
+        assert!(preview.contains("Inline"));
         fs::remove_dir_all(root).unwrap();
     }
 

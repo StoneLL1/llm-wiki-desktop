@@ -3,7 +3,63 @@
 > /loop 本轮范围：只动 `src-tauri/`。对照源 SPEC/PRD.md、UI-Frontend-design/import.html、CLAUDE.md。
 > 硬约束：导入层只无损保留（原文件/提取文本/图片/来源元数据）；OCR/视觉理解交给编译 Agent/Skill。
 
-✅ 本轮进行中 @ 2026-06-21
+✅ 本轮完成 @ 2026-06-21
+
+## 摘要
+
+本轮在 `src-tauri/` 内完成 import 后端 3 项 P0 条目（roadmap 的 P1 中只动后端的部分经核对无独立后端条目，详见各 item 说明）。所有条目 status=verified，完整 test/lint 全绿，未触碰前端 `src/`、未改 `UI-Frontend-design/`、未碰 P2 或其它板块。
+
+### 交付项
+- **[P0-1] PDF/Office 解析适配器**（commit f9a3153）：ExtractionService 对 PDF/DOCX/PPTX/XLSX 不再返回 Unsupported。pdf-extract 抽 PDF（按页），zip+quick-xml 抽 OOXML（docx w:t / pptx a:t / xlsx sharedStrings+cells）。扫描件/无文本层 → Failed 路由 OCR 到编译 Agent（守「导入层只无损保留」硬约束）；旧式 .doc/.ppt/.xls → Failed 带转换提示。文本落 `raw/extracted/` + word/page count。
+- **[P0-2] 打开文件夹为项目命令链路**（commit 29b4326）：新增 `preview_open_folder_as_project` 命令（dlg-folder 入口），复用 `project_service.open_project`：普通文件夹→NeedsConfirmation（注册可确认 pending action）；已有项目→Opened（纯预览，无副作用）。
+- **[P0-3] 导入确认 Git 检查点 + 编译链路**（commit 1dce42f）：`ConfirmImportRequest.create_checkpoint` + `ConfirmedImport.checkpoint_hash`。为 true 时 scoped 提交归档文件 + source-index.json + import-conflicts.json；新仓库自动初始化；无变更→None。编译链路前端驱动（confirm → start_wiki_compile），后端只暴露 checkpoint_hash。
+
+### 文件清单（仅 src-tauri/ + SPEC 文档）
+- `src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`：加 pdf-extract / zip(--no-default-features,deflate) / quick-xml
+- `src-tauri/src/services/extraction_service.rs`：PDF/Office 解析（extract_pdf / extract_ooxml / read_docx_text / read_pptx_text / read_xlsx_text / build_text_result / no_text_layer_result）+ 20 测试
+- `src-tauri/src/services/search_service.rs`、`src-tauri/src/utils/markdown_utils.rs`：clippy --fix 副作用（合并 replace / char-array find）
+- `src-tauri/src/app_state.rs`：`preview_folder_as_project` + `create_import_checkpoint` 方法 + 7 测试（folder_preview_tests 3 + import_checkpoint_tests 4）
+- `src-tauri/src/commands/project_commands.rs`：`preview_open_folder_as_project` 命令薄包装
+- `src-tauri/src/commands/import_commands.rs`：`confirm_import_preview` createCheckpoint 分支
+- `src-tauri/src/models/import.rs`：`ConfirmedImport.checkpoint_hash`
+- `src-tauri/src/lib.rs`：注册 `preview_open_folder_as_project`
+- `SPEC/plans/import-be.md`、`SPEC/progress.txt`：账本 + 进度记录
+
+### 最终验证（全绿）
+- `cargo test --lib --no-default-features --offline`：295 passed（P0-1 23 测试 + P0-2 3 测试 + P0-3 4 测试 = 本轮新增 30；其余预存）
+- `cargo test --test task8_contracts --no-default-features --offline`：7 passed
+- `cargo clippy --no-default-features --offline --lib -- -D warnings`：clean
+- `cargo check --offline`（gui feature）：compiles
+- `npm run test`：90 passed（20 files）
+- `npm run lint`：clean
+- 我的文件无 console.log/println!/dbg! 残留
+
+### 遗留与说明
+- 图片资产落盘是 roadmap P1 单独条目，不在本轮（本 loop scope 只含上述 3 项 P0 后端）。
+- Windows 测试 harness 有预存 `STATUS_ENTRYPOINT_NOT_FOUND` 崩溃（WebView2/DLL），gui-feature `cargo test --lib` 不可跑；用 `--no-default-features --offline` 绕过（已记 gotchas.txt）。gui-feature clippy 有 21 个预存错误在其它命令模块（lint_commands 等），stash 基线验证一致，非本 loop 范围。
+- `mvp_flow.rs` 预存编译错误（build_export_prompt 参数数），基线即存在，属 export 模块，非本 loop。
+- 双子代理审查见下。
+
+### 双子代理审查修复（CLAUDE.md 收尾要求）
+
+双子代理审查（A 共享上下文 + B 全新上下文）并行运行，合并发现并修复：
+
+- **BLOCKER (B1)** XLSX 数值单元格被误读为共享字符串：`read_xlsx_text` 对每个 `<v>` 无条件 `parse::<usize>()` 后查 shared，导致值恰好是合法索引的数值单元格被误替换（如 3 个 shared 时数值 `1` 被输出为第 2 个 shared）。**修复**：在 `<c>` start 事件上记录 `t="s"` 属性，仅当 `cell_shared` 为真时才按索引解析 shared；否则输出字面值。新增回归测试 `xlsx_numeric_cell_is_not_misread_as_a_shared_string`（断言数值 `1` 不变成第二个 shared，"World" 只出现一次）。
+- **SHOULD-FIX (A1)** `.xls` 转换提示拼成 `.xlx`：`trim_end_matches('s')` 把 `xls`→`xl`。**修复**：改 match 显式映射 doc→docx / ppt→pptx / xls→xlsx。新增 `legacy_xls_hint_targets_xlsx_not_xlx` 覆盖三种后缀。
+- **SHOULD-FIX (A2)** XLSX inline string（`t="inlineStr"`，`<is><t>`）被静默丢弃：原循环只在 `is_value`(v) 时输出。**修复**：元素栈记录 enclosing element，`<t>` 文本也输出。新增 `xlsx_inline_string_cells_are_extracted`。
+- **SHOULD-FIX (B4)** Zip bomb / OOM：OOXML 部件用 `read_to_string` 全量读入内存，无解压上限。**修复**：`ensure_entry_size` 在读取前校验 `entry.size()` ≤ 64MiB，超限返回 `EXTRACT_ENTRY_TOO_LARGE`。四个读取器（docx/pptx/xlsx sharedStrings/xlsx worksheet）均接入。
+- **SHOULD-FIX (B5)** `ConfirmedImport.checkpoint_hash` 序列化不对称：用 `skip_serializing_if` 会省略字段→前端 `undefined`，与 `PendingAction.checkpoint_hash`（强制 `null`）约定不一致。**修复**：去掉 `skip_serializing_if`，保留 `#[serde(default)]`，None 序列化为 `null`。
+
+**未改（评估后判定）**：
+- B1-encrypt PDF 消息模糊（S1）：pdf-extract 行为随版本变化，空结果路径已正确路由 OCR；错误消息 hedging 属打磨，非 bug，记 roadmap。
+- S2 新仓库首检查点覆盖整树：与 `confirm_folder_initialization` 行为一致（首检查点天然整树），是预期行为，不改；已在方法文档说明。
+- S3 preview 泄漏 pending action：预存模式（`open_project` 同样），registry 无 TTL；preview 调用更频繁但属预存架构问题，记 roadmap，不本 loop 改。
+- N1 CJK word count：`split_whitespace` 对中文返回 1（无空格）；plan 验收标准是「word_count 有值」，CJK 分词需 `unicode-segmentation`，记 roadmap。
+- 其它 NIT（slide_index unwrap_or(0) 排序、archive_names 吞错）记 roadmap。
+
+最终验证：295 lib + 7 task8_contracts + 90 FE + lint + clippy(--no-default-features, -D warnings) 全绿；GUI 编译通过；我的文件无 clippy 告警、无 debug 日志。
+
+---
 
 ## 后端可落地条目（roadmap P0/P1 中只动 src-tauri 的部分）
 
