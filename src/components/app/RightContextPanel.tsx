@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
+import { ImportRightPanel } from "../../features/import/ImportRightPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { CitationPanel } from "../../features/chat/CitationPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
@@ -137,6 +138,10 @@ export function RightContextPanel() {
         </div>
       </aside>
     );
+  }
+
+  if (activeView === "import") {
+    return <ImportRightPanel />;
   }
 
   const health = currentProject.health;
