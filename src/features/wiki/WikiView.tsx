@@ -58,6 +58,8 @@ export function WikiView() {
   const requestDeletePage = useWikiStore((state) => state.requestDeletePage);
   const confirmDeletePage = useWikiStore((state) => state.confirmDeletePage);
   const cancelPendingAction = useWikiStore((state) => state.cancelPendingAction);
+  const requestedExportType = useWikiStore((state) => state.requestedExportType);
+  const consumeExportRequest = useWikiStore((state) => state.consumeExportRequest);
 
   const exportRecords = useExportStore((state) => state.records);
   const runningExportTaskId = useExportStore((state) => state.runningTaskId);
@@ -82,6 +84,13 @@ export function WikiView() {
   useEffect(() => {
     void loadExports(projectId, rootPath);
   }, [projectId, rootPath, loadExports]);
+
+  useEffect(() => {
+    if (!requestedExportType) return;
+    setHtmlTemplate(requestedExportType);
+    setHtmlDialogOpen(true);
+    consumeExportRequest();
+  }, [requestedExportType, consumeExportRequest]);
 
   const runningExportTask = runningExportTaskId
     ? tasks.find((task) => task.id === runningExportTaskId) ?? null
@@ -423,6 +432,7 @@ export function WikiView() {
       {htmlDialogOpen && page ? (
         <GenerateHtmlDialog
           pagePath={page.meta.path}
+          initialType={htmlTemplate}
           onCancel={() => setHtmlDialogOpen(false)}
           onGenerate={handleGenerateHtml}
         />

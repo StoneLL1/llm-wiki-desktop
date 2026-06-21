@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { FileText } from "lucide-react";
+import { FileOutput, FileText, Image, Link, Network } from "lucide-react";
 
 import type { WikiPageMeta } from "../../types/wiki";
 import { PAGE_TYPE_LABEL_KEYS } from "../../types/wiki";
@@ -9,6 +9,11 @@ interface RelatedPagesPanelProps {
   page: WikiPageMeta | null;
   pages: WikiPageMeta[];
   onOpenPage: (path: string) => void;
+  onViewAllBacklinks: () => void;
+  onGenerateHtml: () => void;
+  onGenerateCard: () => void;
+  onViewInGraph: () => void;
+  onCopyWikilink: () => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -17,11 +22,31 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function RelatedPagesPanel({ page, pages, onOpenPage }: RelatedPagesPanelProps) {
+function resolveSourcePage(source: string, pages: WikiPageMeta[]): WikiPageMeta | null {
+  const normalized = source.toLowerCase().replace(/\.md$/i, "");
+  return (
+    pages.find((candidate) => {
+      const path = candidate.path.toLowerCase().replace(/\.md$/i, "");
+      const stem = path.split("/").pop();
+      return path === normalized || stem === normalized || candidate.title.toLowerCase() === normalized;
+    }) ?? null
+  );
+}
+
+export function RelatedPagesPanel({
+  page,
+  pages,
+  onOpenPage,
+  onViewAllBacklinks,
+  onGenerateHtml,
+  onGenerateCard,
+  onViewInGraph,
+  onCopyWikilink,
+}: RelatedPagesPanelProps) {
   const { t } = useTranslation();
 
   const backlinks = useMemo(() => {
-    if (!page) return [] as WikiPageMeta[];
+    if (!page) return [] as Array<{ page: WikiPageMeta; count: number }>;
     const stems = new Set<string>();
     const fileStem = page.path.split("/").pop()?.replace(/\.md$/i, "").toLowerCase();
     if (fileStem) stems.add(fileStem);
@@ -31,10 +56,13 @@ export function RelatedPagesPanel({ page, pages, onOpenPage }: RelatedPagesPanel
     }
     return pages
       .filter((candidate) => candidate.path !== page.path)
-      .filter((candidate) =>
-        candidate.wikilinks.some((link) => stems.has(link.toLowerCase())),
-      );
+      .map((candidate) => ({
+        page: candidate,
+        count: candidate.wikilinks.filter((link) => stems.has(link.toLowerCase())).length,
+      }))
+      .filter((candidate) => candidate.count > 0);
   }, [page, pages]);
+  const backlinkCount = backlinks.reduce((total, item) => total + item.count, 0);
 
   if (!page) {
     return (
@@ -69,6 +97,10 @@ export function RelatedPagesPanel({ page, pages, onOpenPage }: RelatedPagesPanel
           ) : null}
           <dt className="text-[var(--text-muted)]">{t("wiki.related.words")}</dt>
           <dd className="text-[var(--text-primary)]">{page.wordCount.toLocaleString()}</dd>
+          <dt className="text-[var(--text-muted)]">{t("wiki.related.citationCount")}</dt>
+          <dd className="font-mono text-[var(--text-primary)]">{page.sources.length}</dd>
+          <dt className="text-[var(--text-muted)]">{t("wiki.related.backlinkCount")}</dt>
+          <dd className="font-mono text-[var(--text-primary)]">{backlinkCount}</dd>
           <dt className="text-[var(--text-muted)]">{t("wiki.related.size")}</dt>
           <dd className="text-[var(--text-primary)]">{formatBytes(page.fileSize)}</dd>
         </dl>
@@ -96,24 +128,33 @@ export function RelatedPagesPanel({ page, pages, onOpenPage }: RelatedPagesPanel
         <h4 className="mb-1.5 flex items-center gap-1 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
           {t("wiki.related.backlinks")}
           <span className="font-mono text-[10.5px] font-normal normal-case tracking-normal text-[var(--text-muted)]">
-            {backlinks.length}
+            {backlinkCount}
           </span>
         </h4>
         {backlinks.length === 0 ? (
           <p className="text-[11.5px] text-[var(--text-muted)]">{t("wiki.related.noBacklinks")}</p>
         ) : (
           <div className="flex flex-col gap-0.5">
-            {backlinks.map((link) => (
+            {backlinks.map(({ page: link, count }) => (
               <button
                 key={link.path}
                 type="button"
                 onClick={() => onOpenPage(link.path)}
-                className="flex items-center gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-[12.5px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+                className="relpage"
               >
-                <FileText size={13} className="shrink-0 text-[var(--text-muted)]" />
-                <span className="flex-1 truncate">{link.title}</span>
+                <FileText size={13} className="relpage__icon" />
+                <span className="relpage__title">{link.title}</span>
+                <span className="relpage__count">{count}</span>
               </button>
             ))}
+            <button
+              type="button"
+              onClick={onViewAllBacklinks}
+              aria-label={t("wiki.related.viewAllBacklinks", { count: backlinkCount })}
+              className="mt-1 h-[28px] text-center text-[11.5px] text-[var(--accent-hover)] hover:underline"
+            >
+              {t("wiki.related.viewAllBacklinks", { count: backlinkCount })} →
+            </button>
           </div>
         )}
       </section>
@@ -123,15 +164,62 @@ export function RelatedPagesPanel({ page, pages, onOpenPage }: RelatedPagesPanel
           <h4 className="mb-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
             {t("wiki.related.sources")}
           </h4>
-          <ul className="flex flex-col gap-1 text-[11px]">
-            {page.sources.map((source) => (
-              <li key={source} className="break-all font-mono text-[var(--text-secondary)]">
-                {source}
-              </li>
-            ))}
+          <ul className="flex flex-col gap-1.5">
+            {page.sources.map((source, index) => {
+              const sourcePage = resolveSourcePage(source, pages);
+              return (
+                <li key={`${source}-${index}`}>
+                  <button
+                    id={`citation-${index + 1}`}
+                    type="button"
+                    disabled={!sourcePage}
+                    onClick={() => {
+                      if (sourcePage) onOpenPage(sourcePage.path);
+                    }}
+                    className="citation w-full text-left disabled:cursor-default"
+                  >
+                    <span className="citation__idx">{index + 1}</span>
+                    <span className="citation__title">{source}</span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}
+
+      <section>
+        <h4 className="mb-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+          {t("wiki.related.actions")}
+        </h4>
+        <div className="flex flex-col gap-1.5">
+          <ActionButton icon={<FileOutput size={13} />} label={t("wiki.related.generateHtml")} onClick={onGenerateHtml} />
+          <ActionButton icon={<Image size={13} />} label={t("wiki.related.generateCard")} onClick={onGenerateCard} />
+          <ActionButton icon={<Network size={13} />} label={t("wiki.related.viewInGraph")} onClick={onViewInGraph} />
+          <ActionButton icon={<Link size={13} />} label={t("wiki.related.copyWikilink")} onClick={onCopyWikilink} />
+        </div>
+      </section>
     </div>
+  );
+}
+
+function ActionButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex h-[28px] w-full items-center justify-start gap-2 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--background)] px-2 text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+    >
+      {icon}
+      {label}
+    </button>
   );
 }

@@ -21,14 +21,23 @@ export function RightContextPanel() {
   const wikiPage = useWikiStore((state) => state.page?.meta ?? null);
   const wikiTree = useWikiStore((state) => state.tree);
   const openWikiPage = useWikiStore((state) => state.openPage);
+  const requestWikiExport = useWikiStore((state) => state.requestExport);
   const graphData = useGraphStore((state) => state.data);
   const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
+  const setGraphSelectedNode = useGraphStore((state) => state.setSelectedNode);
   const chatSession = useChatStore((state) => state.activeSession);
 
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
   const openPage = (path: string) => {
     void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
+  };
+
+  const viewWikiPageInGraph = () => {
+    if (!wikiPage) return;
+    const node = graphData?.nodes.find((candidate) => candidate.path === wikiPage.path);
+    setGraphSelectedNode(node?.id ?? wikiPage.path);
+    setActiveView("graph");
   };
 
   if (activeView === "chat") {
@@ -73,6 +82,13 @@ export function RightContextPanel() {
             page={wikiPage}
             pages={wikiTree?.pages ?? []}
             onOpenPage={openPage}
+            onViewAllBacklinks={viewWikiPageInGraph}
+            onGenerateHtml={() => requestWikiExport("beautiful_read")}
+            onGenerateCard={() => requestWikiExport("knowledge_card")}
+            onViewInGraph={viewWikiPageInGraph}
+            onCopyWikilink={() => {
+              if (wikiPage) void navigator.clipboard.writeText(`[[${wikiPage.title}]]`);
+            }}
           />
         </div>
       </aside>

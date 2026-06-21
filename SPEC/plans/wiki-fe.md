@@ -7,7 +7,7 @@
 ## 状态摘要
 
 - P0：4 项 verified，0 项 blocked
-- P1：1 项 pending，1 项 verified，1 个子项 blocked
+- P1：2 项 verified，1 个子项 blocked
 - blocked：WIKI-FE-05b 外部浏览器打开生成 HTML
 
 ## 执行项
@@ -59,12 +59,12 @@
 
 ### WIKI-FE-06 — P1 右侧操作、citation 与反链计数
 
-- status: pending
+- status: verified
 - 意图：右侧增加四项操作；引用来源编号化并与正文 citation 角标对应；元数据显式显示引用/反链总数；相关页面显示每页指向当前页的链接次数和“查看全部”。
 - 决策：反链次数从现有 `wikilinks` 在前端确定性计算；“在图谱中查看”复用 navigation/graph store；生成动作复用 HTML 生成入口；不实现 P2 编辑历史。
 - 验收：citation 编号和正文角标可互相定位；反链总数与逐页次数正确；复制 wikilink 写入剪贴板；图谱动作切换视图并选中页面。
 - 预计文件：`src/features/wiki/MarkdownReader.tsx`、`src/features/wiki/RelatedPagesPanel.tsx`、`src/components/app/RightContextPanel.tsx`、`src/features/wiki/wiki.test.tsx`、`src/i18n/locales/*.json`、`src/styles.css`
-- 完成位置：待记录
+- 完成位置：`src/features/wiki/MarkdownReader.tsx:84-93,102-107,132-151`；`src/features/wiki/RelatedPagesPanel.tsx:1-227`；`src/components/app/RightContextPanel.tsx:23-42,80-92`；`src/features/wiki/wikiStore.ts:54,98-99,110,450-451`；`src/features/wiki/WikiView.tsx:61-62,88-94,433`；`src/features/wiki/wiki.test.tsx:68-74,527-544,689-734`；`src/styles.css:437-483,601-619`
 
 ## Blocked
 
