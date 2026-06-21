@@ -17,6 +17,41 @@ interface MarkdownReaderProps {
 
 const WIKILINK_SCHEME = "wikilink://";
 
+interface FrontmatterRow {
+  key: string;
+  value: string;
+}
+
+/**
+ * Parse frontmatter for presentation without mutating or re-serializing YAML.
+ * The backend remains the source of truth for the raw bytes. This intentionally
+ * small parser handles the flat metadata shape used by Wiki pages and keeps
+ * nested/unknown syntax visible as continuation text instead of dropping it.
+ */
+function parseFrontmatterRows(yaml: string): FrontmatterRow[] {
+  const rows: FrontmatterRow[] = [];
+
+  for (const rawLine of yaml.split(/\r?\n/)) {
+    if (rawLine.trim() === "" || rawLine.trim() === "---") continue;
+
+    const field = rawLine.match(/^([^\s:#][^:]*):(?:\s*(.*))?$/);
+    if (field) {
+      rows.push({ key: field[1].trim(), value: field[2] ?? "" });
+      continue;
+    }
+
+    if (/^\s+/.test(rawLine) && rows.length > 0) {
+      const last = rows[rows.length - 1];
+      last.value = [last.value, rawLine.trim()].filter(Boolean).join(" · ");
+      continue;
+    }
+
+    rows.push({ key: "", value: rawLine.trim() });
+  }
+
+  return rows;
+}
+
 /** Build a case-insensitive wikilink target → page path index. */
 function buildResolver(pages: WikiPageMeta[]): Map<string, string> {
   const index = new Map<string, string>();
@@ -53,11 +88,22 @@ export function MarkdownReader({
   const { t } = useTranslation();
   const resolver = useMemo(() => buildResolver(pages), [pages]);
   const processed = useMemo(() => preprocessWikilinks(bodyMarkdown), [bodyMarkdown]);
+  const frontmatterRows = useMemo(
+    () => (frontmatterYaml ? parseFrontmatterRows(frontmatterYaml) : []),
+    [frontmatterYaml],
+  );
 
   return (
-    <article className="wiki-prose">
-      {frontmatterYaml ? (
-        <pre className="wiki-frontmatter">{frontmatterYaml}</pre>
+    <article className="wiki-prose" role="article">
+      {frontmatterRows.length > 0 ? (
+        <div className="frontmatter">
+          {frontmatterRows.map((row, index) => (
+            <div className="frontmatter__row" key={`${row.key}-${index}`}>
+              <span className="frontmatter__k">{row.key ? `${row.key}:` : ""}</span>
+              <span className="frontmatter__v">{row.value}</span>
+            </div>
+          ))}
+        </div>
       ) : null}
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}

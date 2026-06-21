@@ -254,6 +254,44 @@ describe("wikiStore", () => {
 });
 
 describe("MarkdownReader", () => {
+  it("renders frontmatter as ordered key-value rows instead of raw YAML", () => {
+    const { container } = render(
+      <MarkdownReader
+        bodyMarkdown="# Memory"
+        frontmatterYaml={[
+          "type: concept",
+          "tags: [memory, context]",
+          "schema_version: 3",
+        ].join("\n")}
+        pages={[]}
+        onOpenPage={vi.fn()}
+      />,
+    );
+
+    const card = container.querySelector(".frontmatter");
+    expect(card).not.toBeNull();
+    expect(card?.querySelectorAll(".frontmatter__row")).toHaveLength(3);
+    expect(card?.textContent).toContain("type:");
+    expect(card?.textContent).toContain("[memory, context]");
+    expect(container.querySelector(".wiki-frontmatter")).toBeNull();
+  });
+
+  it("keeps unknown and continuation frontmatter content readable", () => {
+    const { container } = render(
+      <MarkdownReader
+        bodyMarkdown="Body"
+        frontmatterYaml={"custom_field:\n  nested: value\nmalformed line"}
+        pages={[]}
+        onOpenPage={vi.fn()}
+      />,
+    );
+
+    const rows = container.querySelectorAll(".frontmatter__row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain("nested: value");
+    expect(rows[1]?.textContent).toContain("malformed line");
+  });
+
   it("renders an existing wikilink as clickable and invokes onOpenPage", async () => {
     const onOpenPage = vi.fn();
     const pages = [
