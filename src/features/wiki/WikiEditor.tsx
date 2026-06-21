@@ -38,6 +38,7 @@ interface WikiEditorProps {
   onSave: () => void;
   onCancel: () => void;
   onReload: () => void;
+  onReviewConflict?: () => void;
 }
 
 /**
@@ -187,6 +188,7 @@ export function WikiEditor({
   onSave,
   onCancel,
   onReload,
+  onReviewConflict,
 }: WikiEditorProps) {
   const { t } = useTranslation();
   const saving = saveState === "saving";
@@ -229,13 +231,24 @@ export function WikiEditor({
             {t("wiki.editor.cancel")}
           </button>
           {saveState === "conflict" ? (
-            <button
-              type="button"
-              className="h-[26px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
-              onClick={onReload}
-            >
-              {t("wiki.editor.reload")}
-            </button>
+            <>
+              {onReviewConflict ? (
+                <button
+                  type="button"
+                  className="h-[26px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+                  onClick={onReviewConflict}
+                >
+                  {t("wiki.editor.reviewConflict")}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="h-[26px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+                onClick={onReload}
+              >
+                {t("wiki.editor.reload")}
+              </button>
+            </>
           ) : null}
           <button
             type="button"

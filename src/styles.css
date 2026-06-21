@@ -315,8 +315,8 @@ select:focus-visible {
   user-select: none;
 }
 
-.wiki-diff--current .wiki-diff__line { background: var(--warning-soft); }
-.wiki-diff--incoming .wiki-diff__line { background: var(--accent-soft); }
+.wiki-diff__line--current { background: var(--warning-soft); }
+.wiki-diff__line--incoming { background: var(--accent-soft); }
 
 .tmpl-grid {
   display: grid;

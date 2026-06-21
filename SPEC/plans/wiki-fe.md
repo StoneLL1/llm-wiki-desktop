@@ -66,6 +66,13 @@
 - 预计文件：`src/features/wiki/MarkdownReader.tsx`、`src/features/wiki/RelatedPagesPanel.tsx`、`src/components/app/RightContextPanel.tsx`、`src/features/wiki/wiki.test.tsx`、`src/i18n/locales/*.json`、`src/styles.css`
 - 完成位置：`src/features/wiki/MarkdownReader.tsx:84-93,102-107,132-151`；`src/features/wiki/RelatedPagesPanel.tsx:1-227`；`src/components/app/RightContextPanel.tsx:23-42,80-92`；`src/features/wiki/wikiStore.ts:54,98-99,110,450-451`；`src/features/wiki/WikiView.tsx:61-62,88-94,433`；`src/features/wiki/wiki.test.tsx:68-74,527-544,689-734`；`src/styles.css:437-483,601-619`
 
+## 双重审查
+
+- 子代理状态：按流程启动 A（共享上下文）与 B（fresh eyes），两者均因环境 usage limit 未能返回；依照 `CLAUDE.md` 回退为两轮独立人工审查。
+- 审查 A（设计/逻辑/集成）：修复冲突 dialog 取消误等同“保留当前”导致草稿丢失；补 Wiki IPC 错误可见 banner；三路 diff 改为只高亮相对 baseline 的变化行。
+- 审查 B（盲点/边界/漏测）：修复跨页面复用旧 HTML preview；避免把 Markdown reference link 定义误转 citation；用显式目录映射修复 entities/queries/synthesis 类型推断，并新增 CJK 回归测试。
+- 审查后验证：`npm run test` 90/90；`npm run lint` 通过；无新增 `console.log`。
+
 ## Blocked
 
 - WIKI-FE-05b — status: blocked — HTML 预览“外部浏览器打开”缺少已交付后端命令；现有 `open_export_folder` 只能打开位置。已按硬边界跳过，不新增 `src-tauri/` 命令；其余第三态、四模板、后台任务、sandbox iframe、重新生成、打开位置、复制路径均继续完成。

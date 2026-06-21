@@ -86,7 +86,7 @@ function preprocessCitations(body: string): string {
     .replace(/\[\^(\d+)\](?!\s*:)/g, (_match, index: string) => {
       return `[${index}](${CITATION_SCHEME}${index})`;
     })
-    .replace(/\[(\d+)\](?!\()/g, (_match, index: string) => {
+    .replace(/(?<!\])\[(\d+)\](?!\s*(?:\(|:))/g, (_match, index: string) => {
       return `[${index}](${CITATION_SCHEME}${index})`;
     });
 }

@@ -398,6 +398,7 @@
   "wiki.editor.save": "Save",
   "wiki.editor.cancel": "Cancel",
   "wiki.editor.reload": "Reload",
+  "wiki.editor.reviewConflict": "Review conflict",
   "wiki.editor.toolbar.label": "Formatting",
   "wiki.editor.toolbar.bold": "Bold",
   "wiki.editor.toolbar.italic": "Italic",

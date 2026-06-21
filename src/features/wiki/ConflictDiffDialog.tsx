@@ -48,9 +48,9 @@ export function ConflictDiffDialog({
 
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <div className="grid min-w-[780px] grid-cols-3 gap-3">
-            <DiffColumn label={t("wiki.conflict.baseline")} content={conflict.originalContent} tone="baseline" />
-            <DiffColumn label={t("wiki.conflict.current")} content={conflict.currentContent} tone="current" />
-            <DiffColumn label={t("wiki.conflict.incoming")} content={conflict.incomingContent} tone="incoming" />
+            <DiffColumn label={t("wiki.conflict.baseline")} content={conflict.originalContent} tone="baseline" baseline={conflict.originalContent} />
+            <DiffColumn label={t("wiki.conflict.current")} content={conflict.currentContent} tone="current" baseline={conflict.originalContent} />
+            <DiffColumn label={t("wiki.conflict.incoming")} content={conflict.incomingContent} tone="incoming" baseline={conflict.originalContent} />
           </div>
           {manual ? (
             <label className="mt-4 block text-[12px] text-[var(--text-secondary)]">
@@ -94,11 +94,14 @@ function DiffColumn({
   label,
   content,
   tone,
+  baseline,
 }: {
   label: string;
   content: string;
   tone: "baseline" | "current" | "incoming";
+  baseline: string;
 }) {
+  const baselineLines = baseline.split("\n");
   return (
     <section className="overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)]">
       <h3 className="border-b border-[var(--border)] bg-[var(--surface)] px-3 py-2 font-mono text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
@@ -106,7 +109,14 @@ function DiffColumn({
       </h3>
       <pre className={`wiki-diff wiki-diff--${tone}`}>
         {content.split("\n").map((line, index) => (
-          <span className="wiki-diff__line" key={`${index}-${line}`}>
+          <span
+            className={`wiki-diff__line ${
+              tone !== "baseline" && line !== baselineLines[index]
+                ? `wiki-diff__line--${tone}`
+                : ""
+            }`}
+            key={`${index}-${line}`}
+          >
             <span className="wiki-diff__number">{index + 1}</span>
             <span>{line || " "}</span>
           </span>

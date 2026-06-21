@@ -7,6 +7,7 @@ import type {
   WikiPageMeta,
   WikiTree,
 } from "../../types/wiki";
+import type { ExportRecord } from "../../types/export";
 import { MarkdownReader } from "./MarkdownReader";
 import { WikiEditor } from "./WikiEditor";
 import { WikiTree as WikiTreeView } from "./WikiTree";
@@ -15,6 +16,7 @@ import { ConflictDiffDialog } from "./ConflictDiffDialog";
 import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
 import { HtmlPreviewPane as WikiHtmlPreviewPane } from "./HtmlPreviewPane";
 import { RelatedPagesPanel } from "./RelatedPagesPanel";
+import { selectWikiPreviewRecord } from "./WikiView";
 import { useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
 
@@ -542,6 +544,23 @@ describe("MarkdownReader", () => {
     expect(citations).toHaveLength(2);
     expect(citations[0]).toHaveAttribute("href", "#citation-1");
   });
+
+  it("does not rewrite Markdown reference definitions as citations", () => {
+    const { container } = render(
+      <MarkdownReader
+        bodyMarkdown={"See [source][1].\n\n[1]: https://example.com"}
+        frontmatterYaml={null}
+        pages={[]}
+        onOpenPage={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelectorAll(".citation-ref")).toHaveLength(0);
+    expect(screen.getByRole("link", { name: "source" })).toHaveAttribute(
+      "href",
+      "https://example.com",
+    );
+  });
 });
 
 describe("WikiTree page lifecycle actions", () => {
@@ -620,6 +639,29 @@ describe("WikiPageFormDialog", () => {
       pageType: "concept",
     });
   });
+
+  it("infers irregular page-type folders without truncating their names", () => {
+    const onSubmit = vi.fn();
+    render(
+      <WikiPageFormDialog
+        mode="create"
+        initialPath="wiki/entities/"
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Page path"), {
+      target: { value: "wiki/entities/张三" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create page" }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      relativePath: "wiki/entities/张三.md",
+      title: null,
+      pageType: "entity",
+    });
+  });
 });
 
 describe("ConflictDiffDialog", () => {
@@ -650,6 +692,25 @@ describe("ConflictDiffDialog", () => {
 });
 
 describe("Wiki HTML preview", () => {
+  it("does not reuse a preview generated for another page", () => {
+    const records: ExportRecord[] = [
+      {
+        id: "old-preview",
+        exportType: "beautiful_read",
+        title: "Old",
+        sourcePath: "wiki/old.md",
+        outputPath: "exports/html/old.html",
+        createdAt: "2026-06-21T00:00:00Z",
+        route: "agent",
+        status: "succeeded",
+      },
+    ];
+
+    expect(
+      selectWikiPreviewRecord(records, "old-preview", "wiki/new.md"),
+    ).toBeNull();
+  });
+
   it("offers all four export templates", () => {
     render(
       <GenerateHtmlDialog
