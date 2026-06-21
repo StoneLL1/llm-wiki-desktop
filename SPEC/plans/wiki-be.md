@@ -3,6 +3,32 @@
 > 权威源：SPEC/roadmap/wiki.md §1 row 37 + §2 PRD-READ-001 / PRD-WIKI-004 · SPEC/PRD.md (PRD-READ-004 / PRD-WIKI-004 / PRD-GIT-002/004) · CLAUDE.md「必读硬边界」
 > scope：只动 src-tauri/（新增/扩展 Tauri 命令与 service）。status: pending | in_progress | done | verified
 
+## ✅ 本轮完成 @ 2026-06-21
+
+wiki 后端 P0+P1 全部 verified 并提交（3 commits，分支 `task1-backend-contracts`）：
+
+| commit | 内容 |
+|---|---|
+| `4956217` | W1+W2+W4：create/rename/delete wiki page 三命令 + `rewrite_wikilinks` + `apply_page_delete` 双 checkpoint + 路径安全/CJK |
+| `7ed2b2a` | W3：`FILE_HASH_MISMATCH` 透传 `baselineContent`（改 file_store 一处，6 调用点全受益）|
+| `9a0f17d` | 双子代理审查修复：rename/delete 失败回滚（快照+恢复）、page_type YAML 注入、binary 文件 baseline 去垃圾、self-link 排除、死代码清理 |
+
+**改动文件清单（src-tauri/）：**
+- `src/utils/markdown_utils.rs` — `rewrite_wikilinks` + 8 测试
+- `src/models/wiki.rs` — Create/Rename/Delete DTO + RenameWikiPageResponse
+- `src/models/confirmation.rs` — `ConfirmationExecution::DeleteWikiPage`
+- `src/services/search_service.rs` — `create_page` / `rename_page`（快照+回滚）/ `find_pages_referencing`（排除自链）/ `apply_page_delete`（快照+回滚 + baselineContent）/ `yaml_escape_scalar`（含换行）+ 15 测试
+- `src/services/file_store.rs` — `verify_write_mode` mismatch 分支 `baselineContent`（仅 UTF-8）+ 1 测试
+- `src/commands/wiki_commands.rs` — 3 新命令（rename 前置 checkpoint）
+- `src/commands/file_commands.rs` — `DeleteWikiPage` confirm 分支 + 薄包装
+- `src/lib.rs` — 注册 3 handler
+
+**验收：** cargo test --lib = 280 passed（+4 审查驱动新测）｜npm run test = 72 passed｜npm run lint = clean｜cargo check --features gui = compiles｜无 println!/dbg!/console.log。
+
+**P2 已记录到 roadmap（非本 loop 范围）：** wikilink 重写不跳代码块/不识别路径式 `[[dir/old]]`/引用重写非原子写（与 `extract_wikilinks` 同源限制）；前端文件树新建/重命名/删除 UI 接线仍缺。
+
+---
+
 ## 本轮计划
 
 从 SPEC/roadmap/wiki.md 摘出**仅落在后端 src-tauri/** 的 P0+P1 项（前端 UI 项 / P2 / 跨板块 lint 可视化不在本 loop）。逐条实施 → cargo test + npm run test + npm run lint 全绿 → status=verified → 逐项 commit → 追加 progress.txt。收敛后写顶部完成标记并结束 loop。
