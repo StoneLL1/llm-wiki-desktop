@@ -201,17 +201,32 @@ impl FileStore {
                 }
                 let current_hash = hash_file(path)?;
                 if current_hash != expected_hash {
+                    // Surface the on-disk baseline text so the frontend can run
+                    // a 3-way diff (baseline disk + editor buffer + generated)
+                    // instead of forcing a blind reload. Both the wiki save and
+                    // compile conflict paths flow through here, so this one
+                    // change covers PRD-READ-004 (external edits) and
+                    // PRD-WIKI-004 (compile merge conflicts). Read is
+                    // lossy-best-effort: a binary/non-UTF-8 file still yields
+                    // the mismatch error, just without a baseline.
+                    let baseline_content = fs::read(path)
+                        .ok()
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                    let mut details = serde_json::json!({
+                        "path": relative_path,
+                        "expectedHash": expected_hash,
+                        "currentHash": current_hash,
+                    });
+                    if let Some(baseline) = baseline_content {
+                        details["baselineContent"] = serde_json::Value::String(baseline);
+                    }
                     return Err(BackendError::new(
                         "FILE_HASH_MISMATCH",
                         "File changed since it was last read. Reload before overwriting.",
                         true,
                         true,
                     )
-                    .with_details(serde_json::json!({
-                        "path": relative_path,
-                        "expectedHash": expected_hash,
-                        "currentHash": current_hash,
-                    })));
+                    .with_details(details));
                 }
                 Ok(())
             }
@@ -438,6 +453,47 @@ mod tests {
                 .unwrap(),
             "# Second"
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_hash_mismatch_surfaces_disk_baseline_for_three_way_diff() {
+        // PRD-READ-004 / PRD-WIKI-004: on a stale-hash overwrite the error
+        // must carry the on-disk baseline text so the frontend can render a
+        // 3-way diff (disk baseline + editor buffer + generated). Covers both
+        // the wiki save and compile conflict paths, which both flow through
+        // verify_write_mode.
+        let (context, root) = tmp_context("baseline");
+        let store = FileStore;
+
+        store
+            .write_markdown_checked(
+                &context,
+                "wiki/notes/agent.md",
+                "# Agent\n\nOriginal body.",
+                WriteMode::CreateNew,
+            )
+            .unwrap();
+
+        let err = store
+            .write_markdown_checked(
+                &context,
+                "wiki/notes/agent.md",
+                "# Agent\n\nIncoming overwrite.",
+                WriteMode::OverwriteIfHashMatches("stale-hash".to_string()),
+            )
+            .expect_err("stale hash must surface FILE_HASH_MISMATCH");
+        assert_eq!(err.code, "FILE_HASH_MISMATCH");
+        let details = err.details.expect("mismatch must carry details");
+        assert_eq!(details["expectedHash"], "stale-hash");
+        assert_eq!(
+            details["baselineContent"],
+            "# Agent\n\nOriginal body.",
+            "baselineContent must equal the on-disk text"
+        );
+        // currentHash must still be present alongside the baseline.
+        assert!(details.get("currentHash").is_some());
 
         std::fs::remove_dir_all(root).unwrap();
     }
