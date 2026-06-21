@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>Settings — LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .main__body { padding: 0 !important; }
+  .settings-layout { height: 100%; }
+  .settings-content { padding: 32px 40px !important; max-width: 880px !important; }
+  .apikey-row {
+    display: grid;
+    grid-template-columns: 32px 1fr auto auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 16px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--background);
+    margin-bottom: 8px;
+  }
+  .apikey-row__icon { width: 32px; height: 32px; border-radius: var(--radius-md); background: var(--surface-muted); display: grid; place-items: center; color: var(--text-secondary); }
+  .apikey-row__name { font-size: 13px; font-weight: 500; }
+  .apikey-row__hint { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar__brand"><div class="topbar__brand-mark">LW</div><div class="topbar__brand-name">LLM Wiki Desktop</div></div>
+    <button class="projswitch">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="搜索设置项…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch"><button class="is-active">中</button><button>EN</button></div>
+      <a href="dashboard.html" class="btn btn--sm"><svg class="ico-sm"><use href="#i-arrow-r"/></svg>返回项目</a>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span></a>
+        <a class="navitem" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span></a>
+        <a class="navitem" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main__header">
+      <h1 class="main__title">Settings <span class="main__title-sub">· 全局与项目配置</span></h1>
+      <div class="main__toolbar">
+        <span class="badge badge--success"><span class="dot"></span>已自动保存</span>
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-external"/></svg>打开配置文件</button>
+      </div>
+    </div>
+    <div class="main__body">
+      <div class="settings-layout">
+        <!-- Settings nav -->
+        <div class="settings-side">
+          <div class="settings-side__group">
+            <div class="settings-side__title">应用</div>
+            <a class="settings-side__item is-active" href="#general"><svg class="ico-sm"><use href="#i-settings"/></svg>通用</a>
+            <a class="settings-side__item" href="#appearance"><svg class="ico-sm"><use href="#i-sun"/></svg>外观</a>
+            <a class="settings-side__item" href="#language"><svg class="ico-sm"><use href="#i-globe"/></svg>语言</a>
+          </div>
+          <div class="settings-side__group">
+            <div class="settings-side__title">AI</div>
+            <a class="settings-side__item" href="#agent"><svg class="ico-sm"><use href="#i-bot"/></svg>Agent</a>
+            <a class="settings-side__item" href="#providers"><svg class="ico-sm"><use href="#i-cpu"/></svg>LLM Providers</a>
+            <a class="settings-side__item" href="#context"><svg class="ico-sm"><use href="#i-list"/></svg>上下文窗口</a>
+          </div>
+          <div class="settings-side__group">
+            <div class="settings-side__title">系统</div>
+            <a class="settings-side__item" href="#security"><svg class="ico-sm"><use href="#i-shield"/></svg>安全</a>
+            <a class="settings-side__item" href="#background"><svg class="ico-sm"><use href="#i-clock"/></svg>后台任务</a>
+            <a class="settings-side__item" href="#updates"><svg class="ico-sm"><use href="#i-refresh"/></svg>更新</a>
+            <a class="settings-side__item" href="#about"><svg class="ico-sm"><use href="#i-info"/></svg>关于</a>
+          </div>
+        </div>
+
+        <!-- Settings content -->
+        <div class="settings-content">
+          <!-- General -->
+          <div class="settings-section" id="general">
+            <h2 class="settings-section__title">通用</h2>
+            <p class="settings-section__desc">应用启动行为、默认项目、文件关联</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">启动行为</div>
+                <div class="formrow__hint">打开应用时如何选择项目</div>
+              </div>
+              <div class="formrow__control">
+                <select class="select" style="max-width:300px;">
+                  <option>打开上次项目</option>
+                  <option>显示项目选择页</option>
+                  <option>按条件自动打开</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">默认项目位置</div>
+                <div class="formrow__hint">新项目的默认保存目录</div>
+              </div>
+              <div class="formrow__control">
+                <div class="input-group">
+                  <span class="input-group__lead"><svg class="ico-sm"><use href="#i-folder"/></svg></span>
+                  <input class="input input--mono" value="~/Documents/wiki" />
+                  <span class="input-group__trail"><button class="btn btn--sm">选择…</button></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">默认项目模板</div>
+                <div class="formrow__hint">影响 purpose.md / schema.md 初始内容</div>
+              </div>
+              <div class="formrow__control">
+                <select class="select" style="max-width:200px;">
+                  <option>研究</option><option>通用</option><option>读书</option><option>个人成长</option><option>商业</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">外部编辑器</div>
+                <div class="formrow__hint">"在外部打开"使用的应用</div>
+              </div>
+              <div class="formrow__control">
+                <div class="input-group">
+                  <span class="input-group__lead"><svg class="ico-sm"><use href="#i-edit"/></svg></span>
+                  <input class="input input--mono" value="Visual Studio Code" />
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div><div class="formrow__label">文件关联</div></div>
+              <div class="formrow__control" style="display:flex;flex-direction:column;gap:6px;">
+                <label class="checkbox"><input type="checkbox" checked /> 关联 .md 文件</label>
+                <label class="checkbox"><input type="checkbox" /> 关联 .wiki 文件夹</label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Appearance -->
+          <div class="settings-section" id="appearance">
+            <h2 class="settings-section__title">外观</h2>
+            <p class="settings-section__desc">主题、密度、字体</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">主题</div>
+                <div class="formrow__hint">立即生效，无需重启</div>
+              </div>
+              <div class="formrow__control">
+                <div class="seg">
+                  <button class="is-active"><svg class="ico-sm"><use href="#i-sun"/></svg>亮色</button>
+                  <button><svg class="ico-sm"><use href="#i-moon"/></svg>暗色</button>
+                  <button>跟随系统</button>
+                </div>
+                <div style="margin-top:8px;padding:10px;background:var(--surface);border:1px solid var(--border-subtle);border-radius:var(--radius-md);font-size:11px;color:var(--text-muted);">
+                  暗色主题保持低饱和度，teal 仅用于活跃状态与有意义的高亮 · 不变成蓝黑霓虹
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">界面密度</div>
+                <div class="formrow__hint">行高与间距</div>
+              </div>
+              <div class="formrow__control">
+                <div class="seg">
+                  <button>紧凑</button>
+                  <button class="is-active">标准</button>
+                  <button>舒适</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">字体</div>
+                <div class="formrow__hint">UI / 阅读 / 代码 三类</div>
+              </div>
+              <div class="formrow__control" style="display:flex;flex-direction:column;gap:10px;">
+                <div>
+                  <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">UI 字体</div>
+                  <select class="select" style="max-width:300px;">
+                    <option>Inter (默认)</option>
+                    <option>SF Pro Text</option>
+                    <option>Söhne (如已授权)</option>
+                  </select>
+                </div>
+                <div>
+                  <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">阅读字体</div>
+                  <select class="select" style="max-width:300px;">
+                    <option>Source Serif Pro (默认)</option>
+                    <option>Iowan Old Style</option>
+                    <option>Georgia</option>
+                  </select>
+                </div>
+                <div>
+                  <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">代码字体</div>
+                  <select class="select" style="max-width:300px;">
+                    <option>JetBrains Mono (默认)</option>
+                    <option>SFMono-Regular</option>
+                    <option>Menlo</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Language -->
+          <div class="settings-section" id="language">
+            <h2 class="settings-section__title">语言</h2>
+            <p class="settings-section__desc">UI 与生成内容语言</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">界面语言</div>
+                <div class="formrow__hint">立即生效</div>
+              </div>
+              <div class="formrow__control">
+                <div class="seg">
+                  <button class="is-active">中文 (zh-CN)</button>
+                  <button>English (en)</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">Agent 输出语言</div>
+                <div class="formrow__hint">Wiki 编译与问答的语言偏好</div>
+              </div>
+              <div class="formrow__control">
+                <select class="select" style="max-width:240px;">
+                  <option>跟随界面语言</option>
+                  <option>总是中文</option>
+                  <option>总是英文</option>
+                  <option>跟随源文档</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Agent -->
+          <div class="settings-section" id="agent">
+            <h2 class="settings-section__title">Agent</h2>
+            <p class="settings-section__desc">检测、默认绑定、超时与后台</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">默认 Agent</div>
+                <div class="formrow__hint">Wiki 编译 / 问答 / Lint 优先使用</div>
+              </div>
+              <div class="formrow__control">
+                <select class="select" style="max-width:240px;">
+                  <option>claude · 1.0.23 (已检测)</option>
+                  <option>codex · 0.8.1 (已检测)</option>
+                  <option>无 · 使用 BYOK API</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">任务超时</div>
+                <div class="formrow__hint">单任务最大运行时长</div>
+              </div>
+              <div class="formrow__control">
+                <div class="input-group" style="max-width:200px;">
+                  <input class="input" type="number" value="300" />
+                  <span class="input-group__trail" style="padding-right:12px;font-size:11.5px;color:var(--text-muted);">秒</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">安装行为</div>
+                <div class="formrow__hint">不静默安装；命令需用户确认</div>
+              </div>
+              <div class="formrow__control" style="display:flex;flex-direction:column;gap:6px;">
+                <label class="checkbox"><input type="checkbox" /> 允许 Agent 执行安装命令</label>
+                <label class="checkbox"><input type="checkbox" checked /> 仅显示安装命令供复制</label>
+                <label class="checkbox"><input type="checkbox" checked /> 检测到新 Agent 时提示</label>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">Skill 自动加载</div>
+                <div class="formrow__hint">从 skills/ 加载本地 Skill</div>
+              </div>
+              <div class="formrow__control">
+                <label class="toggle"><input type="checkbox" checked /><span class="toggle__slider"></span></label>
+                <span style="margin-left:8px;font-size:12px;color:var(--text-muted);">已加载 7 个 Skill · 1 个缺模板</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- LLM Providers -->
+          <div class="settings-section" id="providers">
+            <h2 class="settings-section__title">LLM Providers · BYOK</h2>
+            <p class="settings-section__desc">API Key 存系统钥匙串 · 项目文件中不明文保存</p>
+
+            <div class="apikey-row">
+              <div class="apikey-row__icon" style="background:#0d0d0d;color:#fff;">A</div>
+              <div>
+                <div class="apikey-row__name">Anthropic</div>
+                <div class="apikey-row__hint">claude-sonnet-4-6 · sk-ant-api03-···8f3a · 钥匙串</div>
+              </div>
+              <span class="badge badge--success"><span class="dot"></span>已配置</span>
+              <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-key"/></svg>测试</button>
+              <button class="btn btn--sm btn--ghost">编辑</button>
+            </div>
+
+            <div class="apikey-row">
+              <div class="apikey-row__icon">O</div>
+              <div>
+                <div class="apikey-row__name">OpenAI</div>
+                <div class="apikey-row__hint">未配置 · 可作为后备</div>
+              </div>
+              <span class="badge badge--outline">未配置</span>
+              <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-plus"/></svg>添加</button>
+              <button class="btn btn--sm btn--ghost btn--icon"><svg class="ico-sm"><use href="#i-more"/></svg></button>
+            </div>
+
+            <div class="apikey-row">
+              <div class="apikey-row__icon">G</div>
+              <div>
+                <div class="apikey-row__name">Google Gemini</div>
+                <div class="apikey-row__hint">未配置 · Gemini Pro / Flash</div>
+              </div>
+              <span class="badge badge--outline">未配置</span>
+              <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-plus"/></svg>添加</button>
+              <button class="btn btn--sm btn--ghost btn--icon"><svg class="ico-sm"><use href="#i-more"/></svg></button>
+            </div>
+
+            <div class="apikey-row">
+              <div class="apikey-row__icon"><svg class="ico-sm"><use href="#i-cpu"/></svg></div>
+              <div>
+                <div class="apikey-row__name">Ollama (本地)</div>
+                <div class="apikey-row__hint">localhost:11434 · 0 个模型 · 服务未运行</div>
+              </div>
+              <span class="badge badge--warn">服务未运行</span>
+              <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-refresh"/></svg>启动</button>
+              <button class="btn btn--sm btn--ghost btn--icon"><svg class="ico-sm"><use href="#i-more"/></svg></button>
+            </div>
+
+            <div class="apikey-row">
+              <div class="apikey-row__icon"><svg class="ico-sm"><use href="#i-link"/></svg></div>
+              <div>
+                <div class="apikey-row__name">Custom (OpenAI 兼容)</div>
+                <div class="apikey-row__hint">支持自定义 BaseURL</div>
+              </div>
+              <span class="badge badge--outline">未配置</span>
+              <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-plus"/></svg>添加</button>
+              <button class="btn btn--sm btn--ghost btn--icon"><svg class="ico-sm"><use href="#i-more"/></svg></button>
+            </div>
+
+            <div style="margin-top:12px;padding:12px;background:var(--accent-soft);border:1px solid var(--accent-border);border-radius:var(--radius-md);font-size:12px;color:var(--accent-hover);">
+              <svg class="ico-sm" style="vertical-align:middle;"><use href="#i-info"/></svg>
+              Key 永远不会以明文形式写入项目文件 · 显示时仅展示末尾 4 位
+            </div>
+          </div>
+
+          <!-- Context window -->
+          <div class="settings-section" id="context">
+            <h2 class="settings-section__title">上下文窗口</h2>
+            <p class="settings-section__desc">控制 Agent / BYOK 调用时的 token 上限</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">最大上下文窗口</div>
+                <div class="formrow__hint">影响单次调用成本与覆盖广度</div>
+              </div>
+              <div class="formrow__control">
+                <div style="display:flex;align-items:center;gap:12px;">
+                  <input type="range" min="4000" max="1000000" step="1000" value="200000" style="flex:1;max-width:340px;" />
+                  <span style="font-family:var(--font-mono);font-size:13px;color:var(--accent-hover);font-weight:500;">200K</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;max-width:340px;margin-top:4px;font-family:var(--font-mono);font-size:10.5px;color:var(--text-muted);">
+                  <span>4K</span><span>32K</span><span>128K</span><span>512K</span><span>1M</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">回答最大 tokens</div>
+                <div class="formrow__hint">单次生成的输出上限</div>
+              </div>
+              <div class="formrow__control">
+                <div class="input-group" style="max-width:200px;">
+                  <input class="input" type="number" value="4096" />
+                  <span class="input-group__trail" style="padding-right:12px;font-size:11.5px;color:var(--text-muted);">tokens</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">温度</div>
+                <div class="formrow__hint">仅影响 BYOK 路径</div>
+              </div>
+              <div class="formrow__control">
+                <div style="display:flex;align-items:center;gap:12px;">
+                  <input type="range" min="0" max="1" step="0.05" value="0.3" style="flex:1;max-width:340px;" />
+                  <span style="font-family:var(--font-mono);font-size:13px;color:var(--text-secondary);">0.30</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Security -->
+          <div class="settings-section" id="security">
+            <h2 class="settings-section__title">安全</h2>
+            <p class="settings-section__desc">Git 检查点、文件保护、Agent 权限</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">自动 Git 检查点</div>
+                <div class="formrow__hint">危险操作前自动创建可回滚提交</div>
+              </div>
+              <div class="formrow__control">
+                <label class="toggle"><input type="checkbox" checked /><span class="toggle__slider"></span></label>
+                <span style="margin-left:8px;font-size:12px;color:var(--text-muted);">删除 / 覆盖 / Agent 自动修复 / 批量重写</span>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">人工编辑保护</div>
+                <div class="formrow__hint">编译时检测外部修改并展示 Diff</div>
+              </div>
+              <div class="formrow__control">
+                <label class="toggle"><input type="checkbox" checked /><span class="toggle__slider"></span></label>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">Raw Sources 默认不可变</div>
+                <div class="formrow__hint">替换 / 删除原始资料需明确确认</div>
+              </div>
+              <div class="formrow__control">
+                <label class="toggle"><input type="checkbox" checked /><span class="toggle__slider"></span></label>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">API Key 存储</div>
+                <div class="formrow__hint">使用系统钥匙串或凭据管理器</div>
+              </div>
+              <div class="formrow__control">
+                <div style="padding:10px;background:var(--surface);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary);font-family:var(--font-mono);">
+                  macOS · Keychain Access · api.anthropic.com<br/>
+                  Windows · Credential Manager · LLM Wiki Desktop<br/>
+                  Linux · libsecret / kwallet
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">沙箱</div>
+                <div class="formrow__hint">Agent 继承 CLI 自身权限与沙箱</div>
+              </div>
+              <div class="formrow__control">
+                <div style="font-size:12px;color:var(--text-muted);line-height:1.6;">
+                  应用不额外实现复杂命令沙箱 · 由 CLI（claude-code / codex）自身的权限系统负责
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Background tasks -->
+          <div class="settings-section" id="background">
+            <h2 class="settings-section__title">后台任务</h2>
+            <p class="settings-section__desc">关闭窗口行为、托盘、通知</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">关闭窗口时</div>
+                <div class="formrow__hint">有任务运行时</div>
+              </div>
+              <div class="formrow__control">
+                <div class="seg">
+                  <button class="is-active">最小化到托盘 · 任务继续</button>
+                  <button>询问</button>
+                  <button>终止任务</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">系统通知</div>
+                <div class="formrow__hint">任务完成 / 失败 / 需要确认</div>
+              </div>
+              <div class="formrow__control" style="display:flex;flex-direction:column;gap:6px;">
+                <label class="checkbox"><input type="checkbox" checked /> 任务完成</label>
+                <label class="checkbox"><input type="checkbox" checked /> 任务失败</label>
+                <label class="checkbox"><input type="checkbox" checked /> 需要用户确认（冲突、高风险）</label>
+                <label class="checkbox"><input type="checkbox" /> 长任务进度（每 30 秒）</label>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">通知点击行为</div>
+                <div class="formrow__hint">点击通知时打开</div>
+              </div>
+              <div class="formrow__control">
+                <select class="select" style="max-width:300px;">
+                  <option>结果页</option>
+                  <option>错误日志</option>
+                  <option>Diff 确认页</option>
+                  <option>仅激活窗口</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">并发任务上限</div>
+                <div class="formrow__hint">同时运行的 Agent 任务</div>
+              </div>
+              <div class="formrow__control">
+                <div class="input-group" style="max-width:120px;">
+                  <input class="input" type="number" value="2" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Updates -->
+          <div class="settings-section" id="updates">
+            <h2 class="settings-section__title">更新</h2>
+            <p class="settings-section__desc">检查、下载与安装必须由用户确认</p>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">当前版本</div>
+              </div>
+              <div class="formrow__control">
+                <div style="display:flex;align-items:center;gap:12px;">
+                  <span style="font-family:var(--font-mono);font-size:14px;color:var(--text-primary);font-weight:500;">v0.1.0</span>
+                  <span class="badge badge--success"><span class="dot"></span>最新</span>
+                  <span style="font-size:11.5px;color:var(--text-muted);font-family:var(--font-mono);">2 小时前检查</span>
+                  <button class="btn btn--sm" style="margin-left:auto;"><svg class="ico-sm"><use href="#i-refresh"/></svg>立即检查</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">自动检查</div>
+              </div>
+              <div class="formrow__control">
+                <select class="select" style="max-width:200px;">
+                  <option>每日</option><option>每周</option><option>从不</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="formrow">
+              <div>
+                <div class="formrow__label">下载与安装</div>
+                <div class="formrow__hint">必须由用户明确确认</div>
+              </div>
+              <div class="formrow__control">
+                <label class="checkbox"><input type="checkbox" /> 自动下载（仍需确认安装）</label>
+                <div style="margin-top:4px;"><label class="checkbox"><input type="checkbox" checked /> 安装前提示变更说明</label></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- About -->
+          <div class="settings-section" id="about">
+            <h2 class="settings-section__title">关于</h2>
+            <div style="display:flex;gap:16px;align-items:flex-start;padding:16px 0;">
+              <div style="width:56px;height:56px;border-radius:var(--radius-lg);background:var(--foreground);color:var(--text-inverse);display:grid;place-items:center;font-family:var(--font-mono);font-size:22px;font-weight:600;letter-spacing:-0.04em;">LW</div>
+              <div style="flex:1;">
+                <div style="font-size:16px;font-weight:600;letter-spacing:-0.01em;">LLM Wiki Desktop</div>
+                <div style="font-family:var(--font-mono);font-size:12px;color:var(--text-muted);margin-top:2px;">v0.1.0 · Tauri v2 · React 19 · TypeScript</div>
+                <div style="font-size:12.5px;color:var(--text-secondary);margin-top:8px;line-height:1.6;">
+                  本地优先的 Markdown 知识库 · 遵循 Karpathy LLM Wiki 模式 · Raw Sources → Wiki → Schema
+                </div>
+                <div style="display:flex;gap:8px;margin-top:12px;">
+                  <a href="#" style="font-size:12px;color:var(--accent-hover);">文档</a>
+                  <span style="color:var(--text-muted);">·</span>
+                  <a href="#" style="font-size:12px;color:var(--accent-hover);">GitHub</a>
+                  <span style="color:var(--text-muted);">·</span>
+                  <a href="#" style="font-size:12px;color:var(--accent-hover);">问题反馈</a>
+                  <span style="color:var(--text-muted);">·</span>
+                  <a href="#" style="font-size:12px;color:var(--accent-hover);">许可证</a>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="rightpanel">
+    <div class="rightpanel__header">
+      <span class="rightpanel__title">配置概览</span>
+      <button class="btn btn--ghost btn--icon btn--sm" data-right-toggle data-tip="折叠"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+    <div class="rightpanel__body">
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">当前配置</h4>
+        <dl class="rightpanel__meta">
+          <dt>主题</dt><dd>亮色</dd>
+          <dt>语言</dt><dd>中文 (zh-CN)</dd>
+          <dt>密度</dt><dd>标准</dd>
+          <dt>默认 Agent</dt><dd style="color:var(--accent-hover);">claude</dd>
+          <dt>上下文</dt><dd>200K</dd>
+          <dt>BYOK</dt><dd>Anthropic</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">配置文件</h4>
+        <dl class="rightpanel__meta">
+          <dt>全局</dt><dd>~/.config/llm-wiki/settings.json</dd>
+          <dt>项目</dt><dd>.app/settings.json</dd>
+          <dt>Agent</dt><dd>.app/agent-config.json</dd>
+          <dt>密钥</dt><dd style="color:var(--accent-hover);">钥匙串 · 不写文件</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">检查</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <svg class="ico-sm" style="color:var(--accent);"><use href="#i-check-circle"/></svg>
+            <span>Agent 路径可用</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <svg class="ico-sm" style="color:var(--accent);"><use href="#i-check-circle"/></svg>
+            <span>BYOK · Anthropic 已配置</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <svg class="ico-sm" style="color:var(--accent);"><use href="#i-check-circle"/></svg>
+            <span>钥匙串可用</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <svg class="ico-sm" style="color:var(--accent);"><use href="#i-check-circle"/></svg>
+            <span>Git 可用 · v2.43</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <svg class="ico-sm" style="color:var(--warning);"><use href="#i-warn"/></svg>
+            <span>Ollama 服务未运行</span>
+          </div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">快捷操作</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-key"/></svg>测试所有 BYOK Key</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-bot"/></svg>重新检测 Agent</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;color:var(--danger);"><svg class="ico-sm"><use href="#i-trash"/></svg>清除缓存</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--ok"></span>claude · 1.0.23</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">Settings · 已自动保存</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">main · 3f8a9c2</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">v0.1.0 · 中文</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

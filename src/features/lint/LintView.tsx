@@ -68,7 +68,7 @@ export function LintView() {
     void startDeepLint(projectId, rootPath, ROUTE_PREFERENCE).then((taskId) => {
       if (taskId) {
         // Mirror start_wiki_compile: upsert so the task drawer follows the run.
-        void invoke("list_tasks").then((list) => {
+          void invoke("list_tasks", { request: { statusFilter: null } }).then((list) => {
           const found = (list as { id: string }[]).find((task) => task.id === taskId);
           if (found) {
             void invoke("get_task", { request: { taskId } }).then((task) => {

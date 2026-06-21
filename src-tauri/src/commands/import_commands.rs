@@ -6,7 +6,6 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::import::{ConfirmedImport, ImportPreview, ImportRequest};
-use crate::models::paths::ProjectContext;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,10 +45,7 @@ pub fn preview_import(
     state: State<'_, AppState>,
     request: ImportPreviewRequest,
 ) -> Result<ImportPreview, BackendError> {
-    let context = ProjectContext::new(
-        request.project_id.clone(),
-        PathBuf::from(&request.project_root_path),
-    );
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
 
     let import_req = ImportRequest {
         source_paths: request.source_paths.clone(),
@@ -79,10 +75,7 @@ pub fn confirm_import_preview(
     state: State<'_, AppState>,
     request: ConfirmImportRequest,
 ) -> Result<ConfirmedImport, BackendError> {
-    let context = ProjectContext::new(
-        request.project_id,
-        PathBuf::from(&request.project_root_path),
-    );
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
 
     state
         .import_service
@@ -108,10 +101,7 @@ pub fn extract_text_preview(
     state: State<'_, AppState>,
     request: ExtractTextRequest,
 ) -> Result<crate::models::import::ExtractResult, BackendError> {
-    let context = ProjectContext::new(
-        request.project_id,
-        PathBuf::from(&request.project_root_path),
-    );
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
 
     let output_dir = context.raw_dir.join("extracted");
     let path = PathBuf::from(&request.source_path);

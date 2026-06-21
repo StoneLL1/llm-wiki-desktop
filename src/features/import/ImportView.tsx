@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, Check, File, FileWarning, LoaderCircle, Upload } from "lucide-react";
 import {
@@ -32,7 +32,7 @@ function StatusIcon({ status }: { status: ImportFileEntry["extractionStatus"] })
 interface ImportViewProps {
   preview: ImportPreview | null;
   isConfirming: boolean;
-  onRequestPreview: (files: File[]) => void;
+  onRequestPreview: (paths: string[]) => void;
   onConfirm: () => void;
 }
 
@@ -43,40 +43,12 @@ export function ImportView({
   onConfirm,
 }: ImportViewProps) {
   const { t } = useTranslation();
-  const [dragOver, setDragOver] = useState(false);
+  const [sourcePath, setSourcePath] = useState("");
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
   const hasPreview = preview !== null;
   const hasConflicts = (preview?.conflicts.length ?? 0) > 0;
   const canCompile = hasPreview && !isConfirming;
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(true);
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-  }, []);
-
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) onRequestPreview(files);
-    },
-    [onRequestPreview],
-  );
-
-  const handleFileInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(e.target.files ?? []);
-      if (files.length > 0) onRequestPreview(files);
-    },
-    [onRequestPreview],
-  );
 
   const selectedFile = selectedIndex !== null ? preview?.files[selectedIndex] : null;
 
@@ -84,30 +56,20 @@ export function ImportView({
     <div className="flex h-full flex-col overflow-hidden">
       {/* Drop zone / toolbar */}
       <div className="shrink-0 border-b border-[var(--border)] px-4 py-3">
-        <div
-          className={`flex items-center gap-3 rounded-lg border-2 border-dashed px-4 py-3 transition-colors ${
-            dragOver
-              ? "border-[var(--accent)] bg-[var(--accent-soft)]"
-              : "border-[var(--border)]"
-          }`}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
+        <form
+          className="flex items-center gap-3 rounded-lg border border-[var(--border)] px-4 py-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (sourcePath.trim()) onRequestPreview([sourcePath.trim()]);
+          }}
         >
           <Upload size={16} className="text-[var(--text-muted)] shrink-0" />
-          <span className="text-[13px] text-[var(--text-secondary)]">
-            {t("view.import.emptyState")}
-          </span>
-          <label className="ml-auto cursor-pointer rounded-md bg-[var(--foreground)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--text-primary)]">
-            {t("view.import.actionPrimary")}
-            <input
-              type="file"
-              multiple
-              className="hidden"
-              onChange={handleFileInput}
-            />
+          <label className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-[var(--text-muted)]">
+            <span className="shrink-0">{t("import.sourcePath")}</span>
+            <input aria-label={t("import.sourcePath")} className="settings-input min-w-0 flex-1 font-mono" value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder={t("import.sourcePathPlaceholder")} />
           </label>
-        </div>
+          <button type="submit" disabled={!sourcePath.trim()} className="rounded-md bg-[var(--foreground)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--text-primary)] disabled:opacity-50">{t("view.import.actionPrimary")}</button>
+        </form>
 
         {/* Summary bar */}
         {hasPreview && (

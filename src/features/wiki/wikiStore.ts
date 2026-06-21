@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 
 import type {
   SaveWikiPageResponse,
@@ -67,26 +68,31 @@ const initial = {
 export const useWikiStore = create<WikiState>((set, get) => ({
   ...initial,
   scan: async (projectId, rootPath) => {
+    const scope = captureProjectScope();
     set({ loadingTree: true, error: null });
     try {
       const tree = await invoke<WikiTree>("scan_wiki", {
         request: { projectId, projectRootPath: rootPath },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       const firstPage = tree.pages[0]?.path ?? null;
       set({ tree, loadingTree: false });
       if (firstPage && !get().selectedPath) {
         await get().openPage(projectId, rootPath, firstPage);
       }
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ loadingTree: false, error: errorMessage(error) });
     }
   },
   openPage: async (projectId, rootPath, path) => {
+    const scope = captureProjectScope();
     set({ loadingPage: true, selectedPath: path, mode: "read", saveState: "idle", error: null });
     try {
       const page = await invoke<WikiPageContent>("read_wiki_page", {
         request: { projectId, projectRootPath: rootPath, relativePath: path },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       set((state) => {
         const entry: RecentPageEntry = { path: page.meta.path, title: page.meta.title };
         const rest = state.recentPages.filter((p) => p.path !== entry.path);
@@ -98,6 +104,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
         };
       });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ loadingPage: false, error: errorMessage(error) });
     }
   },
@@ -116,6 +123,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
   },
   setDraft: (draft) => set({ draft, saveState: "idle" }),
   save: async (projectId, rootPath) => {
+    const scope = captureProjectScope();
     const { page, draft } = get();
     if (!page) return;
     const savedPath = page.meta.path;
@@ -130,6 +138,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
           expectedHash: page.meta.hash,
         },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       // The write succeeded — re-read to reflect saved bytes, but don't let a
       // transient re-read failure mask the successful save. Skip applying only
       // if the user navigated to a different page mid-save.
@@ -142,6 +151,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
             relativePath: response.relativePath,
           },
         });
+        if (!isProjectScopeCurrent(scope)) return;
         if (stillViewing(get().selectedPath)) {
           set((state) => ({
             page: refreshed,
@@ -161,11 +171,13 @@ export const useWikiStore = create<WikiState>((set, get) => ({
           }));
         }
       } catch {
+        if (!isProjectScopeCurrent(scope)) return;
         if (stillViewing(get().selectedPath)) {
           set({ saveState: "saved" });
         }
       }
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       if (isConflictError(error)) {
         set({ saveState: "conflict" });
       } else {
@@ -181,6 +193,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
     }
   },
   toggleBookmark: async (projectId, rootPath) => {
+    const scope = captureProjectScope();
     const { page } = get();
     if (!page) return;
     try {
@@ -188,6 +201,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
         "toggle_bookmark",
         { request: { projectId, projectRootPath: rootPath, relativePath: page.meta.path } },
       );
+      if (!isProjectScopeCurrent(scope)) return;
       set((state) => {
         if (!state.page) return {};
         const nextMeta = { ...state.page.meta, bookmarked: result.bookmarked };
@@ -204,6 +218,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
         };
       });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ error: errorMessage(error) });
     }
   },

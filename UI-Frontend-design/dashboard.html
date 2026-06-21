@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>Dashboard — Agent Knowledge Base · LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  .dash-section { margin-bottom: 24px; }
+  .dash-section__title {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-muted);
+    margin: 0 0 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .dash-section__title .count { font-family: var(--font-mono); color: var(--text-secondary); font-weight: 400; }
+  .dash-section__action { margin-left: auto; }
+
+  .health-row { display: flex; align-items: center; gap: 16px; padding: 16px; background: var(--surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
+  .health-row__icon { width: 36px; height: 36px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-hover); border-radius: var(--radius-md); flex: none; }
+  .health-row__body { flex: 1; }
+  .health-row__title { font-size: 14px; font-weight: 600; }
+  .health-row__desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  .type-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
+  .type-row:last-child { border-bottom: none; }
+  .type-row__swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .type-row__label { flex: 1; font-size: 13px; }
+  .type-row__count { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+  .type-row__bar { width: 80px; height: 4px; background: var(--surface-muted); border-radius: var(--radius-pill); overflow: hidden; }
+  .type-row__bar-fill { height: 100%; border-radius: var(--radius-pill); }
+
+  .activity-row {
+    display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 12px;
+    padding: 10px 0; border-bottom: 1px solid var(--border-subtle); font-size: 13px;
+  }
+  .activity-row:last-child { border-bottom: none; }
+  .activity-row__icon { color: var(--text-muted); }
+  .activity-row__title { color: var(--text-primary); font-weight: 500; }
+  .activity-row__sub { color: var(--text-muted); font-size: 11.5px; font-family: var(--font-mono); margin-top: 2px; }
+  .activity-row__time { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+
+  .graph-mini {
+    height: 200px;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(16,163,127,0.04), transparent 70%),
+      var(--background);
+    background-image:
+      linear-gradient(to right, rgba(0,0,0,0.025) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(0,0,0,0.025) 1px, transparent 1px);
+    background-size: 24px 24px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    position: relative;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ============== TOP BAR ============== -->
+  <header class="topbar">
+    <div class="topbar__brand">
+      <div class="topbar__brand-mark">LW</div>
+      <div>
+        <div class="topbar__brand-name">LLM Wiki Desktop</div>
+      </div>
+    </div>
+    <button class="projswitch" data-tip="切换项目">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <span class="projswitch__path">~/Documents/wiki/agent-llm</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="按名称、标签、类型或来源搜索页面…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务与通知"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch">
+        <button class="is-active">中</button>
+        <button>EN</button>
+      </div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <!-- ============== SIDEBAR ============== -->
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem is-active" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span><span class="navitem__badge"></span></a>
+        <a class="navitem" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span></a>
+        <a class="navitem" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section" style="flex:1;">
+      <div class="sidebar__label">最近页面 <span class="sidebar__label-actions"><button data-tip="刷新"><svg class="ico-sm"><use href="#i-refresh"/></svg></button></span></div>
+      <div class="sidebar__tree">
+        <a class="navitem" href="wiki.html" style="height:26px;font-size:12px;"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-file-md"/></svg><span class="navitem__label truncate">Agent Memory Model</span></a>
+        <a class="navitem" href="wiki.html" style="height:26px;font-size:12px;"><svg class="ico-sm"><use href="#i-file-md"/></svg><span class="navitem__label truncate">Tool Selection Heuristics</span></a>
+        <a class="navitem" href="wiki.html" style="height:26px;font-size:12px;"><svg class="ico-sm"><use href="#i-file-md"/></svg><span class="navitem__label truncate">ReAct Pattern</span></a>
+        <a class="navitem" href="wiki.html" style="height:26px;font-size:12px;"><svg class="ico-sm"><use href="#i-file-md"/></svg><span class="navitem__label truncate">Plan-and-Execute</span></a>
+        <a class="navitem" href="wiki.html" style="height:26px;font-size:12px;"><svg class="ico-sm"><use href="#i-file-md"/></svg><span class="navitem__label truncate">Anthropic Claude</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="Agent 设置" onclick="location.href='agent.html'"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+  </aside>
+
+  <!-- ============== MAIN ============== -->
+  <main class="main">
+    <div class="main__header">
+      <h1 class="main__title">Dashboard <span class="main__title-sub">· Agent Knowledge Base</span></h1>
+      <div class="main__toolbar">
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-refresh"/></svg>刷新</button>
+        <button class="btn btn--sm btn--primary" onclick="location.href='import.html'"><svg class="ico-sm"><use href="#i-upload"/></svg>导入资料</button>
+      </div>
+    </div>
+    <div class="main__body main__body--padded-lg">
+
+      <!-- Project health -->
+      <div class="dash-section">
+        <div class="health-row">
+          <div class="health-row__icon"><svg class="ico-xl"><use href="#i-check-circle"/></svg></div>
+          <div class="health-row__body">
+            <div class="health-row__title">项目状态良好 · 最近一次编译 2 分钟前</div>
+            <div class="health-row__desc">237 篇页面 · 1 个待确认 Lint 问题 · 0 个冲突 · Git 已提交</div>
+          </div>
+          <button class="btn btn--sm" onclick="location.href='lint.html'">查看 Lint</button>
+          <button class="btn btn--sm" onclick="location.href='agent.html'">Agent 面板</button>
+        </div>
+      </div>
+
+      <!-- Stats summary -->
+      <div class="dash-section">
+        <h2 class="dash-section__title">统计摘要 <span class="count">· 截至 2026-06-19 14:32</span></h2>
+        <div class="summarygrid">
+          <div class="sumcard">
+            <div class="sumcard__label">Wiki 页面</div>
+            <div class="sumcard__value">237</div>
+            <div class="sumcard__delta"><svg class="ico-sm"><use href="#i-arrow-u"/></svg>+4 自上次编译</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">实体 Entities</div>
+            <div class="sumcard__value">86</div>
+            <div class="sumcard__hint">人物 / 组织 / 产品 / 模型</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">概念 Concepts</div>
+            <div class="sumcard__value">94</div>
+            <div class="sumcard__hint">方法 / 范式 / 模式</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">来源 Sources</div>
+            <div class="sumcard__value">142</div>
+            <div class="sumcard__hint">PDF · DOCX · URL · MD · 剪贴板</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">综合页面 Synthesis</div>
+            <div class="sumcard__value">15</div>
+            <div class="sumcard__hint">主题综述 / 对比分析</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">Wikilinks</div>
+            <div class="sumcard__value">1,284</div>
+            <div class="sumcard__hint">页面级关联边</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2-col: Type distribution + recent activity -->
+      <div class="dash-section">
+        <div class="dash-grid" style="grid-template-columns:1fr 1.4fr;">
+          <div class="panel">
+            <div class="panel__head">
+              <span class="panel__title">主题分布</span>
+              <span class="panel__sub">按页面类型</span>
+              <div style="margin-left:auto;" class="seg">
+                <button class="is-active">类型</button>
+                <button>社区</button>
+              </div>
+            </div>
+            <div class="panel__body">
+              <div class="type-row">
+                <span class="type-row__swatch" style="background:#10a37f;"></span>
+                <span class="type-row__label">Concept · 概念</span>
+                <span class="type-row__bar"><span class="type-row__bar-fill" style="width:88%;background:#10a37f;"></span></span>
+                <span class="type-row__count">94</span>
+              </div>
+              <div class="type-row">
+                <span class="type-row__swatch" style="background:#0d0d0d;"></span>
+                <span class="type-row__label">Entity · 实体</span>
+                <span class="type-row__bar"><span class="type-row__bar-fill" style="width:80%;background:#0d0d0d;"></span></span>
+                <span class="type-row__count">86</span>
+              </div>
+              <div class="type-row">
+                <span class="type-row__swatch" style="background:#2563eb;"></span>
+                <span class="type-row__label">Source · 来源</span>
+                <span class="type-row__bar"><span class="type-row__bar-fill" style="width:100%;background:#2563eb;"></span></span>
+                <span class="type-row__count">142</span>
+              </div>
+              <div class="type-row">
+                <span class="type-row__swatch" style="background:#f5a623;"></span>
+                <span class="type-row__label">Synthesis · 综合</span>
+                <span class="type-row__bar"><span class="type-row__bar-fill" style="width:14%;background:#f5a623;"></span></span>
+                <span class="type-row__count">15</span>
+              </div>
+              <div class="type-row">
+                <span class="type-row__swatch" style="background:#9b9b9b;"></span>
+                <span class="type-row__label">Comparison · 对比</span>
+                <span class="type-row__bar"><span class="type-row__bar-fill" style="width:7%;background:#9b9b9b;"></span></span>
+                <span class="type-row__count">8</span>
+              </div>
+              <div class="type-row">
+                <span class="type-row__swatch" style="background:#c4c4c4;"></span>
+                <span class="type-row__label">Query · 问答记录</span>
+                <span class="type-row__bar"><span class="type-row__bar-fill" style="width:7%;background:#c4c4c4;"></span></span>
+                <span class="type-row__count">12</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel__head">
+              <span class="panel__title">最近活动</span>
+              <span class="panel__sub">wiki/log.md · .app/tasks/</span>
+              <a href="wiki.html" style="margin-left:auto;font-size:12px;color:var(--accent-hover);">查看全部</a>
+            </div>
+            <div class="panel__body">
+              <div class="activity-row">
+                <span class="activity-row__icon"><svg class="ico-sm" style="color:var(--accent-hover);"><use href="#i-check-circle"/></svg></span>
+                <div>
+                  <div class="activity-row__title">Wiki 编译完成 · 新增 4 篇概念页面</div>
+                  <div class="activity-row__sub">claude · ingest wiki/concepts/ · 23 files → wiki/</div>
+                </div>
+                <span class="activity-row__time">2 分钟前</span>
+              </div>
+              <div class="activity-row">
+                <span class="activity-row__icon"><svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-upload"/></svg></span>
+                <div>
+                  <div class="activity-row__title">导入完成 · 6 个 PDF + 1 个 URL</div>
+                  <div class="activity-row__sub">raw/sources/pdfs/ · raw/sources/links/ · 0 个冲突</div>
+                </div>
+                <span class="activity-row__time">14 分钟前</span>
+              </div>
+              <div class="activity-row">
+                <span class="activity-row__icon"><svg class="ico-sm" style="color:var(--warning);"><use href="#i-warn"/></svg></span>
+                <div>
+                  <div class="activity-row__title">Lint 发现 3 个问题 · 1 个待确认</div>
+                  <div class="activity-row__sub">死链 wiki/entities/agent.md → missing.md</div>
+                </div>
+                <span class="activity-row__time">31 分钟前</span>
+              </div>
+              <div class="activity-row">
+                <span class="activity-row__icon"><svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-edit"/></svg></span>
+                <div>
+                  <div class="activity-row__title">手动编辑 · Agent Memory Model</div>
+                  <div class="activity-row__sub">wiki/concepts/agent-memory.md · 已合并到 Git</div>
+                </div>
+                <span class="activity-row__time">1 小时前</span>
+              </div>
+              <div class="activity-row">
+                <span class="activity-row__icon"><svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-git"/></svg></span>
+                <div>
+                  <div class="activity-row__title">Git 检查点 · pre-compile-20260619-1330</div>
+                  <div class="activity-row__sub">237 files · 12 inserts · 0 deletes</div>
+                </div>
+                <span class="activity-row__time">2 小时前</span>
+              </div>
+              <div class="activity-row">
+                <span class="activity-row__icon"><svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-export"/></svg></span>
+                <div>
+                  <div class="activity-row__title">生成 HTML 报告 · Project Overview</div>
+                  <div class="activity-row__sub">exports/html/project-report-2026-06-19.html</div>
+                </div>
+                <span class="activity-row__time">昨天</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick actions -->
+      <div class="dash-section">
+        <h2 class="dash-section__title">快速操作</h2>
+        <div class="dash-grid">
+          <a class="panel" href="import.html" style="text-decoration:none;color:inherit;">
+            <div class="panel__body" style="display:flex;align-items:center;gap:16px;">
+              <div class="health-row__icon"><svg class="ico-xl"><use href="#i-upload"/></svg></div>
+              <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;">导入资料</div>
+                <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">PDF · DOCX · URL · 剪贴板</div>
+              </div>
+              <svg class="ico" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+            </div>
+          </a>
+          <a class="panel" href="lint.html" style="text-decoration:none;color:inherit;">
+            <div class="panel__body" style="display:flex;align-items:center;gap:16px;">
+              <div class="health-row__icon" style="background:var(--warning-soft);color:#a06a00;"><svg class="ico-xl"><use href="#i-shield"/></svg></div>
+              <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;">运行 Lint</div>
+                <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">3 个问题 · 1 待确认</div>
+              </div>
+              <svg class="ico" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+            </div>
+          </a>
+          <a class="panel" href="chat.html" style="text-decoration:none;color:inherit;">
+            <div class="panel__body" style="display:flex;align-items:center;gap:16px;">
+              <div class="health-row__icon"><svg class="ico-xl"><use href="#i-chat"/></svg></div>
+              <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;">开始问答</div>
+                <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">基于 Wiki · 含引用溯源</div>
+              </div>
+              <svg class="ico" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+            </div>
+          </a>
+          <a class="panel" href="exports.html" style="text-decoration:none;color:inherit;">
+            <div class="panel__body" style="display:flex;align-items:center;gap:16px;">
+              <div class="health-row__icon"><svg class="ico-xl"><use href="#i-export"/></svg></div>
+              <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;">生成 HTML 报告</div>
+                <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">项目级 · exports/html/</div>
+              </div>
+              <svg class="ico" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+            </div>
+          </a>
+        </div>
+      </div>
+
+      <!-- Graph preview -->
+      <div class="dash-section">
+        <h2 class="dash-section__title">知识图谱预览 <span class="count">· 237 节点 · 1,284 边</span>
+          <a class="dash-section__action" href="graph.html" style="font-size:12px;color:var(--accent-hover);">进入完整图谱 →</a>
+        </h2>
+        <div class="graph-mini">
+          <svg viewBox="0 0 800 200" preserveAspectRatio="xMidYMid meet" style="width:100%;height:100%;">
+            <g stroke="#d4d4d4" stroke-width="0.5" fill="none" opacity="0.6">
+              <line x1="120" y1="100" x2="220" y2="60"/>
+              <line x1="220" y1="60" x2="320" y2="120"/>
+              <line x1="320" y1="120" x2="420" y2="80"/>
+              <line x1="420" y1="80" x2="520" y2="140"/>
+              <line x1="520" y1="140" x2="620" y2="100"/>
+              <line x1="620" y1="100" x2="700" y2="60"/>
+              <line x1="120" y1="100" x2="220" y2="140"/>
+              <line x1="220" y1="140" x2="320" y2="120"/>
+              <line x1="320" y1="120" x2="420" y2="160"/>
+              <line x1="420" y1="160" x2="520" y2="140"/>
+              <line x1="220" y1="60" x2="420" y2="80"/>
+              <line x1="320" y1="120" x2="520" y2="140"/>
+              <line x1="220" y1="60" x2="320" y2="40"/>
+              <line x1="320" y1="40" x2="420" y2="80"/>
+              <line x1="520" y1="140" x2="700" y2="100"/>
+            </g>
+            <g>
+              <circle cx="120" cy="100" r="7" fill="#0d0d0d"/>
+              <circle cx="220" cy="60" r="9" fill="#10a37f"/>
+              <circle cx="220" cy="140" r="5" fill="#2563eb"/>
+              <circle cx="320" cy="40" r="6" fill="#10a37f"/>
+              <circle cx="320" cy="120" r="10" fill="#0d0d0d"/>
+              <circle cx="420" cy="80" r="8" fill="#10a37f"/>
+              <circle cx="420" cy="160" r="5" fill="#f5a623"/>
+              <circle cx="520" cy="140" r="7" fill="#0d0d0d"/>
+              <circle cx="620" cy="100" r="6" fill="#10a37f"/>
+              <circle cx="700" cy="60" r="5" fill="#2563eb"/>
+              <circle cx="700" cy="100" r="4" fill="#9b9b9b"/>
+              <circle cx="180" cy="40" r="4" fill="#9b9b9b"/>
+              <circle cx="380" cy="40" r="3" fill="#9b9b9b"/>
+              <circle cx="460" cy="40" r="4" fill="#9b9b9b"/>
+              <circle cx="560" cy="80" r="3" fill="#9b9b9b"/>
+              <circle cx="280" cy="180" r="3" fill="#9b9b9b"/>
+            </g>
+          </svg>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ============== RIGHT PANEL ============== -->
+  <aside class="rightpanel">
+    <div class="rightpanel__header">
+      <span class="rightpanel__title">项目信息</span>
+      <button class="btn btn--ghost btn--icon btn--sm" data-right-toggle data-tip="折叠"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+    <div class="rightpanel__body">
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">路径</h4>
+        <dl class="rightpanel__meta">
+          <dt>项目根</dt><dd>~/Documents/wiki/agent-llm</dd>
+          <dt>Schema</dt><dd>schema.md · v3</dd>
+          <dt>Purpose</dt><dd>purpose.md</dd>
+          <dt>Git 分支</dt><dd>main</dd>
+          <dt>HEAD</dt><dd>3f8a9c2</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">索引状态</h4>
+        <dl class="rightpanel__meta">
+          <dt>页面</dt><dd>237</dd>
+          <dt>索引</dt><dd style="color:var(--accent-hover);">已同步</dd>
+          <dt>图谱缓存</dt><dd>.app/graph-cache.json</dd>
+          <dt>上次编译</dt><dd>2 分钟前</dd>
+          <dt>待确认</dt><dd style="color:var(--warning);">1 项</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">执行路径</h4>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:12px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="dotstatus dotstatus--ok"></span>
+            <span style="font-family:var(--font-mono);">claude</span>
+            <span class="badge badge--accent" style="margin-left:auto;">默认</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="dotstatus dotstatus--ok"></span>
+            <span style="font-family:var(--font-mono);">codex</span>
+            <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);margin-left:auto;">v0.8.1</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="dotstatus dotstatus--ok"></span>
+            <span style="font-family:var(--font-mono);">BYOK · Anthropic</span>
+          </div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">背景任务</h4>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:12px;">
+          <div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+              <span style="color:var(--text-primary);">图谱布局缓存</span>
+              <span style="font-family:var(--font-mono);color:var(--text-muted);">82%</span>
+            </div>
+            <div class="progress progress--sm"><div class="progress__bar"><div class="progress__fill" style="width:82%;"></div></div></div>
+          </div>
+          <div style="color:var(--text-muted);font-size:11px;">无其他运行中任务</div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">磁盘占用</h4>
+        <dl class="rightpanel__meta">
+          <dt>raw/sources</dt><dd>412 MB</dd>
+          <dt>raw/extracted</dt><dd>38 MB</dd>
+          <dt>wiki</dt><dd>14 MB</dd>
+          <dt>exports/html</dt><dd>22 MB</dd>
+          <dt>.app</dt><dd>2 MB</dd>
+        </dl>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============== STATUS BAR ============== -->
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--ok"></span>claude · 1.0.23</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">Agent 路径 · 默认</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">237 页 · 1,284 链接</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">索引同步 · 2 分钟前</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">main · 3f8a9c2</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--ok"></span>Git 干净</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">中文</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

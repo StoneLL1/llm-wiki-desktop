@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>LLM Wiki Desktop — 设计预览</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  body { overflow: auto; }
+  .launcher { max-width: 1200px; margin: 0 auto; padding: 48px 32px 64px; }
+  .launcher__top {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    padding-bottom: 24px; border-bottom: 1px solid var(--border);
+    margin-bottom: 32px;
+  }
+  .launcher__brand { display: flex; align-items: center; gap: 16px; }
+  .launcher__mark {
+    width: 44px; height: 44px;
+    border-radius: var(--radius-lg);
+    background: var(--foreground); color: var(--text-inverse);
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 18px; font-weight: 600;
+    letter-spacing: -0.04em;
+  }
+  .launcher__title { font-size: 24px; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
+  .launcher__sub { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .launcher__hint { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
+  .launcher__section { margin-bottom: 48px; }
+  .launcher__section-head {
+    display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px;
+  }
+  .launcher__section-num {
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+    letter-spacing: 0.04em;
+  }
+  .launcher__section-title {
+    font-size: 14px; font-weight: 600; color: var(--text-primary); margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .launcher__section-desc { font-size: 12.5px; color: var(--text-muted); margin-left: auto; }
+
+  .screencard {
+    display: flex; flex-direction: column;
+    background: var(--background); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    text-decoration: none; color: inherit;
+    transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+  }
+  .screencard:hover { border-color: var(--foreground); }
+  .screencard__thumb {
+    height: 132px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border-subtle);
+    position: relative;
+    overflow: hidden;
+  }
+  .screencard__body { padding: 14px 16px 16px; }
+  .screencard__row { display: flex; align-items: center; gap: 8px; }
+  .screencard__icon {
+    width: 22px; height: 22px; flex: none;
+    display: grid; place-items: center;
+    color: var(--accent-hover);
+    background: var(--accent-soft);
+    border-radius: var(--radius-sm);
+  }
+  .screencard__title { font-size: 13.5px; font-weight: 600; margin: 0; }
+  .screencard__desc { font-size: 12px; color: var(--text-muted); margin: 4px 0 0; line-height: 1.5; }
+  .screencard__meta {
+    margin-top: 10px; display: flex; gap: 8px; align-items: center;
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted);
+  }
+  .screencard__arrow {
+    margin-left: auto; color: var(--text-muted);
+    transition: transform var(--dur-fast) var(--ease);
+  }
+  .screencard:hover .screencard__arrow { transform: translateX(2px); color: var(--foreground); }
+
+  /* Per-card thumb mini-mockups */
+  .thumb-launch { background: var(--surface); padding: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .thumb-launch .row { height: 18px; background: var(--background); border: 1px solid var(--border-subtle); border-radius: 3px; }
+  .thumb-launch .row.is-1 { width: 70%; }
+  .thumb-launch .row.is-2 { width: 50%; }
+  .thumb-launch .row.is-3 { width: 60%; }
+
+  .thumb-dash { padding: 14px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .thumb-dash .card { background: var(--background); border: 1px solid var(--border-subtle); border-radius: 3px; height: 32px; }
+  .thumb-dash .card.is-tall { grid-column: span 2; height: 24px; }
+
+  .thumb-wiki { display: grid; grid-template-columns: 50px 1fr; height: 100%; }
+  .thumb-wiki__side { background: var(--surface); border-right: 1px solid var(--border-subtle); padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+  .thumb-wiki__side .ln { height: 6px; background: var(--border); border-radius: 2px; width: 80%; }
+  .thumb-wiki__side .ln.is-on { background: var(--accent); }
+  .thumb-wiki__body { padding: 12px; }
+  .thumb-wiki__body .ttl { height: 8px; width: 60%; background: var(--text-secondary); border-radius: 2px; margin-bottom: 8px; }
+  .thumb-wiki__body .ln { height: 4px; background: var(--border); border-radius: 2px; margin-bottom: 4px; }
+  .thumb-wiki__body .ln.w1 { width: 95%; }
+  .thumb-wiki__body .ln.w2 { width: 80%; }
+  .thumb-wiki__body .ln.w3 { width: 88%; }
+
+  .thumb-chat { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .thumb-chat .msg { display: flex; gap: 6px; }
+  .thumb-chat .msg .ava { width: 14px; height: 14px; border-radius: 2px; background: var(--text-secondary); flex: none; }
+  .thumb-chat .msg.right .ava { background: var(--accent); margin-left: auto; order: 2; }
+  .thumb-chat .msg .ln { height: 4px; background: var(--border); border-radius: 2px; flex: 1; }
+  .thumb-chat .msg .ln.w1 { max-width: 80%; }
+
+  .thumb-graph { padding: 0; position: relative; }
+  .thumb-graph svg { width: 100%; height: 100%; display: block; }
+
+  .thumb-agent { padding: 12px; font-family: var(--font-mono); font-size: 9.5px; color: var(--text-muted); line-height: 1.7; }
+  .thumb-agent .ln-ok { color: var(--accent-hover); }
+  .thumb-agent .ln-warn { color: var(--warning); }
+
+  .thumb-import { padding: 16px; display: flex; align-items: center; justify-content: center; }
+  .thumb-import .box { border: 1.5px dashed var(--border-strong); border-radius: 4px; padding: 8px 16px; color: var(--text-muted); font-size: 11px; font-family: var(--font-mono); background: var(--background); }
+
+  .thumb-lint { padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .thumb-lint .issue { display: flex; align-items: center; gap: 6px; font-size: 10px; font-family: var(--font-mono); color: var(--text-secondary); }
+  .thumb-lint .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-disabled); }
+  .thumb-lint .dot.err { background: var(--danger); }
+  .thumb-lint .dot.warn { background: var(--warning); }
+  .thumb-lint .dot.ok { background: var(--accent); }
+
+  .thumb-export { padding: 14px 16px; display: flex; gap: 6px; }
+  .thumb-export .doc { flex: 1; border: 1px solid var(--border-subtle); border-radius: 3px; background: var(--background); height: 64px; position: relative; }
+  .thumb-export .doc::after { content: ""; position: absolute; left: 8px; right: 8px; top: 12px; height: 3px; background: var(--border); border-radius: 1px; box-shadow: 0 8px 0 var(--border-subtle), 0 16px 0 var(--border-subtle); }
+
+  .thumb-settings { padding: 12px; display: grid; grid-template-columns: 60px 1fr; gap: 6px; }
+  .thumb-settings__side { background: var(--surface); border-radius: 3px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .thumb-settings__side .ln { height: 4px; background: var(--border); border-radius: 2px; }
+  .thumb-settings__side .ln.is-on { background: var(--accent); }
+  .thumb-settings__main { background: var(--background); border: 1px solid var(--border-subtle); border-radius: 3px; padding: 8px; }
+  .thumb-settings__main .ln { height: 4px; background: var(--border); border-radius: 2px; margin-bottom: 4px; }
+  .thumb-settings__main .ln.w1 { width: 70%; }
+  .thumb-settings__main .ln.w2 { width: 90%; }
+
+  .ds-row { display: grid; grid-template-columns: 220px 1fr 1fr; gap: 24px; padding: 16px 0; border-top: 1px solid var(--border-subtle); }
+  .ds-row:first-of-type { border-top: none; }
+  .ds-row__label { font-size: 12px; font-weight: 500; color: var(--text-primary); }
+  .ds-row__hint { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; font-family: var(--font-mono); }
+  .swatch-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .swatch { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+  .swatch__chip { width: 56px; height: 56px; border-radius: 6px; border: 1px solid var(--border-subtle); }
+  .swatch__hex { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="launcher">
+  <div class="launcher__top">
+    <div class="launcher__brand">
+      <div class="launcher__mark">LW</div>
+      <div>
+        <h1 class="launcher__title">LLM Wiki Desktop · 前端设计预览</h1>
+        <div class="launcher__sub">完整应用骨架 · Codex 浅色克制风 · v0.1</div>
+      </div>
+    </div>
+    <div class="launcher__hint">点击任意卡片进入对应屏幕 →</div>
+  </div>
+
+  <section class="launcher__section">
+    <div class="launcher__section-head">
+      <span class="launcher__section-num">01 / 入口</span>
+      <h2 class="launcher__section-title">应用启动与项目选择</h2>
+      <span class="launcher__section-desc">未加载项目时的入口；选择最近项目、新建或打开文件夹</span>
+    </div>
+    <div class="launchpad">
+      <a class="screencard" href="launch.html">
+        <div class="screencard__thumb">
+          <div class="thumb-launch">
+            <div class="row is-1"></div><div class="row is-2"></div><div class="row is-3"></div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_1"></span>
+            <h3 class="screencard__title">项目选择 / 启动页</h3>
+            <span class="screencard__arrow" id="__arrow_1"></span>
+          </div>
+          <p class="screencard__desc">最近项目列表、新建项目、打开文件夹为项目、搜索与筛选</p>
+          <div class="screencard__meta"><span>launch.html</span><span>·</span><span>桌面端入口</span></div>
+        </div>
+      </a>
+    </div>
+  </section>
+
+  <section class="launcher__section">
+    <div class="launcher__section-head">
+      <span class="launcher__section-num">02 / 主视图</span>
+      <h2 class="launcher__section-title">加载项目后的桌面工作台</h2>
+      <span class="launcher__section-desc">顶部栏 · 左侧导航 · 中央工作区 · 右侧上下文 · 底部状态栏</span>
+    </div>
+    <div class="launchpad">
+      <a class="screencard" href="dashboard.html">
+        <div class="screencard__thumb">
+          <div class="thumb-dash">
+            <div class="card"></div><div class="card"></div>
+            <div class="card is-tall"></div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_2"></span>
+            <h3 class="screencard__title">Dashboard</h3>
+            <span class="screencard__arrow" id="__arrow_2"></span>
+          </div>
+          <p class="screencard__desc">项目健康、统计摘要、主题分布、最近活动、快速操作</p>
+          <div class="screencard__meta"><span>dashboard.html</span><span>·</span><span>项目概览</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="wiki.html">
+        <div class="screencard__thumb">
+          <div class="thumb-wiki">
+            <div class="thumb-wiki__side">
+              <div class="ln is-on"></div><div class="ln"></div><div class="ln"></div><div class="ln"></div><div class="ln"></div>
+            </div>
+            <div class="thumb-wiki__body">
+              <div class="ttl"></div>
+              <div class="ln w1"></div><div class="ln w2"></div><div class="ln w3"></div><div class="ln w1"></div>
+            </div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_3"></span>
+            <h3 class="screencard__title">Wiki 文件树 · 阅读 · 编辑</h3>
+            <span class="screencard__arrow" id="__arrow_3"></span>
+          </div>
+          <p class="screencard__desc">三栏布局、文件树、Markdown 渲染、阅读/编辑切换、元数据面板</p>
+          <div class="screencard__meta"><span>wiki.html</span><span>·</span><span>核心阅读区</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="chat.html">
+        <div class="screencard__thumb">
+          <div class="thumb-chat">
+            <div class="msg"><div class="ava"></div><div class="ln w1"></div></div>
+            <div class="msg right"><div class="ava"></div><div class="ln w1"></div></div>
+            <div class="msg"><div class="ava"></div><div class="ln"></div></div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_4"></span>
+            <h3 class="screencard__title">Chat 问答</h3>
+            <span class="screencard__arrow" id="__arrow_4"></span>
+          </div>
+          <p class="screencard__desc">多会话、引用溯源、保存到 wiki/queries、Agent/BYOK 双路径</p>
+          <div class="screencard__meta"><span>chat.html</span><span>·</span><span>知识库问答</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="graph.html">
+        <div class="screencard__thumb thumb-graph">
+          <svg viewBox="0 0 280 132" preserveAspectRatio="xMidYMid meet">
+            <g stroke="#e5e5e5" stroke-width="0.6" fill="none">
+              <line x1="60" y1="60" x2="140" y2="40"/>
+              <line x1="140" y1="40" x2="220" y2="70"/>
+              <line x1="60" y1="60" x2="100" y2="100"/>
+              <line x1="100" y1="100" x2="180" y2="105"/>
+              <line x1="140" y1="40" x2="180" y2="105"/>
+              <line x1="60" y1="60" x2="140" y2="40"/>
+              <line x1="220" y1="70" x2="180" y2="105"/>
+            </g>
+            <g>
+              <circle cx="60" cy="60" r="6" fill="#10a37f"/>
+              <circle cx="140" cy="40" r="8" fill="#0d0d0d"/>
+              <circle cx="220" cy="70" r="5" fill="#2563eb"/>
+              <circle cx="100" cy="100" r="6" fill="#f5a623"/>
+              <circle cx="180" cy="105" r="4" fill="#9b9b9b"/>
+            </g>
+          </svg>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_5"></span>
+            <h3 class="screencard__title">知识图谱</h3>
+            <span class="screencard__arrow" id="__arrow_5"></span>
+          </div>
+          <p class="screencard__desc">页面级节点、力导向布局、类型/社区着色、节点跳转</p>
+          <div class="screencard__meta"><span>graph.html</span><span>·</span><span>探索性视图</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="agent.html">
+        <div class="screencard__thumb">
+          <div class="thumb-agent">
+            <div class="ln-ok">$ claude --version</div>
+            <div>1.0.23 · ready</div>
+            <div class="ln-warn">$ codex — not found</div>
+            <div class="ln-ok">▸ ingest wiki/entities/*.md</div>
+            <div class="ln-ok">✓ compiled 24 pages</div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_6"></span>
+            <h3 class="screencard__title">Agent 面板</h3>
+            <span class="screencard__arrow" id="__arrow_6"></span>
+          </div>
+          <p class="screencard__desc">CLI 检测、默认绑定、任务执行、stdout/stderr、取消与后台</p>
+          <div class="screencard__meta"><span>agent.html</span><span>·</span><span>Agent 编排</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="import.html">
+        <div class="screencard__thumb">
+          <div class="thumb-import">
+            <div class="box">拖拽文件 / 文件夹 / URL / 剪贴板</div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_7"></span>
+            <h3 class="screencard__title">Import 导入</h3>
+            <span class="screencard__arrow" id="__arrow_7"></span>
+          </div>
+          <p class="screencard__desc">多格式解析预览、状态与错误、确认后触发编译</p>
+          <div class="screencard__meta"><span>import.html</span><span>·</span><span>导入工作流</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="lint.html">
+        <div class="screencard__thumb">
+          <div class="thumb-lint">
+            <div class="issue"><span class="dot err"></span>死链 · wiki/entities/agent.md → missing.md</div>
+            <div class="issue"><span class="dot warn"></span>孤立页面 · 3 处</div>
+            <div class="issue"><span class="dot warn"></span>弱交叉引用 · 12 处</div>
+            <div class="issue"><span class="dot ok"></span>frontmatter · 已通过</div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_8"></span>
+            <h3 class="screencard__title">Lint 健康检查</h3>
+            <span class="screencard__arrow" id="__arrow_8"></span>
+          </div>
+          <p class="screencard__desc">本地确定性 + Agent 深度、按严重程度分组、修复确认</p>
+          <div class="screencard__meta"><span>lint.html</span><span>·</span><span>Wiki 维护</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="exports.html">
+        <div class="screencard__thumb">
+          <div class="thumb-export">
+            <div class="doc"></div><div class="doc"></div><div class="doc"></div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_9"></span>
+            <h3 class="screencard__title">Exports 导出</h3>
+            <span class="screencard__arrow" id="__arrow_9"></span>
+          </div>
+          <p class="screencard__desc">单篇阅读页、知识卡片、项目报告、HTML 模板与历史</p>
+          <div class="screencard__meta"><span>exports.html</span><span>·</span><span>导出与分享</span></div>
+        </div>
+      </a>
+
+      <a class="screencard" href="settings.html">
+        <div class="screencard__thumb">
+          <div class="thumb-settings">
+            <div class="thumb-settings__side">
+              <div class="ln is-on"></div><div class="ln"></div><div class="ln"></div><div class="ln"></div>
+            </div>
+            <div class="thumb-settings__main">
+              <div class="ln w1"></div><div class="ln w2"></div><div class="ln w1"></div><div class="ln w2"></div>
+            </div>
+          </div>
+        </div>
+        <div class="screencard__body">
+          <div class="screencard__row">
+            <span class="screencard__icon" id="__icon_placeholder_10"></span>
+            <h3 class="screencard__title">Settings 设置</h3>
+            <span class="screencard__arrow" id="__arrow_10"></span>
+          </div>
+          <p class="screencard__desc">LLM Provider、Agent、语言、外观、启动行为、后台任务、更新</p>
+          <div class="screencard__meta"><span>settings.html</span><span>·</span><span>全局配置</span></div>
+        </div>
+      </a>
+    </div>
+  </section>
+
+  <section class="launcher__section">
+    <div class="launcher__section-head">
+      <span class="launcher__section-num">03 / 设计系统</span>
+      <h2 class="launcher__section-title">视觉令牌（摘自 FRONTEND_GUIDELINES.md / DESIGN.md）</h2>
+      <span class="launcher__section-desc">单一 teal 强调色 · 1px 描边优先 · 8px 以下圆角 · 无渐变无装饰</span>
+    </div>
+    <div class="panel">
+      <div class="panel__body">
+        <div class="ds-row">
+          <div>
+            <div class="ds-row__label">主色 / 中性</div>
+            <div class="ds-row__hint">#0d0d0d · #ffffff</div>
+          </div>
+          <div class="swatch-row">
+            <div class="swatch"><div class="swatch__chip" style="background:#0d0d0d"></div><div class="swatch__hex">#0d0d0d</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#ffffff;border-color:#d4d4d4"></div><div class="swatch__hex">#ffffff</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#3c3c3c"></div><div class="swatch__hex">#3c3c3c</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#6e6e6e"></div><div class="swatch__hex">#6e6e6e</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#fafafa;border-color:#e5e5e5"></div><div class="swatch__hex">#fafafa</div></div>
+          </div>
+          <div class="swatch-row">
+            <div class="swatch"><div class="swatch__chip" style="background:#10a37f"></div><div class="swatch__hex">#10a37f · accent</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#0a7a5e"></div><div class="swatch__hex">#0a7a5e</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#e8f5f0"></div><div class="swatch__hex">#e8f5f0</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#ef4146"></div><div class="swatch__hex">#ef4146</div></div>
+            <div class="swatch"><div class="swatch__chip" style="background:#f5a623"></div><div class="swatch__hex">#f5a623</div></div>
+          </div>
+        </div>
+        <div class="ds-row">
+          <div>
+            <div class="ds-row__label">字体</div>
+            <div class="ds-row__hint">sans · serif · mono</div>
+          </div>
+          <div style="font-family:var(--font-ui);font-size:16px;font-weight:500;letter-spacing:-0.01em;">Inter · 主 UI · 14px / 1.55</div>
+          <div style="font-family:var(--font-display);font-size:18px;">Source Serif Pro · 阅读标题 28px</div>
+        </div>
+        <div class="ds-row">
+          <div>
+            <div class="ds-row__label">圆角 / 间距</div>
+            <div class="ds-row__hint">sm 4 · md 6 · lg 8 · pill 9999</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div style="width:32px;height:32px;background:var(--surface-muted);border-radius:4px;border:1px solid var(--border);"></div>
+            <div style="width:32px;height:32px;background:var(--surface-muted);border-radius:6px;border:1px solid var(--border);"></div>
+            <div style="width:32px;height:32px;background:var(--surface-muted);border-radius:8px;border:1px solid var(--border);"></div>
+            <div style="height:24px;padding:0 12px;background:var(--surface-muted);border-radius:9999px;border:1px solid var(--border);display:flex;align-items:center;font-size:11px;font-family:var(--font-mono);">pill</div>
+          </div>
+          <div style="display:flex;gap:4px;align-items:flex-end;">
+            <div style="width:4px;height:4px;background:var(--text-muted);"></div>
+            <div style="width:8px;height:8px;background:var(--text-muted);"></div>
+            <div style="width:12px;height:12px;background:var(--text-muted);"></div>
+            <div style="width:16px;height:16px;background:var(--text-muted);"></div>
+            <div style="width:24px;height:24px;background:var(--text-muted);"></div>
+            <div style="width:32px;height:32px;background:var(--text-muted);"></div>
+            <div style="margin-left:8px;font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">4 / 8 / 12 / 16 / 24 / 32</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div style="margin-top:64px;padding-top:24px;border-top:1px solid var(--border-subtle);display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">
+    <span>LLM Wiki Desktop · Frontend Preview · zh-CN</span>
+    <span>Raw Sources → Wiki → Schema · 本地优先</span>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+<script>
+  // Fill icon placeholders
+  function place(id, name) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = window.__icon(name, 14);
+  }
+  place('__icon_placeholder_1', 'folder-open');
+  place('__icon_placeholder_2', 'dashboard');
+  place('__icon_placeholder_3', 'book');
+  place('__icon_placeholder_4', 'chat');
+  place('__icon_placeholder_5', 'graph');
+  place('__icon_placeholder_6', 'bot');
+  place('__icon_placeholder_7', 'upload');
+  place('__icon_placeholder_8', 'shield');
+  place('__icon_placeholder_9', 'export');
+  place('__icon_placeholder_10', 'settings');
+  for (let i = 1; i <= 10; i++) {
+    const a = document.getElementById('__arrow_' + i);
+    if (a) a.innerHTML = window.__icon('arrow-r', 14);
+  }
+</script>
+</body>
+</html>

@@ -718,9 +718,10 @@ mod tests {
             .toggle_bookmark(&context, "wiki/concepts/agent-memory.md")
             .unwrap();
         assert!(!removed.bookmarked);
-        let after: Vec<String> =
-            serde_json::from_str(&std::fs::read_to_string(context.app_dir.join("bookmarks.json")).unwrap())
-                .unwrap();
+        let after: Vec<String> = serde_json::from_str(
+            &std::fs::read_to_string(context.app_dir.join("bookmarks.json")).unwrap(),
+        )
+        .unwrap();
         assert!(after.is_empty());
 
         std::fs::remove_dir_all(root).unwrap();

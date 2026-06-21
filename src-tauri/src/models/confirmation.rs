@@ -72,13 +72,13 @@ pub struct ConfirmedAction {
     pub project_summary: Option<ProjectSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredPendingAction {
     pub action: PendingAction,
     pub execution: Option<ConfirmationExecution>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmationExecution {
     InitializeFolder {
         root_path: String,
@@ -92,6 +92,19 @@ pub enum ConfirmationExecution {
         manifest: crate::models::compile::CompileManifest,
         current_hashes: Vec<(String, String)>,
         checkpoint_hash: Option<String>,
+    },
+    LintFix {
+        project_id: String,
+        root_path: String,
+        issue: crate::models::lint::LintIssue,
+    },
+    ChatOverwrite {
+        project_id: String,
+        root_path: String,
+        session_id: String,
+        message_id: String,
+        target_path: String,
+        current_hash: String,
     },
 }
 

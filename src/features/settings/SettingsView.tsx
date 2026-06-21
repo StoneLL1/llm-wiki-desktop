@@ -120,8 +120,7 @@ export function SettingsView({
     const secretMask = secretStatus[provider] ?? configured?.secretMask ?? null;
     return {
       provider,
-      hasSecret: Boolean(secretMask),
-      secretMask,
+      hasSecret: Boolean(secretMask) || Boolean(configured?.hasSecret),
     };
   });
 

@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>Agent — LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .agent-section { margin-bottom: 24px; }
+  .agent-section__title {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-muted);
+    margin: 0 0 12px;
+  }
+  .task-row {
+    display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 12px;
+    padding: 12px 16px;
+    background: var(--background); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    margin-bottom: 8px;
+  }
+  .task-row__icon { color: var(--accent-hover); display: grid; place-items: center; }
+  .task-row__icon.is-busy { color: var(--warning); }
+  .task-row__icon.is-err { color: var(--danger); }
+  .task-row__icon.is-ok { color: var(--accent-hover); }
+  .task-row__title { font-size: 13px; font-weight: 600; }
+  .task-row__sub { font-size: 11.5px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px; }
+  .task-row__progress { margin-top: 6px; }
+  .task-row__actions { display: flex; gap: 4px; align-items: flex-start; }
+
+  .terminal-wrap { position: relative; }
+  .terminal-wrap .terminal { height: 360px; }
+  .terminal__overlay {
+    position: absolute; top: 8px; right: 8px;
+    display: flex; gap: 4px;
+  }
+  .terminal__overlay button {
+    width: 24px; height: 24px;
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.08);
+    color: #a3a3a3;
+    display: grid; place-items: center;
+  }
+  .terminal__overlay button:hover { background: rgba(255,255,255,0.16); color: #e8e8e8; }
+
+  .ingest-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .ingest-card {
+    padding: 14px;
+    background: var(--background); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease);
+  }
+  .ingest-card:hover { border-color: var(--border-strong); }
+  .ingest-card.is-primary { background: var(--accent-soft); border-color: var(--accent-border); }
+  .ingest-card__icon { width: 28px; height: 28px; border-radius: var(--radius-md); background: var(--surface-muted); display: grid; place-items: center; color: var(--text-secondary); margin-bottom: 8px; }
+  .ingest-card.is-primary .ingest-card__icon { background: var(--background); color: var(--accent-hover); }
+  .ingest-card__title { font-size: 13px; font-weight: 600; }
+  .ingest-card__desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .ingest-card__cta { font-size: 11px; color: var(--accent-hover); margin-top: 8px; font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar__brand"><div class="topbar__brand-mark">LW</div><div class="topbar__brand-name">LLM Wiki Desktop</div></div>
+    <button class="projswitch">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="按名称、标签、类型或来源搜索页面…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch"><button class="is-active">中</button><button>EN</button></div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem is-active" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span><span class="navitem__badge"></span></a>
+        <a class="navitem" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span></a>
+        <a class="navitem" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main__header">
+      <h1 class="main__title">Agent <span class="main__title-sub">· 检测 / 编排 / 日志</span></h1>
+      <div class="main__toolbar">
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-refresh"/></svg>重新检测</button>
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-external"/></svg>安装引导</button>
+        <button class="btn btn--sm btn--primary" data-dialog-open="dlg-run"><svg class="ico-sm"><use href="#i-play"/></svg>运行 Agent</button>
+      </div>
+    </div>
+    <div class="main__body main__body--padded-lg">
+
+      <!-- Detected CLIs -->
+      <div class="agent-section">
+        <h2 class="agent-section__title">已检测的 Agent CLI</h2>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div class="cli-row is-default">
+            <div class="cli-row__icon" style="background:var(--background);color:var(--accent-hover);">CL</div>
+            <div>
+              <div class="cli-row__name">claude <span style="font-family:var(--font-ui);font-weight:400;color:var(--text-muted);font-size:11px;margin-left:8px;">Anthropic · claude-cli</span></div>
+              <div class="cli-row__path">/Users/you/.local/bin/claude · v1.0.23 · 已签名</div>
+            </div>
+            <span class="badge badge--accent">默认</span>
+            <span class="dotstatus dotstatus--ok" data-tip="在线"></span>
+            <button class="btn btn--sm btn--ghost">设为默认</button>
+          </div>
+          <div class="cli-row">
+            <div class="cli-row__icon">CX</div>
+            <div>
+              <div class="cli-row__name">codex <span style="font-family:var(--font-ui);font-weight:400;color:var(--text-muted);font-size:11px;margin-left:8px;">OpenAI · codex-cli</span></div>
+              <div class="cli-row__path">/opt/homebrew/bin/codex · v0.8.1 · 已签名</div>
+            </div>
+            <span class="badge">备用</span>
+            <span class="dotstatus dotstatus--ok"></span>
+            <button class="btn btn--sm btn--ghost">设为默认</button>
+          </div>
+          <div class="cli-row" style="opacity:0.7;">
+            <div class="cli-row__icon" style="background:var(--danger-soft);color:var(--danger);">OC</div>
+            <div>
+              <div class="cli-row__name">openclaw <span style="font-family:var(--font-ui);font-weight:400;color:var(--text-muted);font-size:11px;margin-left:8px;">未检测到</span></div>
+              <div class="cli-row__path">PATH 中未找到 · 提供安装命令</div>
+            </div>
+            <span class="badge badge--outline">缺失</span>
+            <span class="dotstatus dotstatus--err"></span>
+            <button class="btn btn--sm">查看安装引导</button>
+          </div>
+          <div class="cli-row" style="opacity:0.7;">
+            <div class="cli-row__icon" style="background:var(--danger-soft);color:var(--danger);">HE</div>
+            <div>
+              <div class="cli-row__name">hermes <span style="font-family:var(--font-ui);font-weight:400;color:var(--text-muted);font-size:11px;margin-left:8px;">未检测到</span></div>
+              <div class="cli-row__path">PATH 中未找到 · 提供安装命令</div>
+            </div>
+            <span class="badge badge--outline">缺失</span>
+            <span class="dotstatus dotstatus--err"></span>
+            <button class="btn btn--sm">查看安装引导</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- BYOK -->
+      <div class="agent-section">
+        <h2 class="agent-section__title">BYOK 后备路径 <span style="text-transform:none;letter-spacing:0;color:var(--text-muted);font-weight:400;margin-left:8px;font-family:var(--font-ui);">无 Agent 时使用 · API Key 存钥匙串</span></h2>
+        <div class="summarygrid">
+          <div class="sumcard">
+            <div class="sumcard__label">Anthropic</div>
+            <div class="sumcard__value" style="font-size:14px;font-family:var(--font-ui);font-weight:600;color:var(--accent-hover);">已配置</div>
+            <div class="sumcard__hint">claude-sonnet-4-6 · sk-ant-···8f3a</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">OpenAI</div>
+            <div class="sumcard__value" style="font-size:14px;font-family:var(--font-ui);font-weight:600;color:var(--text-muted);">未配置</div>
+            <div class="sumcard__hint">前往 Settings → LLM Providers</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">Google</div>
+            <div class="sumcard__value" style="font-size:14px;font-family:var(--font-ui);font-weight:600;color:var(--text-muted);">未配置</div>
+            <div class="sumcard__hint">Gemini Pro / Flash</div>
+          </div>
+          <div class="sumcard">
+            <div class="sumcard__label">Ollama</div>
+            <div class="sumcard__value" style="font-size:14px;font-family:var(--font-ui);font-weight:600;color:var(--text-muted);">本地</div>
+            <div class="sumcard__hint">localhost:11434 · 0 个模型</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Core operations -->
+      <div class="agent-section">
+        <h2 class="agent-section__title">核心操作</h2>
+        <div class="ingest-grid">
+          <button class="ingest-card is-primary" data-dialog-open="dlg-run">
+            <div class="ingest-card__icon"><svg class="ico"><use href="#i-upload"/></svg></div>
+            <div class="ingest-card__title">Ingest · 编译 Wiki</div>
+            <div class="ingest-card__desc">读取 raw/extracted，生成或更新 wiki/ 页面</div>
+            <div class="ingest-card__cta">claude → wiki-ingest →</div>
+          </button>
+          <a class="ingest-card" href="lint.html">
+            <div class="ingest-card__icon"><svg class="ico"><use href="#i-shield"/></svg></div>
+            <div class="ingest-card__title">Lint · 深度检查</div>
+            <div class="ingest-card__desc">死链 / 重复主题 / 来源缺失 / 结构问题</div>
+            <div class="ingest-card__cta">claude → wiki-lint →</div>
+          </a>
+          <a class="ingest-card" href="chat.html">
+            <div class="ingest-card__icon"><svg class="ico"><use href="#i-chat"/></svg></div>
+            <div class="ingest-card__title">Query · 问答</div>
+            <div class="ingest-card__desc">基于 Wiki 生成回答，附引用溯源</div>
+            <div class="ingest-card__cta">claude → wiki-query →</div>
+          </a>
+          <a class="ingest-card" href="exports.html">
+            <div class="ingest-card__icon"><svg class="ico"><use href="#i-export"/></svg></div>
+            <div class="ingest-card__title">HTML · 卡片 · 报告</div>
+            <div class="ingest-card__desc">单篇阅读页 / 知识卡片 / 项目报告</div>
+            <div class="ingest-card__cta">claude → skills/html-* →</div>
+          </a>
+        </div>
+      </div>
+
+      <!-- Running tasks -->
+      <div class="agent-section">
+        <h2 class="agent-section__title">任务 <span style="text-transform:none;letter-spacing:0;color:var(--text-muted);font-weight:400;margin-left:8px;font-family:var(--font-ui);">2 运行中 · 3 已完成（今日）</span></h2>
+
+        <div class="task-row">
+          <div class="task-row__icon is-busy">
+            <svg class="ico"><use href="#i-spinner"/></svg>
+          </div>
+          <div>
+            <div class="task-row__title">Lint 深度检查 · wiki-lint</div>
+            <div class="task-row__sub">claude · wiki-lint · started 14:31 · PID 8421</div>
+            <div class="task-row__progress">
+              <div class="progress progress--sm">
+                <div class="progress__bar"><div class="progress__fill" style="width:64%;"></div></div>
+                <span class="progress__num">64%</span>
+              </div>
+            </div>
+          </div>
+          <div class="task-row__actions">
+            <button class="btn btn--sm btn--ghost" data-tip="查看日志" onclick="document.getElementById('log-area').scrollIntoView({behavior:'smooth',block:'nearest'})"><svg class="ico-sm"><use href="#i-list"/></svg></button>
+            <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-stop"/></svg>取消</button>
+          </div>
+        </div>
+
+        <div class="task-row">
+          <div class="task-row__icon is-busy">
+            <svg class="ico"><use href="#i-spinner"/></svg>
+          </div>
+          <div>
+            <div class="task-row__title">图谱布局缓存重建</div>
+            <div class="task-row__sub">本地 · ForceAtlas2 · 237 节点</div>
+            <div class="task-row__progress">
+              <div class="progress progress--sm">
+                <div class="progress__bar"><div class="progress__fill" style="width:82%;"></div></div>
+                <span class="progress__num">82%</span>
+              </div>
+            </div>
+          </div>
+          <div class="task-row__actions">
+            <button class="btn btn--sm btn--ghost" data-tip="后台运行"><svg class="ico-sm"><use href="#i-corner"/></svg></button>
+            <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-stop"/></svg>取消</button>
+          </div>
+        </div>
+
+        <div class="task-row" style="opacity:0.7;">
+          <div class="task-row__icon is-ok">
+            <svg class="ico"><use href="#i-check-circle"/></svg>
+          </div>
+          <div>
+            <div class="task-row__title">Wiki 编译 · ingest</div>
+            <div class="task-row__sub">claude · 2 分钟前 · 完成 · +4 / -1 页面 · 12 修改</div>
+          </div>
+          <div class="task-row__actions">
+            <span class="badge badge--success">完成</span>
+            <button class="btn btn--sm btn--ghost"><svg class="ico-sm"><use href="#i-list"/></svg></button>
+          </div>
+        </div>
+
+        <div class="task-row" style="opacity:0.7;">
+          <div class="task-row__icon is-ok">
+            <svg class="ico"><use href="#i-check-circle"/></svg>
+          </div>
+          <div>
+            <div class="task-row__title">导入解析 · 6 PDF + 1 URL</div>
+            <div class="task-row__sub">本地 · 14 分钟前 · 完成 · 0 冲突</div>
+          </div>
+          <div class="task-row__actions">
+            <span class="badge badge--success">完成</span>
+            <button class="btn btn--sm btn--ghost"><svg class="ico-sm"><use href="#i-list"/></svg></button>
+          </div>
+        </div>
+
+        <div class="task-row" style="opacity:0.7;">
+          <div class="task-row__icon is-err">
+            <svg class="ico"><use href="#i-warn"/></svg>
+          </div>
+          <div>
+            <div class="task-row__title">HTML 报告生成 · project-report</div>
+            <div class="task-row__sub">claude · 昨天 · 失败 · Skill 缺少 template.html</div>
+          </div>
+          <div class="task-row__actions">
+            <span class="badge badge--danger">失败</span>
+            <button class="btn btn--sm btn--ghost"><svg class="ico-sm"><use href="#i-list"/></svg></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live log -->
+      <div class="agent-section" id="log-area">
+        <h2 class="agent-section__title">实时输出 <span style="text-transform:none;letter-spacing:0;color:var(--text-muted);font-weight:400;margin-left:8px;font-family:var(--font-ui);">tail · wiki-lint</span></h2>
+        <div class="terminal-wrap">
+          <div class="terminal">
+            <div class="terminal__overlay">
+              <button data-tip="复制"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-copy"/></svg></button>
+              <button data-tip="清空"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-trash"/></svg></button>
+              <button data-tip="全屏"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-corner"/></svg></button>
+            </div>
+<div class="terminal__line"><span class="ts">14:31:02</span> <span class="lvl-info">[INFO]</span>  claude · wiki-lint · skill loaded</div>
+<div class="terminal__line"><span class="ts">14:31:02</span> <span class="lvl-info">[INFO]</span>  scanning wiki/ · 237 files</div>
+<div class="terminal__line"><span class="ts">14:31:03</span> <span class="lvl-ok">[OK]</span>    index.md ↔ 237 files · 一致</div>
+<div class="terminal__line"><span class="ts">14:31:03</span> <span class="lvl-info">[INFO]</span>  checking frontmatter · schema v3</div>
+<div class="terminal__line"><span class="ts">14:31:04</span> <span class="lvl-warn">[WARN]</span>  3 pages missing frontmatter</div>
+<div class="terminal__line"><span class="ts">14:31:04</span> <span class="lvl-warn">[WARN]</span>  wiki/entities/old-entry.md · type missing</div>
+<div class="terminal__line"><span class="ts">14:31:04</span> <span class="lvl-warn">[WARN]</span>  wiki/sources/import-2024.md · created missing</div>
+<div class="terminal__line"><span class="ts">14:31:04</span> <span class="lvl-warn">[WARN]</span>  wiki/queries/2024-12.md · schema_version missing</div>
+<div class="terminal__line"><span class="ts">14:31:05</span> <span class="lvl-info">[INFO]</span>  checking wikilinks · 1,284 edges</div>
+<div class="terminal__line"><span class="ts">14:31:06</span> <span class="lvl-err">[ERR]</span>   死链 · wiki/entities/agent.md → missing.md</div>
+<div class="terminal__line"><span class="ts">14:31:06</span> <span class="lvl-err">[ERR]</span>   死链 · wiki/concepts/deprecated.md → old-term.md</div>
+<div class="terminal__line"><span class="ts">14:31:07</span> <span class="lvl-info">[INFO]</span>  checking orphans · 3 isolated pages</div>
+<div class="terminal__line"><span class="ts">14:31:08</span> <span class="lvl-info">[INFO]</span>  Agent deep-lint · 重复主题检测</div>
+<div class="terminal__line"><span class="ts">14:31:12</span> <span class="lvl-warn">[WARN]</span>  重复主题 · react-pattern ↔ react-looping · 相似度 0.91</div>
+<div class="terminal__line"><span class="ts">14:31:14</span> <span class="lvl-info">[INFO]</span>  Agent deep-lint · 来源缺失检查</div>
+<div class="terminal__line"><span class="ts">14:31:18</span> <span class="lvl-info">[INFO]</span>  Agent deep-lint · 内容过期检查</div>
+<div class="terminal__line"><span class="ts">14:31:22</span> <span class="lvl-info">[INFO]</span>  规划修复 · 8 自动 · 1 待确认</div>
+<div class="terminal__line"><span class="ts">14:31:22</span> <span class="lvl-info">[INFO]</span>  creating Git checkpoint · pre-lint-20260619-1431<span class="terminal__cursor"></span></div>
+          </div>
+        </div>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--text-muted);font-family:var(--font-mono);">
+          <span class="badge"><span class="dot" style="background:var(--warning);"></span>运行中</span>
+          <span>·</span>
+          <span>PID 8421</span>
+          <span>·</span>
+          <span>21s · 218 KB 输出</span>
+          <span style="margin-left:auto;">关闭主窗口时任务继续 · 系统通知将提醒结果</span>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <aside class="rightpanel">
+    <div class="rightpanel__header">
+      <span class="rightpanel__title">Agent 配置</span>
+      <button class="btn btn--ghost btn--icon btn--sm" data-right-toggle data-tip="折叠"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+    <div class="rightpanel__body">
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">默认 Agent</h4>
+        <dl class="rightpanel__meta">
+          <dt>当前</dt><dd style="color:var(--accent-hover);">claude · 1.0.23</dd>
+          <dt>路径</dt><dd>~/.local/bin/claude</dd>
+          <dt>超时</dt><dd>300s · 任务级</dd>
+          <dt>后台</dt><dd>启用</dd>
+          <dt>通知</dt><dd>系统通知</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">Skill 系统</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
+          <div style="display:flex;align-items:center;gap:8px;"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-check"/></svg><span style="font-family:var(--font-mono);">wiki-ingest</span></div>
+          <div style="display:flex;align-items:center;gap:8px;"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-check"/></svg><span style="font-family:var(--font-mono);">wiki-lint</span></div>
+          <div style="display:flex;align-items:center;gap:8px;"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-check"/></svg><span style="font-family:var(--font-mono);">wiki-query</span></div>
+          <div style="display:flex;align-items:center;gap:8px;"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-check"/></svg><span style="font-family:var(--font-mono);">html-beautiful-read</span></div>
+          <div style="display:flex;align-items:center;gap:8px;"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-check"/></svg><span style="font-family:var(--font-mono);">html-knowledge-card</span></div>
+          <div style="display:flex;align-items:center;gap:8px;"><svg class="ico-sm" style="color:var(--warning);"><use href="#i-warn"/></svg><span style="font-family:var(--font-mono);">html-project-report</span><span style="font-size:10.5px;color:var(--text-muted);margin-left:auto;">缺模板</span></div>
+          <div style="display:flex;align-items:center;gap:8px;"><svg class="ico-sm" style="color:var(--accent);"><use href="#i-check"/></svg><span style="font-family:var(--font-mono);">html-concept-map</span></div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">上下文窗口</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span>当前</span><span style="font-family:var(--font-mono);color:var(--accent-hover);">200K</span></div>
+          <input type="range" min="4000" max="1000000" step="1000" value="200000" style="width:100%;" />
+          <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-muted);font-family:var(--font-mono);">
+            <span>4K</span><span>32K</span><span>128K</span><span>512K</span><span>1M</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">BYOK 路径下覆盖此设置</div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">安全边界</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
+          <label class="checkbox"><input type="checkbox" checked /> 危险操作前创建 Git 检查点</label>
+          <label class="checkbox"><input type="checkbox" checked /> 高风险修改需手动确认</label>
+          <label class="checkbox"><input type="checkbox" checked /> 检测人工编辑冲突</label>
+          <label class="checkbox"><input type="checkbox" /> 允许 Agent 执行安装命令</label>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">快捷操作</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-upload"/></svg>Ingest 编译</button>
+          <a href="lint.html" class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-shield"/></svg>运行 Lint</button>
+          <a href="chat.html" class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-chat"/></svg>开始问答</a>
+          <a href="settings.html" class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-settings"/></svg>Agent 设置</a>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--busy"></span>claude · wiki-lint · 64%</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">2 任务运行中 · 1 待确认</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">main · 3f8a9c2</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">中文</span>
+  </footer>
+</div>
+
+<!-- Run Agent dialog -->
+<div class="dialog-overlay hidden" id="dlg-run">
+  <div class="dialog dialog--wide">
+    <div class="dialog__head">
+      <h2 class="dialog__title">运行 Agent</h2>
+      <button class="btn btn--ghost btn--icon btn--sm" data-dialog-close><svg class="ico"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dialog__body">
+      <div class="formrow">
+        <div><div class="formrow__label">操作</div><div class="formrow__hint">选择 Skill</div></div>
+        <div class="formrow__control">
+          <select class="select" style="max-width:360px;">
+            <option>wiki-ingest · 编译 Wiki</option>
+            <option>wiki-lint · 健康检查</option>
+            <option>wiki-query · 问答</option>
+            <option>html-beautiful-read · 单篇阅读页</option>
+            <option>html-knowledge-card · 知识卡片</option>
+            <option>html-concept-map · 概念关系图</option>
+            <option>html-project-report · 项目报告</option>
+          </select>
+        </div>
+      </div>
+      <div class="formrow">
+        <div><div class="formrow__label">执行路径</div><div class="formrow__hint">默认 Agent 优先</div></div>
+        <div class="formrow__control">
+          <div class="seg">
+            <button class="is-active">claude · 默认</button>
+            <button>codex · 备用</button>
+            <button>BYOK · Anthropic</button>
+          </div>
+        </div>
+      </div>
+      <div class="formrow">
+        <div><div class="formrow__label">Git 检查点</div><div class="formrow__hint">危险操作前自动创建</div></div>
+        <div class="formrow__control">
+          <label class="checkbox"><input type="checkbox" checked /> 执行前创建检查点 pre-run-{timestamp}</label>
+        </div>
+      </div>
+      <div class="formrow">
+        <div><div class="formrow__label">后台运行</div><div class="formrow__hint">关闭窗口后任务继续</div></div>
+        <div class="formrow__control">
+          <label class="toggle"><input type="checkbox" checked /><span class="toggle__slider"></span></label>
+          <span style="margin-left:8px;font-size:12px;color:var(--text-muted);">最小化到托盘 · 完成后系统通知</span>
+        </div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn" data-dialog-close>取消</button>
+      <button class="btn btn--primary" data-dialog-close onclick="window.__toast('任务已启动 · 见 Agent 面板', 'ok')"><svg class="ico"><use href="#i-play"/></svg>运行</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

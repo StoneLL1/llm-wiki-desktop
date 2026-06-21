@@ -11,22 +11,22 @@ use crate::models::chat::{
     SaveAnswerToWikiRequest, SendChatMessageRequest,
 };
 use crate::models::compile::CompileRoutePreference;
+use crate::models::confirmation::{
+    ActionPreview, ConfirmationExecution, ConfirmationStatus, PendingAction, PendingActionType,
+    RiskLevel,
+};
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::{AgentService, LlmService};
 use crate::tasks::task_model::LogLevel;
 
-fn context_for(project_id: &str, root_path: &str) -> ProjectContext {
-    ProjectContext::new(project_id, PathBuf::from(root_path))
-}
-
 #[tauri::command]
 pub fn create_chat_session(
     state: State<'_, AppState>,
     request: CreateChatSessionRequest,
 ) -> Result<ChatSession, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .chat_service
         .create_session(&context, request.title.as_deref())
@@ -37,7 +37,7 @@ pub fn list_chat_sessions(
     state: State<'_, AppState>,
     request: ListChatsRequest,
 ) -> Result<Vec<ChatSessionSummary>, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.chat_service.list_sessions(&context)
 }
 
@@ -46,7 +46,7 @@ pub fn load_chat_session(
     state: State<'_, AppState>,
     request: LoadChatRequest,
 ) -> Result<ChatSession, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .chat_service
         .load_session(&context, &request.session_id)
@@ -57,7 +57,7 @@ pub fn rename_chat_session(
     state: State<'_, AppState>,
     request: RenameChatRequest,
 ) -> Result<ChatSession, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .chat_service
         .rename_session(&context, &request.session_id, &request.title)
@@ -68,7 +68,7 @@ pub fn delete_chat_session(
     state: State<'_, AppState>,
     request: DeleteChatRequest,
 ) -> Result<(), BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .chat_service
         .delete_session(&context, &request.session_id)
@@ -83,16 +83,21 @@ pub fn send_chat_message(
     state: State<'_, AppState>,
     request: SendChatMessageRequest,
 ) -> Result<BackendTask, BackendError> {
-    let task = state.task_service.create_task(
-        TaskType::LlmRequest,
-        Some(request.project_id.clone()),
-        format!("Chat: {}", truncate_title(&request.content)),
-        true,
-    );
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let task = state
+        .task_service
+        .create_project_task(
+            TaskType::LlmRequest,
+            request.project_id.clone(),
+            context.root.clone(),
+            format!("Chat: {}", truncate_title(&request.content)),
+            true,
+        )
+        .map_err(task_error)?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if let Err(error) = run_chat_send(&state, request, &task_id).await {
+        if let Err(error) = run_chat_send(&state, request, &context, &task_id).await {
             let _ = state
                 .task_service
                 .append_log(&task_id, LogLevel::Error, error.message.clone());
@@ -113,17 +118,16 @@ pub fn send_chat_message(
 async fn run_chat_send(
     state: &AppState,
     request: SendChatMessageRequest,
+    context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
         .map_err(task_error)?;
-    let context = context_for(&request.project_id, &request.project_root_path);
-
     let mut session = state
         .chat_service
-        .load_session(&context, &request.session_id)?;
+        .load_session(context, &request.session_id)?;
     let user_message = ChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: crate::models::chat::ChatRole::User,
@@ -370,14 +374,63 @@ pub fn save_answer_to_wiki(
     state: State<'_, AppState>,
     request: SaveAnswerToWikiRequest,
 ) -> Result<SaveAnswerResult, BackendError> {
-    let context = context_for(&request.project_id, &request.project_root_path);
-    let session = state
-        .chat_service
-        .load_session(&context, &request.session_id)?;
+    let mut project_id = request.project_id;
+    let mut root_path = request.project_root_path;
+    let mut session_id = request.session_id;
+    let mut message_id = request.message_id;
+    let mut target_path = request.target_path;
+    let mut expected_hash = request.expected_hash;
+    let allow_overwrite = request.allow_overwrite;
+
+    if allow_overwrite {
+        let action_id = request.action_id.as_deref().ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_REQUIRED",
+                "A backend-issued overwrite confirmation is required.",
+                true,
+                true,
+            )
+        })?;
+        let stored = state
+            .confirmation_registry
+            .confirm(action_id, ConfirmationStatus::Confirmed)?;
+        let ConfirmationExecution::ChatOverwrite {
+            project_id: stored_project_id,
+            root_path: stored_root_path,
+            session_id: stored_session_id,
+            message_id: stored_message_id,
+            target_path: stored_target_path,
+            current_hash,
+        } = stored.execution.ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_EXECUTION_MISSING",
+                "Chat overwrite confirmation has no execution plan.",
+                false,
+                true,
+            )
+        })?
+        else {
+            return Err(BackendError::new(
+                "CONFIRMATION_TYPE_MISMATCH",
+                "The pending action is not a chat overwrite.",
+                false,
+                true,
+            ));
+        };
+        project_id = stored_project_id;
+        root_path = stored_root_path;
+        session_id = stored_session_id;
+        message_id = stored_message_id;
+        target_path = Some(stored_target_path);
+        expected_hash = Some(current_hash);
+    }
+
+    let context = state.resolve_project_context(&project_id, &root_path)?;
+    let session = state.chat_service.load_session(&context, &session_id)?;
     let preceding: Vec<&ChatMessage> = session
         .messages
         .iter()
-        .take_while(|m| m.id != request.message_id)
+        .take_while(|m| m.id != message_id)
         .collect();
     let question = preceding
         .iter()
@@ -395,7 +448,7 @@ pub fn save_answer_to_wiki(
     let answer = session
         .messages
         .iter()
-        .find(|m| m.id == request.message_id)
+        .find(|m| m.id == message_id)
         .cloned()
         .ok_or_else(|| {
             BackendError::new(
@@ -408,15 +461,72 @@ pub fn save_answer_to_wiki(
     let (slug, markdown) = state
         .chat_service
         .build_answer_markdown(&session, &question, &answer);
-    state.chat_service.save_answer_to_wiki(
+    let result = state.chat_service.save_answer_to_wiki(
         &context,
         &state.git_service,
-        request.target_path.as_deref(),
-        request.expected_hash.as_deref(),
-        request.allow_overwrite,
+        target_path.as_deref(),
+        expected_hash.as_deref(),
+        allow_overwrite,
         &markdown,
         &slug,
-    )
+    );
+    if let Err(error) = &result {
+        if !allow_overwrite && error.code == "FILE_ALREADY_EXISTS" {
+            let path = error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let current_hash = error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("currentHash"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let action = PendingAction {
+                id: uuid::Uuid::new_v4().to_string(),
+                action_type: PendingActionType::OverwriteFile,
+                title: "Overwrite saved chat answer".into(),
+                message: format!("Overwrite {path} under a Git checkpoint."),
+                risk_level: RiskLevel::High,
+                affected_paths: vec![path.clone()],
+                preview: Some(ActionPreview {
+                    summary: "Replace the existing query page with this chat answer.".into(),
+                    before: None,
+                    after: Some(markdown.clone()),
+                    diff: None,
+                }),
+                expires_at: None,
+            };
+            state.confirmation_registry.register_with_execution(
+                action.clone(),
+                Some(ConfirmationExecution::ChatOverwrite {
+                    project_id,
+                    root_path,
+                    session_id,
+                    message_id,
+                    target_path: path.clone(),
+                    current_hash: current_hash.clone(),
+                }),
+            )?;
+            return Err(BackendError::new(
+                "FILE_ALREADY_EXISTS",
+                "A query page already exists at this path. Confirm to overwrite.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "path": path,
+                "currentHash": current_hash,
+                "actionId": action.id,
+                "pendingAction": action,
+            })));
+        }
+    }
+    result
 }
 
 fn task_error(message: String) -> BackendError {

@@ -11,6 +11,7 @@ import type {
 } from "../types/chat";
 import type { AgentKind } from "../types/agent";
 import type { LlmProviderKind } from "../types/llm";
+import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 
 interface BackendLikeError {
   code?: string;
@@ -20,6 +21,7 @@ interface BackendLikeError {
 interface ErrorDetails {
   path?: string;
   currentHash?: string;
+  actionId?: string;
 }
 
 const hasTauri = (): boolean =>
@@ -95,7 +97,7 @@ interface ChatState {
     targetPath?: string,
   ) => Promise<SaveAnswerResult | null>;
   confirmOverwrite: (projectId: string, rootPath: string) => Promise<void>;
-  cancelOverwrite: () => void;
+  cancelOverwrite: () => Promise<void>;
   reset: () => void;
 }
 
@@ -117,28 +119,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadSessions: async (projectId, rootPath) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     set({ loadingSessions: true, error: null });
     try {
       const sessions = await invoke<ChatSessionSummary[]>("list_chat_sessions", {
         request: { projectId, projectRootPath: rootPath },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       set({ sessions, loadingSessions: false });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ loadingSessions: false, error: errorMessage(error) });
     }
   },
 
   createSession: async (projectId, rootPath, title) => {
     if (!hasTauri()) return null;
+    const scope = captureProjectScope();
     set({ error: null });
     try {
       const session = await invoke<ChatSession>("create_chat_session", {
         request: { projectId, projectRootPath: rootPath, title: title ?? null },
       });
+      if (!isProjectScopeCurrent(scope)) return null;
       await get().loadSessions(projectId, rootPath);
       await get().selectSession(projectId, rootPath, session.id);
       return session;
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
       set({ error: errorMessage(error) });
       return null;
     }
@@ -146,51 +154,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   selectSession: async (projectId, rootPath, sessionId) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     set({ loadingSession: true, activeSessionId: sessionId, error: null, overwriteRequest: null });
     try {
       const session = await invoke<ChatSession>("load_chat_session", {
         request: { projectId, projectRootPath: rootPath, sessionId },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       set({ activeSession: session, loadingSession: false });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ loadingSession: false, error: errorMessage(error) });
     }
   },
 
   renameSession: async (projectId, rootPath, sessionId, title) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     set({ error: null });
     try {
       await invoke<ChatSession>("rename_chat_session", {
         request: { projectId, projectRootPath: rootPath, sessionId, title },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       await get().loadSessions(projectId, rootPath);
       if (get().activeSessionId === sessionId) {
         await get().selectSession(projectId, rootPath, sessionId);
       }
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ error: errorMessage(error) });
     }
   },
 
   deleteSession: async (projectId, rootPath, sessionId) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     set({ error: null });
     try {
       await invoke("delete_chat_session", {
         request: { projectId, projectRootPath: rootPath, sessionId },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       if (get().activeSessionId === sessionId) {
         set({ activeSessionId: null, activeSession: null });
       }
       await get().loadSessions(projectId, rootPath);
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ error: errorMessage(error) });
     }
   },
 
   send: async (projectId, rootPath, sessionId, content, route, agent, provider) => {
     if (!hasTauri()) return null;
+    const scope = captureProjectScope();
     set({ error: null });
     try {
       const task = await invoke<{ id: string }>("send_chat_message", {
@@ -204,9 +222,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           provider: provider ?? null,
         },
       });
+      if (!isProjectScopeCurrent(scope)) return null;
       set({ sendTaskId: task.id, sendSessionId: sessionId });
       return task.id;
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
       set({ error: errorMessage(error) });
       return null;
     }
@@ -224,6 +244,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   saveAnswer: async (projectId, rootPath, sessionId, messageId, targetPath) => {
     if (!hasTauri()) return null;
+    const scope = captureProjectScope();
     set((state) => ({
       saveStatus: { ...state.saveStatus, [messageId]: "saving" },
       overwriteRequest: null,
@@ -241,16 +262,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           allowOverwrite: false,
         },
       });
+      if (!isProjectScopeCurrent(scope)) return null;
       set((state) => ({ saveStatus: { ...state.saveStatus, [messageId]: "saved" } }));
       return result;
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
       if (errorCode(error) === "FILE_ALREADY_EXISTS") {
         const details = errorDetails(error);
         const path = details?.path ?? "";
         const currentHash = details?.currentHash ?? "";
+        const actionId = details?.actionId ?? "";
         set((state) => ({
           saveStatus: { ...state.saveStatus, [messageId]: "exists" },
-          overwriteRequest: { messageId, path, currentHash },
+          overwriteRequest: { messageId, path, currentHash, actionId },
         }));
         return null;
       }
@@ -264,6 +288,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   confirmOverwrite: async (projectId, rootPath) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     const request = get().overwriteRequest;
     const sessionId = get().activeSessionId;
     if (!request || !sessionId) return;
@@ -281,13 +306,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           targetPath: request.path,
           expectedHash: request.currentHash,
           allowOverwrite: true,
+          actionId: request.actionId,
         },
       });
+      if (!isProjectScopeCurrent(scope)) return;
       set((state) => ({
         saveStatus: { ...state.saveStatus, [messageId]: "saved" },
         overwriteRequest: null,
       }));
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set((state) => ({
         saveStatus: { ...state.saveStatus, [messageId]: "error" },
         overwriteRequest: null,
@@ -296,7 +324,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  cancelOverwrite: () => set({ overwriteRequest: null }),
+  cancelOverwrite: async () => {
+    const actionId = get().overwriteRequest?.actionId;
+    set({ overwriteRequest: null });
+    if (!actionId || !hasTauri()) return;
+    try {
+      await invoke("confirm_pending_action", {
+        request: { actionId, status: "cancelled" },
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
 
   reset: () => set({ ...initial }),
 }));

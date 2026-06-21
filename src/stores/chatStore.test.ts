@@ -71,7 +71,7 @@ describe("chatStore", () => {
     invokeMock.mockRejectedValueOnce({
       code: "FILE_ALREADY_EXISTS",
       message: "exists",
-      details: { path: "wiki/queries/foo.md", currentHash: "abc" },
+      details: { path: "wiki/queries/foo.md", currentHash: "abc", actionId: "action-1" },
     });
     const result = await useChatStore.getState().saveAnswer(
       PROJECT.projectId,
@@ -84,13 +84,19 @@ describe("chatStore", () => {
       messageId: "m1",
       path: "wiki/queries/foo.md",
       currentHash: "abc",
+      actionId: "action-1",
     });
     expect(useChatStore.getState().saveStatus.m1).toBe("exists");
   });
 
   it("confirmOverwrite re-invokes with allowOverwrite and the expected hash", async () => {
     useChatStore.setState({
-      overwriteRequest: { messageId: "m1", path: "wiki/queries/foo.md", currentHash: "abc" },
+      overwriteRequest: {
+        messageId: "m1",
+        path: "wiki/queries/foo.md",
+        currentHash: "abc",
+        actionId: "action-1",
+      },
       activeSessionId: "s1",
       saveStatus: { m1: "exists" },
     });
@@ -99,6 +105,7 @@ describe("chatStore", () => {
     const call = invokeMock.mock.calls[0];
     expect(call[1].request.allowOverwrite).toBe(true);
     expect(call[1].request.expectedHash).toBe("abc");
+    expect(call[1].request.actionId).toBe("action-1");
     expect(useChatStore.getState().overwriteRequest).toBeNull();
     expect(useChatStore.getState().saveStatus.m1).toBe("saved");
   });

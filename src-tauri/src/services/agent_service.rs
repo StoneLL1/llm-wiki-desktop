@@ -574,12 +574,7 @@ fn find_executable(command: &str) -> Option<PathBuf> {
                 Path::new(line)
                     .extension()
                     .and_then(|ext| ext.to_str())
-                    .map(|ext| {
-                        matches!(
-                            ext.to_ascii_lowercase().as_str(),
-                            "cmd" | "bat" | "exe"
-                        )
-                    })
+                    .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cmd" | "bat" | "exe"))
                     .unwrap_or(false)
             }) {
                 return Some(PathBuf::from(preferred));
@@ -781,8 +776,7 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
 
-        let resolved =
-            resolved.expect("fallback must find claude.cmd off-PATH via %APPDATA%\\npm");
+        let resolved = resolved.expect("fallback must find claude.cmd off-PATH via %APPDATA%\\npm");
         assert!(
             resolved.to_string_lossy().ends_with("claude.cmd"),
             "fallback must resolve the .cmd shim, got {resolved:?}"

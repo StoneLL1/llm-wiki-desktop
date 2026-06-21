@@ -1,10 +1,7 @@
-use std::path::PathBuf;
-
 use tauri::State;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::paths::ProjectContext;
 use crate::models::wiki::{
     ReadWikiPageRequest, SaveWikiPageRequest, SaveWikiPageResponse, ToggleBookmarkRequest,
     ToggleBookmarkResponse, WikiPageContent, WikiTree,
@@ -22,7 +19,7 @@ pub fn scan_wiki(
     state: State<'_, AppState>,
     request: ScanWikiRequest,
 ) -> Result<WikiTree, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.search_service.scan_wiki(&context)
 }
 
@@ -31,7 +28,7 @@ pub fn read_wiki_page(
     state: State<'_, AppState>,
     request: ReadWikiPageRequest,
 ) -> Result<WikiPageContent, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .search_service
         .read_page(&context, &request.relative_path)
@@ -42,7 +39,7 @@ pub fn save_wiki_page(
     state: State<'_, AppState>,
     request: SaveWikiPageRequest,
 ) -> Result<SaveWikiPageResponse, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.search_service.save_page(
         &context,
         &request.relative_path,
@@ -51,16 +48,12 @@ pub fn save_wiki_page(
     )
 }
 
-fn context_from_request(project_id: &str, root_path: &str) -> ProjectContext {
-    ProjectContext::new(project_id.to_string(), PathBuf::from(root_path))
-}
-
 #[tauri::command]
 pub fn toggle_bookmark(
     state: State<'_, AppState>,
     request: ToggleBookmarkRequest,
 ) -> Result<ToggleBookmarkResponse, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .search_service
         .toggle_bookmark(&context, &request.relative_path)

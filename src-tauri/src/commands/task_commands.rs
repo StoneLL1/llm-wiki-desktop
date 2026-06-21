@@ -30,6 +30,7 @@ pub struct ListTasksRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetActiveProjectRequest {
+    pub project_id: Option<String>,
     pub root_path: Option<String>,
 }
 
@@ -97,7 +98,20 @@ pub fn set_active_project(
     state: State<'_, AppState>,
     request: SetActiveProjectRequest,
 ) -> Result<Vec<BackendTask>, BackendError> {
-    let root = request.root_path.map(std::path::PathBuf::from);
+    let root = match (request.project_id.as_deref(), request.root_path.as_deref()) {
+        (Some(project_id), Some(root_path)) => {
+            Some(state.resolve_project_context(project_id, root_path)?.root)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(BackendError::new(
+                "PROJECT_CONTEXT_MISMATCH",
+                "Project id and root must be supplied together.",
+                true,
+                true,
+            ))
+        }
+    };
     state
         .task_service
         .set_project_root(root)

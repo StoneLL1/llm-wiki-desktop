@@ -23,9 +23,7 @@ use llm_wiki_desktop_lib::models::chat::{ChatMessage, ChatRole, ChatRoute};
 use llm_wiki_desktop_lib::models::compile::{CompileFile, CompileManifest};
 use llm_wiki_desktop_lib::models::export::{ExportRoute, ExportType};
 use llm_wiki_desktop_lib::models::git::CheckpointPurpose;
-use llm_wiki_desktop_lib::models::import::{
-    ExtractionStatus, ImportRequest, SourceFileType,
-};
+use llm_wiki_desktop_lib::models::import::{ExtractionStatus, ImportRequest, SourceFileType};
 use llm_wiki_desktop_lib::models::llm::LlmProviderKind;
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTemplate;
@@ -79,10 +77,7 @@ impl ProcessRunner for FakeAgentRunner {
         })
     }
 
-    fn run_capture(
-        &self,
-        _invocation: &AgentInvocation,
-    ) -> Result<(String, String), BackendError> {
+    fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
         // Realistic Agent stdout for a wiki compile / chat answer: a fenced
         // markdown manifest + a short answer. Callers pass a Skill-specific
         // prompt, so we emit a generic manifest-shaped block.
@@ -145,7 +140,11 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
     //     flag them as duplicates of themselves). ---
     let staging = unique_root("p2w-staging");
     let notes_md = staging.join("notes.md");
-    std::fs::write(&notes_md, "# Notes\n\nSome extracted text about transformers.").unwrap();
+    std::fs::write(
+        &notes_md,
+        "# Notes\n\nSome extracted text about transformers.",
+    )
+    .unwrap();
     let data_csv = staging.join("data.csv");
     std::fs::write(&data_csv, "name,value\nalpha,1\n").unwrap();
     let readme_txt = staging.join("readme.txt");
@@ -168,7 +167,9 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
         .preview_import(&context, &FileStore, &request, &[])
         .unwrap();
     assert!(preview.summary.archived_files >= 1, "at least MD archived");
-    import.confirm_import(&context, &FileStore, &preview).unwrap();
+    import
+        .confirm_import(&context, &FileStore, &preview)
+        .unwrap();
 
     // --- Extraction: MD and TXT extract cleanly; CSV (no MVP parser) surfaces
     //     as `unsupported` — an explicit partial result, pinned (not also
@@ -187,7 +188,11 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
         .unwrap();
     assert_eq!(r1.status, ExtractionStatus::Extracted, "markdown extracts");
     assert_eq!(r1.file_type, SourceFileType::Markdown);
-    assert_eq!(r3.status, ExtractionStatus::Extracted, "plain text extracts");
+    assert_eq!(
+        r3.status,
+        ExtractionStatus::Extracted,
+        "plain text extracts"
+    );
     assert_eq!(r3.file_type, SourceFileType::Text);
     // CSV shares the Markdown/Text text-extraction branch, so it extracts as
     // raw text — pinned here so a regression that silently drops CSV fails loud.
@@ -223,8 +228,7 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
     // Confirmed apply: pass baseline hashes as the expected-current state so the
     // core pages overwrite cleanly (matching hash) and the new concept page is
     // created — no conflict abort, so the loop actually lands the page.
-    let applied =
-        CompileService::apply_confirmed_manifest(&context, &manifest, &baseline).unwrap();
+    let applied = CompileService::apply_confirmed_manifest(&context, &manifest, &baseline).unwrap();
     assert!(
         applied.iter().any(|p| p == "wiki/concepts/transformers.md"),
         "confirmed apply must report the created concept page: {applied:?}"
@@ -238,15 +242,16 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
     let search = SearchService::default();
     let tree = search.scan_wiki(&context).unwrap();
     assert!(
-        tree.pages
-            .iter()
-            .any(|p| p.path.contains("transformers")),
+        tree.pages.iter().any(|p| p.path.contains("transformers")),
         "scanned tree must include the compiled page"
     );
     let resp = search
         .search(&context, &search_request(&context, "transformers"))
         .unwrap();
-    assert!(!resp.results.is_empty(), "keyword search must find the page");
+    assert!(
+        !resp.results.is_empty(),
+        "keyword search must find the page"
+    );
 
     // --- Graph: resolve (stale on first build, then cached). ---
     let graph = GraphService::default();
@@ -280,9 +285,14 @@ fn sample_wiki_loop_scans_searches_and_caches_graph() {
     project_service
         .create_project(&root.to_string_lossy(), "Sample", ProjectTemplate::General)
         .unwrap();
-    let opened = project_service.open_project(&root.to_string_lossy()).unwrap();
+    let opened = project_service
+        .open_project(&root.to_string_lossy())
+        .unwrap();
     let context = ProjectContext::new(
-        opened.summary.expect("opened project has summary").project_id,
+        opened
+            .summary
+            .expect("opened project has summary")
+            .project_id,
         root.clone(),
     );
 
@@ -310,7 +320,10 @@ fn sample_wiki_loop_scans_searches_and_caches_graph() {
     // Graph over the real sample data + cache.
     let graph = GraphService::default();
     let built = graph.resolve(&context, &tree.pages).unwrap();
-    assert!(!built.data.nodes.is_empty(), "graph must contain the sample nodes");
+    assert!(
+        !built.data.nodes.is_empty(),
+        "graph must contain the sample nodes"
+    );
     assert!(context.app_dir.join("graph-cache.json").exists());
 
     std::fs::remove_dir_all(&root).ok();
@@ -396,7 +409,9 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
     )
     .unwrap();
     let secret = SecretService::memory();
-    secret.set(LlmProviderKind::Anthropic, "sk-ant-test-SECRET-VALUE").unwrap();
+    secret
+        .set(LlmProviderKind::Anthropic, "sk-ant-test-SECRET-VALUE")
+        .unwrap();
     // The store holds the key.
     assert_eq!(
         secret.get(LlmProviderKind::Anthropic).unwrap().as_deref(),
@@ -408,7 +423,15 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
     let raw = std::fs::read_to_string(context.app_dir.join("settings.json")).unwrap();
     assert!(raw.contains("claude-test"), "provider config must persist");
     let lowered = raw.to_ascii_lowercase();
-    for forbidden in ["sk-ant", "secret-value", "api_key", "apikey", "authorization", "bearer", "token"] {
+    for forbidden in [
+        "sk-ant",
+        "secret-value",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "token",
+    ] {
         assert!(
             !lowered.contains(forbidden),
             "settings.json must not contain secret material ({forbidden}): {raw}"
@@ -433,14 +456,18 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         route: None,
         task_id: None,
     };
-    chat.append_message(&context, &mut session, question.clone()).unwrap();
+    chat.append_message(&context, &mut session, question.clone())
+        .unwrap();
 
     // Real local retrieval (no model) returns honest citations.
     let retrieval = chat
         .build_retrieval_context(&context, &SearchService::default(), "cat", &session)
         .unwrap();
     assert!(
-        retrieval.citations.iter().any(|c| c.page_path.contains("cats")),
+        retrieval
+            .citations
+            .iter()
+            .any(|c| c.page_path.contains("cats")),
         "retrieval must cite the relevant page"
     );
 
@@ -454,24 +481,26 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         route: Some(ChatRoute::Byok),
         task_id: None,
     };
-    chat.append_message(&context, &mut session, answer.clone()).unwrap();
+    chat.append_message(&context, &mut session, answer.clone())
+        .unwrap();
     let (slug, markdown) = chat.build_answer_markdown(&session, &question, &answer);
-    assert!(markdown.contains("[[cats]]"), "saved answer must cite sources as wikilinks");
+    assert!(
+        markdown.contains("[[cats]]"),
+        "saved answer must cite sources as wikilinks"
+    );
 
     // git must be initialized before save_answer_to_wiki can checkpoint.
-    GitService.initialize_repository(&context, "before chat save").unwrap();
-    let saved = chat
-        .save_answer_to_wiki(
-            &context,
-            &GitService,
-            None,
-            None,
-            false,
-            &markdown,
-            &slug,
-        )
+    GitService
+        .initialize_repository(&context, "before chat save")
         .unwrap();
-    assert!(context.wiki_dir.join("queries").join(format!("{slug}.md")).exists());
+    let saved = chat
+        .save_answer_to_wiki(&context, &GitService, None, None, false, &markdown, &slug)
+        .unwrap();
+    assert!(context
+        .wiki_dir
+        .join("queries")
+        .join(format!("{slug}.md"))
+        .exists());
     let _ = saved;
 
     // --- Deep lint: parse a fake agent JSON block. ---
@@ -485,7 +514,12 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
     // --- Export: build prompt + persist a fake record (no real model call). ---
     let export = ExportService::default();
     let prompt = export
-        .build_export_prompt(&context, ExportType::BeautifulRead, Some("wiki/concepts/cats.md"), &SearchService::default())
+        .build_export_prompt(
+            &context,
+            ExportType::BeautifulRead,
+            Some("wiki/concepts/cats.md"),
+            &SearchService::default(),
+        )
         .unwrap();
     assert!(prompt.contains("html-beautiful-read"));
     // Persist a record the way export_commands would after a fake model run.
@@ -500,7 +534,9 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         ExportRoute::Byok,
         None,
     );
-    export.write_html(&context, &out_rel, "<!doctype html><html></html>").unwrap();
+    export
+        .write_html(&context, &out_rel, "<!doctype html><html></html>")
+        .unwrap();
     export.append_record(&context, record).unwrap();
     let listed = export.list_records(&context).unwrap();
     assert!(listed.iter().any(|r| r.output_path == out_rel));
@@ -544,8 +580,14 @@ fn safety_loop_compile_conflict_does_not_mutate_without_confirmation() {
         "external edit"
     );
     for (name, body) in [
-        ("overview.md", std::fs::read_to_string(context.wiki_dir.join("overview.md")).unwrap()),
-        ("log.md", std::fs::read_to_string(context.wiki_dir.join("log.md")).unwrap()),
+        (
+            "overview.md",
+            std::fs::read_to_string(context.wiki_dir.join("overview.md")).unwrap(),
+        ),
+        (
+            "log.md",
+            std::fs::read_to_string(context.wiki_dir.join("log.md")).unwrap(),
+        ),
     ] {
         assert!(
             !body.contains("CANDIDATE"),
@@ -613,7 +655,9 @@ fn safety_loop_chat_overwrite_requires_checkpoint() {
     );
 
     // (b) Initialize git, capture the current hash, confirm the overwrite.
-    GitService.initialize_repository(&context, "before overwrite").unwrap();
+    GitService
+        .initialize_repository(&context, "before overwrite")
+        .unwrap();
     let current_hash = FileStore.file_hash(&context, "wiki/queries/q.md").unwrap();
     let result = chat
         .save_answer_to_wiki(
@@ -677,9 +721,17 @@ fn safety_loop_lint_fix_applies_safe_fix_under_checkpoint() {
     };
     let (_ps, context, root) = create_project("safety-lint-fix");
     // Page with no frontmatter → MissingFrontmatter fires.
-    write_page(&context, "wiki/concepts/bare.md", "# Bare page\n\nNo frontmatter.");
-    GitService.initialize_repository(&context, "before lint fix").unwrap();
-    let hash = FileStore.file_hash(&context, "wiki/concepts/bare.md").unwrap();
+    write_page(
+        &context,
+        "wiki/concepts/bare.md",
+        "# Bare page\n\nNo frontmatter.",
+    );
+    GitService
+        .initialize_repository(&context, "before lint fix")
+        .unwrap();
+    let hash = FileStore
+        .file_hash(&context, "wiki/concepts/bare.md")
+        .unwrap();
     let issue = LintIssue {
         id: "missing_frontmatter:wiki/concepts/bare.md".into(),
         source: LintIssueSource::Local,
@@ -715,7 +767,11 @@ fn safety_loop_git_checkpoint_records_commit() {
     GitService.initialize_repository(&context, "init").unwrap();
     write_page(&context, "wiki/concepts/x.md", "# X");
     let cp = GitService
-        .create_checkpoint(&context, CheckpointPurpose::HighRiskOperation, "before destructive")
+        .create_checkpoint(
+            &context,
+            CheckpointPurpose::HighRiskOperation,
+            "before destructive",
+        )
         .unwrap();
     assert!(cp.created, "checkpoint must commit when there are changes");
     assert!(cp.commit_hash.is_some());

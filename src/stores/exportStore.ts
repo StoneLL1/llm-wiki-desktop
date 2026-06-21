@@ -11,6 +11,7 @@ import type {
   RegenerateExportRequest,
   StartExportRequest,
 } from "../types/export";
+import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -73,12 +74,15 @@ export const useExportStore = create<ExportState>((set) => ({
 
   loadExports: async (projectId, rootPath) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     set({ loading: true, error: null });
     try {
       const request: ListExportsRequest = { projectId, projectRootPath: rootPath };
       const records = await invoke<ExportRecord[]>("list_exports", { request });
+      if (!isProjectScopeCurrent(scope)) return;
       set({ records, loading: false });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ loading: false, error: errorMessage(error) });
     }
   },
@@ -88,6 +92,7 @@ export const useExportStore = create<ExportState>((set) => ({
 
   startExport: async (projectId, rootPath, type, sourcePath) => {
     if (!hasTauri()) return null;
+    const scope = captureProjectScope();
     set({ error: null });
     const request: StartExportRequest = {
       projectId,
@@ -100,9 +105,11 @@ export const useExportStore = create<ExportState>((set) => ({
     };
     try {
       const task = await invoke<{ id: string }>("start_export", { request });
+      if (!isProjectScopeCurrent(scope)) return null;
       set({ runningTaskId: task.id });
       return task.id;
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
       set({ error: errorMessage(error) });
       return null;
     }
@@ -110,6 +117,7 @@ export const useExportStore = create<ExportState>((set) => ({
 
   regenerateExport: async (projectId, rootPath, record) => {
     if (!hasTauri()) return null;
+    const scope = captureProjectScope();
     set({ error: null });
     const request: RegenerateExportRequest = {
       projectId,
@@ -122,9 +130,11 @@ export const useExportStore = create<ExportState>((set) => ({
     };
     try {
       const task = await invoke<{ id: string }>("regenerate_export", { request });
+      if (!isProjectScopeCurrent(scope)) return null;
       set({ runningTaskId: task.id });
       return task.id;
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
       set({ error: errorMessage(error) });
       return null;
     }
@@ -134,11 +144,14 @@ export const useExportStore = create<ExportState>((set) => ({
 
   loadPreview: async (request, id) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     set({ error: null });
     try {
       const html = await invoke<string>("read_export_preview", { request });
+      if (!isProjectScopeCurrent(scope)) return;
       set({ previewHtml: html, previewId: id });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ previewHtml: null, previewId: null, error: errorMessage(error) });
     }
   },
@@ -147,9 +160,11 @@ export const useExportStore = create<ExportState>((set) => ({
 
   openFolder: async (request) => {
     if (!hasTauri()) return;
+    const scope = captureProjectScope();
     try {
       await invoke("open_export_folder", { request });
     } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ error: errorMessage(error) });
     }
   },

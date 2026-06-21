@@ -56,6 +56,14 @@ const viewActionKeys: Record<AppView, string[]> = {
   settings: ["view.settings.actionPrimary", "view.settings.actionSecondary"],
 };
 
+function errorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return String(error);
+}
+
 export function AppShell() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
@@ -166,9 +174,9 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   }, [currentProject.projectId, currentProject.rootPath, hasTauri, openTaskDrawer, upsertTask]);
 
   const requestImportPreview = useCallback(
-    (files: File[]) => {
-      const sourcePaths = files
-        .map((file) => (file as File & { path?: string }).path ?? "")
+    (paths: string[]) => {
+      const sourcePaths = paths
+        .map((path) => path.trim())
         .filter((path) => path.trim().length > 0);
 
       if (sourcePaths.length === 0) {
@@ -184,9 +192,14 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           allowDuplicates: false,
           linkDuplicates: false,
         },
-      }).then(setImportPreview);
+      })
+        .then(setImportPreview)
+        .catch((error) => {
+          setImportPreview(null);
+          pushToast("error", t("import.previewError", { message: errorMessage(error) }));
+        });
     },
-    [currentProject.projectId, currentProject.rootPath],
+    [currentProject.projectId, currentProject.rootPath, pushToast, t],
   );
 
   const confirmImportPreview = useCallback(() => {
@@ -203,10 +216,13 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         setImportPreview(null);
         await startCompile();
       })
+      .catch((error) => {
+        pushToast("error", t("import.confirmError", { message: errorMessage(error) }));
+      })
       .finally(() => {
         setIsConfirmingImport(false);
       });
-  }, [currentProject.projectId, currentProject.rootPath, importPreview, startCompile]);
+  }, [currentProject.projectId, currentProject.rootPath, importPreview, pushToast, startCompile, t]);
 
   const saveProvider = useCallback(async (config: LlmProviderConfig) => {
     if (!hasTauri) return;

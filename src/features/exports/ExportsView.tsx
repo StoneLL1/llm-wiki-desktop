@@ -87,7 +87,7 @@ export function ExportsView() {
   const handleGenerate = () => {
     void startExport(projectId, rootPath, selectedType, sourcePath).then((taskId) => {
       if (!taskId) return;
-      void invoke("list_tasks").then((list) => {
+        void invoke("list_tasks", { request: { statusFilter: null } }).then((list) => {
         const found = (list as { id: string }[]).find((task) => task.id === taskId);
         if (found) {
           void invoke("get_task", { request: { taskId } }).then((task) => {

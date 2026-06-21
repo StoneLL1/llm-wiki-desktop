@@ -63,6 +63,7 @@ export interface SaveAnswerToWikiRequest {
   targetPath?: string | null;
   expectedHash?: string | null;
   allowOverwrite: boolean;
+  actionId?: string | null;
 }
 
 /** Inline overwrite confirm surfaced when saving would overwrite an existing page. */
@@ -70,4 +71,5 @@ export interface ChatOverwriteRequest {
   messageId: string;
   path: string;
   currentHash: string;
+  actionId: string;
 }

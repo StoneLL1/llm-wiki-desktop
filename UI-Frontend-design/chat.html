@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>Chat — Agent Memory 综述 · LLM Wiki Desktop</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .chat-layout { height: 100%; }
+  .chat-layout .chat-sessions { border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; }
+  .main__body { padding: 0 !important; overflow: hidden; }
+  .chat-shell {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr);
+    height: 100%;
+    overflow: hidden;
+  }
+  .chat-stream-wrap {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="topbar__brand"><div class="topbar__brand-mark">LW</div><div class="topbar__brand-name">LLM Wiki Desktop</div></div>
+    <button class="projswitch">
+      <svg class="ico" style="color:var(--text-muted);"><use href="#i-folder-open"/></svg>
+      <span class="projswitch__name">Agent Knowledge Base</span>
+      <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-chev-d"/></svg>
+    </button>
+    <div class="searchbar">
+      <svg class="ico-sm"><use href="#i-search"/></svg>
+      <input placeholder="按名称、标签、类型或来源搜索页面…" />
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="topbar__spacer"></div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="任务"><svg class="ico"><use href="#i-bell"/></svg></button>
+      <div class="langswitch"><button class="is-active">中</button><button>EN</button></div>
+      <button class="btn btn--ghost btn--icon btn--sm" data-tip="设置" onclick="location.href='settings.html'"><svg class="ico"><use href="#i-settings"/></svg></button>
+      <a href="index.html" class="btn btn--ghost btn--icon btn--sm" data-tip="返回总览"><svg class="ico"><use href="#i-corner"/></svg></a>
+    </div>
+  </header>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar__section">
+      <div class="sidebar__label">主视图</div>
+      <div class="navlist">
+        <a class="navitem" href="dashboard.html"><svg class="ico-lg"><use href="#i-dashboard"/></svg><span class="navitem__label">Dashboard</span></a>
+        <a class="navitem" href="wiki.html"><svg class="ico-lg"><use href="#i-book"/></svg><span class="navitem__label">Wiki</span><span class="navitem__count">237</span></a>
+        <a class="navitem is-active" href="chat.html"><svg class="ico-lg"><use href="#i-chat"/></svg><span class="navitem__label">Chat</span><span class="navitem__count">12</span></a>
+        <a class="navitem" href="graph.html"><svg class="ico-lg"><use href="#i-graph"/></svg><span class="navitem__label">知识图谱</span></a>
+      </div>
+    </div>
+    <div class="sidebar__section">
+      <div class="sidebar__label">工作流</div>
+      <div class="navlist">
+        <a class="navitem" href="agent.html"><svg class="ico-lg"><use href="#i-bot"/></svg><span class="navitem__label">Agent</span></a>
+        <a class="navitem" href="import.html"><svg class="ico-lg"><use href="#i-upload"/></svg><span class="navitem__label">Import</span></a>
+        <a class="navitem" href="lint.html"><svg class="ico-lg"><use href="#i-shield"/></svg><span class="navitem__label">Lint</span><span class="badge badge--warn" style="height:16px;padding:0 5px;font-size:9.5px;">3</span></a>
+        <a class="navitem" href="exports.html"><svg class="ico-lg"><use href="#i-export"/></svg><span class="navitem__label">Exports</span></a>
+      </div>
+    </div>
+    <div class="sidebar__foot">
+      <div class="sidebar__foot-agent">
+        <span class="dot"></span>
+        <span class="sidebar__foot-agent-name">claude · 1.0.23</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="main__header">
+      <h1 class="main__title">Chat <span class="main__title-sub">· 基于当前 Wiki 问答 · 12 个会话</span></h1>
+      <div class="main__toolbar">
+        <div class="seg">
+          <button class="is-active">claude</button>
+          <button>BYOK · Anthropic</button>
+        </div>
+        <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-history"/></svg>历史</button>
+        <button class="btn btn--sm btn--primary"><svg class="ico-sm"><use href="#i-plus"/></svg>新会话</button>
+      </div>
+    </div>
+    <div class="main__body">
+      <div class="chat-shell">
+        <!-- Sessions -->
+        <div class="chat-sessions">
+          <div class="chat-sessions__head">
+            <div class="searchbar" style="background:var(--background);border:1px solid var(--border);height:28px;flex:1;">
+              <svg class="ico-sm"><use href="#i-search"/></svg>
+              <input data-search-input="#session-list" placeholder="搜索会话…" style="font-size:12px;" />
+            </div>
+          </div>
+          <div class="chat-sessions__list" id="session-list">
+            <div class="chat-session is-active" data-search-row data-search-text="Agent Memory 综述">
+              <div class="chat-session__title">Agent Memory 综述</div>
+              <div class="chat-session__meta">14:32 · 8 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="ReAct 与 Plan-and-Execute 对比">
+              <div class="chat-session__title">ReAct 与 Plan-and-Execute 对比</div>
+              <div class="chat-session__meta">昨天 · 5 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="为什么多模态融合需要特殊编码">
+              <div class="chat-session__title">为什么多模态融合需要特殊编码</div>
+              <div class="chat-session__meta">06-17 · 12 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="RAG vs LLM Wiki 区别">
+              <div class="chat-session__title">RAG vs LLM Wiki 区别</div>
+              <div class="chat-session__meta">06-15 · 6 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="Anthropic 最近发布了什么">
+              <div class="chat-session__title">Anthropic 最近发布了什么</div>
+              <div class="chat-session__meta">06-14 · 4 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="长上下文窗口 vs 外部记忆">
+              <div class="chat-session__title">长上下文窗口 vs 外部记忆</div>
+              <div class="chat-session__meta">06-12 · 9 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="Reflection 模式的具体步骤">
+              <div class="chat-session__title">Reflection 模式的具体步骤</div>
+              <div class="chat-session__meta">06-10 · 7 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="工具选择启发式怎么设计">
+              <div class="chat-session__title">工具选择启发式怎么设计</div>
+              <div class="chat-session__meta">06-08 · 11 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="MemGPT 架构是否过时">
+              <div class="chat-session__title">MemGPT 架构是否过时</div>
+              <div class="chat-session__meta">06-05 · 6 条消息</div>
+            </div>
+            <div class="chat-session" data-search-row data-search-text="Multimodal Fusion 在视觉问答中的应用">
+              <div class="chat-session__title">Multimodal Fusion 在视觉问答中的应用</div>
+              <div class="chat-session__meta">06-03 · 4 条消息</div>
+            </div>
+          </div>
+          <div style="padding:8px;border-top:1px solid var(--border-subtle);background:var(--surface-muted);font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">
+            会话保存在 .app/chats/ · 可导出为 wiki/queries/
+          </div>
+        </div>
+
+        <!-- Conversation -->
+        <div class="chat-stream-wrap">
+          <div class="toolbar" style="border-bottom:1px solid var(--border-subtle);">
+            <span class="badge badge--accent"><span class="dot"></span>claude</span>
+            <span style="font-size:12.5px;font-weight:600;">Agent Memory 综述</span>
+            <span style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">8 条 · 14:32</span>
+            <div style="margin-left:auto;display:flex;gap:8px;">
+              <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-save"/></svg>保存到 wiki/queries/</button>
+              <button class="btn btn--sm btn--ghost btn--icon" data-tip="重命名"><svg class="ico-sm"><use href="#i-edit"/></svg></button>
+              <button class="btn btn--sm btn--ghost btn--icon" data-tip="删除"><svg class="ico-sm"><use href="#i-trash"/></svg></button>
+            </div>
+          </div>
+
+          <div class="chat-stream">
+            <div class="msg">
+              <div class="msg__avatar msg__avatar--user">YOU</div>
+              <div class="msg__body">
+                <div class="msg__head"><span class="msg__name">你</span><span class="msg__time">14:30</span></div>
+                <div class="msg__content">
+                  <p>总结一下这些资料里关于 Agent Memory 的主要观点，特别是不同方案的取舍。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="msg__avatar msg__avatar--ai">AI</div>
+              <div class="msg__body">
+                <div class="msg__head"><span class="msg__name">claude</span><span class="msg__time">14:30</span><span class="badge" style="margin-left:8px;height:16px;padding:0 6px;font-size:10px;">ingest · 3 来源</span></div>
+                <div class="msg__content">
+                  <p>根据当前 Wiki 的 4 个相关页面，Agent Memory 的核心张力在于<strong>广度 vs 结构化程度</strong>。</p>
+                  <p>主流实现可以归为四类：</p>
+                  <p>
+                    1. <strong>短上下文窗口</strong> — 把最近内容直接保留在 LLM 上下文里。零额外组件，但成本随长度线性上升。
+                  </p>
+                  <p>
+                    2. <strong>长上下文检索（RAG）</strong> — 把资料存到向量库，提问时检索注入。可覆盖百万级文档，但每次只能"瞥见"若干片段<span class="citation-ref">1</span>。
+                  </p>
+                  <p>
+                    3. <strong>外部记忆系统</strong> — MemGPT、LangGraph State 等把记忆从模型中剥离，单独管理。能跨会话保留，但需要复杂的遗忘策略<span class="citation-ref">2</span>。
+                  </p>
+                  <p>
+                    4. <strong>多模态记忆</strong> — 视觉 / 音频模态经专门编码器嵌入到统一空间。
+                  </p>
+                  <p>取舍维度：覆盖广度、结构化程度、可维护性。LLM Wiki 模式（本应用所采用的）属于 <em>预先结构化</em> 路线 — 把资料编译成稳定 Markdown，而不是即时拼接。</p>
+                </div>
+                <div class="msg__citations">
+                  <div class="citation">
+                    <span class="citation__idx">1</span>
+                    <span class="citation__title">Agent Memory Model</span>
+                    <span class="citation__path">wiki/concepts/agent-memory.md</span>
+                  </div>
+                  <div class="citation">
+                    <span class="citation__idx">2</span>
+                    <span class="citation__title">Plan-and-Execute</span>
+                    <span class="citation__path">wiki/concepts/plan-and-execute.md</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="msg__avatar msg__avatar--user">YOU</div>
+              <div class="msg__body">
+                <div class="msg__head"><span class="msg__name">你</span><span class="msg__time">14:31</span></div>
+                <div class="msg__content">
+                  <p>那 LLM Wiki 模式相比 RAG，最大的代价是什么？</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="msg__avatar msg__avatar--ai">AI</div>
+              <div class="msg__body">
+                <div class="msg__head"><span class="msg__name">claude</span><span class="msg__time">14:31</span><span class="badge" style="margin-left:8px;height:16px;padding:0 6px;font-size:10px;">ingest · 2 来源</span></div>
+                <div class="msg__content">
+                  <p>核心代价是<strong>预先编译成本</strong>。</p>
+                  <p>RAG 在提问时即时检索，零预处理；LLM Wiki 需要在导入资料后触发编译，由 Agent 把原始资料整理成结构化页面。这意味着：</p>
+                  <p>
+                    • 首次导入需要等待编译完成（通常几十秒到几分钟）；<br/>
+                    • 资料更新后需要重新编译相关页面；<br/>
+                    • 编译质量受 Agent / Schema 影响，需要 Lint 维护。
+                  </p>
+                  <p>换来的是：<em>稳定可读的页面、可被外部编辑器修改、可被 Git 跟踪、问答时上下文更精准</em><span class="citation-ref">3</span>。详见 wiki/concepts/rag.md 中的对比段。</p>
+                </div>
+                <div class="msg__citations">
+                  <div class="citation">
+                    <span class="citation__idx">3</span>
+                    <span class="citation__title">Retrieval Augmented Generation</span>
+                    <span class="citation__path">wiki/concepts/rag.md</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="msg__avatar msg__avatar--user">YOU</div>
+              <div class="msg__body">
+                <div class="msg__head"><span class="msg__name">你</span><span class="msg__time">14:32</span></div>
+                <div class="msg__content">
+                  <p>对于跨会话的长期项目，推荐哪种方案？</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="msg__avatar msg__avatar--ai">AI</div>
+              <div class="msg__body">
+                <div class="msg__head"><span class="msg__name">claude</span><span class="msg__time">14:32</span><span class="badge badge--outline" style="margin-left:8px;height:16px;padding:0 6px;font-size:10px;background:var(--surface-muted);"><span class="dotstatus dotstatus--busy" style="width:6px;height:6px;"></span>生成中…</span></div>
+                <div class="msg__content">
+                  <p>对于跨会话长期项目，<strong>LLM Wiki + 外部记忆</strong> 的组合最稳。</p>
+                  <p>原因有三：</p>
+                  <p>
+                    1. LLM Wiki 沉淀了结构化、可审计的知识资产；<br/>
+                    2. 外部记忆（如 Letta、LangGraph）承载会话级状态；<br/>
+                    3. 二者通过 wikilinks 关联，可在 Chat 中即时唤起。<span class="citation-ref">4</span>
+                  </p>
+                  <p>具体落地建议…<span class="terminal__cursor"></span></p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Composer -->
+          <div class="composer">
+            <div class="composer__inner">
+              <textarea class="composer__input" placeholder="基于当前 Wiki 提问 · ⌘↵ 发送 · / 选择 Skill" rows="1"></textarea>
+              <div class="composer__foot">
+                <span class="badge"><span class="dot" style="background:var(--accent);"></span>claude</span>
+                <button class="btn btn--ghost btn--sm"><svg class="ico-sm"><use href="#i-upload"/></svg>附加资料</button>
+                <button class="btn btn--ghost btn--sm"><svg class="ico-sm"><use href="#i-link"/></svg>引用页面</button>
+                <span class="composer__hint">基于 237 篇 Wiki · 上下文窗口 200K</span>
+                <button class="btn btn--sm"><svg class="ico-sm"><use href="#i-stop"/></svg>停止</button>
+                <button class="btn btn--sm btn--primary"><svg class="ico-sm"><use href="#i-arrow-r"/></svg>发送</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- RIGHT PANEL -->
+  <aside class="rightpanel">
+    <div class="rightpanel__header">
+      <span class="rightpanel__title">引用与来源</span>
+      <button class="btn btn--ghost btn--icon btn--sm" data-right-toggle data-tip="折叠"><svg class="ico-sm"><use href="#i-chev-r"/></svg></button>
+    </div>
+    <div class="rightpanel__body">
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">本次回答引用 <span style="font-family:var(--font-mono);color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;margin-left:4px;">4</span></h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <div class="citation">
+            <span class="citation__idx">1</span>
+            <div style="flex:1;min-width:0;">
+              <div class="citation__title truncate">Agent Memory Model</div>
+              <div class="citation__path">wiki/concepts/agent-memory.md</div>
+            </div>
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+          </div>
+          <div class="citation">
+            <span class="citation__idx">2</span>
+            <div style="flex:1;min-width:0;">
+              <div class="citation__title truncate">Plan-and-Execute</div>
+              <div class="citation__path">wiki/concepts/plan-and-execute.md</div>
+            </div>
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+          </div>
+          <div class="citation">
+            <span class="citation__idx">3</span>
+            <div style="flex:1;min-width:0;">
+              <div class="citation__title truncate">Retrieval Augmented Generation</div>
+              <div class="citation__path">wiki/concepts/rag.md</div>
+            </div>
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+          </div>
+          <div class="citation">
+            <span class="citation__idx">4</span>
+            <div style="flex:1;min-width:0;">
+              <div class="citation__title truncate">Memory Landscape</div>
+              <div class="citation__path">wiki/synthesis/memory-landscape.md</div>
+            </div>
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-arrow-r"/></svg>
+          </div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">原始资料</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);">
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-pdf"/></svg>
+            <span style="flex:1;font-family:var(--font-mono);font-size:11.5px;">anthropic-memory-paper.pdf</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);">
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-link-ext"/></svg>
+            <span style="flex:1;font-family:var(--font-mono);font-size:11.5px;">openai-cookbook-memory</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);">
+            <svg class="ico-sm" style="color:var(--text-muted);"><use href="#i-doc"/></svg>
+            <span style="flex:1;font-family:var(--font-mono);font-size:11.5px;">langchain-memory-docs.docx</span>
+          </div>
+        </div>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">执行路径</h4>
+        <dl class="rightpanel__meta">
+          <dt>路径</dt><dd style="color:var(--accent-hover);">claude CLI</dd>
+          <dt>版本</dt><dd>1.0.23</dd>
+          <dt>窗口</dt><dd>200K tokens</dd>
+          <dt>检索</dt><dd>4 / 237 页面</dd>
+          <dt>耗时</dt><dd>2.4s</dd>
+          <dt>Token</dt><dd>2,184 in / 624 out</dd>
+        </dl>
+      </div>
+      <div class="rightpanel__section">
+        <h4 class="rightpanel__section-title">操作</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-save"/></svg>保存到 wiki/queries/</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-copy"/></svg>复制回答 Markdown</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-export"/></svg>生成知识卡片</button>
+          <button class="btn btn--sm btn--block" style="justify-content:flex-start;"><svg class="ico-sm"><use href="#i-warn"/></svg>标记问题回答</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- STATUS BAR -->
+  <footer class="statusbar">
+    <span class="statusbar__item"><svg class="ico-sm" style="width:12px;height:12px;"><use href="#i-folder"/></svg>~/Documents/wiki/agent-llm</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item"><span class="dotstatus dotstatus--busy"></span>claude · 生成中…</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">.app/chats/c4f8-2a9e.json</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">8 条消息 · 2,184 + 624 tokens</span>
+    <span class="statusbar__spacer"></span>
+    <span class="statusbar__item">main · 3f8a9c2</span>
+    <span class="statusbar__sep"></span>
+    <span class="statusbar__item">中文</span>
+  </footer>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

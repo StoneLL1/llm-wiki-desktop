@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vite-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 1420,
+      "autoPort": true
+    },
+    {
+      "name": "dist-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "dist", "-p", "3100", "-s", "--no-clipboard"],
+      "port": 3100,
+      "autoPort": true
+    }
+  ]
+}

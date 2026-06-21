@@ -6,7 +6,6 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus, ConfirmedAction};
-use crate::models::paths::ProjectContext;
 use crate::services::WriteMode;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,7 +55,7 @@ pub fn read_markdown_file(
     state: State<'_, AppState>,
     request: ProjectFileRequest,
 ) -> Result<String, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state
         .file_store
         .read_markdown(&context, &request.relative_path)
@@ -67,7 +66,7 @@ pub fn write_markdown_file(
     state: State<'_, AppState>,
     request: WriteMarkdownRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.file_store.write_markdown_checked(
         &context,
         &request.relative_path,
@@ -88,7 +87,7 @@ pub fn write_json_file(
     state: State<'_, AppState>,
     request: WriteJsonRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.file_store.write_json_atomic_checked(
         &context,
         &request.relative_path,
@@ -109,7 +108,7 @@ pub fn get_file_hash(
     state: State<'_, AppState>,
     request: ProjectFileRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    let context = context_from_request(&request.project_id, &request.project_root_path);
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let hash = state
         .file_store
         .file_hash(&context, &request.relative_path)?;
@@ -148,6 +147,10 @@ pub fn confirm_pending_action(
                     &stored.action,
                     &file_hashes,
                 )?;
+            state.project_registry.register(
+                project_summary.project_id.clone(),
+                &PathBuf::from(&project_summary.root_path),
+            )?;
             Ok(ConfirmedAction {
                 action: stored.action,
                 status: ConfirmationStatus::Confirmed,
@@ -161,6 +164,18 @@ pub fn confirm_pending_action(
             true,
             true,
         )),
+        Some(ConfirmationExecution::LintFix { .. }) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "Lint fixes must be handled by apply_lint_fix.",
+            true,
+            true,
+        )),
+        Some(ConfirmationExecution::ChatOverwrite { .. }) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "Chat overwrites must be handled by save_answer_to_wiki.",
+            true,
+            true,
+        )),
         None => Err(BackendError::new(
             "CONFIRMATION_EXECUTION_MISSING",
             "The pending action has no backend execution plan.",
@@ -169,8 +184,4 @@ pub fn confirm_pending_action(
         )
         .with_details(serde_json::json!({ "actionId": request.action_id }))),
     }
-}
-
-fn context_from_request(project_id: &str, root_path: &str) -> ProjectContext {
-    ProjectContext::new(project_id.to_string(), PathBuf::from(root_path))
 }

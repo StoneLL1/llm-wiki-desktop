@@ -155,12 +155,12 @@ export async function removeCompletedTasks(): Promise<void> {
   }
 }
 
-export async function recoverTasksForProject(rootPath: string): Promise<void> {
+export async function recoverTasksForProject(projectId: string, rootPath: string): Promise<void> {
   if (!hasTauri()) return;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     const tasks = await invoke<BackendTask[]>("set_active_project", {
-      request: { rootPath },
+      request: { projectId, rootPath },
     });
     useTaskStore.getState().setTasks(tasks);
   } catch {

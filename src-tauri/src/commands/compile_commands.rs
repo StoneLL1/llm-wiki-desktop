@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager, State};
 
@@ -32,16 +31,21 @@ pub fn start_wiki_compile(
     state: State<'_, AppState>,
     request: CompileRequest,
 ) -> Result<BackendTask, BackendError> {
-    let task = state.task_service.create_task(
-        TaskType::WikiCompile,
-        Some(request.project_id.clone()),
-        "Compile Wiki".into(),
-        true,
-    );
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let task = state
+        .task_service
+        .create_project_task(
+            TaskType::WikiCompile,
+            request.project_id.clone(),
+            context.root.clone(),
+            "Compile Wiki".into(),
+            true,
+        )
+        .map_err(task_error)?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if let Err(error) = run_compile(&state, &request, &task_id).await {
+        if let Err(error) = run_compile(&state, &request, &context, &task_id).await {
             let _ = state
                 .task_service
                 .append_log(&task_id, LogLevel::Error, error.message.clone());
@@ -65,6 +69,7 @@ pub fn start_wiki_compile(
 async fn run_compile(
     state: &AppState,
     request: &CompileRequest,
+    context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
     state
@@ -75,20 +80,16 @@ async fn run_compile(
         .task_service
         .append_log(task_id, LogLevel::Info, "Creating Git checkpoint".into())
         .map_err(task_error)?;
-    let context = ProjectContext::new(
-        request.project_id.clone(),
-        PathBuf::from(&request.project_root_path),
-    );
     let checkpoint = state.git_service.create_checkpoint(
-        &context,
+        context,
         CheckpointPurpose::HighRiskOperation,
         "Before wiki compile",
     )?;
-    let baseline = CompileService::snapshot_wiki(&context)?;
-    let workspace = CompileService::create_workspace(&context, task_id)?;
+    let baseline = CompileService::snapshot_wiki(context)?;
+    let workspace = CompileService::create_workspace(context, task_id)?;
     let outcome = async {
-        let (route, manifest) = generate_manifest(state, request, &context, &workspace, task_id, &baseline).await?;
-        ensure_checkpoint_head(state, &context, checkpoint.commit_hash.as_deref())?;
+        let (route, manifest) = generate_manifest(state, request, context, &workspace, task_id, &baseline).await?;
+        ensure_checkpoint_head(state, context, checkpoint.commit_hash.as_deref())?;
         if state.task_service.is_cancelled(task_id) {
             return Err(BackendError::new("COMPILE_CANCELLED", "Wiki compile was cancelled.", true, false));
         }
@@ -420,7 +421,7 @@ pub fn confirm_compile_action(
         .task_service
         .transition_status(&task_id, TaskStatus::Running)
         .map_err(task_error)?;
-    let context = ProjectContext::new(project_id, PathBuf::from(root_path));
+    let context = state.resolve_project_context(&project_id, &root_path)?;
     if let Err(error) = ensure_checkpoint_head(&state, &context, checkpoint_hash.as_deref()) {
         let _ = state.task_service.set_error(&task_id, error.clone());
         let _ = state
