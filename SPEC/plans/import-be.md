@@ -24,12 +24,13 @@
 - 验收：✅ 构造真实最小 pdf/docx/pptx/xlsx 解析后 status=Extracted（非 Unsupported），文本落盘，word_count/page_count 有值；损坏文件→Failed；扫描件→Failed(OCR 交给编译 Agent)；旧式二进制→Failed(转换提示)。新增 6 测试 + 替换 2 旧 Unsupported 测试，共 20 测试通过；285 lib tests + 7 task8_contracts + 90 FE tests + lint + clippy(-D warnings) 全绿；GUI feature 编译通过。
 
 ### [P0-2] 「打开文件夹为项目」后端命令链路（PRD-IMP-003 / PRD-PROJ-003）
-- status: pending
+- status: verified
 - 意图：设计稿 `dlg-folder`（import.html:439-479）要求：文件夹路径 + 项目模板 select + 归档策略（按类型归档/同名重命名/初始化 Git）。PRD-IMP-003 要求用户可选「打开为项目」。
 - 现状：`open_project`（project_commands.rs:56-95）已对"普通文件夹"返回 `NeedsConfirmation` + `InitializeFolder` pending action，`confirm_pending_action` 走 `confirm_folder_initialization`。**链路已存在且可用**。
-- 决策：本 loop 确保「命令链路通」即可。后端已支持；需补的是：一个显式的 `open_folder_as_project` 预览命令？经查 `open_project` 已是入口且设计稿 dlg-folder 的"选择…"按钮调的就是 open dialog。故后端无需新增命令——`open_project` 已覆盖。但 roadmap 明确要求"dlg-folder 对应的命令/校验"。为闭环，新增轻量命令 `preview_open_folder_as_project(path) -> OpenProjectResponse` 复用 `project_service.open_project`，前端 dlg-folder 选择文件夹后调它拿 pending action/summary。这样前端不必复用「打开项目」入口语义，避免与"打开已有项目"混淆，符合 PRD「用户能明确区分」。
-- 涉及文件：`src-tauri/src/commands/project_commands.rs`、`src-tauri/src/lib.rs`（注册）
-- 验收：命令存在、注册、对普通文件夹返回 NeedsConfirmation、对已是项目的文件夹返回 Opened。cargo test 覆盖。
+- 决策：新增显式 `preview_open_folder_as_project(path) -> OpenProjectResponse` 命令，复用 `project_service.open_project`，给 dlg-folder 一个语义独立的入口（区别于"打开已有项目"）。关键差异：对 `NeedsConfirmation` 注册 pending action（含 execution plan）让前端可经 `confirm_pending_action` 确认；对 `Opened` 不跑 `open_project` 的 Git/registry/recents 副作用（纯预览，已是项目的文件夹无需重新初始化）。模板选择是前端侧（影响 `confirm_folder_initialization`），预览阶段后端不绑定模板。核心逻辑放 `AppState::preview_folder_as_project`（非 gui-gate，可被 `--no-default-features` 测试），命令层只做薄包装。
+- 涉及文件：`src-tauri/src/commands/project_commands.rs`、`src-tauri/src/app_state.rs`、`src-tauri/src/lib.rs`（注册）
+- 落地位置：`app_state.rs:128-149`（`preview_folder_as_project` 方法 + `folder_preview_tests` 模块 3 测试）、`project_commands.rs:97-118`（命令薄包装）、`lib.rs:129`（注册）。
+- 验收：✅ 命令存在、注册；普通文件夹返回 NeedsConfirmation 且 pending action 已注册可确认（`peek` 验证）；已有 wiki 文件夹返回 Opened 且无 pending action 注册；CJK 文件名安全。3 新测试通过；288 lib + 7 task8_contracts + 90 FE + lint + clippy(--no-default-features, -D warnings) 全绿；GUI feature 编译通过。（注：gui-feature clippy 有 21 个预存错误在其它命令模块，非本 loop 范围，基线 stash 验证一致。）
 
 ### [P0-3] 导入后触发 Wiki 编译的 hook + confirm_import_preview 支持 Git 检查点参数
 - status: pending

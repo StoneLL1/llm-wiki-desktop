@@ -94,6 +94,25 @@ pub fn open_project(
     Ok(outcome)
 }
 
+/// Preview entry point for the "Open folder as project" dialog (dlg-folder).
+///
+/// Unlike `open_project`, this is a pure preview: it returns whether the picked
+/// folder is an existing wiki project (`Opened` + summary) or a plain folder
+/// (`NeedsConfirmation` + pending `InitializeFolder` action). For the
+/// NeedsConfirmation case the pending action is registered (with its execution
+/// plan) so the frontend can later confirm via `confirm_pending_action` ->
+/// `confirm_folder_initialization`, which creates the project structure, moves
+/// files by type, and creates the Git checkpoint. For the Opened case no
+/// Git/registry/recent side effects run — the user is only previewing, and an
+/// already-project folder does not need re-initialization.
+#[tauri::command]
+pub fn preview_open_folder_as_project(
+    state: State<'_, AppState>,
+    request: OpenProjectRequest,
+) -> Result<OpenProjectResponse, BackendError> {
+    state.preview_folder_as_project(&request.path)
+}
+
 #[tauri::command]
 pub fn scan_project(
     state: State<'_, AppState>,

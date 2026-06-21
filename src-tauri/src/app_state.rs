@@ -122,6 +122,31 @@ impl AppState {
         self.project_registry
             .resolve(project_id, Path::new(asserted_root))
     }
+
+    /// Preview a folder for the "Open folder as project" dialog (dlg-folder).
+    ///
+    /// Returns whether the folder is an existing wiki project (`Opened` +
+    /// summary) or a plain folder (`NeedsConfirmation` + pending
+    /// `InitializeFolder` action). For the NeedsConfirmation case the pending
+    /// action is registered with its execution plan so the frontend can later
+    /// confirm via `confirm_pending_action` -> `confirm_folder_initialization`,
+    /// which creates the project structure, organizes files by type, and
+    /// creates the Git checkpoint. For the Opened case no Git/registry/recent
+    /// side effects run — this is a preview only.
+    pub fn preview_folder_as_project(
+        &self,
+        path: &str,
+    ) -> Result<crate::models::project::OpenProjectResponse, BackendError> {
+        let outcome = self.project_service.open_project(path)?;
+        if let Some(pending_action) = outcome.pending_action.as_ref() {
+            let execution = self
+                .project_service
+                .folder_initialization_execution(Path::new(path), pending_action)?;
+            self.confirmation_registry
+                .register_with_execution(pending_action.clone(), Some(execution))?;
+        }
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +227,131 @@ mod project_registry_tests {
         assert_eq!(context.root, project.canonicalize().unwrap());
         assert!(context.root.to_string_lossy().contains("中文资料库"));
         fs::remove_dir_all(project).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod folder_preview_tests {
+    use super::AppState;
+    use crate::models::confirmation::PendingActionType;
+    use crate::models::project::{OpenProjectKind, OpenProjectResponse};
+    use crate::services::ProjectService;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("llm-wiki-folder-preview-{label}-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn app_state_in_temp() -> (AppState, PathBuf) {
+        let config = unique_temp_dir("config");
+        let mut state = AppState::default();
+        state.project_service = ProjectService::with_config_dir(config.clone());
+        (state, config)
+    }
+
+    fn cleanup(dirs: &[&PathBuf]) {
+        for dir in dirs {
+            fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[test]
+    fn preview_plain_folder_registers_confirmable_initialize_action() {
+        let (state, config) = app_state_in_temp();
+        let root = unique_temp_dir("plain");
+        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
+        fs::write(root.join("note.md"), "# note").unwrap();
+
+        let outcome = state
+            .preview_folder_as_project(root.to_string_lossy().as_ref())
+            .unwrap();
+
+        let pending = match outcome {
+            OpenProjectResponse {
+                kind: OpenProjectKind::NeedsConfirmation,
+                pending_action: Some(pending),
+                ..
+            } => pending,
+            _ => panic!("plain folder must require confirmation"),
+        };
+        assert_eq!(pending.action_type, PendingActionType::InitializeFolder);
+        assert!(pending.affected_paths.contains(&"report.pdf".to_string()));
+        assert!(pending.affected_paths.contains(&"note.md".to_string()));
+        // Nothing moved before confirmation.
+        assert!(root.join("report.pdf").exists());
+        assert!(!root.join("raw").exists());
+
+        // The pending action is registered and confirmable via the registry,
+        // i.e. the dlg-folder -> confirm_pending_action chain is wired end to end.
+        let stored = state.confirmation_registry.peek(&pending.id).unwrap();
+        assert_eq!(stored.action.id, pending.id);
+        assert!(stored.execution.is_some());
+
+        cleanup(&[&root, &config]);
+    }
+
+    #[test]
+    fn preview_existing_wiki_folder_returns_opened_without_pending_action() {
+        let (state, config) = app_state_in_temp();
+        let root = unique_temp_dir("existing");
+        fs::write(root.join("schema.md"), "# schema").unwrap();
+        fs::write(root.join("index.md"), "# index").unwrap();
+        fs::create_dir_all(root.join("concepts")).unwrap();
+        fs::write(root.join("concepts").join("agent.md"), "# Agent").unwrap();
+
+        let outcome = state
+            .preview_folder_as_project(root.to_string_lossy().as_ref())
+            .unwrap();
+
+        match outcome {
+            OpenProjectResponse {
+                kind: OpenProjectKind::Opened,
+                summary: Some(summary),
+                pending_action: None,
+            } => {
+                assert!(summary.health.is_wiki_project);
+            }
+            _ => panic!("existing wiki folder should open without confirmation"),
+        }
+
+        // No confirmation was registered for an already-project folder.
+        let err = state
+            .confirmation_registry
+            .peek("nonexistent")
+            .expect_err("no pending action should be registered");
+        assert_eq!(err.code, "CONFIRMATION_NOT_FOUND");
+
+        cleanup(&[&root, &config]);
+    }
+
+    #[test]
+    fn preview_plain_folder_with_cjk_filename_is_organized_safely() {
+        let (state, config) = app_state_in_temp();
+        let root = unique_temp_dir("cjk");
+        fs::write(root.join("论文.pdf"), "%PDF-1.4").unwrap();
+
+        let outcome = state
+            .preview_folder_as_project(root.to_string_lossy().as_ref())
+            .unwrap();
+
+        let pending = match outcome {
+            OpenProjectResponse {
+                kind: OpenProjectKind::NeedsConfirmation,
+                pending_action: Some(pending),
+                ..
+            } => pending,
+            _ => panic!("CJK-named folder must require confirmation"),
+        };
+        assert!(pending.affected_paths.contains(&"论文.pdf".to_string()));
+        assert!(root.join("论文.pdf").exists());
+
+        cleanup(&[&root, &config]);
     }
 }
