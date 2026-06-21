@@ -929,7 +929,7 @@ fn yaml_escape_scalar(value: &str) -> String {
         || value.contains('\n')
         || value.contains('\r')
     {
-        format!("\"{}\"", value.replace('"', "\\\"").replace('\n', " ").replace('\r', " "))
+        format!("\"{}\"", value.replace('"', "\\\"").replace(['\n', '\r'], " "))
     } else {
         value.to_string()
     }
