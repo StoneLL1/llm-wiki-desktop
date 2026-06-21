@@ -299,7 +299,6 @@ pub fn rewrite_wikilinks(body: &str, old_stem: &str, new_stem: &str) -> (String,
     let mut out = String::with_capacity(body.len());
     let mut replaced = 0usize;
     let mut i = 0usize;
-    out.push_str(&body[..0]);
     let mut last_copy_end = 0usize;
 
     while i + 1 < bytes.len() {

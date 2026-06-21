@@ -211,7 +211,7 @@ impl SearchService {
         let mut markdown = String::new();
         markdown.push_str("---\n");
         if let Some(page_type) = request.page_type.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-            markdown.push_str(&format!("type: {}\n", page_type));
+            markdown.push_str(&format!("type: {}\n", yaml_escape_scalar(page_type)));
         }
         markdown.push_str(&format!("title: {}\n", yaml_escape_scalar(&title)));
         markdown.push_str(&format!("created: {}\n", created));
@@ -300,8 +300,16 @@ impl SearchService {
             .map_err(|err| file_read_error(err, &old_absolute))?;
         let split = split_frontmatter(&contents);
 
-        // Scan every wiki markdown file and rewrite references to old_stem.
+        // Snapshot every file we will mutate so a mid-rename failure can
+        // restore the working tree to its pre-rename state. The caller's Git
+        // checkpoint protects the before-state for manual recovery, but an
+        // automatic rollback keeps the wiki consistent without forcing the
+        // user to dig through git (mirrors apply_source_delete's backup+restore).
         let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
+        // (project-relative path, original bytes) for each file we touch,
+        // starting with the source page itself.
+        let mut snapshots: Vec<(String, Vec<u8>)> =
+            vec![(relative_path.to_string(), contents.clone().into_bytes())];
         let mut updated_references: Vec<String> = Vec::new();
         for file_absolute in &files {
             // The renamed page itself is handled separately below; rewriting it
@@ -310,24 +318,22 @@ impl SearchService {
             if file_absolute == &old_absolute {
                 continue;
             }
-            let Ok(body) = std::fs::read_to_string(file_absolute) else {
-                continue;
-            };
+            let body = std::fs::read_to_string(file_absolute)
+                .map_err(|err| file_read_error(err, file_absolute))?;
             let (rewritten, n) = rewrite_wikilinks(&body, &old_stem, &new_stem);
             if n > 0 {
                 std::fs::write(file_absolute, rewritten.as_bytes()).map_err(|err| {
                     io_write_error(err, file_absolute)
                 })?;
                 let project_relative = context.to_project_relative(file_absolute)?;
+                snapshots.push((project_relative.clone(), body.into_bytes()));
                 updated_references.push(project_relative);
             }
         }
 
-        // Move the file, rewriting any self-references in its own body.
-        if let Some(parent) = new_absolute.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| io_write_error(err, parent))?;
-        }
+        // Move the file, rewriting any self-references in its own body. On any
+        // failure after this point, roll back every file we touched and remove
+        // the new file if it was created.
         let final_contents = if old_stem == new_stem {
             // Same stem (e.g. only a directory changed) — no self-rewrite needed.
             contents
@@ -338,9 +344,31 @@ impl SearchService {
                 None => rewritten_body,
             }
         };
-        std::fs::write(&new_absolute, final_contents.as_bytes())
-            .map_err(|err| io_write_error(err, &new_absolute))?;
-        std::fs::remove_file(&old_absolute).map_err(|err| io_write_error(err, &old_absolute))?;
+        let rename_result = (|| {
+            if let Some(parent) = new_absolute.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| io_write_error(err, parent))?;
+            }
+            std::fs::write(&new_absolute, final_contents.as_bytes())
+                .map_err(|err| io_write_error(err, &new_absolute))?;
+            std::fs::remove_file(&old_absolute).map_err(|err| io_write_error(err, &old_absolute))?;
+            Ok::<(), BackendError>(())
+        })();
+        if let Err(error) = rename_result {
+            // Roll back: restore every touched file from its snapshot, then
+            // drop the half-written new file. Git checkpoint from the caller
+            // remains the long-term safety net.
+            for (rel, bytes) in &snapshots {
+                if let Ok(abs) = context.resolve_project_path(rel) {
+                    if let Some(parent) = abs.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&abs, bytes);
+                }
+            }
+            let _ = std::fs::remove_file(&new_absolute);
+            return Err(error);
+        }
 
         let hash = self.file_store.file_hash(context, new_relative_path)?;
         let graph_cache_invalidated = self.invalidate_graph_cache(context);
@@ -360,6 +388,8 @@ impl SearchService {
     /// extension). Used by the delete path to warn the user that those links
     /// would become missing after deletion. Matching is case-insensitive on the
     /// link target, consistent with `extract_wikilinks` / `rewrite_wikilinks`.
+    /// A page's self-references (it links to its own stem) are excluded: those
+    /// links vanish with the page and would not show up as missing elsewhere.
     pub fn find_pages_referencing(
         &self,
         context: &ProjectContext,
@@ -369,9 +399,19 @@ impl SearchService {
         let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
         let mut referencing: Vec<String> = Vec::new();
         for file_absolute in &files {
-            let Ok(body) = std::fs::read_to_string(file_absolute) else {
+            // Skip the target page itself: a self-link `[[self]]` disappears
+            // with the page and should not appear in the "missing links"
+            // preview (the preview warns about *other* pages breaking).
+            if file_absolute
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase() == needle)
+                .unwrap_or(false)
+            {
                 continue;
-            };
+            }
+            let body = std::fs::read_to_string(file_absolute)
+                .map_err(|err| file_read_error(err, file_absolute))?;
             let split = split_frontmatter(&body);
             let links = extract_wikilinks(&split.body);
             if links
@@ -422,17 +462,27 @@ impl SearchService {
         }
         let current_hash = self.file_store.file_hash(context, target_path)?;
         if current_hash != target_hash {
+            // Surface the on-disk baseline so the frontend can show what
+            // changed since the delete was requested (consistent with the
+            // file_store FILE_HASH_MISMATCH baseline surface).
+            let baseline_content = std::fs::read(&absolute)
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+            let mut details = serde_json::json!({
+                "path": target_path,
+                "expectedHash": target_hash,
+                "currentHash": current_hash,
+            });
+            if let Some(baseline) = baseline_content {
+                details["baselineContent"] = serde_json::Value::String(baseline);
+            }
             return Err(BackendError::new(
                 "FILE_HASH_MISMATCH",
                 "The wiki page changed since the delete was requested. Reload and try again.".to_string(),
                 true,
                 true,
             )
-            .with_details(serde_json::json!({
-                "path": target_path,
-                "expectedHash": target_hash,
-                "currentHash": current_hash,
-            })));
+            .with_details(details));
         }
 
         // Pre-delete safety checkpoint (CLAUDE.md). Scoped to the target path
@@ -446,6 +496,13 @@ impl SearchService {
             &[target_path.to_string()],
         )?;
 
+        // Snapshot the file bytes so a mid-operation failure can restore the
+        // working tree. `unstage_paths` alone only resets the index, not the
+        // working tree, so a successful remove_file followed by a failed
+        // post-delete checkpoint would otherwise leave the page gone on disk
+        // (mirrors the backup+restore pattern in apply_source_delete).
+        let snapshot = std::fs::read(&absolute).map_err(|err| file_read_error(err, &absolute))?;
+
         let result = (|| {
             std::fs::remove_file(&absolute).map_err(|err| io_write_error(err, &absolute))?;
             // Drop the deleted page from the graph cache so a stale node
@@ -458,13 +515,14 @@ impl SearchService {
                 context,
                 CheckpointPurpose::FinalResult,
                 "Delete wiki page",
-                &[target_path.to_string(), ".app/graph-cache.json".to_string()],
+                &[target_path.to_string()],
             )?;
             Ok::<(), BackendError>(())
         })();
         if let Err(error) = result {
-            // A failed delete leaves the file in place; unstage anything the
-            // pre-delete checkpoint staged so the working tree is clean.
+            // Restore the page on disk and unstage so the working tree returns
+            // to its pre-delete state.
+            let _ = std::fs::write(&absolute, &snapshot);
             let _ = git_service.unstage_paths(context, &[target_path.to_string()]);
             return Err(error);
         }
@@ -862,10 +920,16 @@ fn io_write_error(err: std::io::Error, path: &Path) -> BackendError {
 
 /// Quote a scalar for our hand-rolled frontmatter parser, matching
 /// `chat_service::yaml_scalar`. Quote when the value would otherwise be parsed
-/// as a list or a nested mapping (`:`, `[`, `]`, or a leading quote).
+/// as a list, a nested mapping (`:`), a multi-line value (newline), or carry a
+/// leading/special character the parser treats specially.
 fn yaml_escape_scalar(value: &str) -> String {
-    if value.contains(':') || value.contains('[') || value.contains(']') {
-        format!("\"{}\"", value.replace('"', "\\\""))
+    if value.contains(':')
+        || value.contains('[')
+        || value.contains(']')
+        || value.contains('\n')
+        || value.contains('\r')
+    {
+        format!("\"{}\"", value.replace('"', "\\\"").replace('\n', " ").replace('\r', " "))
     } else {
         value.to_string()
     }
@@ -1605,5 +1669,126 @@ mod tests {
         assert!(!context.resolve_project_path(target_path).unwrap().exists());
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn find_pages_referencing_excludes_self_links() {
+        // A page that links to its own stem should not appear in the
+        // "will show as missing" preview — those links vanish with the page.
+        let (context, root) = tmp_context("refs-self");
+        seed_sample_vault(&context);
+        // react-pattern now self-links.
+        std::fs::write(
+            context.wiki_dir.join("concepts").join("react-pattern.md"),
+            "# ReAct Pattern\n\nSee [[react-pattern]] for details.",
+        )
+        .unwrap();
+        let service = SearchService::default();
+
+        let refs = service
+            .find_pages_referencing(&context, "react-pattern")
+            .unwrap();
+        // agent-memory links react-pattern; react-pattern itself is excluded.
+        assert_eq!(refs, vec!["wiki/concepts/agent-memory.md".to_string()]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rename_page_rolls_back_referrers_when_move_fails() {
+        // If the file move fails after referrers were rewritten, every touched
+        // file must be restored to its pre-rename content so the wiki is not
+        // left with [[new]] pointing at a non-existent page.
+        let (context, root) = tmp_context("rename-rollback");
+        seed_sample_vault(&context);
+        let service = SearchService::default();
+
+        // agent-memory links react-pattern; snapshot its original content.
+        let referrer_path = context.wiki_dir.join("concepts").join("agent-memory.md");
+        let original_referrer = std::fs::read(&referrer_path).unwrap();
+
+        // Make the destination's parent creation fail by placing a file where
+        // an intermediate directory would need to be. The full new path does
+        // not exist, so the FILE_ALREADY_EXISTS pre-check passes, but
+        // create_dir_all("wiki/concepts/blocker/sub") fails because "blocker"
+        // is a file — exercising rollback after referrers were rewritten.
+        std::fs::write(context.wiki_dir.join("concepts").join("blocker"), "block")
+            .unwrap();
+
+        let err = service
+            .rename_page(
+                &context,
+                "wiki/concepts/react-pattern.md",
+                "wiki/concepts/blocker/sub/never.md",
+            )
+            .expect_err("rename whose destination parent cannot be created must fail");
+        // The failure surfaces via io_write_error (create_dir_all path).
+        assert_eq!(err.code, "FILE_WRITE_FAILED");
+
+        // The referrer must be restored to its original bytes (not left with
+        // [[react-pattern]] stripped/rewritten to the new stem).
+        let after_referrer = std::fs::read(&referrer_path).unwrap();
+        assert_eq!(
+            after_referrer, original_referrer,
+            "referrer must be rolled back to its pre-rename content"
+        );
+        // The source page must still exist (move did not complete).
+        assert!(context
+            .wiki_dir
+            .join("concepts")
+            .join("react-pattern.md")
+            .exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_page_escapes_page_type_and_title_in_frontmatter() {
+        // page_type and title must be YAML-escaped so a value with a colon or
+        // newline cannot inject extra frontmatter keys.
+        let (context, root) = tmp_context("create-escape");
+        seed_sample_vault(&context);
+        let service = SearchService::default();
+
+        let request = CreateWikiPageRequest {
+            project_id: "project-1".into(),
+            project_root_path: context.root.to_string_lossy().to_string(),
+            relative_path: "wiki/concepts/injected.md".to_string(),
+            title: Some("Title: with colon\nand newline".to_string()),
+            page_type: Some("concept\nmalicious: true".to_string()),
+        };
+        service.create_page(&context, &request).unwrap();
+
+        let written = std::fs::read_to_string(
+            context
+                .wiki_dir
+                .join("concepts")
+                .join("injected.md"),
+        )
+        .unwrap();
+        // The injected "malicious: true" must not appear as its own key — it
+        // is quoted inside the type value (newline collapsed to space).
+        assert!(
+            !written.contains("\nmalicious: true"),
+            "page_type newline must not inject a frontmatter key: {written}"
+        );
+        assert!(written.contains("type: \"concept malicious: true\""));
+        // Title colon is quoted.
+        assert!(written.contains("title: \"Title: with colon and newline\""));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rewrite_wikilinks_handles_cjk_target_and_alias_preservation() {
+        // CJK in the wikilink target (not just the filename) must rewrite, and
+        // alias/anchor around a CJK target must be preserved.
+        use crate::utils::markdown_utils::rewrite_wikilinks;
+        let body = "see [[智能体]] and [[智能体|AI Agent]] and [[智能体#概述]]";
+        let (out, n) = rewrite_wikilinks(body, "智能体", "AI助手");
+        assert_eq!(n, 3);
+        assert!(out.contains("[[AI助手]]"));
+        assert!(out.contains("[[AI助手|AI Agent]]"));
+        assert!(out.contains("[[AI助手#概述]]"));
     }
 }
