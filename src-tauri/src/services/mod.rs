@@ -22,7 +22,7 @@ pub use extraction_service::ExtractionService;
 pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
 pub use graph_service::GraphService;
-pub use import_service::ImportService;
+pub use import_service::{classify_file, ImportService};
 pub use lint_service::LintService;
 pub use llm_service::LlmService;
 pub use project_service::ProjectService;

@@ -4,6 +4,7 @@ import { AlertTriangle, Check, File, FileWarning, LoaderCircle, Upload } from "l
 import {
   type ImportFileEntry,
   type ImportPreview,
+  type ImportedSource,
   EXTRACTION_STATUS_LABELS,
   FILE_TYPE_LABELS,
 } from "../../types/import";
@@ -33,6 +34,11 @@ interface ImportViewProps {
   preview: ImportPreview | null;
   isConfirming: boolean;
   onRequestPreview: (paths: string[]) => void;
+  onRequestClipboard: (content: string) => void;
+  onRequestUrl: (url: string) => void;
+  importedSources: ImportedSource[];
+  onDeleteSource: (path: string) => void;
+  onReplaceSource: (path: string, replacementPath: string) => void;
   onConfirm: () => void;
 }
 
@@ -40,10 +46,19 @@ export function ImportView({
   preview,
   isConfirming,
   onRequestPreview,
+  onRequestClipboard,
+  onRequestUrl,
+  importedSources,
+  onDeleteSource,
+  onReplaceSource,
   onConfirm,
 }: ImportViewProps) {
   const { t } = useTranslation();
   const [sourcePath, setSourcePath] = useState("");
+  const [url, setUrl] = useState("");
+  const [clipboardContent, setClipboardContent] = useState("");
+  const [sourceMode, setSourceMode] = useState<"path" | "url" | "clipboard">("path");
+  const [replacementPaths, setReplacementPaths] = useState<Record<string, string>>({});
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
   const hasPreview = preview !== null;
@@ -56,20 +71,60 @@ export function ImportView({
     <div className="flex h-full flex-col overflow-hidden">
       {/* Drop zone / toolbar */}
       <div className="shrink-0 border-b border-[var(--border)] px-4 py-3">
+        <div className="mb-2 flex gap-1" role="tablist" aria-label={t("import.sourceMode")}>
+          {(["path", "url", "clipboard"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              role="tab"
+              aria-selected={sourceMode === mode}
+              onClick={() => setSourceMode(mode)}
+              className={`h-[26px] rounded-[var(--radius-md)] px-2 text-[12px] ${sourceMode === mode ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]" : "text-[var(--text-muted)] hover:bg-[var(--surface-muted)]"}`}
+            >
+              {t(`import.sourceMode.${mode}`)}
+            </button>
+          ))}
+        </div>
         <form
           className="flex items-center gap-3 rounded-lg border border-[var(--border)] px-4 py-3"
           onSubmit={(event) => {
             event.preventDefault();
-            if (sourcePath.trim()) onRequestPreview([sourcePath.trim()]);
+            if (sourceMode === "path" && sourcePath.trim()) onRequestPreview([sourcePath.trim()]);
+            if (sourceMode === "url" && url.trim()) onRequestUrl(url.trim());
+            if (sourceMode === "clipboard" && clipboardContent.trim()) onRequestClipboard(clipboardContent);
           }}
         >
           <Upload size={16} className="text-[var(--text-muted)] shrink-0" />
-          <label className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-[var(--text-muted)]">
+          {sourceMode === "path" ? <label className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-[var(--text-muted)]">
             <span className="shrink-0">{t("import.sourcePath")}</span>
             <input aria-label={t("import.sourcePath")} className="settings-input min-w-0 flex-1 font-mono" value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder={t("import.sourcePathPlaceholder")} />
-          </label>
-          <button type="submit" disabled={!sourcePath.trim()} className="rounded-md bg-[var(--foreground)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--text-primary)] disabled:opacity-50">{t("view.import.actionPrimary")}</button>
+          </label> : sourceMode === "url" ? <label className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-[var(--text-muted)]">
+            <span className="shrink-0">{t("import.articleUrl")}</span>
+            <input type="url" aria-label={t("import.articleUrl")} className="settings-input min-w-0 flex-1 font-mono" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/article" />
+          </label> : <label className="flex min-w-0 flex-1 items-start gap-2 text-[12px] text-[var(--text-muted)]">
+            <span className="shrink-0 pt-2">{t("import.clipboardMarkdown")}</span>
+            <textarea aria-label={t("import.clipboardMarkdown")} className="settings-input min-h-[72px] min-w-0 flex-1 font-mono" value={clipboardContent} onChange={(event) => setClipboardContent(event.target.value)} placeholder={t("import.clipboardPlaceholder")} />
+          </label>}
+          <button type="submit" disabled={sourceMode === "path" ? !sourcePath.trim() : sourceMode === "url" ? !url.trim() : !clipboardContent.trim()} className="rounded-md bg-[var(--foreground)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--text-primary)] disabled:opacity-50">{t("view.import.actionPrimary")}</button>
         </form>
+
+        {importedSources.length > 0 ? (
+          <details className="mt-2 rounded-md border border-[var(--border)] px-3 py-2">
+            <summary className="cursor-pointer text-[12px] font-medium text-[var(--text-secondary)]">
+              {t("import.manageSources", { count: importedSources.length })}
+            </summary>
+            <div className="mt-2 max-h-40 overflow-auto">
+              {importedSources.map((source) => (
+                <div key={source.path} className="flex items-center gap-2 border-t border-[var(--border-subtle)] py-2 first:border-t-0">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={source.path}>{source.path}</span>
+                  <input aria-label={t("import.replacementPathFor", { path: source.path })} className="settings-input w-56 font-mono text-[11px]" value={replacementPaths[source.path] ?? ""} onChange={(event) => setReplacementPaths((current) => ({ ...current, [source.path]: event.target.value }))} placeholder={t("import.replacementPath")} />
+                  <button type="button" className="settings-button settings-button--secondary" disabled={!replacementPaths[source.path]?.trim()} onClick={() => onReplaceSource(source.path, replacementPaths[source.path].trim())}>{t("import.replaceSource")}</button>
+                  <button type="button" className="settings-button text-[var(--danger)]" onClick={() => onDeleteSource(source.path)}>{t("import.deleteSource")}</button>
+                </div>
+              ))}
+            </div>
+          </details>
+        ) : null}
 
         {/* Summary bar */}
         {hasPreview && (

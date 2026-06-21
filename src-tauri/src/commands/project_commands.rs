@@ -61,6 +61,13 @@ pub fn open_project(
     let outcome = state.project_service.open_project(&request.path)?;
     if let Some(summary) = outcome.summary.as_ref() {
         if outcome.kind == OpenProjectKind::Opened {
+            let context = crate::models::paths::ProjectContext::new(
+                summary.project_id.clone(),
+                PathBuf::from(&summary.root_path),
+            );
+            state
+                .git_service
+                .initialize_repository(&context, "Initialize existing wiki project")?;
             state.project_registry.register(
                 summary.project_id.clone(),
                 &PathBuf::from(&summary.root_path),

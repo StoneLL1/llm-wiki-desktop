@@ -13,7 +13,7 @@ to skip the GUI/Tauri feature (Windows Insider WebView2 DLL blocker — see
 ### Frontend
 
 ```
-npm run test    # 16 files, 60 tests, all passed
+npm run test    # 20 files, 72 tests, all passed
 npm run lint    # eslint . --max-warnings=0 → 0 problems
 npm run build   # tsc -b && vite build → built in ~2s
 ```
@@ -28,7 +28,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test mvp_flow --no-default-fea
 # test result: ok. 9 passed; 0 failed
 
 cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features --offline
-# test result: ok. 235 passed; 0 failed
+# test result: ok. 247 passed; 0 failed
 ```
 
 ## MVP loops covered (`src-tauri/tests/mvp_flow.rs`)
@@ -90,3 +90,16 @@ shared text branch), HTML (Readability.js), URL (fetch + Readability.js metadata
 - **Lint flow:** local deterministic rules in `run_local_lint()`; Agent
   deep-lint JSON parsed by `parse_agent_issues()`; fixes constrained to
   `wiki/` paths with checkpoint-gated high-risk branches.
+
+## Manual and release-configuration acceptance
+
+- Packaged Windows/macOS/Linux builds must manually verify tray close behavior,
+  OS notification click routing, native path selection, and Unicode/CJK paths.
+- Real Agent CLI and BYOK provider calls require local credentials and are not
+  exercised by the fake-backed automated suite.
+- The update UI intentionally reports that no update source is configured.
+  Shipping download/install requires a release endpoint and signing public key;
+  those are release inputs and are not fabricated in application code.
+- Sources imported before `.app/source-index.json` existed are listed, but
+  automatic replace/delete is refused because their extracted-artifact ownership
+  cannot be inferred safely.

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
 use crate::errors::BackendError;
-use crate::models::compile::CompileManifest;
+use crate::models::compile::{CompileConflictResolution, CompileFile, CompileManifest};
 use crate::models::paths::ProjectContext;
 use crate::services::{FileStore, WriteMode};
 
@@ -20,6 +20,80 @@ pub struct CompileBackup {
 pub struct CompileService;
 
 impl CompileService {
+    pub fn resolve_conflict_manifest(
+        manifest: &CompileManifest,
+        conflict_paths: &[String],
+        resolution: CompileConflictResolution,
+        manual_files: &[CompileFile],
+    ) -> Result<CompileManifest, BackendError> {
+        Self::validate_manifest(manifest)?;
+        let conflicts: HashSet<&str> = conflict_paths.iter().map(String::as_str).collect();
+        let manifest_paths: HashSet<&str> = manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(manifest.deletions.iter().map(String::as_str))
+            .collect();
+        if conflicts.iter().any(|path| !manifest_paths.contains(path)) {
+            return Err(BackendError::new(
+                "COMPILE_CONFLICT_PATH_INVALID",
+                "A conflict path is not part of the generated manifest.",
+                false,
+                true,
+            ));
+        }
+        if resolution == CompileConflictResolution::UseGenerated {
+            return Ok(manifest.clone());
+        }
+        let mut resolved = CompileManifest {
+            files: manifest
+                .files
+                .iter()
+                .filter(|file| !conflicts.contains(file.path.as_str()))
+                .cloned()
+                .collect(),
+            deletions: manifest
+                .deletions
+                .iter()
+                .filter(|path| !conflicts.contains(path.as_str()))
+                .cloned()
+                .collect(),
+            summary: manifest.summary.clone(),
+        };
+        if resolution == CompileConflictResolution::KeepCurrent {
+            return Ok(resolved);
+        }
+
+        let mut manual_by_path = HashMap::new();
+        for file in manual_files {
+            if !conflicts.contains(file.path.as_str())
+                || manual_by_path.insert(file.path.as_str(), file).is_some()
+            {
+                return Err(BackendError::new(
+                    "COMPILE_MANUAL_MERGE_INVALID",
+                    "Manual merge files must map one-to-one to conflicting paths.",
+                    true,
+                    true,
+                ));
+            }
+        }
+        if manual_by_path.len() != conflicts.len() {
+            return Err(BackendError::new(
+                "COMPILE_MANUAL_MERGE_INCOMPLETE",
+                "Manual merge content is required for every conflicting path.",
+                true,
+                true,
+            ));
+        }
+        for path in conflict_paths {
+            resolved
+                .files
+                .push((*manual_by_path[path.as_str()]).clone());
+        }
+        Self::validate_manifest(&resolved)?;
+        Ok(resolved)
+    }
+
     pub fn parse_manifest(raw: &str) -> Result<CompileManifest, BackendError> {
         let trimmed = raw.trim();
         let json = if let Some(start) = trimmed.find("```json") {
@@ -494,5 +568,89 @@ mod tests {
         let manifest = CompileService::parse_manifest(raw).unwrap();
         assert_eq!(manifest.summary, "ok");
         assert_eq!(manifest.files.len(), 3);
+    }
+
+    #[test]
+    fn conflict_resolution_keeps_current_paths_but_applies_uncontested_candidates() {
+        let manifest = CompileManifest {
+            files: vec![
+                CompileFile::new("wiki/conflict.md", "generated conflict"),
+                CompileFile::new("wiki/safe.md", "generated safe"),
+                CompileFile::new("wiki/index.md", "# Index"),
+                CompileFile::new("wiki/overview.md", "# Overview"),
+                CompileFile::new("wiki/log.md", "# Log"),
+            ],
+            deletions: vec!["wiki/delete-conflict.md".to_string()],
+            summary: "compile".to_string(),
+        };
+
+        let resolved = CompileService::resolve_conflict_manifest(
+            &manifest,
+            &[
+                "wiki/conflict.md".to_string(),
+                "wiki/delete-conflict.md".to_string(),
+            ],
+            crate::models::compile::CompileConflictResolution::KeepCurrent,
+            &[],
+        )
+        .unwrap();
+
+        assert!(resolved
+            .files
+            .iter()
+            .any(|file| file.path == "wiki/safe.md"));
+        assert!(!resolved
+            .files
+            .iter()
+            .any(|file| file.path == "wiki/conflict.md"));
+        assert!(resolved.deletions.is_empty());
+    }
+
+    #[test]
+    fn manual_conflict_resolution_requires_content_for_every_conflicting_path() {
+        let manifest = CompileManifest {
+            files: vec![
+                CompileFile::new("wiki/conflict.md", "generated"),
+                CompileFile::new("wiki/index.md", "# Index"),
+                CompileFile::new("wiki/overview.md", "# Overview"),
+                CompileFile::new("wiki/log.md", "# Log"),
+            ],
+            deletions: vec!["wiki/deleted.md".to_string()],
+            summary: "compile".to_string(),
+        };
+        let conflicts = vec![
+            "wiki/conflict.md".to_string(),
+            "wiki/deleted.md".to_string(),
+        ];
+
+        let missing = CompileService::resolve_conflict_manifest(
+            &manifest,
+            &conflicts,
+            crate::models::compile::CompileConflictResolution::ManualMerge,
+            &[CompileFile::new("wiki/conflict.md", "merged")],
+        )
+        .expect_err("manual merge must cover deletions too");
+        assert_eq!(missing.code, "COMPILE_MANUAL_MERGE_INCOMPLETE");
+
+        let resolved = CompileService::resolve_conflict_manifest(
+            &manifest,
+            &conflicts,
+            crate::models::compile::CompileConflictResolution::ManualMerge,
+            &[
+                CompileFile::new("wiki/conflict.md", "merged"),
+                CompileFile::new("wiki/deleted.md", "kept and edited"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(resolved.files.len(), 5);
+        assert!(resolved.deletions.is_empty());
+        assert_eq!(
+            resolved
+                .files
+                .iter()
+                .find(|file| file.path == "wiki/conflict.md")
+                .map(|file| file.content.as_str()),
+            Some("merged")
+        );
     }
 }

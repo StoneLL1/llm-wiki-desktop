@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import { useGraphStore } from "../../stores/graphStore";
 
 describe("graphStore", () => {
+  beforeEach(() => invokeMock.mockReset());
   it("starts with sensible defaults", () => {
     useGraphStore.getState().reset();
     const state = useGraphStore.getState();
@@ -45,5 +49,30 @@ describe("graphStore", () => {
     expect(state.data?.nodes).toHaveLength(1);
     expect(state.data?.layout?.positions["wiki/a.md"]).toEqual([0.1, 0.2]);
     expect(state.cached).toBe(true);
+  });
+
+  it("runs a rebuild as a background task before loading its cache", async () => {
+    const data = {
+      nodes: [], edges: [], contentHash: "new", builtAt: "2026-06-21T00:00:00Z", layout: null,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "build_graph") {
+        return Promise.resolve({ id: "graph-task", status: "succeeded", error: null });
+      }
+      if (command === "get_graph") {
+        return Promise.resolve({ data, cached: true, layoutStale: true });
+      }
+      return Promise.resolve(null);
+    });
+
+    await useGraphStore.getState().rebuild("project-1", "D:/wiki");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "build_graph", {
+      request: { projectId: "project-1", projectRootPath: "D:/wiki" },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "get_graph", {
+      request: { projectId: "project-1", projectRootPath: "D:/wiki" },
+    });
+    expect(useGraphStore.getState().data).toEqual(data);
   });
 });

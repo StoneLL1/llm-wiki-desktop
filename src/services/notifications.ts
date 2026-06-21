@@ -1,9 +1,13 @@
 import {
   isPermissionGranted,
+  onAction,
   requestPermission,
   sendNotification,
+  type Options,
 } from "@tauri-apps/plugin-notification";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import i18next from "i18next";
+import { useTaskStore } from "../stores/taskStore";
 import type { BackendEvent, BackendTask } from "../types/task";
 
 let permissionGranted: boolean | null = null;
@@ -26,6 +30,28 @@ function taskFromPayload(payload: unknown): BackendTask | null {
   return null;
 }
 
+function notificationRoute(event: BackendEvent): Record<string, string> {
+  return { taskId: event.taskId ?? "", eventType: event.eventType };
+}
+
+export async function handleNotificationAction(
+  notification: Pick<Options, "extra">,
+): Promise<void> {
+  const taskId = notification.extra?.taskId;
+  if (typeof taskId !== "string" || !taskId) return;
+  useTaskStore.getState().openDrawer(taskId);
+  const window = getCurrentWindow();
+  await window.show();
+  await window.setFocus();
+}
+
+export async function registerNotificationActionListener(): Promise<() => void> {
+  const listener = await onAction((notification) => {
+    void handleNotificationAction(notification);
+  });
+  return () => listener.unregister();
+}
+
 /**
  * Fire an OS notification for a task-related backend event. No-ops silently when
  * permission has not been granted or the notification plugin is unavailable.
@@ -44,6 +70,7 @@ export async function notifyTaskEvent(event: BackendEvent): Promise<void> {
         body: task
           ? t("notification.taskCompleted.body", { title: task.title })
           : t("notification.taskCompleted.bodyGeneric"),
+        extra: notificationRoute(event),
       });
       break;
     }
@@ -54,6 +81,7 @@ export async function notifyTaskEvent(event: BackendEvent): Promise<void> {
         body: task
           ? t("notification.taskFailed.body", { title: task.title, reason })
           : t("notification.taskFailed.bodyGeneric", { reason }),
+        extra: notificationRoute(event),
       });
       break;
     }
@@ -63,6 +91,7 @@ export async function notifyTaskEvent(event: BackendEvent): Promise<void> {
         body: task
           ? t("notification.confirmationNeeded.body", { title: task.title })
           : t("notification.confirmationNeeded.bodyGeneric"),
+        extra: notificationRoute(event),
       });
       break;
     }

@@ -128,6 +128,22 @@ pub fn confirm_pending_action(
         .confirm(&request.action_id, request.status.clone())?;
 
     if request.status == ConfirmationStatus::Cancelled {
+        if let Some(ConfirmationExecution::ReplaceSource {
+            project_id,
+            root_path,
+            old_artifacts,
+            new_artifacts,
+            ..
+        }) = stored.execution.as_ref()
+        {
+            if let Ok(context) = state.resolve_project_context(project_id, root_path) {
+                state.import_service.cleanup_replacement_artifacts(
+                    &context,
+                    old_artifacts,
+                    new_artifacts,
+                );
+            }
+        }
         return Ok(ConfirmedAction {
             action: stored.action,
             status: ConfirmationStatus::Cancelled,
@@ -176,6 +192,42 @@ pub fn confirm_pending_action(
             true,
             true,
         )),
+        Some(ConfirmationExecution::DeleteSource {
+            project_id,
+            root_path,
+            target_path,
+            target_hash,
+            artifacts,
+        }) => execute_source_delete(
+            &state,
+            stored.action,
+            &project_id,
+            &root_path,
+            &target_path,
+            &target_hash,
+            &artifacts,
+        ),
+        Some(ConfirmationExecution::ReplaceSource {
+            project_id,
+            root_path,
+            target_path,
+            target_hash,
+            replacement_path,
+            replacement_hash,
+            old_artifacts,
+            new_artifacts,
+        }) => execute_source_replace(
+            &state,
+            stored.action,
+            &project_id,
+            &root_path,
+            &target_path,
+            &target_hash,
+            &replacement_path,
+            &replacement_hash,
+            &old_artifacts,
+            &new_artifacts,
+        ),
         None => Err(BackendError::new(
             "CONFIRMATION_EXECUTION_MISSING",
             "The pending action has no backend execution plan.",
@@ -184,4 +236,75 @@ pub fn confirm_pending_action(
         )
         .with_details(serde_json::json!({ "actionId": request.action_id }))),
     }
+}
+
+fn execute_source_delete(
+    state: &AppState,
+    action: crate::models::confirmation::PendingAction,
+    project_id: &str,
+    root_path: &str,
+    target_path: &str,
+    target_hash: &str,
+    artifacts: &[String],
+) -> Result<ConfirmedAction, BackendError> {
+    let context = state.resolve_project_context(project_id, root_path)?;
+    let checkpoint_exists = state.import_service.apply_source_delete(
+        &context,
+        &state.file_store,
+        &state.git_service,
+        target_path,
+        target_hash,
+        artifacts,
+    )?;
+    Ok(ConfirmedAction {
+        action,
+        status: ConfirmationStatus::Confirmed,
+        checkpoint_exists,
+        project_summary: Some(state.project_service.scan_project(&context, None)),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_source_replace(
+    state: &AppState,
+    action: crate::models::confirmation::PendingAction,
+    project_id: &str,
+    root_path: &str,
+    target_path: &str,
+    target_hash: &str,
+    replacement_path: &str,
+    replacement_hash: &str,
+    old_artifacts: &[String],
+    new_artifacts: &[String],
+) -> Result<ConfirmedAction, BackendError> {
+    let context = state.resolve_project_context(project_id, root_path)?;
+    let replacement = PathBuf::from(replacement_path);
+    let result = state.import_service.apply_source_replace(
+        &context,
+        &state.file_store,
+        &state.git_service,
+        target_path,
+        target_hash,
+        &replacement,
+        replacement_hash,
+        old_artifacts,
+        new_artifacts,
+    );
+    let checkpoint_exists = match result {
+        Ok(checkpoint_exists) => checkpoint_exists,
+        Err(error) => {
+            state.import_service.cleanup_replacement_artifacts(
+                &context,
+                old_artifacts,
+                new_artifacts,
+            );
+            return Err(error);
+        }
+    };
+    Ok(ConfirmedAction {
+        action,
+        status: ConfirmationStatus::Confirmed,
+        checkpoint_exists,
+        project_summary: Some(state.project_service.scan_project(&context, None)),
+    })
 }

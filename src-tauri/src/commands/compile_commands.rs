@@ -25,6 +25,29 @@ pub struct ConfirmCompileRequest {
     pub confirmed: bool,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetCompileConflictRequest {
+    pub action_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileConflictDetail {
+    pub path: String,
+    pub current_content: Option<String>,
+    pub generated_content: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveCompileConflictRequest {
+    pub action_id: String,
+    pub resolution: crate::models::compile::CompileConflictResolution,
+    #[serde(default)]
+    pub manual_files: Vec<crate::models::compile::CompileFile>,
+}
+
 #[tauri::command]
 pub fn start_wiki_compile(
     app: AppHandle,
@@ -357,6 +380,150 @@ fn finish_compile(
         .transition_status(task_id, TaskStatus::Succeeded)
         .map_err(task_error)?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_compile_conflict_details(
+    state: State<'_, AppState>,
+    request: GetCompileConflictRequest,
+) -> Result<Vec<CompileConflictDetail>, BackendError> {
+    let stored = state.confirmation_registry.peek(&request.action_id)?;
+    let ConfirmationExecution::CompileMerge {
+        project_id,
+        root_path,
+        manifest,
+        ..
+    } = stored.execution.ok_or_else(|| {
+        BackendError::new(
+            "CONFIRMATION_EXECUTION_MISSING",
+            "Compile confirmation has no execution plan.",
+            false,
+            true,
+        )
+    })?
+    else {
+        return Err(BackendError::new(
+            "CONFIRMATION_TYPE_INVALID",
+            "Confirmation is not a compile action.",
+            false,
+            true,
+        ));
+    };
+    let context = state.resolve_project_context(&project_id, &root_path)?;
+    let generated: HashMap<&str, &str> = manifest
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.content.as_str()))
+        .collect();
+    stored
+        .action
+        .affected_paths
+        .into_iter()
+        .map(|path| {
+            let absolute = context.resolve_project_path(&path)?;
+            let current_content = if absolute.exists() {
+                Some(state.file_store.read_markdown(&context, &path)?)
+            } else {
+                None
+            };
+            Ok(CompileConflictDetail {
+                generated_content: generated
+                    .get(path.as_str())
+                    .map(|value| (*value).to_string()),
+                path,
+                current_content,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn resolve_compile_conflict(
+    state: State<'_, AppState>,
+    request: ResolveCompileConflictRequest,
+) -> Result<BackendTask, BackendError> {
+    use crate::models::confirmation::ConfirmationStatus;
+    let stored = state.confirmation_registry.peek(&request.action_id)?;
+    let conflict_paths = stored.action.affected_paths.clone();
+    let ConfirmationExecution::CompileMerge {
+        project_id,
+        root_path,
+        task_id,
+        route,
+        manifest,
+        current_hashes,
+        checkpoint_hash,
+    } = stored.execution.ok_or_else(|| {
+        BackendError::new(
+            "CONFIRMATION_EXECUTION_MISSING",
+            "Compile confirmation has no execution plan.",
+            false,
+            true,
+        )
+    })?
+    else {
+        return Err(BackendError::new(
+            "CONFIRMATION_TYPE_INVALID",
+            "Confirmation is not a compile action.",
+            false,
+            true,
+        ));
+    };
+    let task = state.task_service.get_task(&task_id).ok_or_else(|| {
+        BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
+    })?;
+    if task.status != TaskStatus::WaitingForConfirmation {
+        return Err(BackendError::new(
+            "CONFIRMATION_STATE_MISMATCH",
+            "Compile task is no longer waiting for confirmation.",
+            true,
+            true,
+        ));
+    }
+    let context = state.resolve_project_context(&project_id, &root_path)?;
+    ensure_checkpoint_head(&state, &context, checkpoint_hash.as_deref())?;
+    let resolved_manifest = CompileService::resolve_conflict_manifest(
+        &manifest,
+        &conflict_paths,
+        request.resolution,
+        &request.manual_files,
+    )?;
+    state
+        .confirmation_registry
+        .confirm(&request.action_id, ConfirmationStatus::Confirmed)?;
+    state
+        .task_service
+        .transition_status(&task_id, TaskStatus::Running)
+        .map_err(task_error)?;
+    let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
+    let backup = CompileService::backup_outputs(&context, &resolved_manifest)?;
+    let affected_paths =
+        match CompileService::apply_confirmed_manifest(&context, &resolved_manifest, &hashes) {
+            Ok(paths) => paths,
+            Err(error) => {
+                let _ = CompileService::restore_outputs(&context, &backup);
+                let _ = state.task_service.set_error(&task_id, error.clone());
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, TaskStatus::Failed);
+                return Err(error);
+            }
+        };
+    if let Err(error) = finish_compile(&state, &context, &task_id, route, affected_paths, None) {
+        let _ = state
+            .git_service
+            .unstage_paths(&context, &compile_output_paths(&resolved_manifest));
+        CompileService::restore_outputs(&context, &backup)?;
+        let _ = state.task_service.set_error(&task_id, error.clone());
+        let _ = state
+            .task_service
+            .transition_status(&task_id, TaskStatus::Failed);
+        return Err(error);
+    }
+    state
+        .task_service
+        .get_task(&task_id)
+        .ok_or_else(|| BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false))
 }
 
 #[tauri::command]

@@ -1,14 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::errors::BackendError;
+use crate::models::git::CheckpointPurpose;
 use crate::models::import::{
     ConflictResolution, ConflictType, ExtractResult, ExtractionStatus, ImportConflict,
-    ImportFileEntry, ImportPreview, ImportRequest, ImportSummary, SourceFileType,
+    ImportFileEntry, ImportPreview, ImportRequest, ImportSummary, ImportedSource,
+    SourceArtifactIndex, SourceFileType,
 };
 use crate::models::paths::ProjectContext;
-use crate::services::file_store::FileStore;
+use crate::services::{file_store::FileStore, GitService};
 
 // ── Free functions: usable from other services without coupling ──
 
@@ -72,6 +74,7 @@ pub fn classify_file(path: &Path) -> SourceFileType {
         "txt" | "text" => SourceFileType::Text,
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" => SourceFileType::Image,
         "html" | "htm" => SourceFileType::Html,
+        "url" => SourceFileType::Url,
         _ => SourceFileType::Unknown,
     }
 }
@@ -111,7 +114,326 @@ pub fn deterministic_rename(original_name: &str, hash: &str) -> String {
 #[derive(Default)]
 pub struct ImportService;
 
+type FileBackup = Vec<(PathBuf, Option<Vec<u8>>)>;
+
 impl ImportService {
+    pub fn validate_imported_source_path(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+    ) -> Result<PathBuf, BackendError> {
+        let normalized = relative_path.replace('\\', "/");
+        if !(normalized.starts_with("raw/sources/") || normalized.starts_with("raw/assets/")) {
+            return Err(BackendError::new(
+                "SOURCE_PATH_OUT_OF_SCOPE",
+                "Source operations are limited to raw/sources and raw/assets.",
+                true,
+                true,
+            ));
+        }
+        let path = context.resolve_project_path(&normalized)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            BackendError::new("SOURCE_NOT_FOUND", error.to_string(), true, true)
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(BackendError::new(
+                "SOURCE_PATH_INVALID",
+                "The source path must be a regular file and cannot be a symlink.",
+                true,
+                true,
+            ));
+        }
+        Ok(path)
+    }
+
+    pub fn list_imported_sources(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<Vec<ImportedSource>, BackendError> {
+        let mut paths = Vec::new();
+        for root in [
+            context.raw_dir.join("sources"),
+            context.raw_dir.join("assets"),
+        ] {
+            if root.exists() {
+                collect_source_files(&root, &mut paths)?;
+            }
+        }
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let relative = context.to_project_relative(&path)?;
+                Ok(ImportedSource {
+                    size_bytes: path.metadata().map(|value| value.len()).unwrap_or(0),
+                    file_type: classify_file(&path),
+                    path: relative,
+                })
+            })
+            .collect()
+    }
+
+    pub fn hash_external_file(&self, path: &Path) -> Result<String, BackendError> {
+        file_hash_fast(path)
+    }
+
+    pub fn cleanup_replacement_artifacts(
+        &self,
+        context: &ProjectContext,
+        old_artifacts: &[String],
+        new_artifacts: &[String],
+    ) {
+        let current: HashSet<&str> = old_artifacts.iter().map(String::as_str).collect();
+        let staged_only: Vec<String> = new_artifacts
+            .iter()
+            .filter(|path| !current.contains(path.as_str()))
+            .cloned()
+            .collect();
+        remove_project_files(context, &staged_only);
+    }
+
+    pub fn read_source_index(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+    ) -> Result<SourceArtifactIndex, BackendError> {
+        let path = context.app_dir.join("source-index.json");
+        if !path.exists() {
+            return Ok(SourceArtifactIndex::default());
+        }
+        file_store.read_json(context, ".app/source-index.json")
+    }
+
+    pub fn record_confirmed_sources(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        preview: &ImportPreview,
+    ) -> Result<(), BackendError> {
+        let mut index = self.read_source_index(context, file_store)?;
+        for entry in &preview.files {
+            if matches!(
+                entry
+                    .conflict
+                    .as_ref()
+                    .and_then(|conflict| conflict.resolution.as_ref()),
+                Some(ConflictResolution::Skip | ConflictResolution::LinkToExisting)
+            ) {
+                continue;
+            }
+            let mut artifacts = entry.extracted_assets.clone();
+            if let Some(path) = entry.extracted_text_path.clone() {
+                artifacts.push(path);
+            }
+            artifacts.sort();
+            artifacts.dedup();
+            index.sources.insert(entry.archived_path.clone(), artifacts);
+        }
+        file_store.write_json_atomic(context, ".app/source-index.json", &index)
+    }
+
+    pub fn apply_source_delete(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        git_service: &GitService,
+        target_path: &str,
+        target_hash: &str,
+        artifacts: &[String],
+    ) -> Result<bool, BackendError> {
+        self.validate_imported_source_path(context, target_path)?;
+        verify_project_hash(file_store, context, target_path, target_hash)?;
+        validate_artifact_paths(context, artifacts)?;
+        let mut scoped = vec![
+            target_path.to_string(),
+            ".app/source-index.json".to_string(),
+        ];
+        scoped.extend(artifacts.iter().cloned());
+        let backup = backup_project_files(context, &scoped)?;
+        let checkpoint = git_service.create_scoped_checkpoint(
+            context,
+            CheckpointPurpose::HighRiskOperation,
+            "Before deleting original source",
+            &scoped,
+        )?;
+        let result = (|| {
+            fs::remove_file(context.resolve_project_path(target_path)?).map_err(|error| {
+                BackendError::new("SOURCE_DELETE_FAILED", error.to_string(), true, false)
+            })?;
+            remove_project_files(context, artifacts);
+            let mut index = self.read_source_index(context, file_store)?;
+            index.sources.remove(target_path);
+            file_store.write_json_atomic(context, ".app/source-index.json", &index)?;
+            git_service.create_scoped_checkpoint(
+                context,
+                CheckpointPurpose::FinalResult,
+                "Delete original source",
+                &scoped,
+            )?;
+            Ok::<(), BackendError>(())
+        })();
+        if let Err(error) = result {
+            restore_project_files(&backup);
+            let _ = git_service.unstage_paths(context, &scoped);
+            return Err(error);
+        }
+        Ok(checkpoint.commit_hash.is_some())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_source_replace(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        git_service: &GitService,
+        target_path: &str,
+        target_hash: &str,
+        replacement_path: &Path,
+        replacement_hash: &str,
+        old_artifacts: &[String],
+        new_artifacts: &[String],
+    ) -> Result<bool, BackendError> {
+        let operation = (|| {
+            self.validate_imported_source_path(context, target_path)?;
+            verify_project_hash(file_store, context, target_path, target_hash)?;
+            if self.hash_external_file(replacement_path)? != replacement_hash {
+                return Err(BackendError::new(
+                    "CONFIRMATION_STATE_MISMATCH",
+                    "The replacement source changed after preview.",
+                    true,
+                    true,
+                ));
+            }
+            validate_artifact_paths(context, old_artifacts)?;
+            validate_artifact_paths(context, new_artifacts)?;
+            let mut before_paths = vec![
+                target_path.to_string(),
+                ".app/source-index.json".to_string(),
+            ];
+            before_paths.extend(old_artifacts.iter().cloned());
+            let mut result_paths = before_paths.clone();
+            result_paths.extend(new_artifacts.iter().cloned());
+            let backup = backup_project_files(context, &result_paths)?;
+            let checkpoint = git_service.create_scoped_checkpoint(
+                context,
+                CheckpointPurpose::HighRiskOperation,
+                "Before replacing original source",
+                &before_paths,
+            )?;
+            let mutation = (|| {
+                fs::copy(replacement_path, context.resolve_project_path(target_path)?).map_err(
+                    |error| {
+                        BackendError::new("SOURCE_REPLACE_FAILED", error.to_string(), true, false)
+                    },
+                )?;
+                let keep: HashSet<&str> = new_artifacts.iter().map(String::as_str).collect();
+                let obsolete: Vec<String> = old_artifacts
+                    .iter()
+                    .filter(|path| !keep.contains(path.as_str()))
+                    .cloned()
+                    .collect();
+                remove_project_files(context, &obsolete);
+                let mut index = self.read_source_index(context, file_store)?;
+                index
+                    .sources
+                    .insert(target_path.to_string(), new_artifacts.to_vec());
+                file_store.write_json_atomic(context, ".app/source-index.json", &index)?;
+                git_service.create_scoped_checkpoint(
+                    context,
+                    CheckpointPurpose::FinalResult,
+                    "Replace original source",
+                    &result_paths,
+                )?;
+                Ok::<(), BackendError>(())
+            })();
+            if let Err(error) = mutation {
+                restore_project_files(&backup);
+                let _ = git_service.unstage_paths(context, &result_paths);
+                return Err(error);
+            }
+            Ok(checkpoint.commit_hash.is_some())
+        })();
+        if operation.is_err() {
+            self.cleanup_replacement_artifacts(context, old_artifacts, new_artifacts);
+        }
+        operation
+    }
+
+    pub fn collect_source_paths(
+        &self,
+        source_paths: &[String],
+    ) -> Result<Vec<PathBuf>, BackendError> {
+        let mut files = Vec::new();
+        for source_path in source_paths {
+            collect_source_files(Path::new(source_path), &mut files)?;
+        }
+        Ok(files)
+    }
+
+    pub fn stage_text_source(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        source_name: &str,
+        extension: &str,
+        content: &str,
+    ) -> Result<PathBuf, BackendError> {
+        if content.trim().is_empty() {
+            return Err(BackendError::new(
+                "IMPORT_TEXT_EMPTY",
+                "Clipboard or URL content cannot be empty.",
+                true,
+                true,
+            ));
+        }
+        if content.len() > 5 * 1024 * 1024 {
+            return Err(BackendError::new(
+                "IMPORT_TEXT_TOO_LARGE",
+                "Clipboard or extracted URL content exceeds the 5 MB limit.",
+                true,
+                false,
+            ));
+        }
+        if !matches!(extension, "md" | "url") {
+            return Err(BackendError::new(
+                "IMPORT_STAGING_TYPE_INVALID",
+                "Only Markdown clipboard and URL staging files are supported.",
+                false,
+                true,
+            ));
+        }
+
+        let safe_stem: String = source_name
+            .chars()
+            .filter_map(|ch| {
+                if ch.is_alphanumeric() || matches!(ch, '-' | '_') {
+                    Some(ch)
+                } else if ch.is_whitespace() {
+                    Some('-')
+                } else {
+                    None
+                }
+            })
+            .take(80)
+            .collect();
+        let safe_stem = safe_stem.trim_matches('-');
+        let safe_stem = if safe_stem.is_empty() {
+            "import"
+        } else {
+            safe_stem
+        };
+        let staging_dir = context.app_dir.join("import-staging");
+        file_store.ensure_absolute_dir(&staging_dir)?;
+        let path = staging_dir.join(format!(
+            "{}-{}.{}",
+            safe_stem,
+            uuid::Uuid::new_v4(),
+            extension
+        ));
+        file_store.write_text_absolute(&path, content)?;
+        Ok(path)
+    }
+
     pub fn preview_import(
         &self,
         context: &ProjectContext,
@@ -134,10 +456,7 @@ impl ImportService {
         // Build a set of known hashes from existing files in raw/
         let known = self.scan_existing(context)?;
 
-        let mut source_paths = Vec::new();
-        for source_path in &request.source_paths {
-            collect_source_files(Path::new(source_path), &mut source_paths)?;
-        }
+        let source_paths = self.collect_source_paths(&request.source_paths)?;
 
         for source_path in &source_paths {
             let source_path_str = source_path.to_string_lossy().to_string();
@@ -170,6 +489,10 @@ impl ImportService {
                 page_count: extract.and_then(|e| e.metadata.as_ref().and_then(|m| m.page_count)),
                 word_count: extract.and_then(|e| e.metadata.as_ref().and_then(|m| m.word_count)),
                 metadata: extract.and_then(|e| e.metadata.clone()),
+                extracted_text_path: extract.and_then(|e| e.extracted_text_path.clone()),
+                extracted_assets: extract
+                    .map(|e| e.extracted_assets.clone())
+                    .unwrap_or_default(),
                 conflict: None,
                 renamed_from: None,
             };
@@ -250,9 +573,10 @@ impl ImportService {
     pub fn confirm_import(
         &self,
         context: &ProjectContext,
-        _file_store: &FileStore,
+        file_store: &FileStore,
         preview: &ImportPreview,
     ) -> Result<(), BackendError> {
+        let mut planned = Vec::new();
         for entry in &preview.files {
             if matches!(
                 entry
@@ -294,18 +618,48 @@ impl ImportService {
                 })));
             }
 
+            planned.push((entry, source.to_path_buf(), target));
+        }
+
+        let mut copied = Vec::new();
+        for (entry, source, target) in &planned {
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    BackendError::new("FILE_DIR_CREATE_FAILED", err.to_string(), true, false)
-                })?;
+                if let Err(err) = fs::create_dir_all(parent) {
+                    rollback_import_targets(&copied);
+                    return Err(BackendError::new(
+                        "FILE_DIR_CREATE_FAILED",
+                        err.to_string(),
+                        true,
+                        false,
+                    ));
+                }
             }
-            fs::copy(source, &target).map_err(|err| {
-                BackendError::new("IMPORT_ARCHIVE_COPY_FAILED", err.to_string(), true, false)
-                    .with_details(serde_json::json!({
-                        "sourcePath": entry.source_path,
-                        "archivedPath": entry.archived_path,
-                    }))
-            })?;
+            if let Err(err) = fs::copy(source, target) {
+                rollback_import_targets(&copied);
+                return Err(BackendError::new(
+                    "IMPORT_ARCHIVE_COPY_FAILED",
+                    err.to_string(),
+                    true,
+                    false,
+                )
+                .with_details(serde_json::json!({
+                    "sourcePath": entry.source_path,
+                    "archivedPath": entry.archived_path,
+                })));
+            }
+            copied.push(target.clone());
+        }
+
+        if let Err(error) = self.record_confirmed_sources(context, file_store, preview) {
+            rollback_import_targets(&copied);
+            return Err(error);
+        }
+
+        let staging_dir = context.app_dir.join("import-staging");
+        for (_, source, _) in planned {
+            if source.starts_with(&staging_dir) {
+                let _ = fs::remove_file(source);
+            }
         }
 
         Ok(())
@@ -413,6 +767,89 @@ impl ImportService {
             }
         }
         Ok(())
+    }
+}
+
+fn rollback_import_targets(paths: &[PathBuf]) {
+    for path in paths.iter().rev() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn verify_project_hash(
+    file_store: &FileStore,
+    context: &ProjectContext,
+    path: &str,
+    expected: &str,
+) -> Result<(), BackendError> {
+    if file_store.file_hash(context, path)? != expected {
+        return Err(BackendError::new(
+            "CONFIRMATION_STATE_MISMATCH",
+            "The original source changed after preview.",
+            true,
+            true,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_paths(context: &ProjectContext, paths: &[String]) -> Result<(), BackendError> {
+    for path in paths {
+        let normalized = path.replace('\\', "/");
+        if !normalized.starts_with("raw/extracted/") {
+            return Err(BackendError::new(
+                "SOURCE_ARTIFACT_PATH_INVALID",
+                "Source artifacts must remain under raw/extracted.",
+                false,
+                true,
+            ));
+        }
+        context.resolve_project_path(&normalized)?;
+    }
+    Ok(())
+}
+
+fn remove_project_files(context: &ProjectContext, paths: &[String]) {
+    for path in paths {
+        if let Ok(absolute) = context.resolve_project_path(path) {
+            let _ = fs::remove_file(absolute);
+        }
+    }
+}
+
+fn backup_project_files(
+    context: &ProjectContext,
+    paths: &[String],
+) -> Result<FileBackup, BackendError> {
+    paths
+        .iter()
+        .map(|path| {
+            let absolute = context.resolve_project_path(path)?;
+            let bytes = if absolute.exists() {
+                Some(fs::read(&absolute).map_err(|error| {
+                    BackendError::new("SOURCE_BACKUP_FAILED", error.to_string(), true, false)
+                })?)
+            } else {
+                None
+            };
+            Ok((absolute, bytes))
+        })
+        .collect()
+}
+
+fn restore_project_files(backup: &FileBackup) {
+    for (path, bytes) in backup {
+        match bytes {
+            Some(bytes) => {
+                if let Some(parent) = path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(path, bytes);
+            }
+            None => {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -528,6 +965,41 @@ mod tests {
     #[test]
     fn classifies_html() {
         assert_eq!(classify_file(Path::new("page.html")), SourceFileType::Html);
+    }
+
+    #[test]
+    fn classifies_staged_url_sources() {
+        assert_eq!(classify_file(Path::new("article.url")), SourceFileType::Url);
+        assert_eq!(
+            target_archive_dir(&SourceFileType::Url),
+            "raw/sources/links"
+        );
+    }
+
+    #[test]
+    fn staged_text_sources_are_backend_named_and_project_scoped() {
+        let (context, root) = tmp_context("staged-text");
+        let staged = ImportService
+            .stage_text_source(
+                &context,
+                &FileStore,
+                "../../危险标题",
+                "md",
+                "# Clipboard\n\ncontent",
+            )
+            .unwrap();
+
+        assert!(staged.starts_with(root.join(".app/import-staging")));
+        assert_eq!(
+            staged.extension().and_then(|value| value.to_str()),
+            Some("md")
+        );
+        assert_eq!(
+            fs::read_to_string(&staged).unwrap(),
+            "# Clipboard\n\ncontent"
+        );
+        assert!(!staged.to_string_lossy().contains(".."));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -786,6 +1258,11 @@ mod tests {
         let archived = root.join("raw/sources/markdown/notes.md");
         assert!(archived.exists());
         assert_eq!(fs::read_to_string(archived).unwrap(), "# Imported notes");
+        let index = service.read_source_index(&context, &store).unwrap();
+        assert_eq!(
+            index.sources.get("raw/sources/markdown/notes.md"),
+            Some(&Vec::<String>::new())
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -849,6 +1326,37 @@ mod tests {
         assert_eq!(err.code, "IMPORT_SOURCE_CHANGED");
         assert!(!root.join("raw/sources/markdown/notes.md").exists());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn confirmed_import_does_not_partially_archive_when_a_later_source_is_stale() {
+        let (context, root) = tmp_context("confirm-atomic-validation");
+        let source_dir = root.join("import-source");
+        fs::create_dir_all(&source_dir).unwrap();
+        let first = source_dir.join("first.md");
+        let second = source_dir.join("second.md");
+        fs::write(&first, "# First").unwrap();
+        fs::write(&second, "# Second").unwrap();
+        let request = ImportRequest {
+            source_paths: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            allow_duplicates: false,
+            link_duplicates: false,
+        };
+        let preview = ImportService
+            .preview_import(&context, &FileStore, &request, &[])
+            .unwrap();
+        fs::remove_file(&second).unwrap();
+
+        let error = ImportService
+            .confirm_import(&context, &FileStore, &preview)
+            .expect_err("the batch must fail before copying any source");
+
+        assert_eq!(error.code, "IMPORT_SOURCE_MISSING");
+        assert!(!root.join("raw/sources/markdown/first.md").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1031,6 +1539,212 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn imported_source_management_is_scoped_to_regular_raw_files() {
+        let (context, root) = tmp_context("source-management-scope");
+        let source = root.join("raw/sources/markdown/资料.md");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "# Source").unwrap();
+
+        let service = ImportService;
+        let listed = service.list_imported_sources(&context).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "raw/sources/markdown/资料.md");
+        assert!(service
+            .validate_imported_source_path(&context, "raw/sources/markdown/资料.md")
+            .is_ok());
+        assert_eq!(
+            service
+                .validate_imported_source_path(&context, "wiki/index.md")
+                .unwrap_err()
+                .code,
+            "SOURCE_PATH_OUT_OF_SCOPE"
+        );
+        assert!(service
+            .validate_imported_source_path(&context, "raw/sources/../../purpose.md")
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_artifact_cleanup_preserves_artifacts_shared_with_the_current_source() {
+        let (context, root) = tmp_context("replacement-cleanup");
+        let shared = root.join("raw/extracted/shared.md");
+        let staged = root.join("raw/extracted/staged.md");
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&shared, "shared").unwrap();
+        fs::write(&staged, "staged").unwrap();
+
+        ImportService.cleanup_replacement_artifacts(
+            &context,
+            &["raw/extracted/shared.md".to_string()],
+            &[
+                "raw/extracted/shared.md".to_string(),
+                "raw/extracted/staged.md".to_string(),
+            ],
+        );
+
+        assert!(shared.exists());
+        assert!(!staged.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_delete_removes_indexed_artifacts_and_commits_a_clean_result() {
+        let (context, root) = tmp_context("source-delete");
+        let source = root.join("raw/sources/markdown/source.md");
+        let artifact = root.join("raw/extracted/source.md");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        fs::create_dir_all(&context.app_dir).unwrap();
+        fs::write(&source, "# Source").unwrap();
+        fs::write(&artifact, "# Extracted").unwrap();
+        let store = FileStore;
+        store
+            .write_json_atomic(
+                &context,
+                ".app/source-index.json",
+                &SourceArtifactIndex {
+                    sources: HashMap::from([(
+                        "raw/sources/markdown/source.md".to_string(),
+                        vec!["raw/extracted/source.md".to_string()],
+                    )]),
+                },
+            )
+            .unwrap();
+        let git = GitService;
+        git.initialize_repository(&context, "baseline").unwrap();
+        let hash = store
+            .file_hash(&context, "raw/sources/markdown/source.md")
+            .unwrap();
+
+        let checkpoint = ImportService
+            .apply_source_delete(
+                &context,
+                &store,
+                &git,
+                "raw/sources/markdown/source.md",
+                &hash,
+                &["raw/extracted/source.md".to_string()],
+            )
+            .unwrap();
+
+        assert!(checkpoint);
+        assert!(!source.exists());
+        assert!(!artifact.exists());
+        assert!(ImportService
+            .read_source_index(&context, &store)
+            .unwrap()
+            .sources
+            .is_empty());
+        assert!(!git.repository_status(&context).unwrap().has_changes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejected_source_replacement_cleans_only_new_staged_artifacts() {
+        let (context, root) = tmp_context("source-replace-rejected");
+        let source = root.join("raw/sources/markdown/source.md");
+        let shared = root.join("raw/extracted/shared.md");
+        let staged = root.join("raw/extracted/staged.md");
+        let replacement = root.join("replacement.md");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&source, "old").unwrap();
+        fs::write(&shared, "shared").unwrap();
+        fs::write(&staged, "staged").unwrap();
+        fs::write(&replacement, "new").unwrap();
+        let service = ImportService;
+        let replacement_hash = service.hash_external_file(&replacement).unwrap();
+
+        let error = service
+            .apply_source_replace(
+                &context,
+                &FileStore,
+                &GitService,
+                "raw/sources/markdown/source.md",
+                "stale-target-hash",
+                &replacement,
+                &replacement_hash,
+                &["raw/extracted/shared.md".to_string()],
+                &[
+                    "raw/extracted/shared.md".to_string(),
+                    "raw/extracted/staged.md".to_string(),
+                ],
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "CONFIRMATION_STATE_MISMATCH");
+        assert_eq!(fs::read_to_string(source).unwrap(), "old");
+        assert!(shared.exists());
+        assert!(!staged.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_replace_updates_archive_artifacts_index_and_commits_a_clean_result() {
+        let (context, root) = tmp_context("source-replace");
+        let source = root.join("raw/sources/markdown/source.md");
+        let old_artifact = root.join("raw/extracted/old.md");
+        let new_artifact = root.join("raw/extracted/new.md");
+        let replacement = root.join("replacement.md");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(old_artifact.parent().unwrap()).unwrap();
+        fs::create_dir_all(&context.app_dir).unwrap();
+        fs::write(&source, "old source").unwrap();
+        fs::write(&old_artifact, "old extracted").unwrap();
+        fs::write(&new_artifact, "new extracted").unwrap();
+        fs::write(&replacement, "new source").unwrap();
+        let store = FileStore;
+        store
+            .write_json_atomic(
+                &context,
+                ".app/source-index.json",
+                &SourceArtifactIndex {
+                    sources: HashMap::from([(
+                        "raw/sources/markdown/source.md".to_string(),
+                        vec!["raw/extracted/old.md".to_string()],
+                    )]),
+                },
+            )
+            .unwrap();
+        let git = GitService;
+        git.initialize_repository(&context, "baseline").unwrap();
+        let target_hash = store
+            .file_hash(&context, "raw/sources/markdown/source.md")
+            .unwrap();
+        let replacement_hash = ImportService.hash_external_file(&replacement).unwrap();
+
+        let checkpoint = ImportService
+            .apply_source_replace(
+                &context,
+                &store,
+                &git,
+                "raw/sources/markdown/source.md",
+                &target_hash,
+                &replacement,
+                &replacement_hash,
+                &["raw/extracted/old.md".to_string()],
+                &["raw/extracted/new.md".to_string()],
+            )
+            .unwrap();
+
+        assert!(checkpoint);
+        assert_eq!(fs::read_to_string(source).unwrap(), "new source");
+        assert!(!old_artifact.exists());
+        assert!(new_artifact.exists());
+        assert_eq!(
+            ImportService
+                .read_source_index(&context, &store)
+                .unwrap()
+                .sources
+                .get("raw/sources/markdown/source.md"),
+            Some(&vec!["raw/extracted/new.md".to_string()])
+        );
+        assert!(!git.repository_status(&context).unwrap().has_changes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     // ── Extraction status in preview test ──
 
     #[test]
@@ -1059,8 +1773,8 @@ mod tests {
                     word_count: Some(3),
                     language: None,
                 }),
-                extracted_text_path: None,
-                extracted_assets: vec![],
+                extracted_text_path: Some("raw/extracted/good.txt".to_string()),
+                extracted_assets: vec!["raw/extracted/good-cover.png".to_string()],
             },
             ExtractResult {
                 original_name: source_dir.join("bad.pdf").to_string_lossy().to_string(),
@@ -1096,6 +1810,11 @@ mod tests {
         assert_eq!(good.extraction_status, ExtractionStatus::Extracted);
         assert_eq!(good.text_preview, Some("# Good file".to_string()));
         assert_eq!(good.word_count, Some(3));
+        assert_eq!(
+            good.extracted_text_path.as_deref(),
+            Some("raw/extracted/good.txt")
+        );
+        assert_eq!(good.extracted_assets, vec!["raw/extracted/good-cover.png"]);
 
         let bad = preview
             .files
@@ -1129,6 +1848,8 @@ mod tests {
                 page_count: None,
                 word_count: None,
                 metadata: None,
+                extracted_text_path: None,
+                extracted_assets: vec![],
                 conflict: None,
                 renamed_from: None,
             }],

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
   X,
@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useTaskStore } from "../../stores/taskStore";
 import { fetchTaskLogs, cancelTaskRequest } from "../../stores/taskStore";
+import { useToastStore } from "../../stores/toastStore";
 import type { BackendTask, LogLine, TaskStatus } from "../../types/task";
 import { isTerminalStatus, TASK_STATUS_ORDER } from "../../types/task";
 
@@ -75,6 +76,12 @@ function ProgressBar({ task }: { task: BackendTask }) {
   );
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Unknown error";
+}
+
 export function TaskLogDrawer() {
   const { t } = useTranslation();
   const tasks = useTaskStore((s) => s.tasks);
@@ -83,6 +90,9 @@ export function TaskLogDrawer() {
   const selectedTaskId = useTaskStore((s) => s.selectedTaskId);
   const closeDrawer = useTaskStore((s) => s.closeDrawer);
   const selectTask = useTaskStore((s) => s.selectTask);
+  const pushToast = useToastStore((s) => s.pushToast);
+  const translationRef = useRef(t);
+  translationRef.current = t;
 
   const sorted = useMemo(() => {
     return [...tasks].sort(
@@ -93,26 +103,32 @@ export function TaskLogDrawer() {
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
   const selectedLogs = selectedTaskId ? logs[selectedTaskId] ?? [] : [];
 
+  const loadLogs = useCallback((taskId: string) => {
+    void fetchTaskLogs(taskId).catch((error) => {
+      pushToast("error", translationRef.current("task.logsError", { message: errorMessage(error) }));
+    });
+  }, [pushToast]);
+
   useEffect(() => {
     if (selectedTaskId && !isTerminalStatus(selectedTask?.status ?? "queued")) {
       const interval = setInterval(() => {
-        fetchTaskLogs(selectedTaskId);
+        loadLogs(selectedTaskId);
       }, 2000);
       return () => clearInterval(interval);
     }
-  }, [selectedTaskId, selectedTask?.status]);
+  }, [loadLogs, selectedTaskId, selectedTask?.status]);
 
   useEffect(() => {
     if (selectedTaskId) {
-      fetchTaskLogs(selectedTaskId);
+      loadLogs(selectedTaskId);
     }
-  }, [selectedTaskId]);
+  }, [loadLogs, selectedTaskId]);
 
   const handleCancel = async (taskId: string) => {
     try {
       await cancelTaskRequest(taskId);
-    } catch {
-      // handled by store
+    } catch (error) {
+      pushToast("error", t("task.cancelError", { message: errorMessage(error) }));
     }
   };
 
@@ -145,25 +161,26 @@ export function TaskLogDrawer() {
             </div>
           ) : (
             sorted.map((task) => (
-              <button
+              <div
                 key={task.id}
-                onClick={() => selectTask(task.id)}
-                className={`w-full text-left px-3 py-2 flex items-center gap-2 text-[13px] hover:bg-[var(--surface-muted)] transition-colors border-l-2 ${
+                className={`w-full flex items-center text-[13px] hover:bg-[var(--surface-muted)] transition-colors border-l-2 ${
                   selectedTaskId === task.id
                     ? "border-l-[var(--accent)] bg-[var(--accent-soft)]"
                     : "border-l-transparent"
                 }`}
-                type="button"
               >
-                <StatusIcon status={task.status} />
-                <span className="truncate flex-1">{task.title}</span>
+                <button
+                  onClick={() => selectTask(task.id)}
+                  className="min-w-0 flex flex-1 items-center gap-2 px-3 py-2 text-left"
+                  type="button"
+                >
+                  <StatusIcon status={task.status} />
+                  <span className="truncate flex-1">{task.title}</span>
+                </button>
                 {!isTerminalStatus(task.status) && task.cancellable && (
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleCancel(task.id);
-                    }}
-                    className="icon-button shrink-0 ml-1"
+                    onClick={() => handleCancel(task.id)}
+                    className="icon-button mr-2 shrink-0"
                     aria-label={t("task.action.cancel")}
                     title={t("task.action.cancel")}
                     type="button"
@@ -171,7 +188,7 @@ export function TaskLogDrawer() {
                     <Square size={10} />
                   </button>
                 )}
-              </button>
+              </div>
             ))
           )}
         </div>

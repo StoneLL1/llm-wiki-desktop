@@ -1,7 +1,12 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useProjectStore } from "../stores/projectStore";
-import { notifyTaskEvent } from "../services/notifications";
+import { useToastStore } from "../stores/toastStore";
+import i18next from "i18next";
+import {
+  notifyTaskEvent,
+  registerNotificationActionListener,
+} from "../services/notifications";
 import {
   fetchTasks,
   handleTaskEvent,
@@ -11,6 +16,10 @@ import type { BackendEvent } from "../types/task";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 const TASK_EVENT_CHANNELS = [
   "task://updated",
@@ -33,6 +42,7 @@ const TASK_EVENT_CHANNELS = [
  */
 export function useTaskEvents(): void {
   const currentProject = useProjectStore((state) => state.currentProject);
+  const pushToast = useToastStore((state) => state.pushToast);
 
   useEffect(() => {
     if (!hasTauri()) return;
@@ -58,18 +68,31 @@ export function useTaskEvents(): void {
         });
     }
 
-    fetchTasks().catch(() => {});
+    registerNotificationActionListener()
+      .then((unlisten) => {
+        if (cancelled) unlisten();
+        else unlisteners.push(unlisten);
+      })
+      .catch(() => {
+        // Notification actions are unavailable in browser-only development.
+      });
+
+    fetchTasks().catch((error) => {
+      pushToast("error", i18next.t("task.loadError", { message: errorMessage(error) }));
+    });
 
     return () => {
       cancelled = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, []);
+  }, [pushToast]);
 
   // Recover persisted tasks whenever the active project root changes.
   useEffect(() => {
     if (currentProject.rootPath) {
-      recoverTasksForProject(currentProject.projectId, currentProject.rootPath).catch(() => {});
+      recoverTasksForProject(currentProject.projectId, currentProject.rootPath).catch((error) => {
+        pushToast("error", i18next.t("task.recoverError", { message: errorMessage(error) }));
+      });
     }
-  }, [currentProject.projectId, currentProject.rootPath]);
+  }, [currentProject.projectId, currentProject.rootPath, pushToast]);
 }

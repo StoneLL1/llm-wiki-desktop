@@ -3,6 +3,8 @@
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
+[2026-06-21] 现象 — `cargo test --lib --no-default-features` 显示 0 tests 或无法覆盖新增 Tauri command，容易把未编译的命令误报为已验证。 — 根因 — `commands` 模块整体受 `#[cfg(feature = "gui")]` 保护，无 GUI 的强制清单只编译 service/model/utils。 — 规避做法 — 可测试逻辑下沉到无 GUI service/utils 并由 lib tests 覆盖；每次新增 command 额外运行默认 feature 的 `cargo check --offline` 验证 IPC 层可编译。
+
 ----------------------------------------------------------------------
 [2026-06-21] 现象 — 切换项目后旧长任务从任务中心消失且无法取消，但 worker 仍继续运行；终态还可能被写进新项目的 `.app/tasks/`。 — 根因 — `set_project_root` 把全局 task cache 与 CancellationRegistry 全清，并且 terminal persistence 读取“当前项目 root”而非“任务启动时 root”；token 缺失时 `is_cancelled` 返回 false，恰好让旧 worker 更难停止。 — 规避做法 — 项目切换不清运行任务/token；创建任务时固定 taskId→root，所有状态与日志按该 root 持久化；UI 新命令 capability 与已启动 worker context 分离，测试必须覆盖 A 运行→切 B→A 仍可见可取消且只写 A。
 [2026-06-21] 现象 — PowerShell 用分号串行执行多项检查时，前面的 `cargo fmt --check` 已失败，但后续 clippy 成功让整条命令最终返回 0，造成检查清单假绿。 — 根因 — PowerShell 默认只以最后一个外部程序的退出码作为脚本退出码，不会自动在非零退出码时终止。 — 规避做法 — 各检查独立运行并分别采集退出码，或每项后显式判断 `$LASTEXITCODE` 并 `exit`；任一失败后必须从清单第一项重跑。
@@ -104,3 +106,5 @@ serde tagged enum `#[serde(tag="kind")]` 不 camelCase 结构变体字段 — `r
 现象 — ProjectReport（项目级报告）传入的 sourcePath 被用作 slug，历史列表里的项目报告文件名被命名成某个单页名（如 `agent-20260620-...`），与「整库报告」语义矛盾、易误导。 — 根因 — build_output_relative_path 对所有类型都用 source_path 做 slug，未区分项目级类型。 — 规避做法 — ExportType::requires_source() 区分单页/项目级；build_output_relative_path 对 ProjectReport **忽略 source_path**，slug 回退为 skill folder 名去 `html-` 前缀（`project-report`）。单测 build_output_relative_path_ignores_source_for_project_report 断言路径不含源页名。
 现象 — cargo build --tests 报 `this function takes 3 arguments but 2 arguments were supplied` 指向 ExportService::build_output_relative_path。 — 根因 — 该方法是 `&self`（持有 FileStore），不是关联函数，测试里写成 `ExportService::build_output_relative_path(...)` 漏了 receiver。 — 规避做法 — 测试里先 `let service = ExportService::default();` 再 `service.build_output_relative_path(...)`。同类 `&self` 方法（build_export_prompt/write_html/append_record/list_records）同此。
 现象 — ESLint/TS 在 AppShell 的通用 else 分支 `t(\`view.${activeView}.paneTitle\`)` 报错，因为新增 exports 分支后 activeView 被收窄为 `never`（全 9 个 AppView case 都已显式分支）。 — 根因 — TypeScript 穷尽性检查：union 在所有 case 处理后剩 never，模板串里的属性访问类型不匹配。 — 规避做法 — 通用兜底分支里 cast `activeView as string`（该分支现已不可达，仅作防御）。或干脆移除兜底分支（若确认 union 已穷尽）。
+来源替换确认前预生成的提取物在取消或 hash 漂移后残留，且直接删除 `new_artifacts` 可能误删与旧来源共享的文件 — 替换预览先写入内容寻址的 `raw/extracted/`，确认动作失败/取消时若不比较旧、新 artifact 集合会留下孤儿或删掉仍在使用的共享产物 — 清理时只删除 `new_artifacts - old_artifacts`，并让 service 在所有错误出口统一执行；用状态漂移回归测试同时断言新产物删除、共享产物保留。
+任务日志 effect 在测试或热重载中无限重复加载 — `useTranslation()` 的 mock/适配器可能每次 render 返回新的 `t` 函数，若日志加载 callback 依赖 `t`，`setLogs` 触发 render 后 callback/effect 身份继续变化，形成加载循环 — 用 ref 读取最新翻译函数，让网络 callback 只依赖稳定的 toast action；定向测试必须能正常退出而不只是断言通过。

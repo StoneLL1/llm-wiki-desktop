@@ -111,15 +111,11 @@ const hasTauri = (): boolean =>
 
 export async function fetchTasks(): Promise<void> {
   if (!hasTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const tasks = await invoke<BackendTask[]>("list_tasks", {
-      request: { statusFilter: null },
-    });
-    useTaskStore.getState().setTasks(tasks);
-  } catch {
-    // Backend not available (e.g. running in browser-only dev)
-  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  const tasks = await invoke<BackendTask[]>("list_tasks", {
+    request: { statusFilter: null },
+  });
+  useTaskStore.getState().setTasks(tasks);
 }
 
 export async function cancelTaskRequest(taskId: string): Promise<void> {
@@ -133,37 +129,25 @@ export async function cancelTaskRequest(taskId: string): Promise<void> {
 
 export async function fetchTaskLogs(taskId: string): Promise<void> {
   if (!hasTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const lines = await invoke<LogLine[]>("get_task_logs", {
-      request: { taskId },
-    });
-    useTaskStore.getState().setLogs(taskId, lines);
-  } catch {
-    // Backend not available
-  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  const lines = await invoke<LogLine[]>("get_task_logs", {
+    request: { taskId },
+  });
+  useTaskStore.getState().setLogs(taskId, lines);
 }
 
 export async function removeCompletedTasks(): Promise<void> {
   if (!hasTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke<number>("remove_completed_tasks");
-    await fetchTasks();
-  } catch {
-    // Backend not available
-  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke<number>("remove_completed_tasks");
+  await fetchTasks();
 }
 
 export async function recoverTasksForProject(projectId: string, rootPath: string): Promise<void> {
   if (!hasTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const tasks = await invoke<BackendTask[]>("set_active_project", {
-      request: { projectId, rootPath },
-    });
-    useTaskStore.getState().setTasks(tasks);
-  } catch {
-    // Backend not available (e.g. browser-only dev)
-  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  const tasks = await invoke<BackendTask[]>("set_active_project", {
+    request: { projectId, rootPath },
+  });
+  useTaskStore.getState().setTasks(tasks);
 }
