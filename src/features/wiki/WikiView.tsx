@@ -1,13 +1,20 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Book, Edit2, LoaderCircle, Star } from "lucide-react";
+import { Book, Edit2, FileOutput, LoaderCircle, Star } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 
+import { useExportStore } from "../../stores/exportStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useTaskStore } from "../../stores/taskStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
+import type { ExportRecord, ExportType } from "../../types/export";
+import { isTerminalStatus, type BackendTask } from "../../types/task";
 import type { CreateWikiPageInput, WikiPageContent, WikiPageMeta } from "../../types/wiki";
 import { MarkdownReader } from "./MarkdownReader";
 import { ConflictDiffDialog } from "./ConflictDiffDialog";
+import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
+import { HtmlPreviewPane } from "./HtmlPreviewPane";
 import { WikiEditor } from "./WikiEditor";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
@@ -24,6 +31,8 @@ export function WikiView() {
     | { kind: "delete"; action: PendingAction }
     | null
   >(null);
+  const [htmlDialogOpen, setHtmlDialogOpen] = useState(false);
+  const [htmlTemplate, setHtmlTemplate] = useState<ExportType>("beautiful_read");
 
   const tree = useWikiStore((state) => state.tree);
   const loadingTree = useWikiStore((state) => state.loadingTree);
@@ -50,17 +59,106 @@ export function WikiView() {
   const confirmDeletePage = useWikiStore((state) => state.confirmDeletePage);
   const cancelPendingAction = useWikiStore((state) => state.cancelPendingAction);
 
+  const exportRecords = useExportStore((state) => state.records);
+  const runningExportTaskId = useExportStore((state) => state.runningTaskId);
+  const previewHtml = useExportStore((state) => state.previewHtml);
+  const previewId = useExportStore((state) => state.previewId);
+  const loadExports = useExportStore((state) => state.loadExports);
+  const startExport = useExportStore((state) => state.startExport);
+  const regenerateExport = useExportStore((state) => state.regenerateExport);
+  const clearRunningTask = useExportStore((state) => state.clearRunningTask);
+  const loadPreview = useExportStore((state) => state.loadPreview);
+  const openFolder = useExportStore((state) => state.openFolder);
+  const tasks = useTaskStore((state) => state.tasks);
+  const upsertTask = useTaskStore((state) => state.upsertTask);
+  const openTaskDrawer = useTaskStore((state) => state.openDrawer);
+
   const { projectId, rootPath } = currentProject;
 
   useEffect(() => {
     void scan(projectId, rootPath);
   }, [projectId, rootPath, scan]);
 
+  useEffect(() => {
+    void loadExports(projectId, rootPath);
+  }, [projectId, rootPath, loadExports]);
+
+  const runningExportTask = runningExportTaskId
+    ? tasks.find((task) => task.id === runningExportTaskId) ?? null
+    : null;
+
+  useEffect(() => {
+    if (!runningExportTask || !isTerminalStatus(runningExportTask.status)) return;
+    void loadExports(projectId, rootPath).then(() => {
+      clearRunningTask();
+      if (runningExportTask.status !== "succeeded") return;
+      const latest = useExportStore
+        .getState()
+        .records.filter((record) => record.exportType === htmlTemplate)
+        .filter((record) =>
+          htmlTemplate === "project_report"
+            ? true
+            : record.sourcePath === useWikiStore.getState().selectedPath,
+        )
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+      if (!latest) return;
+      void loadPreview(
+        { projectId, projectRootPath: rootPath, outputPath: latest.outputPath },
+        latest.id,
+      );
+    });
+  }, [
+    runningExportTask,
+    projectId,
+    rootPath,
+    htmlTemplate,
+    loadExports,
+    clearRunningTask,
+    loadPreview,
+  ]);
+
   const handleOpen = (path: string) => {
     void openPage(projectId, rootPath, path);
   };
 
   const breadcrumbs = selectedPath ? selectedPath.split("/") : [];
+  const previewRecord: ExportRecord | null =
+    exportRecords.find((record) => record.id === previewId) ??
+    exportRecords
+      .filter((record) =>
+        record.exportType === "project_report" || record.sourcePath === selectedPath,
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ??
+    null;
+
+  const showExportTask = (taskId: string) => {
+    void invoke<BackendTask>("get_task", { request: { taskId } }).then((task) => {
+      if (task) upsertTask(task);
+    });
+    openTaskDrawer(taskId);
+  };
+
+  const handleGenerateHtml = (type: ExportType) => {
+    if (!page) return;
+    setHtmlTemplate(type);
+    setHtmlDialogOpen(false);
+    setMode("preview");
+    const sourcePath = type === "project_report" ? "" : page.meta.path;
+    void startExport(projectId, rootPath, type, sourcePath).then((taskId) => {
+      if (taskId) showExportTask(taskId);
+    });
+  };
+
+  const handleRegenerateHtml = () => {
+    if (!previewRecord) {
+      setHtmlDialogOpen(true);
+      return;
+    }
+    setHtmlTemplate(previewRecord.exportType);
+    void regenerateExport(projectId, rootPath, previewRecord).then((taskId) => {
+      if (taskId) showExportTask(taskId);
+    });
+  };
 
   const handlePageFormSubmit = (input: CreateWikiPageInput) => {
     if (pageForm?.mode === "create") {
@@ -204,7 +302,25 @@ export function WikiView() {
                 icon={<Edit2 size={13} />}
                 label={t("wiki.mode.edit")}
               />
+              <ModeButton
+                active={mode === "preview"}
+                onClick={() => {
+                  if (previewHtml) setMode("preview");
+                  else setHtmlDialogOpen(true);
+                }}
+                icon={<FileOutput size={13} />}
+                label={t("wiki.mode.preview")}
+              />
             </div>
+            <button
+              type="button"
+              disabled={!page || Boolean(runningExportTaskId)}
+              onClick={() => setHtmlDialogOpen(true)}
+              className="inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--foreground)] px-3 text-[11.5px] font-medium text-[var(--text-inverse)] disabled:opacity-40"
+            >
+              <FileOutput size={13} />
+              {t("wiki.html.generate")}
+            </button>
             <button
               type="button"
               disabled={!page}
@@ -248,6 +364,26 @@ export function WikiView() {
                 onReload={() => void reload(projectId, rootPath)}
               />
             </div>
+          ) : mode === "preview" ? (
+            <HtmlPreviewPane
+              html={previewHtml}
+              outputPath={previewRecord?.outputPath ?? null}
+              templateLabel={t(`wiki.html.template.${previewRecord?.exportType ?? htmlTemplate}.title`)}
+              busy={Boolean(runningExportTaskId)}
+              onBack={() => setMode("read")}
+              onRegenerate={handleRegenerateHtml}
+              onOpenFolder={() => {
+                if (!previewRecord) return;
+                void openFolder({
+                  projectId,
+                  projectRootPath: rootPath,
+                  outputPath: previewRecord.outputPath,
+                });
+              }}
+              onCopyPath={() => {
+                if (previewRecord) void navigator.clipboard.writeText(previewRecord.outputPath);
+              }}
+            />
           ) : (
             <ReadingPane
               page={page}
@@ -282,6 +418,13 @@ export function WikiView() {
           onManualMerge={(content) =>
             void resolveConflict(projectId, rootPath, "manual_merge", content)
           }
+        />
+      ) : null}
+      {htmlDialogOpen && page ? (
+        <GenerateHtmlDialog
+          pagePath={page.meta.path}
+          onCancel={() => setHtmlDialogOpen(false)}
+          onGenerate={handleGenerateHtml}
         />
       ) : null}
     </div>
@@ -325,6 +468,8 @@ function ModeButton({
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
       className={`inline-flex h-[26px] items-center gap-1 px-2 text-[11.5px] font-medium transition-colors ${
         active

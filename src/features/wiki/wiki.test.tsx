@@ -12,6 +12,8 @@ import { WikiEditor } from "./WikiEditor";
 import { WikiTree as WikiTreeView } from "./WikiTree";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { ConflictDiffDialog } from "./ConflictDiffDialog";
+import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
+import { HtmlPreviewPane as WikiHtmlPreviewPane } from "./HtmlPreviewPane";
 import { useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
 
@@ -621,6 +623,43 @@ describe("ConflictDiffDialog", () => {
     expect(screen.getByRole("button", { name: "Keep current" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use incoming" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Manual merge" })).toBeInTheDocument();
+  });
+});
+
+describe("Wiki HTML preview", () => {
+  it("offers all four export templates", () => {
+    render(
+      <GenerateHtmlDialog
+        pagePath="wiki/concepts/agent.md"
+        onCancel={vi.fn()}
+        onGenerate={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Beautiful read/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Knowledge card/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Concept map/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Project report/i })).toBeInTheDocument();
+  });
+
+  it("renders generated HTML in a sandboxed iframe", () => {
+    render(
+      <WikiHtmlPreviewPane
+        html="<h1>Preview</h1>"
+        outputPath="exports/html/agent.html"
+        templateLabel="Beautiful read"
+        busy={false}
+        onBack={vi.fn()}
+        onRegenerate={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onCopyPath={vi.fn()}
+      />,
+    );
+
+    const frame = screen.getByTitle("HTML preview");
+    expect(frame).toHaveAttribute("sandbox", "");
+    expect(frame).toHaveAttribute("srcdoc", "<h1>Preview</h1>");
+    expect(screen.getAllByText("exports/html/agent.html")).toHaveLength(2);
   });
 });
 

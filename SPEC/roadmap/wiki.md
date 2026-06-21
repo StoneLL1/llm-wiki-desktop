@@ -85,3 +85,7 @@ Wiki 板块已具备核心骨架但远未对齐设计稿。左侧文件树（`Wi
 6. **P1 - 右侧"操作"区 + citation 编号化 + 反链计数**：补齐 RelatedPagesPanel 的引用/反链视觉与跳转入口。
 7. **P2 - 编辑历史时间线 + 右键菜单 + 键盘快捷键体系**：依赖 Git log / task log 数据源；非 MVP 阻塞项。
 8. **P2 - 阅读视图 lint 可视化叠加**：跨 Lint 板块协同，等 Lint 数据稳定后再接。
+
+## 6. 2026-06-21 wiki-fe loop 后端缺口
+
+- **P1 HTML 预览“外部浏览器打开” blocked**：当前已交付导出命令仅有 `start_export` / `regenerate_export` / `list_exports` / `read_export_preview` / `open_export_folder`，没有安全打开生成 HTML 的外部浏览器命令；本前端 loop 不新增后端命令，故跳过该按钮，其余 preview 第三态不受影响。

@@ -7,8 +7,8 @@
 ## 状态摘要
 
 - P0：4 项 verified，0 项 blocked
-- P1：2 项 pending，0 项 verified，0 项 blocked
-- blocked：无
+- P1：1 项 pending，1 项 verified，1 个子项 blocked
+- blocked：WIKI-FE-05b 外部浏览器打开生成 HTML
 
 ## 执行项
 
@@ -50,12 +50,12 @@
 
 ### WIKI-FE-05 — P1 HTML 预览第三态
 
-- status: pending
+- status: verified
 - 意图：补 read/edit/preview 第三档、四模板选择器、安全 iframe 和重新生成/打开位置/复制路径操作。
 - 决策：复用已交付的 `start_export`、`list_exports`、`read_export_preview`、`open_export_folder` 与现有 export store；不新增后端命令。外部浏览器若无已交付命令则记为 blocked 子项，不越界补后端。
 - 验收：选择模板后启动后台任务；生成记录可加载到 sandbox iframe；模板与输出路径可见；可重新生成、打开位置和复制路径。
 - 预计文件：`src/features/wiki/GenerateHtmlDialog.tsx`、`src/features/wiki/HtmlPreviewPane.tsx`、`src/features/wiki/WikiView.tsx`、`src/features/wiki/wiki.test.tsx`、`src/i18n/locales/*.json`、`src/styles.css`
-- 完成位置：待记录
+- 完成位置：`src/features/wiki/GenerateHtmlDialog.tsx:1-85`；`src/features/wiki/HtmlPreviewPane.tsx:1-78`；`src/features/wiki/WikiView.tsx:1-184,297-328,367-393,421-430`；`src/features/wiki/wiki.test.tsx:629-664`；`src/styles.css:321-440`
 
 ### WIKI-FE-06 — P1 右侧操作、citation 与反链计数
 
@@ -68,7 +68,7 @@
 
 ## Blocked
 
-- 暂无。发现后端契约缺口时在此记录，并同步向 `SPEC/roadmap/wiki.md` 追加一行，不实现替代后端。
+- WIKI-FE-05b — status: blocked — HTML 预览“外部浏览器打开”缺少已交付后端命令；现有 `open_export_folder` 只能打开位置。已按硬边界跳过，不新增 `src-tauri/` 命令；其余第三态、四模板、后台任务、sandbox iframe、重新生成、打开位置、复制路径均继续完成。
 
 ## 收敛清单
 
