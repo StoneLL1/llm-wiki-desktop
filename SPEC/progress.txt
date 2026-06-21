@@ -3,6 +3,8 @@
 > 每完成一个重要进度节点，按时间倒序在此追加一条记录（最新在上）。
 > 格式：[YYYY-MM-DD] 模块/任务 — 完成内容摘要 — 关键决策/遗留问题。
 
+[2026-06-21] wiki-fe WIKI-FE-06 — 右侧补齐操作区（HTML/卡片/图谱/复制 wikilink）、引用/反链元数据计数、citation 编号卡片、逐页反链次数与查看全部；正文 `[1]` / `[^1]` 渲染为可定位 citation-ref。commit `0150c8b`；全量 87 tests + lint 通过。— 关键决策：反链次数从现有 wikilinks 确定性统计；操作通过 typed stores 复用 export/graph/navigation，不引入 ad hoc 事件协议；P2 编辑历史未触碰。
+
 [2026-06-21] wiki-fe WIKI-FE-05 — Wiki 补 read/edit/preview 第三态、四模板选择器、后台 export 任务联动、生成后自动读取预览、sandbox iframe、重新生成/打开位置/复制路径。commit `8ebd007`；清理 3 组陈旧 Vitest worker 后全量 84 tests + lint 通过。— 关键决策：复用现有 exportStore 与已交付后端命令，不新增生成管线；“外部浏览器打开”因无后端命令标 blocked 并记 roadmap，其余第三态已 verified。
 
 [2026-06-21] wiki-fe WIKI-FE-04 — `FILE_HASH_MISMATCH.details.baselineContent/currentHash` 接入三路 Markdown Diff（打开时 baseline / 磁盘 current / editor-Agent incoming），提供保留当前、使用传入、手动合并三选项；覆盖写前调用既有 `create_git_checkpoint`，再用 currentHash 乐观锁保存。commit `9279f0b`；全量 82 tests + lint 通过。— 关键决策：不新增后端命令；若磁盘再次变化则保留 dialog 并刷新 current/hash，绝不静默覆盖。

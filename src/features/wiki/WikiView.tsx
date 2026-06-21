@@ -20,6 +20,22 @@ import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
 import { useWikiStore } from "./wikiStore";
 
+export function selectWikiPreviewRecord(
+  records: ExportRecord[],
+  previewId: string | null,
+  selectedPath: string | null,
+): ExportRecord | null {
+  const belongsToPage = (record: ExportRecord) =>
+    record.exportType === "project_report" || record.sourcePath === selectedPath;
+  const selected = records.find((record) => record.id === previewId);
+  if (selected && belongsToPage(selected)) return selected;
+  return (
+    records
+      .filter(belongsToPage)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null
+  );
+}
+
 export function WikiView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
@@ -33,6 +49,7 @@ export function WikiView() {
   >(null);
   const [htmlDialogOpen, setHtmlDialogOpen] = useState(false);
   const [htmlTemplate, setHtmlTemplate] = useState<ExportType>("beautiful_read");
+  const [conflictDialogOpen, setConflictDialogOpen] = useState(true);
 
   const tree = useWikiStore((state) => state.tree);
   const loadingTree = useWikiStore((state) => state.loadingTree);
@@ -43,6 +60,7 @@ export function WikiView() {
   const saveState = useWikiStore((state) => state.saveState);
   const conflict = useWikiStore((state) => state.conflict);
   const loadingPage = useWikiStore((state) => state.loadingPage);
+  const wikiError = useWikiStore((state) => state.error);
   const scan = useWikiStore((state) => state.scan);
   const openPage = useWikiStore((state) => state.openPage);
   const startEdit = useWikiStore((state) => state.startEdit);
@@ -92,6 +110,10 @@ export function WikiView() {
     consumeExportRequest();
   }, [requestedExportType, consumeExportRequest]);
 
+  useEffect(() => {
+    if (conflict) setConflictDialogOpen(true);
+  }, [conflict?.currentHash]);
+
   const runningExportTask = runningExportTaskId
     ? tasks.find((task) => task.id === runningExportTaskId) ?? null
     : null;
@@ -131,14 +153,8 @@ export function WikiView() {
   };
 
   const breadcrumbs = selectedPath ? selectedPath.split("/") : [];
-  const previewRecord: ExportRecord | null =
-    exportRecords.find((record) => record.id === previewId) ??
-    exportRecords
-      .filter((record) =>
-        record.exportType === "project_report" || record.sourcePath === selectedPath,
-      )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ??
-    null;
+  const previewRecord = selectWikiPreviewRecord(exportRecords, previewId, selectedPath);
+  const pagePreviewHtml = previewRecord?.id === previewId ? previewHtml : null;
 
   const showExportTask = (taskId: string) => {
     void invoke<BackendTask>("get_task", { request: { taskId } }).then((task) => {
@@ -314,8 +330,21 @@ export function WikiView() {
               <ModeButton
                 active={mode === "preview"}
                 onClick={() => {
-                  if (previewHtml) setMode("preview");
-                  else setHtmlDialogOpen(true);
+                  if (pagePreviewHtml) {
+                    setMode("preview");
+                  } else if (previewRecord) {
+                    void loadPreview(
+                      {
+                        projectId,
+                        projectRootPath: rootPath,
+                        outputPath: previewRecord.outputPath,
+                      },
+                      previewRecord.id,
+                    );
+                    setMode("preview");
+                  } else {
+                    setHtmlDialogOpen(true);
+                  }
                 }}
                 icon={<FileOutput size={13} />}
                 label={t("wiki.mode.preview")}
@@ -352,6 +381,12 @@ export function WikiView() {
           </div>
         </div>
 
+        {wikiError ? (
+          <div role="alert" className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
+            {wikiError}
+          </div>
+        ) : null}
+
         <div className="min-h-0 flex-1 overflow-y-auto">
           {!page ? (
             <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
@@ -371,11 +406,12 @@ export function WikiView() {
                 onSave={() => void save(projectId, rootPath)}
                 onCancel={cancelEdit}
                 onReload={() => void reload(projectId, rootPath)}
+                onReviewConflict={() => setConflictDialogOpen(true)}
               />
             </div>
           ) : mode === "preview" ? (
             <HtmlPreviewPane
-              html={previewHtml}
+              html={pagePreviewHtml}
               outputPath={previewRecord?.outputPath ?? null}
               templateLabel={t(`wiki.html.template.${previewRecord?.exportType ?? htmlTemplate}.title`)}
               busy={Boolean(runningExportTaskId)}
@@ -418,10 +454,10 @@ export function WikiView() {
           onConfirm={handleLifecycleConfirm}
         />
       ) : null}
-      {conflict ? (
+      {conflict && conflictDialogOpen ? (
         <ConflictDiffDialog
           conflict={conflict}
-          onCancel={() => void resolveConflict(projectId, rootPath, "keep_current")}
+          onCancel={() => setConflictDialogOpen(false)}
           onKeepCurrent={() => void resolveConflict(projectId, rootPath, "keep_current")}
           onUseIncoming={() => void resolveConflict(projectId, rootPath, "use_incoming")}
           onManualMerge={(content) =>

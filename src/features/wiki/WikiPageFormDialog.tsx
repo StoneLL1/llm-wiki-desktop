@@ -11,6 +11,15 @@ interface WikiPageFormDialogProps {
   onSubmit: (input: CreateWikiPageInput) => void;
 }
 
+const WIKI_FOLDER_TYPES: Record<string, WikiPageType> = {
+  entities: "entity",
+  concepts: "concept",
+  sources: "source",
+  synthesis: "synthesis",
+  comparisons: "comparison",
+  queries: "query",
+};
+
 function normalizeWikiPath(value: string): string {
   let path = value.trim().replace(/\\/g, "/").replace(/^\/+/, "");
   if (!path.startsWith("wiki/")) path = `wiki/${path}`;
@@ -20,10 +29,7 @@ function normalizeWikiPath(value: string): string {
 
 function inferPageType(path: string): WikiPageType | null {
   const folder = normalizeWikiPath(path).split("/")[1];
-  const singular = folder?.endsWith("s") ? folder.slice(0, -1) : folder;
-  return WIKI_PAGE_TYPES.includes(singular as WikiPageType)
-    ? (singular as WikiPageType)
-    : null;
+  return folder ? (WIKI_FOLDER_TYPES[folder] ?? null) : null;
 }
 
 export function WikiPageFormDialog({

@@ -416,6 +416,7 @@
   "wiki.editor.save": "保存",
   "wiki.editor.cancel": "取消",
   "wiki.editor.reload": "重新加载",
+  "wiki.editor.reviewConflict": "查看冲突",
   "wiki.editor.toolbar.label": "格式工具栏",
   "wiki.editor.toolbar.bold": "加粗",
   "wiki.editor.toolbar.italic": "斜体",
