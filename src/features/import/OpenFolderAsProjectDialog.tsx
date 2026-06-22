@@ -74,7 +74,7 @@ export function OpenFolderAsProjectDialog({ open, onClose }: OpenFolderAsProject
         setPendingAction(response.pendingAction);
       } else if (response.summary) {
         setCurrentProject(response.summary);
-        pushToast("ok", t("import.folderDialog.title"));
+        pushToast("info", t("import.folderDialog.title"));
       }
       onClose();
     } catch (error) {

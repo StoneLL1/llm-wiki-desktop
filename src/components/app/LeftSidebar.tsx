@@ -18,7 +18,7 @@ export function LeftSidebar() {
   const openPage = useWikiStore((state) => state.openPage);
   const pushToast = useToastStore((state) => state.pushToast);
   const localReport = useLintStore((state) => state.localReport);
-  const lintIssueCount = localReport?.summary.totalIssues ?? 0;
+  const lintIssueCount = localReport?.issues.length ?? 0;
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
   const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? status?.agents?.find((a) => a.state === "installed") ?? null;

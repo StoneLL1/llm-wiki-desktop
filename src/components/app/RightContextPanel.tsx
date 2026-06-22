@@ -150,7 +150,11 @@ export function RightContextPanel() {
   const gitBranch = status?.git?.branch ?? null;
   const gitHead = status?.git?.head ?? null;
   const installedAgents = (status?.agents ?? []).filter((a) => a.state === "installed");
-  const configuredProviders = (status?.providers ?? []).filter((p) => p.configured);
+  const configuredProviders = (status?.providers ?? []).filter(
+    (provider) =>
+      provider.config.enabled &&
+      (provider.hasSecret || provider.config.provider === "ollama"),
+  );
 
   return (
     <aside
@@ -218,10 +222,10 @@ export function RightContextPanel() {
                     ) : null}
                   </div>
                 ))}
-                {configuredProviders.map((p) => (
-                  <div key={p.kind} className="flex items-center gap-2">
+                {configuredProviders.map((provider) => (
+                  <div key={provider.config.provider} className="flex items-center gap-2">
                     <span className="dotstatus dotstatus--ok" aria-hidden="true" />
-                    <span className="font-mono">{t("rightpanel.route.byokLabel", { provider: p.label ?? p.kind })}</span>
+                    <span className="font-mono">{t("rightpanel.route.byokLabel", { provider: provider.config.provider })}</span>
                   </div>
                 ))}
               </>
@@ -251,7 +255,11 @@ export function RightContextPanel() {
                   <span className={`dotstatus ${task.status === "running" ? "dotstatus--busy" : "dotstatus--ok"}`} aria-hidden="true" />
                   <span className="min-w-0 flex-1 truncate">{task.title}</span>
                   {task.progress != null ? (
-                    <span className="shrink-0 font-mono text-[var(--text-muted)]">{task.progress}%</span>
+                    <span className="shrink-0 font-mono text-[var(--text-muted)]">
+                      {task.progress.total != null && task.progress.total > 0
+                        ? `${Math.round((task.progress.current / task.progress.total) * 100)}%`
+                        : (task.progress.label ?? task.progress.current)}
+                    </span>
                   ) : (
                     <span className="shrink-0 text-[var(--text-muted)]">{t(`task.status.${task.status}`)}</span>
                   )}
