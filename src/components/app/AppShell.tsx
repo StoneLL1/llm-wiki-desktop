@@ -1,10 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import { ExportsView } from "../../features/exports/ExportsView";
 import { ImportView } from "../../features/import/ImportView";
 import { AgentView } from "../../features/agent/AgentView";
+import { RunAgentDialog, type AgentSkill, type RunAgentOptions } from "../../features/agent/RunAgentDialog";
 import { ChatView } from "../../features/chat/ChatView";
 import { GraphView } from "../../features/graph/GraphView";
 import { LintView } from "../../features/lint/LintView";
@@ -17,7 +18,7 @@ import { useImportStore } from "../../stores/importStore";
 import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { useTaskStore, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import type { AgentInfo } from "../../types/agent";
@@ -25,6 +26,7 @@ import type { PendingAction } from "../../types/backend";
 import type { AgentKind } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
 import type { BackendTask } from "../../types/task";
+import type { ExportType } from "../../types/export";
 import type { ConfirmedImport, ImportedSource, ImportPreview } from "../../types/import";
 import type { FetchedImportUrl } from "../../types/import";
 import { articleToMarkdown, extractArticleFromHtml } from "../../lib/readability";
@@ -427,6 +429,94 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     await refreshCapabilities();
   }, [currentProject.projectId, currentProject.rootPath, hasTauri, refreshCapabilities]);
 
+  const defaultAgentKind = useMemo<AgentKind | null>(
+    () =>
+      agents.find((a) => a.isDefault && a.state === "installed")?.kind
+      ?? agents.find((a) => a.state === "installed")?.kind
+      ?? null,
+    [agents],
+  );
+
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
+  const [runDialogPreset, setRunDialogPreset] = useState<AgentSkill | undefined>(undefined);
+  const openRunDialog = useCallback((preset?: AgentSkill) => {
+    setRunDialogPreset(preset);
+    setRunDialogOpen(true);
+  }, []);
+
+  const runAgent = useCallback(async (options: RunAgentOptions) => {
+    setRunDialogOpen(false);
+    if (!hasTauri) return;
+    const route = options.route;
+    const agent = options.agent;
+    const provider = options.provider;
+    try {
+      if (options.skill === "wiki-ingest") {
+        const task = await invoke<BackendTask>("start_wiki_compile", {
+          request: { ...projectRequest, route, agent, provider },
+        });
+        upsertTask(task);
+        openTaskDrawer(task.id);
+        pushToast("info", t("agent.task.skillLoaded", { skill: "wiki-ingest" }));
+        return;
+      }
+      if (options.skill === "wiki-lint") {
+        const task = await invoke<BackendTask>("start_deep_lint", {
+          request: { ...projectRequest, route, agent, provider },
+        });
+        upsertTask(task);
+        openTaskDrawer(task.id);
+        setActiveView("lint");
+        return;
+      }
+      if (options.skill === "wiki-query") {
+        setActiveView("chat");
+        pushToast("info", t("agent.task.queryHint"));
+        return;
+      }
+      const exportSkillMap: Partial<Record<AgentSkill, ExportType>> = {
+        "html-beautiful-read": "beautiful_read",
+        "html-knowledge-card": "knowledge_card",
+        "html-concept-map": "concept_map",
+        "html-project-report": "project_report",
+      };
+      const exportType = exportSkillMap[options.skill];
+      if (!exportType) return;
+      // Single-page exports need a source page picker — defer to Exports view.
+      if (exportType !== "project_report") {
+        setActiveView("exports");
+        pushToast("info", t("agent.task.queryHint"));
+        return;
+      }
+      const task = await invoke<BackendTask>("start_export", {
+        request: { ...projectRequest, exportType, sourcePath: null, route, agent, provider },
+      });
+      upsertTask(task);
+      openTaskDrawer(task.id);
+      setActiveView("exports");
+    } catch (error) {
+      pushToast("error", errorMessage(error));
+    }
+  }, [
+    currentProject.projectId,
+    currentProject.rootPath,
+    hasTauri,
+    openTaskDrawer,
+    projectRequest,
+    pushToast,
+    setActiveView,
+    t,
+    upsertTask,
+  ]);
+
+  const cancelTask = useCallback(async (taskId: string) => {
+    try {
+      await cancelTaskRequest(taskId);
+    } catch (error) {
+      pushToast("error", t("task.cancelError", { message: errorMessage(error) }));
+    }
+  }, [pushToast, t]);
+
   const deleteProviderSecret = useCallback(async (provider: LlmProviderKind) => {
     if (!hasTauri) return;
     await invoke("delete_provider_secret", { request: { provider, secret: null } });
@@ -606,12 +696,14 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         ) : activeView === "agent" ? (
           <AgentView
             agents={agents}
-            providerCount={providers.filter((provider) => provider.config.enabled).length}
-            tasks={tasks.filter((task) => task.taskType === "wiki_compile" || task.taskType === "agent_run" || task.taskType === "llm_request")}
+            providers={providers}
+            tasks={tasks.filter((task) => task.taskType === "wiki_compile" || task.taskType === "agent_run" || task.taskType === "llm_request" || task.taskType === "deep_lint" || task.taskType === "export")}
             onOpenTask={openTaskDrawer}
             onDetect={() => { void refreshCapabilities(); }}
-            onCompile={() => { void startCompile(); }}
+            onRunAgent={(preset) => openRunDialog(preset)}
             onSetDefault={(agent) => { void setDefaultAgent(agent); }}
+            onCancelTask={(taskId) => { void cancelTask(taskId); }}
+            onNavigate={(view) => setActiveView(view)}
           />
         ) : activeView === "settings" ? (
           <SettingsView
@@ -652,6 +744,15 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         </div>
         )}
       </div>
+      <RunAgentDialog
+        open={runDialogOpen}
+        onClose={() => setRunDialogOpen(false)}
+        onRun={(options) => { void runAgent(options); }}
+        agents={agents}
+        providers={providers}
+        defaultAgentKind={defaultAgentKind}
+        presetSkill={runDialogPreset}
+      />
     </section>
   );
 }

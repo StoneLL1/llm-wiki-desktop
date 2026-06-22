@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import "../../i18n";
 import { AgentView } from "./AgentView";
 import type { AgentInfo } from "../../types/agent";
@@ -11,10 +11,53 @@ describe("AgentView", () => {
       { kind: "codex", command: "codex", state: "missing", version: null, executablePath: null, isDefault: false, installGuidance: "npm install codex", error: null },
       { kind: "openclaw", command: "openclaw", state: "failed", version: null, executablePath: "C:/openclaw.exe", isDefault: false, installGuidance: "Read docs", error: "timed out" },
     ];
-    render(<AgentView agents={agents} providerCount={1} onDetect={() => undefined} onCompile={() => undefined} />);
-    expect(screen.getByText("2.1.133")).toBeInTheDocument();
+    render(
+      <AgentView
+        agents={agents}
+        providers={[]}
+        tasks={[]}
+        onDetect={() => undefined}
+        onRunAgent={() => undefined}
+      />,
+    );
+    expect(screen.getByText(/2\.1\.133/)).toBeInTheDocument();
     expect(screen.getByText("npm install codex")).toBeInTheDocument();
     expect(screen.getByText("timed out")).toBeInTheDocument();
     expect(screen.getByText(/default/i)).toBeInTheDocument();
+  });
+
+  it("renders the four-grid core operations with Ingest as the primary card", () => {
+    const onRunAgent = vi.fn();
+    render(
+      <AgentView
+        agents={[]}
+        providers={[]}
+        tasks={[]}
+        onDetect={() => undefined}
+        onRunAgent={onRunAgent}
+      />,
+    );
+    const ingestCard = screen.getByRole("button", { name: /ingest/i });
+    expect(ingestCard.className).toContain("is-primary");
+    ingestCard.click();
+    expect(onRunAgent).toHaveBeenCalledWith("wiki-ingest");
+  });
+
+  it("navigates via non-primary cards instead of opening the run dialog", () => {
+    const onRunAgent = vi.fn();
+    const onNavigate = vi.fn();
+    render(
+      <AgentView
+        agents={[]}
+        providers={[]}
+        tasks={[]}
+        onDetect={() => undefined}
+        onRunAgent={onRunAgent}
+        onNavigate={onNavigate}
+      />,
+    );
+    screen.getByRole("button", { name: /lint/i }).click();
+    expect(onNavigate).toHaveBeenCalledWith("lint");
+    expect(onRunAgent).not.toHaveBeenCalled();
   });
 });
