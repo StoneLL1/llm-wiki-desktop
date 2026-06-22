@@ -1,6 +1,9 @@
 # 踩坑清单 (gotchas.txt)
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
+
+[2026-06-22] 现象 — `onDragDropEvent` 代码和 payload 都正确，桌面拖入仍完全无反应；“本地文件”卡片点击后却只能手填路径。 — 根因 — 项目没有任何 Tauri v2 capability，`plugin:event|listen` 注册被 ACL 拒绝且前端 `catch` 静默吞错；卡片点击实现本身也只调用 textarea `focus()`，从未接入文件选择器。 — 规避做法 — 主窗口 capability 必须同时声明 `core:event:allow-listen`/`allow-unlisten`，配置显式开启 `dragDropEnabled`；系统选择使用官方 dialog 插件的 `dialog:allow-open`，注册失败必须给用户错误提示，并用配置测试防止权限文件再次丢失。
+
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
 [2026-06-22] 现象 — Tauri v2 文件拖入完全无反应，TypeScript 报 `Event<DragDropEvent>` 上不存在 `type/paths`。 — 根因 — `onDragDropEvent` 回调收到事件 envelope，真正的 drag payload 位于 `event.payload`；误按 payload 本体读取会让 drop 分支永远失效。 — 规避做法 — 统一先解包 `event.payload`，用纯 reducer 覆盖 enter/over/leave/drop、Windows+CJK 路径，并测试异步 listener 在组件卸载后才注册完成时立即 unlisten。
