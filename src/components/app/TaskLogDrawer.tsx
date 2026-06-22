@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   X,
@@ -9,12 +9,29 @@ import {
   CircleX,
   Clock,
   HelpCircle,
+  Copy,
+  Trash2,
+  Maximize2,
 } from "lucide-react";
 import { useTaskStore } from "../../stores/taskStore";
 import { fetchTaskLogs, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { BackendTask, LogLine, TaskStatus } from "../../types/task";
 import { isTerminalStatus, TASK_STATUS_ORDER } from "../../types/task";
+
+const LEVEL_BADGE: Record<string, string> = {
+  info: "INFO",
+  warn: "WARN",
+  error: "ERR",
+  debug: "DBG",
+};
+
+const LEVEL_BADGE_CLASS: Record<string, string> = {
+  info: "lvl-info",
+  warn: "lvl-warn",
+  error: "lvl-err",
+  debug: "lvl-info",
+};
 
 function StatusIcon({ status }: { status: TaskStatus }) {
   const cls = "h-3.5 w-3.5 shrink-0";
@@ -36,18 +53,12 @@ function StatusIcon({ status }: { status: TaskStatus }) {
 }
 
 function LogLineView({ line }: { line: LogLine }) {
-  const colorMap: Record<string, string> = {
-    info: "var(--text-secondary)",
-    warn: "var(--warning)",
-    error: "var(--danger)",
-    debug: "var(--text-muted)",
-  };
+  const badge = LEVEL_BADGE[line.level] ?? "INFO";
+  const badgeClass = LEVEL_BADGE_CLASS[line.level] ?? "lvl-info";
   return (
-    <div
-      className="flex items-start gap-2 py-0.5 font-mono text-[11px] leading-[1.45]"
-      style={{ color: colorMap[line.level] || "var(--text-secondary)" }}
-    >
-      <span className="mt-px shrink-0 text-[10px] opacity-60">{line.timestamp.slice(11, 19)}</span>
+    <div className="terminal__line flex items-start gap-2 py-0.5 font-mono text-[11px] leading-[1.45]">
+      <span className="ts mt-px shrink-0 text-[10px] opacity-60">{line.timestamp.slice(11, 19)}</span>
+      <span className={`${badgeClass} mt-px shrink-0 text-[10px] font-semibold`}>[{badge}]</span>
       <span className="break-all">{line.message}</span>
     </div>
   );
@@ -60,13 +71,22 @@ function ProgressBar({ task }: { task: BackendTask }) {
   const current = progress?.current ?? 0;
   const total = progress?.total;
   const pct = total && total > 0 ? Math.round((current / total) * 100) : null;
+  const fillPct = pct ?? (task.status === "running" ? 99 : 100);
+  const nowAria = pct ?? 0;
 
   return (
-    <div className="flex items-center gap-2 mt-1">
+    <div
+      className="flex items-center gap-2 mt-1"
+      role="progressbar"
+      aria-valuenow={nowAria}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label={task.title}
+    >
       <div className="h-1 flex-1 rounded-full bg-[var(--surface-muted)] overflow-hidden">
         <div
           className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
-          style={{ width: `${pct ?? (task.status === "running" ? 99 : 100)}%` }}
+          style={{ width: `${fillPct}%` }}
         />
       </div>
       {pct !== null && (
@@ -82,6 +102,24 @@ function errorMessage(error: unknown): string {
   return "Unknown error";
 }
 
+function computeDurationLabel(startedAt: string, completedAt: string | null): string | null {
+  const start = Date.parse(startedAt);
+  if (!start || Number.isNaN(start)) return null;
+  const end = completedAt ? Date.parse(completedAt) : Date.now();
+  if (!end || Number.isNaN(end)) return null;
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  return rem === 0 ? `${minutes}m` : `${minutes}m ${rem}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 export function TaskLogDrawer() {
   const { t } = useTranslation();
   const tasks = useTaskStore((s) => s.tasks);
@@ -90,9 +128,11 @@ export function TaskLogDrawer() {
   const selectedTaskId = useTaskStore((s) => s.selectedTaskId);
   const closeDrawer = useTaskStore((s) => s.closeDrawer);
   const selectTask = useTaskStore((s) => s.selectTask);
+  const setLogs = useTaskStore((s) => s.setLogs);
   const pushToast = useToastStore((s) => s.pushToast);
   const translationRef = useRef(t);
   translationRef.current = t;
+  const [expanded, setExpanded] = useState(false);
 
   const sorted = useMemo(() => {
     return [...tasks].sort(
@@ -132,10 +172,37 @@ export function TaskLogDrawer() {
     }
   };
 
+  const handleCopyLogs = async () => {
+    if (!selectedTaskId || selectedLogs.length === 0) return;
+    const text = selectedLogs
+      .map((line) => `${line.timestamp.slice(11, 19)} [${LEVEL_BADGE[line.level] ?? "INFO"}] ${line.message}`)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      pushToast("info", t("task.logsCopied"));
+    } catch {
+      pushToast("error", t("task.logsCopyError"));
+    }
+  };
+
+  const handleClearLogs = () => {
+    if (!selectedTaskId) return;
+    setLogs(selectedTaskId, []);
+  };
+
+  const footerDuration = selectedTask
+    ? computeDurationLabel(selectedTask.startedAt, selectedTask.completedAt)
+    : null;
+  const footerBytes = new Blob(
+    selectedLogs.map((line) => `${line.message}\n`),
+  ).size;
+
   if (!drawerOpen) return null;
 
+  const drawerWidth = expanded ? "w-[760px]" : "w-[420px]";
+
   return (
-    <div className="fixed inset-y-0 right-0 z-40 w-[420px] border-l border-[var(--border)] bg-[var(--background)] shadow-lg flex flex-col">
+    <div className={`fixed inset-y-0 right-0 z-40 ${drawerWidth} border-l border-[var(--border)] bg-[var(--background)] shadow-lg flex flex-col`}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 h-[44px] border-b border-[var(--border)] shrink-0">
         <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
@@ -255,14 +322,57 @@ export function TaskLogDrawer() {
               </div>
 
               {/* Log lines */}
-              <div className="flex-1 overflow-y-auto p-2 bg-[var(--surface)]">
-                {selectedLogs.length === 0 ? (
-                  <div className="text-[11px] text-[var(--text-muted)] p-2">
-                    {t("task.drawer.noLogs")}
-                  </div>
-                ) : (
-                  selectedLogs.map((line, i) => <LogLineView key={i} line={line} />)
-                )}
+              <div className="terminal-wrap relative flex-1 min-h-0 flex flex-col">
+                <div className="terminal__overlay">
+                  <button
+                    type="button"
+                    onClick={handleCopyLogs}
+                    disabled={selectedLogs.length === 0}
+                    aria-label={t("task.logsCopy")}
+                    title={t("task.logsCopy")}
+                  >
+                    <Copy size={12} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearLogs}
+                    disabled={selectedLogs.length === 0}
+                    aria-label={t("task.logsClear")}
+                    title={t("task.logsClear")}
+                  >
+                    <Trash2 size={12} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpanded((value) => !value)}
+                    aria-label={t(expanded ? "task.logsCollapse" : "task.logsExpand")}
+                    title={t(expanded ? "task.logsCollapse" : "task.logsExpand")}
+                  >
+                    <Maximize2 size={12} aria-hidden />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 bg-[var(--surface)]">
+                  {selectedLogs.length === 0 ? (
+                    <div className="text-[11px] text-[var(--text-muted)] p-2">
+                      {t("task.drawer.noLogs")}
+                    </div>
+                  ) : (
+                    selectedLogs.map((line, i) => <LogLineView key={i} line={line} />)
+                  )}
+                </div>
+                <div className="terminal__foot border-t border-[var(--border-subtle)] px-2 py-1.5">
+                  <span className="dotstatus dotstatus--busy" aria-hidden />
+                  <span>{t(`task.status.${selectedTask.status}`)}</span>
+                  {footerDuration ? (
+                    <>
+                      <span>·</span>
+                      <span>{footerDuration}</span>
+                    </>
+                  ) : null}
+                  <span>·</span>
+                  <span>{formatBytes(footerBytes)}</span>
+                  <span className="terminal__foot-spacer">{t("task.logsBackgroundHint")}</span>
+                </div>
               </div>
             </div>
           )}
