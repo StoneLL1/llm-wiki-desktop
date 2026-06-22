@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Read, Write};
 use std::path::Path;
 
 use quick_xml::events::Event;
@@ -38,6 +38,7 @@ impl ExtractionService {
                 extracted_assets: vec![],
             });
         }
+        ensure_source_file_size(source_path)?;
 
         match &file_type {
             SourceFileType::Markdown | SourceFileType::Text | SourceFileType::Url => {
@@ -141,12 +142,13 @@ impl ExtractionService {
                     &file_type,
                 )
             }
-            _ => {
-                // Images, unknown: nothing to extract in MVP
+            SourceFileType::Image => {
+                // Images are supported archive-only sources. OCR and visual
+                // understanding intentionally remain compile-time concerns.
                 Ok(ExtractResult {
                     original_name,
                     file_type: file_type.clone(),
-                    status: ExtractionStatus::Unsupported,
+                    status: ExtractionStatus::Extracted,
                     error: None,
                     text_preview: None,
                     metadata: Some(SourceMetadata {
@@ -162,6 +164,16 @@ impl ExtractionService {
                     extracted_assets: vec![],
                 })
             }
+            _ => Ok(ExtractResult {
+                original_name,
+                file_type: file_type.clone(),
+                status: ExtractionStatus::Unsupported,
+                error: None,
+                text_preview: None,
+                metadata: None,
+                extracted_text_path: None,
+                extracted_assets: vec![],
+            }),
         }
     }
 
@@ -387,22 +399,6 @@ fn extract_ooxml(
     original_name: &str,
     file_type: &SourceFileType,
 ) -> Result<ExtractResult, BackendError> {
-    let bytes = match fs::read(source_path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return Ok(ExtractResult {
-                original_name: original_name.to_string(),
-                file_type: file_type.clone(),
-                status: ExtractionStatus::Failed,
-                error: Some(format!("Failed to read file: {error}")),
-                text_preview: None,
-                metadata: None,
-                extracted_text_path: None,
-                extracted_assets: vec![],
-            });
-        }
-    };
-
     let ext = source_path
         .extension()
         .and_then(|e| e.to_str())
@@ -433,8 +429,11 @@ fn extract_ooxml(
         });
     }
 
-    let cursor = Cursor::new(bytes);
-    let mut archive = match ZipArchive::new(cursor) {
+    let file = fs::File::open(source_path).map_err(|error| {
+        BackendError::new("EXTRACT_READ_FAILED", error.to_string(), true, false)
+            .with_details(serde_json::json!({ "path": source_path.to_string_lossy() }))
+    })?;
+    let mut archive = match ZipArchive::new(file) {
         Ok(archive) => archive,
         Err(error) => {
             return Ok(ExtractResult {
@@ -449,6 +448,7 @@ fn extract_ooxml(
             });
         }
     };
+    validate_archive_limits(&mut archive)?;
 
     let (text, page_count) = match file_type {
         SourceFileType::Document => (read_docx_text(&mut archive)?, None),
@@ -796,7 +796,7 @@ fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, Back
                             b"r" => {
                                 cell_column = cell_column_index(&String::from_utf8_lossy(
                                     attribute.value.as_ref(),
-                                ));
+                                ))?;
                             }
                             b"t" => {
                                 cell_type =
@@ -819,13 +819,22 @@ fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, Back
                 b"c" => {
                     row.resize(cell_column + 1, String::new());
                     let value = if cell_type == "s" {
-                        cell_value
-                            .trim()
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|index| shared.get(index))
-                            .cloned()
-                            .unwrap_or_default()
+                        let index = cell_value.trim().parse::<usize>().map_err(|_| {
+                            BackendError::new(
+                                "EXTRACT_XLSX_SHARED_STRING_INVALID",
+                                "An XLSX shared-string cell contains an invalid index.",
+                                true,
+                                false,
+                            )
+                        })?;
+                        shared.get(index).cloned().ok_or_else(|| {
+                            BackendError::new(
+                                "EXTRACT_XLSX_SHARED_STRING_INVALID",
+                                "An XLSX shared-string index is out of range.",
+                                true,
+                                false,
+                            )
+                        })?
                     } else {
                         cell_value.clone()
                     };
@@ -843,14 +852,25 @@ fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, Back
     Ok(rows)
 }
 
-fn cell_column_index(reference: &str) -> usize {
-    reference
+fn cell_column_index(reference: &str) -> Result<usize, BackendError> {
+    let letters = reference
         .bytes()
         .take_while(u8::is_ascii_alphabetic)
-        .fold(0usize, |value, byte| {
-            value * 26 + usize::from(byte.to_ascii_uppercase() - b'A' + 1)
-        })
-        .saturating_sub(1)
+        .collect::<Vec<_>>();
+    let column = letters.iter().try_fold(0usize, |value, byte| {
+        value
+            .checked_mul(26)
+            .and_then(|value| value.checked_add(usize::from(byte.to_ascii_uppercase() - b'A' + 1)))
+    });
+    match column {
+        Some(1..=16_384) if !letters.is_empty() => Ok(column.unwrap() - 1),
+        _ => Err(BackendError::new(
+            "EXTRACT_XLSX_CELL_REFERENCE_INVALID",
+            "An XLSX cell reference exceeds Excel column limits.",
+            true,
+            false,
+        )),
+    }
 }
 
 fn local_name(name: &[u8]) -> &[u8] {
@@ -888,7 +908,66 @@ fn xml_err(error: quick_xml::Error) -> BackendError {
 /// Upper bound on a single decompressed OOXML entry. Guards against zip bombs
 /// (a tiny compressed entry decompressing to gigabytes) by refusing to buffer
 /// an entry larger than this into memory before parsing.
+const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OOXML_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_OOXML_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_OOXML_ENTRIES: usize = 4_096;
+
+fn ensure_source_file_size(path: &Path) -> Result<(), BackendError> {
+    let size = fs::metadata(path).map_err(io_read_err)?.len();
+    if size > MAX_SOURCE_FILE_BYTES {
+        return Err(BackendError::new(
+            "EXTRACT_SOURCE_TOO_LARGE",
+            "The source file exceeds the 64 MiB extraction limit.",
+            true,
+            false,
+        )
+        .with_details(serde_json::json!({ "path": path.to_string_lossy(), "sizeBytes": size })));
+    }
+    Ok(())
+}
+
+fn validate_archive_limits<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<(), BackendError> {
+    if archive.len() > MAX_OOXML_ENTRIES {
+        return Err(BackendError::new(
+            "EXTRACT_ARCHIVE_TOO_LARGE",
+            "The Office archive contains too many entries.",
+            true,
+            false,
+        ));
+    }
+    let mut total = 0u64;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            BackendError::new(
+                "EXTRACT_ARCHIVE_READ_FAILED",
+                error.to_string(),
+                true,
+                false,
+            )
+        })?;
+        ensure_entry_size(&entry)?;
+        total = total.checked_add(entry.size()).ok_or_else(|| {
+            BackendError::new(
+                "EXTRACT_ARCHIVE_TOO_LARGE",
+                "The Office archive size overflowed the extraction limit.",
+                true,
+                false,
+            )
+        })?;
+        if total > MAX_OOXML_TOTAL_BYTES {
+            return Err(BackendError::new(
+                "EXTRACT_ARCHIVE_TOO_LARGE",
+                "The Office archive expands beyond the 64 MiB extraction limit.",
+                true,
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Reject a zip entry whose declared uncompressed size exceeds the safety cap.
 fn ensure_entry_size(entry: &zip::read::ZipFile<'_>) -> Result<(), BackendError> {
@@ -1008,7 +1087,66 @@ fn write_extracted_text(
         .with_details(serde_json::json!({ "path": relative })));
     }
 
-    file_store.write_text_absolute(&output_path, text)?;
+    if output_path.exists() {
+        let existing = fs::read_to_string(&output_path).map_err(|error| {
+            BackendError::new("EXTRACT_OUTPUT_READ_FAILED", error.to_string(), true, false)
+                .with_details(serde_json::json!({ "path": relative }))
+        })?;
+        if existing != text {
+            return Err(BackendError::new(
+                "EXTRACT_OUTPUT_CONFLICT",
+                "The extracted Markdown was externally edited and will not be overwritten during preview.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": relative })));
+        }
+        return Ok(relative);
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output_path)
+    {
+        Ok(mut file) => file.write_all(text.as_bytes()).map_err(|error| {
+            BackendError::new(
+                "EXTRACT_OUTPUT_WRITE_FAILED",
+                error.to_string(),
+                true,
+                false,
+            )
+            .with_details(serde_json::json!({ "path": relative }))
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read_to_string(&output_path).map_err(|read_error| {
+                BackendError::new(
+                    "EXTRACT_OUTPUT_READ_FAILED",
+                    read_error.to_string(),
+                    true,
+                    false,
+                )
+                .with_details(serde_json::json!({ "path": relative }))
+            })?;
+            if existing != text {
+                return Err(BackendError::new(
+                    "EXTRACT_OUTPUT_CONFLICT",
+                    "The extracted Markdown changed while previewing and will not be overwritten.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": relative })));
+            }
+        }
+        Err(error) => {
+            return Err(BackendError::new(
+                "EXTRACT_OUTPUT_WRITE_FAILED",
+                error.to_string(),
+                true,
+                false,
+            )
+            .with_details(serde_json::json!({ "path": relative })));
+        }
+    }
     Ok(relative)
 }
 
@@ -1109,6 +1247,27 @@ mod tests {
             "第一段内容\nsecond paragraph\n"
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preview_does_not_overwrite_an_externally_edited_extracted_markdown() {
+        let (context, root) = tmp_context("extracted-conflict");
+        let source = root.join("notes.txt");
+        let out_dir = root.join("raw/extracted");
+        fs::write(&source, "original source").unwrap();
+        let first = ExtractionService
+            .extract_text(&context, &FileStore, &source, &out_dir)
+            .unwrap();
+        let extracted = root.join(first.extracted_text_path.unwrap());
+        fs::write(&extracted, "external edit").unwrap();
+
+        let error = ExtractionService
+            .extract_text(&context, &FileStore, &source, &out_dir)
+            .unwrap_err();
+
+        assert_eq!(error.code, "EXTRACT_OUTPUT_CONFLICT");
+        assert_eq!(fs::read_to_string(extracted).unwrap(), "external edit");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1231,6 +1390,22 @@ mod tests {
     }
 
     #[test]
+    fn oversized_ooxml_container_is_rejected_before_archive_read() {
+        let (context, root) = tmp_context("ooxml-container-limit");
+        let source = root.join("huge.docx");
+        let file = fs::File::create(&source).unwrap();
+        file.set_len(MAX_SOURCE_FILE_BYTES + 1).unwrap();
+
+        let error = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "EXTRACT_SOURCE_TOO_LARGE");
+        assert!(!root.join("raw/extracted").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn legacy_binary_office_formats_fail_with_conversion_hint() {
         let (context, root) = tmp_context("legacy-doc");
         let store = FileStore;
@@ -1335,6 +1510,43 @@ mod tests {
         let preview = result.text_preview.unwrap();
         assert!(preview.contains("Shared"));
         assert!(preview.contains("Inline"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xlsx_rejects_out_of_range_shared_string_indexes() {
+        let (context, root) = tmp_context("xlsx-shared-range");
+        let source = root.join("bad-shared.xlsx");
+        let sheet = r#"<worksheet xmlns="x"><sheetData><row r="1"><c r="A1" t="s"><v>99</v></c></row></sheetData></worksheet>"#;
+        fs::write(&source, sample_xlsx(&["only".to_string()], sheet)).unwrap();
+
+        let error = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "EXTRACT_XLSX_SHARED_STRING_INVALID");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xlsx_rejects_columns_beyond_excel_limits() {
+        let error = cell_column_index("ZZZZZ1").unwrap_err();
+        assert_eq!(error.code, "EXTRACT_XLSX_CELL_REFERENCE_INVALID");
+    }
+
+    #[test]
+    fn images_are_successfully_archived_without_fake_text_extraction() {
+        let (context, root) = tmp_context("image-archive");
+        let source = root.join("diagram.png");
+        fs::write(&source, b"not decoded during import").unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Extracted);
+        assert_eq!(result.extracted_text_path, None);
+        assert!(result.metadata.is_some());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1651,7 +1863,6 @@ mod tests {
 
     // ── Sample file generators (minimal valid OOXML / PDF fixtures) ──
 
-    use std::io::Write as _;
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
 

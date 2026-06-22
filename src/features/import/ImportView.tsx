@@ -26,7 +26,7 @@ import { FILE_TYPE_LABELS } from "../../types/import";
 import { useImportStore } from "../../stores/importStore";
 import { ImportUrlDialog } from "./ImportUrlDialog";
 import { OpenFolderAsProjectDialog } from "./OpenFolderAsProjectDialog";
-import { reduceDragDrop } from "./dragDrop";
+import { subscribeToDragDrop } from "./dragDrop";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -141,12 +141,12 @@ export function ImportView({
       if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
       try {
         const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-        unlisten = await getCurrentWebview().onDragDropEvent((event) => {
-          const update = reduceDragDrop(event.payload);
-          setDropActive(update.active);
-          if (update.paths) onRequestPreview(update.paths);
+        unlisten = await subscribeToDragDrop({
+          listen: (handler) => getCurrentWebview().onDragDropEvent(handler),
+          isCancelled: () => cancelled,
+          onActive: setDropActive,
+          onPaths: onRequestPreview,
         });
-        if (cancelled) unlisten?.();
       } catch {
         // Tauri runtime unavailable (tests / browser) — drag-drop disabled silently.
       }

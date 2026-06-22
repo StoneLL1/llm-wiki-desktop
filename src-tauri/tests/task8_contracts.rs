@@ -161,7 +161,10 @@ fn compile_conflict_does_not_partially_modify_real_wiki() {
         summary: "compile".into(),
     };
     let result = CompileService::apply_manifest(&context, &manifest, &baseline).unwrap();
-    assert_eq!(result.conflicts, vec!["wiki/index.md"]);
+    assert_eq!(
+        result.conflicts,
+        vec!["wiki/index.md", "wiki/log.md", "wiki/overview.md"]
+    );
     assert_eq!(
         std::fs::read_to_string(root.join("wiki/overview.md")).unwrap(),
         "overview"
