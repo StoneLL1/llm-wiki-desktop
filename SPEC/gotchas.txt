@@ -3,6 +3,12 @@
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
+[2026-06-22] 现象 — Tauri v2 文件拖入完全无反应，TypeScript 报 `Event<DragDropEvent>` 上不存在 `type/paths`。 — 根因 — `onDragDropEvent` 回调收到事件 envelope，真正的 drag payload 位于 `event.payload`；误按 payload 本体读取会让 drop 分支永远失效。 — 规避做法 — 统一先解包 `event.payload`，用纯 reducer 覆盖 enter/over/leave/drop、Windows+CJK 路径，并测试异步 listener 在组件卸载后才注册完成时立即 unlisten。
+
+[2026-06-22] 现象 — 导入预览显示提取成功，但 compile 看不到内容；改成 `.md` 后，取消过的 preview 又会悄悄进入 compile。 — 根因 — 提取器原先写 `raw/extracted/*.txt`，而 compile 只枚举 Markdown；若直接把预览产物改成 `.md` 并枚举整个目录，又会把未确认孤儿产物当正式输入。 — 规避做法 — 成功提取统一写 `.md`，compile 仅从 `.app/source-index.json` 枚举已确认 source 的非空 Markdown并只复制这些文件到 workspace；预览写入采用 create-new/内容一致复用，绝不覆盖外部编辑。
+
+[2026-06-22] 现象 — 单个 ZIP entry 有 64 MiB 检查，恶意 Office 文件仍可在检查前或通过大量小 entry 造成 OOM；超大 XLSX 列引用还能触发巨量 `row.resize`。 — 根因 — 先 `fs::read` 整个 OOXML 容器，且没有容器大小、entry 数、累计展开大小和 Excel 列上限。 — 规避做法 — 所有导入源先做 64 MiB metadata 上限；OOXML 用 `File` 流式打开，限制 4096 entries、累计展开 64 MiB；XLSX 列限制到 XFD/16384，坏 shared-string 索引直接失败而不是静默丢值。
+
 [2026-06-21] 现象 — 从 Wiki 目录名自动推断页面类型时，`entities` / `queries` 被简单去尾 `s` 后变成无效的 `entitie` / `querie`，创建页悄悄退化为空模板。 — 根因 — 英文复数目录并非都能用截尾规则还原，且 `synthesis` 本身以 `s` 结尾。 — 规避做法 — 用显式目录映射（entities→entity、queries→query、synthesis→synthesis），并用 CJK 文件名覆盖回归测试。
 
 [2026-06-21] 现象 — `npm run test` 在大部分用例已通过后报 `AlignedAlloc Allocation failed` / Vitest worker exited unexpectedly。 — 根因 — 仓库残留多组数小时前未退出的 Vitest forks，每个 worker 占用约 3 GB，合计近 10 GB，并非测试断言或当前代码泄漏。 — 规避做法 — 先用 `Get-CimInstance Win32_Process` 核对 command line，只终止明确属于本仓库的陈旧 test/vitest 进程，不碰 Vite/Tauri；随后从完整 test/lint 清单开头重跑。
