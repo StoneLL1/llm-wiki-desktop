@@ -172,11 +172,11 @@ async fn run_export(
         .map_err(task_error)?;
     let language = state
         .settings_service
-        .read_settings(&context)
+        .read_settings(context)
         .map(|settings| settings.language)
         .unwrap_or_else(|_| "en".to_string());
     let prompt = state.export_service.build_export_prompt(
-        &context,
+        context,
         directive.export_type,
         directive.source_path.as_deref(),
         &state.search_service,
@@ -185,7 +185,7 @@ async fn run_export(
 
     let (route, raw_html) = match resolve_route(
         state,
-        &context,
+        context,
         directive.route,
         directive.agent,
         directive.provider,
@@ -276,9 +276,9 @@ async fn run_export(
         .build_output_relative_path(directive.export_type, directive.source_path.as_deref())?;
     state
         .export_service
-        .write_html(&context, &output_path, &html)?;
+        .write_html(context, &output_path, &html)?;
     let title = title_for(
-        &context,
+        context,
         directive.export_type,
         directive.source_path.as_deref(),
     );
@@ -290,7 +290,7 @@ async fn run_export(
         route,
         Some(task_id.to_string()),
     );
-    state.export_service.append_record(&context, record)?;
+    state.export_service.append_record(context, record)?;
 
     state
         .task_service

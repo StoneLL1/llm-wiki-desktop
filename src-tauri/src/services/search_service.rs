@@ -8,8 +8,8 @@ use crate::models::chat::ChatRetrievalHit;
 use crate::models::paths::ProjectContext;
 use crate::models::search::{SearchRequest, SearchResponse, SearchResult};
 use crate::models::wiki::{
-    CreateWikiPageRequest, RenameWikiPageResponse, SaveWikiPageResponse, WikiPageMeta, WikiPageType,
-    WikiTree, WikiTreeNode, WikiTreeNodeKind,
+    CreateWikiPageRequest, RenameWikiPageResponse, SaveWikiPageResponse, WikiPageMeta,
+    WikiPageType, WikiTree, WikiTreeNode, WikiTreeNodeKind,
 };
 use crate::services::file_store::FileStore;
 use crate::services::WriteMode;
@@ -210,7 +210,12 @@ impl SearchService {
 
         let mut markdown = String::new();
         markdown.push_str("---\n");
-        if let Some(page_type) = request.page_type.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some(page_type) = request
+            .page_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
             markdown.push_str(&format!("type: {}\n", yaml_escape_scalar(page_type)));
         }
         markdown.push_str(&format!("title: {}\n", yaml_escape_scalar(&title)));
@@ -322,9 +327,8 @@ impl SearchService {
                 .map_err(|err| file_read_error(err, file_absolute))?;
             let (rewritten, n) = rewrite_wikilinks(&body, &old_stem, &new_stem);
             if n > 0 {
-                std::fs::write(file_absolute, rewritten.as_bytes()).map_err(|err| {
-                    io_write_error(err, file_absolute)
-                })?;
+                std::fs::write(file_absolute, rewritten.as_bytes())
+                    .map_err(|err| io_write_error(err, file_absolute))?;
                 let project_relative = context.to_project_relative(file_absolute)?;
                 snapshots.push((project_relative.clone(), body.into_bytes()));
                 updated_references.push(project_relative);
@@ -346,12 +350,12 @@ impl SearchService {
         };
         let rename_result = (|| {
             if let Some(parent) = new_absolute.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|err| io_write_error(err, parent))?;
+                std::fs::create_dir_all(parent).map_err(|err| io_write_error(err, parent))?;
             }
             std::fs::write(&new_absolute, final_contents.as_bytes())
                 .map_err(|err| io_write_error(err, &new_absolute))?;
-            std::fs::remove_file(&old_absolute).map_err(|err| io_write_error(err, &old_absolute))?;
+            std::fs::remove_file(&old_absolute)
+                .map_err(|err| io_write_error(err, &old_absolute))?;
             Ok::<(), BackendError>(())
         })();
         if let Err(error) = rename_result {
@@ -414,10 +418,7 @@ impl SearchService {
                 .map_err(|err| file_read_error(err, file_absolute))?;
             let split = split_frontmatter(&body);
             let links = extract_wikilinks(&split.body);
-            if links
-                .iter()
-                .any(|link| link.to_ascii_lowercase() == needle)
-            {
+            if links.iter().any(|link| link.to_ascii_lowercase() == needle) {
                 referencing.push(context.to_project_relative(file_absolute)?);
             }
         }
@@ -478,7 +479,8 @@ impl SearchService {
             }
             return Err(BackendError::new(
                 "FILE_HASH_MISMATCH",
-                "The wiki page changed since the delete was requested. Reload and try again.".to_string(),
+                "The wiki page changed since the delete was requested. Reload and try again."
+                    .to_string(),
                 true,
                 true,
             )
@@ -929,7 +931,10 @@ fn yaml_escape_scalar(value: &str) -> String {
         || value.contains('\n')
         || value.contains('\r')
     {
-        format!("\"{}\"", value.replace('"', "\\\"").replace(['\n', '\r'], " "))
+        format!(
+            "\"{}\"",
+            value.replace('"', "\\\"").replace(['\n', '\r'], " ")
+        )
     } else {
         value.to_string()
     }
@@ -1358,7 +1363,9 @@ mod tests {
         assert!(!response.hash.is_empty());
 
         let on_disk = std::fs::read_to_string(
-            context.resolve_project_path("wiki/concepts/new-page.md").unwrap(),
+            context
+                .resolve_project_path("wiki/concepts/new-page.md")
+                .unwrap(),
         )
         .unwrap();
         assert!(on_disk.starts_with("---\n"));
@@ -1392,11 +1399,7 @@ mod tests {
         let err = service
             .create_page(
                 &context,
-                &make_create_request(
-                    "p",
-                    &context.root.to_string_lossy(),
-                    "raw/sources/x.md",
-                ),
+                &make_create_request("p", &context.root.to_string_lossy(), "raw/sources/x.md"),
             )
             .expect_err("non-wiki path must be rejected");
         assert_eq!(err.code, "PATH_OUTSIDE_PROJECT");
@@ -1405,18 +1408,13 @@ mod tests {
         let response = service
             .create_page(
                 &context,
-                &make_create_request(
-                    "p",
-                    &context.root.to_string_lossy(),
-                    "wiki/概念/智能体.md",
-                ),
+                &make_create_request("p", &context.root.to_string_lossy(), "wiki/概念/智能体.md"),
             )
             .unwrap();
         assert_eq!(response.relative_path, "wiki/概念/智能体.md");
-        let on_disk = std::fs::read_to_string(
-            context.resolve_project_path("wiki/概念/智能体.md").unwrap(),
-        )
-        .unwrap();
+        let on_disk =
+            std::fs::read_to_string(context.resolve_project_path("wiki/概念/智能体.md").unwrap())
+                .unwrap();
         assert!(on_disk.contains("# 智能体"));
         assert!(on_disk.contains("title: 智能体"));
 
@@ -1496,11 +1494,7 @@ mod tests {
 
         // Missing source rejected.
         let err = service
-            .rename_page(
-                &context,
-                "wiki/concepts/ghost.md",
-                "wiki/concepts/other.md",
-            )
+            .rename_page(&context, "wiki/concepts/ghost.md", "wiki/concepts/other.md")
             .expect_err("rename must reject a missing source");
         assert_eq!(err.code, "FILE_NOT_FOUND");
 
@@ -1517,11 +1511,7 @@ mod tests {
         )
         .unwrap();
         let response = service
-            .rename_page(
-                &context,
-                "wiki/概念/乙.md",
-                "wiki/概念/乙二.md",
-            )
+            .rename_page(&context, "wiki/概念/乙.md", "wiki/概念/乙二.md")
             .unwrap();
         assert_eq!(response.relative_path, "wiki/概念/乙二.md");
         assert_eq!(
@@ -1529,15 +1519,13 @@ mod tests {
             vec!["wiki/概念/甲.md".to_string()]
         );
         // Self-reference in the renamed page is rewritten too.
-        let moved = std::fs::read_to_string(
-            context.resolve_project_path("wiki/概念/乙二.md").unwrap(),
-        )
-        .unwrap();
+        let moved =
+            std::fs::read_to_string(context.resolve_project_path("wiki/概念/乙二.md").unwrap())
+                .unwrap();
         assert!(moved.contains("[[乙二]]"));
-        let referrer = std::fs::read_to_string(
-            context.resolve_project_path("wiki/概念/甲.md").unwrap(),
-        )
-        .unwrap();
+        let referrer =
+            std::fs::read_to_string(context.resolve_project_path("wiki/概念/甲.md").unwrap())
+                .unwrap();
         assert!(referrer.contains("[[乙二]]"));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1560,7 +1548,10 @@ mod tests {
         let refs_upper = service
             .find_pages_referencing(&context, "REACT-PATTERN")
             .unwrap();
-        assert_eq!(refs_upper, vec!["wiki/concepts/agent-memory.md".to_string()]);
+        assert_eq!(
+            refs_upper,
+            vec!["wiki/concepts/agent-memory.md".to_string()]
+        );
 
         // Unknown stem yields no references.
         let none = service
@@ -1585,7 +1576,10 @@ mod tests {
         let created = service
             .apply_page_delete(&context, &git, target_path, &target_hash)
             .unwrap();
-        assert!(created, "a checkpoint commit must be created before removal");
+        assert!(
+            created,
+            "a checkpoint commit must be created before removal"
+        );
         assert!(!context.resolve_project_path(target_path).unwrap().exists());
         // A graph-cache file would have been removed; seeding none here is fine,
         // the call must still succeed.
@@ -1712,8 +1706,7 @@ mod tests {
         // not exist, so the FILE_ALREADY_EXISTS pre-check passes, but
         // create_dir_all("wiki/concepts/blocker/sub") fails because "blocker"
         // is a file — exercising rollback after referrers were rewritten.
-        std::fs::write(context.wiki_dir.join("concepts").join("blocker"), "block")
-            .unwrap();
+        std::fs::write(context.wiki_dir.join("concepts").join("blocker"), "block").unwrap();
 
         let err = service
             .rename_page(
@@ -1759,13 +1752,8 @@ mod tests {
         };
         service.create_page(&context, &request).unwrap();
 
-        let written = std::fs::read_to_string(
-            context
-                .wiki_dir
-                .join("concepts")
-                .join("injected.md"),
-        )
-        .unwrap();
+        let written =
+            std::fs::read_to_string(context.wiki_dir.join("concepts").join("injected.md")).unwrap();
         // The injected "malicious: true" must not appear as its own key — it
         // is quoted inside the type value (newline collapsed to space).
         assert!(

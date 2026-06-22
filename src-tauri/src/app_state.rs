@@ -165,11 +165,7 @@ impl AppState {
         use crate::models::git::CheckpointPurpose;
         use crate::models::import::ConflictResolution;
 
-        let had_head = self
-            .git_service
-            .repository_status(context)?
-            .head
-            .is_some();
+        let had_head = self.git_service.repository_status(context)?.head.is_some();
         self.git_service
             .initialize_repository(context, "Before import confirmation")?;
 

@@ -326,9 +326,7 @@ pub fn rewrite_wikilinks(body: &str, old_stem: &str, new_stem: &str) -> (String,
                 let inner = &body[start..end];
                 // Split target from alias/anchor the same way extract_wikilinks
                 // does: target = before first `|` or `#`.
-                let target_end = inner
-                    .find(['|', '#'])
-                    .unwrap_or(inner.len());
+                let target_end = inner.find(['|', '#']).unwrap_or(inner.len());
                 let target = inner[..target_end].trim();
                 if target.to_ascii_lowercase() == old_lower {
                     // Flush text before this link, then re-emit with new target.
@@ -590,10 +588,7 @@ mod tests {
         let body = "see [[react-pattern]] and [[React-Pattern]] here";
         let (out, n) = rewrite_wikilinks(body, "react-pattern", "reasoning-loop");
         assert_eq!(n, 2);
-        assert_eq!(
-            out,
-            "see [[reasoning-loop]] and [[reasoning-loop]] here"
-        );
+        assert_eq!(out, "see [[reasoning-loop]] and [[reasoning-loop]] here");
     }
 
     #[test]
@@ -601,7 +596,10 @@ mod tests {
         let body = "[[old|My Alias]] then [[old#Section]] and [[old#Section|Alias]]";
         let (out, n) = rewrite_wikilinks(body, "old", "new");
         assert_eq!(n, 3);
-        assert_eq!(out, "[[new|My Alias]] then [[new#Section]] and [[new#Section|Alias]]");
+        assert_eq!(
+            out,
+            "[[new|My Alias]] then [[new#Section]] and [[new#Section|Alias]]"
+        );
     }
 
     #[test]
@@ -646,7 +644,6 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(out, "see [[new|cite [1]]] next");
     }
-
 
     #[test]
     fn count_words_skips_code_fences() {

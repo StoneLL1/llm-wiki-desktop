@@ -125,16 +125,16 @@ async fn run_compile(
         if state.task_service.is_cancelled(task_id) {
             return Err(BackendError::new("COMPILE_CANCELLED", "Wiki compile was cancelled.", true, false));
         }
-        let backup = CompileService::backup_outputs(&context, &manifest)?;
-        let applied = match CompileService::apply_manifest(&context, &manifest, &baseline) {
+        let backup = CompileService::backup_outputs(context, &manifest)?;
+        let applied = match CompileService::apply_manifest(context, &manifest, &baseline) {
             Ok(applied) => applied,
             Err(error) => {
-                let _ = CompileService::restore_outputs(&context, &backup);
+                let _ = CompileService::restore_outputs(context, &backup);
                 return Err(error);
             }
         };
         if !applied.conflicts.is_empty() {
-            let current_hashes = manifest.files.iter().map(|file| file.path.as_str()).chain(manifest.deletions.iter().map(String::as_str)).filter_map(|path| state.file_store.file_hash(&context, path).ok().map(|hash| (path.to_string(), hash))).collect();
+            let current_hashes = manifest.files.iter().map(|file| file.path.as_str()).chain(manifest.deletions.iter().map(String::as_str)).filter_map(|path| state.file_store.file_hash(context, path).ok().map(|hash| (path.to_string(), hash))).collect();
             let action = PendingAction {
                 id: uuid::Uuid::new_v4().to_string(),
                 action_type: PendingActionType::MergeConflict,
@@ -157,11 +157,11 @@ async fn run_compile(
             state.task_service.transition_status(task_id, TaskStatus::WaitingForConfirmation).map_err(task_error)?;
             return Ok(());
         }
-        if let Err(error) = finish_compile(state, &context, task_id, route, applied.affected_paths, checkpoint.commit_hash) {
+        if let Err(error) = finish_compile(state, context, task_id, route, applied.affected_paths, checkpoint.commit_hash) {
             let _ = state
                 .git_service
-                .unstage_paths(&context, &compile_output_paths(&manifest));
-            CompileService::restore_outputs(&context, &backup)?;
+                .unstage_paths(context, &compile_output_paths(&manifest));
+            CompileService::restore_outputs(context, &backup)?;
             return Err(error);
         }
         Ok(())

@@ -139,7 +139,7 @@ async fn run_chat_send(
     };
     state
         .chat_service
-        .append_message(&context, &mut session, user_message)?;
+        .append_message(context, &mut session, user_message)?;
 
     state
         .task_service
@@ -147,11 +147,11 @@ async fn run_chat_send(
         .map_err(task_error)?;
     let language = state
         .settings_service
-        .read_settings(&context)
+        .read_settings(context)
         .map(|settings| settings.language)
         .unwrap_or_else(|_| "en".to_string());
     let retrieval = state.chat_service.build_retrieval_context(
-        &context,
+        context,
         &state.search_service,
         &request.content,
         &session,
@@ -161,7 +161,7 @@ async fn run_chat_send(
 
     let (route, answer) = match resolve_route(
         state,
-        &context,
+        context,
         request.route,
         request.agent,
         request.provider,
@@ -247,7 +247,7 @@ async fn run_chat_send(
     }
     state
         .chat_service
-        .append_message(&context, &mut session, assistant_message)?;
+        .append_message(context, &mut session, assistant_message)?;
 
     state
         .task_service

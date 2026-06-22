@@ -305,7 +305,10 @@ mod tests {
             checkpoint_hash: None,
         };
         let value = serde_json::to_value(&action).unwrap();
-        assert!(value.get("checkpointHash").is_some(), "field must be present");
+        assert!(
+            value.get("checkpointHash").is_some(),
+            "field must be present"
+        );
         assert!(value["checkpointHash"].is_null());
 
         // Round-trips back to None.

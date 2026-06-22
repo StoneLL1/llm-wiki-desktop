@@ -23,8 +23,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::errors::BackendError;
-use crate::tasks::TaskService;
 use crate::tasks::task_model::LogLevel;
+use crate::tasks::TaskService;
 
 /// Interval at which the cancellation token is polled.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -117,8 +117,8 @@ mod tests {
     use super::{cancelled_error, poll_with_progress, ByokCancelled};
     use crate::errors::BackendError;
     use crate::models::task::TaskType;
-    use crate::tasks::TaskService;
     use crate::tasks::task_model::LogLevel;
+    use crate::tasks::TaskService;
 
     #[tokio::test]
     async fn appends_immediate_progress_and_returns_inner_result() {
@@ -128,8 +128,7 @@ mod tests {
         // id here so the focus stays on the resolve + log path.
         let completion = async { Ok::<_, BackendError>(42_u8) };
 
-        let result =
-            poll_with_progress(&service, "phantom-id", "Generating", completion).await;
+        let result = poll_with_progress(&service, "phantom-id", "Generating", completion).await;
 
         // Ok(Ok(42)) — outer is no-cancel, inner is the provider's success.
         assert_eq!(result.unwrap().unwrap(), 42);
@@ -147,8 +146,7 @@ mod tests {
             ))
         };
 
-        let result =
-            poll_with_progress(&service, "phantom-id", "Generating", completion).await;
+        let result = poll_with_progress(&service, "phantom-id", "Generating", completion).await;
 
         // Outer Ok (not cancelled) wrapping inner Err.
         let inner = result.unwrap();
@@ -159,8 +157,7 @@ mod tests {
     #[tokio::test]
     async fn returns_cancelled_when_token_set() {
         let service = TaskService::default();
-        let task =
-            service.create_task(TaskType::WikiCompile, None, "compile".into(), true);
+        let task = service.create_task(TaskType::WikiCompile, None, "compile".into(), true);
         let task_id = task.id.clone();
 
         // A future that never resolves on its own — only cancellation ends it.
