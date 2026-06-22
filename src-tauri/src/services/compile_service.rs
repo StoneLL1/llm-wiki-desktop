@@ -51,35 +51,52 @@ impl CompileService {
         context: &ProjectContext,
     ) -> Result<Vec<std::path::PathBuf>, BackendError> {
         let index_path = context.app_dir.join("source-index.json");
-        let index = if index_path.exists() {
+        let index_exists = index_path.exists();
+        let index = if index_exists {
             FileStore.read_json_file::<SourceArtifactIndex>(&index_path)?
         } else {
             SourceArtifactIndex::default()
         };
+
+        // Confirmed sources are the index keys; their extracted Markdown
+        // artifacts are raw/extracted/*.md values. Track both so the empty
+        // error can explain *why* compile has no input rather than just that
+        // it doesn't — the generic message sends users hunting for a pipeline
+        // bug when the real cause is "I imported an image-only PDF".
+        let confirmed_sources: Vec<String> = {
+            let mut keys: Vec<String> = index.sources.keys().cloned().collect();
+            keys.sort();
+            keys
+        };
         let mut relative_paths: Vec<String> = index
             .sources
-            .into_values()
+            .values()
             .flatten()
             .filter(|path| path.starts_with("raw/extracted/") && path.ends_with(".md"))
+            .cloned()
             .collect();
         relative_paths.sort();
         relative_paths.dedup();
+
         let mut files = Vec::new();
-        for relative in relative_paths {
-            let file = context.resolve_project_path(&relative)?;
+        let mut empty_on_disk: Vec<String> = Vec::new();
+        for relative in &relative_paths {
+            let file = context.resolve_project_path(relative)?;
             let content = std::fs::read_to_string(&file)
                 .map_err(|error| io_error("COMPILE_INPUT_READ_FAILED", error, &file))?;
-            if !content.trim().is_empty() {
+            if content.trim().is_empty() {
+                empty_on_disk.push(relative.clone());
+            } else {
                 files.push(file);
             }
         }
         files.sort();
         if files.is_empty() {
-            return Err(BackendError::new(
-                "COMPILE_INPUT_EMPTY",
-                "No extracted Markdown was found under raw/extracted. Import and extract at least one textual source before compiling.",
-                true,
-                true,
+            return Err(compile_input_empty_error(
+                index_exists,
+                &confirmed_sources,
+                &relative_paths,
+                &empty_on_disk,
             ));
         }
         Ok(files)
@@ -602,6 +619,53 @@ fn io_error(code: &str, error: std::io::Error, path: &Path) -> BackendError {
         .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
 }
 
+fn compile_input_empty_error(
+    index_exists: bool,
+    confirmed_sources: &[String],
+    relative_paths: &[String],
+    empty_on_disk: &[String],
+) -> BackendError {
+    let (summary, details) = if !index_exists || confirmed_sources.is_empty() {
+        (
+            "No extracted Markdown was found under raw/extracted. \
+             No imports have been confirmed yet — confirm an import preview before compiling."
+                .to_string(),
+            serde_json::json!({
+                "stage": "no_confirmed_imports",
+                "index_exists": index_exists,
+                "confirmed_sources": confirmed_sources,
+                "hint": "Run an import (raw/sources → preview → confirm) so raw/extracted/*.md is populated.",
+            }),
+        )
+    } else if relative_paths.is_empty() {
+        (
+            "No extracted Markdown was found under raw/extracted. \
+             Confirmed sources produced no raw/extracted/*.md (likely image-only or \
+             unsupported sources, or extraction failed silently)."
+                .to_string(),
+            serde_json::json!({
+                "stage": "no_extracted_markdown",
+                "confirmed_sources": confirmed_sources,
+                "hint": "Re-import these sources or add textual sources; verify raw/extracted/ is written.",
+            }),
+        )
+    } else {
+        (
+            "No extracted Markdown was found under raw/extracted. \
+             Confirmed extracted files exist but are empty on disk."
+                .to_string(),
+            serde_json::json!({
+                "stage": "extracted_files_empty",
+                "confirmed_sources": confirmed_sources,
+                "empty_on_disk": empty_on_disk,
+                "hint": "Re-import these sources; extraction wrote empty raw/extracted/*.md files.",
+            }),
+        )
+    };
+
+    BackendError::new("COMPILE_INPUT_EMPTY", summary, true, true).with_details(details)
+}
+
 fn is_safe_wiki_markdown(raw: &str) -> bool {
     if raw.contains('\\') || !raw.starts_with("wiki/") || !raw.ends_with(".md") {
         return false;
@@ -630,6 +694,11 @@ mod tests {
 
         assert_eq!(error.code, "COMPILE_INPUT_EMPTY");
         assert!(error.message.contains("raw/extracted"));
+        let details = error.details.expect("details present");
+        assert_eq!(
+            details.get("stage").and_then(|v| v.as_str()),
+            Some("no_confirmed_imports")
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -669,6 +738,41 @@ mod tests {
         let error = CompileService::extracted_markdown_files(&context).unwrap_err();
 
         assert_eq!(error.code, "COMPILE_INPUT_EMPTY");
+        let details = error.details.expect("details present");
+        assert_eq!(
+            details.get("stage").and_then(|v| v.as_str()),
+            Some("extracted_files_empty")
+        );
+        let empty_count = details
+            .get("empty_on_disk")
+            .and_then(|v| v.as_array())
+            .map(Vec::len);
+        assert_eq!(empty_count, Some(1));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compile_reports_when_confirmed_sources_have_no_extracted_markdown() {
+        let root =
+            std::env::temp_dir().join(format!("compile-no-md-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("raw/extracted")).unwrap();
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::write(
+            root.join(".app/source-index.json"),
+            // Source confirmed but points only at an image artifact, no *.md.
+            r#"{"sources":{"raw/sources/image-only/source.pdf":["raw/extracted/source.png"]}}"#,
+        )
+        .unwrap();
+        let context = ProjectContext::new("project", root.clone());
+
+        let error = CompileService::extracted_markdown_files(&context).unwrap_err();
+
+        assert_eq!(error.code, "COMPILE_INPUT_EMPTY");
+        let details = error.details.expect("details present");
+        assert_eq!(
+            details.get("stage").and_then(|v| v.as_str()),
+            Some("no_extracted_markdown")
+        );
         fs::remove_dir_all(root).ok();
     }
 
