@@ -27,7 +27,7 @@ impl ProcessRunner for FakeProcessRunner {
         Ok(if args == ["--version"] {
             "1.0.0".into()
         } else {
-            "--print --output-format --settings".into()
+            "--print --output-format --settings --bare".into()
         })
     }
 
