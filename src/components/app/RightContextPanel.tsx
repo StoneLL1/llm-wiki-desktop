@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
+import { AgentRightPanel } from "../../features/agent/AgentRightPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { CitationPanel } from "../../features/chat/CitationPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
@@ -142,6 +143,19 @@ export function RightContextPanel() {
 
   if (activeView === "import") {
     return <ImportRightPanel />;
+  }
+
+  if (activeView === "agent") {
+    const agentsFromStatus = status?.agents ?? [];
+    return (
+      <AgentRightPanel
+        agents={agentsFromStatus}
+        onRunIngest={() => {
+          // Switch into the agent view so the run dialog is reachable there.
+          setActiveView("agent");
+        }}
+      />
+    );
   }
 
   const health = currentProject.health;
