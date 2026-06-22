@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertTriangle,
-  Chat as ChatIcon,
+  MessageCircle,
   Check,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -225,7 +225,7 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
               style={{ justifyContent: "flex-start" }}
               onClick={() => setActiveView("chat")}
             >
-              <ChatIcon size={12} aria-hidden />
+              <MessageCircle size={12} aria-hidden />
               {t("agent.rightPanel.action.query")}
             </button>
             <button
