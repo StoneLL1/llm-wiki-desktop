@@ -830,9 +830,7 @@ mod tests {
     fn create_project_builds_full_skeleton_and_templates() {
         let (service, config) = service_in_temp();
         let root = unique_temp_dir("create-root");
-        let parent = root.parent().unwrap();
-        let target = parent.join("llm-wiki-create-target");
-        fs::remove_dir_all(&target).ok();
+        let target = root.join("llm-wiki-create-target");
 
         let summary = service
             .create_project(
@@ -865,7 +863,7 @@ mod tests {
         let recents = service.list_recent_projects().unwrap_or_default();
         let _ = recents;
         fs::remove_dir_all(config).ok();
-        fs::remove_dir_all(target).ok();
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
