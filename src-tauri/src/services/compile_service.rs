@@ -753,8 +753,7 @@ mod tests {
 
     #[test]
     fn compile_reports_when_confirmed_sources_have_no_extracted_markdown() {
-        let root =
-            std::env::temp_dir().join(format!("compile-no-md-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("compile-no-md-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("raw/extracted")).unwrap();
         fs::create_dir_all(root.join(".app")).unwrap();
         fs::write(
