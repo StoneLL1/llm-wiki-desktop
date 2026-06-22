@@ -140,8 +140,17 @@ impl AgentService {
         let prompt_owned = prompt.to_string();
         let invocation = match kind {
             AgentKind::Claude => AgentInvocation {
+                // --bare isolates the programmatic run from the user's
+                // interactive-session state: it skips hooks, plugin sync, MCP
+                // server init, auto-memory and CLAUDE.md auto-discovery. This
+                // matters because the host claude may be configured (via
+                // ~/.claude/) with MCP servers / SessionStart hooks that block
+                // or fail when spawned from a GUI process context, which
+                // otherwise hangs --print runs indefinitely. Auth falls back to
+                // ANTHROPIC_API_KEY / --settings, matching BYOK-style usage.
                 program: "claude".into(),
                 args: vec![
+                    "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
                     "stream-json".into(),
@@ -220,6 +229,7 @@ impl AgentService {
             AgentKind::Claude => AgentInvocation {
                 program: "claude".into(),
                 args: vec![
+                    "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
                     "text".into(),
@@ -266,6 +276,7 @@ impl AgentService {
             AgentKind::Claude => AgentInvocation {
                 program: "claude".into(),
                 args: vec![
+                    "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
                     "text".into(),
@@ -312,6 +323,7 @@ impl AgentService {
             AgentKind::Claude => AgentInvocation {
                 program: "claude".into(),
                 args: vec![
+                    "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
                     "text".into(),
@@ -537,6 +549,7 @@ fn invocation_supported(runner: &dyn ProcessRunner, kind: AgentKind, command: &s
             help.contains("--print")
                 && help.contains("--output-format")
                 && help.contains("--settings")
+                && help.contains("--bare")
         }
         AgentKind::Codex => help.contains("exec") && help.contains("non-interactively"),
         AgentKind::Openclaw => {
@@ -712,6 +725,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let claude = AgentService::invocation(AgentKind::Claude, &workspace, "compile").unwrap();
         assert_eq!(claude.program, "claude");
+        assert!(claude.args.contains(&"--bare".to_string()));
         assert!(claude.args.contains(&"--print".to_string()));
         assert!(claude.args.contains(&"--output-format".to_string()));
 
@@ -740,6 +754,7 @@ mod tests {
             AgentService::html_export_invocation(AgentKind::Claude, &workspace, "build html")
                 .unwrap();
         assert_eq!(claude.program, "claude");
+        assert!(claude.args.contains(&"--bare".to_string()));
         assert!(claude.args.contains(&"--output-format".to_string()));
         assert!(claude.args.contains(&"text".to_string()));
         assert!(!claude.args.contains(&"stream-json".to_string()));
@@ -749,6 +764,30 @@ mod tests {
             AgentService::html_export_invocation(AgentKind::Codex, &workspace, "build html")
                 .unwrap();
         assert_eq!(codex.stdin.as_deref(), Some("build html"));
+    }
+
+    #[test]
+    fn claude_invocations_isolate_from_user_session_state() {
+        // Regression guard: every Claude invocation must pass --bare so
+        // programmatic runs do not load the host's ~/.claude hooks, MCP
+        // servers, plugin sync, or auto-memory. Without --bare, a Claude
+        // configured with blocking MCP servers (e.g. claude-mem, zotero) hangs
+        // indefinitely during init when spawned from the GUI process, because
+        // --print never reaches the model while MCP/SessionStart hooks stall.
+        let workspace = std::env::temp_dir().join("llm-wiki-desktop/bare-invariant-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        for invocation in [
+            AgentService::invocation(AgentKind::Claude, &workspace, "compile").unwrap(),
+            AgentService::chat_invocation(AgentKind::Claude, &workspace, "chat").unwrap(),
+            AgentService::lint_invocation(AgentKind::Claude, &workspace, "lint").unwrap(),
+            AgentService::html_export_invocation(AgentKind::Claude, &workspace, "html").unwrap(),
+        ] {
+            assert!(
+                invocation.args.contains(&"--bare".to_string()),
+                "Claude invocation missing --bare (isolation): {:?}",
+                invocation.args
+            );
+        }
     }
 
     #[cfg(windows)]
