@@ -4,6 +4,10 @@
 
 [2026-06-22] 现象 — `onDragDropEvent` 代码和 payload 都正确，桌面拖入仍完全无反应；“本地文件”卡片点击后却只能手填路径。 — 根因 — 项目没有任何 Tauri v2 capability，`plugin:event|listen` 注册被 ACL 拒绝且前端 `catch` 静默吞错；卡片点击实现本身也只调用 textarea `focus()`，从未接入文件选择器。 — 规避做法 — 主窗口 capability 必须同时声明 `core:event:allow-listen`/`allow-unlisten`，配置显式开启 `dragDropEnabled`；系统选择使用官方 dialog 插件的 `dialog:allow-open`，注册失败必须给用户错误提示，并用配置测试防止权限文件再次丢失。
 
+[2026-06-22] 现象 — `npm run tauri dev` 里点编译/对话/HTML，任务一直 running 永不结束；shell 里跑后端同款 `claude --print --output-format stream-json ...` 却 17s 正常返回。 — 根因 — 程序化 Claude 调用未隔离宿主 `~/.claude` 配置：用户装的 MCP 服务器（claude-mem 连 localhost:37777、zotero）+ SessionStart hooks 在 GUI 进程 spawn 上下文里 init 卡住，`--print` 永远到不了模型。代码链路（命令注册/事件 emit/前端订阅）全对且有测试，故静态分析查不出。 — 规避做法 — 所有 Claude invocation builder 必须带 `--bare`（skip hooks/plugin sync/MCP/auto-memory）；detection 同步要求 `--bare`，旧 CLI 降级 Failed 而非静默挂。诊断时不能只读代码，必须在 shell 复现后端同款调用对比；stream-json init 块里的 `mcp_servers`/`hook_response` 是宿主配置污染的指纹。
+
+[2026-06-22] 现象 — `npm run tauri dev` 启动后只显示空白页（白屏），控制台无运行期报错，看上去像 Vite 配置坏了。 — 根因 — `lucide-react` 没有 `Chat` 命名导出（对话气泡图标实际叫 `MessageCircle` / `MessageSquare`），`import { Chat as ChatIcon } from "lucide-react"` 触发 ESM `module does not provide an export named 'Chat'` 的 SyntaxError，整棵 React 树在 `main.tsx` mount 阶段就抛飞 → 白屏；该错误在浏览器 devtools 控制台里也是抛在 module load 阶段，不进 React error boundary，容易被误判成构建/配置问题。 — 规避做法 — 用 lucide 图标前先核对导出名（`MessageCircle`/`MessageSquare`、`Bell`、`Settings` 等是真名，`Chat`/`Notification` 这类口语名不是）；Vite 白屏诊断先跑 `import('/src/main.tsx').then(...).catch(e => console.error('MOD', e))` 把模块加载期错误单独 catch 出来；CI lint 加一条"禁止从 lucide-react 导入未校验名称"的检查太重，改为白屏复盘时直接查 git 最近改动里所有 `from "lucide-react"`。
+
 > 每条记录：现象 — 根因 — 规避做法。遇到同类问题先查这里。
 
 [2026-06-22] 现象 — Tauri v2 文件拖入完全无反应，TypeScript 报 `Event<DragDropEvent>` 上不存在 `type/paths`。 — 根因 — `onDragDropEvent` 回调收到事件 envelope，真正的 drag payload 位于 `event.payload`；误按 payload 本体读取会让 drop 分支永远失效。 — 规避做法 — 统一先解包 `event.payload`，用纯 reducer 覆盖 enter/over/leave/drop、Windows+CJK 路径，并测试异步 listener 在组件卸载后才注册完成时立即 unlisten。
