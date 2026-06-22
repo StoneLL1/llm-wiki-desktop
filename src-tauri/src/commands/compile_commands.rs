@@ -101,6 +101,15 @@ async fn run_compile(
         .map_err(task_error)?;
     state
         .task_service
+        .append_log(
+            task_id,
+            LogLevel::Info,
+            "Validating extracted Markdown".into(),
+        )
+        .map_err(task_error)?;
+    CompileService::extracted_markdown_files(context)?;
+    state
+        .task_service
         .append_log(task_id, LogLevel::Info, "Creating Git checkpoint".into())
         .map_err(task_error)?;
     let checkpoint = state.git_service.create_checkpoint(
@@ -240,7 +249,7 @@ async fn generate_manifest(
                     format!("Calling {:?}", provider.provider),
                 )
                 .map_err(task_error)?;
-            let prompt = provider_prompt(workspace, &language)?;
+            let prompt = CompileService::provider_prompt(workspace, &language)?;
             let completion = state
                 .llm_service
                 .complete(&provider, secret.as_deref(), &prompt);
@@ -296,34 +305,6 @@ fn select_provider(
         }
     }
     Ok(None)
-}
-
-fn provider_prompt(workspace: &std::path::Path, language: &str) -> Result<String, BackendError> {
-    let mut prompt = String::from("Return only JSON matching {files:[{path,content}],deletions:[],summary}. Paths must be wiki/*.md and include wiki/index.md, wiki/overview.md, wiki/log.md. Never delete pages.\n");
-    // The JSON schema/path contract above stays English so parsing is stable;
-    // only the generated page *content* prose follows the user's language.
-    prompt.push_str(&crate::utils::i18n::language_instruction(language));
-    prompt.push_str(" Write each page's prose body in that language; keep frontmatter keys, paths, and this JSON structure in English.\n");
-    for name in ["purpose.md", "schema.md"] {
-        let content = std::fs::read_to_string(workspace.join(name)).map_err(|error| {
-            BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
-        })?;
-        prompt.push_str(&format!("\n--- {name} ---\n{content}"));
-    }
-    for root in [workspace.join("raw/extracted"), workspace.join("wiki")] {
-        for file in crate::services::FileStore.list_markdown_files(&root)? {
-            let relative = file
-                .strip_prefix(workspace)
-                .unwrap_or(&file)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let content = std::fs::read_to_string(&file).map_err(|error| {
-                BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
-            })?;
-            prompt.push_str(&format!("\n--- {relative} ---\n{content}"));
-        }
-    }
-    Ok(prompt)
 }
 
 fn finish_compile(

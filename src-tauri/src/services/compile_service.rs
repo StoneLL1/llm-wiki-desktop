@@ -20,6 +20,53 @@ pub struct CompileBackup {
 pub struct CompileService;
 
 impl CompileService {
+    pub fn provider_prompt(workspace: &Path, language: &str) -> Result<String, BackendError> {
+        let mut prompt = String::from("Return only JSON matching {files:[{path,content}],deletions:[],summary}. Paths must be wiki/*.md and include wiki/index.md, wiki/overview.md, wiki/log.md. Never delete pages.\n");
+        prompt.push_str(&crate::utils::i18n::language_instruction(language));
+        prompt.push_str(" Write each page's prose body in that language; keep frontmatter keys, paths, and this JSON structure in English.\n");
+        for name in ["purpose.md", "schema.md"] {
+            let content = std::fs::read_to_string(workspace.join(name)).map_err(|error| {
+                BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+            })?;
+            prompt.push_str(&format!("\n--- {name} ---\n{content}"));
+        }
+        for root in [workspace.join("raw/extracted"), workspace.join("wiki")] {
+            for file in FileStore.list_markdown_files(&root)? {
+                let relative = file
+                    .strip_prefix(workspace)
+                    .unwrap_or(&file)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let content = std::fs::read_to_string(&file).map_err(|error| {
+                    BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+                })?;
+                prompt.push_str(&format!("\n--- {relative} ---\n{content}"));
+            }
+        }
+        Ok(prompt)
+    }
+
+    pub fn extracted_markdown_files(
+        context: &ProjectContext,
+    ) -> Result<Vec<std::path::PathBuf>, BackendError> {
+        let extracted_dir = context.raw_dir.join("extracted");
+        let mut files = FileStore.list_markdown_files(&extracted_dir)?;
+        files.sort();
+        if files.is_empty() {
+            return Err(BackendError::new(
+                "COMPILE_INPUT_EMPTY",
+                "No extracted Markdown was found under raw/extracted. Import and extract at least one textual source before compiling.",
+                true,
+                true,
+            ));
+        }
+        for file in &files {
+            std::fs::read_to_string(file)
+                .map_err(|error| io_error("COMPILE_INPUT_READ_FAILED", error, file))?;
+        }
+        Ok(files)
+    }
+
     pub fn resolve_conflict_manifest(
         manifest: &CompileManifest,
         conflict_paths: &[String],
@@ -535,6 +582,43 @@ mod tests {
     use crate::models::compile::{CompileFile, CompileManifest};
     use crate::models::paths::ProjectContext;
     use std::fs;
+
+    #[test]
+    fn compile_rejects_an_empty_extracted_markdown_directory() {
+        let root = std::env::temp_dir().join(format!("compile-empty-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("raw/extracted")).unwrap();
+        let context = ProjectContext::new("project", root.clone());
+
+        let error = CompileService::extracted_markdown_files(&context).unwrap_err();
+
+        assert_eq!(error.code, "COMPILE_INPUT_EMPTY");
+        assert!(error.message.contains("raw/extracted"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn byok_prompt_reads_cjk_extracted_markdown_from_compile_workspace() {
+        let root = std::env::temp_dir().join(format!("compile-input-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("raw/extracted")).unwrap();
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("purpose.md"), "# Purpose").unwrap();
+        fs::write(root.join("schema.md"), "# Schema").unwrap();
+        fs::write(root.join("raw/extracted/资料.md"), "# 提取内容\n\n关键事实").unwrap();
+        let context = ProjectContext::new("project", root.clone());
+        let workspace = CompileService::create_workspace(
+            &context,
+            &format!("prompt-test-{}", uuid::Uuid::new_v4()),
+        )
+        .unwrap();
+
+        let prompt = CompileService::provider_prompt(&workspace, "zh-CN").unwrap();
+
+        assert!(prompt.contains("raw/extracted/资料.md"));
+        assert!(prompt.contains("# 提取内容"));
+        assert!(prompt.contains("关键事实"));
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(workspace).ok();
+    }
 
     #[test]
     fn apply_manifest_rejects_external_edits_before_writing_any_candidate() {
