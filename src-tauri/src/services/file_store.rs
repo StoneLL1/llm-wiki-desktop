@@ -489,8 +489,7 @@ mod tests {
         let details = err.details.expect("mismatch must carry details");
         assert_eq!(details["expectedHash"], "stale-hash");
         assert_eq!(
-            details["baselineContent"],
-            "# Agent\n\nOriginal body.",
+            details["baselineContent"], "# Agent\n\nOriginal body.",
             "baselineContent must equal the on-disk text"
         );
         // currentHash must still be present alongside the baseline.

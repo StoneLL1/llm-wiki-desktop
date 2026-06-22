@@ -61,9 +61,18 @@ mod tests {
 
     #[test]
     fn tray_labels_switch_between_english_and_chinese() {
-        assert_eq!(tray_labels("en"), ("Show", "Hide", "Quit", "LLM Wiki Desktop"));
-        assert_eq!(tray_labels("zh-CN"), ("显示", "隐藏", "退出", "LLM Wiki 桌面版"));
-        assert_eq!(tray_labels("zh"), ("显示", "隐藏", "退出", "LLM Wiki 桌面版"));
+        assert_eq!(
+            tray_labels("en"),
+            ("Show", "Hide", "Quit", "LLM Wiki Desktop")
+        );
+        assert_eq!(
+            tray_labels("zh-CN"),
+            ("显示", "隐藏", "退出", "LLM Wiki 桌面版")
+        );
+        assert_eq!(
+            tray_labels("zh"),
+            ("显示", "隐藏", "退出", "LLM Wiki 桌面版")
+        );
     }
 
     #[test]

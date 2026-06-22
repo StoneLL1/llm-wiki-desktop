@@ -92,13 +92,14 @@ async fn run_deep_lint(
         .read_settings(context)
         .map(|settings| settings.language)
         .unwrap_or_else(|_| "en".to_string());
-    let prompt = state
-        .lint_service
-        .build_deep_lint_prompt(context, &state.search_service, &language)?;
+    let prompt =
+        state
+            .lint_service
+            .build_deep_lint_prompt(context, &state.search_service, &language)?;
 
     let raw = match resolve_route(
         state,
-        &context,
+        context,
         request.route,
         request.agent,
         request.provider,
@@ -173,10 +174,10 @@ async fn run_deep_lint(
         generated_at: crate::utils::time_utils::now_rfc3339(),
     };
     let report_path = format!("{LINT_REPORTS_DIR}/{task_id}.json");
-    state.file_store.ensure_dir(&context, LINT_REPORTS_DIR)?;
+    state.file_store.ensure_dir(context, LINT_REPORTS_DIR)?;
     state
         .file_store
-        .write_json_atomic(&context, &report_path, &report)?;
+        .write_json_atomic(context, &report_path, &report)?;
 
     state
         .task_service
