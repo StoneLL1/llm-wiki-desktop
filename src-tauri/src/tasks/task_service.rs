@@ -315,25 +315,26 @@ impl TaskService {
     }
 
     pub fn cancel_task(&self, id: &str) -> Result<BackendTask, String> {
-        let status = {
-            let tasks = self.tasks.read().expect("lock poisoned");
-            let entry = tasks
-                .get(id)
-                .ok_or_else(|| format!("Task not found: {}", id))?;
-            if !entry.task.cancellable {
-                return Err(format!("Task is not cancellable: {}", id));
-            }
-            if matches!(
-                entry.task.status,
-                TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
-            ) {
-                return Err(format!(
-                    "Cannot cancel task in terminal state: {:?}",
-                    entry.task.status
-                ));
-            }
-            entry.task.status.clone()
-        };
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let entry = tasks
+            .get(id)
+            .ok_or_else(|| format!("Task not found: {}", id))?;
+        if !entry.task.cancellable {
+            return Err(format!("Task is not cancellable: {}", id));
+        }
+        if matches!(
+            entry.task.status,
+            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            // Idempotent: the task is already in a terminal state, so the
+            // caller's intent (stop the task) is already satisfied. Return
+            // the current snapshot instead of rejecting — otherwise a fast-
+            // failing task surfaces a confusing "cannot cancel" error when
+            // the user clicks Cancel after the failure already landed.
+            return Ok(entry.task.clone());
+        }
+        let status = entry.task.status.clone();
+        drop(tasks);
 
         self.cancellation.cancel(id);
 
@@ -725,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cancel_already_completed_task_fails() {
+    fn test_cancel_already_completed_task_is_idempotent() {
         let (service, _events) = make_service();
         let task = service.create_task(TaskType::Import, None, "Import".to_string(), true);
 
@@ -736,9 +737,40 @@ mod tests {
             .transition_status(&task.id, TaskStatus::Succeeded)
             .unwrap();
 
-        let result = service.cancel_task(&task.id);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("terminal state"));
+        // Cancelling a task that already reached a terminal state must not
+        // error — the caller's intent (stop the task) is already satisfied,
+        // and rejecting surfaces a confusing "cannot cancel" toast when a
+        // fast-failing task lands before the user's click.
+        let result = service.cancel_task(&task.id).unwrap();
+        assert_eq!(result.status, TaskStatus::Succeeded);
+
+        // Same idempotency for Failed and Cancelled terminal states.
+        let failed = service.create_task(TaskType::Import, None, "Import".to_string(), true);
+        service
+            .transition_status(&failed.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .transition_status(&failed.id, TaskStatus::Failed)
+            .unwrap();
+        assert_eq!(
+            service.cancel_task(&failed.id).unwrap().status,
+            TaskStatus::Failed
+        );
+
+        let cancelled = service.create_task(TaskType::Import, None, "Import".to_string(), true);
+        service
+            .transition_status(&cancelled.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .transition_status(&cancelled.id, TaskStatus::Cancelling)
+            .unwrap();
+        service
+            .transition_status(&cancelled.id, TaskStatus::Cancelled)
+            .unwrap();
+        assert_eq!(
+            service.cancel_task(&cancelled.id).unwrap().status,
+            TaskStatus::Cancelled
+        );
     }
 
     #[test]
