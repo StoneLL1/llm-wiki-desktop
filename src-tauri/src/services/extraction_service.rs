@@ -40,10 +40,7 @@ impl ExtractionService {
         }
 
         match &file_type {
-            SourceFileType::Markdown
-            | SourceFileType::Text
-            | SourceFileType::Csv
-            | SourceFileType::Url => {
+            SourceFileType::Markdown | SourceFileType::Text | SourceFileType::Url => {
                 // Direct text extraction
                 let content = fs::read_to_string(source_path).map_err(|err| {
                     BackendError::new("EXTRACT_READ_FAILED", err.to_string(), true, false)
@@ -73,6 +70,19 @@ impl ExtractionService {
                     extracted_text_path: Some(extracted_text_path),
                     extracted_assets: vec![],
                 })
+            }
+            SourceFileType::Csv => {
+                let markdown = csv_to_markdown(source_path)?;
+                build_text_result(
+                    context,
+                    file_store,
+                    source_path,
+                    output_dir,
+                    &original_name,
+                    SourceFileType::Csv,
+                    &markdown,
+                    None,
+                )
             }
             SourceFileType::Html => {
                 // Simple text extraction from HTML (full parser adapter in follow-up tasks)
@@ -223,6 +233,64 @@ pub fn strip_html_tags(html: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     collapsed
+}
+
+fn csv_to_markdown(source_path: &Path) -> Result<String, BackendError> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_path(source_path)
+        .map_err(|error| {
+            BackendError::new("EXTRACT_CSV_READ_FAILED", error.to_string(), true, false)
+                .with_details(serde_json::json!({ "path": source_path.to_string_lossy() }))
+        })?;
+    let mut rows = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|error| {
+            BackendError::new("EXTRACT_CSV_PARSE_FAILED", error.to_string(), true, false)
+                .with_details(serde_json::json!({ "path": source_path.to_string_lossy() }))
+        })?;
+        rows.push(record.iter().map(markdown_table_cell).collect::<Vec<_>>());
+    }
+    Ok(rows_to_markdown_table(&rows, true))
+}
+
+fn markdown_table_cell(value: &str) -> String {
+    value
+        .replace('|', "\\|")
+        .replace("\r\n", "<br>")
+        .replace(['\r', '\n'], "<br>")
+        .trim()
+        .to_string()
+}
+
+fn rows_to_markdown_table(rows: &[Vec<String>], first_row_is_header: bool) -> String {
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if width == 0 {
+        return String::new();
+    }
+    let mut normalized = rows.to_vec();
+    for row in &mut normalized {
+        row.resize(width, String::new());
+    }
+    let header = if first_row_is_header && !normalized.is_empty() {
+        normalized.remove(0)
+    } else {
+        (1..=width).map(|index| format!("Column {index}")).collect()
+    };
+    let mut markdown = String::new();
+    push_markdown_row(&mut markdown, &header);
+    push_markdown_row(&mut markdown, &vec!["---".to_string(); width]);
+    for row in normalized {
+        push_markdown_row(&mut markdown, &row);
+    }
+    markdown
+}
+
+fn push_markdown_row(output: &mut String, row: &[String]) {
+    output.push_str("| ");
+    output.push_str(&row.join(" | "));
+    output.push_str(" |\n");
 }
 
 pub fn extract_html_title(html: &str) -> String {
@@ -424,16 +492,125 @@ fn read_docx_text<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
 ) -> Result<String, BackendError> {
     let mut buf = String::new();
-    for name in ["word/document.xml", "word/footnotes.xml", "word/endnotes.xml"] {
+    for name in [
+        "word/document.xml",
+        "word/footnotes.xml",
+        "word/endnotes.xml",
+    ] {
         if let Ok(mut entry) = archive.by_name(name) {
             ensure_entry_size(&entry)?;
             let mut xml = String::new();
             entry.read_to_string(&mut xml).map_err(io_read_err)?;
-            buf.push_str(&collect_element_text(&xml, &["w:t"]));
-            buf.push('\n');
+            let markdown = docx_xml_to_markdown(&xml)?;
+            if !markdown.trim().is_empty() {
+                if !buf.is_empty() {
+                    buf.push_str("\n\n");
+                }
+                buf.push_str(markdown.trim());
+            }
         }
     }
     Ok(buf)
+}
+
+fn docx_xml_to_markdown(xml: &str) -> Result<String, BackendError> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut output = String::new();
+    let mut paragraph = String::new();
+    let mut heading_level = None;
+    let mut is_list = false;
+    let mut in_text = false;
+    let mut in_table = false;
+    let mut in_cell = false;
+    let mut cell = String::new();
+    let mut row = Vec::new();
+    let mut table = Vec::new();
+    let mut event_buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut event_buf) {
+            Ok(Event::Start(event)) => match local_name(event.name().as_ref()) {
+                b"p" => {
+                    paragraph.clear();
+                    heading_level = None;
+                    is_list = false;
+                }
+                b"pStyle" => heading_level = heading_level_from_attributes(&event),
+                b"numPr" => is_list = true,
+                b"t" => in_text = true,
+                b"tbl" => {
+                    in_table = true;
+                    table.clear();
+                }
+                b"tr" => row.clear(),
+                b"tc" => {
+                    in_cell = true;
+                    cell.clear();
+                }
+                _ => {}
+            },
+            Ok(Event::Empty(event)) => match local_name(event.name().as_ref()) {
+                b"pStyle" => heading_level = heading_level_from_attributes(&event),
+                b"numPr" => is_list = true,
+                _ => {}
+            },
+            Ok(Event::Text(text)) if in_text => {
+                let value = text.unescape().map_err(xml_err)?;
+                paragraph.push_str(&value);
+            }
+            Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
+                b"t" => in_text = false,
+                b"p" => {
+                    let value = paragraph.trim();
+                    if in_cell {
+                        if !cell.is_empty() && !value.is_empty() {
+                            cell.push_str("<br>");
+                        }
+                        cell.push_str(value);
+                    } else if !in_table && !value.is_empty() {
+                        if let Some(level) = heading_level {
+                            output.push_str(&"#".repeat(level));
+                            output.push(' ');
+                        } else if is_list {
+                            output.push_str("- ");
+                        }
+                        output.push_str(value);
+                        output.push_str("\n\n");
+                    }
+                }
+                b"tc" => {
+                    row.push(markdown_table_cell(&cell));
+                    in_cell = false;
+                }
+                b"tr" => {
+                    if !row.is_empty() {
+                        table.push(std::mem::take(&mut row));
+                    }
+                }
+                b"tbl" => {
+                    output.push_str(&rows_to_markdown_table(&table, true));
+                    output.push('\n');
+                    in_table = false;
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(xml_err(error)),
+            _ => {}
+        }
+        event_buf.clear();
+    }
+    Ok(output.trim().to_string())
+}
+
+fn heading_level_from_attributes(event: &quick_xml::events::BytesStart<'_>) -> Option<usize> {
+    let value = event.attributes().flatten().find_map(|attribute| {
+        (local_name(attribute.key.as_ref()) == b"val")
+            .then(|| String::from_utf8_lossy(attribute.value.as_ref()).into_owned())
+    })?;
+    let lower = value.to_ascii_lowercase();
+    let digits = lower.strip_prefix("heading")?.trim();
+    digits.parse::<usize>().ok().map(|level| level.clamp(1, 6))
 }
 
 /// Collect slide text from `ppt/slides/slideN.xml` (PPTX): `<a:t>` bodies.
@@ -452,19 +629,68 @@ fn read_pptx_text<R: Read + std::io::Seek>(
     slides.sort_by_key(|a| slide_index(a));
     let slide_count = slides.len() as u32;
     let mut buf = String::new();
-    for name in slides {
+    for (index, name) in slides.into_iter().enumerate() {
         if let Ok(mut entry) = archive.by_name(name) {
             ensure_entry_size(&entry)?;
             let mut xml = String::new();
             entry.read_to_string(&mut xml).map_err(io_read_err)?;
-            let slide_text = collect_element_text(&xml, &["a:t"]);
+            let slide_text = pptx_slide_to_markdown(&xml)?;
+            buf.push_str(&format!("## Slide {}\n", index + 1));
             if !slide_text.trim().is_empty() {
-                buf.push_str(&slide_text);
-                buf.push_str("\n\n");
+                buf.push_str(slide_text.trim());
+                buf.push('\n');
             }
+            buf.push('\n');
         }
     }
     Ok((buf, slide_count))
+}
+
+fn pptx_slide_to_markdown(xml: &str) -> Result<String, BackendError> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut output = String::new();
+    let mut paragraph = String::new();
+    let mut in_text = false;
+    let mut is_bullet = false;
+    let mut event_buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut event_buf) {
+            Ok(Event::Start(event)) => match local_name(event.name().as_ref()) {
+                b"p" => {
+                    paragraph.clear();
+                    is_bullet = false;
+                }
+                b"t" => in_text = true,
+                b"buChar" | b"buAutoNum" => is_bullet = true,
+                _ => {}
+            },
+            Ok(Event::Empty(event))
+                if matches!(local_name(event.name().as_ref()), b"buChar" | b"buAutoNum") =>
+            {
+                is_bullet = true;
+            }
+            Ok(Event::Text(text)) if in_text => {
+                paragraph.push_str(&text.unescape().map_err(xml_err)?);
+            }
+            Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
+                b"t" => in_text = false,
+                b"p" if !paragraph.trim().is_empty() => {
+                    if is_bullet {
+                        output.push_str("- ");
+                    }
+                    output.push_str(paragraph.trim());
+                    output.push('\n');
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(xml_err(error)),
+            _ => {}
+        }
+        event_buf.clear();
+    }
+    Ok(output)
 }
 
 /// Collect cell values from an XLSX: shared strings (`xl/sharedStrings.xml`,
@@ -478,7 +704,7 @@ fn read_xlsx_text<R: Read + std::io::Seek>(
         ensure_entry_size(&entry)?;
         let mut xml = String::new();
         entry.read_to_string(&mut xml).map_err(io_read_err)?;
-        shared = collect_element_text_split(&xml, &["t"]);
+        shared = read_shared_strings(&xml)?;
     }
 
     let names = archive_names(archive);
@@ -500,150 +726,135 @@ fn read_xlsx_text<R: Read + std::io::Seek>(
         let mut xml = String::new();
         entry.read_to_string(&mut xml).map_err(io_read_err)?;
 
-        let mut reader = Reader::from_str(&xml);
-        reader.config_mut().trim_text(true);
-        // Stack of element local names (owned bytes, because the reader reuses
-        // its read buffer) so Text events know their enclosing element. A
-        // separate `cell_shared` flag tracks whether the current `<c>` cell is
-        // `t="s"` (shared-string index): `<v>` bodies are only resolved against
-        // `shared` when this is true, otherwise the literal value is emitted.
-        // Without this check a numeric cell whose value happens to be a valid
-        // shared-string index would be mis-emitted.
-        let mut element_stack: Vec<Vec<u8>> = Vec::new();
-        let mut cell_shared = false;
-        let mut buf_small = Vec::new();
-        loop {
-            match reader.read_event_into(&mut buf_small) {
-                Ok(Event::Start(e)) => {
-                    let local = e.name().as_ref().to_vec();
-                    if local == b"c" {
-                        // Cell type lives on the <c> element's `t` attribute.
-                        cell_shared = e.attributes().flatten().any(|attr| {
-                            attr.key.as_ref() == b"t" && attr.value.as_ref() == b"s"
-                        });
-                    }
-                    element_stack.push(local);
-                }
-                Ok(Event::Empty(e)) => {
-                    if e.name().as_ref() == b"c" {
-                        cell_shared = false;
-                    }
-                }
-                Ok(Event::Text(t)) => {
-                    let text = t.unescape().map_err(xml_err)?.into_owned();
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    let inside_v = element_stack
-                        .last()
-                        .map(|n| n.as_slice() == b"v")
-                        .unwrap_or(false);
-                    let inside_t = element_stack
-                        .last()
-                        .map(|n| n.as_slice() == b"t")
-                        .unwrap_or(false);
-                    if inside_v {
-                        if cell_shared {
-                            if let Ok(idx) = text.trim().parse::<usize>() {
-                                if let Some(shared) = shared.get(idx) {
-                                    buf.push_str(shared);
-                                    buf.push('\t');
-                                    continue;
-                                }
-                            }
-                            // Shared-string index out of range: emit nothing
-                            // rather than a misleading raw index.
-                            continue;
-                        }
-                        // Numeric (or t="str"/t="e") cell: emit the literal.
-                        buf.push_str(&text);
-                        buf.push('\t');
-                    } else if inside_t {
-                        // <is><t>...</t></is> inline string, or stray <t>: emit
-                        // the text so inline-string cells are not dropped.
-                        buf.push_str(&text);
-                        buf.push('\t');
-                    }
-                }
-                Ok(Event::End(e)) => {
-                    if e.name().as_ref() == b"c" {
-                        cell_shared = false;
-                    }
-                    element_stack.pop();
-                }
-                Ok(Event::Eof) => break,
-                Err(error) => return Err(xml_err(error)),
-                _ => {}
-            }
-        }
-        if !buf.is_empty() && !buf.ends_with('\n') {
-            buf.push('\n');
-        }
+        let rows = read_xlsx_rows(&xml, &shared)?;
+        buf.push_str(&format!("## Sheet {}\n\n", sheet_index(name)));
+        buf.push_str(&rows_to_markdown_table(&rows, true));
+        buf.push('\n');
     }
     Ok(buf)
 }
 
-/// Collect the inner text of every occurrence of the given element names,
-/// joined with a space per element to keep words separable.
-fn collect_element_text(xml: &str, names: &[&str]) -> String {
-    let parts = collect_element_text_split(xml, names);
-    parts.join(" ")
-}
-
-/// Collect the inner text of the given elements, one String per occurrence.
-fn collect_element_text_split(xml: &str, names: &[&str]) -> Vec<String> {
+fn read_shared_strings(xml: &str) -> Result<Vec<String>, BackendError> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut depth_in_target = 0u32;
+    reader.config_mut().trim_text(false);
+    let mut strings = Vec::new();
     let mut current = String::new();
-    let mut out = Vec::new();
-    let mut buf = Vec::new();
+    let mut in_si = false;
+    let mut in_text = false;
+    let mut event_buf = Vec::new();
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                if depth_in_target > 0 || names_contains(names, e.name().as_ref()) {
-                    if depth_in_target == 0 {
-                        depth_in_target = 1;
-                    } else {
-                        depth_in_target += 1;
-                    }
+        match reader.read_event_into(&mut event_buf) {
+            Ok(Event::Start(event)) => match local_name(event.name().as_ref()) {
+                b"si" => {
+                    in_si = true;
+                    current.clear();
                 }
+                b"t" if in_si => in_text = true,
+                _ => {}
+            },
+            Ok(Event::Text(text)) if in_text => {
+                current.push_str(&text.unescape().map_err(xml_err)?);
             }
-            Ok(Event::Empty(e)) => {
-                if depth_in_target == 0 && names_contains(names, e.name().as_ref()) {
-                    out.push(String::new());
+            Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
+                b"t" => in_text = false,
+                b"si" => {
+                    strings.push(std::mem::take(&mut current));
+                    in_si = false;
                 }
-            }
-            Ok(Event::Text(t)) if depth_in_target > 0 => {
-                if let Ok(text) = t.unescape() {
-                    if !current.is_empty() && !text.trim().is_empty() {
-                        current.push(' ');
-                    }
-                    current.push_str(text.trim());
-                }
-            }
-            Ok(Event::End(_)) if depth_in_target > 0 => {
-                depth_in_target -= 1;
-                if depth_in_target == 0
-                    && !current.is_empty() {
-                        out.push(std::mem::take(&mut current));
-                    }
-            }
+                _ => {}
+            },
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(error) => return Err(xml_err(error)),
             _ => {}
         }
+        event_buf.clear();
     }
-    out
+    Ok(strings)
 }
 
-fn names_contains(names: &[&str], local: &[u8]) -> bool {
-    names.iter().any(|n| {
-        let n = n.as_bytes();
-        // Match the local name even when namespaced (e.g. "w:t" vs bare "t").
-        local.ends_with(n)
-            && (local.len() == n.len() || local.get(local.len() - n.len() - 1) == Some(&b':'))
-    })
+fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, BackendError> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut cell_column = 0usize;
+    let mut cell_type = String::new();
+    let mut cell_value = String::new();
+    let mut in_value = false;
+    let mut in_inline_text = false;
+    let mut event_buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut event_buf) {
+            Ok(Event::Start(event)) => match local_name(event.name().as_ref()) {
+                b"row" => row.clear(),
+                b"c" => {
+                    cell_type.clear();
+                    cell_value.clear();
+                    cell_column = row.len();
+                    for attribute in event.attributes().flatten() {
+                        match local_name(attribute.key.as_ref()) {
+                            b"r" => {
+                                cell_column = cell_column_index(&String::from_utf8_lossy(
+                                    attribute.value.as_ref(),
+                                ));
+                            }
+                            b"t" => {
+                                cell_type =
+                                    String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                b"v" => in_value = true,
+                b"t" => in_inline_text = true,
+                _ => {}
+            },
+            Ok(Event::Text(text)) if in_value || in_inline_text => {
+                cell_value.push_str(&text.unescape().map_err(xml_err)?);
+            }
+            Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
+                b"v" => in_value = false,
+                b"t" => in_inline_text = false,
+                b"c" => {
+                    row.resize(cell_column + 1, String::new());
+                    let value = if cell_type == "s" {
+                        cell_value
+                            .trim()
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|index| shared.get(index))
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        cell_value.clone()
+                    };
+                    row[cell_column] = markdown_table_cell(&value);
+                }
+                b"row" => rows.push(std::mem::take(&mut row)),
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(xml_err(error)),
+            _ => {}
+        }
+        event_buf.clear();
+    }
+    Ok(rows)
+}
+
+fn cell_column_index(reference: &str) -> usize {
+    reference
+        .bytes()
+        .take_while(u8::is_ascii_alphabetic)
+        .fold(0usize, |value, byte| {
+            value * 26 + usize::from(byte.to_ascii_uppercase() - b'A' + 1)
+        })
+        .saturating_sub(1)
+}
+
+fn local_name(name: &[u8]) -> &[u8] {
+    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
 }
 
 fn archive_names<R: Read + std::io::Seek>(archive: &mut ZipArchive<R>) -> Vec<String> {
@@ -681,7 +892,11 @@ const MAX_OOXML_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Reject a zip entry whose declared uncompressed size exceeds the safety cap.
 fn ensure_entry_size(entry: &zip::read::ZipFile<'_>) -> Result<(), BackendError> {
-    if entry.size() > MAX_OOXML_ENTRY_BYTES {
+    ensure_entry_size_value(entry.size())
+}
+
+fn ensure_entry_size_value(size: u64) -> Result<(), BackendError> {
+    if size > MAX_OOXML_ENTRY_BYTES {
         return Err(BackendError::new(
             "EXTRACT_ENTRY_TOO_LARGE",
             "An Office XML part is too large to extract safely.",
@@ -767,7 +982,7 @@ fn write_extracted_text(
     hasher.update(b"\0");
     hasher.update(text.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
-    let filename = format!("{}-{}.txt", sanitize_filename(stem), &hash[..8]);
+    let filename = format!("{}-{}.md", sanitize_filename(stem), &hash[..8]);
     let output_path = output_dir.join(filename);
 
     let relative = output_path
@@ -874,6 +1089,30 @@ mod tests {
     }
 
     #[test]
+    fn extracted_artifact_is_markdown_and_cjk_safe() {
+        let (context, root) = tmp_context("markdown-artifact");
+        let store = FileStore;
+        let out_dir = root.join("raw/extracted");
+        let source = root.join("研究资料.txt");
+        fs::write(&source, "第一段内容\nsecond paragraph\n").unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &store, &source, &out_dir)
+            .unwrap();
+
+        let relative = result.extracted_text_path.unwrap();
+        assert!(relative.starts_with("raw/extracted/研究资料-"));
+        assert!(relative.ends_with(".md"));
+        assert!(!relative.contains('\\'));
+        assert_eq!(
+            fs::read_to_string(root.join(&relative)).unwrap(),
+            "第一段内容\nsecond paragraph\n"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn extracts_csv_text() {
         let (context, root) = tmp_context("csv-extract");
         let store = FileStore;
@@ -888,6 +1127,31 @@ mod tests {
 
         assert_eq!(result.status, ExtractionStatus::Extracted);
         assert!(result.text_preview.unwrap().contains("Alice"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn csv_is_converted_to_markdown_table() {
+        let (context, root) = tmp_context("csv-markdown");
+        let store = FileStore;
+        let out_dir = root.join("raw/extracted");
+        let source = root.join("people.csv");
+        fs::write(
+            &source,
+            "name,note\nAlice,\"hello, world\"\nBob,\"left | right\"\n",
+        )
+        .unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &store, &source, &out_dir)
+            .unwrap();
+        let markdown = fs::read_to_string(root.join(result.extracted_text_path.unwrap())).unwrap();
+
+        assert!(markdown.contains("| name | note |"));
+        assert!(markdown.contains("| --- | --- |"));
+        assert!(markdown.contains("| Alice | hello, world |"));
+        assert!(markdown.contains("| Bob | left \\| right |"));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1020,11 +1284,7 @@ mod tests {
         let store = FileStore;
         let out_dir = root.join("raw/extracted");
         let source = root.join("data.xlsx");
-        let shared = vec![
-            "Hello".to_string(),
-            "World".to_string(),
-            "Pi".to_string(),
-        ];
+        let shared = vec!["Hello".to_string(), "World".to_string(), "Pi".to_string()];
         // A1: shared string index 1 -> "World". B1: numeric 1 (NOT shared).
         let sheet = r#"<?xml version="1.0"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -1109,6 +1369,81 @@ mod tests {
     }
 
     #[test]
+    fn pdf_text_layer_is_extracted_to_markdown() {
+        let (context, root) = tmp_context("pdf-text-layer");
+        let source = root.join("paper.pdf");
+        fs::write(&source, sample_text_pdf(Some("Hello PDF Wiki"))).unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Extracted);
+        assert!(result.text_preview.unwrap().contains("Hello PDF Wiki"));
+        assert_eq!(result.metadata.unwrap().page_count, Some(1));
+        assert!(result.extracted_text_path.unwrap().ends_with(".md"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_pdf_has_actionable_ocr_handoff_without_fake_markdown() {
+        let (context, root) = tmp_context("pdf-scanned");
+        let source = root.join("scan.pdf");
+        fs::write(&source, sample_text_pdf(None)).unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap();
+
+        assert_eq!(result.status, ExtractionStatus::Failed);
+        assert_ne!(result.status, ExtractionStatus::Unsupported);
+        assert!(result.error.unwrap().contains("OCR"));
+        assert_eq!(result.extracted_text_path, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_ooxml_entry_is_rejected_before_read() {
+        let error = ensure_entry_size_value(MAX_OOXML_ENTRY_BYTES + 1).unwrap_err();
+        assert_eq!(error.code, "EXTRACT_ENTRY_TOO_LARGE");
+    }
+
+    #[test]
+    fn docx_preserves_headings_lists_and_tables_as_markdown() {
+        let (context, root) = tmp_context("docx-structure");
+        let source = root.join("structured.docx");
+        let document = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Research</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>First item</w:t></w:r></w:p>
+<w:p><w:r><w:t>Normal paragraph.</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Name</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Value</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:p><w:r><w:t>Alpha</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>42</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+</w:body></w:document>"#;
+        fs::write(
+            &source,
+            zip_to_bytes(&[
+                ("[Content_Types].xml", "<Types/>"),
+                ("word/document.xml", document),
+            ]),
+        )
+        .unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap();
+        let markdown = fs::read_to_string(root.join(result.extracted_text_path.unwrap())).unwrap();
+
+        assert!(markdown.contains("# Research"));
+        assert!(markdown.contains("- First item"));
+        assert!(markdown.contains("Normal paragraph."));
+        assert!(markdown.contains("| Name | Value |"));
+        assert!(markdown.contains("| --- | --- |"));
+        assert!(markdown.contains("| Alpha | 42 |"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn pptx_text_is_extracted_with_slide_count_as_page_count() {
         let (context, root) = tmp_context("pptx-real");
         let store = FileStore;
@@ -1130,6 +1465,34 @@ mod tests {
         // Slide count is a meaningful "page" surrogate for presentations.
         assert_eq!(meta.page_count, Some(2));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pptx_emits_numbered_slide_sections_and_bullets() {
+        let (context, root) = tmp_context("pptx-structure");
+        let source = root.join("deck.pptx");
+        let slide_one = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><a:p><a:r><a:t>Intro</a:t></a:r></a:p><a:p><a:pPr><a:buChar char="•"/></a:pPr><a:r><a:t>Key point</a:t></a:r></a:p></p:cSld></p:sld>"#;
+        let slide_two = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><a:p><a:r><a:t>Details</a:t></a:r></a:p></p:cSld></p:sld>"#;
+        fs::write(
+            &source,
+            zip_to_bytes(&[
+                ("[Content_Types].xml", "<Types/>"),
+                ("ppt/slides/slide2.xml", slide_two),
+                ("ppt/slides/slide1.xml", slide_one),
+            ]),
+        )
+        .unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap();
+        let markdown = fs::read_to_string(root.join(result.extracted_text_path.unwrap())).unwrap();
+
+        assert!(markdown.starts_with("## Slide 1\n"));
+        assert!(markdown.contains("Intro\n"));
+        assert!(markdown.contains("- Key point"));
+        assert!(markdown.contains("## Slide 2\nDetails"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1161,6 +1524,28 @@ mod tests {
         let meta = result.metadata.unwrap();
         assert!(meta.word_count.unwrap() >= 2);
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xlsx_preserves_missing_columns_in_markdown_table() {
+        let (context, root) = tmp_context("xlsx-layout");
+        let source = root.join("layout.xlsx");
+        let sheet = r#"<worksheet xmlns="x"><sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1"><v>7</v></c></row>
+<row r="2"><c r="A2" t="inlineStr"><is><t>Beta</t></is></c><c r="B2"><v>1</v></c></row>
+</sheetData></worksheet>"#;
+        fs::write(&source, sample_xlsx(&["Name".to_string()], sheet)).unwrap();
+
+        let result = ExtractionService
+            .extract_text(&context, &FileStore, &source, &root.join("raw/extracted"))
+            .unwrap();
+        let markdown = fs::read_to_string(root.join(result.extracted_text_path.unwrap())).unwrap();
+
+        assert!(markdown.contains("## Sheet 1"));
+        assert!(markdown.contains("| Name |  | 7 |"));
+        assert!(markdown.contains("| --- | --- | --- |"));
+        assert!(markdown.contains("| Beta | 1 |  |"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1285,6 +1670,39 @@ mod tests {
         buf
     }
 
+    fn sample_text_pdf(text: Option<&str>) -> Vec<u8> {
+        let stream = text
+            .map(|value| format!("BT /F1 12 Tf 72 720 Td ({value}) Tj ET"))
+            .unwrap_or_default();
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, object).as_bytes());
+        }
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
     /// Build a minimal valid DOCX with the given paragraphs as `word/document.xml`.
     fn sample_docx(first: &str, second: &str) -> Vec<u8> {
         let document = format!(
@@ -1297,7 +1715,10 @@ mod tests {
 </w:document>"#
         );
         zip_to_bytes(&[
-            ("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>"),
+            (
+                "[Content_Types].xml",
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>",
+            ),
             ("word/document.xml", &document),
         ])
     }
@@ -1306,12 +1727,11 @@ mod tests {
     fn sample_pptx(slides: &[String]) -> Vec<u8> {
         let mut owned_names: Vec<String> = Vec::new();
         let mut entries: Vec<(String, String)> = Vec::new();
-        entries.push(
-            (
-                "[Content_Types].xml".to_string(),
-                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>".to_string(),
-            ),
-        );
+        entries.push((
+            "[Content_Types].xml".to_string(),
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>"
+                .to_string(),
+        ));
         for (i, text) in slides.iter().enumerate() {
             let name = format!("ppt/slides/slide{}.xml", i + 1);
             let xml = format!(
@@ -1341,7 +1761,10 @@ mod tests {
         }
         sst.push_str("</sst>");
         zip_to_bytes(&[
-            ("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>"),
+            (
+                "[Content_Types].xml",
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>",
+            ),
             ("xl/sharedStrings.xml", &sst),
             ("xl/worksheets/sheet1.xml", sheet_xml),
         ])
