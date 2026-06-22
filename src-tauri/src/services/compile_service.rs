@@ -3,6 +3,7 @@ use std::path::{Component, Path};
 
 use crate::errors::BackendError;
 use crate::models::compile::{CompileConflictResolution, CompileFile, CompileManifest};
+use crate::models::import::SourceArtifactIndex;
 use crate::models::paths::ProjectContext;
 use crate::services::{FileStore, WriteMode};
 
@@ -49,8 +50,29 @@ impl CompileService {
     pub fn extracted_markdown_files(
         context: &ProjectContext,
     ) -> Result<Vec<std::path::PathBuf>, BackendError> {
-        let extracted_dir = context.raw_dir.join("extracted");
-        let mut files = FileStore.list_markdown_files(&extracted_dir)?;
+        let index_path = context.app_dir.join("source-index.json");
+        let index = if index_path.exists() {
+            FileStore.read_json_file::<SourceArtifactIndex>(&index_path)?
+        } else {
+            SourceArtifactIndex::default()
+        };
+        let mut relative_paths: Vec<String> = index
+            .sources
+            .into_values()
+            .flatten()
+            .filter(|path| path.starts_with("raw/extracted/") && path.ends_with(".md"))
+            .collect();
+        relative_paths.sort();
+        relative_paths.dedup();
+        let mut files = Vec::new();
+        for relative in relative_paths {
+            let file = context.resolve_project_path(&relative)?;
+            let content = std::fs::read_to_string(&file)
+                .map_err(|error| io_error("COMPILE_INPUT_READ_FAILED", error, &file))?;
+            if !content.trim().is_empty() {
+                files.push(file);
+            }
+        }
         files.sort();
         if files.is_empty() {
             return Err(BackendError::new(
@@ -59,10 +81,6 @@ impl CompileService {
                 true,
                 true,
             ));
-        }
-        for file in &files {
-            std::fs::read_to_string(file)
-                .map_err(|error| io_error("COMPILE_INPUT_READ_FAILED", error, file))?;
         }
         Ok(files)
     }
@@ -199,10 +217,21 @@ impl CompileService {
             std::fs::copy(&source, workspace.join(name))
                 .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &source))?;
         }
-        copy_tree(
-            &context.raw_dir.join("extracted"),
-            &workspace.join("raw/extracted"),
-        )?;
+        let workspace_extracted = workspace.join("raw/extracted");
+        std::fs::create_dir_all(&workspace_extracted)
+            .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &workspace_extracted))?;
+        for source in Self::extracted_markdown_files(context)? {
+            let file_name = source.file_name().ok_or_else(|| {
+                BackendError::new(
+                    "COMPILE_INPUT_PATH_INVALID",
+                    "An extracted Markdown path has no file name.",
+                    false,
+                    true,
+                )
+            })?;
+            std::fs::copy(&source, workspace_extracted.join(file_name))
+                .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &source))?;
+        }
         copy_tree(&context.wiki_dir, &workspace.join("wiki"))?;
         let skill_dir = workspace.join("skills/wiki-ingest");
         std::fs::create_dir_all(&skill_dir)
@@ -322,7 +351,15 @@ impl CompileService {
         for file in &manifest.files {
             let target = context.resolve_project_path(&file.path)?;
             if let Some(expected) = baseline.get(&file.path) {
-                if !target.exists() || store.file_hash(context, &file.path)? != *expected {
+                let needs_confirmation =
+                    if !target.exists() || store.file_hash(context, &file.path)? != *expected {
+                        true
+                    } else {
+                        std::fs::read_to_string(&target).map_err(|error| {
+                            io_error("COMPILE_INPUT_READ_FAILED", error, &target)
+                        })? != file.content
+                    };
+                if needs_confirmation {
                     conflicts.push(file.path.clone());
                 }
             } else if target.exists() {
@@ -597,13 +634,58 @@ mod tests {
     }
 
     #[test]
+    fn compile_ignores_unconfirmed_orphan_extracted_markdown() {
+        let root = std::env::temp_dir().join(format!("compile-orphan-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("raw/extracted")).unwrap();
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::write(root.join("raw/extracted/confirmed.md"), "confirmed").unwrap();
+        fs::write(root.join("raw/extracted/cancelled-preview.md"), "orphan").unwrap();
+        fs::write(
+            root.join(".app/source-index.json"),
+            r#"{"sources":{"raw/sources/markdown/source.txt":["raw/extracted/confirmed.md"]}}"#,
+        )
+        .unwrap();
+        let context = ProjectContext::new("project", root.clone());
+
+        let files = CompileService::extracted_markdown_files(&context).unwrap();
+
+        assert_eq!(files, vec![root.join("raw/extracted/confirmed.md")]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compile_rejects_confirmed_extracted_markdown_when_all_content_is_blank() {
+        let root = std::env::temp_dir().join(format!("compile-blank-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("raw/extracted")).unwrap();
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::write(root.join("raw/extracted/blank.md"), " \n\t").unwrap();
+        fs::write(
+            root.join(".app/source-index.json"),
+            r#"{"sources":{"raw/sources/markdown/blank.txt":["raw/extracted/blank.md"]}}"#,
+        )
+        .unwrap();
+        let context = ProjectContext::new("project", root.clone());
+
+        let error = CompileService::extracted_markdown_files(&context).unwrap_err();
+
+        assert_eq!(error.code, "COMPILE_INPUT_EMPTY");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn byok_prompt_reads_cjk_extracted_markdown_from_compile_workspace() {
         let root = std::env::temp_dir().join(format!("compile-input-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("raw/extracted")).unwrap();
         fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::create_dir_all(root.join(".app")).unwrap();
         fs::write(root.join("purpose.md"), "# Purpose").unwrap();
         fs::write(root.join("schema.md"), "# Schema").unwrap();
         fs::write(root.join("raw/extracted/资料.md"), "# 提取内容\n\n关键事实").unwrap();
+        fs::write(
+            root.join(".app/source-index.json"),
+            r#"{"sources":{"raw/sources/markdown/资料.txt":["raw/extracted/资料.md"]}}"#,
+        )
+        .unwrap();
         let context = ProjectContext::new("project", root.clone());
         let workspace = CompileService::create_workspace(
             &context,
@@ -641,7 +723,10 @@ mod tests {
             summary: "compile".into(),
         };
         let result = CompileService::apply_manifest(&context, &manifest, &baseline).unwrap();
-        assert_eq!(result.conflicts, vec!["wiki/index.md"]);
+        assert_eq!(
+            result.conflicts,
+            vec!["wiki/index.md", "wiki/log.md", "wiki/overview.md"]
+        );
         assert_eq!(
             fs::read_to_string(root.join("wiki/index.md")).unwrap(),
             "external"
@@ -649,6 +734,35 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("wiki/overview.md")).unwrap(),
             "overview"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn apply_manifest_requires_confirmation_before_overwriting_existing_page() {
+        let root = std::env::temp_dir().join(format!("compile-overwrite-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/index.md"), "current index").unwrap();
+        fs::write(root.join("wiki/overview.md"), "current overview").unwrap();
+        fs::write(root.join("wiki/log.md"), "current log").unwrap();
+        let context = ProjectContext::new("project", root.clone());
+        let baseline = CompileService::snapshot_wiki(&context).unwrap();
+        let manifest = CompileManifest {
+            files: vec![
+                CompileFile::new("wiki/index.md", "generated index"),
+                CompileFile::new("wiki/overview.md", "current overview"),
+                CompileFile::new("wiki/log.md", "current log"),
+            ],
+            deletions: vec![],
+            summary: "compile".into(),
+        };
+
+        let outcome = CompileService::apply_manifest(&context, &manifest, &baseline).unwrap();
+
+        assert_eq!(outcome.conflicts, vec!["wiki/index.md"]);
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/index.md")).unwrap(),
+            "current index"
         );
         fs::remove_dir_all(root).ok();
     }

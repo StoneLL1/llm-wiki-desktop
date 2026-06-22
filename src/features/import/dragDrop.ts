@@ -19,3 +19,29 @@ export function reduceDragDrop(payload: DragDropEvent): DragDropUpdate {
       return { active: false, paths: null };
   }
 }
+
+interface DragDropEnvelope {
+  payload: DragDropEvent;
+}
+
+interface DragDropSubscription {
+  listen: (handler: (event: DragDropEnvelope) => void) => Promise<() => void>;
+  isCancelled: () => boolean;
+  onActive: (active: boolean) => void;
+  onPaths: (paths: string[]) => void;
+}
+
+export async function subscribeToDragDrop({
+  listen,
+  isCancelled,
+  onActive,
+  onPaths,
+}: DragDropSubscription): Promise<() => void> {
+  const unlisten = await listen((event) => {
+    const update = reduceDragDrop(event.payload);
+    onActive(update.active);
+    if (update.paths) onPaths(update.paths);
+  });
+  if (isCancelled()) unlisten();
+  return unlisten;
+}

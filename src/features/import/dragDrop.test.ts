@@ -1,7 +1,7 @@
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { reduceDragDrop } from "./dragDrop";
+import { reduceDragDrop, subscribeToDragDrop } from "./dragDrop";
 
 const position = new PhysicalPosition(12, 24);
 
@@ -37,5 +37,52 @@ describe("reduceDragDrop", () => {
       active: false,
       paths: null,
     });
+  });
+});
+
+describe("subscribeToDragDrop", () => {
+  it("unwraps the Tauri event payload before forwarding dropped paths", async () => {
+    const registration: {
+      handler?: (event: { payload: Parameters<typeof reduceDragDrop>[0] }) => void;
+    } = {};
+    const onPaths = vi.fn();
+    const onActive = vi.fn();
+    await subscribeToDragDrop({
+      listen: async (next) => {
+        registration.handler = next;
+        return () => undefined;
+      },
+      isCancelled: () => false,
+      onActive,
+      onPaths,
+    });
+
+    registration.handler?.({
+      payload: { type: "drop", paths: ["D:\\资料\\论文.pdf"], position },
+    });
+
+    expect(onActive).toHaveBeenCalledWith(false);
+    expect(onPaths).toHaveBeenCalledWith(["D:\\资料\\论文.pdf"]);
+  });
+
+  it("unlistens when registration resolves after the component was cancelled", async () => {
+    const registration: { finish?: (unlisten: () => void) => void } = {};
+    const unlisten: () => void = vi.fn();
+    let cancelled = false;
+    const subscription = subscribeToDragDrop({
+      listen: () =>
+        new Promise((resolve) => {
+          registration.finish = resolve;
+        }),
+      isCancelled: () => cancelled,
+      onActive: vi.fn(),
+      onPaths: vi.fn(),
+    });
+
+    cancelled = true;
+    registration.finish?.(unlisten);
+    await subscription;
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
   });
 });
