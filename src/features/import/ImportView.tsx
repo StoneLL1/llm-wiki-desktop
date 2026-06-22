@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Bot,
@@ -24,9 +24,11 @@ import type {
 } from "../../types/import";
 import { FILE_TYPE_LABELS } from "../../types/import";
 import { useImportStore } from "../../stores/importStore";
+import { useToastStore } from "../../stores/toastStore";
 import { ImportUrlDialog } from "./ImportUrlDialog";
 import { OpenFolderAsProjectDialog } from "./OpenFolderAsProjectDialog";
 import { subscribeToDragDrop } from "./dragDrop";
+import { selectImportFiles } from "./nativeFilePicker";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -117,6 +119,7 @@ export function ImportView({
   const setCreateCheckpoint = useImportStore((state) => state.setCreateCheckpoint);
   const compileAfterImport = useImportStore((state) => state.compileAfterImport);
   const setCompileAfterImport = useImportStore((state) => state.setCompileAfterImport);
+  const pushToast = useToastStore((state) => state.pushToast);
 
   const [paths, setPaths] = useState("");
   const [clipboardContent, setClipboardContent] = useState("");
@@ -124,7 +127,6 @@ export function ImportView({
   const [dropActive, setDropActive] = useState(false);
   const [checkedPaths, setCheckedPaths] = useState<Set<string>>(new Set());
   const [replacementPaths, setReplacementPaths] = useState<Record<string, string>>({});
-  const pathsRef = useRef<HTMLTextAreaElement>(null);
 
   const files = useMemo(() => preview?.files ?? [], [preview]);
   const hasPreview = preview !== null && files.length > 0;
@@ -147,15 +149,26 @@ export function ImportView({
           onActive: setDropActive,
           onPaths: onRequestPreview,
         });
-      } catch {
-        // Tauri runtime unavailable (tests / browser) — drag-drop disabled silently.
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        pushToast("error", t("import.dragDropUnavailable", { message }));
       }
     })();
     return () => {
       cancelled = true;
       unlisten?.();
     };
-  }, [onRequestPreview]);
+  }, [onRequestPreview, pushToast, t]);
+
+  const chooseFiles = async () => {
+    try {
+      const selectedPaths = await selectImportFiles();
+      if (selectedPaths.length > 0) onRequestPreview(selectedPaths);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast("error", t("import.filePickerError", { message }));
+    }
+  };
 
   const totals = useMemo(() => {
     let ok = 0;
@@ -213,7 +226,7 @@ export function ImportView({
           <button
             type="button"
             className={`import-source ${dropActive ? "import-source--drop" : ""}`}
-            onClick={() => pathsRef.current?.focus()}
+            onClick={() => void chooseFiles()}
             aria-label={t("import.source.files")}
           >
             <span className="import-source__icon"><Upload size={18} /></span>
@@ -252,7 +265,6 @@ export function ImportView({
           <div className="import-paths__row">
             <div className="input-group" style={{ alignItems: "stretch" }}>
               <textarea
-                ref={pathsRef}
                 className="input input--mono"
                 style={{ minHeight: 56, resize: "vertical", padding: "8px 12px" }}
                 value={paths}
