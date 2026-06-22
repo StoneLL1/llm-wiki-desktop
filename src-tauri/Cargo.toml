@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [], optional = true }
 
 [features]
 default = ["gui"]
-gui = ["dep:tauri", "dep:tauri-plugin-notification", "dep:tauri-build"]
+gui = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-notification", "dep:tauri-build"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -25,6 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 sha2 = "0.10"
 tauri = { version = "2", features = ["tray-icon"], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-notification = { version = "2", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }

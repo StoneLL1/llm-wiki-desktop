@@ -17,7 +17,8 @@
         "width": 1280,
         "height": 820,
         "minWidth": 1120,
-        "minHeight": 720
+        "minHeight": 720,
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -30,4 +31,3 @@
     "icon": []
   }
 }
-

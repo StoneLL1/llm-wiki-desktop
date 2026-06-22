@@ -302,6 +302,8 @@
   "import.sourcePath": "File or folder path",
   "import.sourcePathPlaceholder": "Paste an absolute local path",
   "import.previewError": "Could not preview sources: {{message}}",
+  "import.dragDropUnavailable": "File drag-and-drop could not start: {{message}}",
+  "import.filePickerError": "Could not open the file picker: {{message}}",
   "import.confirmError": "Could not import sources: {{message}}",
   "import.summary.ready": "{{count}} ready",
   "import.summary.duplicates": "{{count}} duplicates",

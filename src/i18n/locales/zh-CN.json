@@ -320,6 +320,8 @@
   "import.sourcePath": "文件或文件夹路径",
   "import.sourcePathPlaceholder": "粘贴本地绝对路径",
   "import.previewError": "无法预览来源：{{message}}",
+  "import.dragDropUnavailable": "文件拖拽监听启动失败：{{message}}",
+  "import.filePickerError": "无法打开文件选择器：{{message}}",
   "import.confirmError": "无法导入来源：{{message}}",
   "import.summary.ready": "{{count}} 个就绪",
   "import.summary.duplicates": "{{count}} 个重复",
