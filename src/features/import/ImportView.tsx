@@ -26,6 +26,7 @@ import { FILE_TYPE_LABELS } from "../../types/import";
 import { useImportStore } from "../../stores/importStore";
 import { ImportUrlDialog } from "./ImportUrlDialog";
 import { OpenFolderAsProjectDialog } from "./OpenFolderAsProjectDialog";
+import { reduceDragDrop } from "./dragDrop";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -141,12 +142,9 @@ export function ImportView({
       try {
         const { getCurrentWebview } = await import("@tauri-apps/api/webview");
         unlisten = await getCurrentWebview().onDragDropEvent((event) => {
-          if (event.type === "enter" || event.type === "over") setDropActive(true);
-          else if (event.type === "leave") setDropActive(false);
-          else if (event.type === "drop") {
-            setDropActive(false);
-            if (event.paths.length > 0) onRequestPreview(event.paths);
-          }
+          const update = reduceDragDrop(event.payload);
+          setDropActive(update.active);
+          if (update.paths) onRequestPreview(update.paths);
         });
         if (cancelled) unlisten?.();
       } catch {
