@@ -4,6 +4,15 @@
 > 当前实现：src/features/import/、src/lib/readability.ts、src/types/import.ts
 > 后端实现：src-tauri/src/services/import_service.rs、extraction_service.rs、commands/import_commands.rs
 
+## 2026-06-22 导入闭环修复更新（覆盖下方旧现状）
+
+- 已完成：Tauri v2 原生拖拽（`event.payload`）、Windows/CJK 路径透传与 listener 生命周期测试。
+- 已完成：PDF 文本层、DOCX、PPTX、XLSX、CSV 转结构化 Markdown；成功产物统一为 `raw/extracted/*.md`。扫描 PDF 不在导入层做 OCR，明确交给编译期 Agent/Skill。
+- 已完成：compile 只消费 `.app/source-index.json` 中已确认且非空的 extracted Markdown；没有有效输入时报 `COMPILE_INPUT_EMPTY`；修改已有 Wiki 页面前创建 checkpoint 并进入 PendingAction 确认流。
+- 已完成：64 MiB 源文件/OOXML 累计展开限制、4096 ZIP entry 限制、XLSX XFD 列上限、shared-string 越界失败、extracted 外部编辑不覆盖。
+- 仍属后续范围：把 preview extracted 产物完全移入临时 staging 并在确认时原子迁移/取消时清理。目前孤儿 preview 文件不会进入 compile、也不会覆盖外部编辑，但可能占用磁盘。
+- 仍属后续范围：可选 MinerU 集成、PDF/Office 内嵌图片提取与 URL 图片本地化。它们需要独立的隐私、网络、配额和资产生命周期设计，不在本次修 bug 中静默引入。
+
 ## 0. 现状摘要
 
 Import 板块已打通「路径 / URL / 剪贴板」三种来源的预览-确认-归档主链路：
