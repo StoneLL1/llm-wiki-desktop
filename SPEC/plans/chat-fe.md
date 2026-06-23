@@ -42,9 +42,9 @@
 
 ### P1
 
-- [ ] **P1-1 route segment 切换器** — status: pending
-  - 消费 chat-BE 显式路由：Auto/Agent/BYOK 三态 segment，send 携带所选 route，badge 反映 lastResolvedRoute
-  - 涉及：`ChatView.tsx`（会话工具栏 + segment 状态）、`ChatComposer.tsx`（接收 routePreference 由 ChatView 控制）、styles.css `.seg`
+- [x] **P1-1 route segment 切换器** — status: verified
+  - `src/features/chat/ChatView.tsx`：去掉 `ROUTE_PREFERENCE` const → `useState<ChatRoutePreference>("auto")`；新增 SessionToolbar（`.seg` 三态 Auto/Agent/BYOK + 标题 inline 编辑 + 消息数·时间 + 重命名/删除按钮）；send 携带所选 route；`.seg` / `.seg__btn` / `.seg__btn.is-active` class 已在 P0-1 预置于 styles.css
+  - 验证：lint 0 warning + test 105 pass
 - [ ] **P1-2 右面板操作 + 执行路径** — status: pending
   - 操作：复制回答 Markdown / 生成知识卡片 / 标记问题回答；执行路径：route+检索数+页面数（tokens/timing/version blocked）
   - 涉及：`src/components/app/RightContextPanel.tsx`（chat 分支扩展）、新建 `src/features/chat/ChatRightPanel.tsx`
