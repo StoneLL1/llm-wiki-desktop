@@ -19,6 +19,8 @@ export interface ChatMessage {
   createdAt: string;
   citations?: ChatCitation[];
   route?: ChatRoute;
+  /** BYOK provider that produced this answer (absent for Agent route). */
+  provider?: LlmProviderKind | null;
   taskId?: string;
 }
 
