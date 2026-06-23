@@ -2069,6 +2069,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "csv",
+ "futures-util",
  "keyring",
  "pdf-extract",
  "quick-xml 0.36.2",
