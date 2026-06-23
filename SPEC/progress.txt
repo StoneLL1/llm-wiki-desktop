@@ -99,3 +99,8 @@
 [2026-06-19] Implementation planning — Created root IMPLEMENTATION_PLAN.md from SPEC requirements — Plan decomposes MVP into agent-ready milestones with safety gates, file ownership, checks, and acceptance criteria.
 [2026-06-19] 应用脚手架 — 建立 React/Vite 前端目录、Tauri/Rust 后端模块骨架、基础测试与配置文件 — 仅搭建文件结构和占位边界，未实现真实业务流程。
 [2026-06-19] 项目初始化 — 初始化仓库文档基线与 CLAUDE.md / AGENTS.md，建立 progress.txt 与 gotchas.txt 记录机制。
+[2026-06-23] chat-FE/P0-1 — 消息渲染富化（Markdown+avatar+time+route badge+citation角标+卡片，MessageContent.tsx 复用 remark/rehype 管线，styles.css 补 .msg*/.chat-prose/.seg）— 已 verified（lint 0 warning/test 105 pass）
+[2026-06-23] chat-FE/P0-2 — 流式 UI（useChatStream app 级订阅 task://stream-output，chatStore streamingText 累积，ChatView StreamingBubble 逐字+cursor，终态 reload 幂等）— 已 verified（lint/test 全绿）
+[2026-06-23] chat-FE/P1-1 — route segment 切换器（Auto/Agent/BYOK 三态，ChatView session toolbar，inline 重命名/删除，左栏260）— 已 verified（lint/test 全绿）
+[2026-06-23] chat-FE/P1-2 — 右面板补 引用/原始资料(blocked)/执行路径(partial)/操作 四段，CitationPanel 内联至 RightContextPanel chat 分支 — 已 verified（lint/test 全绿）
+[2026-06-23] chat-FE/收敛 — chat 前端壳 P0+P1 全部交付（P0-1 消息富化/P0-2 流式UI/P1-1 segment切换/P1-2 右面板四段），11 文件，lint 0 warning/test 105 pass/无 console.log；blocked: P1-3 原始资料(rawRefs) + timing/tokens（后端未交付）
