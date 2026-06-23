@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -14,7 +14,11 @@ import { ChatComposer } from "./ChatComposer";
 import { ChatSessionList } from "./ChatSessionList";
 import { MessageContent } from "./MessageContent";
 
-const ROUTE_PREFERENCE: ChatRoutePreference = "auto";
+const SEGMENT_OPTIONS: readonly { value: ChatRoutePreference; key: string }[] = [
+  { value: "auto", key: "chat.composer.route.auto" },
+  { value: "agent", key: "chat.composer.route.agent" },
+  { value: "byok", key: "chat.composer.route.byok" },
+];
 
 const PROVIDER_LABEL: Record<LlmProviderKind, string> = {
   openai: "OpenAI",
@@ -34,6 +38,7 @@ function formatTime(iso: string): string {
 export function ChatView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
+  const [routePreference, setRoutePreference] = useState<ChatRoutePreference>("auto");
 
   const sessions = useChatStore((state) => state.sessions);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
@@ -86,7 +91,7 @@ export function ChatView() {
 
   const handleSend = (content: string) => {
     if (!activeSessionId) return;
-    void send(projectId, rootPath, activeSessionId, content, ROUTE_PREFERENCE);
+    void send(projectId, rootPath, activeSessionId, content, routePreference);
   };
 
   const handleCancel = () => {
@@ -130,7 +135,14 @@ export function ChatView() {
               {t("chat.thread.empty")}
             </div>
           ) : (
-            <div className="chat-stream mx-auto w-full max-w-[820px]">
+            <>
+              <SessionToolbar
+                session={activeSession}
+                routePreference={routePreference}
+                onRouteChange={setRoutePreference}
+                t={t}
+              />
+              <div className="chat-stream mx-auto w-full max-w-[820px] px-4">
               {activeSession.messages.map((message) => (
                 <MessageBubble
                   key={message.id}
@@ -183,10 +195,11 @@ export function ChatView() {
                 </div>
               ) : null}
             </div>
+            </>
           )}
         </div>
         <ChatComposer
-          routePreference={ROUTE_PREFERENCE}
+          routePreference={routePreference}
           lastResolvedRoute={resolvedRoute}
           generating={generating}
           onSend={handleSend}
@@ -270,6 +283,94 @@ function MessageBubble({
             ) : null}
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+interface SessionToolbarProps {
+  session: { id: string; title: string; messages: unknown[]; updatedAt: string };
+  routePreference: ChatRoutePreference;
+  onRouteChange: (value: ChatRoutePreference) => void;
+  t: (k: string, opts?: Record<string, unknown>) => string;
+}
+
+function SessionToolbar({ session, routePreference, onRouteChange, t }: SessionToolbarProps) {
+  const rename = useChatStore((state) => state.renameSession);
+  const del = useChatStore((state) => state.deleteSession);
+  const { projectId, rootPath } = useProjectStore((state) => state.currentProject);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const msgCount = session.messages.length;
+  const time = formatTime(session.updatedAt);
+
+  const commitRename = () => {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== session.title) {
+      void rename(projectId, rootPath, session.id, trimmed);
+    }
+    setEditing(false);
+  };
+
+  const handleEdit = () => {
+    setDraft(session.title);
+    setEditing(true);
+  };
+
+  return (
+    <div className="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2" style={{ minHeight: 44 }}>
+      <div className="seg">
+        {SEGMENT_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            className={`seg__btn${routePreference === opt.value ? " is-active" : ""}`}
+            onClick={() => onRouteChange(opt.value)}
+          >
+            {t(opt.key)}
+          </button>
+        ))}
+      </div>
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        {editing ? (
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitRename();
+              if (e.key === "Escape") setEditing(false);
+            }}
+            className="h-[24px] min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--background)] px-2 text-[12.5px] font-semibold"
+          />
+        ) : (
+          <span className="truncate text-[12.5px] font-semibold text-[var(--text-primary)]">
+            {session.title}
+          </span>
+        )}
+        <span className="font-mono text-[11px] text-[var(--text-muted)]">
+          {msgCount} · {time}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleEdit}
+          className="h-[26px] rounded-[var(--radius-sm)] px-2 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+        >
+          {t("chat.sessions.rename")}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void del(projectId, rootPath, session.id);
+          }}
+          className="h-[26px] rounded-[var(--radius-sm)] px-2 text-[11px] text-[var(--danger)] hover:bg-[var(--surface-muted)]"
+        >
+          {t("chat.sessions.delete")}
+        </button>
       </div>
     </div>
   );
