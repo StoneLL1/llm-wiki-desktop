@@ -86,6 +86,24 @@ pub enum BackendEventType {
     WikiChanged,
     GraphUpdated,
     AgentOutput,
+    /// Ephemeral streaming delta for a long-running generative task (chat
+    /// answer token-by-token). Emitted via `TaskService::emit_stream_delta`,
+    /// NOT persisted into `log_lines` — the authoritative answer lands in the
+    /// chat session file on task completion; these deltas are only live UI
+    /// hints. Frontend channel: `task://stream-output`.
+    TaskStreamOutput,
+}
+
+/// Payload of a [`BackendEventType::TaskStreamOutput`] event. `delta` is the
+/// incremental text (the frontend concatenates); `route` is an optional
+/// human-readable label ("agent" / "byok") so the UI can render a live model
+/// badge before the persisted answer exists.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDelta {
+    pub delta: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
 }
 
 #[cfg(test)]
@@ -98,6 +116,7 @@ mod tests {
 
     #[test]
     fn serializes_task_enums_as_stable_strings() {
+        use crate::models::task::StreamDelta;
         assert_eq!(
             serde_json::to_string(&TaskStatus::WaitingForConfirmation).unwrap(),
             "\"waiting_for_confirmation\""
@@ -109,6 +128,26 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&BackendEventType::ConfirmationRequested).unwrap(),
             "\"confirmation_requested\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BackendEventType::TaskStreamOutput).unwrap(),
+            "\"task_stream_output\""
+        );
+        // Full delta round-trips with camelCase and omits a missing route.
+        let delta = StreamDelta {
+            delta: "Hi".into(),
+            route: None,
+        };
+        let value = serde_json::to_value(&delta).unwrap();
+        assert_eq!(value["delta"], json!("Hi"));
+        assert!(value.get("route").is_none());
+        let with_route = StreamDelta {
+            delta: "Hi".into(),
+            route: Some("byok".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&with_route).unwrap()["route"],
+            json!("byok")
         );
     }
 

@@ -84,6 +84,7 @@ fn event_type_to_tauri_name(event_type: &BackendEventType) -> String {
         WikiChanged => "wiki://changed",
         GraphUpdated => "graph://updated",
         AgentOutput => "agent://output",
+        TaskStreamOutput => "task://stream-output",
     }
     .to_string()
 }

@@ -5,7 +5,9 @@ use std::sync::RwLock;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::models::task::{BackendTask, TaskProgress, TaskResult, TaskStatus, TaskType};
+use crate::models::task::{
+    BackendTask, StreamDelta, TaskProgress, TaskResult, TaskStatus, TaskType,
+};
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
 use crate::tasks::task_events::EventBus;
@@ -312,6 +314,28 @@ impl TaskService {
             .get(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
         Ok(entry.log_lines.clone())
+    }
+
+    /// Emit an ephemeral streaming delta for a generative task (chat answer
+    /// token-by-token). Unlike [`append_log`](Self::append_log), this does NOT
+    /// push into `log_lines` and does NOT persist to disk — fine-grained
+    /// generation deltas would flood the task log store with thousands of
+    /// disk writes. The authoritative answer is persisted in the chat session
+    /// file on completion; these deltas are only live UI hints.
+    pub fn emit_stream_delta(&self, id: &str, delta: StreamDelta) {
+        let (pid, tid) = {
+            let tasks = self.tasks.read().expect("lock poisoned");
+            let Some(entry) = tasks.get(id) else {
+                return;
+            };
+            (entry.task.project_id.clone(), entry.task.id.clone())
+        };
+        self.emit(
+            crate::models::task::BackendEventType::TaskStreamOutput,
+            pid,
+            Some(tid),
+            delta,
+        );
     }
 
     pub fn cancel_task(&self, id: &str) -> Result<BackendTask, String> {
@@ -1193,6 +1217,56 @@ mod tests {
         let captured = events.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].event_type, BackendEventType::TaskLog);
+    }
+
+    #[test]
+    fn emit_stream_delta_emits_without_persisting_to_logs() {
+        let (service, events) = make_service();
+        let task = service.create_task(
+            TaskType::LlmRequest,
+            Some("p1".to_string()),
+            "Chat".to_string(),
+            true,
+        );
+
+        events.lock().unwrap().clear();
+        service.emit_stream_delta(
+            &task.id,
+            StreamDelta {
+                delta: "Hel".into(),
+                route: Some("byok".into()),
+            },
+        );
+        service.emit_stream_delta(
+            &task.id,
+            StreamDelta {
+                delta: "lo".into(),
+                route: None,
+            },
+        );
+
+        // Two stream-output events fired...
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].event_type, BackendEventType::TaskStreamOutput);
+        assert_eq!(captured[1].event_type, BackendEventType::TaskStreamOutput);
+        // ...but the task log store stays empty (deltas are ephemeral).
+        assert!(service.get_logs(&task.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn emit_stream_delta_for_unknown_task_is_noop() {
+        let (service, events) = make_service();
+        events.lock().unwrap().clear();
+        // Must not panic on a missing task id.
+        service.emit_stream_delta(
+            "does-not-exist",
+            StreamDelta {
+                delta: "x".into(),
+                route: None,
+            },
+        );
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]
