@@ -135,6 +135,7 @@ async fn run_chat_send(
         created_at: crate::utils::time_utils::now_rfc3339(),
         citations: Vec::new(),
         route: None,
+        provider: None,
         task_id: None,
     };
     state
@@ -159,7 +160,7 @@ async fn run_chat_send(
     )?;
     let citations = retrieval.citations.clone();
 
-    let (route, answer) = match resolve_route(
+    let (route, answer, provider) = match resolve_route(
         state,
         context,
         request.route,
@@ -177,42 +178,75 @@ async fn run_chat_send(
                 .map_err(task_error)?;
             let workspace = create_chat_workspace(task_id)?;
             let invocation = AgentService::chat_invocation(kind, &workspace, &retrieval.prompt)?;
-            let captured = state.agent_service.run_task_streaming(
+            // Stream the agent's stdout lines to the task stream channel so the
+            // chat UI can render the answer incrementally (uniform with BYOK).
+            let task_service = &state.task_service;
+            let task_id_owned = task_id.to_string();
+            let on_delta = move |delta: &str| {
+                task_service.emit_stream_delta(
+                    &task_id_owned,
+                    crate::models::task::StreamDelta {
+                        delta: delta.to_string(),
+                        route: Some("agent".to_string()),
+                    },
+                );
+            };
+            let captured = state.agent_service.run_task_streaming_with_delta(
                 &invocation,
                 &state.task_service,
                 task_id,
+                &on_delta,
             )?;
             let _ = std::fs::remove_dir_all(&workspace);
-            (ChatRoute::Agent, captured.trim().to_string())
+            (ChatRoute::Agent, captured.trim().to_string(), None)
         }
         ResolvedRoute::Byok(provider) => {
+            let provider_kind = provider.provider;
             state
                 .task_service
                 .append_log(
                     task_id,
                     LogLevel::Info,
-                    format!("Calling {:?}", provider.provider),
+                    format!("Calling {:?}", provider_kind),
                 )
                 .map_err(task_error)?;
-            let secret = state.secret_service.get(provider.provider)?;
-            let completion =
-                state
-                    .llm_service
-                    .complete(&provider, secret.as_deref(), &retrieval.prompt);
-            let raw = crate::tasks::byok_progress::poll_with_progress(
-                &state.task_service,
-                task_id,
-                "Answering",
-                completion,
-            )
-            .await
-            .map_err(|_| {
-                crate::tasks::byok_progress::cancelled_error(
-                    "CHAT_CANCELLED",
-                    "Chat was cancelled.",
+            let secret = state.secret_service.get(provider_kind)?;
+            // Real streaming: each text delta is forwarded to the task stream
+            // channel for live rendering, and cancellation is polled between
+            // chunks. The fully assembled text is returned for persistence.
+            let task_service = &state.task_service;
+            let task_id_owned = task_id.to_string();
+            let raw = match state
+                .llm_service
+                .complete_streaming(
+                    &provider,
+                    secret.as_deref(),
+                    &retrieval.prompt,
+                    move || task_service.is_cancelled(task_id),
+                    move |delta| {
+                        task_service.emit_stream_delta(
+                            &task_id_owned,
+                            crate::models::task::StreamDelta {
+                                delta: delta.to_string(),
+                                route: Some("byok".to_string()),
+                            },
+                        );
+                    },
                 )
-            })??;
-            (ChatRoute::Byok, raw.trim().to_string())
+                .await
+            {
+                Ok(text) => text,
+                Err(error) if error.code == "LLM_CANCELLED" => {
+                    return Err(BackendError::new(
+                        "CHAT_CANCELLED",
+                        "Chat was cancelled.",
+                        true,
+                        false,
+                    ))
+                }
+                Err(error) => return Err(error),
+            };
+            (ChatRoute::Byok, raw.trim().to_string(), Some(provider_kind))
         }
     };
 
@@ -232,6 +266,7 @@ async fn run_chat_send(
         created_at: crate::utils::time_utils::now_rfc3339(),
         citations,
         route: Some(route),
+        provider,
         task_id: Some(task_id.to_string()),
     };
     // Re-check cancellation immediately before persisting: there is a window
@@ -267,6 +302,7 @@ async fn run_chat_send(
     Ok(())
 }
 
+#[derive(Debug)]
 enum ResolvedRoute {
     Agent(AgentKind),
     Byok(LlmProviderConfig),
@@ -290,6 +326,20 @@ fn resolve_route(
             .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
     });
     let selected_provider = select_provider(explicit_provider, &providers, &state.secret_service)?;
+    decide_route(preference, usable_agent, selected_provider)
+}
+
+/// Pure routing decision (no I/O) extracted from [`resolve_route`] so the
+/// Auto/Agent/BYOK discrimination is unit-testable without an `AppState`.
+///
+/// - `Agent` preference → always Agent (error if none usable).
+/// - `Byok` preference → always BYOK (error if no provider).
+/// - `Auto` → Agent when a usable Agent is present, otherwise BYOK.
+fn decide_route(
+    preference: CompileRoutePreference,
+    usable_agent: Option<AgentKind>,
+    selected_provider: Option<LlmProviderConfig>,
+) -> Result<ResolvedRoute, BackendError> {
     let use_agent = match preference {
         CompileRoutePreference::Agent => true,
         CompileRoutePreference::Byok => false,
@@ -553,6 +603,17 @@ fn truncate_title(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::llm::LlmProviderConfig;
+
+    fn byok(provider: LlmProviderKind) -> LlmProviderConfig {
+        LlmProviderConfig {
+            provider,
+            model: "m".into(),
+            base_url: "https://example.test".into(),
+            context_window: 8_000,
+            enabled: true,
+        }
+    }
 
     #[test]
     fn truncate_title_is_first_line_bounded() {
@@ -560,5 +621,75 @@ mod tests {
         let long = "x".repeat(200);
         let t = truncate_title(&long);
         assert!(t.chars().count() <= 60);
+    }
+
+    #[test]
+    fn decide_route_agent_preference_picks_agent_when_usable() {
+        // Explicit Agent preference ignores BYOK availability.
+        let resolved = decide_route(
+            CompileRoutePreference::Agent,
+            Some(AgentKind::Claude),
+            Some(byok(LlmProviderKind::OpenAi)),
+        )
+        .unwrap();
+        assert!(matches!(resolved, ResolvedRoute::Agent(AgentKind::Claude)));
+    }
+
+    #[test]
+    fn decide_route_agent_preference_errors_without_usable_agent() {
+        let err = decide_route(
+            CompileRoutePreference::Agent,
+            None,
+            Some(byok(LlmProviderKind::OpenAi)),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "AGENT_UNAVAILABLE");
+    }
+
+    #[test]
+    fn decide_route_byok_preference_ignores_agent() {
+        // Explicit BYOK preference must not route to Agent even if one is usable.
+        let resolved = decide_route(
+            CompileRoutePreference::Byok,
+            Some(AgentKind::Claude),
+            Some(byok(LlmProviderKind::Anthropic)),
+        )
+        .unwrap();
+        match resolved {
+            ResolvedRoute::Byok(config) => assert_eq!(config.provider, LlmProviderKind::Anthropic),
+            other => panic!("expected BYOK, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_route_byok_preference_errors_without_provider() {
+        let err =
+            decide_route(CompileRoutePreference::Byok, Some(AgentKind::Claude), None).unwrap_err();
+        assert_eq!(err.code, "LLM_PROVIDER_MISSING");
+    }
+
+    #[test]
+    fn decide_route_auto_prefers_agent_when_usable() {
+        let resolved = decide_route(
+            CompileRoutePreference::Auto,
+            Some(AgentKind::Codex),
+            Some(byok(LlmProviderKind::OpenAi)),
+        )
+        .unwrap();
+        assert!(matches!(resolved, ResolvedRoute::Agent(AgentKind::Codex)));
+    }
+
+    #[test]
+    fn decide_route_auto_falls_back_to_byok_without_agent() {
+        let resolved = decide_route(
+            CompileRoutePreference::Auto,
+            None,
+            Some(byok(LlmProviderKind::Ollama)),
+        )
+        .unwrap();
+        match resolved {
+            ResolvedRoute::Byok(config) => assert_eq!(config.provider, LlmProviderKind::Ollama),
+            other => panic!("expected BYOK fallback, got {other:?}"),
+        }
     }
 }
