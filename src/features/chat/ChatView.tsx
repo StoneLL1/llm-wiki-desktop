@@ -21,7 +21,7 @@ const SEGMENT_OPTIONS: readonly { value: ChatRoutePreference; key: string }[] = 
 ];
 
 const PROVIDER_LABEL: Record<LlmProviderKind, string> = {
-  openai: "OpenAI",
+  open_ai: "OpenAI",
   anthropic: "Anthropic",
   google: "Google",
   ollama: "Ollama",
@@ -81,12 +81,20 @@ export function ChatView() {
   }, [projectId, rootPath, loadSessions]);
 
   // When the send task reaches a terminal status, reload the session to surface
-  // the persisted assistant message (and clear the in-flight id).
+  // the persisted message, then clear the in-flight id without discarding a
+  // backend failure that the user needs in order to recover.
   useEffect(() => {
-    if (sendTask && isTerminalStatus(sendTask.status)) {
-      void reloadActive(projectId, rootPath);
-      clearSendTask();
-    }
+    if (!sendTask || !isTerminalStatus(sendTask.status)) return;
+    let cancelled = false;
+    const terminalError = sendTask.status === "failed"
+      ? (sendTask.error?.message ?? sendTask.title)
+      : null;
+    void reloadActive(projectId, rootPath).finally(() => {
+      if (!cancelled) clearSendTask(terminalError);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [sendTask, projectId, rootPath, reloadActive, clearSendTask]);
 
   const handleSend = (content: string) => {

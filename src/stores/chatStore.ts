@@ -92,7 +92,7 @@ interface ChatState {
     agent?: AgentKind | null,
     provider?: LlmProviderKind | null,
   ) => Promise<string | null>;
-  clearSendTask: () => void;
+  clearSendTask: (error?: string | null) => void;
   /** Reload the active session (used by the view once the send task reaches terminal status). */
   reloadActive: (projectId: string, rootPath: string) => Promise<void>;
   saveAnswer: (
@@ -241,8 +241,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  clearSendTask: () =>
-    set({ sendTaskId: null, sendSessionId: null, streamingText: "", streamingRoute: null }),
+  clearSendTask: (error = null) =>
+    set({
+      sendTaskId: null,
+      sendSessionId: null,
+      streamingText: "",
+      streamingRoute: null,
+      error,
+    }),
 
   reloadActive: async (projectId, rootPath) => {
     // Only reload the session the send targeted; if the user switched away

@@ -174,7 +174,7 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
     // --- Extraction: MD and TXT extract cleanly; CSV (no MVP parser) surfaces
     //     as `unsupported` — an explicit partial result, pinned (not also
     //     accepting `extracted`, so a future silent CSV parser can't hide).
-    let extraction = ExtractionService::default();
+    let extraction = ExtractionService;
     let extracted_dir = context.raw_dir.join("extracted");
     std::fs::create_dir_all(&extracted_dir).unwrap();
     let r1 = extraction

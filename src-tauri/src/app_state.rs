@@ -311,8 +311,10 @@ mod folder_preview_tests {
 
     fn app_state_in_temp() -> (AppState, PathBuf) {
         let config = unique_temp_dir("config");
-        let mut state = AppState::default();
-        state.project_service = ProjectService::with_config_dir(config.clone());
+        let state = AppState {
+            project_service: ProjectService::with_config_dir(config.clone()),
+            ..AppState::default()
+        };
         (state, config)
     }
 

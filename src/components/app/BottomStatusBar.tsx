@@ -9,7 +9,8 @@ export function BottomStatusBar() {
   const runningCount = useTaskStore((state) => state.runningCount);
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
-  const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? status?.agents?.find((a) => a.state === "installed") ?? null;
+  const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? null;
+  const agentReady = defaultAgent?.state === "installed";
   const agentLabel = defaultAgent ? `${defaultAgent.kind} · ${defaultAgent.version ?? "—"}` : "—";
 
   const git = status?.git;
@@ -32,7 +33,7 @@ export function BottomStatusBar() {
       </div>
       <div className="flex shrink-0 items-center gap-0">
         <span className="statusbar__item">
-          <span className={`dotstatus ${defaultAgent ? "dotstatus--ok" : "dotstatus--err"}`} aria-hidden="true" />
+          <span className={`dotstatus ${agentReady ? "dotstatus--ok" : "dotstatus--err"}`} aria-hidden="true" />
           {agentLabel}
         </span>
         <span className="statusbar__sep" aria-hidden="true" />

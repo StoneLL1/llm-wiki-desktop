@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::errors::BackendError;
-use crate::models::agent::AgentConfig;
+use crate::models::agent::{AgentConfig, AgentKind};
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::settings::{CloseBehavior, GlobalSettingsFile, ProjectSettingsFile, Settings};
@@ -36,7 +36,7 @@ impl SettingsService {
         }
 
         let agent_config_path = context.resolve_project_path(".app/agent-config.json")?;
-        if settings.agent_default.is_none() && agent_config_path.exists() {
+        if agent_config_path.exists() {
             let agent_config: AgentConfig =
                 FileStore.read_json(context, ".app/agent-config.json")?;
             settings.agent_default = agent_config.default_agent;
@@ -63,6 +63,22 @@ impl SettingsService {
             },
         )?;
         self.read_settings(context)
+    }
+
+    pub fn save_agent_default(
+        &self,
+        context: &ProjectContext,
+        agent: Option<AgentKind>,
+    ) -> Result<AgentConfig, BackendError> {
+        let mut settings = self.read_settings(context)?;
+        settings.agent_default = agent;
+        let config = AgentConfig {
+            default_agent: agent,
+        };
+        let store = FileStore;
+        store.write_json_atomic(context, ".app/agent-config.json", &config)?;
+        store.write_json_atomic(context, ".app/settings.json", &settings.to_project_file())?;
+        Ok(config)
     }
 
     pub fn list_providers(
@@ -156,11 +172,11 @@ mod tests {
     use serde_json::Value;
 
     use super::SettingsService;
-    use crate::models::agent::AgentKind;
+    use crate::models::agent::{AgentConfig, AgentKind};
     use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
     use crate::models::paths::ProjectContext;
     use crate::models::settings::{CloseBehavior, GlobalSettingsFile};
-    use crate::services::{FileStore, SecretService};
+    use crate::services::{AgentService, FileStore, SecretService};
 
     fn tmp_paths(suffix: &str) -> (ProjectContext, PathBuf, PathBuf) {
         let stamp = std::time::SystemTime::now()
@@ -227,6 +243,53 @@ mod tests {
         assert!(!project_value.to_string().contains("sk-secret-1234"));
         assert_eq!(global_value["language"], "zh-CN");
         assert_eq!(global_value["checkUpdates"], false);
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn agent_config_is_canonical_when_legacy_settings_disagree() {
+        let (context, root, config_dir) = tmp_paths("agent-canonical");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        let mut settings = service.read_settings(&context).unwrap();
+        settings.agent_default = Some(AgentKind::Claude);
+        service.save_settings(&context, &settings).unwrap();
+        AgentService::save_config(
+            &context,
+            &AgentConfig {
+                default_agent: Some(AgentKind::Codex),
+            },
+        )
+        .unwrap();
+
+        let reloaded = service.read_settings(&context).unwrap();
+
+        assert_eq!(reloaded.agent_default, Some(AgentKind::Codex));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn save_agent_default_synchronizes_project_files() {
+        let (context, root, config_dir) = tmp_paths("agent-save");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        let saved = service
+            .save_agent_default(&context, Some(AgentKind::Codex))
+            .unwrap();
+
+        assert_eq!(saved.default_agent, Some(AgentKind::Codex));
+        assert_eq!(
+            service.read_settings(&context).unwrap().agent_default,
+            Some(AgentKind::Codex)
+        );
+        let project: Value = FileStore.read_json(&context, ".app/settings.json").unwrap();
+        assert_eq!(project["agentDefault"], "codex");
+        assert_eq!(
+            AgentService::load_config(&context).unwrap().default_agent,
+            Some(AgentKind::Codex)
+        );
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
