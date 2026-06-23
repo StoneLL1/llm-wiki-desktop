@@ -23,6 +23,7 @@ export type BackendEventType =
   | "task_completed"
   | "task_failed"
   | "task_cancelled"
+  | "task_stream_output"
   | "confirmation_requested"
   | "project_refreshed"
   | "wiki_changed"

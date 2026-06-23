@@ -32,9 +32,13 @@
   - `src/styles.css`：补 `.chat-stream`/`.msg*`/`.msg__citation*`/`.chat-prose`/`.chat-prose .citation-ref`/`.seg`/`.chat-session__meta`/`.stream-cursor`
   - i18n：`chat.thread.you`/`chat.thread.citationRef`（en + zh-CN）
   - 验证：`npm run lint`（0 warning）+ `npm run test`（105 pass）全绿；无 console.log
-- [ ] **P0-2 流式 UI** — status: pending
-  - 消费 `task://stream-output`，逐字呈现 + cursor，终态幂等 reload
-  - 涉及：`src/stores/chatStore.ts`（streaming buffer + listen）、`ChatView.tsx`（临时气泡）、`src/types/task.ts`（BackendEventType 补 task_stream_output）、`src/hooks/useTaskEvents.ts`（channel 注册——供通知层，store 独立 listen）
+- [x] **P0-2 流式 UI** — status: verified
+  - `src/types/task.ts`：BackendEventType 补 `task_stream_output`
+  - `src/hooks/useChatStream.ts`：app 级常驻 listen `task://stream-output`，按 sendTaskId 过滤转发 delta（跨 view 不丢）
+  - `src/stores/chatStore.ts`：streamingText/streamingRoute + appendStreamDelta（按 sendTaskId 过滤，仅累积当前 in-flight send）；send 成功清空、clearSendTask 清空
+  - `src/features/chat/ChatView.tsx`：generating 时渲染 StreamingBubble（avatar AI + busy badge + MessageContent 流式正文 + `.stream-cursor` 闪烁光标，空时显占位+光标），终态 reload 幂等取代
+  - `src/app/App.tsx`：挂 useChatStream
+  - 验证：lint 0 warning + test 105 pass；无 console.log
 
 ### P1
 

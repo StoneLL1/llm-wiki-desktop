@@ -44,6 +44,8 @@ export function ChatView() {
   const saveStatus = useChatStore((state) => state.saveStatus);
   const overwriteRequest = useChatStore((state) => state.overwriteRequest);
   const error = useChatStore((state) => state.error);
+  const streamingText = useChatStore((state) => state.streamingText);
+  const streamingRoute = useChatStore((state) => state.streamingRoute);
 
   const loadSessions = useChatStore((state) => state.loadSessions);
   const createSession = useChatStore((state) => state.createSession);
@@ -148,17 +150,13 @@ export function ChatView() {
                 />
               ))}
               {generating ? (
-                <div className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
-                  <span className="dotstatus dotstatus--busy" aria-hidden="true" />
-                  {t("chat.thread.generating")}
-                  <button
-                    type="button"
-                    onClick={() => openTaskDrawer(sendTaskId ?? undefined)}
-                    className="text-[var(--accent-hover)] hover:underline"
-                  >
-                    {t("chat.thread.openLogs")}
-                  </button>
-                </div>
+                <StreamingBubble
+                  text={streamingText}
+                  routeLabel={streamingRoute ? t(`chat.composer.route.${streamingRoute}`) : null}
+                  placeholder={t("chat.thread.generating")}
+                  onOpenLogs={() => openTaskDrawer(sendTaskId ?? undefined)}
+                  openLogsLabel={t("chat.thread.openLogs")}
+                />
               ) : null}
               {overwriteRequest ? (
                 <div className="flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] p-3">
@@ -271,6 +269,49 @@ function MessageBubble({
               </div>
             ) : null}
           </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface StreamingBubbleProps {
+  text: string;
+  routeLabel: string | null;
+  placeholder: string;
+  onOpenLogs: () => void;
+  openLogsLabel: string;
+}
+
+function StreamingBubble({ text, routeLabel, placeholder, onOpenLogs, openLogsLabel }: StreamingBubbleProps) {
+  return (
+    <div className="msg">
+      <div className="msg__avatar msg__avatar--ai">AI</div>
+      <div className="msg__body">
+        <div className="msg__head">
+          <span className="msg__name">AI</span>
+          <span className="msg__route-badge msg__route-badge--busy">
+            <span className="dotstatus dotstatus--busy" aria-hidden="true" style={{ width: 6, height: 6 }} />
+            {routeLabel}
+          </span>
+          <button
+            type="button"
+            onClick={onOpenLogs}
+            className="text-[11px] text-[var(--accent-hover)] hover:underline"
+          >
+            {openLogsLabel}
+          </button>
+        </div>
+        {text ? (
+          <div className="chat-prose">
+            <MessageContent content={text} citationCount={0} onCitationClick={() => {}} />
+            <span className="stream-cursor" aria-hidden="true" />
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
+            <span>{placeholder}</span>
+            <span className="stream-cursor" aria-hidden="true" />
+          </div>
         )}
       </div>
     </div>

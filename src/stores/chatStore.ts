@@ -4,6 +4,7 @@ import { create } from "zustand";
 import type {
   ChatMessage,
   ChatOverwriteRequest,
+  ChatRoute,
   ChatRoutePreference,
   ChatSession,
   ChatSessionSummary,
@@ -62,6 +63,11 @@ interface ChatState {
   error: string | null;
   loadingSessions: boolean;
   loadingSession: boolean;
+  /** Live-streamed assistant text (ephemeral; replaced by the persisted
+   *  message once the send task reaches a terminal status and the session
+   *  reloads). Backend channel: `task://stream-output`. */
+  streamingText: string;
+  streamingRoute: ChatRoute | null;
 
   loadSessions: (projectId: string, rootPath: string) => Promise<void>;
   createSession: (
@@ -98,6 +104,7 @@ interface ChatState {
   ) => Promise<SaveAnswerResult | null>;
   confirmOverwrite: (projectId: string, rootPath: string) => Promise<void>;
   cancelOverwrite: () => Promise<void>;
+  appendStreamDelta: (taskId: string, delta: string, route: ChatRoute | null) => void;
   reset: () => void;
 }
 
@@ -112,6 +119,8 @@ const initial = {
   error: null as string | null,
   loadingSessions: false,
   loadingSession: false,
+  streamingText: "",
+  streamingRoute: null as ChatRoute | null,
 };
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -223,7 +232,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
       });
       if (!isProjectScopeCurrent(scope)) return null;
-      set({ sendTaskId: task.id, sendSessionId: sessionId });
+      set({ sendTaskId: task.id, sendSessionId: sessionId, streamingText: "", streamingRoute: null });
       return task.id;
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return null;
@@ -232,7 +241,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  clearSendTask: () => set({ sendTaskId: null, sendSessionId: null }),
+  clearSendTask: () =>
+    set({ sendTaskId: null, sendSessionId: null, streamingText: "", streamingRoute: null }),
 
   reloadActive: async (projectId, rootPath) => {
     // Only reload the session the send targeted; if the user switched away
@@ -335,6 +345,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (error) {
       set({ error: errorMessage(error) });
     }
+  },
+
+  appendStreamDelta: (taskId, delta, route) => {
+    // Only accumulate deltas for the currently in-flight send; stale deltas
+    // from a previous (e.g. cancelled) task must not bleed into the next one.
+    if (taskId !== get().sendTaskId) return;
+    set((state) => ({
+      streamingText: state.streamingText + delta,
+      streamingRoute: route ?? state.streamingRoute,
+    }));
   },
 
   reset: () => set({ ...initial }),
