@@ -454,6 +454,7 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         created_at: now.clone(),
         citations: vec![],
         route: None,
+        provider: None,
         task_id: None,
     };
     chat.append_message(&context, &mut session, question.clone())
@@ -479,6 +480,7 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         created_at: now,
         citations: retrieval.citations.clone(),
         route: Some(ChatRoute::Byok),
+        provider: None,
         task_id: None,
     };
     chat.append_message(&context, &mut session, answer.clone())

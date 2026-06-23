@@ -44,6 +44,10 @@ pub struct ChatMessage {
     pub citations: Vec<ChatCitation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<ChatRoute>,
+    /// Which BYOK provider answered (only set for the BYOK route). Lets the UI
+    /// render a model badge ("BYOK · Anthropic") without re-deriving it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<LlmProviderKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
 }
@@ -194,6 +198,7 @@ mod tests {
             created_at: "2026-06-20T00:00:00Z".into(),
             citations: vec![citation],
             route: Some(ChatRoute::Byok),
+            provider: None,
             task_id: Some("task-1".into()),
         };
         let value = serde_json::to_value(&message).unwrap();
@@ -217,6 +222,7 @@ mod tests {
             created_at: "2026-06-20T00:00:00Z".into(),
             citations: Vec::new(),
             route: None,
+            provider: None,
             task_id: None,
         };
         let value = serde_json::to_value(&message).unwrap();

@@ -545,6 +545,7 @@ mod tests {
             created_at: "2026-06-20T00:00:00Z".into(),
             citations: Vec::new(),
             route: None,
+            provider: None,
             task_id: None,
         }
     }
@@ -678,6 +679,7 @@ mod tests {
                 created_at: "2026-06-01T00:00:00Z".into(),
                 citations: Vec::new(),
                 route: None,
+                provider: None,
                 task_id: None,
             });
         }
@@ -723,6 +725,7 @@ mod tests {
                 score: 100,
             }],
             route: None,
+            provider: None,
             task_id: None,
         };
 
