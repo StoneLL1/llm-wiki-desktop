@@ -3,7 +3,6 @@ import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
 import { AgentRightPanel } from "../../features/agent/AgentRightPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
-import { CitationPanel } from "../../features/chat/CitationPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -45,6 +44,33 @@ export function RightContextPanel() {
   if (activeView === "chat") {
     const latestAssistant = latestAssistantMessage(chatSession);
     const citations = latestAssistant?.citations ?? [];
+    const route = latestAssistant?.route ?? null;
+    const provider = latestAssistant?.provider ?? null;
+    const wikiCount = currentProject.wikiPageCount;
+    const saveStatus = latestAssistant
+      ? (useChatStore.getState().saveStatus[latestAssistant.id] ?? "idle")
+      : "idle";
+    const saveAnswer = useChatStore.getState().saveAnswer;
+    const { projectId, rootPath } = currentProject;
+
+    const handleSave = () => {
+      if (!chatSession?.id || !latestAssistant) return;
+      void saveAnswer(projectId, rootPath, chatSession.id, latestAssistant.id);
+    };
+
+    const handleCopyMarkdown = () => {
+      if (!latestAssistant) return;
+      void navigator.clipboard.writeText(latestAssistant.content);
+    };
+
+    const routeLabel = route
+      ? route === "agent"
+        ? t("chat.composer.route.agent")
+        : provider
+          ? `BYOK · ${provider}`
+          : t("chat.composer.route.byok")
+      : null;
+
     return (
       <aside
         aria-label={t("chat.citations.title")}
@@ -56,13 +82,113 @@ export function RightContextPanel() {
           </span>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <CitationPanel
-            citations={citations}
-            onOpenPage={(path) => {
-              setActiveView("wiki");
-              void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
-            }}
-          />
+          <div className="px-4 py-3">
+            {/* 引用与来源 */}
+            <div className="border-b border-[var(--border-subtle)] py-3">
+              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
+                {t("chat.citations.title")}
+                {citations.length > 0 && (
+                  <span className="ml-1 font-normal normal-case text-[var(--text-muted)]">{citations.length}</span>
+                )}
+              </h4>
+              {citations.length === 0 ? (
+                <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("chat.citations.empty")}</p>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {citations.map((citation, index) => (
+                    <button
+                      key={citation.pagePath}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("wiki");
+                        void openWikiPage(projectId, rootPath, citation.pagePath);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] p-2 text-left hover:bg-[var(--surface-muted)]"
+                    >
+                      <span className="flex h-[18px] w-[18px] items-center justify-center rounded-full bg-[var(--accent-soft)] text-[10.5px] font-semibold text-[var(--accent-hover)] font-mono shrink-0">
+                        {index + 1}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[12px] font-medium text-[var(--text-primary)]">{citation.title}</div>
+                        <div className="text-[10.5px] text-[var(--text-muted)] font-mono">{citation.pagePath}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* 原始资料 */}
+            <div className="border-b border-[var(--border-subtle)] py-3">
+              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
+                {t("chat.citations.rawSources")}
+              </h4>
+              <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("chat.citations.rawSourcesBlocked")}</p>
+            </div>
+
+            {/* 执行路径 */}
+            <div className="border-b border-[var(--border-subtle)] py-3">
+              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
+                {t("chat.citations.route")}
+              </h4>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs">
+                {routeLabel ? (
+                  <>
+                    <dt className="font-medium text-[var(--text-muted)]">{t("chat.citations.routePath")}</dt>
+                    <dd className="m-0 text-[var(--accent-hover)]">{routeLabel}</dd>
+                  </>
+                ) : null}
+                <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.pages")}</dt>
+                <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">
+                  {citations.length} / {wikiCount}
+                </dd>
+                <dt className="font-medium text-[var(--text-muted)]">{t("chat.citations.timing")}</dt>
+                <dd className="m-0 font-mono text-[11.5px] text-[var(--text-muted)]">—</dd>
+                <dt className="font-medium text-[var(--text-muted)]">{t("chat.citations.tokens")}</dt>
+                <dd className="m-0 font-mono text-[11.5px] text-[var(--text-muted)]">—</dd>
+              </dl>
+            </div>
+
+            {/* 操作 */}
+            <div className="py-3">
+              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
+                {t("chat.citations.actions")}
+              </h4>
+              <div className="flex flex-col gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={!latestAssistant || saveStatus === "saving" || saveStatus === "saved"}
+                  className="flex h-[28px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+                >
+                  {saveStatus === "saved" ? t("chat.thread.saveDone") : t("chat.thread.saveAnswer")}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyMarkdown}
+                  disabled={!latestAssistant}
+                  className="flex h-[28px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+                >
+                  {t("chat.citations.copyMd")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveView("exports")}
+                  disabled={!latestAssistant}
+                  className="flex h-[28px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+                >
+                  {t("chat.citations.generateCard")}
+                </button>
+                <button
+                  type="button"
+                  disabled
+                  className="flex h-[28px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] opacity-40 cursor-not-allowed"
+                >
+                  {t("chat.citations.flagIssue")}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </aside>
     );
