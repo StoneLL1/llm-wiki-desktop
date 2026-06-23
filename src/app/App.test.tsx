@@ -437,6 +437,9 @@ describe("App", () => {
       if (command === "confirm_import_preview") {
         return Promise.resolve({ preview, confirmedAt: new Date().toISOString() });
       }
+      if (command === "scan_wiki") {
+        return Promise.resolve({ root: { name: "", path: "", kind: "folder", children: [] }, pages: [], totalPages: 0 });
+      }
       return Promise.resolve(null);
     });
 
@@ -447,12 +450,13 @@ describe("App", () => {
     fireEvent.change(sourcePathInput, { target: { value: "D:/tmp/sources/notes.md" } });
     fireEvent.click(screen.getByRole("button", { name: "Add to preview" }));
     const confirmButton = await screen.findByRole("button", { name: "Confirm import & compile" });
-    // Skip the compile step so the last backend call stays the confirm itself.
+    // Skip the compile step. Confirm still fires its payload; a wiki re-scan
+    // now follows it so promoted wiki/sources/ pages appear without compiling.
     fireEvent.click(screen.getByRole("checkbox", { name: "Trigger Wiki compile after import" }));
     fireEvent.click(confirmButton);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenLastCalledWith("confirm_import_preview", {
+      expect(invokeMock).toHaveBeenCalledWith("confirm_import_preview", {
         request: {
           projectId: "sample",
           projectRootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
@@ -460,6 +464,7 @@ describe("App", () => {
           createCheckpoint: true,
         },
       });
+      expect(invokeMock).toHaveBeenCalledWith("scan_wiki", expect.anything());
       expect(screen.queryByRole("button", { name: "Confirm import & compile" })).not.toBeInTheDocument();
     });
   });

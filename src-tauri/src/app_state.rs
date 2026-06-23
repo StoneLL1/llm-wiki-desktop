@@ -183,6 +183,31 @@ impl AppState {
             })
             .map(|entry| entry.archived_path.clone())
             .collect();
+        // Promoted verbatim originals now live under wiki/sources/ (written by
+        // confirm_import). Include them so the newly-created browsable pages
+        // are committed alongside the archived sources — the source-index
+        // records each entry's promoted path, which is authoritative here.
+        let confirmed_index = self
+            .import_service
+            .read_source_index(&context, &self.file_store)?;
+        for entry in &preview.files {
+            if matches!(
+                entry
+                    .conflict
+                    .as_ref()
+                    .and_then(|conflict| conflict.resolution.as_ref()),
+                Some(ConflictResolution::Skip | ConflictResolution::LinkToExisting)
+            ) {
+                continue;
+            }
+            if let Some(artifacts) = confirmed_index.sources.get(&entry.archived_path) {
+                for artifact in artifacts {
+                    if artifact.starts_with("wiki/sources/") {
+                        scoped_paths.push(artifact.clone());
+                    }
+                }
+            }
+        }
         scoped_paths.push(".app/source-index.json".to_string());
         scoped_paths.push(".app/import-conflicts.json".to_string());
 

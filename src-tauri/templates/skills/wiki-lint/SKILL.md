@@ -11,7 +11,7 @@ Read `purpose.md`, `schema.md`, and the existing `wiki/` tree.
 - Judge the wiki across exactly these dimensions:
   - `duplicate_topic` — two or more pages cover the same subject and should be merged or cross-linked.
   - `weak_cross_reference` — important relationships between pages are missing a `[[wikilink]]`.
-  - `missing_source` — a claim or page that should cite a source in `raw/` but does not.
+  - `missing_source` — a derived page makes a claim that should cite a source in `wiki/sources/` but does not. (Pages inside `wiki/sources/` are themselves the originals and need no citation.)
   - `schema_mismatch` — a page whose structure violates `schema.md` (missing sections, wrong type).
   - `outdated_content` — content that contradicts newer pages or the stated purpose.
   - `contradiction` — two pages state mutually incompatible facts.
