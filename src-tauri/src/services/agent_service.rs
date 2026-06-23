@@ -36,6 +36,23 @@ pub trait ProcessRunner: Send + Sync {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError>;
+    /// Same as [`run_task_streaming`](Self::run_task_streaming) but additionally
+    /// invokes `on_delta` for each captured stdout line, so callers that render
+    /// output live (chat) get an incremental feed. The default impl ignores the
+    /// callback and delegates to `run_task_streaming`, which is correct for test
+    /// fakes that only need the final captured text. Takes `&dyn Fn` (not a
+    /// generic) so the trait stays dyn-compatible — `ProcessRunner` is held as
+    /// `Arc<dyn ProcessRunner>`.
+    fn run_task_streaming_with_delta(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_delta: &(dyn Fn(&str) + Sync),
+    ) -> Result<String, BackendError> {
+        let _ = on_delta;
+        self.run_task_streaming(invocation, tasks, task_id)
+    }
 }
 
 #[derive(Default)]
@@ -380,6 +397,21 @@ impl AgentService {
     ) -> Result<String, BackendError> {
         self.runner.run_task_streaming(invocation, tasks, task_id)
     }
+
+    /// Streaming variant of [`run_task_streaming`](Self::run_task_streaming):
+    /// additionally invokes `on_delta` for each captured stdout line so the
+    /// chat route can render the agent answer incrementally, uniform with the
+    /// BYOK streaming path.
+    pub fn run_task_streaming_with_delta(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_delta: &(dyn Fn(&str) + Sync),
+    ) -> Result<String, BackendError> {
+        self.runner
+            .run_task_streaming_with_delta(invocation, tasks, task_id, on_delta)
+    }
 }
 
 impl ProcessRunner for SystemProcessRunner {
@@ -444,6 +476,16 @@ impl ProcessRunner for SystemProcessRunner {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError> {
+        self.run_task_streaming_with_delta(invocation, tasks, task_id, &|_| {})
+    }
+
+    fn run_task_streaming_with_delta(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_delta: &(dyn Fn(&str) + Sync),
+    ) -> Result<String, BackendError> {
         let mut child = Command::new(resolve_program(&invocation.program))
             .args(&invocation.args)
             .current_dir(&invocation.cwd)
@@ -491,6 +533,10 @@ impl ProcessRunner for SystemProcessRunner {
             while let Ok((level, line)) = receiver.try_recv() {
                 if level == LogLevel::Info {
                     stdout_lines.push(line.clone());
+                    // Forward each captured stdout line as a live delta so chat
+                    // can render the answer incrementally (uniform with the
+                    // BYOK streaming path).
+                    on_delta(&line);
                 }
                 let _ = tasks.append_log(task_id, level, line);
             }
@@ -509,6 +555,7 @@ impl ProcessRunner for SystemProcessRunner {
                     for (level, line) in receiver.try_iter() {
                         if level == LogLevel::Info {
                             stdout_lines.push(line.clone());
+                            on_delta(&line);
                         }
                         let _ = tasks.append_log(task_id, level, line);
                     }
