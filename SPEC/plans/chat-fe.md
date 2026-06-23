@@ -1,0 +1,52 @@
+# 进度账本 · chat 前端壳 (P0+P1)
+
+> 权威源：SPEC/roadmap/chat.md（§1-5）· SPEC/PRD.md（PRD-CHAT-002/003）· UI-Frontend-design/chat.html + assets/app.css（只读）· CLAUDE.md
+> scope：只动 src/ + src/styles.css。后端缺口标 blocked。
+> status: pending | in_progress | done | verified | blocked
+
+## 后端契约（chat-be 已交付，本 loop 消费）
+
+- 流式 channel：`task://stream-output`，eventType `task_stream_output`，payload `{ delta: string, route?: "agent"|"byok" }`
+- delta 仅 ephemeral UI 提示，**不落盘**；终态后整条 answer 落 `.app/chats/{id}.json`，前端 reload 作幂等兜底
+- `ChatMessage.provider: Option<LlmProviderKind>`（BYOK answer 填入，Agent 留 None）→ 画 "BYOK · Anthropic" badge
+- 显式路由：`send_chat_message` 已接受 `route/agent/provider`，前端此前固定 `auto`
+
+## 关键决策（动手前）
+
+- **segment 切换器位置**：主区 header 是 AppShell 全局统一的两按钮（primary/secondary），跨 view 共享，不宜塞 chat 专属 segment。按设计稿 chat.html 的 `.toolbar`（会话头：badge+标题+操作组），在 **ChatView 主区顶部新增会话工具栏**，segment 放其内。左栏宽度 220→260 对齐设计稿。
+- **流式消费链路**：`TASK_EVENT_CHANNELS` 加 `task://stream-output`；`BackendEventType` 加 `task_stream_output`；taskStore.applyBackendEvent 对该类型 **不** 改 task 状态（delta 非状态），改为 chatStore 直接订阅消费。为避免 taskStore 与 chatStore 双订阅同一 channel 重复处理，**chatStore 自己 listen** `task://stream-output`（按 sendTaskId 过滤），taskStore 不动。终态 reload 幂等清空 streaming buffer。
+- **streaming buffer**：chatStore 增 `streamingText: string` + `streamingRoute: ChatRoute|null`，delta 追加；ChatView 在 generating 时渲染一个临时 assistant 气泡（buffer 内容 + cursor），终态 reload 后被真实落盘消息取代。
+- **Markdown 渲染**：抽 `MessageContent.tsx`，复用 MarkdownReader 的 remark/rehype 管线但去掉 frontmatter/wikilink（chat 无），保留 citation 角标预处理（`[1]`→citation 链接点击跳 Wiki）。user 消息仍纯文本（设计稿 user 无 markdown）。
+- **citation 角标 + 卡片**：assistant 消息正文末尾追加 `<sup>N</sup>`（设计稿 `.citation-ref`），消息下方追加 citation 卡片列表（`.msg__citations` + `.citation`），点击切 wiki 视图打开页面。
+- **avatar/time/badge**：`.msg__avatar` YOU/AI 28px；`.msg__head` name+time+route badge；时间用 `createdAt`（已 ISO）格式化 HH:MM。
+- **右面板三段**：操作区（复制MD/生成卡片/标记问题）纯前端可做；执行路径 route+检索数+页面数 可做，tokens/timing/version **blocked**（后端 ChatMessage 无 timing/tokenUsage 字段）；原始资料 **blocked**（后端 ChatCitation 无 rawRefs 字段，roadmap §1 标 P2）。
+
+## 条目
+
+### P0
+
+- [x] **P0-1 消息渲染富化** — status: verified
+  - 新建 `src/features/chat/MessageContent.tsx`（remark-gfm+remark-math+rehype-katex+rehype-highlight，`[N]`→可点击 citation 角标 `<sup>`）
+  - `src/features/chat/ChatView.tsx` 重写消息渲染：`.msg` + `.msg__avatar`(YOU/AI 28px) + `.msg__head`(name+time+route badge) + MessageContent + `.msg__citations` 消息内 citation 卡片；左栏 220→260；role=log/aria-live
+  - `src/types/chat.ts`：ChatMessage 加 `provider?: LlmProviderKind|null`（badge "BYOK · Anthropic"）
+  - `src/styles.css`：补 `.chat-stream`/`.msg*`/`.msg__citation*`/`.chat-prose`/`.chat-prose .citation-ref`/`.seg`/`.chat-session__meta`/`.stream-cursor`
+  - i18n：`chat.thread.you`/`chat.thread.citationRef`（en + zh-CN）
+  - 验证：`npm run lint`（0 warning）+ `npm run test`（105 pass）全绿；无 console.log
+- [ ] **P0-2 流式 UI** — status: pending
+  - 消费 `task://stream-output`，逐字呈现 + cursor，终态幂等 reload
+  - 涉及：`src/stores/chatStore.ts`（streaming buffer + listen）、`ChatView.tsx`（临时气泡）、`src/types/task.ts`（BackendEventType 补 task_stream_output）、`src/hooks/useTaskEvents.ts`（channel 注册——供通知层，store 独立 listen）
+
+### P1
+
+- [ ] **P1-1 route segment 切换器** — status: pending
+  - 消费 chat-BE 显式路由：Auto/Agent/BYOK 三态 segment，send 携带所选 route，badge 反映 lastResolvedRoute
+  - 涉及：`ChatView.tsx`（会话工具栏 + segment 状态）、`ChatComposer.tsx`（接收 routePreference 由 ChatView 控制）、styles.css `.seg`
+- [ ] **P1-2 右面板操作 + 执行路径** — status: pending
+  - 操作：复制回答 Markdown / 生成知识卡片 / 标记问题回答；执行路径：route+检索数+页面数（tokens/timing/version blocked）
+  - 涉及：`src/components/app/RightContextPanel.tsx`（chat 分支扩展）、新建 `src/features/chat/ChatRightPanel.tsx`
+- [ ] **P1-3 原始资料段** — status: blocked
+  - 后端 ChatCitation 无 rawRefs 字段（roadmap §1 P2，未交付）。前端无法填充。移交后端。
+
+## 进度日志
+
+- 2026-06-23 建账本；读完对照源（roadmap/chat.md、PRD-CHAT、chat.html、app.css、chat-be 账本、ChatView/Composer/SessionList/CitationPanel/chatStore/taskStore/useTaskEvents/RightContextPanel/AppShell/MarkdownReader/task types/i18n/styles.css）。确认后端流式 channel 已 emit、前端未消费。决策见上。

@@ -5,12 +5,31 @@ import { invoke } from "@tauri-apps/api/core";
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useNavigationStore } from "../../stores/navigationStore";
+import { useWikiStore } from "../../features/wiki/wikiStore";
 import { isTerminalStatus } from "../../types/task";
-import type { ChatRoutePreference } from "../../types/chat";
+import type { ChatMessage, ChatRoutePreference } from "../../types/chat";
+import type { LlmProviderKind } from "../../types/llm";
 import { ChatComposer } from "./ChatComposer";
 import { ChatSessionList } from "./ChatSessionList";
+import { MessageContent } from "./MessageContent";
 
 const ROUTE_PREFERENCE: ChatRoutePreference = "auto";
+
+const PROVIDER_LABEL: Record<LlmProviderKind, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google",
+  ollama: "Ollama",
+  custom: "Custom",
+};
+
+/** Format an ISO timestamp as HH:MM (locale-independent, 24h). */
+function formatTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
 
 export function ChatView() {
   const { t } = useTranslation();
@@ -40,6 +59,8 @@ export function ChatView() {
   const tasks = useTaskStore((state) => state.tasks);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const cancelTask = useTaskStore((state) => state.upsertTask);
+  const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const openWikiPage = useWikiStore((state) => state.openPage);
 
   const { projectId, rootPath } = currentProject;
   const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;
@@ -76,8 +97,13 @@ export function ChatView() {
   const latestAssistant = latestAssistantMessage(activeSession);
   const resolvedRoute = latestAssistant?.route ?? null;
 
+  const openCitation = (path: string) => {
+    setActiveView("wiki");
+    void openWikiPage(projectId, rootPath, path);
+  };
+
   return (
-    <div className="grid h-full grid-cols-[220px_minmax(0,1fr)]">
+    <div className="grid h-full grid-cols-[260px_minmax(0,1fr)]">
       <div className="border-r border-[var(--border)] bg-[var(--surface)]">
         <ChatSessionList
           sessions={sessions}
@@ -96,55 +122,34 @@ export function ChatView() {
             {error}
           </div>
         ) : null}
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4" role="log" aria-live="polite">
           {!activeSession ? (
             <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
               {t("chat.thread.empty")}
             </div>
           ) : (
-            <div className="mx-auto flex max-w-[720px] flex-col gap-4">
+            <div className="chat-stream mx-auto w-full max-w-[820px]">
               {activeSession.messages.map((message) => (
-                <div
+                <MessageBubble
                   key={message.id}
-                  className={`flex flex-col gap-1 ${message.role === "user" ? "items-end" : "items-start"}`}
-                >
-                  <div
-                    className={`max-w-[85%] whitespace-pre-wrap rounded-[var(--radius-md)] px-3 py-2 text-[13px] leading-6 ${
-                      message.role === "user"
-                        ? "bg-[var(--accent-soft)] text-[var(--text-primary)]"
-                        : "border border-[var(--border-subtle)] bg-[var(--surface-raised)] text-[var(--text-primary)]"
-                    }`}
-                  >
-                    {message.content}
-                  </div>
-                  {message.role === "assistant" ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {message.route ? (
-                        <span className="text-[10.5px] uppercase tracking-[0.06em] text-[var(--text-muted)]">
-                          {t(`chat.composer.route.${message.route}`)}
-                        </span>
-                      ) : null}
-                      {message.citations && message.citations.length > 0 ? (
-                        <span className="text-[10.5px] text-[var(--text-muted)]">
-                          {t("chat.thread.sources", { count: message.citations.length })}
-                        </span>
-                      ) : null}
-                      <SaveAnswerButton
-                        messageId={message.id}
-                        status={saveStatus[message.id] ?? "idle"}
-                        disabled={generating}
-                        onSave={() => {
-                          if (!activeSessionId) return;
-                          void saveAnswer(projectId, rootPath, activeSessionId, message.id);
-                        }}
-                      />
-                    </div>
-                  ) : null}
-                </div>
+                  message={message}
+                  t={t}
+                  generating={generating}
+                  saveStatus={saveStatus[message.id] ?? "idle"}
+                  onCitationClick={(index) => {
+                    const citation = message.citations?.[index - 1];
+                    if (citation) openCitation(citation.pagePath);
+                  }}
+                  onOpenCitation={(path) => openCitation(path)}
+                  onSave={() => {
+                    if (!activeSessionId) return;
+                    void saveAnswer(projectId, rootPath, activeSessionId, message.id);
+                  }}
+                />
               ))}
               {generating ? (
                 <div className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
-                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--accent)]" />
+                  <span className="dotstatus dotstatus--busy" aria-hidden="true" />
                   {t("chat.thread.generating")}
                   <button
                     type="button"
@@ -194,16 +199,92 @@ export function ChatView() {
   );
 }
 
+interface MessageBubbleProps {
+  message: ChatMessage;
+  t: (k: string, opts?: Record<string, unknown>) => string;
+  generating: boolean;
+  saveStatus: "idle" | "saving" | "saved" | "exists" | "error";
+  onCitationClick: (index: number) => void;
+  onOpenCitation: (path: string) => void;
+  onSave: () => void;
+}
+
+function MessageBubble({
+  message,
+  t,
+  generating,
+  saveStatus,
+  onCitationClick,
+  onOpenCitation,
+  onSave,
+}: MessageBubbleProps) {
+  const isUser = message.role === "user";
+  const citations = message.citations ?? [];
+  const time = formatTime(message.createdAt);
+  const routeLabel = message.route ? t(`chat.composer.route.${message.route}`) : null;
+  const providerLabel = message.provider ? PROVIDER_LABEL[message.provider] : null;
+
+  return (
+    <div className={`msg ${isUser ? "msg--user" : ""}`}>
+      <div className={`msg__avatar ${isUser ? "msg__avatar--user" : "msg__avatar--ai"}`}>
+        {isUser ? "YOU" : "AI"}
+      </div>
+      <div className="msg__body">
+        <div className="msg__head">
+          <span className="msg__name">{isUser ? t("chat.thread.you") : "AI"}</span>
+          {time ? <span className="msg__time">{time}</span> : null}
+          {!isUser && routeLabel ? (
+            <span className="msg__route-badge">
+              {providerLabel ? `${routeLabel} · ${providerLabel}` : routeLabel}
+            </span>
+          ) : null}
+        </div>
+        {isUser ? (
+          <div className="msg__bubble-user">{message.content}</div>
+        ) : (
+          <>
+            <MessageContent
+              content={message.content}
+              citationCount={citations.length}
+              onCitationClick={onCitationClick}
+            />
+            {!isUser && citations.length > 0 ? (
+              <div className="msg__citations">
+                {citations.map((citation, index) => (
+                  <button
+                    key={citation.pagePath}
+                    type="button"
+                    className="msg__citation"
+                    onClick={() => onOpenCitation(citation.pagePath)}
+                    title={t("chat.citations.openPage")}
+                  >
+                    <span className="msg__citation-idx">{index + 1}</span>
+                    <span className="msg__citation-title">{citation.title}</span>
+                    <span className="msg__citation-path">{citation.pagePath}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {!isUser ? (
+              <div className="mt-2 flex items-center gap-2">
+                <SaveAnswerButton status={saveStatus} disabled={generating} onSave={onSave} />
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface SaveAnswerButtonProps {
-  messageId: string;
   status: "idle" | "saving" | "saved" | "exists" | "error";
   disabled: boolean;
   onSave: () => void;
 }
 
-function SaveAnswerButton({ messageId, status, disabled, onSave }: SaveAnswerButtonProps) {
+function SaveAnswerButton({ status, disabled, onSave }: SaveAnswerButtonProps) {
   const { t } = useTranslation();
-  void messageId;
   if (status === "saved") {
     return <span className="text-[10.5px] text-[var(--text-muted)]">{t("chat.thread.saveDone")}</span>;
   }
