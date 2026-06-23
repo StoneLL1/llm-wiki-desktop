@@ -2,6 +2,8 @@
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
+[2026-06-23] 现象 — `cargo test`（lib 单测二进制）一启动即崩，`exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND`，无任何测试运行；直接从 `target/debug/deps/` 跑同一 exe 偶尔返回 0 但无输出（极不稳定）。 — 根因 — Windows loader 级 DLL 入口点缺失（lib test 二进制链接 webview2-com/windows 系列原生 DLL），属本机环境/WebView2 运行时层问题，**与代码无关**：stash 掉本轮全部改动后 base 分支以完全相同的 0xc0000139 失败；`cargo clean` 全量重编（含 webview2-com/reqwest/tauri）后仍同样失败。 — 规避做法 — 不要把 0xc0000139 当代码 bug 排查；用 `cargo build --tests`/`cargo clippy --lib --tests`（编译/clippy 仍正常）作为代码正确性代理，`cargo fmt --check` + 前端 `npm run test/lint` 作旁证；环境恢复（修 WebView2 运行时 / 系统 DLL / 重装 toolchain）后必须重跑 `cargo test` 补验。遇 loader 级 0xc0000139 先 stash 改动验 base，确认是否环境级再深入。
+
 [2026-06-22] 现象 — `onDragDropEvent` 代码和 payload 都正确，桌面拖入仍完全无反应；“本地文件”卡片点击后却只能手填路径。 — 根因 — 项目没有任何 Tauri v2 capability，`plugin:event|listen` 注册被 ACL 拒绝且前端 `catch` 静默吞错；卡片点击实现本身也只调用 textarea `focus()`，从未接入文件选择器。 — 规避做法 — 主窗口 capability 必须同时声明 `core:event:allow-listen`/`allow-unlisten`，配置显式开启 `dragDropEnabled`；系统选择使用官方 dialog 插件的 `dialog:allow-open`，注册失败必须给用户错误提示，并用配置测试防止权限文件再次丢失。
 
 [2026-06-22] 现象 — `npm run tauri dev` 里点编译/对话/HTML，任务一直 running 永不结束；shell 里跑后端同款 `claude --print --output-format stream-json ...` 却 17s 正常返回。 — 根因 — 程序化 Claude 调用未隔离宿主 `~/.claude` 配置：用户装的 MCP 服务器（claude-mem 连 localhost:37777、zotero）+ SessionStart hooks 在 GUI 进程 spawn 上下文里 init 卡住，`--print` 永远到不了模型。代码链路（命令注册/事件 emit/前端订阅）全对且有测试，故静态分析查不出。 — 规避做法 — 所有 Claude invocation builder 必须带 `--bare`（skip hooks/plugin sync/MCP/auto-memory）；detection 同步要求 `--bare`，旧 CLI 降级 Failed 而非静默挂。诊断时不能只读代码，必须在 shell 复现后端同款调用对比；stream-json init 块里的 `mcp_servers`/`hook_response` 是宿主配置污染的指纹。
