@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import "../../i18n";
 import { AgentView } from "./AgentView";
+import { AgentRightPanel } from "./AgentRightPanel";
 import type { AgentInfo } from "../../types/agent";
 
 describe("AgentView", () => {
@@ -59,5 +60,45 @@ describe("AgentView", () => {
     screen.getByRole("button", { name: /lint/i }).click();
     expect(onNavigate).toHaveBeenCalledWith("lint");
     expect(onRunAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not present an installed fallback as the configured default agent", () => {
+    const agents: AgentInfo[] = [
+      {
+        kind: "claude",
+        command: "claude",
+        state: "installed",
+        version: "2.1.133",
+        executablePath: "C:/claude.cmd",
+        isDefault: false,
+        installGuidance: "",
+        error: null,
+      },
+    ];
+
+    render(<AgentRightPanel agents={agents} />);
+
+    expect(screen.getByText("not configured")).toBeInTheDocument();
+    expect(screen.queryByText("claude · v2.1.133")).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed configured agent visible as the default", () => {
+    const agents: AgentInfo[] = [
+      {
+        kind: "openclaw",
+        command: "openclaw",
+        state: "failed",
+        version: null,
+        executablePath: "C:/openclaw.exe",
+        isDefault: true,
+        installGuidance: "",
+        error: "protocol check failed",
+      },
+    ];
+
+    render(<AgentRightPanel agents={agents} />);
+
+    expect(screen.getByText("openclaw · v?")).toBeInTheDocument();
+    expect(screen.queryByText("not configured")).not.toBeInTheDocument();
   });
 });

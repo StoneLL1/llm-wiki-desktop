@@ -18,6 +18,7 @@ import { useImportStore } from "../../stores/importStore";
 import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useTaskStore, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
@@ -425,14 +426,21 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
 
   const setDefaultAgent = useCallback(async (agent: AgentKind) => {
     if (!hasTauri) return;
-    await invoke("set_default_agent", { request: { ...projectRequest, agent } });
-    await refreshCapabilities();
-  }, [currentProject.projectId, currentProject.rootPath, hasTauri, refreshCapabilities]);
+    try {
+      await invoke("set_default_agent", { request: { ...projectRequest, agent } });
+      await useSettingsStore.getState().loadSettings(
+        currentProject.projectId,
+        currentProject.rootPath,
+      );
+      await refreshCapabilities();
+    } catch (error) {
+      pushToast("error", errorMessage(error));
+    }
+  }, [currentProject.projectId, currentProject.rootPath, hasTauri, pushToast, refreshCapabilities]);
 
   const defaultAgentKind = useMemo<AgentKind | null>(
     () =>
       agents.find((a) => a.isDefault && a.state === "installed")?.kind
-      ?? agents.find((a) => a.state === "installed")?.kind
       ?? null,
     [agents],
   );

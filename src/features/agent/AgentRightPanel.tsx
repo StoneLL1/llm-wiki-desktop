@@ -56,10 +56,7 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
     }
   }, [project.projectId, project.rootPath, loadSettings]);
 
-  const defaultAgent =
-    agents.find((agent) => agent.isDefault && agent.state === "installed")
-    ?? agents.find((agent) => agent.state === "installed")
-    ?? null;
+  const defaultAgent = agents.find((agent) => agent.isDefault) ?? null;
 
   const handleContextWindow = (value: number) => {
     void persistPatch(project.projectId, project.rootPath, {

@@ -729,11 +729,14 @@ impl ImportService {
         context: &ProjectContext,
     ) -> Result<HashMap<String, String>, BackendError> {
         let mut map = HashMap::new();
-        let raw_dir = &context.raw_dir;
-        if !raw_dir.exists() {
-            return Ok(map);
+        if context.raw_dir.exists() {
+            self.collect_hashes(
+                &context.raw_dir,
+                &context.root,
+                &context.raw_dir.join("extracted"),
+                &mut map,
+            )?;
         }
-        self.collect_hashes(raw_dir, raw_dir, &mut map)?;
         Ok(map)
     }
 
@@ -741,9 +744,10 @@ impl ImportService {
         &self,
         dir: &Path,
         raw_base: &Path,
+        excluded_dir: &Path,
         map: &mut HashMap<String, String>,
     ) -> Result<(), BackendError> {
-        if !dir.exists() {
+        if !dir.exists() || dir == excluded_dir {
             return Ok(());
         }
         let entries = fs::read_dir(dir).map_err(|err| {
@@ -755,13 +759,13 @@ impl ImportService {
             })?;
             let path = entry.path();
             if path.is_dir() {
-                self.collect_hashes(&path, raw_base, map)?;
+                self.collect_hashes(&path, raw_base, excluded_dir, map)?;
             } else if path.is_file() {
                 if let Ok(hash) = file_hash_fast(&path) {
                     let rel = path
                         .strip_prefix(raw_base)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                     map.insert(hash, rel);
                 }
             }
@@ -1121,6 +1125,77 @@ mod tests {
     }
 
     // ── Duplicate and conflict handling tests ──
+
+    #[test]
+    fn extracted_markdown_does_not_make_source_a_duplicate() {
+        let (context, root) = tmp_context("extracted-is-not-source");
+        let source_root =
+            std::env::temp_dir().join(format!("llm-wiki-import-external-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&source_root).unwrap();
+        let source = source_root.join("研究笔记.md");
+        let content = b"# Same bytes as the preview artifact";
+        fs::write(&source, content).unwrap();
+
+        let extracted_dir = root.join("raw/extracted");
+        fs::create_dir_all(&extracted_dir).unwrap();
+        fs::write(extracted_dir.join("preview-artifact.md"), content).unwrap();
+
+        let preview = ImportService
+            .preview_import(
+                &context,
+                &FileStore,
+                &ImportRequest {
+                    source_paths: vec![source.to_string_lossy().into_owned()],
+                    allow_duplicates: false,
+                    link_duplicates: false,
+                },
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(preview.summary.archived_files, 1);
+        assert_eq!(preview.summary.duplicate_files, 0);
+        assert!(preview.files[0].conflict.is_none());
+
+        fs::remove_dir_all(source_root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_raw_source_directories_still_participate_in_duplicate_detection() {
+        let (context, root) = tmp_context("legacy-raw-source");
+        let legacy_dir = root.join("raw/articles");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let content = b"# Existing legacy source";
+        fs::write(legacy_dir.join("existing.md"), content).unwrap();
+
+        let source_dir = root.join("import-source");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("existing.md");
+        fs::write(&source, content).unwrap();
+
+        let preview = ImportService
+            .preview_import(
+                &context,
+                &FileStore,
+                &ImportRequest {
+                    source_paths: vec![source.to_string_lossy().into_owned()],
+                    allow_duplicates: false,
+                    link_duplicates: false,
+                },
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(preview.summary.archived_files, 0);
+        assert_eq!(preview.summary.duplicate_files, 1);
+        assert_eq!(
+            preview.conflicts[0].existing_path.as_deref(),
+            Some("raw/articles/existing.md")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn detects_exact_duplicates_in_preview() {

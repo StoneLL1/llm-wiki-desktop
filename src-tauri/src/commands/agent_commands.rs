@@ -37,9 +37,7 @@ pub fn set_default_agent(
     request: SetDefaultAgentRequest,
 ) -> Result<AgentConfig, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let config = AgentConfig {
-        default_agent: request.agent,
-    };
-    crate::services::AgentService::save_config(&context, &config)?;
-    Ok(config)
+    state
+        .settings_service
+        .save_agent_default(&context, request.agent)
 }

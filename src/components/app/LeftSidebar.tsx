@@ -21,11 +21,12 @@ export function LeftSidebar() {
   const lintIssueCount = localReport?.issues.length ?? 0;
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
-  const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? status?.agents?.find((a) => a.state === "installed") ?? null;
+  const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? null;
+  const agentReady = defaultAgent?.state === "installed";
   const agentLabel = defaultAgent
     ? `${defaultAgent.kind} · ${defaultAgent.version ?? "—"}`
     : t("shell.agentUnconfigured");
-  const agentDot = defaultAgent ? "bg-[var(--accent)] shadow-[0_0_0_2px_var(--accent-soft)]" : "bg-[var(--text-disabled)]";
+  const agentDot = agentReady ? "bg-[var(--accent)] shadow-[0_0_0_2px_var(--accent-soft)]" : "bg-[var(--text-disabled)]";
 
   const openRecentPage = (path: string) => {
     if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
