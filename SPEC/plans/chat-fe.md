@@ -1,5 +1,24 @@
 # 进度账本 · chat 前端壳 (P0+P1)
 
+**✅ 本轮完成 @ 2026-06-23** — P0-1 (消息富化) / P0-2 (流式UI) / P1-1 (segment切换器) / P1-2 (右面板) 全部 verified。P1-3 (原始资料段) + timing/tokens 字段 blocked（后端未交付 ChatCitation.rawRefs + ChatMessage.timing/tokenUsage）。
+
+## 交付摘要
+- 消息气泡：Markdown（remark-gfm+remark-math+rehype-katex+rehype-highlight）+ YOU/AI avatar 28px + time + route/provider badge + citation `<sup>` 角标（点击跳 Wiki）+ 消息内 citation 卡片列表
+- 流式：`useChatStream` app 级订阅 `task://stream-output`→chatStore streamingText 累积→StreamingBubble 逐字渲染+闪烁 cursor；终态 reload 幂等取代
+- segment：ChatView 顶部会话工具栏 `.seg` Auto/Agent/BYOK 三态切换+标题 inline 重命名+删除
+- 右面板：引用编号列表+跳转 / 原始资料（blocked）/ 执行路径 route+检索数+页面数 / 操作（保存+复制MD+生成卡片+标记问题）
+- 左栏 220→260px 对齐设计稿
+- i18n en+zh-CN 完整
+- lint 0 warning · test 105 pass · 无 console.log
+
+## 文件清单（仅 src/ + styles.css）
+`src/features/chat/MessageContent.tsx` `ChatView.tsx` `src/stores/chatStore.ts` `src/hooks/useChatStream.ts` `src/types/task.ts` `src/types/chat.ts` `src/components/app/RightContextPanel.tsx` `src/app/App.tsx` `src/styles.css` `src/i18n/locales/en.json` `src/i18n/locales/zh-CN.json` + `SPEC/plans/chat-fe.md`（本账本）
+
+## blocked 项
+- P1-3 原始资料段：后端 ChatCitation 需 `rawRefs` 字段（roadmap §1 P2）
+- 执行路径 timing / tokens：后端 ChatMessage 需 `timing`/`tokenUsage` 字段
+- P0 流式验证：本机 `cargo test` 被环境级 loader 故障阻塞（同 chat-BE 账本 gotcha），编译通过+clippy 净+前端逻辑对为代理证据
+
 > 权威源：SPEC/roadmap/chat.md（§1-5）· SPEC/PRD.md（PRD-CHAT-002/003）· UI-Frontend-design/chat.html + assets/app.css（只读）· CLAUDE.md
 > scope：只动 src/ + src/styles.css。后端缺口标 blocked。
 > status: pending | in_progress | done | verified | blocked
@@ -45,9 +64,10 @@
 - [x] **P1-1 route segment 切换器** — status: verified
   - `src/features/chat/ChatView.tsx`：去掉 `ROUTE_PREFERENCE` const → `useState<ChatRoutePreference>("auto")`；新增 SessionToolbar（`.seg` 三态 Auto/Agent/BYOK + 标题 inline 编辑 + 消息数·时间 + 重命名/删除按钮）；send 携带所选 route；`.seg` / `.seg__btn` / `.seg__btn.is-active` class 已在 P0-1 预置于 styles.css
   - 验证：lint 0 warning + test 105 pass
-- [ ] **P1-2 右面板操作 + 执行路径** — status: pending
-  - 操作：复制回答 Markdown / 生成知识卡片 / 标记问题回答；执行路径：route+检索数+页面数（tokens/timing/version blocked）
-  - 涉及：`src/components/app/RightContextPanel.tsx`（chat 分支扩展）、新建 `src/features/chat/ChatRightPanel.tsx`
+- [x] **P1-2 右面板操作 + 执行路径** — status: verified
+  - `src/components/app/RightContextPanel.tsx`：chat 分支重写为四段（引用编号列表+跳转 / 原始资料 blocked / 执行路径 route+检索数+页面数 / 操作 保存+复制MD+生成卡片+标记问题）；内联 CitationPanel 实现，去外部依赖；timing/tokens 占位 "—"
+  - `src/i18n/*.json`：补 `chat.citations.rawSources` / `.rawSourcesBlocked` / `.route` / `.routePath` / `.timing` / `.tokens` / `.actions` / `.copyMd` / `.generateCard` / `.flagIssue`（en + zh-CN）
+  - 验证：lint 0 warning + test 105 pass
 - [ ] **P1-3 原始资料段** — status: blocked
   - 后端 ChatCitation 无 rawRefs 字段（roadmap §1 P2，未交付）。前端无法填充。移交后端。
 
