@@ -22,7 +22,7 @@ pub struct CompileService;
 
 impl CompileService {
     pub fn provider_prompt(workspace: &Path, language: &str) -> Result<String, BackendError> {
-        let mut prompt = String::from("Return only JSON matching {files:[{path,content}],deletions:[],summary}. Paths must be wiki/*.md and include wiki/index.md, wiki/overview.md, wiki/log.md. Never delete pages.\n");
+        let mut prompt = String::from("Return only JSON matching {files:[{path,content}],deletions:[],summary}.\nCreate real DERIVED content pages under wiki/ — entity pages in wiki/entities/, concept pages in wiki/concepts/, and synthesis/comparison pages as schema.md dictates, that synthesize ACROSS the sources. Do NOT return only the index files. wiki/sources/ already holds the verbatim imported originals: READ them as authoritative and CITE them, but NEVER create, modify, or delete any file under wiki/sources/. Cite sources on every derived page two ways: (1) a frontmatter `sources: [\"<original-source-filename>\"]` array, and (2) a human-readable `> Sources:` line linking to the originals. Paths must be wiki/*.md (never wiki/sources/*) and must include wiki/index.md, wiki/overview.md, wiki/log.md. Never delete pages.\n");
         prompt.push_str(&crate::utils::i18n::language_instruction(language));
         prompt.push_str(" Write each page's prose body in that language; keep frontmatter keys, paths, and this JSON structure in English.\n");
         for name in ["purpose.md", "schema.md"] {
@@ -59,10 +59,13 @@ impl CompileService {
         };
 
         // Confirmed sources are the index keys; their extracted Markdown
-        // artifacts are raw/extracted/*.md values. Track both so the empty
-        // error can explain *why* compile has no input rather than just that
-        // it doesn't — the generic message sends users hunting for a pipeline
-        // bug when the real cause is "I imported an image-only PDF".
+        // artifacts are either wiki/sources/*.md (promoted originals, the
+        // current path) or legacy raw/extracted/*.md (older projects). We
+        // admit both so mixed/legacy projects still compile. Track the
+        // confirmed-source keys so the empty error can explain *why* compile
+        // has no input rather than just that it doesn't — the generic message
+        // sends users hunting for a pipeline bug when the real cause is "I
+        // imported an image-only PDF".
         let confirmed_sources: Vec<String> = {
             let mut keys: Vec<String> = index.sources.keys().cloned().collect();
             keys.sort();
@@ -72,7 +75,11 @@ impl CompileService {
             .sources
             .values()
             .flatten()
-            .filter(|path| path.starts_with("raw/extracted/") && path.ends_with(".md"))
+            .filter(|path| {
+                let p = path.as_str();
+                (p.starts_with("raw/extracted/") || p.starts_with("wiki/sources/"))
+                    && p.ends_with(".md")
+            })
             .cloned()
             .collect();
         relative_paths.sort();
@@ -238,6 +245,17 @@ impl CompileService {
         std::fs::create_dir_all(&workspace_extracted)
             .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &workspace_extracted))?;
         for source in Self::extracted_markdown_files(context)? {
+            // Only legacy raw/extracted/ originals need copying into the
+            // workspace's raw/extracted/ bucket. wiki/sources/ originals are
+            // already brought in by the copy_tree of wiki/ below; copying them
+            // here would inject the same source twice into the prompt.
+            let is_legacy = context
+                .to_project_relative(&source)
+                .map(|rel| rel.starts_with("raw/extracted/"))
+                .unwrap_or(false);
+            if !is_legacy {
+                continue;
+            }
             let file_name = source.file_name().ok_or_else(|| {
                 BackendError::new(
                     "COMPILE_INPUT_PATH_INVALID",
@@ -280,12 +298,19 @@ impl CompileService {
                 })?
                 .to_string_lossy()
                 .replace('\\', "/");
+            // wiki/sources/ originals are import-owned; the agent may read and
+            // cite them but must not echo them back into its output manifest.
+            if is_compile_protected_path(&relative) {
+                continue;
+            }
             let content = std::fs::read_to_string(&absolute)
                 .map_err(|error| io_error("COMPILE_OUTPUT_READ_FAILED", error, &absolute))?;
             files.push(crate::models::compile::CompileFile::new(relative, content));
         }
         let candidate_paths: HashSet<&str> = files.iter().map(|file| file.path.as_str()).collect();
         let deletions = original_paths
+            // Never compute a deletion for compile-protected wiki/sources/ pages.
+            .filter(|path| !is_compile_protected_path(path))
             .filter(|path| !candidate_paths.contains(path.as_str()))
             .collect();
         let manifest = CompileManifest {
@@ -299,7 +324,13 @@ impl CompileService {
 
     pub fn compile_prompt(workspace: &Path, language: &str) -> String {
         let mut prompt = format!(
-            "Compile this local Markdown wiki in {}. Read purpose.md, schema.md, raw/extracted/, existing wiki/, and skills/wiki-ingest/SKILL.md. Update wiki/index.md, wiki/overview.md, and wiki/log.md. Do not access or modify anything outside this workspace.",
+            "Compile this local Markdown wiki. Workspace root: {}.\nFollow skills/wiki-ingest/SKILL.md and schema.md. Do exactly this:\n\
+             1. Read purpose.md, schema.md, every original in wiki/sources/ (the verbatim imported sources) and legacy raw/extracted/, plus the existing wiki/ tree.\n\
+             2. wiki/sources/ is IMPORT-OWNED: it holds the verbatim extracted originals. READ them as authoritative and CITE them. NEVER create, modify, or delete any file under wiki/sources/.\n\
+             3. CREATE derived Markdown pages under wiki/ — entity pages in wiki/entities/, concept pages in wiki/concepts/, and synthesis/comparison pages as the sources warrant. Synthesize ACROSS sources; do NOT write one page per source, and do NOT summarize or copy a source into another page. Name each derived page after the concept it covers, not after a source filename. You MUST produce real content pages — touching only the index files is a failure.\n\
+             4. On every derived page, cite sources two ways: a frontmatter `sources: [\"<original-source-filename>\"]` array (machine join key for the graph), and a human-readable `> Sources:` line of Markdown links to ../sources/<page>.md (or [[sources/<page>]]).\n\
+             5. UPDATE wiki/index.md and wiki/overview.md to list and summarize the pages you created, and append a short entry to wiki/log.md. Cascade: after writing a page, update any other page materially affected by the new information.\n\
+             6. Use project-relative Markdown links and [[wikilinks]]. Never delete existing pages. Work only inside this workspace; do not access or modify anything outside it. Any shell commands you run must operate only within this workspace root and must never affect files, directories, or systems outside it.",
             workspace.to_string_lossy()
         );
         // Steer generated wiki page prose to the user's language; structural
@@ -319,6 +350,15 @@ impl CompileService {
             .map(|file| file.path.as_str())
             .chain(manifest.deletions.iter().map(String::as_str))
         {
+            if is_compile_protected_path(path) {
+                return Err(BackendError::new(
+                    "COMPILE_PROTECTED_PATH",
+                    "wiki/sources/ is import-owned; compile may read and cite these originals but cannot create, modify, or delete them.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": path })));
+            }
             if !is_safe_wiki_markdown(path) || !seen.insert(path.to_string()) {
                 return Err(BackendError::new(
                     "COMPILE_PATH_INVALID",
@@ -415,6 +455,24 @@ impl CompileService {
         manifest: &CompileManifest,
         expected_current_hashes: &HashMap<String, String>,
     ) -> Result<Vec<String>, BackendError> {
+        // Defense in depth: even on the confirmed-apply path, refuse any
+        // write or deletion under the compile-protected wiki/sources/ subtree.
+        for path in manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(manifest.deletions.iter().map(String::as_str))
+        {
+            if is_compile_protected_path(path) {
+                return Err(BackendError::new(
+                    "COMPILE_PROTECTED_PATH",
+                    "wiki/sources/ is import-owned; compile may read and cite these originals but cannot create, modify, or delete them.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": path })));
+            }
+        }
         let store = FileStore;
         let mut affected = Vec::new();
         for file in &manifest.files {
@@ -627,38 +685,39 @@ fn compile_input_empty_error(
 ) -> BackendError {
     let (summary, details) = if !index_exists || confirmed_sources.is_empty() {
         (
-            "No extracted Markdown was found under raw/extracted. \
-             No imports have been confirmed yet — confirm an import preview before compiling."
+            "No extracted Markdown originals were found under wiki/sources (or legacy \
+             raw/extracted). No imports have been confirmed yet — confirm an import \
+             preview before compiling."
                 .to_string(),
             serde_json::json!({
                 "stage": "no_confirmed_imports",
                 "index_exists": index_exists,
                 "confirmed_sources": confirmed_sources,
-                "hint": "Run an import (raw/sources → preview → confirm) so raw/extracted/*.md is populated.",
+                "hint": "Run an import (raw/sources → preview → confirm); originals are promoted to wiki/sources/*.md.",
             }),
         )
     } else if relative_paths.is_empty() {
         (
-            "No extracted Markdown was found under raw/extracted. \
-             Confirmed sources produced no raw/extracted/*.md (likely image-only or \
-             unsupported sources, or extraction failed silently)."
+            "No extracted Markdown originals were found under wiki/sources (or legacy \
+             raw/extracted). Confirmed sources produced no source page (likely \
+             image-only or unsupported sources, or extraction failed silently)."
                 .to_string(),
             serde_json::json!({
                 "stage": "no_extracted_markdown",
                 "confirmed_sources": confirmed_sources,
-                "hint": "Re-import these sources or add textual sources; verify raw/extracted/ is written.",
+                "hint": "Re-import these sources or add textual sources; verify wiki/sources/ is populated.",
             }),
         )
     } else {
         (
-            "No extracted Markdown was found under raw/extracted. \
-             Confirmed extracted files exist but are empty on disk."
+            "No extracted Markdown originals were found under wiki/sources (or legacy \
+             raw/extracted). Confirmed source pages exist but are empty on disk."
                 .to_string(),
             serde_json::json!({
                 "stage": "extracted_files_empty",
                 "confirmed_sources": confirmed_sources,
                 "empty_on_disk": empty_on_disk,
-                "hint": "Re-import these sources; extraction wrote empty raw/extracted/*.md files.",
+                "hint": "Re-import these sources; their wiki/sources/*.md (or raw/extracted/*.md) pages are empty.",
             }),
         )
     };
@@ -666,8 +725,20 @@ fn compile_input_empty_error(
     BackendError::new("COMPILE_INPUT_EMPTY", summary, true, true).with_details(details)
 }
 
+/// `wiki/sources/` is import-owned: it holds the verbatim extracted originals.
+/// Compile may read and cite them but must never create, modify, or delete them.
+fn is_compile_protected_path(raw: &str) -> bool {
+    raw.replace('\\', "/").starts_with("wiki/sources/")
+}
+
 fn is_safe_wiki_markdown(raw: &str) -> bool {
     if raw.contains('\\') || !raw.starts_with("wiki/") || !raw.ends_with(".md") {
+        return false;
+    }
+    // Defense in depth: wiki/sources/ is compile-protected (see
+    // is_compile_protected_path). Even without the dedicated check, the
+    // generic safety predicate must refuse these paths.
+    if is_compile_protected_path(raw) {
         return false;
     }
     let path = Path::new(raw);

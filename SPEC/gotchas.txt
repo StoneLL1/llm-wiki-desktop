@@ -2,6 +2,10 @@
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
+[2026-06-24] 现象 — 写「确认导入即把原文提升到 `wiki/sources/`」的逻辑时，若只看 `entry.extracted_text_path` 来决定提升哪些源，纯 `.md` 导入会**被静默跳过**，一篇都不进 `wiki/sources/`。 — 根因 — `preview_import` 对纯 `.md`/`.txt`/`.html` 不产生 `extracted_text_path`（也不写 `raw/extracted/`），因为「原件本身就是 Markdown，无需提取」。所以这些 entry 的 `extracted_text_path == None`、`extracted_assets == []`，确认后 `source-index` 里该源的 artifacts 历史上是空 `[]`。 — 规避做法 — 提升逻辑必须**双路取文本**：有 `extracted_text_path`（PDF/DOCX 等，指向 `raw/extracted/*.md`）就读暂存件；否则若 `archived_path` 在 `raw/sources/` 下且以 `.md` 结尾，直接读归档原件作为逐字正文。归档原件**永不删除**（不可变），只删暂存的 `raw/extracted/`。见 `import_service::promote_extracted_to_sources` 与 `tests/sources_promotion.rs::markdown_import_is_promoted_verbatim_to_wiki_sources`。
+
+[2026-06-24] 现象 — 给编译加入 `wiki/sources/` 作为输入后，同一篇原文会被注入 prompt 两次（一次 `raw/extracted/`、一次 `wiki/sources/`），既浪费 token 又可能让模型以为有两份来源。 — 根因 — `compile_service::populate_workspace` 先把 `extracted_markdown_files()` 返回的每篇复制进 `workspace/raw/extracted/`，随后 `copy_tree(&context.wiki_dir, …)` 又把整个 `wiki/`（含 `wiki/sources/`）复制进 `workspace/wiki/`。`extracted_markdown_files` 现在同时返回 `wiki/sources/` 和 legacy `raw/extracted/` 两种路径，于是 `wiki/sources/` 的原件被两条路径各复制一次。 — 规避做法 — `populate_workspace` 复制进 `workspace/raw/extracted/` 时**只取 `raw/extracted/` 前缀**的项（用 `context.to_project_relative` 判前缀），`wiki/sources/` 的原件交给后面的 `copy_tree(wiki)` 带入即可。见 `compile_service::populate_workspace`。
+
 [2026-06-23] 现象 — Markdown 导入预览能生成 `raw/extracted/*.md`，但确认页把同一文件判为 `exact_duplicate`，确认后 source index 仍为空且编译报 “No extracted Markdown”。 — 根因 — 预览先写入提取产物，随后重复扫描遍历整个 `raw/`，于是刚生成的提取产物与原文件同哈希，形成自产物误判。 — 规避做法 — 既有源哈希扫描必须精确排除 `raw/extracted/` 子树，同时继续扫描 legacy `raw/*` 源目录；对展示/持久化路径统一转成 `/`，并用“提取产物不自重复 + legacy 目录仍能查重”双回归测试约束。
 
 [2026-06-23] 现象 — 已安装 Agent 时界面看似已有默认 Agent，但 Chat 仍无回复；设置页和 Agent 页切换后还可能互相覆盖默认值。 — 根因 — UI 把第一个已安装 CLI 当作伪默认项，后端只读取持久化默认 Agent，且 `.app/settings.json` 与 `.app/agent-config.json` 存在两条不同写入路径；Chat 终态刷新后又清除了失败信息。 — 规避做法 — 以 `.app/agent-config.json` 为默认 Agent 真源，单一路径同时更新兼容镜像和前端 store；展示只认 `isDefault`（配置失败项仍应可见），执行再额外要求 installed；Chat 清理发送态时必须保留终态错误。

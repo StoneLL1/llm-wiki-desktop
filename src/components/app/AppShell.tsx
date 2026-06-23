@@ -398,6 +398,12 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
       })
         .then(async () => {
           setImportPreview(null);
+          // Promoted source originals now live under wiki/sources/; re-scan so
+          // they appear in the tree immediately, even if compile is skipped.
+          await useWikiStore.getState().scan(
+            currentProject.projectId,
+            currentProject.rootPath,
+          );
           if (opts.compileAfterImport) {
             await startCompile();
           }

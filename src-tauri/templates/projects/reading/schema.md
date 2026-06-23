@@ -8,7 +8,7 @@
 |---|---|---|
 | entity | `wiki/entities/` | Authors, series, publishers |
 | concept | `wiki/concepts/` | Recurring themes and mental models from reading |
-| source | `wiki/sources/` | One book, essay, or long-form piece |
+| source | `wiki/sources/` | One book, essay, or long-form piece — the verbatim imported original (import-owned) |
 | query | `wiki/queries/` | Questions raised by the reading, with cited answers |
 | synthesis | `wiki/synthesis/` | Themes spanning multiple books |
 | comparison | `wiki/comparisons/` | Contrasting books on the same topic |
@@ -19,3 +19,4 @@
 - Use frontmatter `tags` for genre and topic.
 - Quote sparingly; favor distilled notes linked by `[[wikilinks]]`.
 - `wiki/synthesis/` pages cite every book they reference.
+- `wiki/sources/` holds verbatim imported originals and is import-owned: derived pages cite these sources via frontmatter `sources: ["<filename>"]` and a `> Sources:` line, but never create, modify, or summarize a page under `wiki/sources/`.
