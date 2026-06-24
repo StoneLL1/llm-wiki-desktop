@@ -216,13 +216,14 @@ export function GraphView() {
         nodeCount={data.nodes.length}
         edgeCount={data.edges.length}
       />
-      <div className="relative min-h-0 flex-1">
-        <div ref={containerRef} className="graph-canvas h-full w-full bg-[var(--background)]" />
-        {!canvasAvailable ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-[var(--background)] text-[12px] text-[var(--text-muted)]">
-            {t("graph.canvasUnavailable")}
-          </div>
-        ) : null}
+      <div className="relative min-h-0 flex-1 p-[var(--sp-4)]">
+        <div ref={containerRef} className="graph-canvas h-full w-full">
+          {!canvasAvailable ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-[var(--background)] text-[12px] text-[var(--text-muted)]">
+              {t("graph.canvasUnavailable")}
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   );
