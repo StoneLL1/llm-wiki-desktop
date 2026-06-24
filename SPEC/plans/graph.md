@@ -1,5 +1,18 @@
 # Graph 板块 P0+P1 修复 — 进度账本（/loop 本轮）
 
+> ✅ **本轮完成 @ 2026-06-24** — graph 板块 P0+P1 全部 `verified`。`npm run test`(125)/`npm run lint`/`tsc -b` 全绿，无 console.log。
+>
+> **摘要**：画布视觉对齐设计稿（网格底纹+圆角+边框）；左上纵向悬浮缩放控件、左下图例（colorMode 动态）、右上信息卡（缩放/选中/度数）；类型 checkbox 筛选 + 度数阈值滑块（nodeReducer 统一 hidden 语义，修正搜索 DIM 不可见）；选中节点相邻列表 + 图谱状态段 + 操作段；SVG/PNG 导出（纯函数 SVG 构建器，浏览器 Blob 下载，零后端改动）。纯函数（legendEntries/graphNeighbors/graphExport）抽离单测共 16 例。
+>
+> **文件清单**（19 个，仅 `src/`+`src/styles.css`+账本）：
+> 新增：`GraphCanvasControls.tsx`·`GraphInfo.tsx`·`GraphLegend.tsx`·`graphExport.ts`+`.test.ts`·`graphNeighbors.ts`+`.test.ts`·`legendEntries.ts`+`.test.ts`
+> 改动：`GraphView.tsx`·`GraphControls.tsx`·`GraphInspector.tsx`·`graphStore.ts`+`.test.ts`·`RightContextPanel.tsx`·`styles.css`·`zh-CN.json`·`en.json`
+> 3 commits：`4e784c1`(画布视觉)·`12b8883`(悬浮控件+SVG 导出)·`f201f46`(图例/信息卡/筛选/邻居列表)
+>
+> **未碰**：`src-tauri/`（导出走浏览器 Blob 下载，无需 capability）、`UI-Frontend-design/`、别板块、P2 其余（键盘可达/搜索去抖/状态栏图谱行等记 roadmap 未动）。
+
+---
+
 > 权威范围：本 `/loop` 调度参数。把 roadmap 中部分 P2（度数阈值、导出）**提升为 P1** 本轮必做；不碰 P2 其余、不碰别板块。
 > 对照源：`SPEC/roadmap/graph.md` · `SPEC/PRD.md` PRD-GRAPH-001..006 · `UI-Frontend-design/graph.html` + `assets/app.css` §32（只读禁改）· `CLAUDE.md`
 > 改动边界：只动 `src/` 与 `src/styles.css`。不改 `UI-Frontend-design/`、不自动改 `src-tauri/`。
