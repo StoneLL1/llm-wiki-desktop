@@ -1,4 +1,4 @@
-import { Maximize, Plus, RotateCcw, ZoomOut } from "lucide-react";
+import { Download, RotateCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { GraphColorMode } from "../../types/graph";
@@ -8,25 +8,25 @@ interface GraphControlsProps {
   onColorModeChange: (mode: GraphColorMode) => void;
   search: string;
   onSearchChange: (value: string) => void;
-  onZoomIn: () => void;
-  onZoomOut: () => void;
-  onFit: () => void;
-  onResetLayout: () => void;
   onRebuild: () => void;
+  onExportSvg: () => void;
   nodeCount: number;
   edgeCount: number;
 }
 
+/**
+ * Top toolbar for the graph view (UI-Frontend-design/graph.html `main__toolbar`):
+ * color-mode segment, node search, rebuild, SVG export and a node/edge count.
+ * Viewport zoom/fit/reset actions are split off into the floating
+ * `GraphCanvasControls` pinned on the canvas itself.
+ */
 export function GraphControls({
   colorMode,
   onColorModeChange,
   search,
   onSearchChange,
-  onZoomIn,
-  onZoomOut,
-  onFit,
-  onResetLayout,
   onRebuild,
+  onExportSvg,
   nodeCount,
   edgeCount,
 }: GraphControlsProps) {
@@ -51,60 +51,37 @@ export function GraphControls({
         ))}
       </div>
 
-      <div className="flex items-center gap-1.5">
-        <input
-          type="text"
-          value={search}
-          onChange={(event) => onSearchChange(event.target.value)}
-          placeholder={t("graph.searchPlaceholder")}
-          className="h-[28px] w-[200px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
-        />
-      </div>
+      <input
+        type="text"
+        value={search}
+        onChange={(event) => onSearchChange(event.target.value)}
+        placeholder={t("graph.searchPlaceholder")}
+        className="h-[28px] w-[200px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+      />
 
-      <div className="ml-auto flex items-center gap-1">
-        <span className="mr-2 font-mono text-[11px] text-[var(--text-muted)]">
+      <div className="ml-auto flex items-center gap-2">
+        <span className="mr-1 font-mono text-[11px] text-[var(--text-muted)]">
           {nodeCount} {t("graph.nodesLabel")} · {edgeCount} {t("graph.edgesLabel")}
         </span>
-        <IconButton label={t("graph.zoomIn")} onClick={onZoomIn}>
-          <Plus size={14} />
-        </IconButton>
-        <IconButton label={t("graph.zoomOut")} onClick={onZoomOut}>
-          <ZoomOut size={14} />
-        </IconButton>
-        <IconButton label={t("graph.fit")} onClick={onFit}>
-          <Maximize size={14} />
-        </IconButton>
-        <IconButton label={t("graph.resetLayout")} onClick={onResetLayout}>
-          <RotateCcw size={14} />
-        </IconButton>
         <button
           type="button"
           onClick={onRebuild}
-          className="ml-1 h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-2.5 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+          className="flex h-[28px] items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-2.5 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
         >
+          <RotateCw size={13} />
           {t("graph.rebuild")}
+        </button>
+        <button
+          type="button"
+          onClick={onExportSvg}
+          aria-label={t("graph.exportSvg")}
+          title={t("graph.exportSvg")}
+          className="flex h-[28px] items-center gap-1.5 rounded-[var(--radius-md)] bg-[var(--accent)] px-2.5 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--accent-hover)]"
+        >
+          <Download size={13} />
+          {t("graph.exportSvg")}
         </button>
       </div>
     </div>
-  );
-}
-
-interface IconButtonProps {
-  label: string;
-  onClick: () => void;
-  children: React.ReactNode;
-}
-
-function IconButton({ label, onClick, children }: IconButtonProps) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      title={label}
-      className="flex h-[28px] w-[28px] items-center justify-center rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
-    >
-      {children}
-    </button>
   );
 }

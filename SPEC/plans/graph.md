@@ -18,13 +18,13 @@
 
 ## 项清单
 
-- [ ] **G1 · 画布视觉** `pending` — 网格底纹 + 圆角 + 边框（styles.css `.graph-canvas`）。文件:`src/styles.css`
+- [x] **G1 · 画布视觉** `verified` — 网格底纹 + 圆角 + 边框（styles.css `.graph-canvas`）+ 容器重构。commit `4e784c1`。文件:`src/styles.css:1552-1672`、`src/features/graph/GraphView.tsx:219-227`
 - [ ] **G2 · 图例 graph-legend** `pending` — 左下悬浮，colorMode 动态。文件:`src/features/graph/GraphLegend.tsx`(新)、`GraphView.tsx`、`graphLegend.ts`(纯函数)
 - [ ] **G3 · 信息卡 graph-info** `pending` — 右上悬浮，缩放/选中/度数。文件:`src/features/graph/GraphInfo.tsx`(新)、`GraphView.tsx`
-- [ ] **G4 · 控件版式** `pending` — GraphCanvasControls(新,纵向悬浮) + GraphControls 顶部精简。文件:`src/features/graph/GraphCanvasControls.tsx`(新)、`GraphControls.tsx`、`GraphView.tsx`
+- [x] **G4 · 控件版式** `verified` — GraphCanvasControls(纵向悬浮,左上) + GraphControls 顶部精简(seg+search+rebuild+exportSvg+counts)。文件:`src/features/graph/GraphCanvasControls.tsx`(新)、`src/features/graph/GraphControls.tsx`、`src/features/graph/GraphView.tsx:168-187,205-233`
 - [ ] **G5 · 类型筛选 + 度数阈值** `pending` — graphStore(typeFilter,degreeThreshold) + nodeReducer + Inspector 筛选区。文件:`graphStore.ts`、`GraphView.tsx`、`GraphInspector.tsx`、`RightContextPanel.tsx`、`graphFilters.ts`(纯函数)
 - [ ] **G6 · 相邻列表 + Inspector 段** `pending` — 邻居列表(label+badge+view-all) + 图谱状态段 + 操作段。文件:`GraphInspector.tsx`、`RightContextPanel.tsx`、`graphNeighbors.ts`(纯函数)
-- [ ] **G7 · SVG/PNG 导出** `pending` — graphExport.ts(SVG 构建+PNG)+工具栏按钮+Inspector 按钮。文件:`src/features/graph/graphExport.ts`(新)、`GraphControls.tsx`、`GraphInspector.tsx`、`GraphView.tsx`
+- [x] **G7 · SVG/PNG 导出** `verified`(工具栏入口) — graphExport.ts(SVG 构建+PNG)+工具栏 SVG 按钮+7 单测。Inspector PNG/按钮待 G6。文件:`src/features/graph/graphExport.ts`(新)、`graphExport.test.ts`(新)、`GraphControls.tsx`、`GraphView.tsx:187-190`
 
 ## 收敛判据
 

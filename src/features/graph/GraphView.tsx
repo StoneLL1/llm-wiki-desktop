@@ -17,6 +17,8 @@ import {
   type GraphData,
 } from "../../types/graph";
 import { GraphControls } from "./GraphControls";
+import { GraphCanvasControls } from "./GraphCanvasControls";
+import { exportGraphSvg } from "./graphExport";
 
 const EDGE_COLOR = "#d4d4d4";
 const PLAIN_COLOR = "#9b9b9b";
@@ -178,6 +180,11 @@ export function GraphView() {
   const handleRebuild = () => {
     if (projectId && rootPath) void rebuild(projectId, rootPath);
   };
+  const handleExportSvg = () => {
+    const graph = refs.current.graph;
+    if (!graph) return;
+    exportGraphSvg(graph, currentProject.name, selectedNodeId);
+  };
 
   if (status === "loading") {
     return (
@@ -208,21 +215,25 @@ export function GraphView() {
         onColorModeChange={setColorMode}
         search={search}
         onSearchChange={setSearch}
-        onZoomIn={handleZoomIn}
-        onZoomOut={handleZoomOut}
-        onFit={handleFit}
-        onResetLayout={handleResetLayout}
         onRebuild={handleRebuild}
+        onExportSvg={handleExportSvg}
         nodeCount={data.nodes.length}
         edgeCount={data.edges.length}
       />
       <div className="relative min-h-0 flex-1 p-[var(--sp-4)]">
         <div ref={containerRef} className="graph-canvas h-full w-full">
-          {!canvasAvailable ? (
+          {canvasAvailable ? (
+            <GraphCanvasControls
+              onZoomIn={handleZoomIn}
+              onZoomOut={handleZoomOut}
+              onFit={handleFit}
+              onResetLayout={handleResetLayout}
+            />
+          ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--background)] text-[12px] text-[var(--text-muted)]">
               {t("graph.canvasUnavailable")}
             </div>
-          ) : null}
+          )}
         </div>
       </div>
     </div>
