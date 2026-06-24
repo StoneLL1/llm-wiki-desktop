@@ -101,6 +101,31 @@
   }
 }
 
+/* Density: scales spacing tokens only (font sizes stay absolute per design).
+   compact ≈ 0.85×, standard = 1×, comfortable ≈ 1.15×. */
+:root[data-density="compact"] {
+  --sp-1: 3px;
+  --sp-2: 6px;
+  --sp-3: 10px;
+  --sp-4: 13px;
+  --sp-5: 17px;
+  --sp-6: 20px;
+  --sp-8: 27px;
+  --sp-10: 34px;
+  --sp-12: 41px;
+}
+:root[data-density="comfortable"] {
+  --sp-1: 5px;
+  --sp-2: 10px;
+  --sp-3: 14px;
+  --sp-4: 19px;
+  --sp-5: 24px;
+  --sp-6: 29px;
+  --sp-8: 38px;
+  --sp-10: 48px;
+  --sp-12: 57px;
+}
+
 * {
   box-sizing: border-box;
 }
