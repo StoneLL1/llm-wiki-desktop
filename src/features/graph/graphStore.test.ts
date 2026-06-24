@@ -29,6 +29,24 @@ describe("graphStore", () => {
     expect(state.search).toBe("agent");
   });
 
+  it("toggles type filters and clamps the degree threshold", () => {
+    useGraphStore.getState().reset();
+    expect(useGraphStore.getState().typeFilter.size).toBe(0);
+    useGraphStore.getState().toggleTypeFilter("concept");
+    expect(useGraphStore.getState().typeFilter.has("concept")).toBe(true);
+    // Toggle off again returns to an empty filter set.
+    useGraphStore.getState().toggleTypeFilter("concept");
+    expect(useGraphStore.getState().typeFilter.has("concept")).toBe(false);
+
+    useGraphStore.getState().setDegreeThreshold(5);
+    expect(useGraphStore.getState().degreeThreshold).toBe(5);
+    // Negative + fractional inputs are clamped to a non-negative integer.
+    useGraphStore.getState().setDegreeThreshold(-3);
+    expect(useGraphStore.getState().degreeThreshold).toBe(0);
+    useGraphStore.getState().setDegreeThreshold(4.9);
+    expect(useGraphStore.getState().degreeThreshold).toBe(4);
+  });
+
   it("accepts externally-injected cached data (layout reuse path)", () => {
     useGraphStore.getState().reset();
     useGraphStore.setState({

@@ -26,6 +26,12 @@ export function RightContextPanel() {
   const graphData = useGraphStore((state) => state.data);
   const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
   const setGraphSelectedNode = useGraphStore((state) => state.setSelectedNode);
+  const graphTypeFilter = useGraphStore((state) => state.typeFilter);
+  const graphDegreeThreshold = useGraphStore((state) => state.degreeThreshold);
+  const toggleGraphType = useGraphStore((state) => state.toggleTypeFilter);
+  const setGraphDegreeThreshold = useGraphStore((state) => state.setDegreeThreshold);
+  const graphExportPng = useGraphStore((state) => state.exportPng);
+  const graphRecomputeLayout = useGraphStore((state) => state.recomputeLayout);
   const chatSession = useChatStore((state) => state.activeSession);
 
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
@@ -225,19 +231,6 @@ export function RightContextPanel() {
 
   if (activeView === "graph") {
     const selectedNode = graphData?.nodes.find((node) => node.id === graphSelectedId) ?? null;
-    const neighborCount = (() => {
-      // Distinct neighbor count from cached topology edges (no sigma needed).
-      // Edges are deduped to undirected pairs in the backend, but count via a Set
-      // so the number stays correct if a future schema allows parallel edges.
-      if (!graphData || !selectedNode) return 0;
-      const id = selectedNode.id;
-      const neighbors = new Set<string>();
-      for (const edge of graphData.edges) {
-        if (edge.source === id) neighbors.add(edge.target);
-        else if (edge.target === id) neighbors.add(edge.source);
-      }
-      return neighbors.size;
-    })();
     return (
       <aside
         aria-label={t("graph.inspector.title")}
@@ -249,19 +242,32 @@ export function RightContextPanel() {
           </span>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <GraphInspector
-            node={selectedNode}
-            neighborCount={neighborCount}
-            onOpenPage={() => {
-              if (!selectedNode) return;
-              setActiveView("wiki");
-              void openWikiPage(
-                currentProject.projectId,
-                currentProject.rootPath,
-                selectedNode.path,
-              );
-            }}
-          />
+          {graphData ? (
+            <GraphInspector
+              node={selectedNode}
+              data={graphData}
+              typeFilter={graphTypeFilter}
+              degreeThreshold={graphDegreeThreshold}
+              onOpenPage={() => {
+                if (!selectedNode) return;
+                setActiveView("wiki");
+                void openWikiPage(
+                  currentProject.projectId,
+                  currentProject.rootPath,
+                  selectedNode.path,
+                );
+              }}
+              onOpenNeighbor={(nodeId) => setGraphSelectedNode(nodeId)}
+              onToggleType={toggleGraphType}
+              onDegreeThresholdChange={setGraphDegreeThreshold}
+              onExportPng={() => graphExportPng?.()}
+              onRecomputeLayout={() => graphRecomputeLayout?.()}
+            />
+          ) : (
+            <p className="px-4 py-3 text-[12px] leading-5 text-[var(--text-muted)]">
+              {t("graph.inspector.empty")}
+            </p>
+          )}
         </div>
       </aside>
     );

@@ -8,6 +8,7 @@ import type {
   GraphStatus,
   SaveGraphLayoutRequest,
 } from "../types/graph";
+import type { WikiPageType } from "../types/wiki";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 import { useTaskStore } from "./taskStore";
 import type { BackendTask } from "../types/task";
@@ -21,6 +22,18 @@ interface GraphState {
   colorMode: GraphColorMode;
   selectedNodeId: string | null;
   search: string;
+  /** Page types hidden from the canvas. Unchecked types are omitted here. */
+  typeFilter: Set<WikiPageType>;
+  /** Nodes with degree <= this threshold are hidden (0 hides nothing). */
+  degreeThreshold: number;
+  /**
+   * Live action hooks registered by GraphView once its sigma renderer is ready.
+   * The inspector (rendered in RightContextPanel) needs to trigger PNG export
+   * and layout recompute, which both require the graphology instance that
+   * lives in GraphView's refs — so GraphView publishes closures here.
+   */
+  exportPng: (() => void) | null;
+  recomputeLayout: (() => void) | null;
   load: (projectId: string, rootPath: string) => Promise<void>;
   rebuild: (projectId: string, rootPath: string) => Promise<void>;
   saveLayout: (
@@ -32,6 +45,9 @@ interface GraphState {
   setColorMode: (mode: GraphColorMode) => void;
   setSelectedNode: (id: string | null) => void;
   setSearch: (query: string) => void;
+  toggleTypeFilter: (type: WikiPageType) => void;
+  setDegreeThreshold: (value: number) => void;
+  registerActions: (actions: { exportPng: (() => void) | null; recomputeLayout: (() => void) | null }) => void;
   reset: () => void;
 }
 
@@ -44,6 +60,10 @@ const initial = {
   colorMode: "type" as GraphColorMode,
   selectedNodeId: null as string | null,
   search: "",
+  typeFilter: new Set<WikiPageType>(),
+  degreeThreshold: 0,
+  exportPng: null,
+  recomputeLayout: null,
 };
 
 export const useGraphStore = create<GraphState>((set, get) => ({
@@ -110,7 +130,16 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   setColorMode: (colorMode) => set({ colorMode }),
   setSelectedNode: (selectedNodeId) => set({ selectedNodeId }),
   setSearch: (search) => set({ search }),
-  reset: () => set({ ...initial }),
+  toggleTypeFilter: (type) =>
+    set((state) => {
+      const next = new Set(state.typeFilter);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return { typeFilter: next };
+    }),
+  setDegreeThreshold: (degreeThreshold) => set({ degreeThreshold: Math.max(0, Math.floor(degreeThreshold)) }),
+  registerActions: (actions) => set({ exportPng: actions.exportPng, recomputeLayout: actions.recomputeLayout }),
+  reset: () => set({ ...initial, typeFilter: new Set<WikiPageType>() }),
 }));
 
 async function runGraphBuild(
