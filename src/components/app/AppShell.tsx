@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { PanelRightOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
@@ -11,11 +12,7 @@ import { GraphView } from "../../features/graph/GraphView";
 import { LintView } from "../../features/lint/LintView";
 import { SettingsView } from "../../features/settings/SettingsView";
 import { WikiView } from "../../features/wiki/WikiView";
-import { useChatStore } from "../../stores/chatStore";
-import { useExportStore } from "../../stores/exportStore";
-import { useGraphStore } from "../../stores/graphStore";
 import { useImportStore } from "../../stores/importStore";
-import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -40,30 +37,6 @@ import { TaskLogDrawer } from "./TaskLogDrawer";
 import { Toaster } from "./Toaster";
 import { TopBar } from "./TopBar";
 
-const viewSummaryKeys: Record<AppView, string> = {
-  dashboard: "view.dashboard.summary",
-  wiki: "view.wiki.summary",
-  chat: "view.chat.summary",
-  graph: "view.graph.summary",
-  agent: "view.agent.summary",
-  import: "view.import.summary",
-  lint: "view.lint.summary",
-  exports: "view.exports.summary",
-  settings: "view.settings.summary",
-};
-
-const viewActionKeys: Record<AppView, string[]> = {
-  dashboard: ["view.dashboard.actionPrimary", "view.dashboard.actionSecondary"],
-  wiki: ["view.wiki.actionPrimary", "view.wiki.actionSecondary"],
-  chat: ["view.chat.actionPrimary", "view.chat.actionSecondary"],
-  graph: ["view.graph.actionPrimary", "view.graph.actionSecondary"],
-  agent: ["view.agent.actionPrimary", "view.agent.actionSecondary"],
-  import: ["view.import.actionPrimary", "view.import.actionSecondary"],
-  lint: ["view.lint.actionPrimary", "view.lint.actionSecondary"],
-  exports: ["view.exports.actionPrimary", "view.exports.actionSecondary"],
-  settings: ["view.settings.actionPrimary", "view.settings.actionSecondary"],
-};
-
 function errorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = (error as { message: unknown }).message;
@@ -79,6 +52,8 @@ function isTerminalTask(task: BackendTask): boolean {
 export function AppShell() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
+  const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
+  const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
   const cancelPendingAction = useProjectStore((state) => state.cancelPendingAction);
@@ -90,6 +65,30 @@ export function AppShell() {
   const compilePendingAction = tasks.find((task) => task.status === "waiting_for_confirmation" && task.result?.pendingAction)?.result?.pendingAction;
   const displayedPendingAction = pendingAction ?? compilePendingAction;
   const title = t(`nav.${activeView}`);
+
+  useEffect(() => {
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(max-width: 1180px)").matches
+    ) {
+      setRightPanelOpen(false);
+    }
+  }, [setRightPanelOpen]);
+
+  useEffect(() => {
+    if (!rightPanelOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (
+        event.key === "Escape" &&
+        !event.defaultPrevented &&
+        !document.querySelector('[aria-modal="true"]')
+      ) {
+        setRightPanelOpen(false);
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [rightPanelOpen, setRightPanelOpen]);
 
   const confirmProjectAction = useCallback(async () => {
     const action = pendingAction;
@@ -128,15 +127,24 @@ export function AppShell() {
   ]);
 
   return (
-    <div className="grid h-full min-w-[1120px] grid-rows-[var(--topbar-h)_1fr_var(--statusbar-h)] bg-[var(--background)] text-[var(--foreground)]">
+    <div className={`app-shell ${rightPanelOpen ? "is-right-open" : "is-right-collapsed"}`}>
       <TopBar />
 
-      <div className="grid min-h-0 grid-cols-[var(--sidebar-w)_minmax(0,1fr)_var(--rightpanel-w)]">
+      <div className="app-shell__workbench">
         <LeftSidebar />
-        <main className="min-w-0 overflow-hidden bg-[var(--background)]">
+        <main className="app-shell__main">
           <WorkspaceView activeView={activeView} title={title} />
         </main>
-        <RightContextPanel />
+        {rightPanelOpen ? <RightContextPanel /> : null}
+        {rightPanelOpen ? (
+          <button
+            aria-hidden="true"
+            className="right-panel__backdrop"
+            onClick={() => setRightPanelOpen(false)}
+            tabIndex={-1}
+            type="button"
+          />
+        ) : null}
       </div>
 
       <BottomStatusBar />
@@ -183,7 +191,8 @@ interface WorkspaceViewProps {
 
 function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const { t } = useTranslation();
-  const actions = viewActionKeys[activeView];
+  const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
+  const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
   const currentProject = useProjectStore((state) => state.currentProject);
   const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
   const setPendingAction = useProjectStore((state) => state.setPendingAction);
@@ -542,145 +551,23 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     return invoke<ProviderTestResult>("test_llm_provider", { request: { ...projectRequest, config } });
   }, [currentProject.projectId, currentProject.rootPath, hasTauri]);
 
-  const requireTauri = useCallback(
-    (): boolean => {
-      if (!hasTauri) {
-        pushToast("warning", t("shell.browserUnavailable"));
-        return false;
-      }
-      return true;
-    },
-    [pushToast, t],
-  );
-
-  // Per-view header action dispatcher. Each view exposes a primary and a
-  // secondary action (see viewActionKeys). The header buttons are the always-
-  // visible entry points; they delegate to the same store actions the in-view
-  // toolbars use. Actions that genuinely live inside a view's own controls
-  // (graph fit-to-view, import file dialog, settings form) redirect there.
-  const runViewAction = useCallback(
-    (slot: "primary" | "secondary") => {
-      const { projectId, rootPath } = currentProject;
-      switch (activeView) {
-        case "dashboard":
-          if (slot === "primary") {
-            setActiveView("import");
-          } else {
-            setActiveView("lint");
-            if (requireTauri()) void useLintStore.getState().runLocalLint(projectId, rootPath);
-          }
-          break;
-        case "wiki": {
-          const wiki = useWikiStore.getState();
-          if (slot === "primary") {
-            if (!wiki.page) return;
-            wiki.startEdit();
-          } else {
-            void wiki.reload(projectId, rootPath);
-          }
-          break;
-        }
-        case "chat": {
-          const chat = useChatStore.getState();
-          if (slot === "primary") {
-            if (!requireTauri()) return;
-            void chat.createSession(projectId, rootPath);
-          } else {
-            const session = chat.activeSession;
-            const lastAssistant = [...(session?.messages ?? [])]
-              .reverse()
-              .find((message) => message.role === "assistant");
-            if (!session || !lastAssistant) {
-              pushToast("info", t("view.chat.actionSecondary"));
-              return;
-            }
-            if (!requireTauri()) return;
-            void chat.saveAnswer(projectId, rootPath, session.id, lastAssistant.id);
-          }
-          break;
-        }
-        case "graph": {
-          const graph = useGraphStore.getState();
-          if (slot === "primary") {
-            if (!requireTauri()) return;
-            void graph.rebuild(projectId, rootPath);
-          } else {
-            void graph.load(projectId, rootPath);
-          }
-          break;
-        }
-        case "agent":
-          if (slot === "primary") {
-            void refreshCapabilities();
-          } else {
-            const last = tasks.find((task) => task.status === "running" || task.status === "queued");
-            if (last) openTaskDrawer(last.id);
-            else pushToast("info", t("view.agent.actionSecondary"));
-          }
-          break;
-        case "import":
-          // Add-sources / preview both need the in-view file dialog and auto
-          // preview; send the user there rather than duplicating the picker.
-          setActiveView("import");
-          pushToast("info", t("view.import.actionPrimary"));
-          break;
-        case "lint": {
-          const lint = useLintStore.getState();
-          if (slot === "primary") {
-            if (!requireTauri()) return;
-            void lint.runLocalLint(projectId, rootPath);
-          } else {
-            if (!requireTauri()) return;
-            void lint.startDeepLint(projectId, rootPath, "auto", null, null);
-          }
-          break;
-        }
-        case "exports": {
-          const exportStore = useExportStore.getState();
-          if (slot === "primary") {
-            if (!requireTauri()) return;
-            void exportStore.startExport(projectId, rootPath, exportStore.selectedType, exportStore.sourcePath);
-          } else {
-            const latest = exportStore.records[0];
-            if (!latest) {
-              pushToast("info", t("view.exports.actionSecondary"));
-              return;
-            }
-            if (!requireTauri()) return;
-            void exportStore.openFolder({ projectId, projectRootPath: rootPath, outputPath: latest.outputPath });
-          }
-          break;
-        }
-        case "settings":
-          // Save / test provider are owned by the settings form; point the user there.
-          pushToast("info", slot === "primary" ? t("view.settings.actionPrimary") : t("view.settings.actionSecondary"));
-          break;
-      }
-    },
-    [activeView, currentProject, openTaskDrawer, pushToast, refreshCapabilities, requireTauri, setActiveView, t, tasks],
-  );
-
   return (
     <section className="flex h-full flex-col">
-      <header className="flex h-[52px] items-center gap-3 border-b border-[var(--border)] px-5">
+      <header className="workspace-header">
         <h1 className="m-0 text-[16px] font-semibold tracking-[-0.01em]">{title}</h1>
-        <span className="truncate font-mono text-xs text-[var(--text-muted)]">{t(viewSummaryKeys[activeView])}</span>
-        <div className="ml-auto flex items-center gap-2">
-          {actions.map((actionKey, index) => (
-            <button
-              key={actionKey}
-              className={`h-[30px] rounded-[var(--radius-md)] px-3 text-[13px] font-medium ${
-                index === 0
-                  ? "bg-[var(--foreground)] text-[var(--text-inverse)] hover:bg-[#1a1a1a]"
-                  : "border border-[var(--border)] bg-[var(--surface-raised)] hover:bg-[var(--surface-muted)]"
-              }`}
-              onClick={() => runViewAction(index === 0 ? "primary" : "secondary")}
-              type="button"
-            >
-              {t(actionKey)}
-            </button>
-          ))}
-        </div>
+        {!rightPanelOpen ? (
+          <button
+                aria-controls="right-context-panel"
+                aria-expanded="false"
+                aria-label={t("shell.contextPanel.open")}
+            className="icon-button ml-auto"
+            onClick={() => setRightPanelOpen(true)}
+            title={t("shell.contextPanel.open")}
+            type="button"
+          >
+            <PanelRightOpen aria-hidden="true" size={16} />
+          </button>
+        ) : null}
       </header>
 
       <div className={activeView === "wiki" || activeView === "graph" || activeView === "chat" || activeView === "lint" || activeView === "exports" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
@@ -736,7 +623,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
             <div className="panel-header">
               <span>{t(`view.${activeView as string}.paneTitle`)}</span>
             </div>
-            <p className="m-0 mt-2 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
+            <p className="m-0 mt-2 max-w-3xl text-[13px] leading-6 text-[var(--text-secondary)]">
               {t(`view.${activeView as string}.emptyState`)}
             </p>
           </div>
@@ -744,15 +631,15 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
           <div className="grid grid-cols-3 gap-3">
             <div className="panel">
               <div className="panel-header">{t("view.shared.localFiles")}</div>
-              <p className="m-0 mt-2 text-xs leading-5 text-[var(--text-muted)]">{t("view.shared.localFilesCopy")}</p>
+              <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.localFilesCopy")}</p>
             </div>
             <div className="panel">
               <div className="panel-header">{t("view.shared.taskState")}</div>
-              <p className="m-0 mt-2 text-xs leading-5 text-[var(--text-muted)]">{t("view.shared.taskStateCopy")}</p>
+              <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.taskStateCopy")}</p>
             </div>
             <div className="panel">
               <div className="panel-header">{t("view.shared.gitSafety")}</div>
-              <p className="m-0 mt-2 text-xs leading-5 text-[var(--text-muted)]">{t("view.shared.gitSafetyCopy")}</p>
+              <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.gitSafetyCopy")}</p>
             </div>
           </div>
         </div>

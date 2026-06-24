@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PendingAction } from "../../types/backend";
 import type { BackendTask } from "../../types/task";
+import { useModalDialog } from "../../hooks/useModalDialog";
 import { Button } from "../ui/button";
 
 interface CompileConflictDetail {
@@ -28,6 +29,7 @@ export function CompileConflictDialog({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const dialogRef = useModalDialog({ open: true, onClose: onCancel });
 
   useEffect(() => {
     let active = true;
@@ -79,7 +81,7 @@ export function CompileConflictDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="compile-conflict-title">
+    <div ref={dialogRef} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="compile-conflict-title">
       <section className="flex max-h-[86vh] w-full max-w-[900px] flex-col rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg">
         <header className="border-b border-[var(--border)] px-4 py-3">
           <h2 id="compile-conflict-title" className="text-[16px] font-semibold">{action.title}</h2>
@@ -90,7 +92,7 @@ export function CompileConflictDialog({
           {details.map((item) => (
             <section key={item.path} className="space-y-2">
               <h3 className="font-mono text-[12px] font-medium">{item.path}</h3>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="compile-diff-grid">
                 <div><p className="mb-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted)]">{t("compileConflict.current")}</p><pre className="max-h-44 overflow-auto rounded border border-[var(--border)] bg-[var(--surface)] p-2 text-[11px]">{item.currentContent ?? t("compileConflict.missing")}</pre></div>
                 <div><p className="mb-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted)]">{t("compileConflict.generated")}</p><pre className="max-h-44 overflow-auto rounded border border-[var(--border)] bg-[var(--surface)] p-2 text-[11px]">{item.generatedContent ?? t("compileConflict.deletion")}</pre></div>
               </div>

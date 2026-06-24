@@ -322,7 +322,7 @@ function QuickAction({
       <div className="panel__body" style={{ display: "flex", alignItems: "center", gap: "var(--sp-4)" }}>
         <div
           className="health-row__icon"
-          style={tone === "warn" ? { background: "var(--warning-soft)", color: "#a06a00" } : undefined}
+          style={tone === "warn" ? { background: "var(--warning-soft)", color: "var(--warning-text)" } : undefined}
         >
           <Icon size={22} aria-hidden="true" />
         </div>

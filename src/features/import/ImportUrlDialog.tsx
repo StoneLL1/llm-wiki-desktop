@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ExternalLink, Plus, X } from "lucide-react";
+import { useModalDialog } from "../../hooks/useModalDialog";
 
 interface ImportUrlDialogProps {
   open: boolean;
@@ -12,23 +13,12 @@ export function ImportUrlDialog({ open, onClose, onSubmit }: ImportUrlDialogProp
   const { t } = useTranslation();
   const [url, setUrl] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useModalDialog({ open, onClose, initialFocusRef: inputRef });
 
   useEffect(() => {
     if (!open) return;
     setUrl("");
-    const id = window.setTimeout(() => inputRef.current?.focus(), 30);
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(id);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -40,6 +30,8 @@ export function ImportUrlDialog({ open, onClose, onSubmit }: ImportUrlDialogProp
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4"
       role="dialog"
       aria-modal="true"

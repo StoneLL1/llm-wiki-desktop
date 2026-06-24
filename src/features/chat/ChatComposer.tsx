@@ -77,7 +77,7 @@ export function ChatComposer({
           type="button"
           onClick={submit}
           disabled={generating || !value.trim()}
-          className="h-[44px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-4 text-[13px] font-medium text-[var(--text-inverse)] hover:bg-[#1a1a1a] disabled:opacity-40"
+          className="h-[44px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-4 text-[13px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
         >
           {t("chat.composer.send")}
         </button>

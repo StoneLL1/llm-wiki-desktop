@@ -82,7 +82,7 @@ export function WikiTree({
   }, [pages, filterText, typeFilter]);
 
   return (
-    <div className="flex h-full w-[260px] flex-col border-r border-[var(--border)] bg-[var(--surface)]">
+    <div className="wiki-tree">
       <div className="flex h-[44px] items-center gap-2 border-b border-[var(--border-subtle)] px-3">
         <div className="flex h-[26px] flex-1 items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--background)] px-2">
           <Search size={13} className="shrink-0 text-[var(--text-muted)]" />
@@ -105,6 +105,7 @@ export function WikiTree({
         <button
           type="button"
           title={t("wiki.tree.refresh")}
+          aria-label={t("wiki.tree.refresh")}
           onClick={onRefresh}
           className="grid h-[26px] w-[26px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
         >

@@ -4,12 +4,12 @@ import type { ButtonHTMLAttributes } from "react";
 import { cn } from "../../lib/cn";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex min-w-0 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--radius-md)] text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
-        primary: "bg-[var(--foreground)] text-white hover:bg-[#1a1a1a]",
-        secondary: "border border-[var(--border)] bg-white text-[var(--foreground)] hover:bg-[var(--surface-muted)]",
+        primary: "bg-[var(--foreground)] text-[var(--text-inverse)] hover:bg-[var(--primary-hover)]",
+        secondary: "border border-[var(--border)] bg-[var(--surface-raised)] text-[var(--foreground)] hover:bg-[var(--surface-muted)]",
         ghost: "bg-transparent text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]",
       },
       size: {
@@ -36,4 +36,3 @@ export function Button({ asChild = false, className, size, variant, ...props }: 
 
   return <Comp className={cn(buttonVariants({ className, size, variant }))} {...props} />;
 }
-

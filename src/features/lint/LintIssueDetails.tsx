@@ -151,7 +151,7 @@ export function LintIssueDetails({
                 type="button"
                 disabled={!pageHash || fixStatus === "applying"}
                 onClick={() => pageHash && onConfirmHighRisk(pageHash)}
-                className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[#1a1a1a] disabled:opacity-40"
+                className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
               >
                 {fixStatus === "applying" ? "…" : t("lint.details.confirm")}
               </button>
@@ -171,7 +171,7 @@ export function LintIssueDetails({
             type="button"
             disabled={fixStatus === "applying"}
             onClick={() => onApplyFix(issue)}
-            className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[#1a1a1a] disabled:opacity-40"
+            className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
           >
             {fixStatus === "applying" ? "…" : t("lint.details.applyFix")}
           </button>

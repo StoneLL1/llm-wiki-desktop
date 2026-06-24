@@ -200,7 +200,7 @@ export function WikiEditor({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border-subtle)] px-1 pb-2 pt-1">
+      <div className="wiki-editor__toolbar">
         <span
           className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${
             saveState === "saved"
@@ -221,7 +221,7 @@ export function WikiEditor({
           />
           {t(`wiki.editor.saveState.${saveState}`)}
         </span>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="wiki-editor__actions">
           <button
             type="button"
             className="h-[26px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"

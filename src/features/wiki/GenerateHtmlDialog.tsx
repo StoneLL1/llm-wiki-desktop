@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { FileOutput, LayoutGrid, Network, Newspaper } from "lucide-react";
 
 import type { ExportType } from "../../types/export";
+import { useModalDialog } from "../../hooks/useModalDialog";
 
 interface GenerateHtmlDialogProps {
   pagePath: string;
@@ -26,9 +27,10 @@ export function GenerateHtmlDialog({
 }: GenerateHtmlDialogProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<ExportType>(initialType);
+  const dialogRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="generate-html-title">
+    <div ref={dialogRef} className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="generate-html-title" tabIndex={-1}>
       <section className="w-full max-w-[820px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg">
         <header className="flex min-h-[52px] items-center border-b border-[var(--border)] px-4">
           <h2 id="generate-html-title" className="text-[16px] font-semibold text-[var(--text-primary)]">

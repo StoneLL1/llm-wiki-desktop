@@ -33,7 +33,7 @@ export function GraphControls({
   const { t } = useTranslation();
   const modes: GraphColorMode[] = ["type", "community", "plain"];
   return (
-    <div className="flex h-[44px] items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3">
+    <div className="view-toolbar border-b border-[var(--border)] bg-[var(--surface)] px-3">
       <div className="seg flex items-center rounded-[var(--radius-md)] border border-[var(--border)] p-0.5">
         {modes.map((mode) => (
           <button
