@@ -11,6 +11,17 @@ interface ExportNode {
   size: number;
   color: string;
   type?: string;
+  degree: number;
+}
+
+/** Mirror of the on-canvas filter state so export matches what the user sees. */
+export interface ExportFilters {
+  /** Page types hidden from the canvas (unchecked in the inspector). */
+  hiddenTypes: Set<string>;
+  /** Nodes with degree <= this are hidden (0 hides nothing). */
+  degreeThreshold: number;
+  /** Active node-search query (empty = no filter). */
+  search: string;
 }
 
 const SVG_VIEWBOX = 1200;
@@ -26,22 +37,34 @@ const LABEL_COLOR = "#6b7280";
  * compute a bounding box and normalize everything into a fixed square viewBox
  * so the exported file is independent of the current pan/zoom. Node colors are
  * read straight from the graph attribute (already reflects the active color
- * mode + filters at call time), matching what the user sees.
+ * mode). The `filters` argument is applied here — NOT just in sigma's
+ * nodeReducer — because the reducer only affects rendering, not the underlying
+ * graphology data; without mirroring the filters, export would draw nodes the
+ * user has hidden by type, degree, or search.
  */
-export function buildGraphSvg(graph: Graph, selectedNodeId: string | null): string {
+export function buildGraphSvg(graph: Graph, selectedNodeId: string | null, filters: ExportFilters): string {
+  const visible = new Set<string>();
   const nodes: ExportNode[] = [];
+  const searchLower = filters.search.trim().toLowerCase();
   graph.forEachNode((id, attrs) => {
     const typed = attrs as Record<string, unknown>;
-    const x = typeof typed.x === "number" && Number.isFinite(typed.x) ? (typed.x as number) : 0;
-    const y = typeof typed.y === "number" && Number.isFinite(typed.y) ? (typed.y as number) : 0;
+    const type = typeof typed.type === "string" ? (typed.type as string) : undefined;
+    const degree = typeof typed.degree === "number" ? (typed.degree as number) : 0;
+    // Apply the same hide rules as the nodeReducer.
+    if (type && filters.hiddenTypes.has(type)) return;
+    if (filters.degreeThreshold > 0 && degree <= filters.degreeThreshold) return;
+    const label = typeof typed.label === "string" ? (typed.label as string) : id;
+    if (searchLower && !label.toLowerCase().includes(searchLower)) return;
+    visible.add(id);
     nodes.push({
       id,
-      label: typeof typed.label === "string" ? (typed.label as string) : id,
-      x,
-      y,
+      label,
+      x: typeof typed.x === "number" && Number.isFinite(typed.x) ? (typed.x as number) : 0,
+      y: typeof typed.y === "number" && Number.isFinite(typed.y) ? (typed.y as number) : 0,
       size: typeof typed.size === "number" ? (typed.size as number) : 4,
       color: typeof typed.color === "string" ? (typed.color as string) : "#9b9b9b",
-      type: typeof typed.type === "string" ? (typed.type as string) : undefined,
+      type,
+      degree,
     });
   });
 
@@ -57,10 +80,14 @@ export function buildGraphSvg(graph: Graph, selectedNodeId: string | null): stri
     originY + (y - minY) * scale,
   ];
 
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
   const edges: string[] = [];
   graph.forEachEdge((edge, attrs, source, target) => {
-    const srcNode = nodes.find((n) => n.id === source);
-    const tgtNode = nodes.find((n) => n.id === target);
+    // Skip edges touching a filtered-out node so export never draws a line to
+    // a node the user can't see.
+    if (!visible.has(source) || !visible.has(target)) return;
+    const srcNode = nodeById.get(source);
+    const tgtNode = nodeById.get(target);
     if (!srcNode || !tgtNode) return;
     const [x1, y1] = project(srcNode.x, srcNode.y);
     const [x2, y2] = project(tgtNode.x, tgtNode.y);
@@ -105,12 +132,18 @@ function computeTransform(nodes: ExportNode[]): {
   originX: number;
   originY: number;
 } {
-  const xs = nodes.map((n) => n.x);
-  const ys = nodes.map((n) => n.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
+  // Loop instead of Math.min/max(...spread) — the spread blows the stack on
+  // very large graphs.
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    if (n.x < minX) minX = n.x;
+    if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y;
+    if (n.y > maxY) maxY = n.y;
+  }
   const width = maxX - minX || 1;
   const height = maxY - minY || 1;
   const inner = SVG_VIEWBOX - PADDING * 2;
@@ -160,8 +193,13 @@ export function downloadBlob(blob: Blob, filename: string): boolean {
 }
 
 /** Export the current graph as an SVG file. */
-export function exportGraphSvg(graph: Graph, projectName: string, selectedNodeId: string | null): boolean {
-  const svg = buildGraphSvg(graph, selectedNodeId);
+export function exportGraphSvg(
+  graph: Graph,
+  projectName: string,
+  selectedNodeId: string | null,
+  filters: ExportFilters,
+): boolean {
+  const svg = buildGraphSvg(graph, selectedNodeId, filters);
   const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
   return downloadBlob(blob, graphExportFilename(projectName, "svg"));
 }
@@ -172,8 +210,13 @@ export function exportGraphSvg(graph: Graph, projectName: string, selectedNodeId
  * started; rejects are swallowed into `false` so a rendering hiccup never
  * throws in the UI.
  */
-export async function exportGraphPng(graph: Graph, projectName: string, selectedNodeId: string | null): Promise<boolean> {
-  const svg = buildGraphSvg(graph, selectedNodeId);
+export async function exportGraphPng(
+  graph: Graph,
+  projectName: string,
+  selectedNodeId: string | null,
+  filters: ExportFilters,
+): Promise<boolean> {
+  const svg = buildGraphSvg(graph, selectedNodeId, filters);
   const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   try {

@@ -10,31 +10,38 @@ export interface LegendEntry {
   count: number;
 }
 
-/** Type counts shown in `type` mode, respecting the active type filter. */
+/**
+ * Type counts shown in `type` mode, respecting the active type filter and
+ * degree threshold. A type present in the data always renders a row (so the
+ * user sees it exists); hidden types are dimmed to zero, and non-hidden types
+ * show the count of nodes still visible after the degree filter — matching the
+ * on-canvas state rather than the raw topology.
+ */
 export function typeLegendEntries(
   data: GraphData,
   pageTypeLabels: Record<WikiPageType, string>,
   hiddenTypes: Set<WikiPageType>,
+  degreeThreshold = 0,
 ): LegendEntry[] {
-  const counts = new Map<WikiPageType, number>();
+  const present = new Set<WikiPageType>();
+  const visibleCounts = new Map<WikiPageType, number>();
   for (const node of data.nodes) {
-    counts.set(node.type, (counts.get(node.type) ?? 0) + 1);
+    present.add(node.type);
+    if (degreeThreshold > 0 && node.degree <= degreeThreshold) continue;
+    visibleCounts.set(node.type, (visibleCounts.get(node.type) ?? 0) + 1);
   }
   const order: WikiPageType[] = ["entity", "concept", "source", "synthesis", "comparison", "query"];
   return order
-    .filter((type) => (counts.get(type) ?? 0) > 0)
-    .map((type) => ({
-      key: type,
-      label: pageTypeLabels[type],
-      color: pageTypeSwatch(type),
-      count: counts.get(type) ?? 0,
-    }))
-    .map((entry) => ({
-      ...entry,
-      // Dim rows whose type is currently filtered out so the legend reflects
-      // the on-canvas state rather than the raw topology.
-      count: hiddenTypes.has(entry.key as WikiPageType) ? 0 : entry.count,
-    }));
+    .filter((type) => present.has(type))
+    .map((type) => {
+      const hidden = hiddenTypes.has(type);
+      return {
+        key: type,
+        label: pageTypeLabels[type],
+        color: pageTypeSwatch(type),
+        count: hidden ? 0 : (visibleCounts.get(type) ?? 0),
+      };
+    });
 }
 
 /** Community counts shown in `community` mode: top N by size + "Other". */
@@ -48,10 +55,13 @@ export function communityLegendEntries(data: GraphData, topN = 8): LegendEntry[]
   const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   const head = sorted.slice(0, topN);
   const tailTotal = sorted.slice(topN).reduce((sum, [, n]) => sum + n, 0);
-  const entries: LegendEntry[] = head.map(([community, count], index) => ({
+  // Index the palette by the RAW community id — this is how GraphView's
+  // `baseColorFor` paints nodes (`COMMUNITY_PALETTE[community % len]`), so the
+  // legend swatch must read the same way or colors won't line up.
+  const entries: LegendEntry[] = head.map(([community, count]) => ({
     key: `community-${community}`,
     label: `#${community}`,
-    color: COMMUNITY_PALETTE[index % COMMUNITY_PALETTE.length],
+    color: COMMUNITY_PALETTE[community % COMMUNITY_PALETTE.length],
     count,
   }));
   if (tailTotal > 0) {
@@ -82,8 +92,9 @@ export function legendEntries(
   data: GraphData,
   pageTypeLabels: Record<WikiPageType, string>,
   hiddenTypes: Set<WikiPageType>,
+  degreeThreshold = 0,
 ): LegendEntry[] {
   if (mode === "community") return communityLegendEntries(data);
   if (mode === "plain") return [];
-  return typeLegendEntries(data, pageTypeLabels, hiddenTypes);
+  return typeLegendEntries(data, pageTypeLabels, hiddenTypes, degreeThreshold);
 }

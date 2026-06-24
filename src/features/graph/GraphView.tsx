@@ -172,11 +172,13 @@ export function GraphView() {
     renderer.on("leaveNode", onLeave);
 
     // Report the live zoom ratio to the floating info card. Sigma's camera
-    // ratio is inverse to zoom (ratio 1 ≈ fit), so display 1/ratio.
+    // ratio is inverse to zoom (ratio 1 ≈ fit), so display 1/ratio. Guard
+    // against degenerate ratios (dispose, NaN) that would render Infinity.
     const camera = renderer.getCamera();
     const syncZoom = () => {
       const ratio = camera.getState().ratio;
-      setZoom(ratio > 0 ? 1 / ratio : 1);
+      const z = ratio > 0 && Number.isFinite(ratio) ? 1 / ratio : 1;
+      if (Number.isFinite(z)) setZoom(z);
     };
     syncZoom();
     camera.on("updated", syncZoom);
@@ -218,21 +220,43 @@ export function GraphView() {
   const handleExportSvg = () => {
     const graph = refs.current.graph;
     if (!graph) return;
-    exportGraphSvg(graph, currentProject.name, selectedNodeId);
-  };
-  const handleExportPng = () => {
-    const graph = refs.current.graph;
-    if (!graph) return;
-    void exportGraphPng(graph, currentProject.name, selectedNodeId);
+    const { typeFilter, degreeThreshold, search, selectedNodeId: selected } = useGraphStore.getState();
+    exportGraphSvg(graph, currentProject.name, selected, {
+      hiddenTypes: typeFilter,
+      degreeThreshold,
+      search,
+    });
   };
 
   // Publish live action hooks so the inspector (rendered in RightContextPanel,
   // which has no access to this component's refs) can export PNG and recompute
-  // the layout. Cleared on unmount so a stale graph never responds.
+  // the layout. The closures read fresh state via getState() so they stay
+  // correct after project switches or data reloads without re-registering;
+  // cleared on unmount so a stale graph never responds.
   useEffect(() => {
-    registerActions({ exportPng: handleExportPng, recomputeLayout: handleResetLayout });
+    const exportPng = () => {
+      const graph = refs.current.graph;
+      if (!graph) return;
+      const { typeFilter, degreeThreshold, search, selectedNodeId } = useGraphStore.getState();
+      void exportGraphPng(graph, currentProject.name, selectedNodeId, {
+        hiddenTypes: typeFilter,
+        degreeThreshold,
+        search,
+      });
+    };
+    const recomputeLayout = () => {
+      const graph = refs.current.graph;
+      if (!graph) return;
+      seedRandomPositions(graph);
+      startBackgroundLayout(refs.current, graph, () => {
+        refresh(refs.current.renderer);
+        const live = useGraphStore.getState();
+        void persistLayout(graph, live.data, projectId, rootPath, saveLayout);
+      });
+    };
+    registerActions({ exportPng, recomputeLayout });
     return () => registerActions({ exportPng: null, recomputeLayout: null });
-  }, [registerActions]);
+  }, [registerActions, currentProject.name, projectId, rootPath, saveLayout]);
 
   if (status === "loading") {
     return (
@@ -282,7 +306,7 @@ export function GraphView() {
                 zoom={zoom}
                 selectedNode={data.nodes.find((n) => n.id === selectedNodeId) ?? null}
               />
-              <GraphLegend data={data} colorMode={colorMode} hiddenTypes={typeFilter} />
+              <GraphLegend data={data} colorMode={colorMode} hiddenTypes={typeFilter} degreeThreshold={degreeThreshold} />
             </>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--background)] text-[12px] text-[var(--text-muted)]">
