@@ -5,6 +5,7 @@ import { Folder, FolderOpen, X } from "lucide-react";
 import type { OpenProjectResponse, ProjectTemplate } from "../../types/project";
 import { useProjectStore } from "../../stores/projectStore";
 import { useToastStore } from "../../stores/toastStore";
+import { useModalDialog } from "../../hooks/useModalDialog";
 
 function describeError(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
@@ -30,6 +31,7 @@ export function OpenFolderAsProjectDialog({ open, onClose }: OpenFolderAsProject
   const [initGit, setInitGit] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useModalDialog({ open, onClose, initialFocusRef: inputRef });
 
   const setPendingAction = useProjectStore((state) => state.setPendingAction);
   const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
@@ -39,19 +41,7 @@ export function OpenFolderAsProjectDialog({ open, onClose }: OpenFolderAsProject
     if (!open) return;
     setPath("");
     setSubmitting(false);
-    const id = window.setTimeout(() => inputRef.current?.focus(), 30);
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(id);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -86,6 +76,8 @@ export function OpenFolderAsProjectDialog({ open, onClose }: OpenFolderAsProject
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4"
       role="dialog"
       aria-modal="true"
@@ -101,7 +93,7 @@ export function OpenFolderAsProjectDialog({ open, onClose }: OpenFolderAsProject
           </button>
         </header>
         <div className="space-y-4 px-4 py-4 text-[13px]">
-          <div className="rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[12.5px]" style={{ color: "#a06a00" }}>
+          <div className="rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[12.5px] text-[var(--warning-text)]">
             <strong>{t("import.folderDialog.warnStrong")}</strong> · {t("import.folderDialog.warn")}
           </div>
 

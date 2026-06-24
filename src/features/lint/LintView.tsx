@@ -105,14 +105,14 @@ export function LintView() {
   };
 
   return (
-    <div className="grid h-full grid-cols-[minmax(0,1fr)_360px]">
+    <div className="lint-view-layout">
       <div className="flex min-w-0 flex-col border-r border-[var(--border)]">
-        <div className="flex h-[44px] shrink-0 items-center gap-2 border-b border-[var(--border)] px-4">
+        <div className="view-toolbar border-b border-[var(--border)] px-4">
           <button
             type="button"
             onClick={handleRunLocal}
             disabled={loadingLocal}
-            className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[#1a1a1a] disabled:opacity-40"
+            className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
           >
             {loadingLocal ? "…" : t("lint.actions.runLocal")}
           </button>

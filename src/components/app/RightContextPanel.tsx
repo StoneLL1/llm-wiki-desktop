@@ -11,6 +11,7 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useProjectStatus } from "../../hooks/useProjectStatus";
 import type { GraphState, IndexState } from "../../types/project";
+import { RightPanelHeader } from "./RightPanelHeader";
 
 export function RightContextPanel() {
   const { t } = useTranslation();
@@ -79,14 +80,11 @@ export function RightContextPanel() {
 
     return (
       <aside
+        id="right-context-panel"
         aria-label={t("chat.citations.title")}
-        className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+        className="right-panel"
       >
-        <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
-          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
-            {t("chat.citations.title")}
-          </span>
-        </div>
+        <RightPanelHeader title={t("chat.citations.title")} />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="px-4 py-3">
             {/* 引用与来源 */}
@@ -124,20 +122,12 @@ export function RightContextPanel() {
               )}
             </div>
 
-            {/* 原始资料 */}
-            <div className="border-b border-[var(--border-subtle)] py-3">
-              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
-                {t("chat.citations.rawSources")}
-              </h4>
-              <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("chat.citations.rawSourcesBlocked")}</p>
-            </div>
-
             {/* 执行路径 */}
             <div className="border-b border-[var(--border-subtle)] py-3">
               <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
                 {t("chat.citations.route")}
               </h4>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs">
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-[12px]">
                 {routeLabel ? (
                   <>
                     <dt className="font-medium text-[var(--text-muted)]">{t("chat.citations.routePath")}</dt>
@@ -148,10 +138,6 @@ export function RightContextPanel() {
                 <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">
                   {citations.length} / {wikiCount}
                 </dd>
-                <dt className="font-medium text-[var(--text-muted)]">{t("chat.citations.timing")}</dt>
-                <dd className="m-0 font-mono text-[11.5px] text-[var(--text-muted)]">—</dd>
-                <dt className="font-medium text-[var(--text-muted)]">{t("chat.citations.tokens")}</dt>
-                <dd className="m-0 font-mono text-[11.5px] text-[var(--text-muted)]">—</dd>
               </dl>
             </div>
 
@@ -185,13 +171,6 @@ export function RightContextPanel() {
                 >
                   {t("chat.citations.generateCard")}
                 </button>
-                <button
-                  type="button"
-                  disabled
-                  className="flex h-[28px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] opacity-40 cursor-not-allowed"
-                >
-                  {t("chat.citations.flagIssue")}
-                </button>
               </div>
             </div>
           </div>
@@ -203,14 +182,11 @@ export function RightContextPanel() {
   if (activeView === "wiki") {
     return (
       <aside
+        id="right-context-panel"
         aria-label={t("wiki.related.title")}
-        className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+        className="right-panel"
       >
-        <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
-          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
-            {t("wiki.related.title")}
-          </span>
-        </div>
+        <RightPanelHeader title={t("wiki.related.title")} />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <RelatedPagesPanel
             page={wikiPage}
@@ -233,14 +209,11 @@ export function RightContextPanel() {
     const selectedNode = graphData?.nodes.find((node) => node.id === graphSelectedId) ?? null;
     return (
       <aside
+        id="right-context-panel"
         aria-label={t("graph.inspector.title")}
-        className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+        className="right-panel"
       >
-        <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
-          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
-            {t("graph.inspector.title")}
-          </span>
-        </div>
+        <RightPanelHeader title={t("graph.inspector.title")} />
         <div className="min-h-0 flex-1 overflow-y-auto">
           {graphData ? (
             <GraphInspector
@@ -304,18 +277,17 @@ export function RightContextPanel() {
 
   return (
     <aside
+      id="right-context-panel"
       aria-label={t("shell.projectInfo")}
-      className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+      className="right-panel"
     >
-      <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
-        <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">{t("shell.projectInfo")}</span>
-      </div>
+      <RightPanelHeader title={t("shell.projectInfo")} />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {/* 路径 */}
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.paths")}</h4>
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-[12px]">
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.root")}</dt>
             <dd className="m-0 truncate font-mono text-[11.5px] text-[var(--text-primary)]">{currentProject.rootPath}</dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.schema")}</dt>
@@ -332,7 +304,7 @@ export function RightContextPanel() {
         {/* 索引状态 */}
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.indexState")}</h4>
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-[12px]">
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.pages")}</dt>
             <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{currentProject.wikiPageCount}</dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.index")}</dt>
@@ -341,8 +313,6 @@ export function RightContextPanel() {
             </dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.graphCache")}</dt>
             <dd className="m-0 font-mono text-[11.5px]">{t(`dashboard.graph.state.${currentProject.graphState as GraphState}`)}</dd>
-            <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.lastCompile")}</dt>
-            <dd className="m-0 font-mono text-[11.5px] text-[var(--text-muted)]">—</dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.pending")}</dt>
             <dd className="m-0 font-mono text-[11.5px]" style={{ color: pendingCount > 0 ? "var(--warning)" : "var(--text-secondary)" }}>
               {pendingCount > 0 ? t("rightpanel.pending.count", { count: pendingCount }) : t("rightpanel.pending.none")}
@@ -353,7 +323,7 @@ export function RightContextPanel() {
         {/* 执行路径 */}
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.route")}</h4>
-          <div className="flex flex-col gap-2 text-xs">
+          <div className="flex flex-col gap-2 text-[12px]">
             {installedAgents.length === 0 && configuredProviders.length === 0 ? (
               <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.route.noAgents")}</p>
             ) : (
@@ -382,7 +352,7 @@ export function RightContextPanel() {
         {/* 背景任务 */}
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.tasks")}</h4>
-          <div className="flex flex-col gap-2 text-xs">
+          <div className="flex flex-col gap-2 text-[12px]">
             {tasks.filter((t) => t.status === "running").length === 0 ? (
               tasks.filter((t) => t.status === "queued").length === 0 ? (
                 <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.tasks.none")}</p>
@@ -418,11 +388,6 @@ export function RightContextPanel() {
           </div>
         </div>
 
-        {/* 磁盘占用 */}
-        <div className="py-3">
-          <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.disk")}</h4>
-          <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.disk.unavailable")}</p>
-        </div>
       </div>
     </aside>
   );

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -13,35 +13,34 @@ vi.mock("@tauri-apps/api/core", () => ({
 beforeEach(async () => {
   await i18next.changeLanguage("en");
   useNavigationStore.getState().setActiveView("dashboard");
+  useNavigationStore.getState().setRightPanelOpen(true);
   invokeMock.mockReset();
 });
 
 afterEach(() => cleanup());
 
-/** The workspace header is the only <header> nested inside <main>, and it owns
- *  the per-view primary/secondary action buttons (distinct from sidebar nav). */
-function headerButtons() {
+function workspaceHeader() {
   const header = document.querySelector("main section > header");
   if (!header) throw new Error("workspace header not rendered");
   return within(header as HTMLElement);
 }
 
-describe("AppShell header action buttons", () => {
-  it("dashboard primary action navigates to the import view", () => {
+describe("AppShell workspace header", () => {
+  it("keeps only the view title and context control in shared chrome", () => {
     render(<AppShell />);
-    fireEvent.click(headerButtons().getByRole("button", { name: "Import" }));
-    expect(useNavigationStore.getState().activeView).toBe("import");
+
+    expect(workspaceHeader().getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    expect(workspaceHeader().queryByText("Health · recent activity · quick actions")).not.toBeInTheDocument();
+    expect(workspaceHeader().queryByRole("button", { name: "Import" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse context panel" })).toBeInTheDocument();
   });
 
-  it("chat primary action surfaces a visible toast in browser mode instead of a silent no-op", async () => {
-    useNavigationStore.getState().setActiveView("chat");
+  it("does not repeat a generic settings title inside the settings section", () => {
+    useNavigationStore.getState().setActiveView("settings");
     render(<AppShell />);
-    // The chat header primary is "New chat" — a Tauri-only action. With no
-    // __TAURI_INTERNALS__ the store call is skipped and a warning toast appears.
-    fireEvent.click(headerButtons().getByRole("button", { name: "New chat" }));
-    await waitFor(() => {
-      expect(screen.getByRole("status")).toBeTruthy();
-    });
-    expect(screen.getByRole("status").textContent).toMatch(/desktop app/i);
+
+    expect(
+      screen.queryByText("Global preferences, project-scoped provider settings, and secure key status."),
+    ).not.toBeInTheDocument();
   });
 });

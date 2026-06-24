@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../i18n";
 import { useWikiStore } from "../features/wiki/wikiStore";
@@ -62,6 +62,7 @@ beforeEach(() => {
   invokeMock.mockReset();
   useToastStore.setState({ toasts: [] });
   useNavigationStore.getState().setActiveView("dashboard");
+  useNavigationStore.getState().setRightPanelOpen(true);
   useProjectStore.getState().setCurrentProject(
     sampleProject({
       rootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
@@ -77,6 +78,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe("App", () => {
@@ -101,6 +103,51 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "New project" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open folder" })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Primary" })).not.toBeInTheDocument();
+  });
+
+  it("collapses the launch setup panel without placeholder controls", () => {
+    useProjectStore.getState().setCurrentProject(
+      sampleProject({ projectId: "", name: "", rootPath: "" }),
+    );
+
+    render(<App />);
+
+    expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Help" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse setup panel" }));
+    expect(screen.queryByRole("complementary", { name: "Launch side panel" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open setup panel" }));
+    expect(screen.getByRole("complementary", { name: "Launch side panel" })).toBeInTheDocument();
+  });
+
+  it("starts the launch setup panel closed on narrow viewports", () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    useProjectStore.getState().setCurrentProject(
+      sampleProject({ projectId: "", name: "", rootPath: "" }),
+    );
+
+    render(<App />);
+
+    expect(screen.queryByRole("complementary", { name: "Launch side panel" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open setup panel" })).toBeInTheDocument();
+  });
+
+  it("opens the setup panel before navigating to templates", () => {
+    useProjectStore.getState().setCurrentProject(
+      sampleProject({ projectId: "", name: "", rootPath: "" }),
+    );
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse setup panel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Templates" }));
+
+    expect(screen.getByRole("complementary", { name: "Launch side panel" })).toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalled();
   });
 
   it("returns to project selection when the project switcher is used", () => {
@@ -148,6 +195,64 @@ describe("App", () => {
     expect(screen.getAllByText("D:/Users/Aletta/Documents/wiki/agent-llm").length).toBeGreaterThan(0);
     expect(screen.getByText("Wiki pages: 237")).toBeInTheDocument();
     expect(screen.getByText("Tasks: 1 running")).toBeInTheDocument();
+  });
+
+  it("collapses and restores the right context panel", () => {
+    render(<App />);
+
+    expect(screen.getByRole("button", { name: "Collapse context panel" })).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse context panel" }));
+    expect(screen.queryByRole("complementary", { name: "Project info" })).not.toBeInTheDocument();
+
+    expect(screen.getByRole("button", { name: "Open context panel" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Open context panel" }));
+    expect(screen.getByRole("complementary", { name: "Project info" })).toBeInTheDocument();
+  });
+
+  it("starts the project context panel closed on narrow viewports", () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+
+    render(<App />);
+
+    expect(screen.queryByRole("complementary", { name: "Project info" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open context panel" })).toBeInTheDocument();
+  });
+
+  it("closes only the topmost modal when Escape is pressed", async () => {
+    useProjectStore.getState().setPendingAction({
+      id: "action-escape",
+      actionType: "initialize_folder",
+      title: "Initialize folder as project",
+      message: "Create the project structure.",
+      riskLevel: "medium",
+      affectedPaths: ["purpose.md"],
+      preview: null,
+      expiresAt: null,
+    });
+    render(<App />);
+
+    const dialog = screen.getByRole("dialog");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(useNavigationStore.getState().rightPanelOpen).toBe(true);
+    expect(screen.getByRole("complementary", { name: "Project info" })).toBeInTheDocument();
+  });
+
+  it("omits unavailable placeholder metrics and actions from context panels", () => {
+    render(<App />);
+
+    expect(screen.queryByText("Last compile")).not.toBeInTheDocument();
+    expect(screen.queryByText("Disk usage")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    expect(screen.queryByText("Raw Sources")).not.toBeInTheDocument();
+    expect(screen.queryByText("Time")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tokens")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Flag issue" })).not.toBeInTheDocument();
   });
 
   it("renders status from mutable project and task stores", () => {

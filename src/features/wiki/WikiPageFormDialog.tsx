@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { CreateWikiPageInput, WikiPageType } from "../../types/wiki";
 import { WIKI_PAGE_TYPES } from "../../types/wiki";
+import { useModalDialog } from "../../hooks/useModalDialog";
 
 interface WikiPageFormDialogProps {
   mode: "create" | "rename";
@@ -40,6 +41,7 @@ export function WikiPageFormDialog({
 }: WikiPageFormDialogProps) {
   const { t } = useTranslation();
   const pathRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useModalDialog({ open: true, onClose: onCancel, initialFocusRef: pathRef });
   const [path, setPath] = useState(initialPath);
   const [title, setTitle] = useState("");
   const [pageType, setPageType] = useState<WikiPageType | null>(
@@ -50,13 +52,12 @@ export function WikiPageFormDialog({
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="wiki-page-form-title"
-      onKeyDown={(event) => {
-        if (event.key === "Escape") onCancel();
-      }}
     >
       <form
         className="w-full max-w-[480px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg"
@@ -80,7 +81,6 @@ export function WikiPageFormDialog({
             <span className="mb-1 block">{t("wiki.pageForm.path")}</span>
             <input
               ref={pathRef}
-              autoFocus
               value={path}
               onChange={(event) => {
                 setPath(event.target.value);

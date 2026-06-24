@@ -118,7 +118,7 @@ export function ChatView() {
   };
 
   return (
-    <div className="grid h-full grid-cols-[260px_minmax(0,1fr)]">
+    <div className="chat-view-layout">
       <div className="border-r border-[var(--border)] bg-[var(--surface)]">
         <ChatSessionList
           sessions={sessions}
@@ -188,7 +188,7 @@ export function ChatView() {
                     <button
                       type="button"
                       onClick={() => void confirmOverwrite(projectId, rootPath)}
-                      className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[#1a1a1a]"
+                    className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)]"
                     >
                       {t("chat.thread.overwrite")}
                     </button>
@@ -327,7 +327,7 @@ function SessionToolbar({ session, routePreference, onRouteChange, t }: SessionT
   };
 
   return (
-    <div className="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2" style={{ minHeight: 44 }}>
+    <div className="view-toolbar border-b border-[var(--border-subtle)] px-4">
       <div className="seg">
         {SEGMENT_OPTIONS.map((opt) => (
           <button

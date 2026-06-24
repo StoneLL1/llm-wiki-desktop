@@ -247,7 +247,7 @@ export function WikiView() {
   };
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="wiki-view-layout">
       {tree ? (
         <WikiTree
           root={tree.root}
@@ -260,7 +260,7 @@ export function WikiView() {
           onDelete={handleDeleteRequest}
         />
       ) : (
-        <div className="flex w-[260px] flex-col items-center justify-center border-r border-[var(--border)] bg-[var(--surface)] text-[12px] text-[var(--text-muted)]">
+        <div className="wiki-tree items-center justify-center text-[12px] text-[var(--text-muted)]">
           {loadingTree ? (
             <LoaderCircle size={16} className="animate-spin" />
           ) : (
@@ -270,7 +270,7 @@ export function WikiView() {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col bg-[var(--background)]">
-        <div className="flex h-[44px] shrink-0 items-center gap-2 border-b border-[var(--border)] px-5">
+        <div className="view-toolbar border-b border-[var(--border)] px-5">
           <div className="flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-[var(--text-muted)]">
             {breadcrumbs.length === 0 ? (
               <span>{t("wiki.content.noSelection")}</span>
@@ -366,6 +366,7 @@ export function WikiView() {
                 if (page) void toggleBookmark(projectId, rootPath);
               }}
               title={t("wiki.content.star")}
+              aria-label={t("wiki.content.star")}
               aria-pressed={page?.meta.bookmarked ?? false}
               className="grid h-[28px] w-[28px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
             >

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle } from "lucide-react";
 
+import { useModalDialog } from "../../hooks/useModalDialog";
 import type { WikiSaveConflict } from "./wikiStore";
 
 interface ConflictDiffDialogProps {
@@ -22,16 +23,16 @@ export function ConflictDiffDialog({
   const { t } = useTranslation();
   const [manual, setManual] = useState(false);
   const [merged, setMerged] = useState(conflict.incomingContent);
+  const dialogRef = useModalDialog({ open: true, onClose: onCancel });
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="wiki-conflict-title"
-      onKeyDown={(event) => {
-        if (event.key === "Escape") onCancel();
-      }}
     >
       <section className="flex max-h-[88vh] w-full max-w-[1080px] flex-col rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg">
         <header className="flex min-h-[52px] items-center gap-3 border-b border-[var(--border)] px-4">
@@ -47,7 +48,7 @@ export function ConflictDiffDialog({
         </header>
 
         <div className="min-h-0 flex-1 overflow-auto p-4">
-          <div className="grid min-w-[780px] grid-cols-3 gap-3">
+          <div className="diff-grid">
             <DiffColumn label={t("wiki.conflict.baseline")} content={conflict.originalContent} tone="baseline" baseline={conflict.originalContent} />
             <DiffColumn label={t("wiki.conflict.current")} content={conflict.currentContent} tone="current" baseline={conflict.originalContent} />
             <DiffColumn label={t("wiki.conflict.incoming")} content={conflict.incomingContent} tone="incoming" baseline={conflict.originalContent} />

@@ -199,10 +199,8 @@ export function TaskLogDrawer() {
 
   if (!drawerOpen) return null;
 
-  const drawerWidth = expanded ? "w-[760px]" : "w-[420px]";
-
   return (
-    <div className={`fixed inset-y-0 right-0 z-40 ${drawerWidth} border-l border-[var(--border)] bg-[var(--background)] shadow-lg flex flex-col`}>
+    <div className={`task-drawer ${expanded ? "is-expanded" : ""}`}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 h-[44px] border-b border-[var(--border)] shrink-0">
         <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
@@ -219,9 +217,9 @@ export function TaskLogDrawer() {
         </button>
       </div>
 
-      <div className="flex flex-1 min-h-0">
+      <div className="task-drawer__body flex flex-1 min-h-0">
         {/* Task list */}
-        <div className="w-[180px] shrink-0 border-r border-[var(--border)] overflow-y-auto">
+        <div className="task-drawer__list w-[180px] shrink-0 border-r border-[var(--border)] overflow-y-auto">
           {sorted.length === 0 ? (
             <div className="p-3 text-[12px] text-[var(--text-muted)]">
               {t("task.drawer.empty")}

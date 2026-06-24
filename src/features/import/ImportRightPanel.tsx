@@ -12,6 +12,7 @@ import type { LucideIcon } from "lucide-react";
 import type { ImportFileEntry, SourceFileType } from "../../types/import";
 import { FILE_TYPE_LABELS } from "../../types/import";
 import { useImportStore } from "../../stores/importStore";
+import { RightPanelHeader } from "../../components/app/RightPanelHeader";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -63,14 +64,11 @@ export function ImportRightPanel() {
 
   return (
     <aside
+      id="right-context-panel"
       aria-label={t("import.rightpanel.title")}
-      className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+      className="right-panel"
     >
-      <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
-        <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
-          {t("import.rightpanel.title")}
-        </span>
-      </div>
+      <RightPanelHeader title={t("import.rightpanel.title")} />
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!file ? (
           <p className="px-4 py-3 text-[12px] text-[var(--text-muted)]">{t("import.rightpanel.noSelection")}</p>
@@ -150,7 +148,7 @@ function SelectedFileSection({ file }: { file: ImportFileEntry }) {
       </dl>
 
       {file.extractionStatus === "unsupported" && (
-        <p className="mt-3 rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[11.5px]" style={{ color: "#a06a00" }}>
+        <p className="mt-3 rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[11.5px] text-[var(--warning-text)]">
           {t("import.unsupported.note")}
         </p>
       )}

@@ -12,6 +12,7 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import type { AgentInfo } from "../../types/agent";
+import { RightPanelHeader } from "../../components/app/RightPanelHeader";
 
 interface AgentRightPanelProps {
   agents: AgentInfo[];
@@ -66,14 +67,11 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
 
   return (
     <aside
+      id="right-context-panel"
       aria-label={t("agent.rightPanel.title")}
-      className="flex w-[var(--rightpanel-w)] flex-col border-l border-[var(--border)] bg-[var(--surface)]"
+      className="right-panel"
     >
-      <div className="flex h-[52px] items-center border-b border-[var(--border-subtle)] bg-[var(--background)] px-4">
-        <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
-          {t("agent.rightPanel.title")}
-        </span>
-      </div>
+      <RightPanelHeader title={t("agent.rightPanel.title")} />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {/* Default Agent meta */}
@@ -81,7 +79,7 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
             {t("agent.rightPanel.defaultAgent")}
           </h4>
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-[12px]">
             <dt className="font-medium text-[var(--text-muted)]">{t("agent.rightPanel.current")}</dt>
             <dd className="m-0 font-mono text-[11.5px]" style={{ color: defaultAgent ? "var(--accent-hover)" : "var(--text-muted)" }}>
               {defaultAgent ? `${defaultAgent.command} · v${defaultAgent.version ?? "?"}` : t("agent.rightPanel.none")}

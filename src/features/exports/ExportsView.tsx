@@ -138,9 +138,9 @@ export function ExportsView() {
   );
 
   return (
-    <div className="grid h-full grid-cols-[minmax(0,1fr)_420px]">
+    <div className="exports-view-layout">
       <div className="flex min-w-0 flex-col border-r border-[var(--border)]">
-        <div className="flex h-[44px] shrink-0 items-center gap-2 border-b border-[var(--border)] px-4">
+        <div className="view-toolbar border-b border-[var(--border)] px-4">
           <div className="flex items-center gap-1">
             {EXPORT_TYPE_ORDER.map((type) => {
               const active = selectedType === type;
@@ -183,7 +183,7 @@ export function ExportsView() {
                 type="button"
                 onClick={handleGenerate}
                 disabled={!canGenerate}
-                className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[#1a1a1a] disabled:opacity-40"
+                className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
               >
                 {t("exports.actions.generate")}
               </button>
@@ -271,7 +271,7 @@ export function ExportsView() {
       </div>
 
       <aside className="flex min-h-0 flex-col bg-[var(--surface-raised)]">
-        <div className="flex h-[44px] shrink-0 items-center border-b border-[var(--border)] px-4">
+          <div className="view-toolbar border-b border-[var(--border)] px-4">
           <span className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
             {t("exports.preview.title")}
           </span>

@@ -27,34 +27,28 @@ export function BottomStatusBar() {
   const languageLabel = activeLanguage === "zh-CN" ? t("language.zhCN") : t("language.en");
 
   return (
-    <footer className="flex h-7 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-3 font-mono text-[11px] text-[var(--text-secondary)]">
-      <div className="flex min-w-0 items-center gap-0">
+    <footer className="statusbar flex h-7 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-3 font-mono text-[11px] text-[var(--text-secondary)]">
+      <div className="statusbar__path flex min-w-0 items-center gap-0">
         <span className="statusbar__item truncate">{currentProject.rootPath}</span>
       </div>
-      <div className="flex shrink-0 items-center gap-0">
-        <span className="statusbar__item">
+      <div className="statusbar__details flex shrink-0 items-center gap-0">
+        <span className="statusbar__item statusbar__agent">
           <span className={`dotstatus ${agentReady ? "dotstatus--ok" : "dotstatus--err"}`} aria-hidden="true" />
           {agentLabel}
         </span>
-        <span className="statusbar__sep" aria-hidden="true" />
-        <span className="statusbar__item">
+        <span className="statusbar__item statusbar__wiki">
           {t("status.wikiPages", { count: currentProject.wikiPageCount })}
         </span>
-        <span className="statusbar__sep" aria-hidden="true" />
-        <span className="statusbar__item">{t("status.tasks", { count: runningCount })}</span>
-        <span className="statusbar__sep" aria-hidden="true" />
-        <span className="statusbar__item">
+        <span className="statusbar__item statusbar__tasks">{t("status.tasks", { count: runningCount })}</span>
+        <span className="statusbar__item statusbar__index">
           {t("status.indexSync")} · {t("status.indexSync.unknown")}
         </span>
-        <span className="statusbar__spacer" aria-hidden="true" />
-        <span className="statusbar__item">{gitLabel}</span>
-        <span className="statusbar__sep" aria-hidden="true" />
-        <span className="statusbar__item">
+        <span className="statusbar__item statusbar__git-label">{gitLabel}</span>
+        <span className="statusbar__item statusbar__git-state">
           <span className={`dotstatus ${!git?.isRepository || git?.hasChanges ? "dotstatus--busy" : "dotstatus--ok"}`} aria-hidden="true" />
           {gitCleanLabel}
         </span>
-        <span className="statusbar__sep" aria-hidden="true" />
-        <span className="statusbar__item">{languageLabel}</span>
+        <span className="statusbar__item statusbar__language">{languageLabel}</span>
       </div>
     </footer>
   );

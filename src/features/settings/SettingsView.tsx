@@ -125,13 +125,13 @@ export function SettingsView({
   });
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[240px_minmax(0,1fr)]">
-      <aside className="border-r border-[var(--border)] bg-[var(--surface)] p-3">
+    <div className="settings-view-layout">
+      <aside className="settings-view__nav border-r border-[var(--border)] bg-[var(--surface)] p-3">
         <div className="mb-3 px-2">
           <div className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">{t("settings.nav.label")}</div>
           <div className="mt-1 text-[13px] font-medium">{project.name}</div>
         </div>
-        <nav className="grid gap-1" aria-label={t("nav.settings")}>
+        <nav className="settings-view__tabs grid gap-1" aria-label={t("nav.settings")}>
           {sections.map((section) => (
             <button
               key={section.key}
@@ -151,16 +151,12 @@ export function SettingsView({
 
       <div className="min-h-0 overflow-auto p-5">
         <div className="mx-auto grid max-w-[920px] gap-5">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-[18px] font-semibold">{t("settings.title")}</div>
-              <p className="mt-1 text-[12px] text-[var(--text-muted)]">{t("settings.description")}</p>
-            </div>
-            <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)]">
+          {loading || saving ? (
+            <div className="flex justify-end gap-2 text-[11px] text-[var(--text-muted)]" role="status">
               {loading ? <span>{t("settings.state.loading")}</span> : null}
               {saving ? <span>{t("settings.state.saving")}</span> : null}
             </div>
-          </div>
+          ) : null}
 
           {error ? <div className="rounded-[var(--radius-md)] border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[12px] text-[var(--danger)]">{error}</div> : null}
 

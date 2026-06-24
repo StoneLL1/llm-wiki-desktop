@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { GitBranch, ShieldAlert } from "lucide-react";
 import { Button } from "../ui/button";
+import { useModalDialog } from "../../hooks/useModalDialog";
 import type { PendingAction } from "../../types/backend";
 
 interface ConfirmationDialogProps {
@@ -31,39 +31,8 @@ export function ConfirmationDialog({
   onConfirm,
 }: ConfirmationDialogProps) {
   const { t } = useTranslation();
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useModalDialog({ open: true, onClose: onCancel });
   const isDestructive = action.riskLevel === "destructive";
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    dialog?.querySelector<HTMLButtonElement>("button")?.focus();
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCancel();
-        return;
-      }
-      if (event.key !== "Tab" || !dialog) return;
-
-      const focusable = Array.from(
-        dialog.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"),
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel]);
 
   return (
     <div
@@ -72,6 +41,7 @@ export function ConfirmationDialog({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4"
       role="dialog"
       aria-labelledby="confirmation-dialog-title"
+      tabIndex={-1}
     >
       <section className="w-full max-w-[560px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg">
         <header className="flex min-h-[52px] items-center gap-3 border-b border-[var(--border)] px-4">

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Play, X } from "lucide-react";
 import type { AgentInfo, AgentKind } from "../../types/agent";
 import type { ProviderStatus } from "../../types/llm";
 import type { LlmProviderKind } from "../../types/llm";
+import { useModalDialog } from "../../hooks/useModalDialog";
 
 export type AgentSkill =
   | "wiki-ingest"
@@ -73,7 +74,7 @@ export function RunAgentDialog({
   presetSkill,
 }: RunAgentDialogProps) {
   const { t } = useTranslation();
-  const containerRef = useRef<HTMLDivElement>(null);
+  const containerRef = useModalDialog({ open, onClose });
 
   const execChoices = useMemo<ExecChoice[]>(() => {
     const installed = agents.filter((agent) => agent.state === "installed");
@@ -128,18 +129,6 @@ export function RunAgentDialog({
     }
   }, [open, presetSkill, defaultChoiceKey]);
 
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose]);
-
   if (!open) return null;
 
   const handleSubmit = () => {
@@ -162,6 +151,7 @@ export function RunAgentDialog({
       className="dialog-overlay"
       role="dialog"
       aria-labelledby="run-agent-dialog-title"
+      tabIndex={-1}
     >
       <div className="dialog dialog--wide">
         <header className="dialog__head">

@@ -2,14 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   FolderOpen,
   FolderPlus,
-  HelpCircle,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
   Search,
-  Settings,
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { i18next, LANGUAGE_STORAGE_KEY } from "../../i18n";
@@ -18,6 +18,7 @@ import type { AgentInfo } from "../../types/agent";
 import type { ProviderStatus } from "../../types/llm";
 import type { ProjectTemplate } from "../../types/project";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
+import { useModalDialog } from "../../hooks/useModalDialog";
 
 const TEMPLATES: Array<{ key: ProjectTemplate; titleKey: string; descKey: string }> = [
   { key: "general", titleKey: "launch.template.general", descKey: "launch.template.generalDesc" },
@@ -63,8 +64,14 @@ export function ProjectStartView() {
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [newDialogOpen, setNewDialogOpen] = useState(false);
+  const [sideOpen, setSideOpen] = useState(() =>
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function" ||
+    !window.matchMedia("(max-width: 1180px)").matches,
+  );
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const templatesRequestedRef = useRef(false);
 
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
 
@@ -76,6 +83,30 @@ export function ProjectStartView() {
       /* localStorage may be unavailable in some embed contexts */
     }
   };
+
+  useEffect(() => {
+    if (!sideOpen || !templatesRequestedRef.current) return;
+    templatesRequestedRef.current = false;
+    document.getElementById("launch-templates")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, [sideOpen]);
+
+  useEffect(() => {
+    if (!sideOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (
+        event.key === "Escape" &&
+        !event.defaultPrevented &&
+        !document.querySelector('[aria-modal="true"]')
+      ) {
+        setSideOpen(false);
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [sideOpen]);
 
   // Agent / BYOK detection. detect_agents requires a project context, so reuse
   // the most recent project's id/path when available (agent CLI availability is
@@ -128,7 +159,7 @@ export function ProjectStartView() {
   const availableAgents = agents.filter((a) => a.state === "installed").length;
 
   return (
-    <div className="launch">
+    <div className={`launch ${sideOpen ? "launch--side-open" : ""}`}>
       <header className="launch__top">
         <div className="launch__brand">
           <div className="launch__mark">LW</div>
@@ -145,8 +176,12 @@ export function ProjectStartView() {
             el?.focus();
           }}>{t("launch.nav.open")}</button>
           <button type="button" onClick={() => {
-            const el = document.getElementById("launch-templates");
-            el?.scrollIntoView({ behavior: "smooth", block: "start" });
+            if (sideOpen) {
+              document.getElementById("launch-templates")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            } else {
+              templatesRequestedRef.current = true;
+              setSideOpen(true);
+            }
           }}>{t("launch.nav.templates")}</button>
         </nav>
         <div className="launch__top-actions">
@@ -154,11 +189,20 @@ export function ProjectStartView() {
             <button type="button" className={activeLanguage === "zh-CN" ? "is-active" : ""} onClick={() => setLanguage("zh-CN")}>中</button>
             <button type="button" className={activeLanguage === "en" ? "is-active" : ""} onClick={() => setLanguage("en")}>EN</button>
           </div>
-          <button type="button" className="btn btn--ghost btn--icon btn--sm" title={t("nav.settings")} aria-label={t("nav.settings")} onClick={() => setLocalError(t("launch.openProjectFirst"))}>
-            <Settings size={16} aria-hidden="true" />
-          </button>
-          <button type="button" className="btn btn--ghost btn--icon btn--sm" title={t("launch.help")} aria-label={t("launch.help")} onClick={() => setLocalError(t("launch.openProjectFirst"))}>
-            <HelpCircle size={16} aria-hidden="true" />
+          <button
+            type="button"
+            className="btn btn--ghost btn--icon btn--sm"
+            title={t(sideOpen ? "launch.side.collapse" : "launch.side.open")}
+            aria-label={t(sideOpen ? "launch.side.collapse" : "launch.side.open")}
+            aria-controls="launch-info-panel"
+            aria-expanded={sideOpen}
+            onClick={() => setSideOpen((value) => !value)}
+          >
+            {sideOpen ? (
+              <PanelRightClose size={16} aria-hidden="true" />
+            ) : (
+              <PanelRightOpen size={16} aria-hidden="true" />
+            )}
           </button>
         </div>
       </header>
@@ -276,7 +320,16 @@ export function ProjectStartView() {
           ) : null}
         </main>
 
-        <aside className="launch__side" aria-label={t("launch.side.label")}>
+        {sideOpen ? (
+          <button
+            aria-hidden="true"
+            className="launch__side-backdrop"
+            onClick={() => setSideOpen(false)}
+            tabIndex={-1}
+            type="button"
+          />
+        ) : null}
+        {sideOpen ? <aside id="launch-info-panel" className="launch__side" aria-label={t("launch.side.label")}>
           <h3>{t("launch.side.agents")}</h3>
           {agents.length === 0 ? (
             <p className="m-0 mb-2 text-[11.5px] leading-5 text-[var(--text-muted)]">{t("launch.side.agentsHint")}</p>
@@ -330,7 +383,7 @@ export function ProjectStartView() {
           <div style={{ marginTop: 24, padding: 12, background: "var(--surface-muted)", borderRadius: "var(--radius-md)", fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.6 }}>
             <strong style={{ color: "var(--text-secondary)" }}>{t("launch.tip.label")}</strong> · {t("launch.tip.body")}
           </div>
-        </aside>
+        </aside> : null}
       </div>
 
       <footer className="launch__bottom">
@@ -434,6 +487,8 @@ function NewProjectDialog({
   const [rootPath, setRootPath] = useState("");
   const [template, setTemplate] = useState<ProjectTemplate>("general");
   const [initGit, setInitGit] = useState(true);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useModalDialog({ onClose, initialFocusRef: nameRef });
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -443,6 +498,8 @@ function NewProjectDialog({
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4"
       role="dialog"
       aria-modal="true"
@@ -469,7 +526,7 @@ function NewProjectDialog({
               <div className="formrow__hint">{t("launch.dialog.nameHint")}</div>
             </div>
             <div className="formrow__control">
-              <input className="input" value={name} onChange={(event) => setName(event.target.value)} autoFocus />
+              <input ref={nameRef} className="input" value={name} onChange={(event) => setName(event.target.value)} />
             </div>
           </div>
 

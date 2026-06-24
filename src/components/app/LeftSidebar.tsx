@@ -51,15 +51,16 @@ export function LeftSidebar() {
               : "text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
           }`}
           onClick={() => setActiveView(item.view)}
+          title={t(item.labelKey)}
           type="button"
         >
           <Icon aria-hidden="true" size={16} />
-          <span className="truncate">{t(item.labelKey)}</span>
+          <span className="app-sidebar__nav-label truncate">{t(item.labelKey)}</span>
           {item.view === "wiki" ? (
-            <span className={`ml-auto font-mono text-[10.5px] ${active ? "text-[var(--accent-hover)]" : "text-[var(--text-muted)]"}`}>{currentProject.wikiPageCount}</span>
+            <span className={`app-sidebar__count ml-auto font-mono text-[10.5px] ${active ? "text-[var(--accent-hover)]" : "text-[var(--text-muted)]"}`}>{currentProject.wikiPageCount}</span>
           ) : null}
           {item.view === "lint" && lintIssueCount > 0 ? (
-            <span className="ml-auto inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-[var(--radius-pill)] bg-[#e0550a] px-[5px] text-[9.5px] font-semibold text-white" aria-label={`${lintIssueCount} lint issues`}>{lintIssueCount}</span>
+            <span className="app-sidebar__count ml-auto inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-[var(--radius-pill)] bg-[var(--danger)] px-[5px] text-[9.5px] font-semibold text-[var(--text-inverse)]" aria-label={`${lintIssueCount} lint issues`}>{lintIssueCount}</span>
           ) : null}
         </button>
       );
@@ -69,24 +70,24 @@ export function LeftSidebar() {
     <aside
       aria-label={t("shell.primaryNavigation")}
       role="navigation"
-      className="flex w-[var(--sidebar-w)] flex-col overflow-hidden border-r border-[var(--border)] bg-[var(--surface)]"
+      className="app-sidebar"
     >
       <div className="py-3">
-        <div className="px-2 pb-1 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+        <div className="app-sidebar__section-label">
           {t("shell.mainViews")}
         </div>
         <div className="flex flex-col gap-[1px] px-2">{renderNavGroup(mainViews)}</div>
       </div>
 
       <div className="py-3">
-        <div className="px-2 pb-1 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+        <div className="app-sidebar__section-label">
           {t("shell.workflow")}
         </div>
         <div className="flex flex-col gap-[1px] px-2">{renderNavGroup(workflowViews)}</div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto py-3">
-        <div className="flex items-center justify-between px-2 pb-1 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+      <div className="app-sidebar__recent min-h-0 flex-1 overflow-y-auto py-3">
+        <div className="app-sidebar__section-label flex items-center justify-between">
           <span>{t("shell.recentPages")}</span>
         </div>
         <div className="flex flex-col gap-[1px] px-2">
@@ -114,7 +115,7 @@ export function LeftSidebar() {
       <div className="flex items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
         <span className="flex min-w-0 flex-1 items-center gap-2">
           <span className={`inline-block h-[7px] w-[7px] shrink-0 rounded-full ${agentDot}`} aria-hidden="true" />
-          <span className="truncate font-mono text-[var(--text-secondary)]">{agentLabel}</span>
+          <span className="app-sidebar__agent-name truncate font-mono text-[var(--text-secondary)]">{agentLabel}</span>
         </span>
         <button
           aria-label={t("shell.agentTooltip")}

@@ -38,7 +38,11 @@ export function TopBar() {
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "k" &&
+        !document.querySelector('[aria-modal="true"]')
+      ) {
         event.preventDefault();
         searchInput.current?.focus();
       }
@@ -99,26 +103,26 @@ export function TopBar() {
   };
 
   return (
-    <header className="flex h-12 items-center gap-3 border-b border-[var(--border)] bg-[var(--background)] px-4 text-[13px]">
-      <div className="flex h-full items-center gap-2 border-r border-[var(--border-subtle)] pr-3">
+    <header className="app-topbar">
+      <div className="app-topbar__brand">
         <div className="grid h-[22px] w-[22px] place-items-center rounded-[var(--radius-sm)] bg-[var(--foreground)] font-mono text-[11px] font-semibold text-[var(--text-inverse)]">
           LW
         </div>
-        <strong className="text-[13px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{t("app.title")}</strong>
+        <strong className="app-topbar__brand-name">{t("app.title")}</strong>
       </div>
 
-      <div className="relative" ref={menuRef}>
+      <div className="app-topbar__project" ref={menuRef}>
         <button
           aria-label={t("shell.switchProject")}
           aria-expanded={menuOpen}
-          className="flex h-[30px] min-w-0 max-w-[360px] items-center gap-2 rounded-[var(--radius-md)] px-2 text-left hover:bg-[var(--surface-muted)]"
+          className="app-topbar__project-button"
           onClick={() => setMenuOpen((v) => !v)}
           title={t("shell.switchProject")}
           type="button"
         >
           <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={16} />
           <span className="truncate text-[13px] font-medium">{currentProject.name}</span>
-          <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{currentProject.rootPath}</span>
+          <span className="app-topbar__project-path">{currentProject.rootPath}</span>
           <ChevronDown aria-hidden="true" className="shrink-0 text-[var(--text-muted)]" size={12} />
         </button>
         {menuOpen ? (
@@ -156,8 +160,8 @@ export function TopBar() {
         ) : null}
       </div>
 
-      <div className="relative flex max-w-[520px] flex-1">
-        <label className="flex h-[30px] w-full items-center gap-2 rounded-[var(--radius-md)] bg-[var(--surface-muted)] px-3 text-[13px] text-[var(--text-muted)] focus-within:bg-[var(--background)] focus-within:shadow-[0_0_0_3px_rgba(16,163,127,0.12)]">
+      <div className="app-topbar__search-wrap">
+        <label className="app-topbar__search">
           <Search aria-hidden="true" size={14} />
           <input
             ref={searchInput}
@@ -188,9 +192,9 @@ export function TopBar() {
         ) : null}
       </div>
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="app-topbar__actions">
         <TaskActivityButton />
-        <div className="flex h-[26px] items-center rounded-[var(--radius-md)] bg-[var(--surface-muted)] p-0.5 text-[11px]">
+        <div className="app-topbar__language">
           <button
             aria-pressed={activeLanguage === "zh-CN"}
             className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
