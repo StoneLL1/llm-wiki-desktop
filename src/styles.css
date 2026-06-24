@@ -755,9 +755,43 @@ select:focus-visible {
   font-family: var(--font-mono);
 }
 .badge--accent { background: var(--accent-soft); color: var(--accent-hover); border-color: var(--accent-border); }
-.badge--warn { background: var(--warning-soft); color: #a06a00; }
+.badge--success { background: var(--accent-soft); color: var(--accent-hover); border-color: var(--accent-border); }
+.badge--outline { background: transparent; color: var(--text-muted); border-color: var(--border); }
+.badge--warn { background: var(--warning-soft); color: #a06a00; border-color: transparent; }
 .badge--danger { background: var(--danger-soft); color: var(--danger); }
 .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* apikey-row: LLM provider list (design settings.html:345-398). 5-col grid:
+   icon | name+hint | badge | primary action | secondary action. */
+.apikey-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.apikey-row__icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+.apikey-row__name { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.apikey-row__hint {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .pill {
   display: inline-flex;
