@@ -134,7 +134,14 @@ export function GraphView() {
     let renderer: Sigma | null = null;
     try {
       renderer = createRenderer(graph, container, stateRef);
-    } catch {
+    } catch (err) {
+      // sigma v3 needs a WebGL context; when `canvas.getContext("webgl2" /
+      // "webgl" / "experimental-webgl")` all return null (headless, GPU
+      // disabled, blacklisted driver, remote desktop w/o hw accel), sigma
+      // dereferences the null `gl` and throws. The original `catch {}` swallowed
+      // that error silently, leaving only the "canvas unavailable" message with
+      // no clue why — so surface it. See SPEC/gotchas.txt.
+      console.warn("[graph] sigma renderer init failed:", err);
       setCanvasAvailable(false);
       disposeRenderer(refs.current);
       return;
