@@ -119,6 +119,7 @@ pub fn run() {
             commands::llm_commands::store_provider_secret,
             commands::llm_commands::delete_provider_secret,
             commands::llm_commands::provider_secret_status,
+            commands::llm_commands::check_ollama_reachable,
             commands::llm_commands::test_llm_provider,
             commands::compile_commands::start_wiki_compile,
             commands::compile_commands::confirm_compile_action,
