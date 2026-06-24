@@ -8,6 +8,7 @@ interface GraphLegendProps {
   data: GraphData;
   colorMode: GraphColorMode;
   hiddenTypes: Set<WikiPageType>;
+  degreeThreshold: number;
 }
 
 /**
@@ -16,9 +17,9 @@ interface GraphLegendProps {
  * counts, the top communities + "other", or a plain label. Filtered-out types
  * are dimmed and counted as zero so the legend tracks the on-canvas state.
  */
-export function GraphLegend({ data, colorMode, hiddenTypes }: GraphLegendProps) {
+export function GraphLegend({ data, colorMode, hiddenTypes, degreeThreshold }: GraphLegendProps) {
   const { t } = useTranslation();
-  const entries = legendEntries(colorMode, data, resolveLabels(t), hiddenTypes);
+  const entries = legendEntries(colorMode, data, resolveLabels(t), hiddenTypes, degreeThreshold);
 
   if (colorMode === "plain") {
     return (

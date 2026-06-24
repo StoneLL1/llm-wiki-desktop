@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { PAGE_TYPE_COLORS, type GraphData } from "../../types/graph";
 import { PAGE_TYPE_LABEL_KEYS, WIKI_PAGE_TYPES, type WikiPageType } from "../../types/wiki";
-import { neighborCount, neighborsOf } from "./graphNeighbors";
+import { neighborsOf } from "./graphNeighbors";
 
 interface GraphInspectorProps {
   node: import("../../types/graph").GraphNode | null;
@@ -41,13 +41,30 @@ export function GraphInspector({
 }: GraphInspectorProps) {
   const { t } = useTranslation();
 
-  const neighbors = node ? neighborsOf(data, node.id) : [];
+  const byId = new Map(data.nodes.map((n) => [n.id, n]));
+  const isVisible = (id: string): boolean => {
+    const n = byId.get(id);
+    if (!n) return false;
+    if (typeFilter.has(n.type)) return false;
+    if (degreeThreshold > 0 && n.degree <= degreeThreshold) return false;
+    return true;
+  };
+  // Only list neighbors the user can actually see on the canvas — a hidden
+  // neighbor would select a node that stays invisible (no visible feedback).
+  const neighbors = node ? neighborsOf(data, node.id).filter((n) => isVisible(n.id)) : [];
   const preview = neighbors.slice(0, NEIGHBOR_PREVIEW);
-  const totalNeighbors = node ? neighborCount(data, node.id) : 0;
+  const totalNeighbors = neighbors.length;
   const communityCount = countCommunities(data);
 
   const typeCounts = new Map<WikiPageType, number>();
-  for (const n of data.nodes) typeCounts.set(n.type, (typeCounts.get(n.type) ?? 0) + 1);
+  let maxDegree = 0;
+  for (const n of data.nodes) {
+    typeCounts.set(n.type, (typeCounts.get(n.type) ?? 0) + 1);
+    if (n.degree > maxDegree) maxDegree = n.degree;
+  }
+  // Clamp the degree slider to the data's real max so a hard 20 can't blank
+  // a small wiki entirely; keep at least 0..1 when the graph is trivial.
+  const degreeMax = Math.max(1, maxDegree);
 
   return (
     <div className="px-4 py-3">
@@ -162,7 +179,7 @@ export function GraphInspector({
           <input
             type="range"
             min={0}
-            max={20}
+            max={degreeMax}
             value={degreeThreshold}
             onChange={(event) => onDegreeThresholdChange(Number(event.target.value))}
             className="h-[4px] flex-1 accent-[var(--accent)]"
@@ -190,8 +207,7 @@ export function GraphInspector({
           <button
             type="button"
             onClick={onExportPng}
-            disabled={!node}
-            className="flex h-[30px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+            className="flex h-[30px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
           >
             <Download size={13} />
             {t("graph.exportPng")}

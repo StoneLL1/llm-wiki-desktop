@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { GraphData } from "../../types/graph";
+import { COMMUNITY_PALETTE, type GraphData } from "../../types/graph";
 import type { WikiPageType } from "../../types/wiki";
 import { communityLegendEntries, legendEntries, typeLegendEntries } from "./legendEntries";
 
@@ -51,6 +51,18 @@ describe("legendEntries", () => {
     expect(entries.find((e) => e.key === "entity")?.count).toBe(2);
   });
 
+  it("subtracts degree-filtered nodes from type counts but keeps the row", () => {
+    // entity: e1 degree 5, e2 degree 1. With threshold 1, e2 (degree<=1) is
+    // hidden → entity visible count drops to 1, but the row stays present.
+    const entries = typeLegendEntries(makeData(), labels, new Set(), 1);
+    const entity = entries.find((e) => e.key === "entity");
+    expect(entity?.count).toBe(1);
+    // concept: c1/c2 both degree 3 (>1) → still 2.
+    expect(entries.find((e) => e.key === "concept")?.count).toBe(2);
+    // source s1 degree 2 (>1) → still 1.
+    expect(entries.find((e) => e.key === "source")?.count).toBe(1);
+  });
+
   it("groups communities by size, top-N then Other", () => {
     const entries = communityLegendEntries(makeData(), 2);
     // community 0 and 1 have 2 each, community 2 has 1 → top 2 then Other(1).
@@ -58,6 +70,27 @@ describe("legendEntries", () => {
     expect(entries[0].count).toBe(2);
     expect(entries.at(-1)?.label).toBe("other");
     expect(entries.at(-1)?.count).toBe(1);
+  });
+
+  it("colors community swatches by raw id (matching the canvas), not sort rank", () => {
+    // Communities {3:5, 1:3, 7:2} → sorted head [3,1]. The swatch for community
+    // 3 must use palette[3 % len], NOT palette[0] (sort rank). This is the same
+    // indexing GraphView's baseColorFor uses, so legend matches the canvas even
+    // when community ids don't align with size rank.
+    const data: GraphData = {
+      nodes: [
+        { id: "n1", path: "n1", label: "N1", type: "entity", tags: [], starred: false, degree: 1 },
+        { id: "n2", path: "n2", label: "N2", type: "entity", tags: [], starred: false, degree: 1 },
+      ],
+      edges: [],
+      contentHash: "h",
+      builtAt: "2026-06-24T00:00:00Z",
+      layout: { positions: {}, communities: { n1: 3, n2: 1 } },
+    };
+    const entries = communityLegendEntries(data, 8);
+    const palette = COMMUNITY_PALETTE;
+    expect(entries.find((e) => e.label === "#3")?.color).toBe(palette[3 % palette.length]);
+    expect(entries.find((e) => e.label === "#1")?.color).toBe(palette[1 % palette.length]);
   });
 
   it("returns no entries in plain mode (component renders a static label)", () => {
