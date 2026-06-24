@@ -8,9 +8,10 @@ describe("graphExport", () => {
 
   function seededGraph(): Graph {
     const g = new Graph();
-    g.addNode("a", { label: "Agent", x: 0, y: 0, size: 8, color: "#10a37f", type: "concept", degree: 4 });
-    g.addNode("b", { label: "Claude", x: 2, y: 1, size: 5, color: "#0d0d0d", type: "entity", degree: 2 });
-    g.addNode("c", { label: "<Tagged>", x: 4, y: 0, size: 4, color: "#2563eb", type: "source", degree: 1 });
+    // pageType mirrors what GraphView writes (sigma reserves `type`).
+    g.addNode("a", { label: "Agent", x: 0, y: 0, size: 8, color: "#10a37f", pageType: "concept", degree: 4 });
+    g.addNode("b", { label: "Claude", x: 2, y: 1, size: 5, color: "#0d0d0d", pageType: "entity", degree: 2 });
+    g.addNode("c", { label: "<Tagged>", x: 4, y: 0, size: 4, color: "#2563eb", pageType: "source", degree: 1 });
     g.addEdge("a", "b", { color: "#d4d4d4", size: 1 });
     g.addEdge("a", "c", { color: "#d4d4d4", size: 1 });
     return g;
