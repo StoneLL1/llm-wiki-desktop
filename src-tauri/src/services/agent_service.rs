@@ -174,6 +174,26 @@ impl AgentService {
                     "--verbose".into(),
                     "--permission-mode".into(),
                     "dontAsk".into(),
+                    // Pre-approve the file tools the wiki-ingest compiler
+                    // needs. dontAsk alone denies anything not explicitly
+                    // allowed, and the sandbox setting only auto-allows Bash
+                    // (not Edit/Write), so without this allowlist the agent
+                    // reads sources, plans pages, then silently fails to write
+                    // any file — producing a stub wiki (only index/log/overview)
+                    // on every platform. Bash is included because bulk page
+                    // creation (heredocs) is how most compile models reliably
+                    // emit many files; without it weaker models try Bash, get
+                    // denied, and give up instead of falling back to Edit.
+                    // Residual risk: a prompt-injected source in
+                    // raw/extracted/*.md could run arbitrary shell, and the CLI
+                    // sandbox that would jail Bash is unsupported on Windows —
+                    // project-level safety is still enforced by the isolated
+                    // temp workspace + validated manifest + Git checkpoint, but
+                    // system-level commands are NOT contained. Accepted by the
+                    // user (user-initiated compile on user-imported content).
+                    // The `=` binding is required because --allowedTools is
+                    // variadic and would otherwise consume the prompt arg.
+                    "--allowedTools=Edit Write Read Bash".into(),
                     "--settings".into(),
                     r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}"#.into(),
                     prompt_owned,
@@ -429,20 +449,14 @@ impl ProcessRunner for SystemProcessRunner {
     }
 
     fn run_capture(&self, invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
-        let mut child = Command::new(resolve_program(&invocation.program))
-            .args(&invocation.args)
-            .current_dir(&invocation.cwd)
-            .stdin(if invocation.stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                BackendError::new("AGENT_SPAWN_FAILED", error.to_string(), true, false)
-            })?;
+        let mut child = build_command(
+            &invocation.program,
+            &invocation.args,
+            &invocation.cwd,
+            invocation.stdin.is_some(),
+        )
+        .spawn()
+        .map_err(|error| BackendError::new("AGENT_SPAWN_FAILED", error.to_string(), true, false))?;
         if let Some(input) = &invocation.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(input.as_bytes()).map_err(|error| {
@@ -486,20 +500,14 @@ impl ProcessRunner for SystemProcessRunner {
         task_id: &str,
         on_delta: &(dyn Fn(&str) + Sync),
     ) -> Result<String, BackendError> {
-        let mut child = Command::new(resolve_program(&invocation.program))
-            .args(&invocation.args)
-            .current_dir(&invocation.cwd)
-            .stdin(if invocation.stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                BackendError::new("AGENT_SPAWN_FAILED", error.to_string(), true, false)
-            })?;
+        let mut child = build_command(
+            &invocation.program,
+            &invocation.args,
+            &invocation.cwd,
+            invocation.stdin.is_some(),
+        )
+        .spawn()
+        .map_err(|error| BackendError::new("AGENT_SPAWN_FAILED", error.to_string(), true, false))?;
         if let Some(input) = &invocation.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(input.as_bytes()).map_err(|error| {
@@ -666,20 +674,186 @@ fn find_executable(command: &str) -> Option<PathBuf> {
     None
 }
 
-/// Resolve a bare program name to a spawnable path. On Windows, `CreateProcess`
-/// (and therefore `Command::new`) will not find a `.cmd` shim via PATH in
-/// processes whose PATH lacks the npm global dir; resolving to the full path
-/// first lets `Command` run the `.cmd` (std internally routes `.cmd` through
-/// `cmd.exe`). On non-Windows, or when the program is already a path, it is
-/// returned unchanged.
-fn resolve_program(program: &str) -> String {
+/// A directly-spawnable target for an Agent CLI command.
+///
+/// On Windows, npm-installed CLIs ship as `.cmd` shims (e.g. `claude.cmd`).
+/// Rust's `Command` refuses to spawn a `.cmd`/`.bat` directly with the error
+/// `batch file arguments are invalid` whenever an argument contains
+/// characters `cmd.exe` cannot safely represent (CVE-2024-24576) — and the
+/// compile/chat prompts (arbitrary wiki content carrying `"`, `%`, newlines)
+/// always do. Drilling through the shim to the executable it forwards to and
+/// spawning *that* directly uses normal Windows argument escaping and passes
+/// the prompt byte-for-byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnTarget {
+    program: String,
+    /// Arguments inserted before the caller's args. Populated when the shim
+    /// forwards to `node <script>` (e.g. `codex`): `program` is the node
+    /// executable and `leading_args` holds the script path.
+    leading_args: Vec<String>,
+}
+
+fn resolve_spawn_target(program: &str) -> SpawnTarget {
     if cfg!(not(windows)) || program.contains('/') || program.contains('\\') {
-        return program.to_string();
+        return SpawnTarget {
+            program: program.to_string(),
+            leading_args: Vec::new(),
+        };
     }
-    match find_executable(program) {
-        Some(resolved) => resolved.to_string_lossy().into_owned(),
-        None => program.to_string(),
+    let Some(resolved) = find_executable(program) else {
+        return SpawnTarget {
+            program: program.to_string(),
+            leading_args: Vec::new(),
+        };
+    };
+    let is_batch = resolved
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cmd" | "bat"))
+        .unwrap_or(false);
+    if !is_batch {
+        return SpawnTarget {
+            program: resolved.to_string_lossy().into_owned(),
+            leading_args: Vec::new(),
+        };
     }
+    resolve_cmd_shim(&resolved).unwrap_or(SpawnTarget {
+        program: resolved.to_string_lossy().into_owned(),
+        leading_args: Vec::new(),
+    })
+}
+
+/// Parse an npm-style `.cmd`/`.bat` shim into the executable it forwards to.
+/// Such shims end with a line that quotes the real target and appends `%*`,
+/// e.g. `"%dp0%\...\claude.exe" %*` or `"%_prog%" "%dp0%\...\codex.js" %*`.
+/// Returns `None` when no quoted existing target is found, so callers fall
+/// back to the shim itself — detection of `--version`/`--help` still works
+/// there because those arguments are trivial and never trip the guard.
+fn resolve_cmd_shim(cmd_path: &Path) -> Option<SpawnTarget> {
+    let dp0 = cmd_path.parent()?;
+    let text = std::fs::read_to_string(cmd_path).ok()?;
+    let forward_line = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| line.contains("%*"))?;
+    let mut targets: Vec<PathBuf> = Vec::new();
+    let mut forwards_to_node = false;
+    for token in quoted_tokens(forward_line) {
+        if token.contains("%_prog%") {
+            forwards_to_node = true;
+            continue;
+        }
+        if !token.contains("%dp0%") {
+            continue;
+        }
+        let candidate = PathBuf::from(token.replace("%dp0%", &dp0.to_string_lossy()));
+        // Reject anything that does not exist or that climbs out of the shim's
+        // own directory after resolving `..`, so a corrupted/malicious shim
+        // cannot redirect to an arbitrary executable outside the npm dir.
+        if is_within_dir(&candidate, dp0) {
+            targets.push(candidate);
+        }
+    }
+    if let Some(exe) = targets.iter().find(|path| is_extension(path, "exe")) {
+        return Some(SpawnTarget {
+            program: exe.to_string_lossy().into_owned(),
+            leading_args: Vec::new(),
+        });
+    }
+    let script = targets.iter().find(|path| {
+        is_extension(path, "js") || is_extension(path, "cjs") || is_extension(path, "mjs")
+    })?;
+    let node_program = node_executable(forwards_to_node)?;
+    Some(SpawnTarget {
+        program: node_program,
+        leading_args: vec![script.to_string_lossy().into_owned()],
+    })
+}
+
+fn is_extension(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+/// `candidate` must be an existing file that, after canonicalizing `..`,
+/// still lives under `root`. Guards the shim resolver against `..`-climbing
+/// or poisoned targets that would otherwise spawn an unintended executable.
+fn is_within_dir(candidate: &Path, root: &Path) -> bool {
+    candidate.is_file()
+        && candidate
+            .canonicalize()
+            .ok()
+            .zip(root.canonicalize().ok())
+            .map(|(candidate, root)| candidate.starts_with(root))
+            .unwrap_or(false)
+}
+
+/// Resolve a real `node` executable for JS-forwarding shims. Only a native
+/// `.exe` is accepted: returning anything else (a `.cmd`/extensionless shim)
+/// would re-introduce the batch-spawn failure this module exists to avoid, so
+/// a miss yields `None` and the caller falls back to the `.cmd` shim itself —
+/// which is safe for `codex` because it pipes the prompt via stdin, never as
+/// a command-line argument.
+fn node_executable(forwards_to_node: bool) -> Option<String> {
+    if !forwards_to_node {
+        return None;
+    }
+    match find_executable("node") {
+        Some(path) if is_extension(&path, "exe") => Some(path.to_string_lossy().into_owned()),
+        _ => None,
+    }
+}
+
+fn quoted_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                if in_quote {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                in_quote = !in_quote;
+            }
+            other if in_quote => current.push(other),
+            _ => {}
+        }
+    }
+    tokens
+}
+
+#[cfg(windows)]
+fn no_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+}
+
+#[cfg(not(windows))]
+fn no_window(_command: &mut Command) {}
+
+/// Build a `Command` for the resolved target of `program` + `args`, avoiding
+/// the Windows batch-shim spawn failure. See [`resolve_spawn_target`].
+fn build_command(program: &str, args: &[String], cwd: &Path, stdin_piped: bool) -> Command {
+    let target = resolve_spawn_target(program);
+    let mut command = Command::new(&target.program);
+    for leading in &target.leading_args {
+        command.arg(leading);
+    }
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(if stdin_piped {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    no_window(&mut command);
+    command
 }
 
 fn run_with_timeout(
@@ -687,8 +861,14 @@ fn run_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, BackendError> {
-    let mut child = Command::new(resolve_program(command))
-        .args(args)
+    let target = resolve_spawn_target(command);
+    let mut program = Command::new(&target.program);
+    for leading in &target.leading_args {
+        program.arg(leading);
+    }
+    program.args(args);
+    no_window(&mut program);
+    let mut child = program
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -870,17 +1050,97 @@ mod tests {
     }
 
     #[test]
-    fn resolve_program_passes_through_paths_and_non_windows_bare_names() {
+    fn resolve_spawn_target_passes_through_paths_and_bare_names() {
         // Already-qualified paths are returned unchanged on every platform...
-        assert_eq!(resolve_program("/usr/bin/claude"), "/usr/bin/claude");
-        assert_eq!(resolve_program("./local/agent"), "./local/agent");
-        // ...and bare names are left as-is when nothing is resolvable, so the
-        // caller (e.g. `Command::new`) still gets the original input rather
-        // than an empty string.
-        let bare = resolve_program("definitely-not-installed-cli-xyz");
+        let target = resolve_spawn_target("/usr/bin/claude");
+        assert_eq!(target.program, "/usr/bin/claude");
+        assert!(target.leading_args.is_empty());
+        let target = resolve_spawn_target("./local/agent");
+        assert_eq!(target.program, "./local/agent");
+        // ...and bare unresolvable names pass through unchanged too, so the
+        // caller still gets the original input rather than an empty string.
+        let target = resolve_spawn_target("definitely-not-installed-cli-xyz");
         assert!(
-            bare == "definitely-not-installed-cli-xyz",
-            "unresolvable bare name should pass through unchanged, got {bare:?}"
+            target.program == "definitely-not-installed-cli-xyz",
+            "unresolvable bare name should pass through unchanged, got {:?}",
+            target
         );
+        assert!(target.leading_args.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_cmd_shim_drills_through_npm_shim_to_forwarded_executable() {
+        // Regression guard for the "batch file arguments are invalid" failure:
+        // spawning a `.cmd` directly trips Rust's CVE-2024-24576 guard once the
+        // prompt argument carries characters cmd.exe can't safely represent.
+        // The resolver must drill through the npm shim to the executable it
+        // forwards to (claude.exe) or to node + script (codex.js).
+        let dir = std::env::temp_dir().join(format!(
+            "llm-wiki-desktop/shim-resolve-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let npm = dir.join("npm");
+
+        // claude-style shim: forwards directly to a native .exe.
+        let exe_pkg = npm.join("node_modules/@anthropic-ai/claude-code/bin");
+        std::fs::create_dir_all(&exe_pkg).unwrap();
+        std::fs::write(exe_pkg.join("claude.exe"), b"MZ").unwrap();
+        std::fs::write(
+            npm.join("claude.cmd"),
+            "@ECHO off\nGOTO start\n:find_dp0\nSET dp0=%~dp0\nEXIT /b\n:start\nSETLOCAL\nCALL :find_dp0\n\"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe\"   %*\n",
+        )
+        .unwrap();
+        let expected_exe = exe_pkg.join("claude.exe");
+        let resolved = resolve_cmd_shim(&npm.join("claude.cmd"))
+            .expect("exe-forwarding shim must resolve to the forwarded .exe");
+        assert_eq!(
+            std::fs::canonicalize(&resolved.program).ok(),
+            std::fs::canonicalize(&expected_exe).ok(),
+            "resolved program must be exactly the forwarded .exe, got {:?}",
+            resolved.program,
+        );
+        assert!(resolved.leading_args.is_empty());
+
+        // codex-style shim: forwards to "%_prog%" "<script.js>". Only asserts
+        // when node.exe is resolvable; otherwise the resolver returns None and
+        // the caller falls back to the .cmd shim (safe — codex pipes its
+        // prompt via stdin, never as a command-line argument).
+        let js_pkg = npm.join("node_modules/@openai/codex/bin");
+        std::fs::create_dir_all(&js_pkg).unwrap();
+        let expected_script = js_pkg.join("codex.js");
+        std::fs::write(&expected_script, "// entry").unwrap();
+        std::fs::write(
+            npm.join("codex.cmd"),
+            "@ECHO off\n:start\nendLocal & title x & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\n",
+        )
+        .unwrap();
+        if let Some(resolved) = resolve_cmd_shim(&npm.join("codex.cmd")) {
+            let script = resolved
+                .leading_args
+                .iter()
+                .find(|arg| arg.ends_with("codex.js"))
+                .expect("script path should be a leading arg when node is resolvable");
+            assert_eq!(
+                std::fs::canonicalize(script).ok(),
+                std::fs::canonicalize(&expected_script).ok(),
+                "leading script arg must be exactly the forwarded .js",
+            );
+        }
+
+        // A shim that climbs out of its own directory must be rejected, so a
+        // corrupted/malicious shim cannot redirect to an arbitrary executable.
+        std::fs::write(dir.join("outside.exe"), b"MZ").unwrap();
+        std::fs::write(
+            npm.join("poison.cmd"),
+            "@ECHO off\n:start\n\"%dp0%\\..\\outside.exe\" %*\n",
+        )
+        .unwrap();
+        assert!(
+            resolve_cmd_shim(&npm.join("poison.cmd")).is_none(),
+            "a ..-climbing shim must not resolve to a target outside the npm dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -226,10 +226,28 @@ async fn generate_manifest(
             state
                 .agent_service
                 .run_task_streaming(&invocation, &state.task_service, task_id)?;
-            Ok((
-                route,
-                CompileService::manifest_from_workspace(workspace, baseline.keys().cloned())?,
-            ))
+            let manifest =
+                CompileService::manifest_from_workspace(workspace, baseline.keys().cloned())?;
+            // Guard against silent agent failure. The spawned CLI exits 0 even
+            // when permission settings denied every write (e.g. sandbox
+            // unsupported on Windows), so an end_turn looks "successful" while
+            // the workspace holds only the scaffold pages. If extracted sources
+            // existed but the agent produced no content pages, surface a real
+            // error instead of applying a stub wiki the user must debug blind.
+            const SCAFFOLD: [&str; 3] = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
+            let has_content = manifest
+                .files
+                .iter()
+                .any(|file| !SCAFFOLD.contains(&file.path.as_str()));
+            if !has_content && !CompileService::extracted_markdown_files(context)?.is_empty() {
+                return Err(BackendError::new(
+                    "COMPILE_EMPTY_OUTPUT",
+                    "Agent finished but wrote no wiki pages. This usually means the agent lacked write permission or hit an upstream API error.",
+                    true,
+                    false,
+                ));
+            }
+            Ok((route, manifest))
         }
         CompileRoute::Byok => {
             let provider = selected_provider.ok_or_else(|| {
