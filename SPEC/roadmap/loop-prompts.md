@@ -21,12 +21,12 @@
 3. `import-BE` → `import-FE`
 4. `chat-BE` → `chat-FE`
 5. `lint-BE` → `lint-FE`
-6. `cross-cutting-FE`
+6. **`cross-cutting-FE`**
 7. `agent`（单 loop）
-8. `exports`（单 loop）
+8. **`exports`（单 loop**）
 9. `shell-dashboard`（单 loop；注意也会动 `lib.rs` 托盘，与第 1 步错开）
-10. `settings`（单 loop）
-11. `graph`（单 loop）
+10. **`settings`（单 loop）**
+11. **`graph`（单 loop）**
 
 > 想并行只能用**独立 git worktree** 隔离，最后合并。
 
@@ -101,7 +101,7 @@ scope（详见 roadmap）：
 - CLAUDE.md
 
 # 进度账本
-SPEC/plans/wiki-fe.md（不存在则从 roadmap 摘本 loop 范围内 P0/P1 建条目）。status: pending|in_progress|done|verified|blocked。
+SPEC/plans/wiki-fe.md（不存在则从头做计划）。status: pending|in_progress|done|verified|blocked。
 
 # 每次唤醒
 1. 读账本，找第一个 status ∈ {pending,in_progress} 的项；无 → 跳【收敛】。
@@ -181,7 +181,7 @@ scope：
 - CLAUDE.md
 
 # 进度账本
-SPEC/plans/import-fe.md（不存在则从 roadmap 摘 P0/P1 建条目）。status: pending|in_progress|done|verified|blocked。
+SPEC/plans/import-fe.md（不存在则自己撰写计划）。status: pending|in_progress|done|verified|blocked。
 
 # 每次唤醒
 1. 读账本，找第一个 status ∈ {pending,in_progress} 项；无 → 【收敛】。
