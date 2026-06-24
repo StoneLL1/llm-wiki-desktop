@@ -18,7 +18,9 @@ import {
 } from "../../types/graph";
 import { GraphControls } from "./GraphControls";
 import { GraphCanvasControls } from "./GraphCanvasControls";
-import { exportGraphSvg } from "./graphExport";
+import { GraphInfo } from "./GraphInfo";
+import { GraphLegend } from "./GraphLegend";
+import { exportGraphPng, exportGraphSvg } from "./graphExport";
 
 const EDGE_COLOR = "#d4d4d4";
 const PLAIN_COLOR = "#9b9b9b";
@@ -60,12 +62,15 @@ export function GraphView() {
   const colorMode = useGraphStore((state) => state.colorMode);
   const search = useGraphStore((state) => state.search);
   const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
+  const typeFilter = useGraphStore((state) => state.typeFilter);
+  const degreeThreshold = useGraphStore((state) => state.degreeThreshold);
   const load = useGraphStore((state) => state.load);
   const rebuild = useGraphStore((state) => state.rebuild);
   const setColorMode = useGraphStore((state) => state.setColorMode);
   const setSelectedNode = useGraphStore((state) => state.setSelectedNode);
   const setSearch = useGraphStore((state) => state.setSearch);
   const saveLayout = useGraphStore((state) => state.saveLayout);
+  const registerActions = useGraphStore((state) => state.registerActions);
 
   const currentProject = useProjectStore((state) => state.currentProject);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
@@ -73,8 +78,15 @@ export function GraphView() {
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const refs = useRef<RenderRefs>({ graph: null, renderer: null, layout: null, layoutTimer: null, refreshTimer: null });
-  const stateRef = useRef({ hovered: null as string | null, selected: selectedNodeId, search });
+  const stateRef = useRef({
+    hovered: null as string | null,
+    selected: selectedNodeId,
+    search,
+    typeFilter,
+    degreeThreshold,
+  });
   const [canvasAvailable, setCanvasAvailable] = useState(true);
+  const [zoom, setZoom] = useState<number | null>(null);
 
   useEffect(() => {
     stateRef.current.selected = selectedNodeId;
@@ -85,6 +97,18 @@ export function GraphView() {
     stateRef.current.search = search;
     refresh(refs.current.renderer);
   }, [search]);
+
+  // Filter changes (type checkboxes / degree slider) must re-run the node
+  // reducer so hidden nodes drop out without rebuilding topology.
+  useEffect(() => {
+    stateRef.current.typeFilter = typeFilter;
+    refresh(refs.current.renderer);
+  }, [typeFilter]);
+
+  useEffect(() => {
+    stateRef.current.degreeThreshold = degreeThreshold;
+    refresh(refs.current.renderer);
+  }, [degreeThreshold]);
 
   const projectId = currentProject.projectId;
   const rootPath = currentProject.rootPath;
@@ -147,11 +171,22 @@ export function GraphView() {
     renderer.on("enterNode", onEnter);
     renderer.on("leaveNode", onLeave);
 
+    // Report the live zoom ratio to the floating info card. Sigma's camera
+    // ratio is inverse to zoom (ratio 1 ≈ fit), so display 1/ratio.
+    const camera = renderer.getCamera();
+    const syncZoom = () => {
+      const ratio = camera.getState().ratio;
+      setZoom(ratio > 0 ? 1 / ratio : 1);
+    };
+    syncZoom();
+    camera.on("updated", syncZoom);
+
     return () => {
       renderer?.off("clickNode", onClick);
       renderer?.off("doubleClickNode", onDoubleClick);
       renderer?.off("enterNode", onEnter);
       renderer?.off("leaveNode", onLeave);
+      camera.off("updated", syncZoom);
       disposeRenderer(refs.current);
     };
   }, [data?.contentHash]);
@@ -185,6 +220,19 @@ export function GraphView() {
     if (!graph) return;
     exportGraphSvg(graph, currentProject.name, selectedNodeId);
   };
+  const handleExportPng = () => {
+    const graph = refs.current.graph;
+    if (!graph) return;
+    void exportGraphPng(graph, currentProject.name, selectedNodeId);
+  };
+
+  // Publish live action hooks so the inspector (rendered in RightContextPanel,
+  // which has no access to this component's refs) can export PNG and recompute
+  // the layout. Cleared on unmount so a stale graph never responds.
+  useEffect(() => {
+    registerActions({ exportPng: handleExportPng, recomputeLayout: handleResetLayout });
+    return () => registerActions({ exportPng: null, recomputeLayout: null });
+  }, [registerActions]);
 
   if (status === "loading") {
     return (
@@ -223,12 +271,19 @@ export function GraphView() {
       <div className="relative min-h-0 flex-1 p-[var(--sp-4)]">
         <div ref={containerRef} className="graph-canvas h-full w-full">
           {canvasAvailable ? (
-            <GraphCanvasControls
-              onZoomIn={handleZoomIn}
-              onZoomOut={handleZoomOut}
-              onFit={handleFit}
-              onResetLayout={handleResetLayout}
-            />
+            <>
+              <GraphCanvasControls
+                onZoomIn={handleZoomIn}
+                onZoomOut={handleZoomOut}
+                onFit={handleFit}
+                onResetLayout={handleResetLayout}
+              />
+              <GraphInfo
+                zoom={zoom}
+                selectedNode={data.nodes.find((n) => n.id === selectedNodeId) ?? null}
+              />
+              <GraphLegend data={data} colorMode={colorMode} hiddenTypes={typeFilter} />
+            </>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--background)] text-[12px] text-[var(--text-muted)]">
               {t("graph.canvasUnavailable")}
@@ -297,7 +352,13 @@ function nodeSize(degree: number): number {
 function createRenderer(
   graph: Graph,
   container: HTMLElement,
-  stateRef: React.RefObject<{ hovered: string | null; selected: string | null; search: string }>,
+  stateRef: React.RefObject<{
+    hovered: string | null;
+    selected: string | null;
+    search: string;
+    typeFilter: Set<string>;
+    degreeThreshold: number;
+  }>,
 ): Sigma {
   const renderer = new Sigma(graph, container, {
     renderEdgeLabels: false,
@@ -311,18 +372,31 @@ function createRenderer(
   renderer.setSetting("nodeReducer", (node, data) => {
     const state = stateRef.current;
     const next = { ...data };
+    const typed = data as NodeShape;
+    // Type + degree filters fully hide nodes (consistent with the design's
+    // checkbox/range semantics). Search hides non-matches too; previously it
+    // also set a DIM color that was never visible behind hidden=true.
+    if (state.typeFilter.has(String(typed.type ?? ""))) {
+      next.hidden = true;
+      return next;
+    }
+    const degree = typeof typed.degree === "number" ? typed.degree : 0;
+    if (state.degreeThreshold > 0 && degree <= state.degreeThreshold) {
+      next.hidden = true;
+      return next;
+    }
     const matchesSearch =
       !state.search ||
       String(data.label ?? "")
         .toLowerCase()
         .includes(state.search.toLowerCase());
+    if (state.search && !matchesSearch) {
+      next.hidden = true;
+      return next;
+    }
     const hovered = state.hovered;
     const isNeighbor =
       hovered && (node === hovered || graph.areNeighbors(node, hovered));
-    if (state.search && !matchesSearch) {
-      next.color = DIM_COLOR;
-      next.hidden = true;
-    }
     if (hovered && !isNeighbor) {
       next.color = DIM_COLOR;
     }

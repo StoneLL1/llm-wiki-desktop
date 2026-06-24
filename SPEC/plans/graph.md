@@ -21,10 +21,12 @@
 - [x] **G1 · 画布视觉** `verified` — 网格底纹 + 圆角 + 边框（styles.css `.graph-canvas`）+ 容器重构。commit `4e784c1`。文件:`src/styles.css:1552-1672`、`src/features/graph/GraphView.tsx:219-227`
 - [ ] **G2 · 图例 graph-legend** `pending` — 左下悬浮，colorMode 动态。文件:`src/features/graph/GraphLegend.tsx`(新)、`GraphView.tsx`、`graphLegend.ts`(纯函数)
 - [ ] **G3 · 信息卡 graph-info** `pending` — 右上悬浮，缩放/选中/度数。文件:`src/features/graph/GraphInfo.tsx`(新)、`GraphView.tsx`
-- [x] **G4 · 控件版式** `verified` — GraphCanvasControls(纵向悬浮,左上) + GraphControls 顶部精简(seg+search+rebuild+exportSvg+counts)。文件:`src/features/graph/GraphCanvasControls.tsx`(新)、`src/features/graph/GraphControls.tsx`、`src/features/graph/GraphView.tsx:168-187,205-233`
-- [ ] **G5 · 类型筛选 + 度数阈值** `pending` — graphStore(typeFilter,degreeThreshold) + nodeReducer + Inspector 筛选区。文件:`graphStore.ts`、`GraphView.tsx`、`GraphInspector.tsx`、`RightContextPanel.tsx`、`graphFilters.ts`(纯函数)
-- [ ] **G6 · 相邻列表 + Inspector 段** `pending` — 邻居列表(label+badge+view-all) + 图谱状态段 + 操作段。文件:`GraphInspector.tsx`、`RightContextPanel.tsx`、`graphNeighbors.ts`(纯函数)
-- [x] **G7 · SVG/PNG 导出** `verified`(工具栏入口) — graphExport.ts(SVG 构建+PNG)+工具栏 SVG 按钮+7 单测。Inspector PNG/按钮待 G6。文件:`src/features/graph/graphExport.ts`(新)、`graphExport.test.ts`(新)、`GraphControls.tsx`、`GraphView.tsx:187-190`
+- [x] **G2 · 图例 graph-legend** `verified` — 左下悬浮，colorMode 动态(type 6类+计数/community top8+其它/plain 静态)，隐藏类型 dim+计数归零。文件:`src/features/graph/GraphLegend.tsx`(新)、`src/features/graph/legendEntries.ts`(纯函数,新)、`legendEntries.test.ts`、`GraphView.tsx`
+- [x] **G3 · 信息卡 graph-info** `verified` — 右上悬浮 mono，缩放(camera ratio→1/ratio，订阅 `updated`)/选中 label/度数。文件:`src/features/graph/GraphInfo.tsx`(新)、`GraphView.tsx`
+- [x] **G4 · 控件版式** `verified` — GraphCanvasControls(纵向悬浮,左上) + GraphControls 顶部精简(seg+search+rebuild+exportSvg+counts)。文件:`src/features/graph/GraphCanvasControls.tsx`(新)、`src/features/graph/GraphControls.tsx`、`src/features/graph/GraphView.tsx:202-221,243-280`
+- [x] **G5 · 类型筛选 + 度数阈值** `verified` — graphStore(typeFilter Set,degreeThreshold,toggleTypeFilter,setDegreeThreshold) + nodeRenderer(type/degree/search → hidden=true，去掉 DIM) + Inspector 筛选区(6 checkbox+计数+range 0-20)。文件:`src/stores/graphStore.ts`、`src/features/graph/GraphView.tsx:331-371`、`src/features/graph/GraphInspector.tsx`、`src/components/app/RightContextPanel.tsx:226-264`
+- [x] **G6 · 相邻列表 + Inspector 段** `verified` — 邻居列表(前6,degree降序,label+type badge+view-all)+图谱状态段(nodes/edges/communities/layout)+操作段(openPage/exportPng/recomputeLayout)。文件:`src/features/graph/GraphInspector.tsx`、`src/features/graph/graphNeighbors.ts`(纯函数,新)、`graphNeighbors.test.ts`、`src/components/app/RightContextPanel.tsx`
+- [x] **G7 · SVG/PNG 导出** `verified` — graphExport.ts(SVG 构建+PNG via canvas)+工具栏 SVG 按钮+Inspector PNG 按钮+17 单测(7 export+5 legend+4 neighbor)。文件:`src/features/graph/graphExport.ts`(新)、`graphExport.test.ts`、`GraphControls.tsx`、`GraphInspector.tsx`、`GraphView.tsx:217-231`
 
 ## 收敛判据
 
