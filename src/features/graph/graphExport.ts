@@ -48,7 +48,9 @@ export function buildGraphSvg(graph: Graph, selectedNodeId: string | null, filte
   const searchLower = filters.search.trim().toLowerCase();
   graph.forEachNode((id, attrs) => {
     const typed = attrs as Record<string, unknown>;
-    const type = typeof typed.type === "string" ? (typed.type as string) : undefined;
+    // Read the wiki page type from `pageType` — sigma reserves `type` as its
+    // rendering-program key, so GraphView stores our page type there. See gotchas.
+    const type = typeof typed.pageType === "string" ? (typed.pageType as string) : undefined;
     const degree = typeof typed.degree === "number" ? (typed.degree as number) : 0;
     // Apply the same hide rules as the nodeReducer.
     if (type && filters.hiddenTypes.has(type)) return;

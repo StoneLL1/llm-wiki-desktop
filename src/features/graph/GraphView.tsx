@@ -33,7 +33,12 @@ interface NodeShape {
   y?: number;
   community?: number;
   label?: string;
-  type?: string;
+  // Our wiki page type (entity/concept/source/...). Deliberately NOT named
+  // `type` — sigma v3 reserves the graphology `type` attribute as its node
+  // *rendering program* key ("circle"/"point"/...). Setting `type: "comparison"`
+  // makes sigma look up a program that doesn't exist and throw
+  // "could not find a suitable program for node type" at init. See gotchas.
+  pageType?: string;
   color?: string;
   degree?: number;
   size?: number;
@@ -332,7 +337,7 @@ function buildGraph(data: GraphData): { graph: Graph; computed: boolean } {
     graph.addNode(node.id, {
       label: node.label,
       size: nodeSize(node.degree),
-      type: node.type,
+      pageType: node.type,
       starred: node.starred,
       degree: node.degree,
     });
@@ -407,7 +412,7 @@ function createRenderer(
     // Type + degree filters fully hide nodes (consistent with the design's
     // checkbox/range semantics). Search hides non-matches too; previously it
     // also set a DIM color that was never visible behind hidden=true.
-    if (state.typeFilter.has(String(typed.type ?? ""))) {
+    if (state.typeFilter.has(String(typed.pageType ?? ""))) {
       next.hidden = true;
       return next;
     }
@@ -456,7 +461,7 @@ function applyColors(graph: Graph, mode: GraphColorMode): void {
 }
 
 function baseColorFor(
-  attrs: { type?: string; community?: number },
+  attrs: { pageType?: string; community?: number },
   mode: GraphColorMode,
 ): string {
   if (mode === "plain") return PLAIN_COLOR;
@@ -464,7 +469,7 @@ function baseColorFor(
     const community = typeof attrs.community === "number" ? attrs.community : 0;
     return COMMUNITY_PALETTE[community % COMMUNITY_PALETTE.length];
   }
-  return PAGE_TYPE_COLORS[attrs.type as keyof typeof PAGE_TYPE_COLORS] ?? PLAIN_COLOR;
+  return PAGE_TYPE_COLORS[attrs.pageType as keyof typeof PAGE_TYPE_COLORS] ?? PLAIN_COLOR;
 }
 
 function refresh(renderer: Sigma | null): void {
