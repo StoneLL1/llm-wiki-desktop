@@ -68,7 +68,9 @@ impl LintService {
                 issues.push(LintIssue {
                     id: format!("dead_link:{}:{target}", page.path),
                     source: LintIssueSource::Local,
-                    severity: LintSeverity::Warning,
+                    // Dead links break navigation — they are "must-fix", so the
+                    // summary card's error count carries real data (PRD-LINT-001).
+                    severity: LintSeverity::Error,
                     issue_type: LintIssueType::DeadLink,
                     path: page.path.clone(),
                     range: line.map(|l| LintRange {
@@ -275,7 +277,9 @@ impl LintService {
             issues.push(LintIssue {
                 id: format!("index_drift:wiki/index.md:{target}"),
                 source: LintIssueSource::Local,
-                severity: LintSeverity::Warning,
+                // Index drift means the entry point references missing pages —
+                // must-fix, surfaces in the error summary (PRD-LINT-001).
+                severity: LintSeverity::Error,
                 issue_type: LintIssueType::IndexDrift,
                 path: "wiki/index.md".into(),
                 range: None,
@@ -1082,6 +1086,64 @@ mod tests {
         assert!(report.issues.iter().any(|i| {
             i.issue_type == LintIssueType::IndexDrift && i.target.as_deref() == Some("ghost")
         }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn severity_grading_marks_dead_link_and_index_drift_as_error() {
+        // PRD-LINT-001: dead links and index drift are "must-fix" → Error so the
+        // summary card's error count is meaningful; frontmatter stays Warning.
+        let (context, root) = tmp_context("severity");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nSee [[ghost]].",
+        );
+        write_file(
+            &context,
+            "wiki/concepts/bare.md",
+            "# Bare\n\nLinks [[agent]].",
+        );
+        write_file(
+            &context,
+            "wiki/index.md",
+            "# Index\n\n- [[agent]]\n- [[missing]]\n",
+        );
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let dead = report
+            .issues
+            .iter()
+            .find(|i| i.issue_type == LintIssueType::DeadLink)
+            .expect("dead link expected");
+        assert_eq!(
+            dead.severity,
+            LintSeverity::Error,
+            "dead links must be error-grade"
+        );
+        let drift = report
+            .issues
+            .iter()
+            .find(|i| i.issue_type == LintIssueType::IndexDrift)
+            .expect("index drift expected");
+        assert_eq!(
+            drift.severity,
+            LintSeverity::Error,
+            "index drift must be error-grade"
+        );
+        let fm = report
+            .issues
+            .iter()
+            .find(|i| i.issue_type == LintIssueType::MissingFrontmatter)
+            .expect("missing frontmatter expected");
+        assert_eq!(
+            fm.severity,
+            LintSeverity::Warning,
+            "missing frontmatter stays warning-grade"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
