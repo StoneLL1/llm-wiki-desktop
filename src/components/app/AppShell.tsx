@@ -162,7 +162,7 @@ export function AppShell() {
       ) : displayedPendingAction ? (
         <ConfirmationDialog
           action={displayedPendingAction}
-          checkpointExists={false}
+          checkpointExists={displayedPendingAction.checkpointHash != null}
           onCancel={() => {
             if (pendingAction) {
               void cancelPendingAction();
