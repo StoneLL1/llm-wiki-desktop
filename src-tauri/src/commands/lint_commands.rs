@@ -8,8 +8,9 @@ use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
 use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus};
 use crate::models::lint::{
-    ApplyLintFixesBatchRequest, ApplyLintFixRequest, DeepLintReport, GetDeepLintReportRequest,
-    LintBatchOutcome, LintFixOutcome, LintReport, RunLocalLintRequest, StartDeepLintRequest,
+    AddLintIgnoreRequest, ApplyLintFixesBatchRequest, ApplyLintFixRequest, DeepLintReport,
+    GetDeepLintReportRequest, LintBatchOutcome, LintFixOutcome, LintIgnoreFile, LintReport,
+    ListLintIgnoresRequest, RemoveLintIgnoreRequest, RunLocalLintRequest, StartDeepLintRequest,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
@@ -307,6 +308,40 @@ pub fn apply_lint_fixes(
             )?;
     }
     Ok(outcome)
+}
+
+/// Record an ignored (path, rule) so `run_local_lint` skips it on future scans.
+#[tauri::command]
+pub fn add_lint_ignore(
+    state: State<'_, AppState>,
+    request: AddLintIgnoreRequest,
+) -> Result<LintIgnoreFile, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .lint_service
+        .add_ignore(&context, &request.path, request.rule)
+}
+
+/// Remove an ignored (path, rule) so it is reported again.
+#[tauri::command]
+pub fn remove_lint_ignore(
+    state: State<'_, AppState>,
+    request: RemoveLintIgnoreRequest,
+) -> Result<LintIgnoreFile, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .lint_service
+        .remove_ignore(&context, &request.path, request.rule)
+}
+
+/// Return the current ignore list.
+#[tauri::command]
+pub fn list_lint_ignores(
+    state: State<'_, AppState>,
+    request: ListLintIgnoresRequest,
+) -> Result<LintIgnoreFile, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.lint_service.list_ignores(&context)
 }
 
 enum ResolvedRoute {

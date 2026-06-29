@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::errors::BackendError;
 use crate::models::confirmation::{ActionPreview, PendingAction, PendingActionType, RiskLevel};
 use crate::models::lint::{
     Fixability, LintAgentIssue, LintBatchConfirmation, LintBatchOutcome, LintBatchSkip,
-    LintFixOutcome, LintFixOutcomeKind, LintIssue, LintIssueSource, LintIssueType, LintRange,
-    LintReport, LintSeverity,
+    LintFixOutcome, LintFixOutcomeKind, LintIgnoreEntry, LintIgnoreFile, LintIssue, LintIssueSource,
+    LintIssueType, LintRange, LintReport, LintSeverity,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{WikiPageMeta, WikiPageType};
@@ -17,6 +17,9 @@ use crate::utils::markdown_utils::{
 use crate::utils::time_utils::now_rfc3339;
 
 const DEEP_LINT_EXCERPT_CHARS: usize = 240;
+/// Persisted lint-ignore list, recording (path, rule) pairs the user has
+/// dismissed so `run_local_lint` skips them on subsequent scans.
+const LINT_IGNORE_PATH: &str = ".app/lint-ignore.json";
 /// Pages linked from `index.md` aren't "orphans" even though nothing links
 /// back to them, and the structural pages themselves are never orphans.
 const STRUCTURAL_FILES: &[&str] = &["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
@@ -243,6 +246,21 @@ impl LintService {
         // Index drift (only when wiki/index.md exists).
         issues.extend(self.check_index_drift(context, &lookup));
 
+        // Drop issues the user has dismissed via `.app/lint-ignore.json`. The
+        // match key is (path, rule): ignoring a rule on a page suppresses every
+        // occurrence of that rule on that page.
+        let ignored_keys: HashSet<(String, LintIssueType)> = self
+            .load_ignores(context)
+            .ignored
+            .into_iter()
+            .map(|entry| (entry.path, entry.rule))
+            .collect();
+        if !ignored_keys.is_empty() {
+            issues.retain(|issue| {
+                !ignored_keys.contains(&(issue.path.clone(), issue.issue_type))
+            });
+        }
+
         issues.sort_by(|a, b| {
             severity_rank(a.severity)
                 .cmp(&severity_rank(b.severity))
@@ -255,6 +273,81 @@ impl LintService {
             generated_at: now_rfc3339(),
             scanned_pages: scanned,
         })
+    }
+
+    /// Read `.app/lint-ignore.json`. A missing file is the first-run default
+    /// (empty); an unreadable/corrupt file is logged and treated as empty so a
+    /// bad ignore list never blocks linting (mirrors the bookmarks reader).
+    fn load_ignores(&self, context: &ProjectContext) -> LintIgnoreFile {
+        match self
+            .file_store
+            .read_json::<LintIgnoreFile>(context, LINT_IGNORE_PATH)
+        {
+            Ok(file) => file,
+            Err(err) if err.code == "FILE_READ_FAILED" => LintIgnoreFile::default(),
+            Err(err) => {
+                eprintln!(
+                    "[lint] ignoring unreadable {LINT_IGNORE_PATH} (treating as empty): {}",
+                    err.message
+                );
+                LintIgnoreFile::default()
+            }
+        }
+    }
+
+    /// Persist the ignore list. `write_atomic` creates `.app/` if absent.
+    fn save_ignores(
+        &self,
+        context: &ProjectContext,
+        file: &LintIgnoreFile,
+    ) -> Result<(), BackendError> {
+        self.file_store
+            .write_json_atomic(context, LINT_IGNORE_PATH, file)
+    }
+
+    /// Record an ignored `(path, rule)`. Dedupes by key (re-adding refreshes
+    /// the timestamp) and returns the resulting list.
+    pub fn add_ignore(
+        &self,
+        context: &ProjectContext,
+        path: &str,
+        rule: LintIssueType,
+    ) -> Result<LintIgnoreFile, BackendError> {
+        let mut file = self.load_ignores(context);
+        if let Some(existing) = file
+            .ignored
+            .iter_mut()
+            .find(|entry| entry.path == path && entry.rule == rule)
+        {
+            existing.created_at = now_rfc3339();
+        } else {
+            file.ignored.push(LintIgnoreEntry {
+                path: path.to_string(),
+                rule,
+                created_at: now_rfc3339(),
+            });
+        }
+        self.save_ignores(context, &file)?;
+        Ok(file)
+    }
+
+    /// Remove an ignored `(path, rule)`. Returns the resulting list.
+    pub fn remove_ignore(
+        &self,
+        context: &ProjectContext,
+        path: &str,
+        rule: LintIssueType,
+    ) -> Result<LintIgnoreFile, BackendError> {
+        let mut file = self.load_ignores(context);
+        file.ignored
+            .retain(|entry| !(entry.path == path && entry.rule == rule));
+        self.save_ignores(context, &file)?;
+        Ok(file)
+    }
+
+    /// Return the current ignore list (empty when none persisted).
+    pub fn list_ignores(&self, context: &ProjectContext) -> Result<LintIgnoreFile, BackendError> {
+        Ok(self.load_ignores(context))
     }
 
     fn check_index_drift(
@@ -1826,6 +1919,101 @@ mod tests {
             .apply_fixes_batch(&context, &git, std::slice::from_ref(&bad), &HashMap::new())
             .expect_err("out-of-scope path must abort the batch");
         assert_eq!(err.code, "LINT_FIX_PATH_OUT_OF_SCOPE");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_local_lint_excludes_ignored_issues() {
+        let (context, root) = tmp_context("ignore");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nSee [[ghost]].",
+        );
+        write_file(&context, "wiki/concepts/bare.md", "# Bare\n\n[[agent]].");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let service = LintService::default();
+        let search = SearchService::default();
+        let before = service.run_local_lint(&context, &search).unwrap();
+        assert!(before.issues.iter().any(|i| i.issue_type == LintIssueType::DeadLink));
+        assert!(before
+            .issues
+            .iter()
+            .any(|i| i.issue_type == LintIssueType::MissingFrontmatter));
+
+        // Ignore dead links on agent.md only — the (path, rule) granularity.
+        service
+            .add_ignore(&context, "wiki/concepts/agent.md", LintIssueType::DeadLink)
+            .unwrap();
+
+        let after = service.run_local_lint(&context, &search).unwrap();
+        assert!(
+            !after
+                .issues
+                .iter()
+                .any(|i| i.issue_type == LintIssueType::DeadLink),
+            "ignored dead link must be suppressed"
+        );
+        assert!(
+            after.issues
+                .iter()
+                .any(|i| i.issue_type == LintIssueType::MissingFrontmatter),
+            "unrelated issue must remain"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn add_then_remove_lint_ignore_round_trips() {
+        let (context, root) = tmp_context("ignore-rt");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        let service = LintService::default();
+
+        assert!(service.list_ignores(&context).unwrap().ignored.is_empty());
+
+        let after_add = service
+            .add_ignore(&context, "wiki/concepts/x.md", LintIssueType::DeadLink)
+            .unwrap();
+        assert_eq!(after_add.ignored.len(), 1);
+        // Dedupe: re-adding the same (path, rule) must not duplicate.
+        service
+            .add_ignore(&context, "wiki/concepts/x.md", LintIssueType::DeadLink)
+            .unwrap();
+        let listed = service.list_ignores(&context).unwrap();
+        assert_eq!(listed.ignored.len(), 1);
+        assert_eq!(listed.ignored[0].path, "wiki/concepts/x.md");
+        assert_eq!(listed.ignored[0].rule, LintIssueType::DeadLink);
+        assert!(context.app_dir.join("lint-ignore.json").exists());
+
+        let after_remove = service
+            .remove_ignore(&context, "wiki/concepts/x.md", LintIssueType::DeadLink)
+            .unwrap();
+        assert!(after_remove.ignored.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_local_lint_tolerates_corrupt_ignore_file() {
+        let (context, root) = tmp_context("ignore-corrupt");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nSee [[ghost]].",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        write_file(&context, ".app/lint-ignore.json", "{ this is not valid json");
+        // A corrupt ignore file must not crash linting; it is treated as empty.
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        assert!(report
+            .issues
+            .iter()
+            .any(|i| i.issue_type == LintIssueType::DeadLink));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
