@@ -92,6 +92,28 @@ pub enum ExportRoutePreference {
     Byok,
 }
 
+/// User-controlled content flags for an export. These adjust the prompt only —
+/// they never touch schema, lint, or agent behavior. `embed_css` reflects the
+/// self-contained HTML contract (always inlined); it is kept as a flag so the
+/// dialog can surface it, and the prompt reinforces it when set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExportContentOptions {
+    pub include_frontmatter: bool,
+    pub embed_css: bool,
+    pub embed_images: bool,
+}
+
+impl Default for ExportContentOptions {
+    fn default() -> Self {
+        Self {
+            include_frontmatter: true,
+            embed_css: true,
+            embed_images: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartExportRequest {
@@ -106,6 +128,12 @@ pub struct StartExportRequest {
     pub agent: Option<AgentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<LlmProviderKind>,
+    /// Selected template name (e.g. `default-serif`). When set, the matching
+    /// skill's `template.html` styling is injected into the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub options: ExportContentOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +159,10 @@ pub struct RegenerateExportRequest {
     pub agent: Option<AgentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<LlmProviderKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub options: ExportContentOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,7 +183,9 @@ pub struct OpenExportFolderRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportRecord, ExportRoute, ExportStatus, ExportType};
+    use super::{
+        ExportContentOptions, ExportRecord, ExportRoute, ExportStatus, ExportType,
+    };
 
     #[test]
     fn skill_folder_maps_each_type() {
@@ -216,5 +250,28 @@ mod tests {
             serde_json::to_string(&ExportType::ConceptMap).unwrap(),
             "\"concept_map\""
         );
+    }
+
+    #[test]
+    fn content_options_default_and_round_trip() {
+        let defaults = ExportContentOptions::default();
+        assert!(defaults.include_frontmatter);
+        assert!(defaults.embed_css);
+        assert!(!defaults.embed_images);
+
+        // Absent fields deserialize to the same defaults (camelCase keys).
+        let from_empty: ExportContentOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_empty, defaults);
+
+        let custom = ExportContentOptions {
+            include_frontmatter: false,
+            embed_css: true,
+            embed_images: true,
+        };
+        let value = serde_json::to_value(&custom).unwrap();
+        assert_eq!(value["includeFrontmatter"], serde_json::json!(false));
+        assert_eq!(value["embedImages"], serde_json::json!(true));
+        let back: ExportContentOptions = serde_json::from_value(value).unwrap();
+        assert_eq!(back, custom);
     }
 }

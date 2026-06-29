@@ -21,7 +21,7 @@ use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::agent::{AgentDetectionState, AgentKind};
 use llm_wiki_desktop_lib::models::chat::{ChatMessage, ChatRole, ChatRoute};
 use llm_wiki_desktop_lib::models::compile::{CompileFile, CompileManifest};
-use llm_wiki_desktop_lib::models::export::{ExportRoute, ExportType};
+use llm_wiki_desktop_lib::models::export::{ExportContentOptions, ExportRoute, ExportType};
 use llm_wiki_desktop_lib::models::git::CheckpointPurpose;
 use llm_wiki_desktop_lib::models::import::{ExtractionStatus, ImportRequest, SourceFileType};
 use llm_wiki_desktop_lib::models::llm::LlmProviderKind;
@@ -522,6 +522,8 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
             Some("wiki/concepts/cats.md"),
             &SearchService::default(),
             "en",
+            None,
+            &ExportContentOptions::default(),
         )
         .unwrap();
     assert!(prompt.contains("html-beautiful-read"));

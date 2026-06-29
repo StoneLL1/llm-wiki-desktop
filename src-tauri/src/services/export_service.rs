@@ -1,5 +1,7 @@
 use crate::errors::BackendError;
-use crate::models::export::{ExportRecord, ExportRoute, ExportStatus, ExportType};
+use crate::models::export::{
+    ExportContentOptions, ExportRecord, ExportRoute, ExportStatus, ExportType,
+};
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
 use crate::services::SearchService;
@@ -8,6 +10,39 @@ use crate::utils::time_utils::now_rfc3339;
 const EXPORTS_HTML_DIR: &str = "exports/html";
 const EXPORTS_INDEX_PATH: &str = ".app/exports.json";
 const PAGE_EXCERPT_CHARS: usize = 600;
+
+// Skill `template.html` styling references, baked in at compile time (mirrors
+// `compile_service` embedding SKILL.md). Injecting these into the prompt makes
+// the BYOK route — which has no skill workspace — follow the same styling the
+// Agent CLI gets from its skill folder. Templates are styling-only.
+const BEAUTIFUL_READ_TEMPLATE: &str =
+    include_str!("../../templates/skills/html-beautiful-read/template.html");
+const KNOWLEDGE_CARD_TEMPLATE: &str =
+    include_str!("../../templates/skills/html-knowledge-card/template.html");
+const CONCEPT_MAP_TEMPLATE: &str =
+    include_str!("../../templates/skills/html-concept-map/template.html");
+const PROJECT_REPORT_TEMPLATE: &str =
+    include_str!("../../templates/skills/html-project-report/template.html");
+
+fn template_for(export_type: ExportType) -> &'static str {
+    match export_type {
+        ExportType::BeautifulRead => BEAUTIFUL_READ_TEMPLATE,
+        ExportType::KnowledgeCard => KNOWLEDGE_CARD_TEMPLATE,
+        ExportType::ConceptMap => CONCEPT_MAP_TEMPLATE,
+        ExportType::ProjectReport => PROJECT_REPORT_TEMPLATE,
+    }
+}
+
+/// A short style-direction clause for the named template. The skill's
+/// `template.html` is always the styling baseline; the name communicates the
+/// desired aesthetic the model should lean into.
+fn style_direction(template_name: &str) -> &'static str {
+    match template_name {
+        "modern-sans" => "modern sans-serif system font stack for body and headings",
+        "editorial-magazine" => "magazine feel: prominent display headings, generous measure, optional drop cap",
+        _ => "default serif treatment",
+    }
+}
 
 /// Skill-driven HTML export orchestration: prompt assembly, output-path
 /// derivation, HTML extraction, and record persistence. The model/Agent run
@@ -28,6 +63,10 @@ impl ExportService {
     /// Assemble the prompt for the matching `skills/html-*` Skill. Single-page
     /// jobs embed the source page body; project jobs embed purpose + page
     /// summaries. No secret or API key is ever placed in the prompt.
+    ///
+    /// `template` (when set) injects the skill's `template.html` styling
+    /// baseline so the BYOK route — which lacks the Agent's skill workspace —
+    /// still follows the template. `options` adjusts content clauses only.
     pub fn build_export_prompt(
         &self,
         context: &ProjectContext,
@@ -35,6 +74,8 @@ impl ExportService {
         source_path: Option<&str>,
         search_service: &SearchService,
         language: &str,
+        template: Option<&str>,
+        options: &ExportContentOptions,
     ) -> Result<String, BackendError> {
         let skill = export_type.skill_folder();
         let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
@@ -44,14 +85,24 @@ impl ExportService {
         // structural HTML contract (single doctype, inlined CSS, no external
         // resources) is language-independent and stays as written below.
 
+        // Embedding images as base64 is the only content option that relaxes
+        // the self-contained contract; otherwise the strict "inline SVG only"
+        // clause stands.
+        let resource_clause = if options.embed_images {
+            "Do NOT load external stylesheets, fonts, or scripts. You may embed images as base64 \
+             data URIs where helpful, and use inline SVG otherwise; never reference external \
+             image URLs."
+        } else {
+            "Do NOT load external stylesheets, fonts, images, or scripts (inline SVG only)."
+        };
+
         let mut prompt = String::new();
         prompt.push_str(&format!(
             "You are generating a single, self-contained HTML document for a local Markdown wiki, \
              following the `{skill}` skill. Emit ONLY a complete standalone HTML document: a single \
-             `<!doctype html>` page with all CSS inlined in a `<style>` block. Do NOT load external \
-             stylesheets, fonts, images, or scripts (inline SVG only). Do NOT modify any project \
-             files. You may wrap the whole document in a fenced ```html block; everything else will \
-             be discarded.\n",
+             `<!doctype html>` page with all CSS inlined in a `<style>` block. {resource_clause} \
+             Do NOT modify any project files. You may wrap the whole document in a fenced ```html \
+             block; everything else will be discarded.\n",
         ));
         prompt.push_str(&crate::utils::i18n::language_instruction(language));
         prompt.push_str(" Write the visible document text in that language.\n");
@@ -93,6 +144,12 @@ impl ExportService {
                          bullets, a one-line source attribution).",
                     );
                 }
+                if options.include_frontmatter {
+                    prompt.push_str(
+                        " Render the page's frontmatter (title, type, tags) as a small metadata \
+                         header near the top of the document.",
+                    );
+                }
             }
             ExportType::ConceptMap => {
                 if let Some(path) = source_path {
@@ -124,6 +181,22 @@ impl ExportService {
                 );
             }
         }
+
+        if let Some(name) = template {
+            prompt.push_str(&format!(
+                "\n--- Template: {} ({}) ---\n",
+                name,
+                style_direction(name)
+            ));
+            prompt.push_str(
+                "Use the following HTML template as the styling baseline: keep its CSS structure \
+                 and visual language, fill the {{...}} regions with generated content, and extend \
+                 rather than contradict it.\n",
+            );
+            prompt.push_str(template_for(export_type).trim());
+            prompt.push('\n');
+        }
+
         Ok(prompt)
     }
 
@@ -282,6 +355,32 @@ impl ExportService {
             created_at: now_rfc3339(),
             route,
             status: ExportStatus::Succeeded,
+            task_id,
+        }
+    }
+
+    /// Build a Failed record so a botched export still appears in the history
+    /// list with a retry entry. `output_path` is the would-be path (no file is
+    /// written on failure); `route` is the intended route derived from the
+    /// preference, since the resolved route may not be known at the point of
+    /// failure.
+    pub fn new_failed_record(
+        export_type: ExportType,
+        title: String,
+        source_path: Option<String>,
+        output_path: String,
+        route: ExportRoute,
+        task_id: Option<String>,
+    ) -> ExportRecord {
+        ExportRecord {
+            id: format!("export-{}", uuid::Uuid::new_v4()),
+            export_type,
+            title,
+            source_path,
+            output_path,
+            created_at: now_rfc3339(),
+            route,
+            status: ExportStatus::Failed,
             task_id,
         }
     }
@@ -553,6 +652,8 @@ mod tests {
                 Some("wiki/concepts/agent.md"),
                 &SearchService::default(),
                 "en",
+                None,
+                &ExportContentOptions::default(),
             )
             .unwrap();
         assert!(prompt.contains("html-beautiful-read"));
@@ -574,6 +675,8 @@ mod tests {
                 None,
                 &SearchService::default(),
                 "en",
+                None,
+                &ExportContentOptions::default(),
             )
             .expect_err("source required");
         assert_eq!(err.code, "EXPORT_SOURCE_REQUIRED");
@@ -603,6 +706,8 @@ mod tests {
                 None,
                 &SearchService::default(),
                 "en",
+                None,
+                &ExportContentOptions::default(),
             )
             .unwrap();
         assert!(prompt.contains("html-project-report"));
@@ -634,6 +739,8 @@ mod tests {
                 Some("wiki/concepts/agent.md"),
                 &SearchService::default(),
                 "zh-CN",
+                None,
+                &ExportContentOptions::default(),
             )
             .unwrap();
         assert!(zh_prompt.contains("Respond in Simplified Chinese."));
@@ -648,10 +755,127 @@ mod tests {
                 Some("wiki/concepts/agent.md"),
                 &SearchService::default(),
                 "en",
+                None,
+                &ExportContentOptions::default(),
             )
             .unwrap();
         assert!(en_prompt.contains("Respond in English."));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_prompt_injects_template_when_requested() {
+        let (context, root) = tmp_context("prompt-tmpl");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nAn agent acts.",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let service = ExportService::default();
+        // No template ⇒ the styling baseline is not in the prompt.
+        let no_template = service
+            .build_export_prompt(
+                &context,
+                ExportType::BeautifulRead,
+                Some("wiki/concepts/agent.md"),
+                &SearchService::default(),
+                "en",
+                None,
+                &ExportContentOptions::default(),
+            )
+            .unwrap();
+        assert!(!no_template.contains("--- Template:"));
+        assert!(!no_template.contains("Source Serif Pro"));
+
+        // Template selected ⇒ its CSS (baked-in template.html) is injected.
+        let with_template = service
+            .build_export_prompt(
+                &context,
+                ExportType::BeautifulRead,
+                Some("wiki/concepts/agent.md"),
+                &SearchService::default(),
+                "en",
+                Some("modern-sans"),
+                &ExportContentOptions::default(),
+            )
+            .unwrap();
+        assert!(with_template.contains("--- Template: modern-sans"));
+        assert!(with_template.contains("modern sans-serif system font stack"));
+        // The skill's template.html styling baseline is present.
+        assert!(with_template.contains("Source Serif Pro"));
+        assert!(with_template.contains("{{body}}"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_prompt_respects_content_options() {
+        let (context, root) = tmp_context("prompt-opts");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\ntags: [ai]\n---\n\n# Agent\n\nAn agent acts.",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let service = ExportService::default();
+
+        // Defaults: frontmatter on, images off.
+        let defaults = service
+            .build_export_prompt(
+                &context,
+                ExportType::BeautifulRead,
+                Some("wiki/concepts/agent.md"),
+                &SearchService::default(),
+                "en",
+                None,
+                &ExportContentOptions::default(),
+            )
+            .unwrap();
+        assert!(defaults.contains("inline SVG only"));
+        assert!(!defaults.contains("base64 data URIs"));
+        assert!(defaults.contains("frontmatter"));
+
+        // Images on relaxes the clause; frontmatter off drops the instruction.
+        let images_on = ExportContentOptions {
+            include_frontmatter: false,
+            embed_css: true,
+            embed_images: true,
+        };
+        let prompt = service
+            .build_export_prompt(
+                &context,
+                ExportType::BeautifulRead,
+                Some("wiki/concepts/agent.md"),
+                &SearchService::default(),
+                "en",
+                None,
+                &images_on,
+            )
+            .unwrap();
+        assert!(prompt.contains("base64 data URIs"));
+        assert!(!prompt.contains("inline SVG only."));
+        assert!(!prompt.contains("Render the page's frontmatter"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_failed_record_marks_failed_status() {
+        let record = ExportService::new_failed_record(
+            ExportType::ProjectReport,
+            "Project report".into(),
+            None,
+            "exports/html/project-report-x.html".into(),
+            ExportRoute::Agent,
+            Some("task-1".into()),
+        );
+        assert_eq!(record.status, ExportStatus::Failed);
+        assert_eq!(record.export_type, ExportType::ProjectReport);
+        assert!(record.id.starts_with("export-"));
+        assert_eq!(record.task_id.as_deref(), Some("task-1"));
     }
 
     /// Each template.html must be styling-only — it must not carry schema/lint
