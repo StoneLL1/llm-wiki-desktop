@@ -313,6 +313,19 @@ impl LintService {
         path: &str,
         rule: LintIssueType,
     ) -> Result<LintIgnoreFile, BackendError> {
+        // The ignore path is only ever a string key matched against scanned
+        // issue paths (always `wiki/...`), so it has no file sink. Reject `..`
+        // anyway at the boundary so crafted UI input can't persist traversal
+        // strings into a project file.
+        if path.contains("..") {
+            return Err(BackendError::new(
+                "LINT_IGNORE_PATH_OUT_OF_SCOPE",
+                "Ignored paths must not escape the project folder.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": path })));
+        }
         let mut file = self.load_ignores(context);
         if let Some(existing) = file
             .ignored
@@ -606,11 +619,12 @@ impl LintService {
     ) -> Result<LintFixOutcome, BackendError> {
         let path = "wiki/index.md";
         if !confirm_high_risk {
+            let target = issue.target.clone().unwrap_or_default();
             return Ok(LintFixOutcome {
                 kind: LintFixOutcomeKind::NeedsConfirmation,
                 affected_paths: Vec::new(),
                 checkpoint: None,
-                pending_action: Some(index_drift_pending_action(path, &issue.message)),
+                pending_action: Some(index_drift_pending_action(path, &target, &issue.message)),
             });
         }
         let (affected_paths, checkpoint) =
@@ -918,10 +932,12 @@ impl LintService {
                     });
                 }
                 LintIssueType::IndexDrift => {
+                    let target = issue.target.clone().unwrap_or_default();
                     needs_confirmation.push(LintBatchConfirmation {
                         issue: issue.clone(),
                         pending_action: index_drift_pending_action(
                             "wiki/index.md",
+                            &target,
                             &issue.message,
                         ),
                     });
@@ -1004,9 +1020,12 @@ fn dead_link_pending_action(path: &str, target: &str) -> PendingAction {
     }
 }
 
-fn index_drift_pending_action(path: &str, message: &str) -> PendingAction {
+fn index_drift_pending_action(path: &str, target: &str, message: &str) -> PendingAction {
     PendingAction {
-        id: format!("lint-index-drift-{path}"),
+        // Include the target so multiple index-drift issues (one per stale link
+        // in wiki/index.md) get distinct confirmation ids instead of colliding
+        // in the registry and silently dropping all but the last.
+        id: format!("lint-index-drift-{path}-{target}"),
         action_type: PendingActionType::AgentAutoFix,
         title: "Regenerate wiki index".into(),
         message: format!("{message} Regenerate {path} from the current page set."),
@@ -1919,6 +1938,71 @@ mod tests {
             .apply_fixes_batch(&context, &git, std::slice::from_ref(&bad), &HashMap::new())
             .expect_err("out-of-scope path must abort the batch");
         assert_eq!(err.code, "LINT_FIX_PATH_OUT_OF_SCOPE");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_fix_gives_index_drift_confirmations_distinct_ids() {
+        // Two stale links in wiki/index.md must produce two confirmations with
+        // distinct ids; otherwise the registry keeps only the last.
+        let (context, root) = tmp_context("batch-drift-ids");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\n[[react]]",
+        );
+        write_file(
+            &context,
+            "wiki/concepts/react.md",
+            "---\ntitle: ReAct\ntype: concept\n---\n\n# ReAct\n\n[[agent]]",
+        );
+        write_file(
+            &context,
+            "wiki/index.md",
+            "# Index\n\n- [[agent]]\n- [[ghost1]]\n- [[ghost2]]\n",
+        );
+        write_file(&context, "wiki/log.md", "# Log\n");
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let drift_count = report
+            .issues
+            .iter()
+            .filter(|i| i.issue_type == LintIssueType::IndexDrift)
+            .count();
+        assert_eq!(drift_count, 2);
+
+        let outcome = service
+            .apply_fixes_batch(&context, &git, &report.issues, &HashMap::new())
+            .unwrap();
+        let ids: Vec<&str> = outcome
+            .needs_confirmation
+            .iter()
+            .map(|c| c.pending_action.id.as_str())
+            .collect();
+        let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "index-drift confirmation ids must be distinct, got {ids:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn add_lint_ignore_rejects_traversal_path() {
+        let (context, root) = tmp_context("ignore-traversal");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        let service = LintService::default();
+        let err = service
+            .add_ignore(&context, "../etc/evil.md", LintIssueType::DeadLink)
+            .expect_err("traversal path must be rejected");
+        assert_eq!(err.code, "LINT_IGNORE_PATH_OUT_OF_SCOPE");
         std::fs::remove_dir_all(root).unwrap();
     }
 
