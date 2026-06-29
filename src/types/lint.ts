@@ -98,6 +98,88 @@ export interface LintFixConfirmRequest {
   expectedHash: string;
 }
 
+// --- Batch auto-fix (PRD-LINT-003) ---------------------------------------
+
+/** View-mode filter for the lint list / summary cards. */
+export type LintMode = "all" | "local" | "agent";
+
+export interface ApplyLintFixesBatchRequest {
+  projectId: string;
+  projectRootPath: string;
+  issues: LintIssue[];
+  /** `{path -> sha256}` captured at scan time; the optimistic-lock baseline
+   * for each safe fix. Paths missing here are skipped with LINT_FIX_HASH_REQUIRED. */
+  expectedHashes: Record<string, string>;
+}
+
+/** A high-risk fix awaiting user confirmation after a batch run. */
+export interface LintBatchConfirmation {
+  issue: LintIssue;
+  pendingAction: PendingAction;
+}
+
+/** An issue the batch could not handle (non-fixable, stale, missing hash). */
+export interface LintBatchSkip {
+  issueId: string;
+  path: string;
+  reasonCode: string;
+  reason: string;
+}
+
+export interface LintBatchOutcome {
+  /** Single Git checkpoint hash covering every applied safe fix. */
+  checkpoint?: string;
+  applied: LintFixOutcome[];
+  needsConfirmation: LintBatchConfirmation[];
+  skipped: LintBatchSkip[];
+}
+
+// --- lint-ignore (.app/lint-ignore.json) ---------------------------------
+
+/** One persisted ignore entry. Match key is `(path, rule)`. */
+export interface LintIgnoreEntry {
+  path: string;
+  rule: LintIssueType;
+  createdAt: string;
+}
+
+export interface LintIgnoreFile {
+  ignored: LintIgnoreEntry[];
+}
+
+export interface AddLintIgnoreRequest {
+  projectId: string;
+  projectRootPath: string;
+  path: string;
+  rule: LintIssueType;
+}
+
+export interface RemoveLintIgnoreRequest {
+  projectId: string;
+  projectRootPath: string;
+  path: string;
+  rule: LintIssueType;
+}
+
+export interface ListLintIgnoresRequest {
+  projectId: string;
+  projectRootPath: string;
+}
+
+// --- Safety preferences (UI-side; backend checkpoint is a hard boundary) --
+
+export interface LintSafetyPrefs {
+  /** Git checkpoint before writing — hard boundary, always enforced. */
+  checkpoint: boolean;
+  /** Commit immediately after the fix — fused with the checkpoint commit. */
+  commitAfter: boolean;
+  /** Run a wiki recompile after a successful fix. */
+  recompile: boolean;
+}
+
+/** Radio choice on the detail panel's 修复方案 group. */
+export type LintFixChoice = "fix" | "ignore";
+
 export const SEVERITY_ORDER: Record<LintSeverity, number> = {
   error: 0,
   warning: 1,

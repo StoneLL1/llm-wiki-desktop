@@ -9,6 +9,7 @@ interface LintIssueListProps {
   issues: LintIssue[];
   selectedIssueId: string | null;
   onSelect: (issueId: string) => void;
+  onApplyFix: (issue: LintIssue) => void;
 }
 
 const SEVERITY_ICON: Record<LintSeverity, typeof Info> = {
@@ -17,17 +18,35 @@ const SEVERITY_ICON: Record<LintSeverity, typeof Info> = {
   info: Info,
 };
 
-const SEVERITY_COLOR: Record<LintSeverity, string> = {
-  error: "text-[var(--error)]",
+const SEVERITY_ICON_COLOR: Record<LintSeverity, string> = {
+  error: "text-[var(--danger)]",
   warning: "text-[var(--warning)]",
-  info: "text-[var(--text-muted)]",
+  info: "text-[var(--info)]",
+};
+
+const SEVERITY_BADGE: Record<LintSeverity, string> = {
+  error: "badge badge--danger",
+  warning: "badge badge--warn",
+  info: "badge badge--info",
 };
 
 function groupLabel(issue: LintIssue, t: (key: string) => string): string {
   return `${t(`lint.severity.${issue.severity}`)} · ${t(`lint.source.${issue.source}`)}`;
 }
 
-export function LintIssueList({ issues, selectedIssueId, onSelect }: LintIssueListProps) {
+function subLine(issue: LintIssue): string {
+  const parts = [issue.path];
+  if (issue.range) parts.push(`L${issue.range.line}`);
+  if (issue.target) parts.push(`→ ${issue.target}`);
+  return parts.join(" · ");
+}
+
+export function LintIssueList({
+  issues,
+  selectedIssueId,
+  onSelect,
+  onApplyFix,
+}: LintIssueListProps) {
   const { t } = useTranslation();
 
   const grouped = useMemo(() => {
@@ -60,38 +79,68 @@ export function LintIssueList({ issues, selectedIssueId, onSelect }: LintIssueLi
         const first = group[0]!;
         return (
           <div key={key}>
-            <div className="px-4 pt-3 pb-1 text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+            <div className="px-5 pt-3 pb-1 text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
               {groupLabel(first, t)} · {group.length}
             </div>
             {group.map((issue) => {
               const Icon = SEVERITY_ICON[issue.severity];
               const active = issue.id === selectedIssueId;
+              const fixable = issue.fixability !== "none";
               return (
-                <button
+                <div
                   key={issue.id}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={active}
                   onClick={() => onSelect(issue.id)}
-                  className={`flex w-full items-start gap-2 border-l-2 px-4 py-2 text-left transition-colors ${
-                    active
-                      ? "border-[var(--accent)] bg-[var(--surface-muted)]"
-                      : "border-transparent hover:bg-[var(--surface-muted)]"
-                  }`}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onSelect(issue.id);
+                    }
+                  }}
+                  className={`issue-card ${active ? "is-selected" : ""}`}
                 >
-                  <Icon size={14} className={`mt-0.5 shrink-0 ${SEVERITY_COLOR[issue.severity]}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="truncate text-[12px] font-medium text-[var(--text-primary)]">
-                        {t(`lint.issueType.${issue.issueType}`)}
-                      </span>
-                      <span className="shrink-0 text-[10.5px] text-[var(--text-muted)]">
-                        {t(`lint.source.${issue.source}`)}
-                      </span>
+                  <span className={`issue-card__icon ${SEVERITY_ICON_COLOR[issue.severity]}`}>
+                    <Icon size={16} aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="issue-card__title">
+                      {t(`lint.issueType.${issue.issueType}`)}
                     </div>
-                    <div className="truncate font-mono text-[11px] text-[var(--text-muted)]">
-                      {issue.path}
+                    <div className="issue-card__sub">{subLine(issue)}</div>
+                    <div className="issue-card__tags">
+                      <span className={SEVERITY_BADGE[issue.severity]}>
+                        {t(`lint.severity.${issue.severity}`)}
+                      </span>
+                      <span className="badge">{t(`lint.issueType.${issue.issueType}`)}</span>
+                      <span className="badge">{t(`lint.source.${issue.source}`)}</span>
+                      {issue.fixability === "safe" ? (
+                        <span className="badge badge--outline">{t("lint.tag.autoFixable")}</span>
+                      ) : null}
+                      {issue.fixability === "high_risk" ? (
+                        <span className="badge badge--warn">{t("lint.tag.highRisk")}</span>
+                      ) : null}
                     </div>
                   </div>
-                </button>
+                  <div className="issue-card__actions">
+                    {fixable ? (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onSelect(issue.id);
+                          onApplyFix(issue);
+                        }}
+                        className="h-[26px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-2.5 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)]"
+                      >
+                        {issue.fixability === "high_risk"
+                          ? t("lint.card.details")
+                          : t("lint.card.fix")}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
               );
             })}
           </div>
