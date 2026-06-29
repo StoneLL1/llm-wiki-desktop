@@ -250,6 +250,11 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     const agentReady = detected.some((agent) => agent.isDefault && agent.state === "installed");
     const byokReady = statuses.some((provider) => provider.config.enabled && (provider.hasSecret || provider.config.provider === "ollama"));
     const latest = useProjectStore.getState().currentProject;
+    // Drop the result if the active project changed while the probes were in
+    // flight, so a slow probe for project A can't overwrite project B's route.
+    if (latest.projectId !== currentProject.projectId || latest.rootPath !== currentProject.rootPath) {
+      return;
+    }
     setCurrentProject({ ...latest, agentRoute: agentReady ? "agent" : byokReady ? "byok" : "unconfigured" });
   }, [currentProject.projectId, currentProject.rootPath, hasTauri, setCurrentProject]);
 

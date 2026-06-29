@@ -73,6 +73,13 @@ describe("AppShell confirmation dialog checkpoint wiring", () => {
 
     expect(screen.getByText("Checkpoint: not created yet")).toBeInTheDocument();
   });
+
+  it("treats a missing checkpointHash field as not created yet", () => {
+    useProjectStore.getState().setPendingAction(baseAction);
+    render(<AppShell />);
+
+    expect(screen.getByText("Checkpoint: not created yet")).toBeInTheDocument();
+  });
 });
 
 describe("AppShell first-screen agent detection", () => {
