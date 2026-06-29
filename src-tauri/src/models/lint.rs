@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::agent::AgentKind;
 use super::compile::CompileRoutePreference;
@@ -169,6 +170,55 @@ pub struct ApplyLintFixRequest {
     pub expected_hash: Option<String>,
     #[serde(default)]
     pub action_id: Option<String>,
+}
+
+/// Batch auto-fix request (PRD-LINT-003). One Git checkpoint protects every
+/// safe write; high-risk fixes are returned as confirmations for unified
+/// user review instead of being written immediately.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyLintFixesBatchRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub issues: Vec<LintIssue>,
+    /// `{path -> sha256}` captured at scan time, used as the optimistic-lock
+    /// baseline for each safe fix. Paths missing from the map are skipped with
+    /// `LINT_FIX_HASH_REQUIRED` rather than aborting the whole batch.
+    #[serde(default)]
+    pub expected_hashes: HashMap<String, String>,
+}
+
+/// Result of a batch auto-fix run.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LintBatchOutcome {
+    /// Single Git checkpoint hash covering every applied safe fix (the rollback
+    /// point). `None` when no safe fixes ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    /// Safe fixes that were written under the shared checkpoint.
+    pub applied: Vec<LintFixOutcome>,
+    /// High-risk fixes awaiting user confirmation. Each carries its source
+    /// issue so the command layer can register it for the existing confirm path.
+    pub needs_confirmation: Vec<LintBatchConfirmation>,
+    /// Issues the batch could not handle (non-fixable, stale, missing hash).
+    pub skipped: Vec<LintBatchSkip>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LintBatchConfirmation {
+    pub issue: LintIssue,
+    pub pending_action: crate::models::confirmation::PendingAction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LintBatchSkip {
+    pub issue_id: String,
+    pub path: String,
+    pub reason_code: String,
+    pub reason: String,
 }
 
 /// Result of an apply attempt. Kept as a struct with a discriminator field

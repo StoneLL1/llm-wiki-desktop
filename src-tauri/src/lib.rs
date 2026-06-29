@@ -183,6 +183,7 @@ pub fn run() {
             commands::lint_commands::start_deep_lint,
             commands::lint_commands::get_deep_lint_report,
             commands::lint_commands::apply_lint_fix,
+            commands::lint_commands::apply_lint_fixes,
             commands::export_commands::start_export,
             commands::export_commands::regenerate_export,
             commands::export_commands::list_exports,

@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use crate::errors::BackendError;
 use crate::models::confirmation::{ActionPreview, PendingAction, PendingActionType, RiskLevel};
 use crate::models::lint::{
-    Fixability, LintAgentIssue, LintFixOutcome, LintFixOutcomeKind, LintIssue, LintIssueSource,
-    LintIssueType, LintRange, LintReport, LintSeverity,
+    Fixability, LintAgentIssue, LintBatchConfirmation, LintBatchOutcome, LintBatchSkip,
+    LintFixOutcome, LintFixOutcomeKind, LintIssue, LintIssueSource, LintIssueType, LintRange,
+    LintReport, LintSeverity,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{WikiPageMeta, WikiPageType};
@@ -464,6 +465,82 @@ impl LintService {
         issue: &LintIssue,
         expected_hash: Option<&str>,
     ) -> Result<LintFixOutcome, BackendError> {
+        let (affected_paths, checkpoint) =
+            self.write_missing_frontmatter_fix(context, git_service, issue, expected_hash, None)?;
+        Ok(LintFixOutcome {
+            kind: LintFixOutcomeKind::Applied,
+            affected_paths,
+            checkpoint,
+            pending_action: None,
+        })
+    }
+
+    fn apply_dead_link_fix(
+        &self,
+        context: &ProjectContext,
+        git_service: &GitService,
+        issue: &LintIssue,
+        confirm_high_risk: bool,
+        expected_hash: Option<&str>,
+    ) -> Result<LintFixOutcome, BackendError> {
+        let path = &issue.path;
+        let target = issue.target.clone().unwrap_or_default();
+        if !confirm_high_risk {
+            return Ok(LintFixOutcome {
+                kind: LintFixOutcomeKind::NeedsConfirmation,
+                affected_paths: Vec::new(),
+                checkpoint: None,
+                pending_action: Some(dead_link_pending_action(path, &target)),
+            });
+        }
+        let (affected_paths, checkpoint) =
+            self.write_dead_link_fix(context, git_service, issue, expected_hash, None)?;
+        Ok(LintFixOutcome {
+            kind: LintFixOutcomeKind::Applied,
+            affected_paths,
+            checkpoint,
+            pending_action: None,
+        })
+    }
+
+    fn apply_index_drift_fix(
+        &self,
+        context: &ProjectContext,
+        git_service: &GitService,
+        issue: &LintIssue,
+        confirm_high_risk: bool,
+        _expected_hash: Option<&str>,
+    ) -> Result<LintFixOutcome, BackendError> {
+        let path = "wiki/index.md";
+        if !confirm_high_risk {
+            return Ok(LintFixOutcome {
+                kind: LintFixOutcomeKind::NeedsConfirmation,
+                affected_paths: Vec::new(),
+                checkpoint: None,
+                pending_action: Some(index_drift_pending_action(path, &issue.message)),
+            });
+        }
+        let (affected_paths, checkpoint) =
+            self.write_index_drift_fix(context, git_service, issue, None)?;
+        Ok(LintFixOutcome {
+            kind: LintFixOutcomeKind::Applied,
+            affected_paths,
+            checkpoint,
+            pending_action: None,
+        })
+    }
+
+    /// Read-transform-write for the missing-frontmatter fix without wrapping
+    /// the outcome. `shared_checkpoint` lets the batch flow pass a single
+    /// pre-created checkpoint hash instead of creating one per path.
+    fn write_missing_frontmatter_fix(
+        &self,
+        context: &ProjectContext,
+        git_service: &GitService,
+        issue: &LintIssue,
+        expected_hash: Option<&str>,
+        shared_checkpoint: Option<&str>,
+    ) -> Result<(Vec<String>, Option<String>), BackendError> {
         let path = &issue.path;
         let expected = expected_hash.ok_or_else(|| {
             BackendError::new(
@@ -498,7 +575,13 @@ impl LintService {
         );
         let new_contents = format!("{header}{}", raw);
 
-        let checkpoint = self.checkpoint_path(context, git_service, path)?;
+        let checkpoint = self.resolve_checkpoint(
+            context,
+            git_service,
+            path,
+            shared_checkpoint,
+            "Before applying wiki lint fix",
+        )?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -508,32 +591,21 @@ impl LintService {
         invalidate_graph_cache(context);
         append_fix_log(context, path, "added frontmatter");
 
-        Ok(LintFixOutcome {
-            kind: LintFixOutcomeKind::Applied,
-            affected_paths: vec![path.clone()],
-            checkpoint,
-            pending_action: None,
-        })
+        Ok((vec![path.clone()], checkpoint))
     }
 
-    fn apply_dead_link_fix(
+    /// Read-transform-write for the dead-link fix (confirmed path only). The
+    /// unconfirmed branch lives in [`Self::apply_dead_link_fix`] / batch.
+    fn write_dead_link_fix(
         &self,
         context: &ProjectContext,
         git_service: &GitService,
         issue: &LintIssue,
-        confirm_high_risk: bool,
         expected_hash: Option<&str>,
-    ) -> Result<LintFixOutcome, BackendError> {
+        shared_checkpoint: Option<&str>,
+    ) -> Result<(Vec<String>, Option<String>), BackendError> {
         let path = &issue.path;
         let target = issue.target.clone().unwrap_or_default();
-        if !confirm_high_risk {
-            return Ok(LintFixOutcome {
-                kind: LintFixOutcomeKind::NeedsConfirmation,
-                affected_paths: Vec::new(),
-                checkpoint: None,
-                pending_action: Some(dead_link_pending_action(path, &target)),
-            });
-        }
         let expected = expected_hash.ok_or_else(|| {
             BackendError::new(
                 "LINT_FIX_HASH_REQUIRED",
@@ -556,7 +628,13 @@ impl LintService {
             .with_details(serde_json::json!({ "path": path, "target": target })));
         }
 
-        let checkpoint = self.checkpoint_path(context, git_service, path)?;
+        let checkpoint = self.resolve_checkpoint(
+            context,
+            git_service,
+            path,
+            shared_checkpoint,
+            "Before applying wiki lint fix",
+        )?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -566,34 +644,28 @@ impl LintService {
         invalidate_graph_cache(context);
         append_fix_log(context, path, &format!("removed dead link [[{target}]]"));
 
-        Ok(LintFixOutcome {
-            kind: LintFixOutcomeKind::Applied,
-            affected_paths: vec![path.clone()],
-            checkpoint,
-            pending_action: None,
-        })
+        Ok((vec![path.clone()], checkpoint))
     }
 
-    fn apply_index_drift_fix(
+    /// Read-transform-write for the index-drift fix (confirmed path only). The
+    /// index hash is recomputed server-side because regeneration is destructive.
+    fn write_index_drift_fix(
         &self,
         context: &ProjectContext,
         git_service: &GitService,
-        issue: &LintIssue,
-        confirm_high_risk: bool,
-        _expected_hash: Option<&str>,
-    ) -> Result<LintFixOutcome, BackendError> {
+        _issue: &LintIssue,
+        shared_checkpoint: Option<&str>,
+    ) -> Result<(Vec<String>, Option<String>), BackendError> {
         let path = "wiki/index.md";
-        if !confirm_high_risk {
-            return Ok(LintFixOutcome {
-                kind: LintFixOutcomeKind::NeedsConfirmation,
-                affected_paths: Vec::new(),
-                checkpoint: None,
-                pending_action: Some(index_drift_pending_action(path, &issue.message)),
-            });
-        }
         let expected = self.file_store.file_hash(context, path)?;
         let new_contents = regenerate_index(context, self)?;
-        let checkpoint = self.checkpoint_path(context, git_service, path)?;
+        let checkpoint = self.resolve_checkpoint(
+            context,
+            git_service,
+            path,
+            shared_checkpoint,
+            "Before applying wiki lint fix",
+        )?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -603,43 +675,180 @@ impl LintService {
         invalidate_graph_cache(context);
         append_fix_log(context, path, "regenerated index");
 
-        Ok(LintFixOutcome {
-            kind: LintFixOutcomeKind::Applied,
-            affected_paths: vec![path.into()],
-            checkpoint,
-            pending_action: None,
-        })
+        Ok((vec![path.into()], checkpoint))
     }
 
-    /// Create a scoped checkpoint for a single path. A missing repo surfaces
-    /// as an error so the user can init Git rather than lose the prior content
-    /// to an un-checkpointed write (mirrors `ChatService::save_answer_to_wiki`).
-    fn checkpoint_path(
+    /// Resolve the checkpoint for a write: reuse a caller-provided shared
+    /// checkpoint (batch flow) or create a per-path scoped checkpoint
+    /// (single-fix flow). A missing repo surfaces as an error so the user can
+    /// init Git rather than lose the prior content to an un-checkpointed write.
+    fn resolve_checkpoint(
         &self,
         context: &ProjectContext,
         git_service: &GitService,
         path: &str,
+        shared_checkpoint: Option<&str>,
+        message: &str,
     ) -> Result<Option<String>, BackendError> {
+        if let Some(hash) = shared_checkpoint {
+            return Ok(Some(hash.to_string()));
+        }
         let checkpoint = git_service
             .create_scoped_checkpoint(
                 context,
                 crate::models::git::CheckpointPurpose::HighRiskOperation,
-                "Before applying wiki lint fix",
+                message,
                 std::slice::from_ref(&path.to_string()),
             )
             .map_err(|err| {
                 BackendError::new(
                     "GIT_CHECKPOINT_FAILED",
-                    format!(
-                        "Could not create a Git checkpoint before fixing: {}",
-                        err.message
-                    ),
+                    format!("Could not create a Git checkpoint before fixing: {}", err.message),
                     true,
                     true,
                 )
                 .with_details(serde_json::json!({ "path": path }))
             })?;
         Ok(checkpoint.commit_hash)
+    }
+
+    /// Apply (or plan) fixes for many issues in one shot (PRD-LINT-003). A
+    /// single Git checkpoint protects every safe write so the whole batch can
+    /// be rolled back at once; high-risk fixes are returned as confirmations
+    /// for unified review instead of being written. Per-item failures are
+    /// collected into `skipped` rather than aborting the batch — the checkpoint
+    /// already preserves the pre-batch state.
+    pub fn apply_fixes_batch(
+        &self,
+        context: &ProjectContext,
+        git_service: &GitService,
+        issues: &[LintIssue],
+        expected_hashes: &HashMap<String, String>,
+    ) -> Result<LintBatchOutcome, BackendError> {
+        // Defense in depth: validate every path is in-scope before touching
+        // anything, so a single out-of-scope payload can't slip through once
+        // other writes have started.
+        for issue in issues {
+            if !issue.path.starts_with("wiki/") || issue.path.contains("..") {
+                return Err(BackendError::new(
+                    "LINT_FIX_PATH_OUT_OF_SCOPE",
+                    "Lint fixes may only target pages inside the wiki/ folder.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": issue.path })));
+            }
+        }
+
+        let mut applied: Vec<LintFixOutcome> = Vec::new();
+        let mut needs_confirmation: Vec<LintBatchConfirmation> = Vec::new();
+        let mut skipped: Vec<LintBatchSkip> = Vec::new();
+
+        let safe: Vec<&LintIssue> = issues
+            .iter()
+            .filter(|issue| issue.issue_type == LintIssueType::MissingFrontmatter)
+            .collect();
+        // Only safe fixes that carry an optimistic-lock hash can proceed; the
+        // rest are skipped up front so we don't create a checkpoint for writes
+        // that will never happen.
+        let (safe_ready, safe_no_hash): (Vec<&LintIssue>, Vec<&LintIssue>) = safe
+            .iter()
+            .partition(|issue| expected_hashes.contains_key(&issue.path));
+        for issue in safe_no_hash {
+            skipped.push(LintBatchSkip {
+                issue_id: issue.id.clone(),
+                path: issue.path.clone(),
+                reason_code: "LINT_FIX_HASH_REQUIRED".into(),
+                reason: "Applying a fix requires the page's current hash.".into(),
+            });
+        }
+
+        // One checkpoint over every ready safe path, created before any write.
+        // Git is the data-safety boundary, so a checkpoint failure aborts the
+        // batch wholesale rather than writing without a rollback point.
+        let shared_checkpoint: Option<String> = if safe_ready.is_empty() {
+            None
+        } else {
+            let safe_paths: Vec<String> = safe_ready.iter().map(|i| i.path.clone()).collect();
+            let checkpoint = git_service
+                .create_scoped_checkpoint(
+                    context,
+                    crate::models::git::CheckpointPurpose::HighRiskOperation,
+                    "Before applying batch wiki lint fixes",
+                    &safe_paths,
+                )
+                .map_err(|err| {
+                    BackendError::new(
+                        "GIT_CHECKPOINT_FAILED",
+                        format!(
+                            "Could not create a Git checkpoint before batch fixing: {}",
+                            err.message
+                        ),
+                        true,
+                        true,
+                    )
+                })?;
+            checkpoint.commit_hash
+        };
+
+        for issue in &safe_ready {
+            let expected = expected_hashes.get(&issue.path).map(String::as_str);
+            match self.write_missing_frontmatter_fix(
+                context,
+                git_service,
+                issue,
+                expected,
+                shared_checkpoint.as_deref(),
+            ) {
+                Ok((affected_paths, _)) => applied.push(LintFixOutcome {
+                    kind: LintFixOutcomeKind::Applied,
+                    affected_paths,
+                    checkpoint: shared_checkpoint.clone(),
+                    pending_action: None,
+                }),
+                Err(err) => skipped.push(LintBatchSkip {
+                    issue_id: issue.id.clone(),
+                    path: issue.path.clone(),
+                    reason_code: err.code,
+                    reason: err.message,
+                }),
+            }
+        }
+
+        for issue in issues {
+            match issue.issue_type {
+                LintIssueType::DeadLink => {
+                    let target = issue.target.clone().unwrap_or_default();
+                    needs_confirmation.push(LintBatchConfirmation {
+                        issue: issue.clone(),
+                        pending_action: dead_link_pending_action(&issue.path, &target),
+                    });
+                }
+                LintIssueType::IndexDrift => {
+                    needs_confirmation.push(LintBatchConfirmation {
+                        issue: issue.clone(),
+                        pending_action: index_drift_pending_action(
+                            "wiki/index.md",
+                            &issue.message,
+                        ),
+                    });
+                }
+                LintIssueType::MissingFrontmatter => {} // handled above
+                _ => skipped.push(LintBatchSkip {
+                    issue_id: issue.id.clone(),
+                    path: issue.path.clone(),
+                    reason_code: "LINT_FIX_NOT_AUTO".into(),
+                    reason: "This issue type has no deterministic auto-fix.".into(),
+                }),
+            }
+        }
+
+        Ok(LintBatchOutcome {
+            checkpoint: shared_checkpoint,
+            applied,
+            needs_confirmation,
+            skipped,
+        })
     }
 }
 
@@ -905,6 +1114,7 @@ mod tests {
     use crate::models::lint::{Fixability, LintFixOutcomeKind, LintIssueType, LintSeverity};
     use crate::models::paths::ProjectContext;
     use crate::services::{GitService, SearchService};
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     fn tmp_context(suffix: &str) -> (ProjectContext, PathBuf) {
@@ -1459,5 +1669,163 @@ mod tests {
         let raw = "body [[react|the ReAct pattern]] more";
         assert_eq!(strip_wikilink(raw, "react"), "body the ReAct pattern more");
         assert_eq!(strip_wikilink("see [[ghost]].", "ghost"), "see ghost.");
+    }
+
+    /// Count commits on HEAD; used to prove the batch creates a single shared
+    /// checkpoint rather than one per fix.
+    fn commit_count(context: &ProjectContext) -> usize {
+        let output = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&context.root)
+            .output()
+            .expect("git rev-list must succeed in test");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn batch_fix_uses_one_shared_checkpoint_for_safe_writes() {
+        let (context, root) = tmp_context("batch-cp");
+        write_file(&context, "wiki/concepts/bare.md", "# Bare\n\n[[react]].");
+        write_file(&context, "wiki/concepts/bare2.md", "# Bare2\n\n[[react]].");
+        write_file(
+            &context,
+            "wiki/concepts/react.md",
+            "---\ntitle: ReAct\ntype: concept\n---\n\n# ReAct\n\n[[bare]].",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        // Dirty the safe pages so the scoped checkpoint produces a real commit
+        // we can count (clean files return created:false with the existing HEAD).
+        write_file(
+            &context,
+            "wiki/concepts/bare.md",
+            "# Bare\n\nuncommitted edit [[react]].",
+        );
+        write_file(
+            &context,
+            "wiki/concepts/bare2.md",
+            "# Bare2\n\nuncommitted edit [[react]].",
+        );
+
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let mut expected_hashes: HashMap<String, String> = HashMap::new();
+        for issue in &report.issues {
+            if issue.issue_type == LintIssueType::MissingFrontmatter {
+                expected_hashes.insert(
+                    issue.path.clone(),
+                    service.file_store.file_hash(&context, &issue.path).unwrap(),
+                );
+            }
+        }
+        let before = commit_count(&context);
+        let outcome = service
+            .apply_fixes_batch(&context, &git, &report.issues, &expected_hashes)
+            .unwrap();
+        let after = commit_count(&context);
+
+        assert_eq!(outcome.applied.len(), 2, "both safe fixes should apply");
+        assert_eq!(
+            after - before,
+            1,
+            "two safe fixes must share a single checkpoint commit"
+        );
+        let cp = outcome.checkpoint.clone().expect("shared checkpoint hash");
+        assert!(!cp.is_empty());
+        for applied in &outcome.applied {
+            assert_eq!(applied.checkpoint.as_deref(), Some(cp.as_str()));
+            assert!(applied.pending_action.is_none());
+        }
+        for path in ["wiki/concepts/bare.md", "wiki/concepts/bare2.md"] {
+            let on_disk =
+                std::fs::read_to_string(context.resolve_project_path(path).unwrap()).unwrap();
+            assert!(on_disk.starts_with("---\n"), "{path} should have frontmatter");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_fix_collects_high_risk_skips_non_fixable_and_missing_hash() {
+        let (context, root) = tmp_context("batch-partition");
+        // Dead link (high-risk) + missing-frontmatter (safe) side by side.
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nSee [[ghost]].",
+        );
+        write_file(&context, "wiki/concepts/bare.md", "# Bare\n\n[[agent]].");
+        write_file(
+            &context,
+            "wiki/concepts/react.md",
+            "---\ntitle: ReAct\ntype: concept\n---\n\n# ReAct\n\n[[agent]].",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        // Deliberately pass NO hashes → the safe fix is skipped up front, no
+        // checkpoint is created, and the high-risk fix is still surfaced.
+        let outcome = service
+            .apply_fixes_batch(&context, &git, &report.issues, &HashMap::new())
+            .unwrap();
+
+        // Dead link → confirmation, never written.
+        assert!(outcome
+            .needs_confirmation
+            .iter()
+            .any(|c| c.issue.issue_type == LintIssueType::DeadLink));
+        let agent_disk =
+            std::fs::read_to_string(context.resolve_project_path("wiki/concepts/agent.md").unwrap())
+                .unwrap();
+        assert!(agent_disk.contains("[[ghost]]"));
+
+        // Safe fix skipped for lack of a hash.
+        assert!(outcome.skipped.iter().any(|s| {
+            s.path == "wiki/concepts/bare.md" && s.reason_code == "LINT_FIX_HASH_REQUIRED"
+        }));
+
+        // Nothing applied → no checkpoint.
+        assert!(outcome.applied.is_empty());
+        assert!(outcome.checkpoint.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_fix_rejects_out_of_scope_path() {
+        let (context, root) = tmp_context("batch-scope");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        let bad = crate::models::lint::LintIssue {
+            id: "missing_frontmatter:../etc/evil".into(),
+            source: crate::models::lint::LintIssueSource::Local,
+            severity: LintSeverity::Warning,
+            issue_type: LintIssueType::MissingFrontmatter,
+            path: "../etc/evil.md".into(),
+            range: None,
+            message: "x".into(),
+            evidence: None,
+            target: None,
+            fixability: Fixability::Safe,
+            suggested_action: None,
+        };
+        let err = LintService::default()
+            .apply_fixes_batch(&context, &git, std::slice::from_ref(&bad), &HashMap::new())
+            .expect_err("out-of-scope path must abort the batch");
+        assert_eq!(err.code, "LINT_FIX_PATH_OUT_OF_SCOPE");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
