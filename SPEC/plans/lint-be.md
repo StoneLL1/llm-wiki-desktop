@@ -28,6 +28,8 @@
 - 关键决策：safe（MissingFrontmatter）先按 `expected_hashes` 分流——无 hash 的提前 skip，有 hash 的共用**一次** `create_scoped_checkpoint` 写盘；high-risk（DeadLink/IndexDrift）收集 `LintBatchConfirmation{issue, pending_action}`，命令层注册后前端逐条走既有 `apply_lint_fix(confirm=true, action_id)` 确认。无 safe 可写 → 不建 checkpoint。路径越界 → 整批 fail-fast。
 - 验证：`cargo check --lib --tests` ✅（0 warning）；`npm run test`（146）✅；`npm run lint` ✅。`cargo test` 仍 0xc0000139（环境，见 gotchas），新增 3 测试：`batch_fix_uses_one_shared_checkpoint_for_safe_writes`（断言 2 safe→1 commit）、`batch_fix_collects_high_risk_skips_non_fixable_and_missing_hash`、`batch_fix_rejects_out_of_scope_path`。
 
-### [P0/P1] lint-ignore 持久化 — status: pending
-- 动：`models/lint.rs`（`LintIgnoreEntry`/`LintIgnoreFile`）；`lint_service.rs`（`load_ignores`/`save_ignore`/`remove_ignore` + `run_local_lint` 过滤）；`commands/lint_commands.rs`（`add_lint_ignore`/`remove_lint_ignore`/`list_lint_ignores`）；`lib.rs` 注册。
-- 测试：`run_local_lint_excludes_ignored_issues`；`add_then_remove_lint_ignore_round_trips`。
+### [P0/P1] lint-ignore 持久化 — status: verified
+- 动：`models/lint.rs`（`LintIgnoreEntry`/`LintIgnoreFile` + `AddLintIgnoreRequest`/`RemoveLintIgnoreRequest`/`ListLintIgnoresRequest`）；`lint_service.rs`（`load_ignores`/`save_ignores`/`add_ignore`/`remove_ignore`/`list_ignores` + `run_local_lint` 内按 `(path, rule)` 过滤，常量 `LINT_IGNORE_PATH = ".app/lint-ignore.json"`）；`commands/lint_commands.rs`（`add_lint_ignore`/`remove_lint_ignore`/`list_lint_ignores`）；`lib.rs` 注册。
+- 文件:行号：`src-tauri/src/models/lint.rs`（`LintIgnoreEntry`/`LintIgnoreFile` ~L227-275）、`src-tauri/src/services/lint_service.rs`（`load_ignores` 等 ~L278-355、过滤 ~L250-263、常量 L20）、`src-tauri/src/commands/lint_commands.rs`（三命令 ~L313-345）、`src-tauri/src/lib.rs:187-189`。
+- 关键决策：key = `(path, rule)`（遵循 loop 说明）；损坏/缺失 ignore 文件不崩——`load_ignores` 对 `FILE_READ_FAILED` 静默回空、对其它读错误 eprintln 后回空（mirrors bookmarks reader）。add 去重（同 key 刷新 createdAt）。`write_atomic` 自动建 `.app/`。
+- 验证：`cargo check --lib --tests` ✅（0 warning）；`cargo clippy --lib --tests` 我方代码 0 warning（余 3 个 warning 全在 app_state/export_service/import_service，本 loop 范围外，不动）；`npm run test`（146）✅；`npm run lint` ✅。新增 3 测试：`run_local_lint_excludes_ignored_issues`、`add_then_remove_lint_ignore_round_trips`、`run_local_lint_tolerates_corrupt_ignore_file`。

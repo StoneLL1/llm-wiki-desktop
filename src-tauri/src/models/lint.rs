@@ -221,6 +221,49 @@ pub struct LintBatchSkip {
     pub reason: String,
 }
 
+/// One persisted ignore entry. The match key is `(path, rule)` — ignoring a
+/// rule on a page suppresses every occurrence of that rule on that page (e.g.
+/// all dead links on one page). Stored at `.app/lint-ignore.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LintIgnoreEntry {
+    pub path: String,
+    pub rule: LintIssueType,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LintIgnoreFile {
+    #[serde(default)]
+    pub ignored: Vec<LintIgnoreEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddLintIgnoreRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub path: String,
+    pub rule: LintIssueType,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveLintIgnoreRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub path: String,
+    pub rule: LintIssueType,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListLintIgnoresRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+}
+
 /// Result of an apply attempt. Kept as a struct with a discriminator field
 /// (rather than a `#[serde(tag)]` enum) so nested `pending_action` fields
 /// serialize camelCase consistently — see gotchas.txt on tagged-enum leakage.
