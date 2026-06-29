@@ -22,9 +22,11 @@
 - 文件:行号：`src-tauri/src/services/lint_service.rs`（DeadLink 构造 ~L68-86、IndexDrift 构造 ~L275-289）；新增测试 `severity_grading_marks_dead_link_and_index_drift_as_error`。
 - 验证：`cargo check --lib --tests` ✅；`npm run test`（146 passed）✅；`npm run lint` ✅。`cargo test` 因 WebView2 0xc0000139 无法运行（环境问题，见 gotchas）。
 
-### [P0] 批量自动修复 apply_fixes_batch — status: pending
-- 动：`models/lint.rs`（DTO：`ApplyLintFixesBatchRequest`/`LintBatchOutcome`/`LintBatchSkip`）；`lint_service.rs`（抽取 `write_missing_frontmatter_fix`/`write_dead_link_fix`/`write_index_drift_fix` 共享写盘 helper + 新 `apply_fixes_batch`）；`commands/lint_commands.rs`（`apply_lint_fixes` 命令，注册 high-risk PendingAction）；`lib.rs` 注册命令。
-- 测试：`batch_fix_creates_one_checkpoint_applies_safe_collects_high_risk`；`batch_fix_rejects_when_no_git_checkpoint`。
+### [P0] 批量自动修复 apply_fixes_batch — status: verified
+- 动：`models/lint.rs`（DTO：`ApplyLintFixesBatchRequest`/`LintBatchOutcome`/`LintBatchConfirmation`/`LintBatchSkip`）；`lint_service.rs`（抽取共享写盘 helper `write_missing_frontmatter_fix`/`write_dead_link_fix`/`write_index_drift_fix` + `resolve_checkpoint`（共享/单条两种 checkpoint 源）+ 新 `apply_fixes_batch`）；`commands/lint_commands.rs`（`apply_lint_fixes` 命令，注册每个 high-risk PendingAction 到 confirmation_registry）；`lib.rs` 注册命令。
+- 文件:行号：`src-tauri/src/models/lint.rs`（DTO ~L160-225）、`src-tauri/src/services/lint_service.rs`（`apply_fixes_batch` + write helpers ~L460-815）、`src-tauri/src/commands/lint_commands.rs`（`apply_lint_fixes` ~L281-310）、`src-tauri/src/lib.rs:186`。
+- 关键决策：safe（MissingFrontmatter）先按 `expected_hashes` 分流——无 hash 的提前 skip，有 hash 的共用**一次** `create_scoped_checkpoint` 写盘；high-risk（DeadLink/IndexDrift）收集 `LintBatchConfirmation{issue, pending_action}`，命令层注册后前端逐条走既有 `apply_lint_fix(confirm=true, action_id)` 确认。无 safe 可写 → 不建 checkpoint。路径越界 → 整批 fail-fast。
+- 验证：`cargo check --lib --tests` ✅（0 warning）；`npm run test`（146）✅；`npm run lint` ✅。`cargo test` 仍 0xc0000139（环境，见 gotchas），新增 3 测试：`batch_fix_uses_one_shared_checkpoint_for_safe_writes`（断言 2 safe→1 commit）、`batch_fix_collects_high_risk_skips_non_fixable_and_missing_hash`、`batch_fix_rejects_out_of_scope_path`。
 
 ### [P0/P1] lint-ignore 持久化 — status: pending
 - 动：`models/lint.rs`（`LintIgnoreEntry`/`LintIgnoreFile`）；`lint_service.rs`（`load_ignores`/`save_ignore`/`remove_ignore` + `run_local_lint` 过滤）；`commands/lint_commands.rs`（`add_lint_ignore`/`remove_lint_ignore`/`list_lint_ignores`）；`lib.rs` 注册。

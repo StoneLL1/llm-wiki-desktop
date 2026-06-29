@@ -8,8 +8,8 @@ use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
 use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus};
 use crate::models::lint::{
-    ApplyLintFixRequest, DeepLintReport, GetDeepLintReportRequest, LintFixOutcome, LintReport,
-    RunLocalLintRequest, StartDeepLintRequest,
+    ApplyLintFixesBatchRequest, ApplyLintFixRequest, DeepLintReport, GetDeepLintReportRequest,
+    LintBatchOutcome, LintFixOutcome, LintReport, RunLocalLintRequest, StartDeepLintRequest,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
@@ -274,6 +274,37 @@ pub fn apply_lint_fix(
                 issue: request.issue,
             }),
         )?;
+    }
+    Ok(outcome)
+}
+
+/// Apply many lint fixes in one shot (PRD-LINT-003). One Git checkpoint
+/// protects every safe write; high-risk fixes come back as confirmations for
+/// unified review. Each confirmation is registered here so the existing
+/// `apply_lint_fix(confirm_high_risk=true, action_id)` path can execute it.
+#[tauri::command]
+pub fn apply_lint_fixes(
+    state: State<'_, AppState>,
+    request: ApplyLintFixesBatchRequest,
+) -> Result<LintBatchOutcome, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let outcome = state.lint_service.apply_fixes_batch(
+        &context,
+        &state.git_service,
+        &request.issues,
+        &request.expected_hashes,
+    )?;
+    for confirmation in &outcome.needs_confirmation {
+        state
+            .confirmation_registry
+            .register_with_execution(
+                confirmation.pending_action.clone(),
+                Some(ConfirmationExecution::LintFix {
+                    project_id: request.project_id.clone(),
+                    root_path: request.project_root_path.clone(),
+                    issue: confirmation.issue.clone(),
+                }),
+            )?;
     }
     Ok(outcome)
 }
