@@ -9,6 +9,23 @@ export type ExportStatus = "succeeded" | "failed";
 
 export type ExportRoutePreference = "auto" | "agent" | "byok";
 
+/**
+ * User-controlled content flags for an export. Mirrors the backend
+ * `ExportContentOptions`; these adjust the prompt only. `embedCss` reflects the
+ * always-on self-contained HTML contract.
+ */
+export interface ExportContentOptions {
+  includeFrontmatter: boolean;
+  embedCss: boolean;
+  embedImages: boolean;
+}
+
+export const DEFAULT_EXPORT_OPTIONS: ExportContentOptions = {
+  includeFrontmatter: true,
+  embedCss: true,
+  embedImages: false,
+};
+
 export interface ExportRecord {
   id: string;
   exportType: ExportType;
@@ -29,6 +46,8 @@ export interface StartExportRequest {
   route?: ExportRoutePreference;
   agent?: AgentKind | null;
   provider?: LlmProviderKind | null;
+  template?: string | null;
+  options?: ExportContentOptions;
 }
 
 export interface RegenerateExportRequest {
@@ -39,6 +58,8 @@ export interface RegenerateExportRequest {
   route?: ExportRoutePreference;
   agent?: AgentKind | null;
   provider?: LlmProviderKind | null;
+  template?: string | null;
+  options?: ExportContentOptions;
 }
 
 export interface ListExportsRequest {
