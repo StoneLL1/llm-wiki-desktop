@@ -1,5 +1,20 @@
 # Exports 板块 P0+P1 实施账本（本轮 loop）
 
+> ✅ 本轮完成 @ 2026-06-29 — exports 板块 P0+P1 三条 scope 全部 verified。
+>
+> **交付摘要**：
+> 1. P0 新建导出对话框（源页 scan_wiki 可搜索浏览 / 模板下拉 default-serif·modern-sans·editorial-magazine / 执行路径 auto·agent·byok / 4 选项，embedCss 锁定反映自包含硬约束）。
+> 2. P0/P1 已生成列表表格化（.table，列：文件名/类型/源/时间/执行路径/状态/操作）+ 失败状态徽章（badge--danger）+ 成功徽章（badge--success）+ 失败行「查看日志（开任务抽屉）+ 重试」、成功行「预览 + 打开位置」。
+> 3. P1 模板选择端到端：后端 prompt 接收模板名（`include_str!` 注入 skill 的 template.html 样式基底 + 风格方向句），不修改 template.html 内容 → `templates_carry_no_schema_or_lint_directives` 回归测试不破。
+>
+> **文件清单**：后端 `src-tauri/src/models/export.rs`、`services/export_service.rs`、`commands/export_commands.rs`、`tests/mvp_flow.rs`；前端 `src/types/export.ts`、`stores/exportStore.ts`、`features/exports/{ExportDialog.tsx(新),ExportsView.tsx,exportsView.test.tsx}`、`i18n/locales/{en,zh-CN}.json`。
+>
+> **验证**：`npm run lint` 全绿；`npm run test` 146 通过（30 files，+3 导出测试）；`cargo check --lib --tests` 全绿。`cargo test` 运行期受阻于 Windows 测试 runner 的 DLL 入口点加载失败（STATUS_ENTRYPOINT_NOT_FOUND，进程起不来，与代码无关），详见 `SPEC/gotchas.txt` 2026-06-29 条。
+>
+> **双子代理审查**：A（共享上下文）+ B（零偏见）并行审查合并，修复 1 blocker（取消态误判为 Failed 并落 Failed 记录：改用取消令牌 + Cancelling/Cancelled 窗口双判）+ 2 major（浏览加载态文案/竞态、预览成功后错条回退/双触发）+ 数 nit，commit `13dfe46`。
+>
+> **commit 序列**：`1596b9e`(Item1) → `e956c4f`(Item2) → `df474be`(Item3) → `2a6250a`(Item4) → `13dfe46`(审查修复)。
+
 > 对照源：UI-Frontend-design/exports.html + assets/app.css（只读）+ SPEC/PRD.md + CLAUDE.md
 > 范围：仅 exports 板块的 P0+P1（见 loop scope 三条）。不碰 P2、不碰别板块。
 > status: pending | in_progress | done | verified
