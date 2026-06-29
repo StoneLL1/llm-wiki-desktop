@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  Eye,
   FileOutput,
   FolderOpen,
-  RefreshCw,
-  Eye,
+  List,
   Plus,
   type LucideIcon,
 } from "lucide-react";
@@ -143,6 +143,10 @@ export function ExportsView() {
     });
   };
 
+  const handleViewLogs = (record: ExportRecord) => {
+    if (record.taskId) openTaskDrawer(record.taskId);
+  };
+
   const handleOpenFolder = (record: ExportRecord) => {
     void openFolder({
       projectId,
@@ -193,66 +197,106 @@ export function ExportsView() {
               {t("exports.list.empty")}
             </div>
           ) : (
-            <ul className="divide-y divide-[var(--border-subtle)]">
-              {sortedRecords.map((record) => {
-                const Icon = TYPE_ICON[record.exportType];
-                const isPreviewing = previewId === record.id;
-                return (
-                  <li
-                    key={record.id}
-                    className={`flex items-start gap-3 px-4 py-2.5 ${
-                      isPreviewing ? "bg-[var(--surface-muted)]" : ""
-                    }`}
-                  >
-                    <Icon
-                      size={14}
-                      strokeWidth={1.5}
-                      className="mt-1 shrink-0 text-[var(--text-muted)]"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-[13px] font-medium text-[var(--text-primary)]">
-                          {record.title}
-                        </span>
-                        <span className="rounded-full border border-[var(--border-subtle)] px-1.5 py-px text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th className="col-icon"></th>
+                  <th>{t("exports.table.file")}</th>
+                  <th>{t("exports.table.type")}</th>
+                  <th>{t("exports.table.source")}</th>
+                  <th>{t("exports.table.time")}</th>
+                  <th>{t("exports.table.route")}</th>
+                  <th>{t("exports.table.status")}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedRecords.map((record) => {
+                  const Icon = TYPE_ICON[record.exportType];
+                  const failed = record.status === "failed";
+                  const isPreviewing = previewId === record.id;
+                  return (
+                    <tr key={record.id} className={isPreviewing ? "is-selected" : ""}>
+                      <td className="col-icon">
+                        <Icon
+                          size={14}
+                          strokeWidth={1.5}
+                          className={
+                            failed
+                              ? "text-[var(--warning)]"
+                              : "text-[var(--accent)]"
+                          }
+                        />
+                      </td>
+                      <td>
+                        <div className="primary truncate">{record.title}</div>
+                        <div className="secondary font-mono">{record.outputPath}</div>
+                      </td>
+                      <td>
+                        <span className="badge">
                           {t(`exports.type.${record.exportType}`)}
                         </span>
-                        <span className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
-                          {record.route}
+                      </td>
+                      <td className="col-path">{record.sourcePath ?? "—"}</td>
+                      <td className="col-path">{formatTimestamp(record.createdAt)}</td>
+                      <td>
+                        <span className="badge badge--accent">
+                          {t(`exports.route.${record.route}`)}
                         </span>
-                      </div>
-                      <div className="mt-0.5 truncate font-mono text-[11px] text-[var(--text-muted)]">
-                        {record.outputPath}
-                      </div>
-                      <div className="text-[11px] text-[var(--text-muted)]">
-                        {formatTimestamp(record.createdAt)}
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1">
-                      <IconButton
-                        label={t("exports.actions.preview")}
-                        onClick={() => handlePreview(record)}
-                        active={isPreviewing}
-                      >
-                        <Eye size={14} strokeWidth={1.5} />
-                      </IconButton>
-                      <IconButton
-                        label={t("exports.actions.regenerate")}
-                        onClick={() => handleRegenerate(record)}
-                      >
-                        <RefreshCw size={14} strokeWidth={1.5} />
-                      </IconButton>
-                      <IconButton
-                        label={t("exports.actions.openFolder")}
-                        onClick={() => handleOpenFolder(record)}
-                      >
-                        <FolderOpen size={14} strokeWidth={1.5} />
-                      </IconButton>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
+                      </td>
+                      <td>
+                        {failed ? (
+                          <span className="badge badge--danger">
+                            <span className="dot"></span>
+                            {t("exports.status.failed")}
+                          </span>
+                        ) : (
+                          <span className="badge badge--success">
+                            <span className="dot"></span>
+                            {t("exports.status.succeeded")}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {failed ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <IconButton
+                              label={t("exports.actions.viewLogs")}
+                              onClick={() => handleViewLogs(record)}
+                            >
+                              <List size={14} strokeWidth={1.5} />
+                            </IconButton>
+                            <button
+                              type="button"
+                              className="btn btn--sm"
+                              onClick={() => handleRegenerate(record)}
+                            >
+                              {t("exports.actions.retry")}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1">
+                            <IconButton
+                              label={t("exports.actions.preview")}
+                              onClick={() => handlePreview(record)}
+                              active={isPreviewing}
+                            >
+                              <Eye size={14} strokeWidth={1.5} />
+                            </IconButton>
+                            <IconButton
+                              label={t("exports.actions.openFolder")}
+                              onClick={() => handleOpenFolder(record)}
+                            >
+                              <FolderOpen size={14} strokeWidth={1.5} />
+                            </IconButton>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
           {loading ? (
             <div className="px-4 py-2 text-[11px] text-[var(--text-muted)]">
