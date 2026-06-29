@@ -45,13 +45,9 @@ export interface ExportState {
   runningTaskId: string | null;
   previewHtml: string | null;
   previewId: string | null;
-  selectedType: ExportType;
-  sourcePath: string;
   error: string | null;
 
   loadExports: (projectId: string, rootPath: string) => Promise<void>;
-  setSelectedType: (type: ExportType) => void;
-  setSourcePath: (path: string) => void;
   startExport: (
     projectId: string,
     rootPath: string,
@@ -78,8 +74,6 @@ const initial = {
   runningTaskId: null as string | null,
   previewHtml: null as string | null,
   previewId: null as string | null,
-  selectedType: "beautiful_read" as ExportType,
-  sourcePath: "",
   error: null as string | null,
 };
 
@@ -100,9 +94,6 @@ export const useExportStore = create<ExportState>((set) => ({
       set({ loading: false, error: errorMessage(error) });
     }
   },
-
-  setSelectedType: (selectedType) => set({ selectedType }),
-  setSourcePath: (sourcePath) => set({ sourcePath }),
 
   startExport: async (projectId, rootPath, type, sourcePath, prefs) => {
     if (!hasTauri()) return null;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -6,6 +6,7 @@ import {
   FolderOpen,
   RefreshCw,
   Eye,
+  Plus,
   type LucideIcon,
 } from "lucide-react";
 
@@ -13,12 +14,8 @@ import { useExportStore } from "../../stores/exportStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { isTerminalStatus } from "../../types/task";
-import {
-  EXPORT_TYPE_ORDER,
-  SINGLE_PAGE_EXPORT_TYPES,
-  type ExportRecord,
-  type ExportType,
-} from "../../types/export";
+import { type ExportRecord, type ExportType } from "../../types/export";
+import { ExportDialog, type ExportDialogResult } from "./ExportDialog";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
 
 const TYPE_ICON: Record<ExportType, LucideIcon> = {
@@ -43,13 +40,9 @@ export function ExportsView() {
   const runningTaskId = useExportStore((state) => state.runningTaskId);
   const previewHtml = useExportStore((state) => state.previewHtml);
   const previewId = useExportStore((state) => state.previewId);
-  const selectedType = useExportStore((state) => state.selectedType);
-  const sourcePath = useExportStore((state) => state.sourcePath);
   const error = useExportStore((state) => state.error);
 
   const loadExports = useExportStore((state) => state.loadExports);
-  const setSelectedType = useExportStore((state) => state.setSelectedType);
-  const setSourcePath = useExportStore((state) => state.setSourcePath);
   const startExport = useExportStore((state) => state.startExport);
   const regenerateExport = useExportStore((state) => state.regenerateExport);
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
@@ -62,6 +55,8 @@ export function ExportsView() {
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [pendingPreviewTaskId, setPendingPreviewTaskId] = useState<string | null>(null);
 
   // Load the export history when the view mounts or the project changes.
   useEffect(() => {
@@ -72,22 +67,47 @@ export function ExportsView() {
     ? tasks.find((task) => task.id === runningTaskId) ?? null
     : null;
 
-  // When the background export task lands, refresh the list + clear the running id.
+  // When the background export task lands, refresh the list + clear the running
+  // id. If the user asked to open the preview, load the just-written record.
   useEffect(() => {
-    if (runningTask && isTerminalStatus(runningTask.status)) {
-      void loadExports(projectId, rootPath);
-      clearRunningTask();
-    }
-  }, [runningTask, projectId, rootPath, loadExports, clearRunningTask]);
+    if (!runningTask || !isTerminalStatus(runningTask.status)) return;
+    const finishedId = runningTask.id;
+    const succeeded = runningTask.status === "succeeded";
+    const wantPreview = pendingPreviewTaskId === finishedId;
+    void loadExports(projectId, rootPath).then(() => {
+      if (wantPreview && succeeded) {
+        const fresh = useExportStore.getState().records;
+        const target = fresh.find((record) => record.taskId === finishedId) ?? fresh[0];
+        if (target) {
+          void loadPreview(
+            { projectId, projectRootPath: rootPath, outputPath: target.outputPath },
+            target.id,
+          );
+        }
+      }
+    });
+    clearRunningTask();
+    if (wantPreview) setPendingPreviewTaskId(null);
+  }, [
+    runningTask,
+    projectId,
+    rootPath,
+    loadExports,
+    clearRunningTask,
+    pendingPreviewTaskId,
+    loadPreview,
+  ]);
 
-  const needsSource = SINGLE_PAGE_EXPORT_TYPES.includes(selectedType);
-  const canGenerate =
-    !runningTaskId && (!needsSource || sourcePath.trim().length > 0);
-
-  const handleGenerate = () => {
-    void startExport(projectId, rootPath, selectedType, sourcePath).then((taskId) => {
+  const handleDialogGenerate = (result: ExportDialogResult) => {
+    setDialogOpen(false);
+    void startExport(projectId, rootPath, result.type, result.sourcePath, {
+      route: result.route,
+      template: result.template,
+      options: result.options,
+    }).then((taskId) => {
       if (!taskId) return;
-        void invoke("list_tasks", { request: { statusFilter: null } }).then((list) => {
+      if (result.openPreview) setPendingPreviewTaskId(taskId);
+      void invoke("list_tasks", { request: { statusFilter: null } }).then((list) => {
         const found = (list as { id: string }[]).find((task) => task.id === taskId);
         if (found) {
           void invoke("get_task", { request: { taskId } }).then((task) => {
@@ -141,51 +161,23 @@ export function ExportsView() {
     <div className="exports-view-layout">
       <div className="flex min-w-0 flex-col border-r border-[var(--border)]">
         <div className="view-toolbar border-b border-[var(--border)] px-4">
-          <div className="flex items-center gap-1">
-            {EXPORT_TYPE_ORDER.map((type) => {
-              const active = selectedType === type;
-              return (
-                <button
-                  key={type}
-                  type="button"
-                  onClick={() => setSelectedType(type)}
-                  className={`h-[28px] rounded-[var(--radius-md)] px-3 text-[12px] font-medium ${
-                    active
-                      ? "bg-[var(--foreground)] text-[var(--text-inverse)]"
-                      : "border border-[var(--border)] bg-[var(--surface-raised)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
-                  }`}
-                >
-                  {t(`exports.type.${type}`)}
-                </button>
-              );
-            })}
-          </div>
-          {needsSource ? (
-            <input
-              type="text"
-              value={sourcePath}
-              onChange={(event) => setSourcePath(event.target.value)}
-              placeholder={t("exports.sourcePlaceholder")}
-              className="ml-2 h-[28px] min-w-0 flex-1 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] px-2 font-mono text-[11px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)]"
-            />
-          ) : null}
           <div className="ml-auto flex items-center gap-2">
             {runningTaskId ? (
               <button
                 type="button"
                 onClick={handleCancel}
-                className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)]"
+                className="btn btn--sm"
               >
                 {t("exports.actions.cancel")}
               </button>
             ) : (
               <button
                 type="button"
-                onClick={handleGenerate}
-                disabled={!canGenerate}
-                className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
+                onClick={() => setDialogOpen(true)}
+                className="btn btn--primary btn--sm"
               >
-                {t("exports.actions.generate")}
+                <Plus size={12} strokeWidth={2} aria-hidden />
+                {t("exports.actions.newExport")}
               </button>
             )}
           </div>
@@ -289,6 +281,14 @@ export function ExportsView() {
           <HtmlPreviewPane html={previewHtml} />
         </div>
       </aside>
+
+      <ExportDialog
+        open={dialogOpen}
+        projectId={projectId}
+        rootPath={rootPath}
+        onClose={() => setDialogOpen(false)}
+        onGenerate={handleDialogGenerate}
+      />
     </div>
   );
 }

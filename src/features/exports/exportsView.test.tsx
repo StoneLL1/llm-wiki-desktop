@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
@@ -18,11 +18,11 @@ const PROJECT = {
 };
 
 describe("ExportsView", () => {
-  it("renders the empty state and generate control before any export", () => {
+  it("renders the empty state and new-export control before any export", () => {
     useExportStore.getState().reset();
     useProjectStore.setState({ currentProject: PROJECT } as never);
     render(<ExportsView />);
-    expect(screen.getByRole("button", { name: /^Generate$/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /New export/i })).toBeInTheDocument();
     expect(screen.getByText(/Run an export/i)).toBeInTheDocument();
   });
 
@@ -46,5 +46,21 @@ describe("ExportsView", () => {
     render(<ExportsView />);
     expect(screen.getByText("Agent")).toBeInTheDocument();
     expect(screen.getByText("exports/html/agent-1.html")).toBeInTheDocument();
+  });
+
+  it("opens the new-export dialog with template and route controls", async () => {
+    useExportStore.getState().reset();
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+    render(<ExportsView />);
+    fireEvent.click(screen.getByRole("button", { name: /New export/i }));
+    expect(await screen.findByRole("heading", { name: "New export" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Template")).toBeInTheDocument();
+    expect(screen.getByLabelText("Execution path")).toBeInTheDocument();
+    const generateBtn = screen.getByRole("button", { name: /Generate/i });
+    // beautiful_read (default) requires a source page → disabled.
+    expect(generateBtn).toBeDisabled();
+    // project_report needs no source → enabled.
+    fireEvent.click(screen.getByRole("radio", { name: "Report" }));
+    expect(generateBtn).toBeEnabled();
   });
 });
