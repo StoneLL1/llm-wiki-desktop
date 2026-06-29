@@ -7,8 +7,9 @@ use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
 use crate::models::export::{
-    ExportRecord, ExportRoute, ExportRoutePreference, ExportType, ListExportsRequest,
-    OpenExportFolderRequest, ReadExportPreviewRequest, RegenerateExportRequest, StartExportRequest,
+    ExportContentOptions, ExportRecord, ExportRoute, ExportRoutePreference, ExportType,
+    ListExportsRequest, OpenExportFolderRequest, ReadExportPreviewRequest, RegenerateExportRequest,
+    StartExportRequest,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
@@ -95,6 +96,16 @@ fn run_export_task(
         )
         .map_err(task_error)?;
     let task_id = task.id.clone();
+    // Capture what a Failed record would need before `directive` moves into
+    // the task body. The intended route is derived from the preference: the
+    // resolved route is only known after `resolve_route` succeeds, which may
+    // itself be the point of failure.
+    let failed_type = directive.export_type;
+    let failed_source = directive.source_path.clone();
+    let failed_route = match directive.route {
+        ExportRoutePreference::Byok => ExportRoute::Byok,
+        _ => ExportRoute::Agent,
+    };
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         if let Err(error) = run_export(&state, directive, &context, &task_id).await {
@@ -102,13 +113,33 @@ fn run_export_task(
                 .task_service
                 .append_log(&task_id, LogLevel::Error, error.message.clone());
             let _ = state.task_service.set_error(&task_id, error);
-            if !matches!(
+            let already_cancelled = matches!(
                 state.task_service.get_task(&task_id).map(|t| t.status),
                 Some(TaskStatus::Cancelled)
-            ) {
+            );
+            if !already_cancelled {
                 let _ = state
                     .task_service
                     .transition_status(&task_id, TaskStatus::Failed);
+                // Persist a Failed record so the user can see the failure and
+                // retry from the history list. Best-effort: if the would-be
+                // output path can't be derived we skip the record (the task is
+                // still marked Failed either way).
+                let title = title_for(&context, failed_type, failed_source.as_deref());
+                if let Ok(output_path) = state
+                    .export_service
+                    .build_output_relative_path(failed_type, failed_source.as_deref())
+                {
+                    let record = ExportService::new_failed_record(
+                        failed_type,
+                        title,
+                        failed_source.clone(),
+                        output_path,
+                        failed_route,
+                        Some(task_id.clone()),
+                    );
+                    let _ = state.export_service.append_record(&context, record);
+                }
             }
         }
     });
@@ -124,6 +155,8 @@ struct ExportDirective {
     route: ExportRoutePreference,
     agent: Option<AgentKind>,
     provider: Option<LlmProviderKind>,
+    template: Option<String>,
+    options: ExportContentOptions,
 }
 
 impl From<StartExportRequest> for ExportDirective {
@@ -135,6 +168,8 @@ impl From<StartExportRequest> for ExportDirective {
             route: value.route,
             agent: value.agent,
             provider: value.provider,
+            template: value.template,
+            options: value.options,
         }
     }
 }
@@ -148,6 +183,8 @@ impl RegenerateExportRequest {
             route: self.route,
             agent: self.agent,
             provider: self.provider,
+            template: self.template,
+            options: self.options,
         }
     }
 }
@@ -181,6 +218,8 @@ async fn run_export(
         directive.source_path.as_deref(),
         &state.search_service,
         &language,
+        directive.template.as_deref(),
+        &directive.options,
     )?;
 
     let (route, raw_html) = match resolve_route(
