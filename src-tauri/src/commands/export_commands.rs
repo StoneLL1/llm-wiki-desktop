@@ -99,7 +99,9 @@ fn run_export_task(
     // Capture what a Failed record would need before `directive` moves into
     // the task body. The intended route is derived from the preference: the
     // resolved route is only known after `resolve_route` succeeds, which may
-    // itself be the point of failure.
+    // itself be the point of failure. Note: for an `Auto` preference that
+    // fails before resolution, the badge falls back to `Agent` — imprecise but
+    // harmless (retry re-runs from the record's type/source, not its route).
     let failed_type = directive.export_type;
     let failed_source = directive.source_path.clone();
     let failed_route = match directive.route {
@@ -113,11 +115,18 @@ fn run_export_task(
                 .task_service
                 .append_log(&task_id, LogLevel::Error, error.message.clone());
             let _ = state.task_service.set_error(&task_id, error);
-            let already_cancelled = matches!(
-                state.task_service.get_task(&task_id).map(|t| t.status),
-                Some(TaskStatus::Cancelled)
-            );
-            if !already_cancelled {
+            // A cancel request flips the cancellation token immediately, but the
+            // task status only reaches Cancelled after an async transition — and
+            // `Cancelling -> Failed` is an allowed transition. Persisting a
+            // Failed record for something the user cancelled violates the
+            // contract, so consult both the token (source of truth) and the
+            // Cancelling/Cancelled status window before marking Failed.
+            let cancelled = state.task_service.is_cancelled(&task_id)
+                || matches!(
+                    state.task_service.get_task(&task_id).map(|t| t.status),
+                    Some(TaskStatus::Cancelled) | Some(TaskStatus::Cancelling)
+                );
+            if !cancelled {
                 let _ = state
                     .task_service
                     .transition_status(&task_id, TaskStatus::Failed);

@@ -758,6 +758,7 @@
   "exports.dialog.browseTitle": "选择源页面",
   "exports.dialog.browseSearch": "搜索页面…",
   "exports.dialog.browseEmpty": "没有可用页面",
+  "exports.dialog.browseLoading": "正在加载页面…",
   "exports.dialog.template": "模板",
   "exports.dialog.templateHint": "只影响输出样式",
   "exports.dialog.template.default": "default-serif · 默认衬线",

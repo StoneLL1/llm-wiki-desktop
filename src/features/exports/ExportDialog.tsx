@@ -45,6 +45,8 @@ const ROUTE_OPTIONS: { value: ExportRoutePreference; labelKey: string }[] = [
   { value: "byok", labelKey: "exports.dialog.route.byok" },
 ];
 
+const DEFAULT_TEMPLATE = "default-serif";
+
 interface BrowsePage {
   path: string;
   title: string;
@@ -64,12 +66,13 @@ export function ExportDialog({
 
   const [type, setType] = useState<ExportType>(initialType);
   const [sourcePath, setSourcePath] = useState(initialSourcePath);
-  const [template, setTemplate] = useState<string>("default-serif");
+  const [template, setTemplate] = useState<string>(DEFAULT_TEMPLATE);
   const [route, setRoute] = useState<ExportRoutePreference>("auto");
   const [options, setOptions] = useState<ExportContentOptions>(DEFAULT_EXPORT_OPTIONS);
   const [openPreview, setOpenPreview] = useState(true);
 
   const [browseOpen, setBrowseOpen] = useState(false);
+  const [browseLoading, setBrowseLoading] = useState(false);
   const [pages, setPages] = useState<BrowsePage[] | null>(null);
   const [query, setQuery] = useState("");
 
@@ -79,7 +82,7 @@ export function ExportDialog({
     if (open) {
       setType(initialType);
       setSourcePath(initialSourcePath);
-      setTemplate("default-serif");
+      setTemplate(DEFAULT_TEMPLATE);
       setRoute("auto");
       setOptions(DEFAULT_EXPORT_OPTIONS);
       setOpenPreview(true);
@@ -94,6 +97,7 @@ export function ExportDialog({
   const openBrowse = async () => {
     setBrowseOpen(true);
     if (pages === null) {
+      setBrowseLoading(true);
       try {
         const tree = await invoke<WikiTree>("scan_wiki", {
           request: { projectId, projectRootPath: rootPath },
@@ -101,6 +105,8 @@ export function ExportDialog({
         setPages(tree.pages.map((page) => ({ path: page.path, title: page.title })));
       } catch {
         setPages([]);
+      } finally {
+        setBrowseLoading(false);
       }
     }
   };
@@ -234,8 +240,8 @@ export function ExportDialog({
                       <div className="max-h-[180px] overflow-auto py-1">
                         {filteredPages.length === 0 ? (
                           <div className="px-3 py-2 text-[11px] text-[var(--text-muted)]">
-                            {pages === null
-                              ? t("exports.list.loading")
+                            {browseLoading
+                              ? t("exports.dialog.browseLoading")
                               : t("exports.dialog.browseEmpty")}
                           </div>
                         ) : (
