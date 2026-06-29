@@ -264,6 +264,14 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     }
   }, [activeView, refreshCapabilities]);
 
+  // Detect agents/providers once per project switch so the dashboard first
+  // screen doesn't read as "Agent not detected" before the user opens the
+  // Agent/Settings view (PRD-AGENT-001, roadmap 2.3).
+  useEffect(() => {
+    if (!hasTauri || !currentProject.projectId) return;
+    void refreshCapabilities();
+  }, [currentProject.projectId, hasTauri, refreshCapabilities]);
+
   const startCompile = useCallback(async () => {
     if (!hasTauri) return;
     const task = await invoke<BackendTask>("start_wiki_compile", {

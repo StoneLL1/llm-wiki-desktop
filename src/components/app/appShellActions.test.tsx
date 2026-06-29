@@ -1,8 +1,8 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import { useNavigationStore } from "../../stores/navigationStore";
-import { useProjectStore } from "../../stores/projectStore";
+import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { AppShell } from "./AppShell";
 import type { PendingAction } from "../../types/backend";
 
@@ -72,5 +72,51 @@ describe("AppShell confirmation dialog checkpoint wiring", () => {
     render(<AppShell />);
 
     expect(screen.getByText("Checkpoint: not created yet")).toBeInTheDocument();
+  });
+});
+
+describe("AppShell first-screen agent detection", () => {
+  const tauriWindow = window as unknown as { __TAURI_INTERNALS__?: unknown };
+
+  afterEach(() => {
+    delete tauriWindow.__TAURI_INTERNALS__;
+    useProjectStore.getState().setCurrentProject(defaultProject);
+  });
+
+  it("refreshes agentRoute when the dashboard mounts with an active project", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    useProjectStore.getState().setCurrentProject({
+      ...defaultProject,
+      projectId: "proj-1",
+      rootPath: "/tmp/proj-1",
+      agentRoute: "unconfigured",
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "detect_agents") {
+        return Promise.resolve([
+          {
+            kind: "claude",
+            command: "claude",
+            state: "installed",
+            version: "1.0",
+            executablePath: "/usr/bin/claude",
+            isDefault: true,
+            installGuidance: "",
+            error: null,
+          },
+        ]);
+      }
+      if (cmd === "list_llm_providers") return Promise.resolve([]);
+      if (cmd === "git_status") {
+        return Promise.resolve({ isRepository: false, branch: null, head: null, hasChanges: false });
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<AppShell />);
+
+    await waitFor(() => {
+      expect(useProjectStore.getState().currentProject.agentRoute).toBe("agent");
+    });
   });
 });
