@@ -15,7 +15,36 @@
 - **safe 写盘失败不整体回滚**：逐条收集 `skipped/failures`，checkpoint 已保护 pre-batch 状态可手动回滚（返回 checkpoint hash）。无 git 仓库 → 整批失败（Git 是数据安全硬边界，自动修复前必须有检查点）。
 - **severity 仅升级**：DeadLink（lint_service.rs:71）、IndexDrift（check_index_drift 内 :278）Warning→Error。其余保持（MissingFrontmatter=Warning、OrphanPage=Info、其余 Warning）。
 
-## 进度
+## ✅ 本轮完成 @ 2026-06-29
+三项 P0/P1 全部 verified，双子代理审查通过（修了 1 个真 bug + 1 个防御性加固）。
+
+### 摘要
+- **P0 severity 分级**：DeadLink / IndexDrift → `Error`（commit b2689be）。
+- **P0 批量自动修复**：`apply_fixes_batch` 一次 Git 检查点覆盖全部 safe 写盘，high-risk 收集确认（commit cdc6f17）。
+- **P0/P1 lint-ignore 持久化**：`.app/lint-ignore.json`，`(path, rule)` 过滤（commit ab8b77a）。
+- **审查修复**：index-drift 确认 id 加 target 去重（修复 batch 多 ghost 链接确认被吞）；add_ignore 拒 `..`（commit 8460329）。
+
+### 文件清单（仅 src-tauri/）
+- `src-tauri/src/models/lint.rs`：DTO（batch + ignore）。
+- `src-tauri/src/services/lint_service.rs`：severity、write helper 抽取、`resolve_checkpoint`、`apply_fixes_batch`、ignore load/save/add/remove + 过滤、`index_drift_pending_action` id 修复。
+- `src-tauri/src/commands/lint_commands.rs`：`apply_lint_fixes`、`add_lint_ignore`、`remove_lint_ignore`、`list_lint_ignores`。
+- `src-tauri/src/lib.rs`：4 个命令注册。
+
+### 验证基线
+`cargo check --lib --tests` ✅（0 warning，我方代码）；`cargo clippy --lib --tests` 我方 0 warning（余 3 warning 在 app_state/export_service/import_service，范围外）；`npm run test`（146）✅；`npm run lint` ✅。`cargo test` 因 Windows WebView2 0xc0000139 加载期失败无法运行（环境问题，见 gotchas.txt 2026-06-29 / 2026-06-23），以 `cargo check --lib --tests` 为代码正确性闸门。
+
+### 审查结论
+- 子代理 A（共享上下文）：无 BLOCKER；SHOULD-FIX/NIT 全为既有代码（`regenerate_index` 裸 fs 读、pending id 同 target 碰撞）或 by-design，非本轮回归。
+- 子代理 B（全新上下文）：报 3 BLOCKER——B1（index-drift id 碰撞）**真 bug 已修**；B2（needs_confirmation 无去重）经核为 B1 同源、修后幂等；B3（clean-file 回滚点是 HEAD "无效"）**误报**——HEAD 作为 per-path `git checkout` 目标可正确回滚未提交写（既有单条路径同此）。S1（ignore 波及 agent）**误报**——agent issue 走 `parse_agent_issues`→`.app/lint-reports/`，不经 `run_local_lint`，过滤只作用于 local。
+
+### 未做（显式留白，不在本 loop scope）
+- 前端集成（批量按钮、ignore UI、summary 卡接 error 计数）→ 前端任务。
+- P2 项（详情头/diff/check-row/a11y/规则开关）。
+- 既有 `regenerate_index` 裸 `std::fs::read_to_string` 与 dead-link 同 target id 碰撞 → 非本轮回归，记 roadmap。
+
+---
+
+## 进度（历史留档）
 
 ### [P0] severity 分级 — status: verified
 - 动：`lint_service.rs` DeadLink（:71）、IndexDrift（check_index_drift :278）`Warning`→`Error`。
