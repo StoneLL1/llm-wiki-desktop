@@ -2056,3 +2056,87 @@ select:focus-visible {
   }
 }
 
+/* ---------- Lint: summary cards / mode seg / issue tags / fix plan (aligns UI-Frontend-design/lint.html) ---------- */
+.badge--info { background: var(--info-soft); color: var(--info); border-color: transparent; }
+.btn--block { width: 100%; }
+
+/* Compact summary card variant for the lint four-up grid (design uses 22px value). */
+.sumcard--lint { padding: var(--sp-3); }
+.sumcard--lint .sumcard__value { font-size: 22px; margin-top: var(--sp-1); }
+
+/* Radio row for the 修复方案 group. Selected row takes the accent tint. */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 10px;
+  background: var(--background);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+}
+.check-row + .check-row { margin-top: 4px; }
+.check-row.is-selected {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+.check-row input[type="radio"],
+.check-row input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
+
+/* Three-column issue card (icon / title+sub+tags / right actions). */
+.issue-card {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 10px;
+  width: 100%;
+  padding: 10px var(--sp-5);
+  text-align: left;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.issue-card:hover { background: var(--surface-hover); }
+.issue-card.is-selected {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+.issue-card__icon { display: grid; place-items: center; color: var(--text-muted); }
+.issue-card__title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.issue-card__sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.issue-card__tags { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+.issue-card__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  justify-content: center;
+}
+
+/* Passed-checks strip at the bottom of the lint list. */
+.lint-passed {
+  padding: 12px var(--sp-5);
+  background: var(--accent-soft);
+  border-top: 1px solid var(--accent-border);
+}
+.lint-passed__label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-hover);
+  margin-bottom: var(--sp-2);
+}
+.lint-passed__badges { display: flex; flex-wrap: wrap; gap: 6px; }
+
+

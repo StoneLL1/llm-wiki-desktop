@@ -2,14 +2,22 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
 import type {
+  AddLintIgnoreRequest,
   ApplyLintFixRequest,
+  ApplyLintFixesBatchRequest,
   DeepLintReport,
   GetDeepLintReportRequest,
+  LintBatchConfirmation,
+  LintBatchOutcome,
   LintFixConfirmRequest,
   LintFixOutcome,
+  LintIgnoreEntry,
   LintIssue,
+  LintMode,
   LintReport,
   LintRoutePreference,
+  LintSafetyPrefs,
+  ListLintIgnoresRequest,
   StartDeepLintRequest,
 } from "../types/lint";
 import type { AgentKind } from "../types/agent";
@@ -27,6 +35,37 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+const SAFETY_PREFS_KEY = "llm-wiki-desktop.lintSafetyPrefs";
+
+const DEFAULT_SAFETY_PREFS: LintSafetyPrefs = {
+  checkpoint: true,
+  commitAfter: true,
+  recompile: false,
+};
+
+function loadSafetyPrefs(): LintSafetyPrefs {
+  try {
+    const raw = window.localStorage.getItem(SAFETY_PREFS_KEY);
+    if (!raw) return { ...DEFAULT_SAFETY_PREFS };
+    const parsed = JSON.parse(raw) as Partial<LintSafetyPrefs>;
+    return {
+      checkpoint: true, // hard boundary; always on regardless of stored value
+      commitAfter: parsed.commitAfter ?? true,
+      recompile: parsed.recompile ?? false,
+    };
+  } catch {
+    return { ...DEFAULT_SAFETY_PREFS };
+  }
+}
+
+function saveSafetyPrefs(prefs: LintSafetyPrefs): void {
+  try {
+    window.localStorage.setItem(SAFETY_PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* ignore persistence failures */
+  }
+}
+
 export interface LintState {
   localReport: LintReport | null;
   deepTaskId: string | null;
@@ -39,6 +78,16 @@ export interface LintState {
   fixStatus: Record<string, "idle" | "applying" | "applied" | "error">;
   /** Inline high-risk confirm surfaced when a fix returns needs_confirmation. */
   fixConfirm: LintFixConfirmRequest | null;
+  /** View-mode filter for the list and summary cards. */
+  mode: LintMode;
+  /** High-risk confirmations collected by the last batch run, awaiting review. */
+  batchConfirmations: LintBatchConfirmation[];
+  /** "idle" | "running" after a batch auto-fix CTA. */
+  batchRunning: boolean;
+  /** Persisted ignore entries loaded from .app/lint-ignore.json. */
+  ignores: LintIgnoreEntry[];
+  /** UI-side safety preferences (checkpoint is a hard boundary, always on). */
+  safetyPrefs: LintSafetyPrefs;
 
   runLocalLint: (projectId: string, rootPath: string) => Promise<void>;
   startDeepLint: (
@@ -51,11 +100,21 @@ export interface LintState {
   clearDeepTask: () => void;
   loadDeepReport: (request: GetDeepLintReportRequest) => Promise<void>;
   selectIssue: (issueId: string | null) => void;
+  setMode: (mode: LintMode) => void;
+  setSafetyPrefs: (prefs: Partial<LintSafetyPrefs>) => void;
+  loadIgnores: (request: ListLintIgnoresRequest) => Promise<void>;
+  addIgnore: (request: AddLintIgnoreRequest) => Promise<boolean>;
   applyFix: (
     projectId: string,
     rootPath: string,
     issue: LintIssue,
+    expectedHash?: string | null,
   ) => Promise<LintFixOutcome | null>;
+  applyFixesBatch: (
+    request: ApplyLintFixesBatchRequest,
+  ) => Promise<LintBatchOutcome | null>;
+  /** Promote one batched high-risk confirmation into the inline confirm flow. */
+  openBatchConfirmation: (issueId: string) => void;
   confirmHighRisk: (
     projectId: string,
     rootPath: string,
@@ -75,6 +134,11 @@ const initial = {
   selectedIssueId: null as string | null,
   fixStatus: {} as LintState["fixStatus"],
   fixConfirm: null as LintFixConfirmRequest | null,
+  mode: "all" as LintMode,
+  batchConfirmations: [] as LintBatchConfirmation[],
+  batchRunning: false,
+  ignores: [] as LintIgnoreEntry[],
+  safetyPrefs: loadSafetyPrefs(),
 };
 
 export const useLintStore = create<LintState>((set, get) => ({
@@ -136,7 +200,56 @@ export const useLintStore = create<LintState>((set, get) => ({
 
   selectIssue: (issueId) => set({ selectedIssueId: issueId }),
 
-  applyFix: async (projectId, rootPath, issue) => {
+  setMode: (mode) => set({ mode }),
+
+  setSafetyPrefs: (prefs) =>
+    set((state) => {
+      // checkpoint is a hard boundary — always on, never stored as off.
+      const next: LintSafetyPrefs = {
+        ...state.safetyPrefs,
+        ...prefs,
+        checkpoint: true,
+        commitAfter: prefs.commitAfter ?? state.safetyPrefs.commitAfter,
+      };
+      saveSafetyPrefs(next);
+      return { safetyPrefs: next };
+    }),
+
+  loadIgnores: async (request) => {
+    if (!hasTauri()) return;
+    const scope = captureProjectScope();
+    try {
+      const file = await invoke<{ ignored: LintIgnoreEntry[] }>(
+        "list_lint_ignores",
+        { request },
+      );
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ ignores: file.ignored ?? [] });
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  addIgnore: async (request) => {
+    if (!hasTauri()) return false;
+    const scope = captureProjectScope();
+    try {
+      const file = await invoke<{ ignored: LintIgnoreEntry[] }>(
+        "add_lint_ignore",
+        { request },
+      );
+      if (!isProjectScopeCurrent(scope)) return false;
+      set({ ignores: file.ignored ?? [] });
+      return true;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return false;
+      set({ error: errorMessage(error) });
+      return false;
+    }
+  },
+
+  applyFix: async (projectId, rootPath, issue, expectedHash = null) => {
     if (!hasTauri()) return null;
     const scope = captureProjectScope();
     set((state) => ({
@@ -149,7 +262,10 @@ export const useLintStore = create<LintState>((set, get) => ({
       projectRootPath: rootPath,
       issue,
       confirmHighRisk: false,
-      expectedHash: null,
+      // Safe fixes (missing frontmatter) require the page hash as an
+      // optimistic-lock baseline; high-risk fixes ignore it (they go through
+      // the confirm flow). The view resolves the hash for safe fixes.
+      expectedHash,
       actionId: null,
     };
     try {
@@ -178,6 +294,42 @@ export const useLintStore = create<LintState>((set, get) => ({
     }
   },
 
+  applyFixesBatch: async (request) => {
+    if (!hasTauri()) return null;
+    const scope = captureProjectScope();
+    set({ batchRunning: true, error: null });
+    try {
+      const outcome = await invoke<LintBatchOutcome>("apply_lint_fixes", {
+        request,
+      });
+      if (!isProjectScopeCurrent(scope)) return null;
+      set({
+        batchRunning: false,
+        batchConfirmations: outcome.needsConfirmation ?? [],
+      });
+      return outcome;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
+      set({ batchRunning: false, error: errorMessage(error) });
+      return null;
+    }
+  },
+
+  openBatchConfirmation: (issueId) => {
+    const confirmation = get().batchConfirmations.find(
+      (entry) => entry.issue.id === issueId,
+    );
+    if (!confirmation) return;
+    set({
+      selectedIssueId: issueId,
+      fixConfirm: {
+        issue: confirmation.issue,
+        pendingAction: confirmation.pendingAction,
+        expectedHash: "",
+      },
+    });
+  },
+
   confirmHighRisk: async (projectId, rootPath, expectedHash) => {
     if (!hasTauri()) return null;
     const scope = captureProjectScope();
@@ -200,6 +352,9 @@ export const useLintStore = create<LintState>((set, get) => ({
         set((state) => ({
           fixStatus: { ...state.fixStatus, [issue.id]: "applied" },
           fixConfirm: null,
+          batchConfirmations: state.batchConfirmations.filter(
+            (entry) => entry.issue.id !== issue.id,
+          ),
         }));
       } else {
         set((state) => ({ fixStatus: { ...state.fixStatus, [issue.id]: "idle" } }));
@@ -217,8 +372,17 @@ export const useLintStore = create<LintState>((set, get) => ({
   },
 
   cancelHighRisk: async () => {
-    const actionId = get().fixConfirm?.pendingAction.id;
+    const confirm = get().fixConfirm;
+    const actionId = confirm?.pendingAction.id;
+    const issueId = confirm?.issue.id;
     set({ fixConfirm: null });
+    if (issueId) {
+      set((state) => ({
+        batchConfirmations: state.batchConfirmations.filter(
+          (entry) => entry.issue.id !== issueId,
+        ),
+      }));
+    }
     if (!actionId || !hasTauri()) return;
     try {
       await invoke("confirm_pending_action", {
