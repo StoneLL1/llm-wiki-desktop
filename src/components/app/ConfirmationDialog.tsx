@@ -125,12 +125,7 @@ export function ConfirmationDialog({
           </Button>
           <Button
             type="button"
-            variant={isDestructive ? "primary" : "secondary"}
-            className={
-              isDestructive
-                ? "bg-[var(--danger)] text-white hover:bg-[var(--danger)]"
-                : undefined
-            }
+            variant={isDestructive ? "danger" : "secondary"}
             onClick={onConfirm}
           >
             {t(confirmLabelKeys[action.actionType])}

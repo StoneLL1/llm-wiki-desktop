@@ -80,4 +80,34 @@ describe("ConfirmationDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm overwrite" }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
+
+  it("renders the confirm button with the danger variant for destructive actions", () => {
+    render(
+      <ConfirmationDialog
+        action={{ ...pendingAction, riskLevel: "destructive" }}
+        checkpointExists={false}
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    const confirmButton = screen.getByRole("button", { name: "Confirm overwrite" });
+    expect(confirmButton).toHaveClass("bg-[var(--danger)]");
+    expect(confirmButton).toHaveClass("text-white");
+  });
+
+  it("renders the confirm button with the secondary variant for non-destructive actions", () => {
+    render(
+      <ConfirmationDialog
+        action={{ ...pendingAction, riskLevel: "medium" }}
+        checkpointExists={false}
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    const confirmButton = screen.getByRole("button", { name: "Confirm overwrite" });
+    expect(confirmButton).not.toHaveClass("bg-[var(--danger)]");
+    expect(confirmButton).toHaveClass("bg-[var(--surface-raised)]");
+  });
 });
