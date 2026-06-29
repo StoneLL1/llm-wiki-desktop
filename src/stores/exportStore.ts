@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
 import type {
+  ExportContentOptions,
   ExportRecord,
   ExportRoutePreference,
   ExportType,
@@ -26,6 +27,17 @@ function errorMessage(error: unknown): string {
 
 const ROUTE_PREFERENCE: ExportRoutePreference = "auto";
 
+/**
+ * Caller-supplied export preferences. All optional so the bare 4-arg call
+ * (WikiView quick export) keeps working with the prior "auto + no template"
+ * behaviour.
+ */
+export interface ExportPrefs {
+  route?: ExportRoutePreference;
+  template?: string | null;
+  options?: ExportContentOptions;
+}
+
 export interface ExportState {
   records: ExportRecord[];
   loading: boolean;
@@ -45,11 +57,13 @@ export interface ExportState {
     rootPath: string,
     type: ExportType,
     sourcePath: string,
+    prefs?: ExportPrefs,
   ) => Promise<string | null>;
   regenerateExport: (
     projectId: string,
     rootPath: string,
     record: ExportRecord,
+    prefs?: ExportPrefs,
   ) => Promise<string | null>;
   clearRunningTask: () => void;
   loadPreview: (request: ReadExportPreviewRequest, id: string) => Promise<void>;
@@ -90,7 +104,7 @@ export const useExportStore = create<ExportState>((set) => ({
   setSelectedType: (selectedType) => set({ selectedType }),
   setSourcePath: (sourcePath) => set({ sourcePath }),
 
-  startExport: async (projectId, rootPath, type, sourcePath) => {
+  startExport: async (projectId, rootPath, type, sourcePath, prefs) => {
     if (!hasTauri()) return null;
     const scope = captureProjectScope();
     set({ error: null });
@@ -99,9 +113,11 @@ export const useExportStore = create<ExportState>((set) => ({
       projectRootPath: rootPath,
       exportType: type,
       sourcePath: sourcePath.trim() ? sourcePath.trim() : null,
-      route: ROUTE_PREFERENCE,
+      route: prefs?.route ?? ROUTE_PREFERENCE,
       agent: null,
       provider: null,
+      template: prefs?.template ?? null,
+      options: prefs?.options,
     };
     try {
       const task = await invoke<{ id: string }>("start_export", { request });
@@ -115,7 +131,7 @@ export const useExportStore = create<ExportState>((set) => ({
     }
   },
 
-  regenerateExport: async (projectId, rootPath, record) => {
+  regenerateExport: async (projectId, rootPath, record, prefs) => {
     if (!hasTauri()) return null;
     const scope = captureProjectScope();
     set({ error: null });
@@ -124,9 +140,11 @@ export const useExportStore = create<ExportState>((set) => ({
       projectRootPath: rootPath,
       exportType: record.exportType,
       sourcePath: record.sourcePath ?? null,
-      route: ROUTE_PREFERENCE,
+      route: prefs?.route ?? ROUTE_PREFERENCE,
       agent: null,
       provider: null,
+      template: prefs?.template ?? null,
+      options: prefs?.options,
     };
     try {
       const task = await invoke<{ id: string }>("regenerate_export", { request });

@@ -23,7 +23,7 @@
 | # | 项 | 涉及文件 | status |
 |---|---|---|---|
 | 1 | 后端：DTO 加 `template`+`ExportContentOptions`；prompt 注入模板/选项；失败记录持久化；测试 | `models/export.rs`, `services/export_service.rs`, `commands/export_commands.rs`, `tests/mvp_flow.rs` | done |
-| 2 | 前端类型+store：请求类型加字段；`startExport/regenerateExport` 透传 template/options/route；openPreview 状态 | `types/export.ts`, `stores/exportStore.ts` | pending |
+| 2 | 前端类型+store：请求类型加字段；`startExport/regenerateExport` 透传 template/options/route；openPreview 状态 | `types/export.ts`, `stores/exportStore.ts` | verified |
 | 3 | 新建导出对话框 + 顶栏入口 + i18n | `features/exports/ExportDialog.tsx`(新), `features/exports/ExportsView.tsx`, `i18n/locales/*.json` | pending |
 | 4 | 已生成列表表格化 + 状态徽章 + 失败重试 + i18n + 测试更新 | `features/exports/ExportsView.tsx`, `features/exports/exportsView.test.tsx`, `i18n/locales/*.json` | pending |
 
