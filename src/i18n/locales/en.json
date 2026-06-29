@@ -757,6 +757,7 @@
   "exports.dialog.browseTitle": "Choose a source page",
   "exports.dialog.browseSearch": "Search pages…",
   "exports.dialog.browseEmpty": "No pages found",
+  "exports.dialog.browseLoading": "Loading pages…",
   "exports.dialog.template": "Template",
   "exports.dialog.templateHint": "Only affects output styling",
   "exports.dialog.template.default": "default-serif · Default serif",

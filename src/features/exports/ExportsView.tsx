@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -57,6 +57,9 @@ export function ExportsView() {
   const { projectId, rootPath } = currentProject;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingPreviewTaskId, setPendingPreviewTaskId] = useState<string | null>(null);
+  // Guards the terminal handler against re-running for the same task if the
+  // task event stream emits two rapid updates before the running-task id clears.
+  const processedTerminalRef = useRef<string | null>(null);
 
   // Load the export history when the view mounts or the project changes.
   useEffect(() => {
@@ -72,12 +75,17 @@ export function ExportsView() {
   useEffect(() => {
     if (!runningTask || !isTerminalStatus(runningTask.status)) return;
     const finishedId = runningTask.id;
+    if (processedTerminalRef.current === finishedId) return;
+    processedTerminalRef.current = finishedId;
     const succeeded = runningTask.status === "succeeded";
     const wantPreview = pendingPreviewTaskId === finishedId;
     void loadExports(projectId, rootPath).then(() => {
+      // Only auto-preview the exact record this task produced — never fall back
+      // to the newest row, which could belong to a different concurrent export.
       if (wantPreview && succeeded) {
-        const fresh = useExportStore.getState().records;
-        const target = fresh.find((record) => record.taskId === finishedId) ?? fresh[0];
+        const target = useExportStore
+          .getState()
+          .records.find((record) => record.taskId === finishedId);
         if (target) {
           void loadPreview(
             { projectId, projectRootPath: rootPath, outputPath: target.outputPath },
