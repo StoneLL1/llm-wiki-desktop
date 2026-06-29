@@ -26,7 +26,7 @@ describe("ExportsView", () => {
     expect(screen.getByText(/Run an export/i)).toBeInTheDocument();
   });
 
-  it("lists prior exports with their output path", () => {
+  it("lists succeeded exports in the table with a success badge and preview action", () => {
     useExportStore.getState().reset();
     useExportStore.setState({
       records: [
@@ -46,6 +46,36 @@ describe("ExportsView", () => {
     render(<ExportsView />);
     expect(screen.getByText("Agent")).toBeInTheDocument();
     expect(screen.getByText("exports/html/agent-1.html")).toBeInTheDocument();
+    expect(screen.getByText("Succeeded")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Preview/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open folder/i })).toBeInTheDocument();
+  });
+
+  it("renders failed exports with a danger badge and retry control", () => {
+    useExportStore.getState().reset();
+    useExportStore.setState({
+      records: [
+        {
+          id: "export-failed",
+          exportType: "project_report",
+          title: "Project report",
+          sourcePath: null,
+          outputPath: "exports/html/project-report-1.html",
+          createdAt: "2026-06-20T10:00:00Z",
+          route: "agent",
+          status: "failed",
+          taskId: "task-failed",
+        },
+      ],
+    });
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+    render(<ExportsView />);
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /View logs/i })).toBeInTheDocument();
+    // success-only actions must not appear for failed rows
+    expect(screen.queryByRole("button", { name: /Preview/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Open folder/i })).not.toBeInTheDocument();
   });
 
   it("opens the new-export dialog with template and route controls", async () => {

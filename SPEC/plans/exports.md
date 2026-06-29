@@ -25,7 +25,7 @@
 | 1 | 后端：DTO 加 `template`+`ExportContentOptions`；prompt 注入模板/选项；失败记录持久化；测试 | `models/export.rs`, `services/export_service.rs`, `commands/export_commands.rs`, `tests/mvp_flow.rs` | done |
 | 2 | 前端类型+store：请求类型加字段；`startExport/regenerateExport` 透传 template/options/route；openPreview 状态 | `types/export.ts`, `stores/exportStore.ts` | verified |
 | 3 | 新建导出对话框 + 顶栏入口 + i18n | `features/exports/ExportDialog.tsx`(新), `features/exports/ExportsView.tsx`, `i18n/locales/*.json` | verified |
-| 4 | 已生成列表表格化 + 状态徽章 + 失败重试 + i18n + 测试更新 | `features/exports/ExportsView.tsx`, `features/exports/exportsView.test.tsx`, `i18n/locales/*.json` | pending |
+| 4 | 已生成列表表格化 + 状态徽章 + 失败重试 + i18n + 测试更新 | `features/exports/ExportsView.tsx`, `features/exports/exportsView.test.tsx`, `i18n/locales/*.json` | verified |
 
 > Item 1 验证状态：`cargo check --lib --tests` 全绿（编译/类型无误）。`cargo test` 运行期失败 = Windows 测试 runner 的 DLL 入口点（STATUS_ENTRYPOINT_NOT_FOUND）+ 运行中的 app 锁住主 exe，均为环境问题、与本次纯逻辑改动无关。收尾时关闭 app 后重跑 `cargo test` 终验。
 
