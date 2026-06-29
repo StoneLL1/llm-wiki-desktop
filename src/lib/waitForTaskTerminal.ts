@@ -49,7 +49,7 @@ export function waitForTaskTerminal(task: BackendTask): Promise<BackendTask> {
 
     invoke<BackendTask>("get_task", { request: { taskId } })
       .then((next) => {
-        if (isTerminalStatus(next.status)) finish(next);
+        if (next && isTerminalStatus(next.status)) finish(next);
       })
       .catch(() => {
         // Ignore — the terminal event listeners are the authoritative source.
