@@ -28,6 +28,7 @@ import type { ExportType } from "../../types/export";
 import type { ConfirmedImport, ImportedSource, ImportPreview } from "../../types/import";
 import type { FetchedImportUrl } from "../../types/import";
 import { articleToMarkdown, extractArticleFromHtml } from "../../lib/readability";
+import { waitForTaskTerminal } from "../../lib/waitForTaskTerminal";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import { CompileConflictDialog } from "./CompileConflictDialog";
@@ -43,10 +44,6 @@ function errorMessage(error: unknown): string {
     if (typeof message === "string") return message;
   }
   return String(error);
-}
-
-function isTerminalTask(task: BackendTask): boolean {
-  return task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
 }
 
 export function AppShell() {
@@ -302,14 +299,10 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         },
       })
         .then(async (started) => {
-          let task = started;
+          upsertTask(started);
+          openTaskDrawer(started.id);
+          const task = await waitForTaskTerminal(started);
           upsertTask(task);
-          openTaskDrawer(task.id);
-          while (!isTerminalTask(task)) {
-            await new Promise((resolve) => setTimeout(resolve, 250));
-            task = await invoke<BackendTask>("get_task", { request: { taskId: task.id } });
-            upsertTask(task);
-          }
           if (task.status !== "succeeded") {
             throw new Error(task.error?.message ?? `Import preview ${task.status}.`);
           }
