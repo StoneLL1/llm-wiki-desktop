@@ -29,7 +29,7 @@ const PROVIDER_LABEL: Record<LlmProviderKind, string> = {
 };
 
 /** Format an ISO timestamp as HH:MM (locale-independent, 24h). */
-function formatTime(iso: string): string {
+export function formatTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
@@ -218,7 +218,7 @@ export function ChatView() {
   );
 }
 
-interface MessageBubbleProps {
+export interface MessageBubbleProps {
   message: ChatMessage;
   t: (k: string, opts?: Record<string, unknown>) => string;
   generating: boolean;
@@ -228,7 +228,7 @@ interface MessageBubbleProps {
   onSave: () => void;
 }
 
-function MessageBubble({
+export function MessageBubble({
   message,
   t,
   generating,
@@ -384,7 +384,7 @@ function SessionToolbar({ session, routePreference, onRouteChange, t }: SessionT
   );
 }
 
-interface StreamingBubbleProps {
+export interface StreamingBubbleProps {
   text: string;
   routeLabel: string | null;
   placeholder: string;
@@ -392,7 +392,7 @@ interface StreamingBubbleProps {
   openLogsLabel: string;
 }
 
-function StreamingBubble({ text, routeLabel, placeholder, onOpenLogs, openLogsLabel }: StreamingBubbleProps) {
+export function StreamingBubble({ text, routeLabel, placeholder, onOpenLogs, openLogsLabel }: StreamingBubbleProps) {
   return (
     <div className="msg">
       <div className="msg__avatar msg__avatar--ai">AI</div>

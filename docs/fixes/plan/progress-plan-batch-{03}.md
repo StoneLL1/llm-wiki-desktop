@@ -16,7 +16,7 @@ Started: 2026-07-05 00:05
 - [x] Task 8 - Pinned Page Chat DTO/backend
 - [x] Task 9 - Chat Store send options
 - [x] Task 10 - Navigation right panel mode
-- [ ] Task 11 - Wiki Ask AI button + PageChatPanel
+- [x] Task 11 - Wiki Ask AI button + PageChatPanel
 - [ ] Task 12 - Citation UI pinned sources
 - [ ] Task 13 - Styling/i18n
 - [ ] Task 14 - Integration checks + review
@@ -35,6 +35,7 @@ Started: 2026-07-05 00:05
 - [2026-07-05 00:44] 完成 Task 8：Chat DTO 增加 pinned page/citation 字段；retrieval context 支持当前 Wiki 页优先注入、去重和 prompt `Current Wiki page` 分区；chat IPC 透传 pinnedPagePath，TS 类型同步更新。
 - [2026-07-05 00:45] 完成 Task 9：chatStore `send` 改为 options 参数，backend payload 固定发送 agent/provider/pinnedPagePath null fallback；补充 pinnedPagePath store 测试，保持全局 Chat 调用不变。
 - [2026-07-05 00:54] 完成 Task 10：navigationStore 增加 rightPanelMode/wikiAssistantPagePath 与 open/close/update actions；补充右侧面板模式测试；已有 sidebar layout dirty 改动保持未纳入本步骤提交。
+- [2026-07-05 00:59] 完成 Task 11：新增 PageChatPanel 并复用 ChatView 消息组件；Wiki toolbar 增加 Ask AI 图标按钮；RightContextPanel 可切换页面聊天；补充 PageChatPanel 测试和 i18n。
 
 ## Changed Files
 
@@ -77,6 +78,12 @@ Started: 2026-07-05 00:05
 - src/stores/chatStore.test.ts
 - src/stores/navigationStore.ts
 - src/stores/navigationStore.test.ts
+- src/features/chat/PageChatPanel.tsx
+- src/features/chat/PageChatPanel.test.tsx
+- src/features/chat/ChatView.tsx
+- src/features/chat/ChatComposer.tsx
+- src/features/wiki/WikiView.tsx
+- src/components/app/RightContextPanel.tsx
 
 ## Verification
 
@@ -91,6 +98,8 @@ Started: 2026-07-05 00:05
 - cargo test --manifest-path src-tauri/Cargo.toml chat --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
 - npm run test -- src/stores/chatStore.test.ts: pass
 - npm run test -- src/stores/navigationStore.test.ts: pass
+- npm run test -- src/features/chat/PageChatPanel.test.tsx src/features/chat/chatView.test.tsx: pass
+- npm run test -- src/features/wiki/wiki.test.tsx: pass
 - npm run test -- src/features/wiki/wiki.test.tsx: pass
 - npm run test -- src/stores/exportStore.test.ts src/features/exports/exportsView.test.tsx src/features/wiki/wiki.test.tsx: pass
 - cargo test --manifest-path src-tauri/Cargo.toml export_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions

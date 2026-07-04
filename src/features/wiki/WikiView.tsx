@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Book, Edit2, FileOutput, LoaderCircle, Star } from "lucide-react";
+import { Book, Edit2, FileOutput, LoaderCircle, MessageSquareText, Star } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
@@ -45,6 +45,9 @@ export function WikiView() {
   const paneSizes = useNavigationStore((state) => state.paneSizes);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
+  const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
+  const openWikiAssistant = useNavigationStore((state) => state.openWikiAssistant);
+  const setWikiAssistantPagePath = useNavigationStore((state) => state.setWikiAssistantPagePath);
   const [pageForm, setPageForm] = useState<
     { mode: "create" | "rename"; path: string } | null
   >(null);
@@ -122,6 +125,12 @@ export function WikiView() {
   useEffect(() => {
     if (conflict) setConflictDialogOpen(true);
   }, [conflict?.currentHash]);
+
+  useEffect(() => {
+    if (rightPanelMode === "wikiAssistant" && page?.meta.path) {
+      setWikiAssistantPagePath(page.meta.path);
+    }
+  }, [rightPanelMode, page?.meta.path, setWikiAssistantPagePath]);
 
   const runningExportTask = runningExportTaskId
     ? tasks.find((task) => task.id === runningExportTaskId) ?? null
@@ -377,6 +386,18 @@ export function WikiView() {
             >
               <FileOutput size={13} />
               {t("wiki.html.generate")}
+            </button>
+            <button
+              type="button"
+              disabled={!page}
+              onClick={() => {
+                if (page) openWikiAssistant(page.meta.path);
+              }}
+              title={t("wiki.actions.askAi")}
+              aria-label={t("wiki.actions.askAi")}
+              className="grid h-[28px] w-[28px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+            >
+              <MessageSquareText size={14} />
             </button>
             <button
               type="button"
