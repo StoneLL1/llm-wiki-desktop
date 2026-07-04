@@ -12,11 +12,12 @@ Started: 2026-07-04 18:38
 - [x] Task 4 - Wiki, Exports, and Lint Internal Splitters
 - [x] Task 5 - Compact Project Switcher
 - [x] Task 6 - Color Theme Presets and Settings Contract
-- [ ] Task 7 - Appearance UI and Reading Tokens
+- [x] Task 7 - Appearance UI and Reading Tokens
 - [ ] Task 8 - Regression Coverage and Quality Gates
 
 ## Activity Log
 
+- [2026-07-04 19:32] Task 7 Step 5 完成：新增 AppearanceSettings UI test，覆盖内置 preset、无任意颜色输入和 preset selection callback；focused Appearance/colorTheme tests 通过。
 - [2026-07-04 19:29] Task 7 Step 4 完成：新增 Appearance color theme/Markdown preview 与 6 个 preset 的中英文 i18n 文案，preset metadata 改用计划要求的 `themePreset.*` key。
 - [2026-07-04 19:26] Task 7 Step 3 完成：新增 reading token 默认值，Wiki/Chat Markdown、HTML preview 外壳和 Appearance Markdown preview 改用 reading token，并补齐 preset grid 样式。
 - [2026-07-04 19:22] Task 7 Step 2 完成：AppearanceSettings 新增内置 color theme preset radiogroup、色块、选中状态和 Markdown reading preview 结构。
@@ -64,6 +65,7 @@ Started: 2026-07-04 18:38
 - src/app/App.test.tsx
 - src/components/app/TopBar.tsx
 - src/features/settings/AppearanceSettings.tsx
+- src/features/settings/AppearanceSettings.test.tsx
 - src/features/settings/SettingsView.tsx
 - src/lib/colorThemePresets.ts
 - src/lib/colorThemePresets.test.ts
@@ -86,6 +88,7 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/features/settings/AppearanceSettings.test.tsx src/lib/colorThemePresets.test.ts: passed (5 tests)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
 - cargo test --manifest-path src-tauri/Cargo.toml settings::tests::color_theme_preset_is_global_and_legacy_safe: failed due known Windows loader 0xc0000139 after successful compile
 - npm run test -- src/stores/settingsStore.test.ts: passed (1 test)
