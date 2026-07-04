@@ -20,6 +20,12 @@
   --accent-hover: #0a7a5e;
   --accent-soft: #e8f5f0;
   --accent-border: #b8dccd;
+  --reading-background: var(--background);
+  --reading-text: var(--text-secondary);
+  --reading-muted: var(--text-muted);
+  --reading-link: var(--accent-hover);
+  --reading-code-bg: var(--surface-muted);
+  --reading-border: var(--border-subtle);
   --danger: #ef4146;
   --danger-soft: #fde8e8;
   --warning: #f5a623;
@@ -517,7 +523,7 @@ select:focus-visible {
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  background: var(--surface);
+  background: var(--reading-background);
 }
 
 .html-preview__bar {
@@ -560,7 +566,7 @@ select:focus-visible {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--background);
+  background: var(--reading-background);
   margin: var(--sp-3);
 }
 
@@ -631,7 +637,7 @@ select:focus-visible {
 /* ---------- Wiki reading surface (ported from app.css .prose) ---------- */
 .wiki-prose {
   max-width: 760px;
-  color: var(--text-primary);
+  color: var(--reading-text);
   font-family: var(--font-reading);
   font-size: 15px;
   line-height: 1.75;
@@ -665,7 +671,7 @@ select:focus-visible {
 
 .wiki-prose p {
   margin: 0 0 var(--sp-4);
-  color: var(--text-secondary);
+  color: var(--reading-text);
   text-wrap: pretty;
 }
 
@@ -677,14 +683,14 @@ select:focus-visible {
 
 .wiki-prose li {
   margin-bottom: var(--sp-1);
-  color: var(--text-secondary);
+  color: var(--reading-text);
   text-wrap: pretty;
 }
 
 .wiki-prose code {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--reading-border);
   border-radius: var(--radius-sm);
-  background: var(--surface-muted);
+  background: var(--reading-code-bg);
   padding: 1px 6px;
   color: var(--text-primary);
   font-family: var(--font-mono);
@@ -694,9 +700,9 @@ select:focus-visible {
 .wiki-prose pre {
   margin: 0 0 var(--sp-4);
   overflow-x: auto;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--reading-border);
   border-radius: var(--radius-md);
-  background: var(--surface);
+  background: var(--reading-code-bg);
   padding: var(--sp-3) var(--sp-4);
   font-size: 13px;
 }
@@ -721,7 +727,7 @@ select:focus-visible {
 .wiki-prose blockquote p { margin: 0; }
 
 .wiki-prose a {
-  color: var(--accent-hover);
+  color: var(--reading-link);
   text-decoration: underline;
   text-decoration-color: var(--accent-border);
   text-decoration-thickness: 1px;
@@ -1611,12 +1617,14 @@ select:focus-visible {
 .msg__citation-path { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
 
 /* Chat markdown body (lighter density than wiki reading view) */
-.chat-prose { font-size: 14px; line-height: 1.65; color: var(--text-primary); }
+.chat-prose { font-size: 14px; line-height: 1.65; color: var(--reading-text); }
 .chat-prose p { margin: 0 0 var(--sp-2); }
 .chat-prose p:last-child { margin-bottom: 0; }
 .chat-prose ul,
 .chat-prose ol { margin: 0 0 var(--sp-2); padding-left: var(--sp-5); }
 .chat-prose li { margin-bottom: 2px; }
+.chat-prose p,
+.chat-prose li { color: var(--reading-text); }
 .chat-prose h1,
 .chat-prose h2,
 .chat-prose h3,
@@ -1632,9 +1640,9 @@ select:focus-visible {
 .chat-prose h3,
 .chat-prose h4 { font-size: 14px; }
 .chat-prose code {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--reading-border);
   border-radius: var(--radius-sm);
-  background: var(--surface-muted);
+  background: var(--reading-code-bg);
   padding: 1px 5px;
   font-family: var(--font-mono);
   font-size: 0.88em;
@@ -1642,9 +1650,9 @@ select:focus-visible {
 .chat-prose pre {
   margin: 0 0 var(--sp-2);
   overflow-x: auto;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--reading-border);
   border-radius: var(--radius-md);
-  background: var(--surface);
+  background: var(--reading-code-bg);
   padding: var(--sp-2) var(--sp-3);
   font-size: 12.5px;
 }
@@ -1653,11 +1661,11 @@ select:focus-visible {
   margin: 0 0 var(--sp-2);
   border-left: 3px solid var(--accent);
   padding: 0 var(--sp-3);
-  color: var(--text-secondary);
+  color: var(--reading-text);
 }
 .chat-prose blockquote p { margin: 0; }
 .chat-prose a {
-  color: var(--accent-hover);
+  color: var(--reading-link);
   text-decoration: underline;
   text-decoration-color: var(--accent-border);
   text-underline-offset: 2px;
@@ -1988,6 +1996,82 @@ select:focus-visible {
 .settings-view-layout { grid-template-columns: 240px minmax(0, 1fr); }
 .wiki-view-layout { display: flex; height: 100%; min-width: 0; min-height: 0; }
 .wiki-tree { display: flex; width: var(--wiki-tree-w-current, 260px); min-width: 0; flex-shrink: 0; flex-direction: column; background: var(--surface); }
+
+.appearance-presets {
+  display: grid;
+  gap: var(--sp-2);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.appearance-preset {
+  display: flex;
+  min-height: 74px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--sp-3);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.appearance-preset:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.appearance-preset:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.appearance-preset.is-selected {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+.appearance-preset__copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.appearance-preset__name {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.appearance-preset__description {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.appearance-preset__swatches {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(4, 14px);
+  gap: 4px;
+}
+
+.appearance-preset__swatches span {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+}
+
+.appearance-markdown-preview {
+  max-width: none;
+  border: 1px solid var(--reading-border);
+  border-radius: var(--radius-lg);
+  background: var(--reading-background);
+  padding: var(--sp-4);
+}
 
 .exports-view__list-pane,
 .exports-view__preview-pane {
