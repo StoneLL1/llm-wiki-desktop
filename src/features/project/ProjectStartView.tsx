@@ -294,7 +294,8 @@ export function ProjectStartView() {
                   key={`${entry.projectId}:${entry.rootPath}`}
                   type="button"
                   className="projcard"
-                  disabled={initializing || busy}
+                  disabled={initializing || busy || entry.missing}
+                  title={entry.missing ? t("launch.recent.missingTitle") : entry.rootPath}
                   onClick={() => void run(() => openProject(entry.rootPath))}
                 >
                   <div className="projcard__head">
@@ -306,6 +307,14 @@ export function ProjectStartView() {
                   </div>
                   <div className="projcard__meta">
                     <span className="pill pill--active">{t(`launch.filter.${templateOf(entry)}`)}</span>
+                    {entry.missing ? <span className="badge badge--danger">{t("launch.recent.missing")}</span> : null}
+                    <span>{t("launch.recent.pages", { count: entry.wikiPageCount })}</span>
+                    <span>·</span>
+                    <span>{t("launch.recent.sources", { count: entry.sourceCount })}</span>
+                    <span>·</span>
+                    <span>{t(`status.indexState.${entry.indexState}`)}</span>
+                    <span>·</span>
+                    <span>{t(`launch.recent.graphState.${entry.graphState}`)}</span>
                     <span>·</span>
                     <span>{relativeTime(entry.openedAt, t)}</span>
                   </div>
