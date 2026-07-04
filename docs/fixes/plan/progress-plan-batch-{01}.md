@@ -1,7 +1,7 @@
 ﻿# Progress - plan-batch-{01}
 
 Plan: D:\Users\Aletta\Desktop\Works\llm-wiki-desktop\docs\fixes\plan\plan-batch-{01}.md
-Status: in_progress
+Status: completed
 Started: 2026-07-04 18:38
 
 ## Task Progress
@@ -13,10 +13,11 @@ Started: 2026-07-04 18:38
 - [x] Task 5 - Compact Project Switcher
 - [x] Task 6 - Color Theme Presets and Settings Contract
 - [x] Task 7 - Appearance UI and Reading Tokens
-- [ ] Task 8 - Regression Coverage and Quality Gates
+- [x] Task 8 - Regression Coverage and Quality Gates
 
 ## Activity Log
 
+- [2026-07-04 20:02] Task 8 final 完成：review fixes 后重新运行 `npm run test`、`npm run lint`、`npm run build`、`cargo check --lib --tests` 与 `console.log` 扫描，全部通过；计划状态更新为 completed。
 - [2026-07-04 19:56] Task 8 Step 7 完成：按计划向 `SPEC/progress.txt` 顶部追加 Batch 01 implementation 记录；因该文件已有用户未提交改动，提交时仅 staged 新增这一条记录，保留既有工作树改动未提交。
 - [2026-07-04 19:52] Task 8 Step 6 review fixes 完成：合并 A/B review，修复 auto color preset 监听 OS dark preference、移除 night 强制 dark 特例、补 project switcher click-open 后 Escape/Arrow 键盘路径、修复 collapsed sidebar selector，并补 focused tests/CSS contract；review focused tests 通过。
 - [2026-07-04 19:42] Task 8 Step 5 完成：Rust `cargo check --lib --tests` 通过。
@@ -96,6 +97,11 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- final Get-ChildItem -LiteralPath src -Recurse -File | Select-String -Pattern 'console\\.log': passed (no matches)
+- final cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
+- final npm run build: passed (Vite large chunk warning only)
+- final npm run lint: passed
+- final npm run test: passed (197 tests)
 - npm run test -- src/lib/colorThemePresets.test.ts src/stores/settingsStore.test.ts src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (45 tests)
 - npm run test -- src/lib/colorThemePresets.test.ts src/stores/settingsStore.test.ts src/app/App.test.tsx: failed as expected before review fixes (night forced dark, auto media change not applied, project menu Escape from button not handled)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
@@ -127,11 +133,6 @@ Started: 2026-07-04 18:38
 - npm run test -- src/stores/navigationStore.test.ts src/hooks/useResizablePane.test.ts: passed (6 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: passed (4 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: failed as expected (missing ./useResizablePane)
-- npm run test: not run
-- npm run lint: not run
-- npm run build: not run
-- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: not run
-
 ## Blockers
 
 - None
