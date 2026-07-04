@@ -9,11 +9,13 @@ Started: 2026-07-04 19:51
 - [x] Task 1 - Backend Graph Read Reliability
 - [x] Task 2 - Graph Store State Machine And Task Waiting
 - [x] Task 3 - Pure Graph Render Style Helpers
-- [ ] Task 4 - Graph View, Legend, Inspector, And Empty States
+- [x] Task 4 - Graph View, Legend, Inspector, And Empty States
 - [ ] Task 5 - Dashboard Graph Overview Panel
 - [ ] Task 6 - Integrated Verification And Review
 
 ## Activity Log
+
+- [2026-07-04 23:42] Completed Task 4: integrated graphRenderStyle into GraphView reducers, added rebuilding/error/ready-empty surfaces, legend hover and visible/hidden counts, inspector focus-neighbor controls, graph status metadata, i18n keys, and compact CSS classes.
 
 - [2026-07-04 20:07] Completed Task 3: added pure graphRenderStyle helpers for search, hidden reasons, selected-neighbor emphasis, hovered type emphasis, and export-visible IDs; graphExport now reuses the helper while preserving the existing hiddenTypes API.
 
@@ -29,6 +31,18 @@ Started: 2026-07-04 19:51
 - src/features/graph/graphExport.ts
 - src/features/graph/graphRenderStyle.test.ts
 - src/features/graph/graphRenderStyle.ts
+- src/app/App.test.tsx
+- src/components/app/RightContextPanel.tsx
+- src/features/graph/GraphControls.tsx
+- src/features/graph/GraphInspector.tsx
+- src/features/graph/GraphLegend.tsx
+- src/features/graph/GraphView.tsx
+- src/features/graph/graphView.test.tsx
+- src/features/graph/legendEntries.test.ts
+- src/features/graph/legendEntries.ts
+- src/i18n/locales/en.json
+- src/i18n/locales/zh-CN.json
+- src/styles.css
 - src-tauri/src/commands/graph_commands.rs
 - src-tauri/src/services/graph_service.rs
 - src/features/graph/graphStore.test.ts
@@ -47,6 +61,8 @@ Started: 2026-07-04 19:51
 - cargo test --manifest-path src-tauri/Cargo.toml --no-default-features graph_service: passed, 16 tests
 - npm run test -- src/features/graph/graphStore.test.ts: passed, 9 tests
 - npm run test -- src/features/graph/graphRenderStyle.test.ts src/features/graph/graphExport.test.ts: passed, 16 tests
+- npm run test -- src/features/graph/graphView.test.tsx src/features/graph/legendEntries.test.ts src/app/App.test.tsx: passed, 42 tests (jsdom logs expected canvas getContext fallback noise)
+- npm run test -- src/test/ui-css-contracts.test.ts: passed, 11 tests
 
 ## Blockers
 

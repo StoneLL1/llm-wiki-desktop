@@ -15,17 +15,20 @@ import {
   PAGE_TYPE_COLORS,
   type GraphColorMode,
   type GraphData,
+  type GraphNode,
 } from "../../types/graph";
+import type { WikiPageType } from "../../types/wiki";
 import { GraphControls } from "./GraphControls";
 import { GraphCanvasControls } from "./GraphCanvasControls";
 import { GraphInfo } from "./GraphInfo";
 import { GraphLegend } from "./GraphLegend";
 import { exportGraphPng, exportGraphSvg } from "./graphExport";
+import { hiddenReasonForNode, visualForEdge, visualForNode, type GraphRenderOptions } from "./graphRenderStyle";
 
 const EDGE_COLOR = "#d4d4d4";
 const PLAIN_COLOR = "#9b9b9b";
-const SELECTED_COLOR = "#0d9488";
 const DIM_COLOR = "#ececec";
+const DIM_EDGE_COLOR = "#ececec";
 const FA2_ITERATIONS = 80;
 
 interface NodeShape {
@@ -53,6 +56,17 @@ interface RenderRefs {
   refreshTimer: ReturnType<typeof setInterval> | null;
 }
 
+interface RenderState {
+  hoveredNodeId: string | null;
+  hoveredType: WikiPageType | null;
+  selectedNodeId: string | null;
+  focusedNodeId: string | null;
+  search: string;
+  typeFilter: Set<WikiPageType>;
+  degreeThreshold: number;
+  neighborIds: Set<string>;
+}
+
 /**
  * Graph view: full-bleed sigma.js canvas over a graphology topology built from
  * the backend cache. ForceAtlas2 + Louvain run on the frontend and persist back
@@ -67,6 +81,7 @@ export function GraphView() {
   const colorMode = useGraphStore((state) => state.colorMode);
   const search = useGraphStore((state) => state.search);
   const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
+  const focusedNodeId = useGraphStore((state) => state.focusedNodeId);
   const typeFilter = useGraphStore((state) => state.typeFilter);
   const degreeThreshold = useGraphStore((state) => state.degreeThreshold);
   const load = useGraphStore((state) => state.load);
@@ -83,20 +98,36 @@ export function GraphView() {
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const refs = useRef<RenderRefs>({ graph: null, renderer: null, layout: null, layoutTimer: null, refreshTimer: null });
-  const stateRef = useRef({
-    hovered: null as string | null,
-    selected: selectedNodeId,
+  const stateRef = useRef<RenderState>({
+    hoveredNodeId: null,
+    hoveredType: null,
+    selectedNodeId,
+    focusedNodeId,
     search,
     typeFilter,
     degreeThreshold,
+    neighborIds: new Set(),
   });
+  const [hoveredType, setHoveredType] = useState<WikiPageType | null>(null);
   const [canvasAvailable, setCanvasAvailable] = useState(true);
   const [zoom, setZoom] = useState<number | null>(null);
 
   useEffect(() => {
-    stateRef.current.selected = selectedNodeId;
+    stateRef.current.selectedNodeId = selectedNodeId;
+    syncNeighborIds(refs.current.graph, stateRef.current);
     refresh(refs.current.renderer);
   }, [selectedNodeId]);
+
+  useEffect(() => {
+    stateRef.current.focusedNodeId = focusedNodeId;
+    syncNeighborIds(refs.current.graph, stateRef.current);
+    refresh(refs.current.renderer);
+  }, [focusedNodeId]);
+
+  useEffect(() => {
+    stateRef.current.hoveredType = hoveredType;
+    refresh(refs.current.renderer);
+  }, [hoveredType]);
 
   useEffect(() => {
     stateRef.current.search = search;
@@ -138,7 +169,7 @@ export function GraphView() {
 
     let renderer: Sigma | null = null;
     try {
-      renderer = createRenderer(graph, container, stateRef);
+      renderer = createRenderer(graph, data, container, stateRef);
     } catch (err) {
       // sigma v3 needs a WebGL context; when `canvas.getContext("webgl2" /
       // "webgl" / "experimental-webgl")` all return null (headless, GPU
@@ -171,11 +202,13 @@ export function GraphView() {
       );
     };
     const onEnter = ({ node }: { node: string }) => {
-      stateRef.current.hovered = node;
+      stateRef.current.hoveredNodeId = node;
+      syncNeighborIds(graph, stateRef.current);
       refresh(renderer);
     };
     const onLeave = () => {
-      stateRef.current.hovered = null;
+      stateRef.current.hoveredNodeId = null;
+      syncNeighborIds(graph, stateRef.current);
       refresh(renderer);
     };
     renderer.on("clickNode", onClick);
@@ -203,7 +236,7 @@ export function GraphView() {
       camera.off("updated", syncZoom);
       disposeRenderer(refs.current);
     };
-  }, [data?.contentHash]);
+  }, [data?.contentHash, data?.nodes.length, data?.edges.length]);
 
   // Recolor when the color mode changes without rebuilding topology.
   useEffect(() => {
@@ -270,24 +303,45 @@ export function GraphView() {
     return () => registerActions({ exportPng: null, recomputeLayout: null });
   }, [registerActions, currentProject.name, projectId, rootPath, saveLayout]);
 
-  if (status === "loading") {
+  if (status === "loading" && !data) {
     return (
       <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
         {t("graph.loading")}
       </div>
     );
   }
-  if (status === "error") {
+  if (status === "error" && !data) {
     return (
-      <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-[var(--text-danger)]">
-        {error ?? t("graph.error")}
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-[var(--danger)]">
+        <p className="m-0">{error ?? t("graph.error")}</p>
+        <button
+          type="button"
+          onClick={handleRebuild}
+          className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+        >
+          {t("graph.rebuild")}
+        </button>
+      </div>
+    );
+  }
+  if (status === "ready-empty") {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-[var(--text-muted)]">
+        <p className="m-0">{t("graph.empty.noPages")}</p>
+        <button
+          type="button"
+          onClick={() => setActiveView("import")}
+          className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+        >
+          {t("dashboard.quickActions.import")}
+        </button>
       </div>
     );
   }
   if (!data || data.nodes.length === 0) {
     return (
       <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-[var(--text-muted)]">
-        {t("graph.empty")}
+        {status === "error" && error ? error : t("graph.empty")}
       </div>
     );
   }
@@ -303,9 +357,16 @@ export function GraphView() {
         onExportSvg={handleExportSvg}
         nodeCount={data.nodes.length}
         edgeCount={data.edges.length}
+        status={status}
       />
       <div className="relative min-h-0 flex-1 p-[var(--sp-4)]">
         <div ref={containerRef} className="graph-canvas h-full w-full">
+          {status === "rebuilding" ? (
+            <div className="graph-state-banner" role="status">{t("graph.status.rebuilding")}</div>
+          ) : null}
+          {status === "error" && error ? (
+            <div className="graph-state-banner graph-state-banner--error" role="status">{error}</div>
+          ) : null}
           {canvasAvailable ? (
             <>
               <GraphCanvasControls
@@ -318,7 +379,15 @@ export function GraphView() {
                 zoom={zoom}
                 selectedNode={data.nodes.find((n) => n.id === selectedNodeId) ?? null}
               />
-              <GraphLegend data={data} colorMode={colorMode} hiddenTypes={typeFilter} degreeThreshold={degreeThreshold} />
+              <GraphLegend
+                data={data}
+                colorMode={colorMode}
+                hiddenTypes={typeFilter}
+                degreeThreshold={degreeThreshold}
+                search={search}
+                hoveredType={hoveredType}
+                onTypeHover={setHoveredType}
+              />
             </>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--background)] text-[12px] text-[var(--text-muted)]">
@@ -387,15 +456,30 @@ function nodeSize(degree: number): number {
 
 function createRenderer(
   graph: Graph,
+  graphData: GraphData,
   container: HTMLElement,
-  stateRef: React.RefObject<{
-    hovered: string | null;
-    selected: string | null;
-    search: string;
-    typeFilter: Set<string>;
-    degreeThreshold: number;
-  }>,
+  stateRef: React.RefObject<RenderState>,
 ): Sigma {
+  const nodeById = new Map(graphData.nodes.map((node) => [node.id, node]));
+  const edgeByKey = new Map(graphData.edges.map((edge) => [edgeKey(edge.source, edge.target), edge]));
+  const currentRenderOptions = (): GraphRenderOptions => ({
+    colorMode: useGraphStore.getState().colorMode,
+    selectedNodeId: stateRef.current.selectedNodeId,
+    hoveredNodeId: stateRef.current.hoveredNodeId,
+    focusedNodeId: stateRef.current.focusedNodeId,
+    search: stateRef.current.search,
+    typeFilter: visibleTypeFilter(graphData.nodes, stateRef.current.typeFilter),
+    degreeThreshold: stateRef.current.degreeThreshold,
+    neighborIds: stateRef.current.neighborIds,
+    hoveredType: stateRef.current.hoveredType,
+  });
+  const hiddenNodeIds = (options: GraphRenderOptions): Set<string> =>
+    new Set(
+      graphData.nodes
+        .filter((node) => hiddenReasonForNode(node, options) !== null)
+        .map((node) => node.id),
+    );
+
   const renderer = new Sigma(graph, container, {
     renderEdgeLabels: false,
     labelDensity: 0.07,
@@ -406,52 +490,53 @@ function createRenderer(
   });
 
   renderer.setSetting("nodeReducer", (node, data) => {
-    const state = stateRef.current;
-    const next = { ...data };
-    const typed = data as NodeShape;
-    // Type + degree filters fully hide nodes (consistent with the design's
-    // checkbox/range semantics). Search hides non-matches too; previously it
-    // also set a DIM color that was never visible behind hidden=true.
-    if (state.typeFilter.has(String(typed.pageType ?? ""))) {
-      next.hidden = true;
-      return next;
-    }
-    const degree = typeof typed.degree === "number" ? typed.degree : 0;
-    if (state.degreeThreshold > 0 && degree <= state.degreeThreshold) {
-      next.hidden = true;
-      return next;
-    }
-    const matchesSearch =
-      !state.search ||
-      String(data.label ?? "")
-        .toLowerCase()
-        .includes(state.search.toLowerCase());
-    if (state.search && !matchesSearch) {
-      next.hidden = true;
-      return next;
-    }
-    const hovered = state.hovered;
-    const isNeighbor =
-      hovered && (node === hovered || graph.areNeighbors(node, hovered));
-    if (hovered && !isNeighbor) {
-      next.color = DIM_COLOR;
-    }
-    if (state.selected === node) {
-      next.highlighted = true;
-      next.color = SELECTED_COLOR;
-    }
-    return next;
+    const source = nodeById.get(node);
+    if (!source) return data;
+    const visual = visualForNode(source, currentRenderOptions());
+    const baseSize = typeof data.size === "number" ? data.size : 1;
+    return {
+      ...data,
+      hidden: visual.hidden,
+      color: visual.opacity < 1 ? DIM_COLOR : visual.color,
+      size: Math.max(1, baseSize + visual.sizeDelta),
+      highlighted: visual.highlighted,
+      forceLabel: visual.forceLabel,
+      label: visual.hidden ? "" : data.label,
+    };
   });
 
   renderer.setSetting("edgeReducer", (edge, data) => {
-    const state = stateRef.current;
-    if (!state.hovered) return data;
     const [src, tgt] = graph.extremities(edge);
-    const touched = src === state.hovered || tgt === state.hovered;
-    return touched ? { ...data, color: SELECTED_COLOR, size: 1.4 } : { ...data, color: "#ececec" };
+    const options = currentRenderOptions();
+    const source = edgeByKey.get(edgeKey(src, tgt)) ?? { source: src, target: tgt, relation: "related", weight: 1 };
+    const visual = visualForEdge(source, options, hiddenNodeIds(options));
+    return {
+      ...data,
+      hidden: visual.hidden,
+      color: visual.opacity < 1 ? DIM_EDGE_COLOR : visual.color,
+      size: visual.size,
+    };
   });
 
   return renderer;
+}
+
+function syncNeighborIds(graph: Graph | null, state: RenderState): void {
+  const root = state.hoveredNodeId ?? state.focusedNodeId ?? state.selectedNodeId;
+  if (!graph || !root || !graph.hasNode(root)) {
+    state.neighborIds = new Set();
+    return;
+  }
+  state.neighborIds = new Set(graph.neighbors(root));
+}
+
+function visibleTypeFilter(nodes: GraphNode[], hiddenTypes: Set<WikiPageType>): Set<WikiPageType> {
+  if (hiddenTypes.size === 0) return new Set();
+  return new Set(nodes.map((node) => node.type).filter((type) => !hiddenTypes.has(type)));
+}
+
+function edgeKey(source: string, target: string): string {
+  return `${source}\u0000${target}`;
 }
 
 function applyColors(graph: Graph, mode: GraphColorMode): void {

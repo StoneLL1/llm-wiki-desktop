@@ -47,20 +47,35 @@ describe("legendEntries", () => {
   it("zeros and dims types that are currently filtered out", () => {
     const entries = typeLegendEntries(makeData(), labels, new Set<WikiPageType>(["concept"]));
     const concept = entries.find((e) => e.key === "concept");
-    expect(concept?.count).toBe(0);
+    expect(concept?.count).toBe(2);
+    expect(concept?.visibleCount).toBe(0);
+    expect(concept?.hiddenCount).toBe(2);
     expect(entries.find((e) => e.key === "entity")?.count).toBe(2);
   });
 
   it("subtracts degree-filtered nodes from type counts but keeps the row", () => {
     // entity: e1 degree 5, e2 degree 1. With threshold 1, e2 (degree<=1) is
     // hidden → entity visible count drops to 1, but the row stays present.
-    const entries = typeLegendEntries(makeData(), labels, new Set(), 1);
+    const entries = typeLegendEntries(makeData(), labels, new Set(), 2);
     const entity = entries.find((e) => e.key === "entity");
-    expect(entity?.count).toBe(1);
+    expect(entity?.count).toBe(2);
+    expect(entity?.visibleCount).toBe(1);
+    expect(entity?.hiddenCount).toBe(1);
     // concept: c1/c2 both degree 3 (>1) → still 2.
-    expect(entries.find((e) => e.key === "concept")?.count).toBe(2);
+    expect(entries.find((e) => e.key === "concept")?.visibleCount).toBe(2);
     // source s1 degree 2 (>1) → still 1.
-    expect(entries.find((e) => e.key === "source")?.count).toBe(1);
+    expect(entries.find((e) => e.key === "source")?.visibleCount).toBe(1);
+  });
+
+  it("reports visible and hidden counts from type, degree, and search filters", () => {
+    const entries = typeLegendEntries(makeData(), labels, new Set<WikiPageType>(["source"]), 2, "wiki/e");
+    const entity = entries.find((e) => e.key === "entity");
+    const concept = entries.find((e) => e.key === "concept");
+    const source = entries.find((e) => e.key === "source");
+
+    expect(entity).toMatchObject({ count: 2, visibleCount: 1, hiddenCount: 1 });
+    expect(concept).toMatchObject({ count: 2, visibleCount: 0, hiddenCount: 2 });
+    expect(source).toMatchObject({ count: 1, visibleCount: 0, hiddenCount: 1 });
   });
 
   it("groups communities by size, top-N then Other", () => {

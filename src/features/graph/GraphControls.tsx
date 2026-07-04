@@ -1,7 +1,7 @@
 import { Download, RotateCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import type { GraphColorMode } from "../../types/graph";
+import type { GraphColorMode, GraphStatus } from "../../types/graph";
 
 interface GraphControlsProps {
   colorMode: GraphColorMode;
@@ -12,6 +12,7 @@ interface GraphControlsProps {
   onExportSvg: () => void;
   nodeCount: number;
   edgeCount: number;
+  status: GraphStatus;
 }
 
 /**
@@ -29,6 +30,7 @@ export function GraphControls({
   onExportSvg,
   nodeCount,
   edgeCount,
+  status,
 }: GraphControlsProps) {
   const { t } = useTranslation();
   const modes: GraphColorMode[] = ["type", "community", "plain"];
@@ -63,6 +65,11 @@ export function GraphControls({
         <span className="mr-1 font-mono text-[11px] text-[var(--text-muted)]">
           {nodeCount} {t("graph.nodesLabel")} · {edgeCount} {t("graph.edgesLabel")}
         </span>
+        {status === "loading" || status === "rebuilding" ? (
+          <span className="graph-toolbar-status">
+            {status === "rebuilding" ? t("graph.status.rebuilding") : t("graph.loading")}
+          </span>
+        ) : null}
         <button
           type="button"
           onClick={onRebuild}

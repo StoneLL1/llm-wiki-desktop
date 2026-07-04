@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../i18n";
 import { useWikiStore } from "../features/wiki/wikiStore";
+import { useGraphStore } from "../stores/graphStore";
 import { useNavigationStore } from "../stores/navigationStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
@@ -63,6 +64,7 @@ beforeEach(() => {
   invokeMock.mockReset();
   window.localStorage.clear();
   useToastStore.setState({ toasts: [] });
+  useGraphStore.getState().reset();
   useNavigationStore.getState().setActiveView("dashboard");
   useNavigationStore.getState().setRightPanelOpen(true);
   useNavigationStore.getState().setSidebarCollapsed(false);
@@ -301,6 +303,31 @@ describe("App", () => {
     expect(screen.getByText("Tasks: 1 running")).toBeInTheDocument();
   });
 
+  it("passes focus-neighbor action from right panel inspector to graph store", async () => {
+    useNavigationStore.getState().setActiveView("graph");
+    useGraphStore.setState({
+      status: "ready",
+      data: {
+        nodes: [
+          { id: "a", path: "wiki/a.md", label: "Alpha", type: "concept", tags: [], starred: false, degree: 1 },
+          { id: "b", path: "wiki/b.md", label: "Beta", type: "entity", tags: [], starred: false, degree: 1 },
+        ],
+        edges: [{ source: "a", target: "b", relation: "related", weight: 1 }],
+        contentHash: "graph-hash",
+        builtAt: "2026-07-04T00:00:00Z",
+        layout: { positions: { a: [0, 0], b: [1, 1] }, communities: { a: 0, b: 0 } },
+      },
+      selectedNodeId: "a",
+      load: async () => {},
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus neighbors" }));
+
+    expect(useGraphStore.getState().focusedNodeId).toBe("a");
+  });
+
   it("collapses and restores the right context panel", () => {
     render(<App />);
 
@@ -313,16 +340,16 @@ describe("App", () => {
     expect(screen.getByRole("complementary", { name: "Project info" })).toBeInTheDocument();
   });
 
-  it("collapses the sidebar while keeping primary navigation reachable", () => {
+  it("uses the sidebar splitter as the only collapse control and keeps navigation reachable", () => {
     render(<App />);
 
-    expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Expand sidebar" })).not.toBeInTheDocument();
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    useNavigationStore.getState().setPaneSize("sidebar", 56);
 
-    expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
-    expect(screen.queryByRole("separator", { name: "Resize sidebar" })).not.toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
     for (const label of ["Dashboard", "Wiki", "Chat", "Graph", "Agent", "Import", "Lint", "Exports"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }

@@ -1,13 +1,17 @@
-import type { GraphData } from "../../types/graph";
+import type { GraphData, GraphNode } from "../../types/graph";
 import { COMMUNITY_PALETTE, type GraphColorMode } from "../../types/graph";
 import type { WikiPageType } from "../../types/wiki";
+import { hiddenReasonForNode } from "./graphRenderStyle";
 
 /** A single legend row: color swatch, label, and visible-node count. */
 export interface LegendEntry {
+  id: string;
   key: string;
   label: string;
   color: string;
   count: number;
+  visibleCount: number;
+  hiddenCount: number;
 }
 
 /**
@@ -22,24 +26,33 @@ export function typeLegendEntries(
   pageTypeLabels: Record<WikiPageType, string>,
   hiddenTypes: Set<WikiPageType>,
   degreeThreshold = 0,
+  search = "",
 ): LegendEntry[] {
   const present = new Set<WikiPageType>();
+  const totalCounts = new Map<WikiPageType, number>();
   const visibleCounts = new Map<WikiPageType, number>();
+  const typeFilter = visibleTypeFilter(data.nodes, hiddenTypes);
   for (const node of data.nodes) {
     present.add(node.type);
-    if (degreeThreshold > 0 && node.degree <= degreeThreshold) continue;
-    visibleCounts.set(node.type, (visibleCounts.get(node.type) ?? 0) + 1);
+    totalCounts.set(node.type, (totalCounts.get(node.type) ?? 0) + 1);
+    if (hiddenReasonForNode(node, { typeFilter, degreeThreshold, search }) === null) {
+      visibleCounts.set(node.type, (visibleCounts.get(node.type) ?? 0) + 1);
+    }
   }
   const order: WikiPageType[] = ["entity", "concept", "source", "synthesis", "comparison", "query"];
   return order
     .filter((type) => present.has(type))
     .map((type) => {
-      const hidden = hiddenTypes.has(type);
+      const total = totalCounts.get(type) ?? 0;
+      const visible = visibleCounts.get(type) ?? 0;
       return {
+        id: type,
         key: type,
         label: pageTypeLabels[type],
         color: pageTypeSwatch(type),
-        count: hidden ? 0 : (visibleCounts.get(type) ?? 0),
+        count: total,
+        visibleCount: visible,
+        hiddenCount: total - visible,
       };
     });
 }
@@ -59,13 +72,16 @@ export function communityLegendEntries(data: GraphData, topN = 8): LegendEntry[]
   // `baseColorFor` paints nodes (`COMMUNITY_PALETTE[community % len]`), so the
   // legend swatch must read the same way or colors won't line up.
   const entries: LegendEntry[] = head.map(([community, count]) => ({
+    id: `community-${community}`,
     key: `community-${community}`,
     label: `#${community}`,
     color: COMMUNITY_PALETTE[community % COMMUNITY_PALETTE.length],
     count,
+    visibleCount: count,
+    hiddenCount: 0,
   }));
   if (tailTotal > 0) {
-    entries.push({ key: "community-other", label: "other", color: "#c4c4c4", count: tailTotal });
+    entries.push({ id: "community-other", key: "community-other", label: "other", color: "#c4c4c4", count: tailTotal, visibleCount: tailTotal, hiddenCount: 0 });
   }
   return entries;
 }
@@ -93,8 +109,14 @@ export function legendEntries(
   pageTypeLabels: Record<WikiPageType, string>,
   hiddenTypes: Set<WikiPageType>,
   degreeThreshold = 0,
+  search = "",
 ): LegendEntry[] {
   if (mode === "community") return communityLegendEntries(data);
   if (mode === "plain") return [];
-  return typeLegendEntries(data, pageTypeLabels, hiddenTypes, degreeThreshold);
+  return typeLegendEntries(data, pageTypeLabels, hiddenTypes, degreeThreshold, search);
+}
+
+function visibleTypeFilter(nodes: GraphNode[], hiddenTypes: Set<WikiPageType>): Set<WikiPageType> {
+  if (hiddenTypes.size === 0) return new Set();
+  return new Set(nodes.map((node) => node.type).filter((type) => !hiddenTypes.has(type)));
 }
