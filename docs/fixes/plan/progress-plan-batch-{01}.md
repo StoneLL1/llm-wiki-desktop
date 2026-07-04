@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 18:56] Task 5 Step 1/2 完成：新增 `compactPath` 红灯测试与路径压缩 helper，覆盖 Windows drive、UNC、POSIX、短路径和 CJK leaf name；focused helper test 通过。
 - [2026-07-04 18:55] Task 4 完成：Wiki tree、Exports list、Lint issue list 接入 `ResizableSplitter`，新增内部 pane 宽度 CSS 变量、响应式隐藏规则和中英文 i18n 键；计划指定 focused tests 通过。
 - [2026-07-04 18:51] Task 3 完成：新增 shell 级 sidebar/right panel splitters、顶部栏侧边栏折叠按钮、折叠侧栏可访问导航名称、响应式 splitter 隐藏规则和中英文 i18n 键；focused App/CSS tests 通过。
 - [2026-07-04 18:46] Task 2 Step 3 完成：新增 `.resize-handle`、focus-visible/hover/drag 状态和 `body.is-resizing-pane` CSS contract；Task 2 focused tests 通过。
@@ -43,6 +44,8 @@ Started: 2026-07-04 18:38
 - src/features/lint/lintView.test.tsx
 - src/features/wiki/WikiView.tsx
 - src/features/wiki/wiki.test.tsx
+- src/lib/pathDisplay.ts
+- src/lib/pathDisplay.test.ts
 - src/components/app/ResizableSplitter.tsx
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
@@ -54,6 +57,8 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/lib/pathDisplay.test.ts: passed (5 tests)
+- npm run test -- src/lib/pathDisplay.test.ts: failed as expected (missing ./pathDisplay)
 - npm run test -- src/features/wiki/wiki.test.tsx src/features/exports/exportsView.test.tsx src/features/lint/lintView.test.tsx src/test/ui-css-contracts.test.ts: passed (51 tests)
 - npm run test -- src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (33 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts src/test/ui-css-contracts.test.ts: passed (12 tests)
