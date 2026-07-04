@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 18:45] Task 2 Step 2 完成：新增 `ResizableSplitter` 组件，映射 separator role、aria value 属性、pane id、方向和 reset/change 回调。
 - [2026-07-04 18:44] Task 2 Step 1 完成：扩展 `useResizablePane` pointer/keyboard resize hook，覆盖 Arrow/Home/End/Enter、direction=-1 pointer delta、pointer cleanup 和 body resizing class。
 - [2026-07-04 18:42] Task 1 Step 3 完成：扩展 `navigationStore` 的 `sidebarCollapsed`、`paneSizes`、collapse/pane setter 和 reset API；layout-changing setter 会写入 sanitized localStorage snapshot，active view/right panel open 不写 layout preferences。
 - [2026-07-04 18:41] Task 1 Step 2 完成：新增 `useResizablePane` 布局常量、宽度 clamp、layout preference sanitize/read/write helper；单测已通过。
@@ -27,6 +28,7 @@ Started: 2026-07-04 18:38
 
 ## Changed Files
 
+- src/components/app/ResizableSplitter.tsx
 - src/stores/navigationStore.ts
 - src/stores/navigationStore.test.ts
 - src/hooks/useResizablePane.ts
@@ -35,6 +37,7 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/hooks/useResizablePane.test.ts: passed (6 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: passed (6 tests)
 - npm run test -- src/stores/navigationStore.test.ts src/hooks/useResizablePane.test.ts: passed (6 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: passed (4 tests)
