@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 02:42] Task 2 Step 1 完成：新增 Lint 历史 DTO、默认值与 serde 省略报告体测试，cargo check 通过
 - [2026-07-05 02:31] Task 1 Step 5 完成：新增 TaskService updated_at 倒序回归测试，并通过 cargo check --lib --tests
 - [2026-07-05 02:25] Task 1 Step 4 完成：补充 TaskLogDrawer 默认时间排序和切换状态排序保持选中任务的测试
 - [2026-07-05 02:24] Task 1 Step 3 完成：TaskLogDrawer 接入排序偏好与 segmented control，补充中英文文案和 CSS
@@ -35,9 +36,11 @@ Started: 2026-07-05 02:19
 - src/i18n/locales/zh-CN.json
 - src/styles.css
 - src-tauri/src/tasks/task_service.rs
+- src-tauri/src/models/lint.rs
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 1)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
 - npm run test -- src/components/app/TaskLogDrawer.test.tsx src/components/app/taskSort.test.ts: passed (8 tests)
 - npm run test -- src/components/app/taskSort.test.ts: passed (5 tests)
