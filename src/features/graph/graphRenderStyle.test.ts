@@ -8,7 +8,7 @@ import {
   visibleNodeIdsForExport,
   visualForNode,
 } from "./graphRenderStyle";
-import type { GraphNode } from "../../types/graph";
+import { COMMUNITY_PALETTE, type GraphNode } from "../../types/graph";
 
 describe("graphRenderStyle", () => {
   const baseNode: GraphNode = {
@@ -80,6 +80,18 @@ describe("graphRenderStyle", () => {
     expect(matching.opacity).toBe(1);
     expect(other.hidden).toBe(false);
     expect(other.opacity).toBeLessThan(1);
+  });
+
+  it("colors community mode from supplied community ids", () => {
+    const visual = visualForNode(
+      { ...baseNode, id: "concepts/agents.md" },
+      options({
+        colorMode: "community",
+        communityByNodeId: new Map([["concepts/agents.md", 3]]),
+      }),
+    );
+
+    expect(visual.color).toBe(COMMUNITY_PALETTE[3 % COMMUNITY_PALETTE.length]);
   });
 
   it("returns export-visible ids by excluding any node with a hidden reason", () => {

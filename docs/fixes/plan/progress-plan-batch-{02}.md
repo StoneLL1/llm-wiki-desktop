@@ -1,7 +1,7 @@
 # Progress - Graph Dashboard Visuals Reliability Implementation Plan
 
 Plan: D:\Users\Aletta\Desktop\Works\llm-wiki-desktop\docs\fixes\plan\plan-batch-{02}.md
-Status: in_progress
+Status: completed
 Started: 2026-07-04 19:51
 
 ## step Progress
@@ -11,9 +11,11 @@ Started: 2026-07-04 19:51
 - [x] Task 3 - Pure Graph Render Style Helpers
 - [x] Task 4 - Graph View, Legend, Inspector, And Empty States
 - [x] Task 5 - Dashboard Graph Overview Panel
-- [ ] Task 6 - Integrated Verification And Review
+- [x] Task 6 - Integrated Verification And Review
 
 ## Activity Log
+
+- [2026-07-05 00:15] Completed Task 6: merged shared-context and fresh-context review findings; fixed layout freshness coverage by node id, stale-layout client recompute, community color mapping, search-aware inspector neighbors, all-types-hidden filtering, dashboard graph status display, and related regression tests; reran full verification.
 
 - [2026-07-04 23:48] Completed Task 5: added dashboardGraphPreview model/helper and tests, rendered compact dashboard graph overview with deterministic mini-SVG, wired Open Graph navigation, surfaced active graph build task state without starting graph builds, and replaced recent compile selection with latestCompileTask sorting.
 
@@ -29,8 +31,10 @@ Started: 2026-07-04 19:51
 ## Changed Files
 
 - docs/fixes/plan/progress-plan-batch-{02}.md
+- SPEC/progress.txt
 - src/features/graph/graphExport.test.ts
 - src/features/graph/graphExport.ts
+- src/features/graph/GraphInspector.test.tsx
 - src/features/graph/graphRenderStyle.test.ts
 - src/features/graph/graphRenderStyle.ts
 - src/app/App.test.tsx
@@ -57,9 +61,14 @@ Started: 2026-07-04 19:51
 
 ## Verification
 
-- npm run test: not run
-- npm run lint: not run
-- npm run build: not run
+- npm run test -- src/features/graph/graphRenderStyle.test.ts src/features/graph/legendEntries.test.ts src/features/graph/graphExport.test.ts src/features/graph/graphNeighbors.test.ts src/features/graph/graphStore.test.ts src/features/graph/graphView.test.tsx src/features/graph/GraphInspector.test.tsx src/features/dashboard/dashboardGraphPreview.test.ts src/features/dashboard/DashboardView.test.tsx src/test/ui-css-contracts.test.ts: passed, 10 files, 64 tests (jsdom logs expected canvas getContext fallback noise)
+- npm run test: passed, 41 files, 231 tests (jsdom logs expected canvas getContext fallback noise)
+- npm run lint: passed
+- npm run build: passed (existing Vite large chunk warning)
+- Get-ChildItem -LiteralPath src -Recurse -File | Select-String -Pattern 'console\.log': passed, no matches
+- cargo test --manifest-path src-tauri/Cargo.toml graph_service: failed before tests ran, 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
+- cargo test --manifest-path src-tauri/Cargo.toml --no-default-features graph_service: passed, 16 tests
 - cargo test --manifest-path src-tauri/Cargo.toml resolve_rebuilds_stale_empty_cache_when_live_pages_exist: failed before tests ran, 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND
 - cargo test --manifest-path src-tauri/Cargo.toml resolve_marks_layout_stale_when_positions_do_not_cover_nodes: failed before tests ran, 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND
 - cargo test --manifest-path src-tauri/Cargo.toml graph_service: failed before tests ran, 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND

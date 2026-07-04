@@ -20,6 +20,7 @@ export interface GraphRenderOptions {
   degreeThreshold: number;
   neighborIds: Set<string>;
   hoveredType: WikiPageType | null;
+  communityByNodeId?: Map<string, number>;
 }
 
 export interface NodeVisual {
@@ -75,7 +76,7 @@ export function hiddenReasonForNode(
 
 export function visualForNode(node: GraphNode, options: GraphRenderOptions): NodeVisual {
   const hiddenReason = hiddenReasonForNode(node, options);
-  const color = nodeColor(node, options.colorMode);
+  const color = nodeColor(node, options.colorMode, options.communityByNodeId);
   if (hiddenReason) {
     return {
       hidden: true,
@@ -155,10 +156,11 @@ export function visibleNodeIdsForExport(
   return new Set(nodes.filter((node) => hiddenReasonForNode(node, options) === null).map((node) => node.id));
 }
 
-function nodeColor(node: GraphNode, mode: GraphColorMode): string {
+function nodeColor(node: GraphNode, mode: GraphColorMode, communityByNodeId?: Map<string, number>): string {
   if (mode === "plain") return PLAIN_COLOR;
   if (mode === "community") {
-    return COMMUNITY_PALETTE[stableIndex(node.id, COMMUNITY_PALETTE.length)];
+    const community = communityByNodeId?.get(node.id) ?? stableIndex(node.id, COMMUNITY_PALETTE.length);
+    return COMMUNITY_PALETTE[community % COMMUNITY_PALETTE.length];
   }
   return PAGE_TYPE_COLORS[node.type] ?? PLAIN_COLOR;
 }

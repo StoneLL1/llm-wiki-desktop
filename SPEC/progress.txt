@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-04] graph/dashboard batch-02 implementation - Implemented graph cache read-through recovery, event-driven graph rebuild state, pure graph render styling, graph legend/inspector empty states, and dashboard graph overview - Key decision: GraphData schema stays unchanged; get_graph resolves live wiki state through GraphService::resolve; stale cached layouts are recomputed on the client and persisted through the existing save_layout path.
+
 > 每完成一个重要进度节点，按时间倒序在此追加一条记录（最新在上）。
 > 格式：[YYYY-MM-DD] 模块/任务 — 完成内容摘要 — 关键决策/遗留问题。
 

@@ -78,6 +78,17 @@ describe("legendEntries", () => {
     expect(source).toMatchObject({ count: 1, visibleCount: 0, hiddenCount: 1 });
   });
 
+  it("keeps every present type hidden when all present types are filtered out", () => {
+    const entries = typeLegendEntries(
+      makeData(),
+      labels,
+      new Set<WikiPageType>(["entity", "concept", "source"]),
+    );
+
+    expect(entries.every((entry) => entry.visibleCount === 0)).toBe(true);
+    expect(entries.map((entry) => entry.hiddenCount)).toEqual([2, 2, 1]);
+  });
+
   it("groups communities by size, top-N then Other", () => {
     const entries = communityLegendEntries(makeData(), 2);
     // community 0 and 1 have 2 each, community 2 has 1 → top 2 then Other(1).

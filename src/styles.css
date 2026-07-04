@@ -1138,6 +1138,7 @@ select:focus-visible {
   color: var(--text-muted);
 }
 .dashboard-graph__task,
+.dashboard-graph__status,
 .dashboard-graph__types {
   grid-column: 1 / -1;
   font-size: 11.5px;

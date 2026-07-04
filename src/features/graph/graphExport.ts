@@ -158,7 +158,8 @@ function readTags(value: unknown): string[] {
 
 function visibleTypeFilter(nodes: GraphNode[], hiddenTypes: Set<string>): Set<WikiPageType> {
   if (hiddenTypes.size === 0) return new Set();
-  return new Set(nodes.map((node) => node.type).filter((type) => !hiddenTypes.has(type)));
+  void nodes;
+  return new Set((Object.keys(PAGE_TYPE_COLORS) as WikiPageType[]).filter((type) => !hiddenTypes.has(type)));
 }
 
 function emptySvg(): string {

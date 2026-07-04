@@ -164,7 +164,7 @@ impl GraphService {
                 let layout_stale = cached
                     .layout
                     .as_ref()
-                    .map(|layout| layout.positions.len() != cached.nodes.len())
+                    .map(|layout| !layout_covers_nodes(layout, &cached.nodes))
                     .unwrap_or(true);
                 return Ok(GraphBuildResult {
                     data: cached,
@@ -219,6 +219,10 @@ impl GraphService {
         self.write_cache(context, &cached)?;
         Ok(Some(cached))
     }
+}
+
+fn layout_covers_nodes(layout: &GraphLayout, nodes: &[GraphNode]) -> bool {
+    nodes.iter().all(|node| layout.positions.contains_key(&node.id))
 }
 
 /// Build a case-insensitive lookup from note-name/title/alias -> page path.
@@ -545,6 +549,20 @@ mod tests {
         assert!(result.cached);
         assert!(result.layout_stale);
         assert_eq!(result.data.nodes.len(), 2);
+
+        data.layout = Some(GraphLayout {
+            positions: HashMap::from([
+                ("wiki/ghost-1.md".to_string(), [1.0, 2.0]),
+                ("wiki/ghost-2.md".to_string(), [3.0, 4.0]),
+            ]),
+            communities: HashMap::new(),
+        });
+        service.write_cache(&context, &data).unwrap();
+
+        let wrong_keys = service.resolve(&context, &pages).unwrap();
+
+        assert!(wrong_keys.cached);
+        assert!(wrong_keys.layout_stale);
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -65,6 +65,15 @@ describe("DashboardView", () => {
     expect(screen.getAllByText("Building graph preview").length).toBeGreaterThan(0);
     expect(invokeMock).not.toHaveBeenCalledWith("build_graph", expect.anything());
   });
+
+  it("surfaces graph store status in the graph overview", () => {
+    useGraphStore.setState({ status: "rebuilding" });
+
+    render(<DashboardView />);
+
+    const section = screen.getByRole("region", { name: "Graph overview" });
+    expect(section).toHaveTextContent("Rebuilding graph");
+  });
 });
 
 function project(overrides: Partial<ProjectSummary> = {}): ProjectSummary {

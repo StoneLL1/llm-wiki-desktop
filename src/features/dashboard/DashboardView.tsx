@@ -174,6 +174,7 @@ export function DashboardView() {
                 {graphPreview.activeTaskLabel ? (
                   <div className="dashboard-graph__task">{graphPreview.activeTaskLabel}</div>
                 ) : null}
+                <div className="dashboard-graph__status">{graphStatusLabel(graphPreview.status, t)}</div>
                 {graphPreview.topTypes.length > 0 ? (
                   <div className="dashboard-graph__types">
                     {graphPreview.topTypes.map((row) => (
@@ -397,6 +398,14 @@ function QuickAction({
       </div>
     </button>
   );
+}
+
+function graphStatusLabel(status: ReturnType<typeof useGraphStore.getState>["status"], t: (key: string) => string): string {
+  if (status === "loading") return t("graph.loading");
+  if (status === "rebuilding") return t("graph.status.rebuilding");
+  if (status === "ready-empty") return t("graph.empty.noPages");
+  if (status === "error") return t("graph.error");
+  return t("graph.status.fresh");
 }
 
 function relativeTime(iso: string | null, t: (key: string, opts?: Record<string, unknown>) => string): string {

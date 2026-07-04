@@ -30,6 +30,7 @@ export function RightContextPanel() {
   const graphLayoutStale = useGraphStore((state) => state.layoutStale);
   const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
   const graphFocusedId = useGraphStore((state) => state.focusedNodeId);
+  const graphSearch = useGraphStore((state) => state.search);
   const setGraphSelectedNode = useGraphStore((state) => state.setSelectedNode);
   const setGraphFocusedNode = useGraphStore((state) => state.setFocusedNodeId);
   const graphTypeFilter = useGraphStore((state) => state.typeFilter);
@@ -226,6 +227,7 @@ export function RightContextPanel() {
               data={graphData}
               typeFilter={graphTypeFilter}
               degreeThreshold={graphDegreeThreshold}
+              search={graphSearch}
               focusedNodeId={graphFocusedId}
               layoutStale={graphLayoutStale}
               cached={graphCached}
