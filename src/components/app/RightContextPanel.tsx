@@ -19,6 +19,7 @@ export function RightContextPanel() {
   const activeView = useNavigationStore((state) => state.activeView);
   const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const closeWikiAssistant = useNavigationStore((state) => state.closeWikiAssistant);
   const currentProject = useProjectStore((state) => state.currentProject);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const tasks = useTaskStore((state) => state.tasks);
@@ -209,6 +210,7 @@ export function RightContextPanel() {
               page={wikiContent}
               projectId={currentProject.projectId}
               rootPath={currentProject.rootPath}
+              onShowRelatedPages={closeWikiAssistant}
             />
           </div>
         </aside>

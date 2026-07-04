@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { BookOpenText } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useTaskStore } from "../../stores/taskStore";
@@ -13,9 +14,15 @@ interface PageChatPanelProps {
   page: WikiPageContent | null;
   projectId: string;
   rootPath: string;
+  onShowRelatedPages?: () => void;
 }
 
-export function PageChatPanel({ page, projectId, rootPath }: PageChatPanelProps) {
+export function PageChatPanel({
+  page,
+  projectId,
+  rootPath,
+  onShowRelatedPages,
+}: PageChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const activeSession = useChatStore((state) => state.activeSession);
@@ -38,7 +45,9 @@ export function PageChatPanel({ page, projectId, rootPath }: PageChatPanelProps)
     sendTask?.status === "queued" ||
     sendTask?.status === "cancelling";
   const latestAssistant = latestAssistantMessage(activeSession);
-  const pinnedCitation = latestAssistant?.citations?.find((citation) => citation.isPinned);
+  const pinnedCitation = latestAssistant?.citations?.find(
+    (citation) => citation.isPinned && citation.pagePath === page?.meta.path,
+  );
 
   useEffect(() => {
     if (!sendTask || !isTerminalStatus(sendTask.status)) return;
@@ -84,11 +93,26 @@ export function PageChatPanel({ page, projectId, rootPath }: PageChatPanelProps)
   return (
     <div className="page-chat flex h-full min-h-0 flex-col">
       <div className="page-chat__head border-b border-[var(--border-subtle)] px-4 py-3">
-        <div className="truncate text-[12.5px] font-semibold text-[var(--text-primary)]">
-          {page.meta.title}
-        </div>
-        <div className="mt-1 truncate font-mono text-[10.5px] text-[var(--text-muted)]">
-          {page.meta.path}
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[12.5px] font-semibold text-[var(--text-primary)]">
+              {page.meta.title}
+            </div>
+            <div className="mt-1 truncate font-mono text-[10.5px] text-[var(--text-muted)]">
+              {page.meta.path}
+            </div>
+          </div>
+          {onShowRelatedPages ? (
+            <button
+              aria-label={t("wiki.related.title")}
+              className="icon-button shrink-0"
+              onClick={onShowRelatedPages}
+              title={t("wiki.related.title")}
+              type="button"
+            >
+              <BookOpenText aria-hidden="true" size={15} />
+            </button>
+          ) : null}
         </div>
         {pinnedCitation ? (
           <div className="mt-2 inline-flex h-[20px] items-center rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-2 text-[10.5px] font-medium text-[var(--accent-hover)]">

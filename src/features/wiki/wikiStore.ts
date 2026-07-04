@@ -362,10 +362,15 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       );
       if (!isProjectScopeCurrent(scope)) return;
       set((state) => {
-        if (!state.page) return {};
-        const nextMeta = { ...state.page.meta, bookmarked: result.bookmarked };
+        const nextPage =
+          state.page?.meta.path === result.relativePath
+            ? {
+                ...state.page,
+                meta: { ...state.page.meta, bookmarked: result.bookmarked },
+              }
+            : state.page;
         return {
-          page: { ...state.page, meta: nextMeta },
+          page: nextPage,
           tree: state.tree
             ? {
                 ...state.tree,
@@ -375,7 +380,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
                   result.bookmarked,
                 ),
                 pages: state.tree.pages.map((p) =>
-                  p.path === nextMeta.path ? { ...p, bookmarked: result.bookmarked } : p,
+                  p.path === result.relativePath ? { ...p, bookmarked: result.bookmarked } : p,
                 ),
               }
             : state.tree,

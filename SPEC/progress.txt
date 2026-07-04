@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-05] batch-03 knowledge/chat/bookmarks implementation - Implemented app-owned wiki/export bookmarks, sidebar favorites, Chinese local-search normalization, pinned-page chat retrieval, Wiki Ask AI panel, pinned citation UI, integration tests, and review fixes - Key decision: user favorites stay in `.app/bookmarks.json`; Chat remains local retrieval plus Agent/BYOK answer flow; export/sidebar/page-chat async paths guard against project or page switches.
+
 [2026-07-04] graph/dashboard batch-02 implementation - Implemented graph cache read-through recovery, event-driven graph rebuild state, pure graph render styling, graph legend/inspector empty states, and dashboard graph overview - Key decision: GraphData schema stays unchanged; get_graph resolves live wiki state through GraphService::resolve; stale cached layouts are recomputed on the client and persisted through the existing save_layout path.
 
 > 每完成一个重要进度节点，按时间倒序在此追加一条记录（最新在上）。
