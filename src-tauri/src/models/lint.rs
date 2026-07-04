@@ -121,6 +121,75 @@ pub struct DeepLintReport {
     pub generated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LintReportKind {
+    Local,
+    Deep,
+}
+
+impl Default for LintReportKind {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LintHistoryEntry {
+    pub id: String,
+    pub kind: LintReportKind,
+    pub created_at: String,
+    pub issue_count: usize,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+    #[serde(default)]
+    pub scanned_pages: Option<usize>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub route: Option<CompileRoutePreference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LintHistoryFile {
+    #[serde(default = "lint_history_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub entries: Vec<LintHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedLintReport {
+    pub entry: LintHistoryEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_report: Option<LintReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_report: Option<DeepLintReport>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadLintHistoryReportRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListLintHistoryRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+}
+
+fn lint_history_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLocalLintRequest {
@@ -379,5 +448,38 @@ mod tests {
         let raw = r#"{"projectId":"p","projectRootPath":"/x"}"#;
         let request: StartDeepLintRequest = serde_json::from_str(raw).unwrap();
         assert_eq!(request.route, CompileRoutePreference::Auto);
+    }
+
+    #[test]
+    fn lint_history_file_defaults_version_and_entries() {
+        let file: LintHistoryFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(file.version, 1);
+        assert!(file.entries.is_empty());
+    }
+
+    #[test]
+    fn persisted_lint_report_omits_missing_report_bodies() {
+        let entry = LintHistoryEntry {
+            id: "local-1".into(),
+            kind: LintReportKind::Local,
+            created_at: "2026-07-04T00:00:00Z".into(),
+            issue_count: 0,
+            error_count: 0,
+            warning_count: 0,
+            info_count: 0,
+            scanned_pages: Some(10),
+            task_id: None,
+            route: None,
+        };
+        let value = serde_json::to_value(PersistedLintReport {
+            entry,
+            local_report: None,
+            deep_report: None,
+        })
+        .unwrap();
+
+        assert_eq!(value["entry"]["kind"], json!("local"));
+        assert!(value.get("localReport").is_none());
+        assert!(value.get("deepReport").is_none());
     }
 }
