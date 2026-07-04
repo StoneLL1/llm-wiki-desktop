@@ -10,11 +10,12 @@ Started: 2026-07-05 02:19
 - [x] Task 2 - Lint History Backend Persistence
 - [x] Task 3 - Lint History Frontend Restore UX
 - [x] Task 4 - Native Directory Picker and New Project Parent Path
-- [ ] Task 5 - Compact Project Start Page and Enriched Recents
+- [x] Task 5 - Compact Project Start Page and Enriched Recents
 - [ ] Task 6 - Regression Coverage, Review, and Quality Gates
 
 ## Activity Log
 
+- [2026-07-05 04:07] Task 5 Step 6 完成：新增 launch CSS contract，并补 projcard metadata 样式，CSS contract 测试通过
 - [2026-07-05 04:03] Task 5 Step 5 完成：新增启动页三入口、native picker 打开已有项目、新建项目父目录生成路径回归测试，三组前端测试通过
 - [2026-07-05 03:59] Task 5 Step 4 完成：recent project 卡片展示页面/来源/索引/图谱状态，缺失项目禁用并标记，App 测试通过
 - [2026-07-05 03:56] Task 5 Step 3 完成：启动页 quick actions 改为新建、打开文件夹为项目、打开已有项目，移除手填路径表单与导入提示，App 测试通过
@@ -83,9 +84,11 @@ Started: 2026-07-05 02:19
 - src-tauri/src/commands/project_commands.rs
 - src-tauri/src/services/project_service.rs
 - src/app/App.test.tsx
+- src/test/ui-css-contracts.test.ts
 
 ## Verification
 
+- npm run test -- src/test/ui-css-contracts.test.ts: passed (13 tests; Task 5 Step 6)
 - npm run test -- src/app/App.test.tsx src/features/project/projectPath.test.ts src/features/import/nativeFilePicker.test.ts: passed (45 tests; jsdom canvas getContext warnings; Task 5 Step 5)
 - npm run test -- src/app/App.test.tsx: passed (31 tests; jsdom canvas getContext warnings; Task 5 Step 4)
 - npm run test -- src/app/App.test.tsx: passed (31 tests; jsdom canvas getContext warnings; Task 5 Step 3)
