@@ -11,6 +11,8 @@ import type {
   ReadExportPreviewRequest,
   RegenerateExportRequest,
   StartExportRequest,
+  ToggleExportBookmarkRequest,
+  ToggleExportBookmarkResponse,
 } from "../types/export";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 
@@ -64,6 +66,7 @@ export interface ExportState {
   clearRunningTask: () => void;
   loadPreview: (request: ReadExportPreviewRequest, id: string) => Promise<void>;
   clearPreview: () => void;
+  toggleBookmark: (projectId: string, rootPath: string, recordId: string) => Promise<void>;
   openFolder: (request: OpenExportFolderRequest) => Promise<void>;
   reset: () => void;
 }
@@ -166,6 +169,34 @@ export const useExportStore = create<ExportState>((set) => ({
   },
 
   clearPreview: () => set({ previewHtml: null, previewId: null }),
+
+  toggleBookmark: async (projectId, rootPath, recordId) => {
+    if (!hasTauri()) return;
+    const scope = captureProjectScope();
+    set({ error: null });
+    const request: ToggleExportBookmarkRequest = {
+      projectId,
+      projectRootPath: rootPath,
+      exportRecordId: recordId,
+    };
+    try {
+      const response = await invoke<ToggleExportBookmarkResponse>(
+        "toggle_export_bookmark",
+        { request },
+      );
+      if (!isProjectScopeCurrent(scope)) return;
+      set((state) => ({
+        records: state.records.map((record) =>
+          record.id === response.exportRecordId
+            ? { ...record, bookmarked: response.bookmarked }
+            : record,
+        ),
+      }));
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
 
   openFolder: async (request) => {
     if (!hasTauri()) return;

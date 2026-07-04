@@ -190,6 +190,7 @@ pub fn run() {
             commands::export_commands::start_export,
             commands::export_commands::regenerate_export,
             commands::export_commands::list_exports,
+            commands::export_commands::toggle_export_bookmark,
             commands::export_commands::read_export_preview,
             commands::export_commands::open_export_folder,
         ])

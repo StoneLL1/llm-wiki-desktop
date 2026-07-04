@@ -35,6 +35,7 @@ export interface ExportRecord {
   createdAt: string;
   route: ExportRoute;
   status: ExportStatus;
+  bookmarked: boolean;
   taskId?: string;
 }
 
@@ -65,6 +66,17 @@ export interface RegenerateExportRequest {
 export interface ListExportsRequest {
   projectId: string;
   projectRootPath: string;
+}
+
+export interface ToggleExportBookmarkRequest {
+  projectId: string;
+  projectRootPath: string;
+  exportRecordId: string;
+}
+
+export interface ToggleExportBookmarkResponse {
+  exportRecordId: string;
+  bookmarked: boolean;
 }
 
 export interface ReadExportPreviewRequest {
