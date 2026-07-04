@@ -240,7 +240,7 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
 
     // --- Search the new page. ---
     let search = SearchService::default();
-    let tree = search.scan_wiki(&context).unwrap();
+    let tree = search.scan_wiki(&context, &Default::default()).unwrap();
     assert!(
         tree.pages.iter().any(|p| p.path.contains("transformers")),
         "scanned tree must include the compiled page"
@@ -305,7 +305,7 @@ fn sample_wiki_loop_scans_searches_and_caches_graph() {
     }
 
     let search = SearchService::default();
-    let tree = search.scan_wiki(&context).unwrap();
+    let tree = search.scan_wiki(&context, &Default::default()).unwrap();
     // The skeleton index/overview/log pages inflate the total, so check each
     // *copied* path is present rather than comparing raw counts.
     let scanned: std::collections::HashSet<&str> =

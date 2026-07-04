@@ -353,7 +353,8 @@ fn finish_compile(
     state
         .file_store
         .write_json_atomic(context, ".app/graph-cache.json", &graph_cache)?;
-    state.search_service.scan_wiki(context)?;
+    let bookmark_paths = state.bookmark_service.wiki_page_paths(context)?;
+    state.search_service.scan_wiki(context, &bookmark_paths)?;
     let mut checkpoint_paths = affected_paths.clone();
     checkpoint_paths.push(".app/graph-cache.json".into());
     let result_checkpoint = state.git_service.create_scoped_checkpoint(

@@ -42,7 +42,7 @@ impl LintService {
         context: &ProjectContext,
         search_service: &SearchService,
     ) -> Result<LintReport, BackendError> {
-        let tree = search_service.scan_wiki(context)?;
+        let tree = search_service.scan_wiki(context, &HashSet::new())?;
         let pages = tree.pages;
         let scanned = pages.len();
 
@@ -409,7 +409,7 @@ impl LintService {
         search_service: &SearchService,
         language: &str,
     ) -> Result<String, BackendError> {
-        let tree = search_service.scan_wiki(context)?;
+        let tree = search_service.scan_wiki(context, &HashSet::new())?;
         let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
         let schema = self.file_store.read_markdown(context, "schema.md").ok();
         // `language` is read by the command layer from SettingsService so this
@@ -454,7 +454,7 @@ impl LintService {
                 page.path,
                 page.tags.join(", ")
             ));
-            if let Ok(content) = search_service.read_page(context, &page.path) {
+            if let Ok(content) = search_service.read_page(context, &page.path, &HashSet::new()) {
                 let excerpt = truncate_chars(&content.body_markdown, DEEP_LINT_EXCERPT_CHARS);
                 if !excerpt.is_empty() {
                     prompt.push_str(excerpt.trim());

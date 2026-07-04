@@ -25,7 +25,8 @@ pub fn scan_wiki(
     request: ScanWikiRequest,
 ) -> Result<WikiTree, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.search_service.scan_wiki(&context)
+    let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
+    state.search_service.scan_wiki(&context, &bookmark_paths)
 }
 
 #[tauri::command]
@@ -34,9 +35,10 @@ pub fn read_wiki_page(
     request: ReadWikiPageRequest,
 ) -> Result<WikiPageContent, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
     state
         .search_service
-        .read_page(&context, &request.relative_path)
+        .read_page(&context, &request.relative_path, &bookmark_paths)
 }
 
 #[tauri::command]
@@ -59,9 +61,13 @@ pub fn toggle_bookmark(
     request: ToggleBookmarkRequest,
 ) -> Result<ToggleBookmarkResponse, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
+    let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
+    let page = state
         .search_service
-        .toggle_bookmark(&context, &request.relative_path)
+        .read_page(&context, &request.relative_path, &bookmark_paths)?;
+    state
+        .bookmark_service
+        .toggle_wiki_page(&context, &page.meta.path, &page.meta.title)
 }
 
 /// Create a new wiki page with seeded frontmatter + H1. Non-destructive (no Git

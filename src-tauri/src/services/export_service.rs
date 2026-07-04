@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::errors::BackendError;
 use crate::models::export::{
     ExportContentOptions, ExportRecord, ExportRoute, ExportStatus, ExportType,
@@ -123,7 +125,7 @@ impl ExportService {
                         true,
                     )
                 })?;
-                let page = search_service.read_page(context, path)?;
+                let page = search_service.read_page(context, path, &HashSet::new())?;
                 prompt.push_str(&format!(
                     "\n--- Source page: {} ---\ntitle: {}\ntype: {:?}\ntags: {}\n\n",
                     path,
@@ -153,7 +155,7 @@ impl ExportService {
             }
             ExportType::ConceptMap => {
                 if let Some(path) = source_path {
-                    let page = search_service.read_page(context, path)?;
+                    let page = search_service.read_page(context, path, &HashSet::new())?;
                     prompt.push_str(&format!(
                         "\n--- Centre page: {} ---\ntitle: {}\nlinks: {}\n\n",
                         path,
@@ -206,7 +208,7 @@ impl ExportService {
         search_service: &SearchService,
         prompt: &mut String,
     ) -> Result<(), BackendError> {
-        let tree = search_service.scan_wiki(context)?;
+        let tree = search_service.scan_wiki(context, &HashSet::new())?;
         prompt.push_str("\n--- Pages ---\n");
         for page in &tree.pages {
             if page.path == "wiki/log.md" {
@@ -220,7 +222,7 @@ impl ExportService {
                 page.tags.join(", "),
                 page.wikilinks.join(", ")
             ));
-            if let Ok(content) = search_service.read_page(context, &page.path) {
+            if let Ok(content) = search_service.read_page(context, &page.path, &HashSet::new()) {
                 let excerpt = truncate_chars(&content.body_markdown, PAGE_EXCERPT_CHARS);
                 if !excerpt.is_empty() {
                     prompt.push_str(excerpt.trim());

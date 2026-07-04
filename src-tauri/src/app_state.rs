@@ -6,9 +6,9 @@ use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
 use crate::models::confirmation::ConfirmationRegistry;
 use crate::models::paths::ProjectContext;
 use crate::services::{
-    AgentService, ChatService, ExportService, ExtractionService, FileStore, GitService,
-    GraphService, ImportService, LintService, LlmService, ProjectService, SearchService,
-    SecretService, SettingsService,
+    AgentService, BookmarkService, ChatService, ExportService, ExtractionService, FileStore,
+    GitService, GraphService, ImportService, LintService, LlmService, ProjectService,
+    SearchService, SecretService, SettingsService,
 };
 use crate::tasks::TaskService;
 
@@ -21,6 +21,7 @@ pub struct AppState {
     pub extraction_service: ExtractionService,
     pub git_service: GitService,
     pub agent_service: AgentService,
+    pub bookmark_service: BookmarkService,
     pub chat_service: ChatService,
     pub llm_service: LlmService,
     pub search_service: SearchService,

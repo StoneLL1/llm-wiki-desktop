@@ -15,7 +15,8 @@ pub fn get_graph(
     request: GraphRequest,
 ) -> Result<GraphBuildResult, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let tree = state.search_service.scan_wiki(&context)?;
+    let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
+    let tree = state.search_service.scan_wiki(&context, &bookmark_paths)?;
     state.graph_service.resolve(&context, &tree.pages)
 }
 
@@ -74,7 +75,8 @@ fn run_graph_build(
         .task_service
         .append_log(task_id, LogLevel::Info, "Scanning wiki pages".to_string())
         .map_err(task_error)?;
-    let tree = state.search_service.scan_wiki(context)?;
+    let bookmark_paths = state.bookmark_service.wiki_page_paths(context)?;
+    let tree = state.search_service.scan_wiki(context, &bookmark_paths)?;
     if state.task_service.is_cancelled(task_id) {
         return Err(BackendError::new(
             "GRAPH_BUILD_CANCELLED",
