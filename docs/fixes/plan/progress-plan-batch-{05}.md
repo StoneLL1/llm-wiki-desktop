@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 03:02] Task 3 Step 1 完成：新增前端 Lint 历史 DTO，lintView 测试通过
 - [2026-07-05 02:59] Task 2 Step 4 完成：run_local_lint/deep lint 接入历史持久化，新增 list/read lint history commands 并注册，cargo check 无警告通过
 - [2026-07-05 02:53] Task 2 Step 3 完成：新增 Lint 历史本地持久化、50 条上限与单报告损坏回归测试，cargo check 通过
 - [2026-07-05 02:48] Task 2 Step 2 完成：LintService 增加历史索引、报告 wrapper 持久化、legacy deep report 兼容读取与 ID 校验，cargo check 通过
@@ -43,9 +44,11 @@ Started: 2026-07-05 02:19
 - src-tauri/src/services/lint_service.rs
 - src-tauri/src/commands/lint_commands.rs
 - src-tauri/src/lib.rs
+- src/types/lint.ts
 
 ## Verification
 
+- npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 1)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 4)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 3)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 2)

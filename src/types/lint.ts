@@ -59,6 +59,43 @@ export interface DeepLintReport {
 
 export type LintRoutePreference = "auto" | "agent" | "byok";
 
+export type LintReportKind = "local" | "deep";
+
+export interface LintHistoryEntry {
+  id: string;
+  kind: LintReportKind;
+  createdAt: string;
+  issueCount: number;
+  errorCount: number;
+  warningCount: number;
+  infoCount: number;
+  scannedPages?: number | null;
+  taskId?: string | null;
+  route?: LintRoutePreference | null;
+}
+
+export interface LintHistoryFile {
+  version: number;
+  entries: LintHistoryEntry[];
+}
+
+export interface PersistedLintReport {
+  entry: LintHistoryEntry;
+  localReport?: LintReport | null;
+  deepReport?: DeepLintReport | null;
+}
+
+export interface ListLintHistoryRequest {
+  projectId: string;
+  projectRootPath: string;
+}
+
+export interface ReadLintHistoryReportRequest {
+  projectId: string;
+  projectRootPath: string;
+  id: string;
+}
+
 export interface StartDeepLintRequest {
   projectId: string;
   projectRootPath: string;
