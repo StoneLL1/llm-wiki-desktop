@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 04:18] Task 6 Step 3 完成：npm run build 初次发现 RecentProject 测试 fixture 缺少 enriched metadata；补齐后重跑 npm run test、npm run lint、npm run build 均通过
 - [2026-07-05 04:14] Task 6 Step 2 完成：npm run test 通过（298 tests），npm run lint 初次发现 projectPath 控制字符正则后已改为 codePoint 过滤并重跑通过
 - [2026-07-05 04:10] Task 6 Step 1 完成：focused frontend tests 通过（85 tests；保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 04:07] Task 5 Step 6 完成：新增 launch CSS contract，并补 projcard metadata 样式，CSS contract 测试通过
@@ -88,9 +89,14 @@ Started: 2026-07-05 02:19
 - src/app/App.test.tsx
 - src/test/ui-css-contracts.test.ts
 - src/features/project/projectPath.ts
+- src/stores/projectStore.test.ts
 
 ## Verification
 
+- npm run build: passed (Task 6 Step 3 rerun after RecentProject fixture update; Vite large chunk warning only)
+- npm run lint: passed (Task 6 Step 3 rerun)
+- npm run test: passed (47 files, 298 tests; jsdom canvas getContext warnings; Task 6 Step 3 rerun)
+- npm run build: failed initially (RecentProject test fixtures missing enriched metadata fields)
 - npm run test: passed (47 files, 298 tests; jsdom canvas getContext warnings; Task 6 Step 2 rerun)
 - npm run lint: passed (Task 6 Step 2 rerun after projectPath no-control-regex fix)
 - npm run lint: failed initially (no-control-regex in projectPath INVALID_FOLDER_CHARS)

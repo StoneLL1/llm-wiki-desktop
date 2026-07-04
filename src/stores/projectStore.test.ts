@@ -17,6 +17,11 @@ const recent: RecentProject = {
   rootPath: "D:/知识库/project-a",
   template: "general",
   openedAt: "2026-06-21T00:00:00Z",
+  wikiPageCount: 2,
+  sourceCount: 1,
+  taskCount: 0,
+  indexState: "indexed",
+  graphState: "cached",
   missing: false,
 };
 
