@@ -1,7 +1,7 @@
 import { Download, ExternalLink, FileText, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { PAGE_TYPE_COLORS, type GraphData } from "../../types/graph";
+import { PAGE_TYPE_COLORS, type GraphData, type GraphStatus } from "../../types/graph";
 import { PAGE_TYPE_LABEL_KEYS, WIKI_PAGE_TYPES, type WikiPageType } from "../../types/wiki";
 import { neighborsOf } from "./graphNeighbors";
 
@@ -10,7 +10,12 @@ interface GraphInspectorProps {
   data: GraphData;
   typeFilter: Set<WikiPageType>;
   degreeThreshold: number;
+  focusedNodeId: string | null;
+  layoutStale: boolean;
+  cached: boolean;
+  status: GraphStatus;
   onOpenPage: () => void;
+  onFocusNode: (nodeId: string | null) => void;
   onOpenNeighbor: (nodeId: string) => void;
   onToggleType: (type: WikiPageType) => void;
   onDegreeThresholdChange: (value: number) => void;
@@ -32,7 +37,12 @@ export function GraphInspector({
   data,
   typeFilter,
   degreeThreshold,
+  focusedNodeId,
+  layoutStale,
+  cached,
+  status,
   onOpenPage,
+  onFocusNode,
   onOpenNeighbor,
   onToggleType,
   onDegreeThresholdChange,
@@ -46,7 +56,7 @@ export function GraphInspector({
     const n = byId.get(id);
     if (!n) return false;
     if (typeFilter.has(n.type)) return false;
-    if (degreeThreshold > 0 && n.degree <= degreeThreshold) return false;
+    if (degreeThreshold > 0 && n.degree < degreeThreshold) return false;
     return true;
   };
   // Only list neighbors the user can actually see on the canvas — a hidden
@@ -65,6 +75,7 @@ export function GraphInspector({
   // Clamp the degree slider to the data's real max so a hard 20 can't blank
   // a small wiki entirely; keep at least 0..1 when the graph is trivial.
   const degreeMax = Math.max(1, maxDegree);
+  const focusActive = Boolean(node && focusedNodeId === node.id);
 
   return (
     <div className="px-4 py-3">
@@ -150,8 +161,18 @@ export function GraphInspector({
           <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{communityCount} (Louvain)</dd>
           <dt className="font-medium text-[var(--text-muted)]">{t("graph.inspector.status.layout")}</dt>
           <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">
-            {data.layout ? t("graph.inspector.status.layoutCached") : t("graph.inspector.status.layoutComputed")}
+            {layoutStale
+              ? t("graph.status.layoutStale")
+              : data.layout
+                ? t("graph.inspector.status.layoutCached")
+                : t("graph.inspector.status.layoutComputed")}
           </dd>
+          <dt className="font-medium text-[var(--text-muted)]">{t("graph.inspector.status.cache")}</dt>
+          <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">
+            {cached ? t("graph.status.cached") : t("graph.status.fresh")}
+          </dd>
+          <dt className="font-medium text-[var(--text-muted)]">{t("graph.inspector.graphStatus")}</dt>
+          <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{status}</dd>
         </dl>
       </div>
 
@@ -194,15 +215,24 @@ export function GraphInspector({
         <h5 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
           {t("graph.inspector.actions")}
         </h5>
-        <div className="flex flex-col gap-1.5">
+        <div className="graph-inspector__actions">
           <button
             type="button"
             onClick={onOpenPage}
             disabled={!node}
-            className="flex h-[30px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+            className="flex h-[30px] items-center gap-2 rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] text-[var(--text-inverse)] hover:bg-[var(--text-secondary)] disabled:opacity-40"
           >
             <ExternalLink size={13} />
-            {t("graph.inspector.openPage")}
+            {t("graph.inspector.openInWiki")}
+          </button>
+          <button
+            type="button"
+            onClick={() => onFocusNode(focusActive ? null : (node?.id ?? null))}
+            disabled={!node}
+            className="flex h-[30px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+          >
+            <FileText size={13} />
+            {focusActive ? t("graph.inspector.clearFocus") : t("graph.inspector.focusNeighbors")}
           </button>
           <button
             type="button"

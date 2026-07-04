@@ -25,8 +25,13 @@ export function RightContextPanel() {
   const openWikiPage = useWikiStore((state) => state.openPage);
   const requestWikiExport = useWikiStore((state) => state.requestExport);
   const graphData = useGraphStore((state) => state.data);
+  const graphStatus = useGraphStore((state) => state.status);
+  const graphCached = useGraphStore((state) => state.cached);
+  const graphLayoutStale = useGraphStore((state) => state.layoutStale);
   const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
+  const graphFocusedId = useGraphStore((state) => state.focusedNodeId);
   const setGraphSelectedNode = useGraphStore((state) => state.setSelectedNode);
+  const setGraphFocusedNode = useGraphStore((state) => state.setFocusedNodeId);
   const graphTypeFilter = useGraphStore((state) => state.typeFilter);
   const graphDegreeThreshold = useGraphStore((state) => state.degreeThreshold);
   const toggleGraphType = useGraphStore((state) => state.toggleTypeFilter);
@@ -221,6 +226,10 @@ export function RightContextPanel() {
               data={graphData}
               typeFilter={graphTypeFilter}
               degreeThreshold={graphDegreeThreshold}
+              focusedNodeId={graphFocusedId}
+              layoutStale={graphLayoutStale}
+              cached={graphCached}
+              status={graphStatus}
               onOpenPage={() => {
                 if (!selectedNode) return;
                 setActiveView("wiki");
@@ -230,6 +239,7 @@ export function RightContextPanel() {
                   selectedNode.path,
                 );
               }}
+              onFocusNode={setGraphFocusedNode}
               onOpenNeighbor={(nodeId) => setGraphSelectedNode(nodeId)}
               onToggleType={toggleGraphType}
               onDegreeThresholdChange={setGraphDegreeThreshold}

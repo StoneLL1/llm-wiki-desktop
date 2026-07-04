@@ -9,6 +9,9 @@ interface GraphLegendProps {
   colorMode: GraphColorMode;
   hiddenTypes: Set<WikiPageType>;
   degreeThreshold: number;
+  search: string;
+  hoveredType: WikiPageType | null;
+  onTypeHover: (type: WikiPageType | null) => void;
 }
 
 /**
@@ -17,9 +20,17 @@ interface GraphLegendProps {
  * counts, the top communities + "other", or a plain label. Filtered-out types
  * are dimmed and counted as zero so the legend tracks the on-canvas state.
  */
-export function GraphLegend({ data, colorMode, hiddenTypes, degreeThreshold }: GraphLegendProps) {
+export function GraphLegend({
+  data,
+  colorMode,
+  hiddenTypes,
+  degreeThreshold,
+  search,
+  hoveredType,
+  onTypeHover,
+}: GraphLegendProps) {
   const { t } = useTranslation();
-  const entries = legendEntries(colorMode, data, resolveLabels(t), hiddenTypes, degreeThreshold);
+  const entries = legendEntries(colorMode, data, resolveLabels(t), hiddenTypes, degreeThreshold, search);
 
   if (colorMode === "plain") {
     return (
@@ -45,13 +56,29 @@ export function GraphLegend({ data, colorMode, hiddenTypes, degreeThreshold }: G
         {colorMode === "community" ? t("graph.legend.title.community") : t("graph.legend.title.type")}
       </div>
       {entries.map((entry) => {
-        const dim = entry.count === 0;
+        const type = colorMode === "type" ? (entry.id as WikiPageType) : null;
+        const dim = entry.visibleCount === 0;
+        const active = Boolean(type && hoveredType === type);
         return (
-          <div key={entry.key} className={`graph-legend__row${dim ? " is-dim" : ""}`}>
+          <button
+            key={entry.key}
+            type="button"
+            className={`graph-legend__row${dim ? " is-dim" : ""}`}
+            data-active={active}
+            onMouseEnter={() => onTypeHover(type)}
+            onMouseLeave={() => onTypeHover(null)}
+            onFocus={() => onTypeHover(type)}
+            onBlur={() => onTypeHover(null)}
+            disabled={!type}
+          >
             <span className="swatch" style={{ background: entry.color }} aria-hidden />
             <span>{entry.label}</span>
-            <span className="graph-legend__count">{dim ? t("graph.legend.hidden") : entry.count}</span>
-          </div>
+            <span className="graph-legend__count">
+              {colorMode === "type"
+                ? t("graph.legend.visibleHiddenCount", { visible: entry.visibleCount, hidden: entry.hiddenCount })
+                : entry.count}
+            </span>
+          </button>
         );
       })}
     </div>
