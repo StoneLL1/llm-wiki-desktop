@@ -36,4 +36,10 @@ describe("responsive UI CSS contracts", () => {
   it("respects reduced-motion preferences", () => {
     expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
   });
+
+  it("defines keyboard-visible resizable pane handles", () => {
+    expect(styles).toContain(".resize-handle");
+    expect(styles).toMatch(/\.resize-handle:focus-visible::before/s);
+    expect(styles).toContain("body.is-resizing-pane");
+  });
 });

@@ -226,6 +226,35 @@ body {
   display: none;
 }
 
+.resize-handle {
+  position: relative;
+  width: 6px;
+  min-width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  outline: none;
+  touch-action: none;
+}
+
+.resize-handle::before {
+  position: absolute;
+  inset: 0 2px;
+  content: "";
+  background: var(--border);
+}
+
+.resize-handle:hover::before,
+.resize-handle:focus-visible::before,
+.resize-handle.is-dragging::before {
+  inset: 0 1px;
+  background: var(--accent-border);
+}
+
+body.is-resizing-pane {
+  cursor: col-resize;
+  user-select: none;
+}
+
 button,
 input,
 textarea,
