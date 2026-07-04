@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 03:23] Task 4 Step 1 完成：新增 pickDirectory 红灯测试，验证因 pickDirectory 未实现而失败
 - [2026-07-05 03:20] Task 3 Step 6 完成：新增 LintView 历史恢复/损坏报告测试与 lintStore history payload 测试，前端测试通过
 - [2026-07-05 03:16] Task 3 Step 5 完成：补充 Lint 历史中英文文案，lintView 测试通过
 - [2026-07-05 03:13] Task 3 Step 4 完成：LintView 集成历史列表、加载历史并自动打开最新报告，lintView 测试通过
@@ -58,9 +59,11 @@ Started: 2026-07-05 02:19
 - src/i18n/locales/zh-CN.json
 - src/features/lint/lintView.test.tsx
 - src/stores/lintStore.test.ts
+- src/features/import/nativeFilePicker.test.ts
 
 ## Verification
 
+- npm run test -- src/features/import/nativeFilePicker.test.ts: failed as expected (pickDirectory is not a function; Task 4 Step 1)
 - npm run test -- src/features/lint/lintView.test.tsx src/stores/lintStore.test.ts: passed (19 tests; Task 3 Step 6)
 - npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 5)
 - npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 4)
