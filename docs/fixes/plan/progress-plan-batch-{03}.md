@@ -18,7 +18,7 @@ Started: 2026-07-05 00:05
 - [x] Task 10 - Navigation right panel mode
 - [x] Task 11 - Wiki Ask AI button + PageChatPanel
 - [x] Task 12 - Citation UI pinned sources
-- [ ] Task 13 - Styling/i18n
+- [x] Task 13 - Styling/i18n
 - [ ] Task 14 - Integration checks + review
 
 ## Activity Log
@@ -37,6 +37,7 @@ Started: 2026-07-05 00:05
 - [2026-07-05 00:54] 完成 Task 10：navigationStore 增加 rightPanelMode/wikiAssistantPagePath 与 open/close/update actions；补充右侧面板模式测试；已有 sidebar layout dirty 改动保持未纳入本步骤提交。
 - [2026-07-05 00:59] 完成 Task 11：新增 PageChatPanel 并复用 ChatView 消息组件；Wiki toolbar 增加 Ask AI 图标按钮；RightContextPanel 可切换页面聊天；补充 PageChatPanel 测试和 i18n。
 - [2026-07-05 01:00] 完成 Task 12：MessageBubble 与 RightContextPanel citation 列表显示 current page badge；PageChatPanel pinned citation 测试保持覆盖。
+- [2026-07-05 01:01] 完成 Task 13：确认 Ask AI/PageChatPanel 新增 UI 使用现有 token 与 utility class，无新增 hex/gradient/blob；新增 i18n 键已覆盖 en/zh-CN；`npm run lint -- --quiet` 通过。
 
 ## Changed Files
 
@@ -102,6 +103,7 @@ Started: 2026-07-05 00:05
 - npm run test -- src/features/chat/PageChatPanel.test.tsx src/features/chat/chatView.test.tsx: pass
 - npm run test -- src/features/wiki/wiki.test.tsx: pass
 - npm run test -- src/features/chat/PageChatPanel.test.tsx src/features/chat/chatView.test.tsx: pass
+- npm run lint -- --quiet: pass
 - npm run test -- src/features/wiki/wiki.test.tsx: pass
 - npm run test -- src/stores/exportStore.test.ts src/features/exports/exportsView.test.tsx src/features/wiki/wiki.test.tsx: pass
 - cargo test --manifest-path src-tauri/Cargo.toml export_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
