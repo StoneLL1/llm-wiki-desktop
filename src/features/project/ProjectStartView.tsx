@@ -6,7 +6,6 @@ import {
   PanelRightOpen,
   Plus,
   Search,
-  Upload,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -62,7 +61,9 @@ export function ProjectStartView() {
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<Category>("all");
-  const [openPath, setOpenPath] = useState("");
+  const [pendingLaunchIntent, setPendingLaunchIntent] = useState<
+    "open_existing" | "open_folder_as_project" | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [newDialogOpen, setNewDialogOpen] = useState(false);
@@ -158,6 +159,30 @@ export function ProjectStartView() {
     }
   };
 
+  const chooseAndOpenProject = async (
+    intent: "open_existing" | "open_folder_as_project",
+  ) => {
+    setPendingLaunchIntent(intent);
+    const selected = await pickDirectory({
+      title: t(
+        intent === "open_existing"
+          ? "launch.quick.openExistingPicker"
+          : "launch.quick.openFolderPicker",
+      ),
+    });
+    if (!selected) return;
+    await run(() => openProject(selected));
+  };
+
+  const pendingActionForDisplay =
+    pendingAction && pendingLaunchIntent === "open_existing"
+      ? {
+          ...pendingAction,
+          title: t("launch.confirm.notExistingTitle"),
+          message: t("launch.confirm.notExistingMessage"),
+        }
+      : pendingAction;
+
   const availableAgents = agents.filter((a) => a.state === "installed").length;
 
   return (
@@ -173,10 +198,7 @@ export function ProjectStartView() {
         <nav className="launch__nav" aria-label={t("launch.nav.label")}>
           <button type="button" className="is-active">{t("launch.nav.recent")}</button>
           <button type="button" onClick={() => setNewDialogOpen(true)}>{t("launch.nav.new")}</button>
-          <button type="button" onClick={() => {
-            const el = document.getElementById("launch-open-input");
-            el?.focus();
-          }}>{t("launch.nav.open")}</button>
+          <button type="button" onClick={() => void chooseAndOpenProject("open_existing")}>{t("launch.nav.open")}</button>
           <button type="button" onClick={() => {
             if (sideOpen) {
               document.getElementById("launch-templates")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -249,41 +271,16 @@ export function ProjectStartView() {
               <h3 className="quickaction__title">{t("launch.quick.new")}</h3>
               <p className="quickaction__desc">{t("launch.quick.newDesc")}</p>
             </button>
-            <label className="quickaction" htmlFor="launch-open-input">
+            <button type="button" className="quickaction" onClick={() => void chooseAndOpenProject("open_folder_as_project")}>
               <span className="quickaction__icon"><FolderOpen size={20} aria-hidden="true" /></span>
-              <h3 className="quickaction__title">{t("launch.quick.open")}</h3>
-              <p className="quickaction__desc">{t("launch.quick.openDesc")}</p>
-            </label>
-            <div className="quickaction" role="note" aria-label={t("launch.quick.import")}>
-              <span className="quickaction__icon"><Upload size={20} aria-hidden="true" /></span>
-              <h3 className="quickaction__title">{t("launch.quick.import")}</h3>
-              <p className="quickaction__desc">{t("launch.quick.importDesc")}</p>
-            </div>
-
-            {/* Open-folder inline input (drives the "open folder as project" quick action) */}
-            <form
-              className="quickaction"
-              style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)", cursor: "default" }}
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (openPath.trim()) void run(() => openProject(openPath.trim()));
-              }}
-            >
-              <label className="quickaction__title" htmlFor="launch-open-input" style={{ fontSize: 13, fontWeight: 600 }}>
-                {t("launch.open.title")}
-              </label>
-              <input
-                id="launch-open-input"
-                className="input input--mono"
-                value={openPath}
-                onChange={(event) => setOpenPath(event.target.value)}
-                placeholder={t("launch.open.placeholder")}
-                disabled={initializing || busy}
-              />
-              <button type="submit" className="btn btn--sm btn--primary" disabled={initializing || busy || !openPath.trim()}>
-                {t("launch.open.action")}
-              </button>
-            </form>
+              <h3 className="quickaction__title">{t("launch.quick.openFolderAsProject")}</h3>
+              <p className="quickaction__desc">{t("launch.quick.openFolderAsProjectDesc")}</p>
+            </button>
+            <button type="button" className="quickaction" onClick={() => void chooseAndOpenProject("open_existing")}>
+              <span className="quickaction__icon"><FolderOpen size={20} aria-hidden="true" /></span>
+              <h3 className="quickaction__title">{t("launch.quick.openExisting")}</h3>
+              <p className="quickaction__desc">{t("launch.quick.openExistingDesc")}</p>
+            </button>
 
             {/* Recent project cards */}
             {filtered.length === 0 ? (
@@ -414,9 +411,9 @@ export function ProjectStartView() {
         />
       ) : null}
 
-      {pendingAction ? (
+      {pendingActionForDisplay ? (
         <ConfirmationDialog
-          action={pendingAction}
+          action={pendingActionForDisplay}
           checkpointExists={false}
           onCancel={() => void run(cancelPendingAction)}
           onConfirm={() => void run(confirmPendingAction)}
