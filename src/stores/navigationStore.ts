@@ -20,11 +20,15 @@ export type AppView =
 
 export type RightPanelMode = "default" | "wikiAssistant";
 
+export type WorkspaceFocus = "exportPreview";
+
 export interface NavigationState {
   activeView: AppView;
   rightPanelOpen: boolean;
   rightPanelMode: RightPanelMode;
   wikiAssistantPagePath: string | null;
+  workspaceFocus: WorkspaceFocus | null;
+  rightPanelOpenBeforeFocus: boolean | null;
   sidebarCollapsed: boolean;
   paneSizes: Record<ResizablePaneId, number>;
   setActiveView: (view: AppView) => void;
@@ -32,6 +36,8 @@ export interface NavigationState {
   openWikiAssistant: (path: string) => void;
   setWikiAssistantPagePath: (path: string | null) => void;
   closeWikiAssistant: () => void;
+  focusWorkspace: (focus: WorkspaceFocus) => void;
+  clearWorkspaceFocus: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapsed: () => void;
   setPaneSize: (pane: ResizablePaneId, width: number) => void;
@@ -45,6 +51,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   rightPanelOpen: true,
   rightPanelMode: "default",
   wikiAssistantPagePath: null,
+  workspaceFocus: null,
+  rightPanelOpenBeforeFocus: null,
   sidebarCollapsed: initialLayoutPreferences.sidebarCollapsed,
   paneSizes: initialLayoutPreferences.paneSizes,
   setActiveView: (activeView) =>
@@ -75,6 +83,23 @@ export const useNavigationStore = create<NavigationState>((set) => ({
       rightPanelMode: "default",
       wikiAssistantPagePath: null,
     }),
+  focusWorkspace: (workspaceFocus) =>
+    set((state) => {
+      if (state.workspaceFocus === workspaceFocus) {
+        return state;
+      }
+      return {
+        workspaceFocus,
+        rightPanelOpenBeforeFocus: state.rightPanelOpen,
+        rightPanelOpen: false,
+      };
+    }),
+  clearWorkspaceFocus: () =>
+    set((state) => ({
+      workspaceFocus: null,
+      rightPanelOpenBeforeFocus: null,
+      rightPanelOpen: state.rightPanelOpenBeforeFocus ?? state.rightPanelOpen,
+    })),
   setSidebarCollapsed: (sidebarCollapsed) =>
     set((state) => {
       const snapshot = sanitizeLayoutPreferences({

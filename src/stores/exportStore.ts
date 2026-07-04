@@ -3,11 +3,13 @@ import { create } from "zustand";
 
 import type {
   ExportContentOptions,
+  ExportPreviewMode,
   ExportRecord,
   ExportRoutePreference,
   ExportType,
   ListExportsRequest,
   OpenExportFolderRequest,
+  OpenExportInBrowserRequest,
   ReadExportPreviewRequest,
   RegenerateExportRequest,
   StartExportRequest,
@@ -47,6 +49,7 @@ export interface ExportState {
   runningTaskId: string | null;
   previewHtml: string | null;
   previewId: string | null;
+  previewMode: ExportPreviewMode;
   error: string | null;
 
   loadExports: (projectId: string, rootPath: string) => Promise<void>;
@@ -66,8 +69,10 @@ export interface ExportState {
   clearRunningTask: () => void;
   loadPreview: (request: ReadExportPreviewRequest, id: string) => Promise<void>;
   clearPreview: () => void;
+  setPreviewMode: (mode: ExportPreviewMode) => void;
   toggleBookmark: (projectId: string, rootPath: string, recordId: string) => Promise<void>;
   openFolder: (request: OpenExportFolderRequest) => Promise<void>;
+  openInBrowser: (request: OpenExportInBrowserRequest) => Promise<void>;
   reset: () => void;
 }
 
@@ -77,6 +82,7 @@ const initial = {
   runningTaskId: null as string | null,
   previewHtml: null as string | null,
   previewId: null as string | null,
+  previewMode: "inline" as ExportPreviewMode,
   error: null as string | null,
 };
 
@@ -170,6 +176,8 @@ export const useExportStore = create<ExportState>((set) => ({
 
   clearPreview: () => set({ previewHtml: null, previewId: null }),
 
+  setPreviewMode: (previewMode) => set({ previewMode }),
+
   toggleBookmark: async (projectId, rootPath, recordId) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
@@ -201,8 +209,21 @@ export const useExportStore = create<ExportState>((set) => ({
   openFolder: async (request) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
+    set({ error: null });
     try {
       await invoke("open_export_folder", { request });
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  openInBrowser: async (request) => {
+    if (!hasTauri()) return;
+    const scope = captureProjectScope();
+    set({ error: null });
+    try {
+      await invoke("open_export_in_browser", { request });
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       set({ error: errorMessage(error) });

@@ -38,6 +38,14 @@ afterEach(() => {
 });
 
 describe("exportStore", () => {
+  it("defaults to inline preview mode and allows switching modes", () => {
+    expect(useExportStore.getState().previewMode).toBe("inline");
+
+    useExportStore.getState().setPreviewMode("source");
+
+    expect(useExportStore.getState().previewMode).toBe("source");
+  });
+
   it("toggles an export bookmark and updates the matching record", async () => {
     useExportStore.setState({ records: [record()] });
     invokeMock.mockResolvedValueOnce({
@@ -55,5 +63,16 @@ describe("exportStore", () => {
       },
     });
     expect(useExportStore.getState().records[0]?.bookmarked).toBe(true);
+  });
+
+  it("opens an export in the browser through the backend command", async () => {
+    const request = { projectId: "p", projectRootPath: "/x", outputPath: "exports/html/agent.html" };
+    useExportStore.setState({ error: "stale error" });
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await useExportStore.getState().openInBrowser(request);
+
+    expect(invokeMock).toHaveBeenCalledWith("open_export_in_browser", { request });
+    expect(useExportStore.getState().error).toBeNull();
   });
 });
