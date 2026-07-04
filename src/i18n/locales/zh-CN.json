@@ -810,6 +810,8 @@
   "exports.actions.generate": "生成",
   "exports.actions.cancel": "取消",
   "exports.actions.preview": "预览",
+  "exports.actions.bookmark": "收藏导出",
+  "exports.actions.unbookmark": "取消收藏导出",
   "exports.actions.regenerate": "重新生成",
   "exports.actions.openFolder": "打开文件夹",
   "exports.actions.clearPreview": "关闭",

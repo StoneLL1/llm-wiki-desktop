@@ -809,6 +809,8 @@
   "exports.actions.generate": "Generate",
   "exports.actions.cancel": "Cancel",
   "exports.actions.preview": "Preview",
+  "exports.actions.bookmark": "Bookmark export",
+  "exports.actions.unbookmark": "Unbookmark export",
   "exports.actions.regenerate": "Regenerate",
   "exports.actions.openFolder": "Open folder",
   "exports.actions.clearPreview": "Close",
