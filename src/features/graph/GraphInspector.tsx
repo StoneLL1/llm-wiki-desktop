@@ -4,12 +4,14 @@ import { useTranslation } from "react-i18next";
 import { PAGE_TYPE_COLORS, type GraphData, type GraphStatus } from "../../types/graph";
 import { PAGE_TYPE_LABEL_KEYS, WIKI_PAGE_TYPES, type WikiPageType } from "../../types/wiki";
 import { neighborsOf } from "./graphNeighbors";
+import { graphSearchMatches } from "./graphRenderStyle";
 
 interface GraphInspectorProps {
   node: import("../../types/graph").GraphNode | null;
   data: GraphData;
   typeFilter: Set<WikiPageType>;
   degreeThreshold: number;
+  search: string;
   focusedNodeId: string | null;
   layoutStale: boolean;
   cached: boolean;
@@ -37,6 +39,7 @@ export function GraphInspector({
   data,
   typeFilter,
   degreeThreshold,
+  search,
   focusedNodeId,
   layoutStale,
   cached,
@@ -57,6 +60,7 @@ export function GraphInspector({
     if (!n) return false;
     if (typeFilter.has(n.type)) return false;
     if (degreeThreshold > 0 && n.degree < degreeThreshold) return false;
+    if (!graphSearchMatches(n, search)) return false;
     return true;
   };
   // Only list neighbors the user can actually see on the canvas — a hidden

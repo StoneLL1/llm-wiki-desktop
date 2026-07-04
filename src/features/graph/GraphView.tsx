@@ -78,6 +78,7 @@ export function GraphView() {
   const data = useGraphStore((state) => state.data);
   const status = useGraphStore((state) => state.status);
   const error = useGraphStore((state) => state.error);
+  const layoutStale = useGraphStore((state) => state.layoutStale);
   const colorMode = useGraphStore((state) => state.colorMode);
   const search = useGraphStore((state) => state.search);
   const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
@@ -164,7 +165,7 @@ export function GraphView() {
       return;
     }
 
-    const { graph, computed } = buildGraph(data);
+    const { graph, computed } = buildGraph(data, layoutStale);
     refs.current.graph = graph;
 
     let renderer: Sigma | null = null;
@@ -236,7 +237,7 @@ export function GraphView() {
       camera.off("updated", syncZoom);
       disposeRenderer(refs.current);
     };
-  }, [data?.contentHash, data?.nodes.length, data?.edges.length]);
+  }, [data?.contentHash, data?.nodes.length, data?.edges.length, layoutStale]);
 
   // Recolor when the color mode changes without rebuilding topology.
   useEffect(() => {
@@ -400,13 +401,15 @@ export function GraphView() {
   );
 }
 
-function buildGraph(data: GraphData): { graph: Graph; computed: boolean } {
+function buildGraph(data: GraphData, layoutStale = false): { graph: Graph; computed: boolean } {
   const graph = new Graph();
   for (const node of data.nodes) {
     graph.addNode(node.id, {
       label: node.label,
       size: nodeSize(node.degree),
       pageType: node.type,
+      path: node.path,
+      tags: node.tags,
       starred: node.starred,
       degree: node.degree,
     });
@@ -422,7 +425,7 @@ function buildGraph(data: GraphData): { graph: Graph; computed: boolean } {
 
   let computed = false;
   const cached = data.layout;
-  if (cached && Object.keys(cached.positions).length > 0) {
+  if (!layoutStale && cached && Object.keys(cached.positions).length > 0) {
     graph.forEachNode((id) => {
       const pos = cached.positions[id];
       graph.setNodeAttribute(id, "x", pos ? pos[0] : Math.random());
@@ -472,6 +475,7 @@ function createRenderer(
     degreeThreshold: stateRef.current.degreeThreshold,
     neighborIds: stateRef.current.neighborIds,
     hoveredType: stateRef.current.hoveredType,
+    communityByNodeId: new Map(Object.entries(graphData.layout?.communities ?? {})),
   });
   const hiddenNodeIds = (options: GraphRenderOptions): Set<string> =>
     new Set(
@@ -532,7 +536,8 @@ function syncNeighborIds(graph: Graph | null, state: RenderState): void {
 
 function visibleTypeFilter(nodes: GraphNode[], hiddenTypes: Set<WikiPageType>): Set<WikiPageType> {
   if (hiddenTypes.size === 0) return new Set();
-  return new Set(nodes.map((node) => node.type).filter((type) => !hiddenTypes.has(type)));
+  void nodes;
+  return new Set((Object.keys(PAGE_TYPE_COLORS) as WikiPageType[]).filter((type) => !hiddenTypes.has(type)));
 }
 
 function edgeKey(source: string, target: string): string {

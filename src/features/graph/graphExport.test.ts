@@ -81,6 +81,16 @@ describe("graphExport", () => {
     expect(svg).not.toContain('fill="#0d0d0d"');
   });
 
+  it("exports an empty graph when every present type is filtered out", () => {
+    const svg = buildGraphSvg(seededGraph(), null, {
+      hiddenTypes: new Set(["concept", "entity", "source"]),
+      degreeThreshold: 0,
+      search: "",
+    });
+    expect(svg.match(/<circle/g)?.length ?? 0).toBe(0);
+    expect(svg.match(/<line/g)?.length ?? 0).toBe(0);
+  });
+
   it("excludes nodes below the degree threshold and prunes dangling edges", () => {
     // c has degree 1; threshold 2 hides degree < 2, so c and the a-c edge drop.
     const svg = buildGraphSvg(seededGraph(), null, {

@@ -1,5 +1,5 @@
 import type { GraphData, GraphNode } from "../../types/graph";
-import { COMMUNITY_PALETTE, type GraphColorMode } from "../../types/graph";
+import { COMMUNITY_PALETTE, PAGE_TYPE_COLORS, type GraphColorMode } from "../../types/graph";
 import type { WikiPageType } from "../../types/wiki";
 import { hiddenReasonForNode } from "./graphRenderStyle";
 
@@ -118,5 +118,6 @@ export function legendEntries(
 
 function visibleTypeFilter(nodes: GraphNode[], hiddenTypes: Set<WikiPageType>): Set<WikiPageType> {
   if (hiddenTypes.size === 0) return new Set();
-  return new Set(nodes.map((node) => node.type).filter((type) => !hiddenTypes.has(type)));
+  void nodes;
+  return new Set((Object.keys(PAGE_TYPE_COLORS) as WikiPageType[]).filter((type) => !hiddenTypes.has(type)));
 }
