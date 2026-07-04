@@ -15,6 +15,8 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 04:33] Task 6 Step 6 review fixes completed: addressed subagent findings for missing recent bootstrap, picker rejection handling, mandatory Git UI, nested source counts, and empty graph cache detection; focused frontend tests passed and cargo check passed
+- [2026-07-05 04:27] Task 6 Step 6 review completed: Subagent A and B returned findings; accepted five scoped issues, with Git checkbox removed because backend requires Git initialization
 - [2026-07-05 04:22] Task 6 Step 5 完成：cargo check --manifest-path src-tauri/Cargo.toml --lib --tests 通过
 - [2026-07-05 04:20] Task 6 Step 4 完成：扫描 src 下 console.log，无命中
 - [2026-07-05 04:18] Task 6 Step 3 完成：npm run build 初次发现 RecentProject 测试 fixture 缺少 enriched metadata；补齐后重跑 npm run test、npm run lint、npm run build 均通过
@@ -92,9 +94,15 @@ Started: 2026-07-05 02:19
 - src/test/ui-css-contracts.test.ts
 - src/features/project/projectPath.ts
 - src/stores/projectStore.test.ts
+- src/stores/projectStore.ts
+- src-tauri/src/services/project_service.rs
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 6 Step 6 review fix compile check)
+- cargo test --manifest-path src-tauri/Cargo.toml scan_project_counts_nested_sources_and_ignores_empty_graph_cache --lib: failed to execute test binary in this environment (STATUS_ENTRYPOINT_NOT_FOUND) after compilation
+- npm run test -- src/stores/projectStore.test.ts src/app/App.test.tsx: passed (38 tests; jsdom canvas getContext warnings; Task 6 Step 6 review fixes)
+- npm run test -- src/stores/projectStore.test.ts src/app/App.test.tsx: failed as expected before review fixes (missing recent bootstrap, picker rejection, Git checkbox)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 6 Step 5)
 - console.log scan: passed (Get-ChildItem src -Recurse -File | Select-String 'console\.log' returned no matches; Task 6 Step 4)
 - npm run build: passed (Task 6 Step 3 rerun after RecentProject fixture update; Vite large chunk warning only)
