@@ -44,6 +44,7 @@ export interface RecentProject {
   rootPath: string;
   template: ProjectTemplate;
   openedAt: string;
+  missing: boolean;
 }
 
 export type OpenProjectKind = "opened" | "needs_confirmation";
