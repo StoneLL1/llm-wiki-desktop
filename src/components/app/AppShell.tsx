@@ -53,6 +53,8 @@ export function AppShell() {
   const activeView = useNavigationStore((state) => state.activeView);
   const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
   const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
+  const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
+  const clearWorkspaceFocus = useNavigationStore((state) => state.clearWorkspaceFocus);
   const sidebarCollapsed = useNavigationStore((state) => state.sidebarCollapsed);
   const paneSizes = useNavigationStore((state) => state.paneSizes);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
@@ -68,6 +70,7 @@ export function AppShell() {
   const compilePendingAction = tasks.find((task) => task.status === "waiting_for_confirmation" && task.result?.pendingAction)?.result?.pendingAction;
   const displayedPendingAction = pendingAction ?? compilePendingAction;
   const title = t(`nav.${activeView}`);
+  const showRightPanel = rightPanelOpen && workspaceFocus === null;
   const shellStyle = {
     "--sidebar-w-current": `${sidebarCollapsed ? 56 : paneSizes.sidebar}px`,
     "--rightpanel-w-current": `${paneSizes.rightPanel}px`,
@@ -83,19 +86,24 @@ export function AppShell() {
   }, [setRightPanelOpen]);
 
   useEffect(() => {
-    if (!rightPanelOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (
         event.key === "Escape" &&
         !event.defaultPrevented &&
         !document.querySelector('[aria-modal="true"]')
       ) {
-        setRightPanelOpen(false);
+        if (workspaceFocus !== null) {
+          clearWorkspaceFocus();
+          return;
+        }
+        if (rightPanelOpen) {
+          setRightPanelOpen(false);
+        }
       }
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [rightPanelOpen, setRightPanelOpen]);
+  }, [clearWorkspaceFocus, rightPanelOpen, setRightPanelOpen, workspaceFocus]);
 
   const confirmProjectAction = useCallback(async () => {
     const action = pendingAction;
@@ -137,7 +145,8 @@ export function AppShell() {
     <div
       className={[
         "app-shell",
-        rightPanelOpen ? "is-right-open" : "is-right-collapsed",
+        showRightPanel ? "is-right-open" : "is-right-collapsed",
+        workspaceFocus !== null ? "is-workspace-focused" : "",
         sidebarCollapsed ? "is-sidebar-collapsed" : "",
       ].filter(Boolean).join(" ")}
       style={shellStyle}
@@ -160,7 +169,7 @@ export function AppShell() {
         <main className="app-shell__main">
           <WorkspaceView activeView={activeView} title={title} />
         </main>
-        {rightPanelOpen ? (
+        {showRightPanel ? (
           <ResizableSplitter
             paneId="rightPanel"
             label={t("shell.splitter.rightPanel")}
@@ -172,8 +181,8 @@ export function AppShell() {
             onReset={() => resetPaneSize("rightPanel")}
           />
         ) : null}
-        {rightPanelOpen ? <RightContextPanel /> : null}
-        {rightPanelOpen ? (
+        {showRightPanel ? <RightContextPanel /> : null}
+        {showRightPanel ? (
           <button
             aria-hidden="true"
             className="right-panel__backdrop"
@@ -230,6 +239,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const { t } = useTranslation();
   const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
   const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
+  const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
   const currentProject = useProjectStore((state) => state.currentProject);
   const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
   const setPendingAction = useProjectStore((state) => state.setPendingAction);
@@ -601,7 +611,7 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
     <section className="flex h-full flex-col">
       <header className="workspace-header">
         <h1 className="m-0 text-[16px] font-semibold tracking-[-0.01em]">{title}</h1>
-        {!rightPanelOpen ? (
+        {!rightPanelOpen && workspaceFocus === null ? (
           <button
                 aria-controls="right-context-panel"
                 aria-expanded="false"
