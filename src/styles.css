@@ -2043,6 +2043,7 @@ select:focus-visible {
 }
 
 .app-shell.is-sidebar-collapsed .app-sidebar__section-label,
+.app-shell.is-sidebar-collapsed .app-sidebar__favorites,
 .app-shell.is-sidebar-collapsed .app-sidebar__recent,
 .app-shell.is-sidebar-collapsed .app-sidebar__nav-label,
 .app-shell.is-sidebar-collapsed .app-sidebar__agent-name,
@@ -2341,6 +2342,7 @@ select:focus-visible {
   .app-shell.is-sidebar-collapsed.is-right-collapsed .app-shell__workbench { grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr); }
   .app-sidebar { width: var(--sidebar-w-current); }
   .app-sidebar__section-label,
+  .app-sidebar__favorites,
   .app-sidebar__recent,
   .app-sidebar__nav-label,
   .app-sidebar__agent-name,
