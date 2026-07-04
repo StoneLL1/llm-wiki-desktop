@@ -2,10 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
 import { i18next, LANGUAGE_STORAGE_KEY } from "../i18n";
+import { applyColorThemePresetToRoot } from "../lib/colorThemePresets";
 import type { Settings, ThemePreference } from "../types/settings";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 
 const THEME_STORAGE_KEY = "llm-wiki-desktop.theme";
+const COLOR_THEME_STORAGE_KEY = "llm-wiki-desktop.colorThemePreset";
 const DENSITY_STORAGE_KEY = "llm-wiki-desktop.density";
 const FONT_STORAGE_KEY = "llm-wiki-desktop.fonts";
 
@@ -68,6 +70,19 @@ export function applyThemePreference(theme: ThemePreference) {
   document.documentElement.dataset.theme = theme;
   try {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Ignore localStorage errors in restricted environments.
+  }
+}
+
+export function applyColorThemePresetPreference(
+  colorThemePreset: Settings["colorThemePreset"],
+  theme: ThemePreference,
+) {
+  if (typeof document === "undefined") return;
+  applyColorThemePresetToRoot(colorThemePreset, theme);
+  try {
+    window.localStorage.setItem(COLOR_THEME_STORAGE_KEY, colorThemePreset);
   } catch {
     // Ignore localStorage errors in restricted environments.
   }
@@ -163,6 +178,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         : defaultSettings;
       if (!isProjectScopeCurrent(scope)) return get().settings;
       applyThemePreference(settings.theme);
+      applyColorThemePresetPreference(settings.colorThemePreset, settings.theme);
       applyDensityPreference(settings.density);
       applyFontPreference({
         ui: settings.uiFont,
@@ -190,6 +206,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const next = { ...previous, ...patch };
     set({ settings: next, saving: true, error: null });
     applyThemePreference(next.theme);
+    applyColorThemePresetPreference(next.colorThemePreset, next.theme);
     applyDensityPreference(next.density);
     applyFontPreference({
       ui: next.uiFont,
@@ -209,6 +226,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       });
       if (!isProjectScopeCurrent(scope)) return get().settings;
       applyThemePreference(saved.theme);
+      applyColorThemePresetPreference(saved.colorThemePreset, saved.theme);
       applyDensityPreference(saved.density);
       applyFontPreference({
         ui: saved.uiFont,
@@ -227,6 +245,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (!isProjectScopeCurrent(scope)) return get().settings;
       set({ settings: previous, saving: false, error: errorMessage(error) });
       applyThemePreference(previous.theme);
+      applyColorThemePresetPreference(previous.colorThemePreset, previous.theme);
       applyDensityPreference(previous.density);
       applyFontPreference({
         ui: previous.uiFont,
