@@ -35,6 +35,7 @@ const runningTask: BackendTask = {
 describe("TaskLogDrawer", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    window.localStorage.clear();
     useTaskStore.setState({
       tasks: [runningTask],
       logs: {},
@@ -67,5 +68,65 @@ describe("TaskLogDrawer", () => {
         }),
       ]),
     );
+  });
+
+  it("shows latest execution tasks first by default regardless of status", () => {
+    const oldRunning = {
+      ...runningTask,
+      id: "old-running",
+      title: "Old running",
+      status: "running" as const,
+      startedAt: "2026-07-04T01:00:00Z",
+      updatedAt: "2026-07-04T05:00:00Z",
+    };
+    const newFailed = {
+      ...runningTask,
+      id: "new-failed",
+      title: "New failed",
+      status: "failed" as const,
+      startedAt: "2026-07-04T03:00:00Z",
+      updatedAt: "2026-07-04T03:01:00Z",
+      completedAt: "2026-07-04T03:02:00Z",
+    };
+    useTaskStore.setState({
+      tasks: [oldRunning, newFailed],
+      drawerOpen: true,
+      selectedTaskId: null,
+    });
+
+    render(<TaskLogDrawer />);
+
+    const buttons = screen.getAllByRole("button").map((button) => button.textContent ?? "");
+    expect(buttons.indexOf("New failed")).toBeLessThan(buttons.indexOf("Old running"));
+  });
+
+  it("switches to status sort without changing the selected task", () => {
+    const oldRunning = {
+      ...runningTask,
+      id: "old-running",
+      title: "Old running",
+      status: "running" as const,
+      startedAt: "2026-07-04T01:00:00Z",
+      updatedAt: "2026-07-04T01:00:00Z",
+    };
+    const newFailed = {
+      ...runningTask,
+      id: "new-failed",
+      title: "New failed",
+      status: "failed" as const,
+      startedAt: "2026-07-04T03:00:00Z",
+      updatedAt: "2026-07-04T03:00:00Z",
+      completedAt: "2026-07-04T03:01:00Z",
+    };
+    useTaskStore.setState({
+      tasks: [newFailed, oldRunning],
+      drawerOpen: true,
+      selectedTaskId: "new-failed",
+    });
+
+    render(<TaskLogDrawer />);
+    fireEvent.click(screen.getByRole("button", { name: "task.sort.status" }));
+
+    expect(useTaskStore.getState().selectedTaskId).toBe("new-failed");
   });
 });
