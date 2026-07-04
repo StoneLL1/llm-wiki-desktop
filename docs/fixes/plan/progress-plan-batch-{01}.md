@@ -11,12 +11,13 @@ Started: 2026-07-04 18:38
 - [x] Task 3 - Shell Splitters and Collapsible Sidebar
 - [x] Task 4 - Wiki, Exports, and Lint Internal Splitters
 - [x] Task 5 - Compact Project Switcher
-- [ ] Task 6 - Color Theme Presets and Settings Contract
+- [x] Task 6 - Color Theme Presets and Settings Contract
 - [ ] Task 7 - Appearance UI and Reading Tokens
 - [ ] Task 8 - Regression Coverage and Quality Gates
 
 ## Activity Log
 
+- [2026-07-04 19:16] Task 6 Step 5 完成：Rust settings DTO 新增 global-only `colorThemePreset` 契约、legacy 默认值和 global/project split 测试；`cargo test` 编译后命中已知 Windows loader 0xc0000139，`cargo check --lib --tests` 通过。
 - [2026-07-04 19:07] Task 6 Step 4 完成：settings store 新增 color theme preset root/localStorage application helper，并在 load、optimistic save、saved response、rollback 中同步应用；focused settings store test 通过。
 - [2026-07-04 19:06] Task 6 Step 1/2/3 完成：新增 color theme preset 测试、TS settings preset 类型/defaultSettings 和 preset metadata/root application helper；focused preset test 通过。
 - [2026-07-04 19:03] Task 5 Step 5/6/7/8 完成：TopBar 使用 compact path 和 full-path title，recent menu 显示缺失状态与 openedAt meta，缺失项目不会打开，Arrow/Escape 键盘菜单行为和 compact switcher CSS 已覆盖；Task 5 前端 tests 与 cargo check 通过。
@@ -63,6 +64,7 @@ Started: 2026-07-04 18:38
 - src/stores/settingsStore.ts
 - src/stores/settingsStore.test.ts
 - src/types/settings.ts
+- src-tauri/src/models/settings.rs
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
 - src/styles.css
@@ -78,6 +80,8 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
+- cargo test --manifest-path src-tauri/Cargo.toml settings::tests::color_theme_preset_is_global_and_legacy_safe: failed due known Windows loader 0xc0000139 after successful compile
 - npm run test -- src/stores/settingsStore.test.ts: passed (1 test)
 - npm run test -- src/stores/settingsStore.test.ts: failed as expected (document root preset not applied)
 - npm run test -- src/lib/colorThemePresets.test.ts: passed (3 tests)

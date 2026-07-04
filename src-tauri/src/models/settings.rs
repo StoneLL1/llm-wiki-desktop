@@ -84,6 +84,18 @@ impl ThemePreference {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorThemePresetId {
+    #[default]
+    Codex,
+    Paper,
+    Graphite,
+    Mint,
+    Night,
+    HighContrast,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CloseBehavior {
     #[default]
@@ -223,6 +235,8 @@ pub struct Settings {
     #[serde(default)]
     pub theme: ThemePreference,
     #[serde(default)]
+    pub color_theme_preset: ColorThemePresetId,
+    #[serde(default)]
     pub density: DensityPreference,
     #[serde(default)]
     pub ui_font: String,
@@ -294,6 +308,7 @@ impl Default for Settings {
         Self {
             language: default_language(),
             theme: ThemePreference::Auto,
+            color_theme_preset: ColorThemePresetId::Codex,
             density: DensityPreference::Standard,
             ui_font: String::new(),
             reading_font: String::new(),
@@ -338,6 +353,8 @@ pub struct GlobalSettingsFile {
     #[serde(default)]
     pub theme: ThemePreference,
     #[serde(default)]
+    pub color_theme_preset: ColorThemePresetId,
+    #[serde(default)]
     pub density: DensityPreference,
     #[serde(default)]
     pub ui_font: String,
@@ -381,6 +398,7 @@ impl Default for GlobalSettingsFile {
         Self {
             language: settings.language,
             theme: settings.theme,
+            color_theme_preset: settings.color_theme_preset,
             density: settings.density,
             ui_font: settings.ui_font,
             reading_font: settings.reading_font,
@@ -440,6 +458,7 @@ impl Settings {
     pub fn apply_global(&mut self, global: GlobalSettingsFile) {
         self.language = global.language;
         self.theme = global.theme;
+        self.color_theme_preset = global.color_theme_preset;
         self.density = global.density;
         self.ui_font = global.ui_font;
         self.reading_font = global.reading_font;
@@ -481,6 +500,7 @@ impl Settings {
         GlobalSettingsFile {
             language: self.language.clone(),
             theme: self.theme,
+            color_theme_preset: self.color_theme_preset,
             density: self.density,
             ui_font: self.ui_font.clone(),
             reading_font: self.reading_font.clone(),
@@ -547,7 +567,7 @@ pub struct ProviderSecretStatusRequest {
 mod tests {
     use serde_json::json;
 
-    use super::{CloseBehavior, Settings, ThemePreference};
+    use super::{CloseBehavior, ColorThemePresetId, Settings, ThemePreference};
     use crate::models::agent::AgentKind;
 
     #[test]
@@ -687,6 +707,31 @@ mod tests {
         assert_eq!(value, json!("ask"));
         let restored: CloseBehavior = serde_json::from_value(json!("ask")).unwrap();
         assert_eq!(restored, CloseBehavior::Ask);
+    }
+
+    #[test]
+    fn color_theme_preset_is_global_and_legacy_safe() {
+        let legacy = json!({
+            "language": "en",
+            "theme": "auto",
+            "contextWindow": 32000
+        });
+
+        let settings: Settings = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(settings.color_theme_preset, ColorThemePresetId::Codex);
+        assert_eq!(
+            serde_json::to_value(settings.color_theme_preset).unwrap(),
+            json!("codex")
+        );
+
+        let global = settings.to_global_file();
+        let project = settings.to_project_file();
+        let global_value = serde_json::to_value(global).unwrap();
+        let project_value = serde_json::to_value(project).unwrap();
+
+        assert_eq!(global_value["colorThemePreset"], json!("codex"));
+        assert!(project_value.get("colorThemePreset").is_none());
     }
 
     #[test]
