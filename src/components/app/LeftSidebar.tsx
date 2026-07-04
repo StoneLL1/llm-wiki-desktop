@@ -44,6 +44,7 @@ export function LeftSidebar() {
       return (
         <button
           key={item.view}
+          aria-label={t(item.labelKey)}
           aria-current={active ? "page" : undefined}
           className={`flex h-[30px] w-full items-center gap-2 rounded-[var(--radius-md)] px-2 text-left text-[13px] font-medium ${
             active
@@ -99,6 +100,7 @@ export function LeftSidebar() {
             recentPages.map((page, index) => (
               <button
                 key={page.path}
+                aria-label={page.title}
                 onClick={() => openRecentPage(page.path)}
                 className="flex h-[26px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
                 title={page.path}

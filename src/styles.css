@@ -161,6 +161,8 @@ body {
 }
 
 .app-shell {
+  --sidebar-w-current: var(--sidebar-w);
+  --rightpanel-w-current: var(--rightpanel-w);
   display: grid;
   width: 100%;
   height: 100%;
@@ -173,11 +175,19 @@ body {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--rightpanel-w);
+  grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr) 6px var(--rightpanel-w-current);
 }
 
 .app-shell.is-right-collapsed .app-shell__workbench {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr);
+}
+
+.app-shell.is-sidebar-collapsed .app-shell__workbench {
+  grid-template-columns: var(--sidebar-w-current) minmax(0, 1fr) 6px var(--rightpanel-w-current);
+}
+
+.app-shell.is-sidebar-collapsed.is-right-collapsed .app-shell__workbench {
+  grid-template-columns: var(--sidebar-w-current) minmax(0, 1fr);
 }
 
 .app-shell__main {
@@ -200,7 +210,7 @@ body {
 
 .right-panel {
   display: flex;
-  width: var(--rightpanel-w);
+  width: var(--rightpanel-w-current);
   min-width: 0;
   min-height: 0;
   flex-direction: column;
@@ -1865,7 +1875,7 @@ select:focus-visible {
 
 .app-sidebar {
   display: flex;
-  width: var(--sidebar-w);
+  width: var(--sidebar-w-current);
   min-width: 0;
   flex-direction: column;
   overflow: hidden;
@@ -1874,6 +1884,24 @@ select:focus-visible {
 }
 
 .app-sidebar__section-label { padding: 0 var(--sp-2) var(--sp-1); color: var(--text-muted); font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; }
+
+.app-shell.is-sidebar-collapsed .app-sidebar {
+  width: var(--sidebar-collapsed-w);
+}
+
+.app-shell.is-sidebar-collapsed .app-sidebar__section-label,
+.app-shell.is-sidebar-collapsed .app-sidebar__recent,
+.app-shell.is-sidebar-collapsed .app-sidebar__nav-label,
+.app-shell.is-sidebar-collapsed .app-sidebar__agent-name,
+.app-shell.is-sidebar-collapsed .app-sidebar__count {
+  display: none;
+}
+
+.app-shell.is-sidebar-collapsed .app-sidebar nav button,
+.app-shell.is-sidebar-collapsed .app-sidebar [aria-current] {
+  justify-content: center;
+  padding-inline: 0;
+}
 
 .view-toolbar {
   display: flex;
@@ -1976,7 +2004,16 @@ select:focus-visible {
 @media (max-width: 1180px) {
   .app-shell__workbench,
   .app-shell.is-right-collapsed .app-shell__workbench {
-    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr);
+  }
+
+  .app-shell.is-sidebar-collapsed .app-shell__workbench,
+  .app-shell.is-sidebar-collapsed.is-right-collapsed .app-shell__workbench {
+    grid-template-columns: var(--sidebar-w-current) minmax(0, 1fr);
+  }
+
+  .resize-handle[data-pane-id="rightPanel"] {
+    display: none;
   }
 
   .right-panel {
@@ -2047,8 +2084,11 @@ select:focus-visible {
 
 @media (max-width: 820px) {
   .app-shell__workbench,
-  .app-shell.is-right-collapsed .app-shell__workbench { grid-template-columns: var(--sidebar-collapsed-w) minmax(0, 1fr); }
+  .app-shell.is-right-collapsed .app-shell__workbench,
+  .app-shell.is-sidebar-collapsed .app-shell__workbench,
+  .app-shell.is-sidebar-collapsed.is-right-collapsed .app-shell__workbench { grid-template-columns: var(--sidebar-collapsed-w) minmax(0, 1fr); }
   .app-sidebar { width: var(--sidebar-collapsed-w); }
+  .resize-handle[data-pane-id="sidebar"] { display: none; }
   .app-sidebar__section-label,
   .app-sidebar__recent,
   .app-sidebar__nav-label,
