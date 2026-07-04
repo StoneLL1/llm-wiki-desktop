@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { ChevronRight, FileOutput, FileText, Star } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useProjectStatus } from "../../hooks/useProjectStatus";
@@ -19,7 +19,8 @@ export function LeftSidebar() {
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const currentProject = useProjectStore((state) => state.currentProject);
   const recentPages = useWikiStore((state) => state.recentPages);
-  const wikiPages = useWikiStore((state) => state.tree?.pages ?? []);
+  const wikiTree = useWikiStore((state) => state.tree);
+  const wikiPages = wikiTree?.pages ?? [];
   const openPage = useWikiStore((state) => state.openPage);
   const exportRecords = useExportStore((state) => state.records);
   const loadExports = useExportStore((state) => state.loadExports);
@@ -40,6 +41,19 @@ export function LeftSidebar() {
     [wikiPages, exportRecords],
   );
 
+  useEffect(() => {
+    if (
+      exportRecords.length > 0 ||
+      !currentProject.projectId ||
+      !currentProject.rootPath ||
+      typeof window === "undefined" ||
+      !("__TAURI_INTERNALS__" in window)
+    ) {
+      return;
+    }
+    void loadExports(currentProject.projectId, currentProject.rootPath);
+  }, [currentProject.projectId, currentProject.rootPath, exportRecords.length, loadExports]);
+
   const openRecentPage = (path: string) => {
     if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
       pushToast("warning", t("shell.browserUnavailable"));
@@ -59,17 +73,23 @@ export function LeftSidebar() {
       void openPage(currentProject.projectId, currentProject.rootPath, item.path);
       return;
     }
+    const projectId = currentProject.projectId;
+    const rootPath = currentProject.rootPath;
     setActiveView("exports");
-    void loadExports(currentProject.projectId, currentProject.rootPath).then(() =>
+    void loadExports(projectId, rootPath).then(() => {
+      const latestProject = useProjectStore.getState().currentProject;
+      if (latestProject.projectId !== projectId || latestProject.rootPath !== rootPath) {
+        return;
+      }
       loadPreview(
         {
-          projectId: currentProject.projectId,
-          projectRootPath: currentProject.rootPath,
+          projectId,
+          projectRootPath: rootPath,
           outputPath: item.path,
         },
         item.exportRecordId ?? item.id,
-      ),
-    );
+      );
+    });
   };
 
   const renderNavGroup = (items: NavigationItem[]) =>

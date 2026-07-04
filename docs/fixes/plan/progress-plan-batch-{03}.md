@@ -1,7 +1,7 @@
 # Progress - plan-batch-{03}
 
 Plan: D:\Users\Aletta\Desktop\Works\llm-wiki-desktop\docs\fixes\plan\plan-batch-{03}.md
-Status: in_progress
+Status: completed
 Started: 2026-07-05 00:05
 
 ## step Progress
@@ -19,7 +19,7 @@ Started: 2026-07-05 00:05
 - [x] Task 11 - Wiki Ask AI button + PageChatPanel
 - [x] Task 12 - Citation UI pinned sources
 - [x] Task 13 - Styling/i18n
-- [ ] Task 14 - Integration checks + review
+- [x] Task 14 - Integration checks + review
 
 ## Activity Log
 
@@ -38,6 +38,9 @@ Started: 2026-07-05 00:05
 - [2026-07-05 00:59] 完成 Task 11：新增 PageChatPanel 并复用 ChatView 消息组件；Wiki toolbar 增加 Ask AI 图标按钮；RightContextPanel 可切换页面聊天；补充 PageChatPanel 测试和 i18n。
 - [2026-07-05 01:00] 完成 Task 12：MessageBubble 与 RightContextPanel citation 列表显示 current page badge；PageChatPanel pinned citation 测试保持覆盖。
 - [2026-07-05 01:01] 完成 Task 13：确认 Ask AI/PageChatPanel 新增 UI 使用现有 token 与 utility class，无新增 hex/gradient/blob；新增 i18n 键已覆盖 en/zh-CN；`npm run lint -- --quiet` 通过。
+
+- [2026-07-05 01:11] Task 14 focused/full verification run; fixed LeftSidebar selector loop found by full tests, then launched two review subagents.
+- [2026-07-05 01:21] Review merge complete: accepted fixes for cold-load export favorites, export favorite project-switch guard, delayed wiki bookmark response, stale pinned page badge, and returning from Page Ask AI to Page info. Final checks passed.
 
 ## Changed Files
 
@@ -86,12 +89,13 @@ Started: 2026-07-05 00:05
 - src/features/chat/ChatComposer.tsx
 - src/features/wiki/WikiView.tsx
 - src/components/app/RightContextPanel.tsx
+- src/components/app/LeftSidebar.test.tsx
 
 ## Verification
 
-- npm run test: not run
-- npm run lint: not run
-- npm run build: not run
+- npm run test: pass (261 tests; jsdom/Sigma canvas warning emitted but exit code 0)
+- npm run lint: pass
+- npm run build: pass (Vite large chunk warning only)
 - cargo check --manifest-path src-tauri/Cargo.toml: pass
 - cargo test --manifest-path src-tauri/Cargo.toml bookmark_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: pass
@@ -112,6 +116,15 @@ Started: 2026-07-05 00:05
 - npm run test -- src/features/exports/exportsView.test.tsx: pass
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: pass
 - cargo test --manifest-path src-tauri/Cargo.toml search_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
+- npm run test -- src/components/app/LeftSidebar.test.tsx src/features/wiki/wiki.test.tsx src/features/exports/exportsView.test.tsx src/stores/chatStore.test.ts src/features/chat/chatView.test.tsx src/features/chat/PageChatPanel.test.tsx: pass
+- npm run test -- src/features/chat/PageChatPanel.test.tsx src/components/app/LeftSidebar.test.tsx src/features/wiki/wiki.test.tsx: pass
+- npm run test: pass (261 tests; jsdom/Sigma canvas warning emitted but exit code 0)
+- npm run lint: pass
+- npm run build: pass (Vite large chunk warning only)
+- cargo check --manifest-path .\src-tauri\Cargo.toml --lib --tests: pass
+- console.log scan in src/ and src-tauri/src/: pass (no matches)
+- Review subagent A: completed; findings fixed/covered.
+- Review subagent B: completed; findings fixed/covered.
 
 ## Blockers
 

@@ -1,0 +1,174 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import "../../i18n";
+import { useExportStore } from "../../stores/exportStore";
+import { useNavigationStore } from "../../stores/navigationStore";
+import { defaultProject, useProjectStore } from "../../stores/projectStore";
+import { useWikiStore } from "../../features/wiki/wikiStore";
+import type { ExportRecord } from "../../types/export";
+import type { WikiPageMeta, WikiTree } from "../../types/wiki";
+import { LeftSidebar } from "./LeftSidebar";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+}));
+
+const wikiPage: WikiPageMeta = {
+  path: "wiki/concepts/transformer.md",
+  title: "Transformer",
+  pageType: "concept",
+  tags: [],
+  sources: [],
+  aliases: [],
+  created: null,
+  updated: null,
+  starred: false,
+  bookmarked: true,
+  wordCount: 10,
+  fileSize: 100,
+  modifiedTime: "2026-07-04T00:00:00Z",
+  hash: "hash",
+  wikilinks: [],
+};
+
+const wikiTree: WikiTree = {
+  root: {
+    name: "wiki",
+    kind: "folder",
+    path: "wiki",
+    starred: false,
+    bookmarked: false,
+    fileCount: 1,
+    children: [],
+  },
+  pages: [wikiPage],
+  totalPages: 1,
+};
+
+const exportRecord: ExportRecord = {
+  id: "export-1",
+  exportType: "beautiful_read",
+  title: "Transformer HTML",
+  sourcePath: wikiPage.path,
+  outputPath: "exports/html/transformer.html",
+  createdAt: "2026-07-04T00:00:00Z",
+  route: "agent",
+  status: "succeeded",
+  bookmarked: true,
+};
+
+const originalExportActions = {
+  loadExports: useExportStore.getState().loadExports,
+  loadPreview: useExportStore.getState().loadPreview,
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+describe("LeftSidebar favorites", () => {
+  beforeEach(() => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+    invokeMock.mockResolvedValue([]);
+    useNavigationStore.setState({ activeView: "dashboard" });
+    useProjectStore.getState().setCurrentProject({
+      ...defaultProject,
+      projectId: "project-1",
+      rootPath: "/wiki",
+    });
+    useWikiStore.getState().reset();
+    useExportStore.getState().reset();
+    useExportStore.setState(originalExportActions);
+    useWikiStore.setState({ tree: wikiTree, recentPages: [wikiPage] });
+    useExportStore.setState({ records: [exportRecord] });
+  });
+
+  it("renders favorites between workflow and recent pages", () => {
+    render(<LeftSidebar />);
+
+    const workflow = screen.getByText("Workflow");
+    const favorites = screen.getByText("Favorites");
+    const recent = screen.getByText("Recent pages");
+
+    expect(workflow.compareDocumentPosition(favorites)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(favorites.compareDocumentPosition(recent)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("opens a wiki favorite in the wiki view", () => {
+    const openPage = vi.fn(async () => {});
+    useWikiStore.setState({ openPage });
+    render(<LeftSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open wiki favorite: Transformer" }));
+
+    expect(useNavigationStore.getState().activeView).toBe("wiki");
+    expect(openPage).toHaveBeenCalledWith("project-1", "/wiki", wikiPage.path);
+  });
+
+  it("opens an export favorite preview in the exports view", async () => {
+    const loadExports = vi.fn(async () => {});
+    const loadPreview = vi.fn(async () => {});
+    useExportStore.setState({ loadExports, loadPreview });
+    render(<LeftSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open export favorite: Transformer HTML" }));
+
+    await waitFor(() => {
+      expect(useNavigationStore.getState().activeView).toBe("exports");
+      expect(loadExports).toHaveBeenCalledWith("project-1", "/wiki");
+      expect(loadPreview).toHaveBeenCalledWith(
+        {
+          projectId: "project-1",
+          projectRootPath: "/wiki",
+          outputPath: exportRecord.outputPath,
+        },
+        exportRecord.id,
+      );
+    });
+  });
+
+  it("loads export favorites on cold project load", async () => {
+    useExportStore.getState().reset();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_exports") return Promise.resolve([exportRecord]);
+      return Promise.resolve([]);
+    });
+
+    render(<LeftSidebar />);
+
+    expect(
+      await screen.findByRole("button", { name: "Open export favorite: Transformer HTML" }),
+    ).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("list_exports", {
+      request: { projectId: "project-1", projectRootPath: "/wiki" },
+    });
+  });
+
+  it("does not open an export preview if the project changes while loading favorites", async () => {
+    const loading = deferred<void>();
+    const loadExports = vi.fn(() => loading.promise);
+    const loadPreview = vi.fn(async () => {});
+    useExportStore.setState({ loadExports, loadPreview });
+    render(<LeftSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open export favorite: Transformer HTML" }));
+    useProjectStore.getState().setCurrentProject({
+      ...defaultProject,
+      projectId: "project-2",
+      rootPath: "/other-wiki",
+    });
+    loading.resolve();
+
+    await waitFor(() => {
+      expect(loadExports).toHaveBeenCalledWith("project-1", "/wiki");
+      expect(loadPreview).not.toHaveBeenCalled();
+    });
+  });
+});

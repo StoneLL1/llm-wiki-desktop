@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import type {
@@ -21,6 +21,7 @@ import { selectWikiPreviewRecord, WikiView } from "./WikiView";
 import { updateTreeNodeBookmark, useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -59,9 +60,23 @@ function pageContent(overrides: Partial<WikiPageContent> = {}): WikiPageContent 
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   invokeMock.mockReset();
   useWikiStore.getState().reset();
+  useNavigationStore.setState({
+    activeView: "dashboard",
+    rightPanelOpen: true,
+    rightPanelMode: "default",
+    wikiAssistantPagePath: null,
+  });
   void i18next.changeLanguage("en");
 });
 
@@ -121,6 +136,48 @@ describe("wikiStore", () => {
     expect(
       useWikiStore.getState().tree?.root.children[0]?.children[0]?.bookmarked,
     ).toBe(true);
+  });
+
+  it("does not apply a delayed bookmark response to a newly opened page", async () => {
+    const firstPage = pageMeta({ path: "wiki/concepts/first.md", title: "First", bookmarked: false });
+    const secondPage = pageMeta({ path: "wiki/concepts/second.md", title: "Second", bookmarked: false });
+    const tree: WikiTree = {
+      root: {
+        name: "wiki",
+        kind: "folder",
+        path: "wiki",
+        starred: false,
+        bookmarked: false,
+        fileCount: 2,
+        children: [],
+      },
+      pages: [firstPage, secondPage],
+      totalPages: 2,
+    };
+    const toggleResponse = deferred<{ relativePath: string; bookmarked: boolean }>();
+    invokeMock.mockReturnValueOnce(toggleResponse.promise);
+    useWikiStore.setState({
+      page: pageContent({ meta: firstPage }),
+      tree,
+      selectedPath: firstPage.path,
+    });
+
+    const toggling = useWikiStore.getState().toggleBookmark("proj-1", "D:/wiki");
+    useWikiStore.setState({
+      page: pageContent({ meta: secondPage }),
+      selectedPath: secondPage.path,
+    });
+    toggleResponse.resolve({ relativePath: firstPage.path, bookmarked: true });
+    await toggling;
+
+    expect(useWikiStore.getState().page?.meta.path).toBe(secondPage.path);
+    expect(useWikiStore.getState().page?.meta.bookmarked).toBe(false);
+    expect(
+      useWikiStore.getState().tree?.pages.find((page) => page.path === firstPage.path)?.bookmarked,
+    ).toBe(true);
+    expect(
+      useWikiStore.getState().tree?.pages.find((page) => page.path === secondPage.path)?.bookmarked,
+    ).toBe(false);
   });
 
   it("updates a matching nested tree node bookmark flag", () => {
@@ -832,6 +889,65 @@ describe("Wiki HTML preview", () => {
     render(<WikiView />);
 
     expect(await screen.findByRole("separator", { name: "Resize wiki tree" })).toHaveAttribute("aria-valuemin", "220");
+  });
+
+  it("opens the wiki assistant mode from the Ask AI button", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+
+    render(<WikiView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Ask AI" }));
+
+    expect(useNavigationStore.getState().rightPanelMode).toBe("wikiAssistant");
+    expect(useNavigationStore.getState().wikiAssistantPagePath).toBe(
+      "wiki/concepts/transformer.md",
+    );
+  });
+
+  it("updates the wiki assistant page path when the selected page changes", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") {
+        return Promise.resolve({ root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 0, children: [] }, pages: [], totalPages: 0 });
+      }
+      if (command === "list_exports") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useNavigationStore.setState({
+      activeView: "wiki",
+      rightPanelOpen: true,
+      rightPanelMode: "wikiAssistant",
+      wikiAssistantPagePath: "wiki/old.md",
+    });
+
+    render(<WikiView />);
+    act(() => {
+      useWikiStore.setState({
+        page: pageContent({ meta: pageMeta({ path: "wiki/concepts/updated.md" }) }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(useNavigationStore.getState().wikiAssistantPagePath).toBe(
+        "wiki/concepts/updated.md",
+      );
+    });
   });
 
   it("does not reuse a preview generated for another page", () => {

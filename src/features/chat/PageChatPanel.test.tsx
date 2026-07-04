@@ -54,6 +54,22 @@ describe("PageChatPanel", () => {
     expect(screen.getByText("wiki/concepts/react-pattern.md")).toBeInTheDocument();
   });
 
+  it("can return from page chat to related pages", () => {
+    const showRelated = vi.fn();
+    render(
+      <PageChatPanel
+        page={page}
+        projectId="project-1"
+        rootPath="/wiki"
+        onShowRelatedPages={showRelated}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Page info" }));
+
+    expect(showRelated).toHaveBeenCalledTimes(1);
+  });
+
   it("creates a page chat session when no active session exists", async () => {
     const createSession = vi.fn(async () => session({ id: "created-session" }));
     const send = vi.fn(async () => "task-1");
@@ -124,6 +140,38 @@ describe("PageChatPanel", () => {
     render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
 
     expect(screen.getAllByText("Current page").length).toBeGreaterThan(0);
+  });
+
+  it("does not mark an old pinned citation as the current page after navigation", () => {
+    useChatStore.setState({
+      activeSessionId: "session-1",
+      activeSession: session({
+        messages: [
+          {
+            id: "a1",
+            role: "assistant",
+            content: "Answer",
+            createdAt: "2026-07-04T00:00:00Z",
+            route: "byok",
+            citations: [
+              {
+                pagePath: "wiki/concepts/old-page.md",
+                title: "Old Page",
+                score: 10_000,
+                isPinned: true,
+              },
+            ],
+          },
+        ],
+      }),
+    });
+
+    render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
+
+    const header = screen
+      .getByText("wiki/concepts/react-pattern.md")
+      .closest(".page-chat__head");
+    expect(header).not.toHaveTextContent("Current page");
   });
 
   it("displays the chat store error string", () => {
