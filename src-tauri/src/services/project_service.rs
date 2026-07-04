@@ -151,7 +151,7 @@ impl ProjectService {
             .list_markdown_files(&wiki_base)
             .map(|files| files.len())
             .unwrap_or(0);
-        let source_count = count_files(&context.raw_dir.join("sources"));
+        let source_count = count_files_recursive(&context.raw_dir.join("sources"));
         let task_count = count_files(&context.app_dir.join("tasks"));
         let index_state = if context.wiki_dir.join("index.md").exists()
             || context.root.join("index.md").exists()
@@ -160,13 +160,10 @@ impl ProjectService {
         } else {
             IndexState::Missing
         };
-        let graph_state = match fs::read_to_string(context.app_dir.join("graph-cache.json")) {
-            Ok(contents)
-                if !contents.trim().is_empty() && contents != "{\"nodes\":[],\"edges\":[]}" =>
-            {
-                GraphState::Cached
-            }
-            _ => GraphState::Missing,
+        let graph_state = if graph_cache_has_content(&context.app_dir.join("graph-cache.json")) {
+            GraphState::Cached
+        } else {
+            GraphState::Missing
         };
 
         let name = name_override
@@ -668,6 +665,45 @@ fn count_files(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
+fn count_files_recursive(dir: &Path) -> usize {
+    let mut count = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_file() => count += 1,
+                Ok(file_type) if file_type.is_dir() => stack.push(entry.path()),
+                _ => {}
+            }
+        }
+    }
+    count
+}
+
+fn graph_cache_has_content(path: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    let nodes = value
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let edges = value
+        .get("edges")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    nodes > 0 || edges > 0
+}
+
 fn has_child_named(root: &Path, expected: &str) -> bool {
     let expected_lower = expected.to_ascii_lowercase();
     fs::read_dir(root)
@@ -1157,6 +1193,38 @@ mod tests {
         fs::remove_dir_all(config).ok();
         fs::remove_dir_all(root_a).ok();
         fs::remove_dir_all(root_b).ok();
+    }
+
+    #[test]
+    fn scan_project_counts_nested_sources_and_ignores_empty_graph_cache() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("metadata");
+        fs::create_dir_all(root.join("raw/sources/pdfs")).unwrap();
+        fs::create_dir_all(root.join("raw/sources/docs")).unwrap();
+        fs::create_dir_all(root.join(".app/tasks")).unwrap();
+        fs::write(root.join("raw/sources/pdfs/report.pdf"), "pdf").unwrap();
+        fs::write(root.join("raw/sources/docs/brief.docx"), "doc").unwrap();
+        fs::write(
+            root.join(".app/graph-cache.json"),
+            "{\n  \"nodes\": [],\n  \"edges\": []\n}",
+        )
+        .unwrap();
+
+        let context = ProjectContext::new("metadata", root.clone());
+        let summary = service.scan_project(&context, Some("Metadata"));
+
+        assert_eq!(summary.source_count, 2);
+        assert_eq!(summary.graph_state, GraphState::Missing);
+
+        fs::write(
+            root.join(".app/graph-cache.json"),
+            "{\n  \"nodes\": [{\"id\":\"a\"}],\n  \"edges\": []\n}",
+        )
+        .unwrap();
+        let summary = service.scan_project(&context, Some("Metadata"));
+        assert_eq!(summary.graph_state, GraphState::Cached);
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

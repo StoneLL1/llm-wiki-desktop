@@ -86,6 +86,31 @@ describe("projectStore bootstrap", () => {
     expect(useProjectStore.getState().initialized).toBe(true);
   });
 
+  it("skips missing recents during automatic bootstrap", async () => {
+    const missing: RecentProject = {
+      ...recent,
+      projectId: "missing-project",
+      name: "Missing Project",
+      rootPath: "D:/知识库/missing-project",
+      wikiPageCount: 0,
+      sourceCount: 0,
+      indexState: "missing",
+      graphState: "missing",
+      missing: true,
+    };
+    const opened: OpenProjectResponse = { kind: "opened", summary };
+    invokeMock.mockResolvedValueOnce([missing, recent]).mockResolvedValueOnce(opened);
+
+    await useProjectStore.getState().bootstrap();
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["list_recent_projects"],
+      ["open_project", { request: { path: recent.rootPath } }],
+    ]);
+    expect(useProjectStore.getState().currentProject).toEqual(summary);
+    expect(useProjectStore.getState().error).toBeNull();
+  });
+
   it("never lets a delayed automatic reopen overwrite an explicit project selection", async () => {
     let resolveAutomatic!: (value: OpenProjectResponse) => void;
     const automatic = new Promise<OpenProjectResponse>((resolve) => {

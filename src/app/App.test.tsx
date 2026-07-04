@@ -156,6 +156,21 @@ describe("App", () => {
     });
   });
 
+  it("shows launch picker errors instead of leaving an unhandled rejection", async () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", rootPath: "" }));
+    openDialogMock.mockRejectedValue(new Error("dialog unavailable"));
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Open existing project/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("dialog unavailable");
+    expect(invokeMock).not.toHaveBeenCalledWith("open_project", expect.anything());
+  });
+
   it("creates a project from a parent folder and project name", async () => {
     useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", rootPath: "" }));
     openDialogMock.mockResolvedValue("D:\\资料库");
@@ -170,6 +185,7 @@ describe("App", () => {
 
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /New empty project/i }));
+    expect(screen.queryByRole("checkbox", { name: /Initialize a Git repo/i })).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
       target: { value: "中文知识库" },
     });

@@ -163,15 +163,17 @@ export function ProjectStartView() {
     intent: "open_existing" | "open_folder_as_project",
   ) => {
     setPendingLaunchIntent(intent);
-    const selected = await pickDirectory({
-      title: t(
-        intent === "open_existing"
-          ? "launch.quick.openExistingPicker"
-          : "launch.quick.openFolderPicker",
-      ),
+    await run(async () => {
+      const selected = await pickDirectory({
+        title: t(
+          intent === "open_existing"
+            ? "launch.quick.openExistingPicker"
+            : "launch.quick.openFolderPicker",
+        ),
+      });
+      if (!selected) return;
+      await openProject(selected);
     });
-    if (!selected) return;
-    await run(() => openProject(selected));
   };
 
   const pendingActionForDisplay =
@@ -487,14 +489,13 @@ function NewProjectDialog({
   busy,
 }: {
   onClose: () => void;
-  onCreate: (payload: { rootPath: string; name: string; template: ProjectTemplate; initGit: boolean }) => void;
+  onCreate: (payload: { rootPath: string; name: string; template: ProjectTemplate }) => void;
   busy: boolean;
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState("");
   const [parentPath, setParentPath] = useState("");
   const [template, setTemplate] = useState<ProjectTemplate>("general");
-  const [initGit, setInitGit] = useState(true);
   const nameRef = useRef<HTMLInputElement>(null);
   const dialogRef = useModalDialog({ onClose, initialFocusRef: nameRef });
   const rootPath = buildProjectRootPath(parentPath, name);
@@ -513,7 +514,7 @@ function NewProjectDialog({
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!canCreate) return;
-    onCreate({ rootPath, name: name.trim(), template, initGit });
+    onCreate({ rootPath, name: name.trim(), template });
   };
 
   return (
@@ -603,19 +604,6 @@ function NewProjectDialog({
                   </button>
                 ))}
               </div>
-            </div>
-          </div>
-
-          <div className="formrow">
-            <div>
-              <div className="formrow__label">{t("launch.dialog.git")}</div>
-              <div className="formrow__hint">{t("launch.dialog.gitHint")}</div>
-            </div>
-            <div className="formrow__control">
-              <label className="checkbox">
-                <input type="checkbox" checked={initGit} onChange={(event) => setInitGit(event.target.checked)} />
-                {t("launch.dialog.gitLabel")}
-              </label>
             </div>
           </div>
         </div>

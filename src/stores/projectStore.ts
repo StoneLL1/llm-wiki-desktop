@@ -173,7 +173,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     try {
       const recentProjects = await get().loadRecentProjects();
-      const last = recentProjects[0];
+      const last = recentProjects.find((project) => !project.missing);
       if (last && bootstrapEpoch === selectionEpoch) {
         await get().openProject(last.rootPath);
       }
