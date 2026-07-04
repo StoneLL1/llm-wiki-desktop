@@ -147,19 +147,20 @@ pub fn remember_recent_project(
     request: RememberRecentProjectRequest,
 ) -> Result<Vec<RecentProject>, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.root_path)?;
+    let summary = state.project_service.scan_project(&context, Some(&request.name));
     state
         .project_service
         .remember_recent_project(RecentProject {
-            project_id: request.project_id,
-            name: request.name,
-            root_path: context.root.to_string_lossy().into_owned(),
+            project_id: summary.project_id,
+            name: summary.name,
+            root_path: summary.root_path,
             template: request.template,
             opened_at: now_rfc3339(),
-            wiki_page_count: 0,
-            source_count: 0,
-            task_count: 0,
-            index_state: crate::models::project::IndexState::Missing,
-            graph_state: crate::models::project::GraphState::Missing,
+            wiki_page_count: summary.wiki_page_count,
+            source_count: summary.source_count,
+            task_count: summary.task_count,
+            index_state: summary.index_state,
+            graph_state: summary.graph_state,
             missing: false,
         })
 }

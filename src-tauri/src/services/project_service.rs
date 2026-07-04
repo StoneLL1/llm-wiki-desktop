@@ -206,13 +206,35 @@ impl ProjectService {
             Ok(file) => Ok(file
                 .projects
                 .into_iter()
-                .map(|mut project| {
-                    project.missing = !Path::new(&project.root_path).exists();
-                    project
-                })
+                .map(|entry| self.enrich_recent_project(entry))
                 .collect()),
             Err(_) => Ok(Vec::new()),
         }
+    }
+
+    fn enrich_recent_project(&self, mut entry: RecentProject) -> RecentProject {
+        let root = PathBuf::from(&entry.root_path);
+        if !root.exists() {
+            entry.missing = true;
+            entry.wiki_page_count = 0;
+            entry.source_count = 0;
+            entry.task_count = 0;
+            entry.index_state = IndexState::Missing;
+            entry.graph_state = GraphState::Missing;
+            return entry;
+        }
+        let context = ProjectContext::new(entry.project_id.clone(), root);
+        let summary = self.scan_project(&context, Some(&entry.name));
+        entry.name = summary.name;
+        entry.root_path = summary.root_path;
+        entry.template = summary.template;
+        entry.wiki_page_count = summary.wiki_page_count;
+        entry.source_count = summary.source_count;
+        entry.task_count = summary.task_count;
+        entry.index_state = summary.index_state;
+        entry.graph_state = summary.graph_state;
+        entry.missing = false;
+        entry
     }
 
     pub fn remember_recent_project(
@@ -1135,6 +1157,33 @@ mod tests {
         fs::remove_dir_all(config).ok();
         fs::remove_dir_all(root_a).ok();
         fs::remove_dir_all(root_b).ok();
+    }
+
+    #[test]
+    fn list_recent_projects_marks_missing_paths_without_deleting_them() {
+        let (service, config) = service_in_temp();
+        let missing = config.join("missing-project");
+        service
+            .remember_recent_project(crate::models::project::RecentProject {
+                project_id: "missing".into(),
+                name: "Missing".into(),
+                root_path: missing.to_string_lossy().to_string(),
+                template: ProjectTemplate::General,
+                opened_at: "2026-07-04T00:00:00Z".into(),
+                wiki_page_count: 0,
+                source_count: 0,
+                task_count: 0,
+                index_state: IndexState::Missing,
+                graph_state: GraphState::Missing,
+                missing: false,
+            })
+            .unwrap();
+
+        let listed = service.list_recent_projects().unwrap();
+        assert_eq!(listed[0].project_id, "missing");
+        assert!(listed[0].missing);
+        assert!(service.recent_projects_path().exists());
+        fs::remove_dir_all(config).ok();
     }
 
     #[test]
