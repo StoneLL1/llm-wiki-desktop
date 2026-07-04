@@ -1,7 +1,7 @@
 # Progress - plan-batch-{04}
 
 Plan: D:\Users\Aletta\Desktop\Works\llm-wiki-desktop\docs\fixes\plan\plan-batch-{04}.md
-Status: in_progress
+Status: completed
 Started: 2026-07-05 01:25
 
 ## step Progress
@@ -14,7 +14,7 @@ Started: 2026-07-05 01:25
 - [x] Task 6 - CSS and i18n
 - [x] Task 7 - Frontend regression tests
 - [x] Task 8 - Backend verification
-- [ ] Task 9 - Required checks and review workflow
+- [x] Task 9 - Required checks and review workflow
 
 ## Activity Log
 
@@ -33,6 +33,10 @@ Started: 2026-07-05 01:25
 - [2026-07-05 01:45] Task 6 实现：补充导出行内动作、segmented control、HTML source preview 样式以及中英文导出预览翻译键
 - [2026-07-05 01:46] Task 7 实现：新增 CSS contract 覆盖 workspace focus、导出行内动作、segmented control 和 HTML source preview
 - [2026-07-05 01:49] Task 8 验证：cargo test export 命中已知 Windows loader 0xc0000139；cargo check --lib --tests 通过
+
+- [2026-07-05 01:55] Task 9 review: launched shared-context and fresh-context subagents; both found missing maximized export preview layout, keyboard propagation, focus cleanup, and missing-export code mismatch.
+- [2026-07-05 01:56] Task 9 fixes: added focused export preview layout, row-action keyboard propagation guard, clear/unmount focus cleanup, EXPORT_FILE_NOT_FOUND backend code, and regression coverage for the review findings.
+- [2026-07-05 01:58] Task 9 final verification: npm test/lint/build, cargo check, console.log scan passed; cargo test export still blocked by known Windows loader 0xc0000139 after successful compile.
 
 ## Changed Files
 
@@ -55,21 +59,24 @@ Started: 2026-07-05 01:25
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
 - src/test/ui-css-contracts.test.ts
+- SPEC/progress.txt
 
 ## Verification
 
-- npm run test: not run
+- npm run test: passed (45 test files, 276 tests; jsdom/sigma canvas warnings printed, exit 0)
 - npm run test -- src/stores/exportStore.test.ts src/stores/navigationStore.test.ts: passed (Task 3)
 - npm run test -- src/components/app/appShellActions.test.tsx: passed (Task 4)
 - npm run test -- src/features/exports/exportsView.test.tsx: passed (Task 5)
 - npm run test -- src/features/exports/exportsView.test.tsx: passed (Task 6)
 - node JSON parse locale check: passed (Task 6)
 - npm run test -- src/features/exports/exportsView.test.tsx src/stores/exportStore.test.ts src/stores/navigationStore.test.ts src/components/app/appShellActions.test.tsx src/test/ui-css-contracts.test.ts: passed (Task 7)
-- npm run lint: not run
-- npm run build: not run
+- npm run lint: passed
+- npm run build: passed (Vite large chunk warning only)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 1, Task 2, Task 8)
 - cargo test --manifest-path src-tauri/Cargo.toml export: failed to start test binary (0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND; known local loader issue)
-- console.log scan: not run
+- Review Subagent A: completed; valid findings fixed
+- Review Subagent B: completed; valid findings fixed
+- console.log scan: passed (no matches in src, src-tauri/src, src-tauri/tests)
 
 ## Blockers
 

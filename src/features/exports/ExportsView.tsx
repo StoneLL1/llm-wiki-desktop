@@ -87,6 +87,14 @@ export function ExportsView() {
     void loadExports(projectId, rootPath);
   }, [projectId, rootPath, loadExports]);
 
+  useEffect(() => {
+    return () => {
+      if (useNavigationStore.getState().workspaceFocus === "exportPreview") {
+        useNavigationStore.getState().clearWorkspaceFocus();
+      }
+    };
+  }, [projectId, rootPath]);
+
   const runningTask = runningTaskId
     ? tasks.find((task) => task.id === runningTaskId) ?? null
     : null;
@@ -200,6 +208,13 @@ export function ExportsView() {
     focusWorkspace("exportPreview");
   };
 
+  const handleClearPreview = () => {
+    clearPreview();
+    if (workspaceFocus === "exportPreview") {
+      clearWorkspaceFocus();
+    }
+  };
+
   const handleToggleBookmark = (record: ExportRecord) => {
     void toggleBookmark(projectId, rootPath, record.id);
   };
@@ -212,7 +227,10 @@ export function ExportsView() {
   const previewRecord = sortedRecords.find((record) => record.id === previewId) ?? null;
 
   return (
-    <div className="exports-view-layout" style={layoutStyle}>
+    <div
+      className={`exports-view-layout ${workspaceFocus === "exportPreview" ? "is-preview-focused" : ""}`.trim()}
+      style={layoutStyle}
+    >
       <div className="exports-view__list-pane">
         <div className="view-toolbar border-b border-[var(--border)] px-4">
           <div className="ml-auto flex items-center gap-2">
@@ -460,7 +478,7 @@ export function ExportsView() {
               </IconButton>
               <button
                 type="button"
-                onClick={clearPreview}
+                onClick={handleClearPreview}
                 className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
               >
                 {t("exports.actions.clearPreview")}
@@ -500,6 +518,11 @@ function IconButton({ label, onClick, active, children }: IconButtonProps) {
       onClick={(event) => {
         event.stopPropagation();
         onClick();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.stopPropagation();
+        }
       }}
       className={`flex h-[26px] w-[26px] items-center justify-center rounded-[var(--radius-md)] text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] ${
         active ? "bg-[var(--surface-muted)] text-[var(--text-primary)]" : ""

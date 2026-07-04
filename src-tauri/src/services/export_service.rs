@@ -296,7 +296,7 @@ impl ExportService {
         let absolute = context.resolve_project_path(&normalized)?;
         if !absolute.is_file() {
             return Err(BackendError::new(
-                "EXPORT_NOT_FOUND",
+                "EXPORT_FILE_NOT_FOUND",
                 "Export HTML file does not exist.",
                 true,
                 true,
@@ -700,7 +700,7 @@ mod tests {
             .resolve_existing_html_export(&context, "exports/html/missing.html")
             .expect_err("missing export must be rejected");
 
-        assert_eq!(err.code, "EXPORT_NOT_FOUND");
+        assert_eq!(err.code, "EXPORT_FILE_NOT_FOUND");
         std::fs::remove_dir_all(root).unwrap();
     }
 

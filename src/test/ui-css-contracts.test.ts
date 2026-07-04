@@ -64,6 +64,8 @@ describe("responsive UI CSS contracts", () => {
 
   it("defines focused export preview and source-mode affordances", () => {
     expect(styles).toContain(".app-shell.is-workspace-focused .app-shell__workbench");
+    expect(styles).toContain(".exports-view-layout.is-preview-focused");
+    expect(styles).toContain('.exports-view-layout.is-preview-focused > .resize-handle[data-pane-id="exportsList"]');
     expect(styles).toContain(".export-file-cell");
     expect(styles).toContain(".export-row-actions");
     expect(styles).toContain(".segmented-control button[aria-pressed=\"true\"]");
