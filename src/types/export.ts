@@ -9,6 +9,8 @@ export type ExportStatus = "succeeded" | "failed";
 
 export type ExportRoutePreference = "auto" | "agent" | "byok";
 
+export type ExportPreviewMode = "inline" | "source";
+
 /**
  * User-controlled content flags for an export. Mirrors the backend
  * `ExportContentOptions`; these adjust the prompt only. `embedCss` reflects the
@@ -86,6 +88,12 @@ export interface ReadExportPreviewRequest {
 }
 
 export interface OpenExportFolderRequest {
+  projectId: string;
+  projectRootPath: string;
+  outputPath: string;
+}
+
+export interface OpenExportInBrowserRequest {
   projectId: string;
   projectRootPath: string;
   outputPath: string;
