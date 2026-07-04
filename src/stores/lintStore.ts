@@ -11,12 +11,17 @@ import type {
   LintBatchOutcome,
   LintFixConfirmRequest,
   LintFixOutcome,
+  LintHistoryEntry,
+  LintHistoryFile,
   LintIgnoreEntry,
   LintIssue,
   LintMode,
+  ListLintHistoryRequest,
   LintReport,
   LintRoutePreference,
   LintSafetyPrefs,
+  PersistedLintReport,
+  ReadLintHistoryReportRequest,
   ListLintIgnoresRequest,
   StartDeepLintRequest,
 } from "../types/lint";
@@ -88,6 +93,11 @@ export interface LintState {
   ignores: LintIgnoreEntry[];
   /** UI-side safety preferences (checkpoint is a hard boundary, always on). */
   safetyPrefs: LintSafetyPrefs;
+  /** Persisted local/deep lint snapshots from .app/lint-history.json. */
+  history: LintHistoryEntry[];
+  historyLoading: boolean;
+  historyError: string | null;
+  activeHistoryId: string | null;
 
   runLocalLint: (projectId: string, rootPath: string) => Promise<void>;
   startDeepLint: (
@@ -102,6 +112,10 @@ export interface LintState {
   selectIssue: (issueId: string | null) => void;
   setMode: (mode: LintMode) => void;
   setSafetyPrefs: (prefs: Partial<LintSafetyPrefs>) => void;
+  loadHistory: (request: ListLintHistoryRequest) => Promise<LintHistoryEntry[]>;
+  openHistoryReport: (
+    request: ReadLintHistoryReportRequest,
+  ) => Promise<PersistedLintReport | null>;
   loadIgnores: (request: ListLintIgnoresRequest) => Promise<void>;
   addIgnore: (request: AddLintIgnoreRequest) => Promise<boolean>;
   applyFix: (
@@ -139,6 +153,10 @@ const initial = {
   batchRunning: false,
   ignores: [] as LintIgnoreEntry[],
   safetyPrefs: loadSafetyPrefs(),
+  history: [] as LintHistoryEntry[],
+  historyLoading: false,
+  historyError: null as string | null,
+  activeHistoryId: null as string | null,
 };
 
 export const useLintStore = create<LintState>((set, get) => ({
@@ -153,7 +171,13 @@ export const useLintStore = create<LintState>((set, get) => ({
         request: { projectId, projectRootPath: rootPath },
       });
       if (!isProjectScopeCurrent(scope)) return;
-      set({ localReport: report, loadingLocal: false });
+      set({
+        localReport: report,
+        deepReport: null,
+        activeHistoryId: null,
+        loadingLocal: false,
+      });
+      void get().loadHistory({ projectId, projectRootPath: rootPath });
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       set({ loadingLocal: false, error: errorMessage(error) });
@@ -191,7 +215,16 @@ export const useLintStore = create<LintState>((set, get) => ({
     try {
       const report = await invoke<DeepLintReport>("get_deep_lint_report", { request });
       if (!isProjectScopeCurrent(scope)) return;
-      set({ deepReport: report, runningDeep: false });
+      set({
+        deepReport: report,
+        localReport: null,
+        activeHistoryId: request.taskId,
+        runningDeep: false,
+      });
+      void get().loadHistory({
+        projectId: request.projectId,
+        projectRootPath: request.projectRootPath,
+      });
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       set({ runningDeep: false, error: errorMessage(error) });
@@ -214,6 +247,48 @@ export const useLintStore = create<LintState>((set, get) => ({
       saveSafetyPrefs(next);
       return { safetyPrefs: next };
     }),
+
+  loadHistory: async (request) => {
+    if (!hasTauri()) return [];
+    const scope = captureProjectScope();
+    set({ historyLoading: true, historyError: null });
+    try {
+      const file = await invoke<LintHistoryFile>("list_lint_history", { request });
+      if (!isProjectScopeCurrent(scope)) return [];
+      const history = file.entries ?? [];
+      set({ history, historyLoading: false });
+      return history;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return [];
+      set({ historyLoading: false, historyError: errorMessage(error) });
+      return [];
+    }
+  },
+
+  openHistoryReport: async (request) => {
+    if (!hasTauri()) return null;
+    const scope = captureProjectScope();
+    set({ historyError: null });
+    try {
+      const persisted = await invoke<PersistedLintReport>(
+        "read_lint_history_report",
+        { request },
+      );
+      if (!isProjectScopeCurrent(scope)) return null;
+      set({
+        localReport: persisted.localReport ?? null,
+        deepReport: persisted.deepReport ?? null,
+        selectedIssueId: null,
+        activeHistoryId: persisted.entry.id,
+        mode: persisted.entry.kind === "local" ? "local" : "agent",
+      });
+      return persisted;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return null;
+      set({ historyError: errorMessage(error) });
+      return null;
+    }
+  },
 
   loadIgnores: async (request) => {
     if (!hasTauri()) return;
