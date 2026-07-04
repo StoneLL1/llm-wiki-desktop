@@ -9,9 +9,9 @@ describe("graphExport", () => {
   function seededGraph(): Graph {
     const g = new Graph();
     // pageType mirrors what GraphView writes (sigma reserves `type`).
-    g.addNode("a", { label: "Agent", x: 0, y: 0, size: 8, color: "#10a37f", pageType: "concept", degree: 4 });
-    g.addNode("b", { label: "Claude", x: 2, y: 1, size: 5, color: "#0d0d0d", pageType: "entity", degree: 2 });
-    g.addNode("c", { label: "<Tagged>", x: 4, y: 0, size: 4, color: "#2563eb", pageType: "source", degree: 1 });
+    g.addNode("a", { label: "Agent", x: 0, y: 0, size: 8, color: "#10a37f", pageType: "concept", degree: 4, path: "concepts/agent.md", tags: ["llm"] });
+    g.addNode("b", { label: "Claude", x: 2, y: 1, size: 5, color: "#0d0d0d", pageType: "entity", degree: 2, path: "entities/claude.md", tags: [] });
+    g.addNode("c", { label: "<Tagged>", x: 4, y: 0, size: 4, color: "#2563eb", pageType: "source", degree: 1, path: "sources/paper.md", tags: ["reading"] });
     g.addEdge("a", "b", { color: "#d4d4d4", size: 1 });
     g.addEdge("a", "c", { color: "#d4d4d4", size: 1 });
     return g;
@@ -82,10 +82,10 @@ describe("graphExport", () => {
   });
 
   it("excludes nodes below the degree threshold and prunes dangling edges", () => {
-    // c has degree 1; threshold 1 hides degree <= 1 → c and the a-c edge drop.
+    // c has degree 1; threshold 2 hides degree < 2, so c and the a-c edge drop.
     const svg = buildGraphSvg(seededGraph(), null, {
       hiddenTypes: new Set(),
-      degreeThreshold: 1,
+      degreeThreshold: 2,
       search: "",
     });
     expect(svg.match(/<circle/g)?.length).toBe(2);
@@ -101,6 +101,16 @@ describe("graphExport", () => {
     // Only "Agent" matches (case-insensitive).
     expect(svg.match(/<circle/g)?.length).toBe(1);
     expect(svg.match(/<line/g)?.length ?? 0).toBe(0);
+  });
+
+  it("matches export search against path and tags as well as labels", () => {
+    const svg = buildGraphSvg(seededGraph(), null, {
+      hiddenTypes: new Set(),
+      degreeThreshold: 0,
+      search: "reading",
+    });
+    expect(svg.match(/<circle/g)?.length).toBe(1);
+    expect(svg).toContain("&lt;Tagged&gt;");
   });
 
   it("builds a timestamped, sanitized filename", () => {

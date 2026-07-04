@@ -1,6 +1,8 @@
 import type Graph from "graphology";
 
-import type { GraphData } from "../../types/graph";
+import { PAGE_TYPE_COLORS, type GraphData, type GraphNode } from "../../types/graph";
+import type { WikiPageType } from "../../types/wiki";
+import { visibleNodeIdsForExport } from "./graphRenderStyle";
 
 /** Node attributes read off the graphology graph for export. */
 interface ExportNode {
@@ -18,7 +20,7 @@ interface ExportNode {
 export interface ExportFilters {
   /** Page types hidden from the canvas (unchecked in the inspector). */
   hiddenTypes: Set<string>;
-  /** Nodes with degree <= this are hidden (0 hides nothing). */
+  /** Nodes with degree < this are hidden (0 hides nothing). */
   degreeThreshold: number;
   /** Active node-search query (empty = no filter). */
   search: string;
@@ -45,18 +47,37 @@ const LABEL_COLOR = "#6b7280";
 export function buildGraphSvg(graph: Graph, selectedNodeId: string | null, filters: ExportFilters): string {
   const visible = new Set<string>();
   const nodes: ExportNode[] = [];
-  const searchLower = filters.search.trim().toLowerCase();
+  const graphNodes: GraphNode[] = [];
   graph.forEachNode((id, attrs) => {
     const typed = attrs as Record<string, unknown>;
     // Read the wiki page type from `pageType` — sigma reserves `type` as its
     // rendering-program key, so GraphView stores our page type there. See gotchas.
-    const type = typeof typed.pageType === "string" ? (typed.pageType as string) : undefined;
+    const type = readPageType(typed.pageType);
     const degree = typeof typed.degree === "number" ? (typed.degree as number) : 0;
-    // Apply the same hide rules as the nodeReducer.
-    if (type && filters.hiddenTypes.has(type)) return;
-    if (filters.degreeThreshold > 0 && degree <= filters.degreeThreshold) return;
     const label = typeof typed.label === "string" ? (typed.label as string) : id;
-    if (searchLower && !label.toLowerCase().includes(searchLower)) return;
+    graphNodes.push({
+      id,
+      path: typeof typed.path === "string" ? (typed.path as string) : id,
+      label,
+      type,
+      tags: readTags(typed.tags),
+      starred: Boolean(typed.starred),
+      degree,
+    });
+  });
+
+  const visibleIds = visibleNodeIdsForExport(graphNodes, {
+    typeFilter: visibleTypeFilter(graphNodes, filters.hiddenTypes),
+    degreeThreshold: filters.degreeThreshold,
+    search: filters.search,
+  });
+
+  graph.forEachNode((id, attrs) => {
+    if (!visibleIds.has(id)) return;
+    const typed = attrs as Record<string, unknown>;
+    const type = readPageType(typed.pageType);
+    const degree = typeof typed.degree === "number" ? (typed.degree as number) : 0;
+    const label = typeof typed.label === "string" ? (typed.label as string) : id;
     visible.add(id);
     nodes.push({
       id,
@@ -121,6 +142,23 @@ export function buildGraphSvg(graph: Graph, selectedNodeId: string | null, filte
     `<g>${nodeMarks.join("")}</g>`,
     `</svg>`,
   ].join("");
+}
+
+const KNOWN_PAGE_TYPES = new Set(Object.keys(PAGE_TYPE_COLORS) as WikiPageType[]);
+
+function readPageType(value: unknown): WikiPageType {
+  return typeof value === "string" && KNOWN_PAGE_TYPES.has(value as WikiPageType)
+    ? (value as WikiPageType)
+    : "other";
+}
+
+function readTags(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function visibleTypeFilter(nodes: GraphNode[], hiddenTypes: Set<string>): Set<WikiPageType> {
+  if (hiddenTypes.size === 0) return new Set();
+  return new Set(nodes.map((node) => node.type).filter((type) => !hiddenTypes.has(type)));
 }
 
 function emptySvg(): string {

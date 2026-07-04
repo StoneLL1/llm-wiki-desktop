@@ -8,12 +8,14 @@ Started: 2026-07-04 19:51
 
 - [x] Task 1 - Backend Graph Read Reliability
 - [x] Task 2 - Graph Store State Machine And Task Waiting
-- [ ] Task 3 - Pure Graph Render Style Helpers
+- [x] Task 3 - Pure Graph Render Style Helpers
 - [ ] Task 4 - Graph View, Legend, Inspector, And Empty States
 - [ ] Task 5 - Dashboard Graph Overview Panel
 - [ ] Task 6 - Integrated Verification And Review
 
 ## Activity Log
+
+- [2026-07-04 20:07] Completed Task 3: added pure graphRenderStyle helpers for search, hidden reasons, selected-neighbor emphasis, hovered type emphasis, and export-visible IDs; graphExport now reuses the helper while preserving the existing hiddenTypes API.
 
 - [2026-07-04 20:02] 完成 Task 2：GraphStatus 增加 rebuilding/ready-empty；graphStore 增加 focusedNodeId 与项目切换重置；rebuild 改用 waitForTaskTerminal 并保留可用旧图数据。
 - [2026-07-04 20:01] 完成 Task 1：新增 graph_service stale empty cache / partial layout 覆盖测试；get_graph 改为扫描 live wiki pages 后通过 GraphService::resolve 读穿透修复缓存。
@@ -23,6 +25,10 @@ Started: 2026-07-04 19:51
 ## Changed Files
 
 - docs/fixes/plan/progress-plan-batch-{02}.md
+- src/features/graph/graphExport.test.ts
+- src/features/graph/graphExport.ts
+- src/features/graph/graphRenderStyle.test.ts
+- src/features/graph/graphRenderStyle.ts
 - src-tauri/src/commands/graph_commands.rs
 - src-tauri/src/services/graph_service.rs
 - src/features/graph/graphStore.test.ts
@@ -40,6 +46,7 @@ Started: 2026-07-04 19:51
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
 - cargo test --manifest-path src-tauri/Cargo.toml --no-default-features graph_service: passed, 16 tests
 - npm run test -- src/features/graph/graphStore.test.ts: passed, 9 tests
+- npm run test -- src/features/graph/graphRenderStyle.test.ts src/features/graph/graphExport.test.ts: passed, 16 tests
 
 ## Blockers
 
