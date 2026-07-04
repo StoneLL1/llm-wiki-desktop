@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:56] Task 8 Step 7 完成：按计划向 `SPEC/progress.txt` 顶部追加 Batch 01 implementation 记录；因该文件已有用户未提交改动，提交时仅 staged 新增这一条记录，保留既有工作树改动未提交。
 - [2026-07-04 19:52] Task 8 Step 6 review fixes 完成：合并 A/B review，修复 auto color preset 监听 OS dark preference、移除 night 强制 dark 特例、补 project switcher click-open 后 Escape/Arrow 键盘路径、修复 collapsed sidebar selector，并补 focused tests/CSS contract；review focused tests 通过。
 - [2026-07-04 19:42] Task 8 Step 5 完成：Rust `cargo check --lib --tests` 通过。
 - [2026-07-04 19:41] Task 8 Step 4 完成：PowerShell `console.log` 搜索无匹配。
@@ -90,6 +91,7 @@ Started: 2026-07-04 18:38
 - src/stores/navigationStore.test.ts
 - src/hooks/useResizablePane.ts
 - src/hooks/useResizablePane.test.ts
+- SPEC/progress.txt
 - docs/fixes/plan/progress-plan-batch-{01}.md
 
 ## Verification
