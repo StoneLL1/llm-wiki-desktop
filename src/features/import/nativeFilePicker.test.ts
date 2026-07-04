@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { normalizeSelectedPaths, selectImportFiles } from "./nativeFilePicker";
+import {
+  normalizeSelectedPaths,
+  pickDirectory,
+  selectImportFiles,
+} from "./nativeFilePicker";
 
 describe("normalizeSelectedPaths", () => {
   it("keeps a single absolute CJK path", () => {
@@ -26,5 +30,26 @@ describe("selectImportFiles", () => {
 
     await expect(selectImportFiles(open)).resolves.toEqual(["D:\\资料\\论文.pdf"]);
     expect(open).toHaveBeenCalledWith({ directory: false, multiple: true });
+  });
+});
+
+describe("pickDirectory", () => {
+  it("opens the native dialog in single-directory mode", async () => {
+    const open = vi.fn().mockResolvedValue("D:\\资料库");
+
+    await expect(pickDirectory({ title: "Choose folder" }, open)).resolves.toBe(
+      "D:\\资料库",
+    );
+    expect(open).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+      title: "Choose folder",
+    });
+  });
+
+  it("returns null when directory selection is cancelled", async () => {
+    const open = vi.fn().mockResolvedValue(null);
+
+    await expect(pickDirectory({}, open)).resolves.toBeNull();
   });
 });
