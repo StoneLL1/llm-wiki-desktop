@@ -48,6 +48,7 @@ describe("ExportsView", () => {
           createdAt: "2026-06-20T10:00:00Z",
           route: "byok",
           status: "succeeded",
+          bookmarked: false,
         },
       ],
     });
@@ -72,6 +73,7 @@ describe("ExportsView", () => {
           createdAt: "2026-06-20T10:00:00Z",
           route: "agent",
           status: "failed",
+          bookmarked: false,
           taskId: "task-failed",
         },
       ],

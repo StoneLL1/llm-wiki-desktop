@@ -349,6 +349,7 @@ mod tests {
             created_at: "2026-07-04T00:00:00Z".into(),
             route: ExportRoute::Byok,
             status,
+            bookmarked: false,
             task_id: None,
         }
     }

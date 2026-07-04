@@ -339,6 +339,18 @@ impl ExportService {
         self.file_store.read_json(context, EXPORTS_INDEX_PATH)
     }
 
+    pub fn list_records_with_bookmarks(
+        &self,
+        context: &ProjectContext,
+        bookmark_ids: &HashSet<String>,
+    ) -> Result<Vec<ExportRecord>, BackendError> {
+        let mut records = self.list_records(context)?;
+        for record in &mut records {
+            record.bookmarked = bookmark_ids.contains(&record.id);
+        }
+        Ok(records)
+    }
+
     /// Convenience for the command layer to build a record after a run.
     pub fn new_record(
         export_type: ExportType,
@@ -357,6 +369,7 @@ impl ExportService {
             created_at: now_rfc3339(),
             route,
             status: ExportStatus::Succeeded,
+            bookmarked: false,
             task_id,
         }
     }
@@ -383,6 +396,7 @@ impl ExportService {
             created_at: now_rfc3339(),
             route,
             status: ExportStatus::Failed,
+            bookmarked: false,
             task_id,
         }
     }
@@ -443,6 +457,8 @@ fn trim_trailing_prose(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::BookmarkService;
+    use std::collections::HashSet;
     use crate::models::paths::ProjectContext;
     use std::path::PathBuf;
 
@@ -632,6 +648,83 @@ mod tests {
             listed[1].source_path.as_deref(),
             Some("wiki/concepts/agent.md")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn list_records_with_bookmarks_marks_matching_record_id() {
+        let (context, root) = tmp_context("record-bookmarks");
+        let service = ExportService::default();
+        let first = ExportService::new_record(
+            ExportType::BeautifulRead,
+            "Agent".into(),
+            Some("wiki/concepts/agent.md".into()),
+            "exports/html/agent-1.html".into(),
+            ExportRoute::Byok,
+            Some("task-1".into()),
+        );
+        let second = ExportService::new_record(
+            ExportType::ProjectReport,
+            "Report".into(),
+            None,
+            "exports/html/project-report-2.html".into(),
+            ExportRoute::Agent,
+            Some("task-2".into()),
+        );
+        let second_id = second.id.clone();
+        service.append_record(&context, first).unwrap();
+        service.append_record(&context, second).unwrap();
+        let bookmark_ids = HashSet::from([second_id.clone()]);
+
+        let listed = service
+            .list_records_with_bookmarks(&context, &bookmark_ids)
+            .unwrap();
+
+        assert!(listed.iter().find(|record| record.id == second_id).unwrap().bookmarked);
+        assert!(listed.iter().any(|record| !record.bookmarked));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn toggle_export_bookmark_keeps_missing_output_as_bookmarkable_history() {
+        let (context, root) = tmp_context("bookmark-missing-output");
+        let record = ExportService::new_record(
+            ExportType::BeautifulRead,
+            "Agent".into(),
+            Some("wiki/concepts/agent.md".into()),
+            "exports/html/missing.html".into(),
+            ExportRoute::Byok,
+            Some("task-1".into()),
+        );
+
+        let result = BookmarkService::default()
+            .toggle_export_html(&context, &record)
+            .unwrap();
+        let bookmark_ids = BookmarkService::default().export_record_ids(&context).unwrap();
+
+        assert!(result.bookmarked);
+        assert!(bookmark_ids.contains(&record.id));
+        assert!(!context.resolve_project_path(&record.output_path).unwrap().exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_export_records_are_not_bookmarkable() {
+        let (context, root) = tmp_context("bookmark-failed");
+        let record = ExportService::new_failed_record(
+            ExportType::BeautifulRead,
+            "Agent".into(),
+            Some("wiki/concepts/agent.md".into()),
+            "exports/html/agent-failed.html".into(),
+            ExportRoute::Byok,
+            Some("task-1".into()),
+        );
+
+        let err = BookmarkService::default()
+            .toggle_export_html(&context, &record)
+            .expect_err("failed exports cannot be bookmarked");
+
+        assert_eq!(err.code, "EXPORT_BOOKMARK_UNAVAILABLE");
         std::fs::remove_dir_all(root).unwrap();
     }
 

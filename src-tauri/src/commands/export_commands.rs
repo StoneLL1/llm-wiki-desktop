@@ -9,7 +9,7 @@ use crate::models::compile::CompileRoutePreference;
 use crate::models::export::{
     ExportContentOptions, ExportRecord, ExportRoute, ExportRoutePreference, ExportType,
     ListExportsRequest, OpenExportFolderRequest, ReadExportPreviewRequest, RegenerateExportRequest,
-    StartExportRequest,
+    StartExportRequest, ToggleExportBookmarkRequest, ToggleExportBookmarkResponse,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
@@ -365,7 +365,39 @@ pub fn list_exports(
     request: ListExportsRequest,
 ) -> Result<Vec<ExportRecord>, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.export_service.list_records(&context)
+    let bookmark_ids = state.bookmark_service.export_record_ids(&context)?;
+    state
+        .export_service
+        .list_records_with_bookmarks(&context, &bookmark_ids)
+}
+
+#[tauri::command]
+pub fn toggle_export_bookmark(
+    state: State<'_, AppState>,
+    request: ToggleExportBookmarkRequest,
+) -> Result<ToggleExportBookmarkResponse, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let record = state
+        .export_service
+        .list_records(&context)?
+        .into_iter()
+        .find(|record| record.id == request.export_record_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "EXPORT_RECORD_NOT_FOUND",
+                "Export record does not exist.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "exportRecordId": request.export_record_id }))
+        })?;
+    let response = state
+        .bookmark_service
+        .toggle_export_html(&context, &record)?;
+    Ok(ToggleExportBookmarkResponse {
+        export_record_id: response.export_record_id,
+        bookmarked: response.bookmarked,
+    })
 }
 
 /// Read an exported HTML file for in-app iframe preview. The path is asserted

@@ -77,6 +77,8 @@ pub struct ExportRecord {
     pub created_at: String,
     pub route: ExportRoute,
     pub status: ExportStatus,
+    #[serde(default)]
+    pub bookmarked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
 }
@@ -141,6 +143,21 @@ pub struct StartExportRequest {
 pub struct ListExportsRequest {
     pub project_id: String,
     pub project_root_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleExportBookmarkRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub export_record_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleExportBookmarkResponse {
+    pub export_record_id: String,
+    pub bookmarked: bool,
 }
 
 /// Regenerate from an existing record — the task re-runs with the same type
@@ -222,6 +239,7 @@ mod tests {
             created_at: "2026-06-20T10:15:00Z".into(),
             route: ExportRoute::Agent,
             status: ExportStatus::Succeeded,
+            bookmarked: false,
             task_id: Some("task-1".into()),
         };
         let value = serde_json::to_value(&record).unwrap();

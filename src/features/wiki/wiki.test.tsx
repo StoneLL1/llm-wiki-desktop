@@ -845,6 +845,7 @@ describe("Wiki HTML preview", () => {
         createdAt: "2026-06-21T00:00:00Z",
         route: "agent",
         status: "succeeded",
+        bookmarked: false,
       },
     ];
 
