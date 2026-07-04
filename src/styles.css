@@ -2092,6 +2092,11 @@ select:focus-visible {
 
 .chat-view-layout { grid-template-columns: minmax(220px, 260px) minmax(0, 1fr); }
 .exports-view-layout { grid-template-columns: var(--exports-list-w-current, 360px) 6px minmax(320px, 1fr); }
+.exports-view-layout.is-preview-focused { grid-template-columns: minmax(0, 1fr); }
+.exports-view-layout.is-preview-focused .exports-view__list-pane,
+.exports-view-layout.is-preview-focused > .resize-handle[data-pane-id="exportsList"] {
+  display: none;
+}
 .lint-view-layout { grid-template-columns: var(--lint-list-w-current, 360px) 6px minmax(320px, 1fr); }
 .settings-view-layout { grid-template-columns: 240px minmax(0, 1fr); }
 .wiki-view-layout { display: flex; height: 100%; min-width: 0; min-height: 0; }
