@@ -2371,6 +2371,17 @@ select:focus-visible {
   color: var(--danger);
 }
 
+.project-path-preview {
+  margin-top: var(--sp-2);
+  overflow-wrap: anywhere;
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .wiki-editor__toolbar {
   display: flex;
   min-width: 0;
