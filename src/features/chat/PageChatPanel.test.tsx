@@ -123,7 +123,7 @@ describe("PageChatPanel", () => {
 
     render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
 
-    expect(screen.getByText("Current page")).toBeInTheDocument();
+    expect(screen.getAllByText("Current page").length).toBeGreaterThan(0);
   });
 
   it("displays the chat store error string", () => {

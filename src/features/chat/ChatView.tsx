@@ -279,6 +279,11 @@ export function MessageBubble({
                   >
                     <span className="msg__citation-idx">{index + 1}</span>
                     <span className="msg__citation-title">{citation.title}</span>
+                    {citation.isPinned ? (
+                      <span className="rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent-hover)]">
+                        {t("chat.citations.currentPage")}
+                      </span>
+                    ) : null}
                     <span className="msg__citation-path">{citation.pagePath}</span>
                   </button>
                 ))}
