@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 03:27] Task 4 Step 3 完成：新增 projectPath 红灯测试，验证因 projectPath.ts 缺失而失败
 - [2026-07-05 03:25] Task 4 Step 2 完成：实现 pickDirectory 单目录选择 helper，native picker 测试通过
 - [2026-07-05 03:23] Task 4 Step 1 完成：新增 pickDirectory 红灯测试，验证因 pickDirectory 未实现而失败
 - [2026-07-05 03:20] Task 3 Step 6 完成：新增 LintView 历史恢复/损坏报告测试与 lintStore history payload 测试，前端测试通过
@@ -62,9 +63,11 @@ Started: 2026-07-05 02:19
 - src/stores/lintStore.test.ts
 - src/features/import/nativeFilePicker.test.ts
 - src/features/import/nativeFilePicker.ts
+- src/features/project/projectPath.test.ts
 
 ## Verification
 
+- npm run test -- src/features/project/projectPath.test.ts: failed as expected (missing ./projectPath; Task 4 Step 3)
 - npm run test -- src/features/import/nativeFilePicker.test.ts: passed (6 tests; Task 4 Step 2)
 - npm run test -- src/features/import/nativeFilePicker.test.ts: failed as expected (pickDirectory is not a function; Task 4 Step 1)
 - npm run test -- src/features/lint/lintView.test.tsx src/stores/lintStore.test.ts: passed (19 tests; Task 3 Step 6)
