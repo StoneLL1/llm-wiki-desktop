@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:06] Task 6 Step 1/2/3 完成：新增 color theme preset 测试、TS settings preset 类型/defaultSettings 和 preset metadata/root application helper；focused preset test 通过。
 - [2026-07-04 19:03] Task 5 Step 5/6/7/8 完成：TopBar 使用 compact path 和 full-path title，recent menu 显示缺失状态与 openedAt meta，缺失项目不会打开，Arrow/Escape 键盘菜单行为和 compact switcher CSS 已覆盖；Task 5 前端 tests 与 cargo check 通过。
 - [2026-07-04 19:00] Task 5 Step 4 完成：TypeScript `RecentProject` DTO 新增 `missing` 字段并更新 project store fixture；focused projectStore test 通过。
 - [2026-07-04 18:58] Task 5 Step 3 完成：Rust `RecentProject` 新增 `missing` 默认字段，recent 列表按路径存在性动态标记，所有构造点显式写入 `missing: false`；`cargo test` 命中已知 Windows loader 0xc0000139，`cargo check --lib --tests` 通过。
@@ -56,6 +57,10 @@ Started: 2026-07-04 18:38
 - src/types/project.ts
 - src/app/App.test.tsx
 - src/components/app/TopBar.tsx
+- src/lib/colorThemePresets.ts
+- src/lib/colorThemePresets.test.ts
+- src/stores/settingsStore.ts
+- src/types/settings.ts
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
 - src/styles.css
@@ -71,6 +76,8 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/lib/colorThemePresets.test.ts: passed (3 tests)
+- npm run test -- src/lib/colorThemePresets.test.ts: failed as expected (missing ./colorThemePresets)
 - npm run test -- src/lib/pathDisplay.test.ts src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (43 tests)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
 - npm run test -- src/stores/projectStore.test.ts: passed (3 tests)
