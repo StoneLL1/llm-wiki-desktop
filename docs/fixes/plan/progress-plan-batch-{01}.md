@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:22] Task 7 Step 2 完成：AppearanceSettings 新增内置 color theme preset radiogroup、色块、选中状态和 Markdown reading preview 结构。
 - [2026-07-04 19:20] Task 7 Step 1 完成：AppearanceSettings props 扩展为接收 `colorThemePreset` 与 preset change callback，SettingsView 通过现有 settings store savePatch 接线全局颜色主题偏好。
 - [2026-07-04 19:16] Task 6 Step 5 完成：Rust settings DTO 新增 global-only `colorThemePreset` 契约、legacy 默认值和 global/project split 测试；`cargo test` 编译后命中已知 Windows loader 0xc0000139，`cargo check --lib --tests` 通过。
 - [2026-07-04 19:07] Task 6 Step 4 完成：settings store 新增 color theme preset root/localStorage application helper，并在 load、optimistic save、saved response、rollback 中同步应用；focused settings store test 通过。
