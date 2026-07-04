@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:39] Task 8 Step 3 完成：`npm run build` 首次因 `useResizablePane.test.ts` helper 使用过宽 `EventTarget` 类型失败；收窄为 Testing Library 接受的 DOM target 类型后，TypeScript/Vite build 通过。
 - [2026-07-04 19:36] Task 8 Step 2 完成：全量 frontend tests 与 lint 通过。
 - [2026-07-04 19:34] Task 8 Step 1 完成：计划指定 focused frontend tests 通过，覆盖 resizable pane、layout store、path display、color presets、Appearance UI、App shell actions 和 CSS contracts。
 - [2026-07-04 19:32] Task 7 Step 5 完成：新增 AppearanceSettings UI test，覆盖内置 preset、无任意颜色输入和 preset selection callback；focused Appearance/colorTheme tests 通过。
@@ -90,6 +91,8 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run build: passed after narrowing test helper target type
+- npm run build: failed (TypeScript EventTarget is not assignable to fireEvent target in src/hooks/useResizablePane.test.ts)
 - npm run lint: passed
 - npm run test: passed (194 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts src/stores/navigationStore.test.ts src/lib/pathDisplay.test.ts src/lib/colorThemePresets.test.ts src/features/settings/AppearanceSettings.test.tsx src/app/App.test.tsx src/components/app/appShellActions.test.tsx src/test/ui-css-contracts.test.ts: passed (62 tests)
