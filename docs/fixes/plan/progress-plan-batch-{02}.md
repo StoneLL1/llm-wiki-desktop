@@ -10,10 +10,12 @@ Started: 2026-07-04 19:51
 - [x] Task 2 - Graph Store State Machine And Task Waiting
 - [x] Task 3 - Pure Graph Render Style Helpers
 - [x] Task 4 - Graph View, Legend, Inspector, And Empty States
-- [ ] Task 5 - Dashboard Graph Overview Panel
+- [x] Task 5 - Dashboard Graph Overview Panel
 - [ ] Task 6 - Integrated Verification And Review
 
 ## Activity Log
+
+- [2026-07-04 23:48] Completed Task 5: added dashboardGraphPreview model/helper and tests, rendered compact dashboard graph overview with deterministic mini-SVG, wired Open Graph navigation, surfaced active graph build task state without starting graph builds, and replaced recent compile selection with latestCompileTask sorting.
 
 - [2026-07-04 23:42] Completed Task 4: integrated graphRenderStyle into GraphView reducers, added rebuilding/error/ready-empty surfaces, legend hover and visible/hidden counts, inspector focus-neighbor controls, graph status metadata, i18n keys, and compact CSS classes.
 
@@ -43,6 +45,10 @@ Started: 2026-07-04 19:51
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
 - src/styles.css
+- src/features/dashboard/DashboardView.test.tsx
+- src/features/dashboard/DashboardView.tsx
+- src/features/dashboard/dashboardGraphPreview.test.ts
+- src/features/dashboard/dashboardGraphPreview.ts
 - src-tauri/src/commands/graph_commands.rs
 - src-tauri/src/services/graph_service.rs
 - src/features/graph/graphStore.test.ts
@@ -62,6 +68,8 @@ Started: 2026-07-04 19:51
 - npm run test -- src/features/graph/graphStore.test.ts: passed, 9 tests
 - npm run test -- src/features/graph/graphRenderStyle.test.ts src/features/graph/graphExport.test.ts: passed, 16 tests
 - npm run test -- src/features/graph/graphView.test.tsx src/features/graph/legendEntries.test.ts src/app/App.test.tsx: passed, 42 tests (jsdom logs expected canvas getContext fallback noise)
+- npm run test -- src/test/ui-css-contracts.test.ts: passed, 11 tests
+- npm run test -- src/features/dashboard/dashboardGraphPreview.test.ts src/features/dashboard/DashboardView.test.tsx: passed, 8 tests
 - npm run test -- src/test/ui-css-contracts.test.ts: passed, 11 tests
 
 ## Blockers
