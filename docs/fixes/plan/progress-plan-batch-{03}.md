@@ -12,7 +12,7 @@ Started: 2026-07-05 00:05
 - [x] Task 4 - Export bookmark backend/store
 - [x] Task 5 - Sidebar Favorites
 - [x] Task 6 - Export Favorites UI
-- [ ] Task 7 - Chinese natural question search retrieval fix
+- [x] Task 7 - Chinese natural question search retrieval fix
 - [ ] Task 8 - Pinned Page Chat DTO/backend
 - [ ] Task 9 - Chat Store send options
 - [ ] Task 10 - Navigation right panel mode
@@ -30,6 +30,8 @@ Started: 2026-07-05 00:05
 - [2026-07-05 01:08] 完成 Task 4：ExportRecord 增加派生 `bookmarked` 字段；新增 `toggle_export_bookmark` IPC；export list 从 BookmarkService join record id；exportStore 增加 `toggleBookmark` 并更新本地 records。
 - [2026-07-05 01:19] 完成 Task 5：新增 FavoriteSidebarItem 类型和 bookmark selector；LeftSidebar 增加 Favorites section，可打开 Wiki favorites 或 Export preview；补充 i18n 与收起侧栏样式。
 - [2026-07-05 01:27] 完成 Task 6：ExportsView 成功导出行增加收藏/取消收藏图标按钮，失败行不显示收藏按钮；补充 i18n 和 UI 测试。
+
+- [2026-07-05 00:36] 完成 Task 7：SearchService 改为 Unicode 归一化、中文/ASCII 词项提取和字段加权打分；补充中文自然问句、Unicode lowercase、排序和无命中测试；`cargo check --manifest-path src-tauri/Cargo.toml --lib --tests` 通过，目标 `cargo test` 仍受已知 Windows runner `STATUS_ENTRYPOINT_NOT_FOUND` 阻断。
 
 ## Changed Files
 
@@ -80,6 +82,8 @@ Started: 2026-07-05 00:05
 - npm run test -- src/features/bookmarks/bookmarkSelectors.test.ts src/features/exports/exportsView.test.tsx src/features/wiki/wiki.test.tsx: pass
 - npm run lint -- --quiet: pass
 - npm run test -- src/features/exports/exportsView.test.tsx: pass
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: pass
+- cargo test --manifest-path src-tauri/Cargo.toml search_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
 
 ## Blockers
 

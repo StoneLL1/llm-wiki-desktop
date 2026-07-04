@@ -486,24 +486,25 @@ impl SearchService {
         let bookmarks = HashSet::new();
         let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
 
-        let query = request
+        let query_terms = request
             .query
             .as_deref()
             .map(|q| q.trim())
             .filter(|q| !q.is_empty())
-            .map(|q| q.to_ascii_lowercase());
+            .map(extract_query_terms)
+            .filter(|terms| !terms.is_empty());
         let type_filter: HashSet<WikiPageType> = request.page_types.iter().copied().collect();
         let tag_filter: Vec<String> = request
             .tags
             .iter()
-            .map(|tag| tag.to_ascii_lowercase())
+            .map(|tag| normalize_for_search(tag))
             .collect();
         let source_filter = request
             .source
             .as_deref()
             .map(str::trim)
             .filter(|source| !source.is_empty())
-            .map(|source| source.to_ascii_lowercase());
+            .map(normalize_for_search);
 
         let mut results: Vec<SearchResult> = Vec::new();
 
@@ -518,7 +519,7 @@ impl SearchService {
                 && !meta
                     .tags
                     .iter()
-                    .any(|tag| tag_filter.contains(&tag.to_ascii_lowercase()))
+                    .any(|tag| tag_filter.contains(&normalize_for_search(tag)))
             {
                 continue;
             }
@@ -526,57 +527,53 @@ impl SearchService {
                 let has_source = meta
                     .sources
                     .iter()
-                    .any(|source| source.to_ascii_lowercase().contains(source_needle));
+                    .any(|source| normalize_for_search(source).contains(source_needle));
                 if !has_source {
                     continue;
                 }
             }
 
-            let (matched_fields, snippet, score) = match query.as_deref() {
-                Some(query_lower) => {
+            let (matched_fields, snippet, score) = match query_terms.as_deref() {
+                Some(terms) => {
                     let mut fields: Vec<&'static str> = Vec::new();
                     let mut score = 0i64;
 
-                    if meta.title.to_ascii_lowercase().contains(query_lower) {
+                    if let Some(field_score) = score_field(&meta.title, terms, 120, 80) {
                         fields.push("title");
-                        score += 100;
+                        score += field_score;
                     }
-                    if meta
-                        .tags
-                        .iter()
-                        .any(|tag| tag.to_ascii_lowercase().contains(query_lower))
-                    {
+                    let tags = meta.tags.join(" ");
+                    if let Some(field_score) = score_field(&tags, terms, 0, 35) {
                         fields.push("tags");
-                        score += 40;
+                        score += field_score;
                     }
-                    if meta
-                        .sources
-                        .iter()
-                        .any(|source| source.to_ascii_lowercase().contains(query_lower))
-                    {
+                    let sources = meta.sources.join(" ");
+                    if let Some(field_score) = score_field(&sources, terms, 0, 25) {
                         fields.push("sources");
-                        score += 30;
+                        score += field_score;
                     }
-                    if meta
-                        .aliases
-                        .iter()
-                        .any(|alias| alias.to_ascii_lowercase().contains(query_lower))
-                    {
+                    let aliases = meta.aliases.join(" ");
+                    if let Some(field_score) = score_field(&aliases, terms, 70, 45) {
                         fields.push("aliases");
-                        score += 30;
+                        score += field_score;
                     }
 
-                    let body_lower = body.to_ascii_lowercase();
-                    if body_lower.contains(query_lower) {
+                    if let Some(field_score) = score_field(&body, terms, 18, 8) {
                         fields.push("content");
-                        score += 10;
+                        score += field_score;
+                    }
+                    if let Some(field_score) = score_field(&meta.path, terms, 0, 20) {
+                        fields.push("path");
+                        score += field_score;
                     }
 
                     if fields.is_empty() {
                         continue;
                     }
 
-                    let snippet = snippet_for_query(&body, query_lower, 48);
+                    let snippet = first_matching_term(&body, terms)
+                        .and_then(|term| snippet_for_query(&body, &term, 48))
+                        .or_else(|| first_body_excerpt(&body, 96));
                     let fields_owned: Vec<String> = fields.into_iter().map(String::from).collect();
                     (fields_owned, snippet, score)
                 }
@@ -594,7 +591,7 @@ impl SearchService {
             });
         }
 
-        if query.is_some() {
+        if query_terms.is_some() {
             results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
         } else {
             results.sort_by(|a, b| a.path.cmp(&b.path));
@@ -877,6 +874,151 @@ fn yaml_escape_scalar(value: &str) -> String {
     }
 }
 
+fn normalize_for_search(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_space = true;
+
+    for ch in value.to_lowercase().chars() {
+        if ch.is_alphanumeric() || is_cjk(ch) {
+            normalized.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+
+    let mut trimmed = normalized.trim().to_string();
+    for prefix in ["什么是", "请解释", "解释一下"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            trimmed = rest.trim().to_string();
+            break;
+        }
+    }
+    for suffix in ["是什么", "？", "?", "吗", "呢"] {
+        if let Some(rest) = trimmed.strip_suffix(suffix) {
+            trimmed = rest.trim().to_string();
+            break;
+        }
+    }
+    trimmed
+}
+
+fn extract_query_terms(query: &str) -> Vec<String> {
+    let normalized = normalize_for_search(query);
+    let mut terms: Vec<String> = Vec::new();
+    push_unique_term(&mut terms, normalized.clone());
+
+    let mut cjk_run = String::new();
+    let mut ascii_run = String::new();
+    for ch in normalized.chars() {
+        if is_cjk(ch) {
+            flush_ascii_run(&mut terms, &mut ascii_run);
+            cjk_run.push(ch);
+        } else if ch.is_ascii_alphanumeric() {
+            flush_cjk_run(&mut terms, &mut cjk_run);
+            ascii_run.push(ch);
+        } else {
+            flush_cjk_run(&mut terms, &mut cjk_run);
+            flush_ascii_run(&mut terms, &mut ascii_run);
+        }
+    }
+    flush_cjk_run(&mut terms, &mut cjk_run);
+    flush_ascii_run(&mut terms, &mut ascii_run);
+
+    let base_terms: Vec<String> = terms
+        .iter()
+        .filter_map(|term| strip_trailing_ascii_digits(term))
+        .collect();
+    for term in base_terms {
+        push_unique_term(&mut terms, term);
+    }
+
+    terms
+}
+
+fn score_field(
+    field: &str,
+    terms: &[String],
+    exact_phrase_weight: i64,
+    term_weight: i64,
+) -> Option<i64> {
+    let haystack = normalize_for_search(field);
+    if haystack.is_empty() {
+        return None;
+    }
+
+    let mut score = 0i64;
+    if let Some(phrase) = terms.first() {
+        if !phrase.is_empty() && haystack.contains(phrase) {
+            score += exact_phrase_weight;
+        }
+    }
+    for term in terms {
+        if !term.is_empty() && haystack.contains(term) {
+            score += term_weight;
+        }
+    }
+
+    (score > 0).then_some(score)
+}
+
+fn first_matching_term(field: &str, terms: &[String]) -> Option<String> {
+    let haystack = normalize_for_search(field);
+    terms
+        .iter()
+        .find(|term| !term.is_empty() && haystack.contains(term.as_str()))
+        .cloned()
+}
+
+fn first_body_excerpt(body: &str, max_chars: usize) -> Option<String> {
+    let line = body.lines().map(str::trim).find(|line| !line.is_empty())?;
+    Some(truncate_excerpt(line, max_chars))
+}
+
+fn push_unique_term(terms: &mut Vec<String>, term: String) {
+    let term = term.trim();
+    if term.chars().count() >= 2 && !terms.iter().any(|existing| existing == term) {
+        terms.push(term.to_string());
+    }
+}
+
+fn flush_cjk_run(terms: &mut Vec<String>, run: &mut String) {
+    if run.chars().count() >= 2 {
+        push_unique_term(terms, run.clone());
+    }
+    run.clear();
+}
+
+fn flush_ascii_run(terms: &mut Vec<String>, run: &mut String) {
+    if run.chars().count() >= 2 {
+        push_unique_term(terms, run.clone());
+    }
+    run.clear();
+}
+
+fn strip_trailing_ascii_digits(term: &str) -> Option<String> {
+    let stripped = term.trim_end_matches(|ch: char| ch.is_ascii_digit());
+    if stripped != term && stripped.chars().count() >= 2 {
+        Some(stripped.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+    )
+}
+
 /// Bound a page body excerpt to keep chat prompts within a sane token budget.
 fn truncate_excerpt(body: &str, max_chars: usize) -> String {
     let trimmed = body.trim();
@@ -939,6 +1081,26 @@ mod tests {
             "---\ntitle: Anthropic Claude\ntype: entity\ntags: [vendor, claude]\n---\n\n# Anthropic Claude\n\nMaker of Claude models.",
         );
         write_file(context, "wiki/index.md", "# Index\n\nWelcome to the wiki.");
+    }
+
+    fn seed_chinese_question_page(context: &ProjectContext) {
+        write_file(
+            context,
+            "wiki/concepts/constraints-first.md",
+            "---\ntitle: 约束先行\naliases: [约束先行2]\ntags: [方法]\n---\n\n# 约束先行\n\n约束先行是一种先定义限制条件再生成方案的工作方式。",
+        );
+    }
+
+    fn search_request(context: &ProjectContext, query: &str) -> SearchRequest {
+        SearchRequest {
+            project_id: "p".into(),
+            project_root_path: context.root.to_string_lossy().to_string(),
+            query: Some(query.to_string()),
+            page_types: Vec::new(),
+            tags: Vec::new(),
+            source: None,
+            limit: None,
+        }
     }
 
     fn find_tree_node<'a>(node: &'a WikiTreeNode, path: &str) -> Option<&'a WikiTreeNode> {
@@ -1019,7 +1181,9 @@ mod tests {
         .unwrap();
 
         let service = SearchService::default();
-        let bookmark_paths = BookmarkService::default().wiki_page_paths(&context).unwrap();
+        let bookmark_paths = BookmarkService::default()
+            .wiki_page_paths(&context)
+            .unwrap();
         let tree = service.scan_wiki(&context, &bookmark_paths).unwrap();
         let react = tree
             .pages
@@ -1047,7 +1211,9 @@ mod tests {
         )
         .unwrap();
 
-        let bookmark_paths = BookmarkService::default().wiki_page_paths(&context).unwrap();
+        let bookmark_paths = BookmarkService::default()
+            .wiki_page_paths(&context)
+            .unwrap();
         let tree = SearchService::default()
             .scan_wiki(&context, &bookmark_paths)
             .unwrap();
@@ -1239,6 +1405,115 @@ mod tests {
             .contains(&"title".to_string()));
 
         let _ = SearchResponse::empty();
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_matches_chinese_question_by_extracted_title_term() {
+        let (context, root) = tmp_context("search-cjk-title");
+        seed_chinese_question_page(&context);
+        let service = SearchService::default();
+
+        let response = service
+            .search(&context, &search_request(&context, "什么是约束先行2？"))
+            .unwrap();
+
+        assert_eq!(response.total, 1);
+        assert_eq!(
+            response.results[0].path,
+            "wiki/concepts/constraints-first.md"
+        );
+        assert!(response.results[0]
+            .matched_fields
+            .contains(&"title".to_string()));
+        assert!(response.results[0]
+            .matched_fields
+            .contains(&"aliases".to_string()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieve_with_excerpts_handles_chinese_question_suffix() {
+        let (context, root) = tmp_context("retrieve-cjk");
+        seed_chinese_question_page(&context);
+        let service = SearchService::default();
+
+        let hits = service
+            .retrieve_with_excerpts(&context, "约束先行是什么？", 3, 80)
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "wiki/concepts/constraints-first.md");
+        assert!(hits[0].excerpt.as_deref().unwrap().contains("约束先行"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_uses_unicode_lowercase_not_ascii_only() {
+        let (context, root) = tmp_context("search-unicode-lower");
+        write_file(
+            &context,
+            "wiki/concepts/eclair.md",
+            "---\ntitle: Éclair Guide\n---\n\n# Éclair Guide\n\nDessert notes.",
+        );
+        let service = SearchService::default();
+
+        let response = service
+            .search(&context, &search_request(&context, "éclair"))
+            .unwrap();
+
+        assert_eq!(response.total, 1);
+        assert_eq!(response.results[0].path, "wiki/concepts/eclair.md");
+        assert!(response.results[0]
+            .matched_fields
+            .contains(&"title".to_string()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_prefers_exact_title_or_alias_over_body_term() {
+        let (context, root) = tmp_context("search-cjk-ranking");
+        seed_chinese_question_page(&context);
+        write_file(
+            &context,
+            "wiki/concepts/body-mention.md",
+            "---\ntitle: Body Mention\n---\n\n# Body Mention\n\n什么是约束先行2 是正文里的一个问题。",
+        );
+        let service = SearchService::default();
+
+        let response = service
+            .search(&context, &search_request(&context, "什么是约束先行2？"))
+            .unwrap();
+
+        assert_eq!(response.total, 2);
+        assert_eq!(
+            response.results[0].path,
+            "wiki/concepts/constraints-first.md"
+        );
+        assert!(response.results[0].score > response.results[1].score);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_returns_no_hits_for_truly_unmatched_question() {
+        let (context, root) = tmp_context("search-cjk-none");
+        seed_chinese_question_page(&context);
+        let service = SearchService::default();
+
+        let response = service
+            .search(
+                &context,
+                &search_request(&context, "什么是完全不存在的概念？"),
+            )
+            .unwrap();
+
+        assert_eq!(response.total, 0);
+        assert!(response.results.is_empty());
 
         std::fs::remove_dir_all(root).unwrap();
     }
