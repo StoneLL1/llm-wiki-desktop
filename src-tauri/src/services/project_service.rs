@@ -774,7 +774,7 @@ mod tests {
     use crate::models::confirmation::ConfirmationExecution;
     use crate::models::confirmation::{PendingActionType, RiskLevel};
     use crate::models::paths::ProjectContext;
-    use crate::models::project::{IndexState, ProjectTemplate};
+    use crate::models::project::{GraphState, IndexState, ProjectTemplate};
     use crate::services::GitService;
     use std::fs;
     use std::path::PathBuf;
@@ -1083,6 +1083,11 @@ mod tests {
                 root_path: root_a.to_string_lossy().to_string(),
                 template: ProjectTemplate::General,
                 opened_at: "2026-06-19T00:00:00Z".into(),
+                wiki_page_count: 0,
+                source_count: 0,
+                task_count: 0,
+                index_state: IndexState::Missing,
+                graph_state: GraphState::Missing,
                 missing: false,
             })
             .unwrap();
@@ -1093,6 +1098,11 @@ mod tests {
                 root_path: root_b.to_string_lossy().to_string(),
                 template: ProjectTemplate::Business,
                 opened_at: "2026-06-19T00:00:01Z".into(),
+                wiki_page_count: 0,
+                source_count: 0,
+                task_count: 0,
+                index_state: IndexState::Missing,
+                graph_state: GraphState::Missing,
                 missing: false,
             })
             .unwrap();
@@ -1108,6 +1118,11 @@ mod tests {
                 root_path: root_a.to_string_lossy().to_string(),
                 template: ProjectTemplate::General,
                 opened_at: "2026-06-19T00:00:02Z".into(),
+                wiki_page_count: 0,
+                source_count: 0,
+                task_count: 0,
+                index_state: IndexState::Missing,
+                graph_state: GraphState::Missing,
                 missing: false,
             })
             .unwrap();
