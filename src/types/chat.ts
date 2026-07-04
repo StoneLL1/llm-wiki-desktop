@@ -10,6 +10,7 @@ export interface ChatCitation {
   title: string;
   snippet?: string;
   score: number;
+  isPinned?: boolean;
 }
 
 export interface ChatMessage {
@@ -55,6 +56,7 @@ export interface SendChatMessageRequest {
   route: ChatRoutePreference;
   agent?: AgentKind | null;
   provider?: LlmProviderKind | null;
+  pinnedPagePath?: string | null;
 }
 
 export interface SaveAnswerToWikiRequest {

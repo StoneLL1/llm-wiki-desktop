@@ -13,7 +13,7 @@ Started: 2026-07-05 00:05
 - [x] Task 5 - Sidebar Favorites
 - [x] Task 6 - Export Favorites UI
 - [x] Task 7 - Chinese natural question search retrieval fix
-- [ ] Task 8 - Pinned Page Chat DTO/backend
+- [x] Task 8 - Pinned Page Chat DTO/backend
 - [ ] Task 9 - Chat Store send options
 - [ ] Task 10 - Navigation right panel mode
 - [ ] Task 11 - Wiki Ask AI button + PageChatPanel
@@ -32,6 +32,7 @@ Started: 2026-07-05 00:05
 - [2026-07-05 01:27] 完成 Task 6：ExportsView 成功导出行增加收藏/取消收藏图标按钮，失败行不显示收藏按钮；补充 i18n 和 UI 测试。
 
 - [2026-07-05 00:36] 完成 Task 7：SearchService 改为 Unicode 归一化、中文/ASCII 词项提取和字段加权打分；补充中文自然问句、Unicode lowercase、排序和无命中测试；`cargo check --manifest-path src-tauri/Cargo.toml --lib --tests` 通过，目标 `cargo test` 仍受已知 Windows runner `STATUS_ENTRYPOINT_NOT_FOUND` 阻断。
+- [2026-07-05 00:44] 完成 Task 8：Chat DTO 增加 pinned page/citation 字段；retrieval context 支持当前 Wiki 页优先注入、去重和 prompt `Current Wiki page` 分区；chat IPC 透传 pinnedPagePath，TS 类型同步更新。
 
 ## Changed Files
 
@@ -66,6 +67,10 @@ Started: 2026-07-05 00:05
 - src/i18n/locales/zh-CN.json
 - src/styles.css
 - src/features/exports/ExportsView.tsx
+- src-tauri/src/models/chat.rs
+- src-tauri/src/services/chat_service.rs
+- src-tauri/src/commands/chat_commands.rs
+- src/types/chat.ts
 
 ## Verification
 
@@ -76,6 +81,8 @@ Started: 2026-07-05 00:05
 - cargo test --manifest-path src-tauri/Cargo.toml bookmark_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: pass
 - cargo test --manifest-path src-tauri/Cargo.toml search_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: pass
+- cargo test --manifest-path src-tauri/Cargo.toml chat --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
 - npm run test -- src/features/wiki/wiki.test.tsx: pass
 - npm run test -- src/stores/exportStore.test.ts src/features/exports/exportsView.test.tsx src/features/wiki/wiki.test.tsx: pass
 - cargo test --manifest-path src-tauri/Cargo.toml export_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions

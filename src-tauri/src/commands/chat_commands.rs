@@ -157,6 +157,7 @@ async fn run_chat_send(
         &request.content,
         &session,
         &language,
+        request.pinned_page_path.as_deref(),
     )?;
     let citations = retrieval.citations.clone();
 
