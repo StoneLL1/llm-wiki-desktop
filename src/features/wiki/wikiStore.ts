@@ -10,6 +10,7 @@ import type {
   SaveWikiPageResponse,
   WikiPageContent,
   WikiTree,
+  WikiTreeNode,
 } from "../../types/wiki";
 
 export type WikiMode = "read" | "edit" | "preview";
@@ -114,6 +115,23 @@ const initial = {
   error: null as string | null,
   recentPages: [] as RecentPageEntry[],
 };
+
+export function updateTreeNodeBookmark(
+  node: WikiTreeNode,
+  path: string,
+  bookmarked: boolean,
+): WikiTreeNode {
+  if (node.kind === "file" && node.path === path) {
+    return { ...node, bookmarked };
+  }
+  if (node.children.length === 0) return node;
+  return {
+    ...node,
+    children: node.children.map((child) =>
+      updateTreeNodeBookmark(child, path, bookmarked),
+    ),
+  };
+}
 
 export const useWikiStore = create<WikiState>((set, get) => ({
   ...initial,
@@ -351,6 +369,11 @@ export const useWikiStore = create<WikiState>((set, get) => ({
           tree: state.tree
             ? {
                 ...state.tree,
+                root: updateTreeNodeBookmark(
+                  state.tree.root,
+                  result.relativePath,
+                  result.bookmarked,
+                ),
                 pages: state.tree.pages.map((p) =>
                   p.path === nextMeta.path ? { ...p, bookmarked: result.bookmarked } : p,
                 ),
