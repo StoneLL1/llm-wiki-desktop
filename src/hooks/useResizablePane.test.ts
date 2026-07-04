@@ -105,7 +105,7 @@ function ResizeHarness({
   );
 }
 
-function dispatchPointerEvent(target: EventTarget, type: string, clientX: number) {
+function dispatchPointerEvent(target: Document | Element | Window, type: string, clientX: number) {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperty(event, "clientX", { value: clientX });
   Object.defineProperty(event, "pointerId", { value: 1 });
