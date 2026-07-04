@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:36] Task 8 Step 2 完成：全量 frontend tests 与 lint 通过。
 - [2026-07-04 19:34] Task 8 Step 1 完成：计划指定 focused frontend tests 通过，覆盖 resizable pane、layout store、path display、color presets、Appearance UI、App shell actions 和 CSS contracts。
 - [2026-07-04 19:32] Task 7 Step 5 完成：新增 AppearanceSettings UI test，覆盖内置 preset、无任意颜色输入和 preset selection callback；focused Appearance/colorTheme tests 通过。
 - [2026-07-04 19:29] Task 7 Step 4 完成：新增 Appearance color theme/Markdown preview 与 6 个 preset 的中英文 i18n 文案，preset metadata 改用计划要求的 `themePreset.*` key。
@@ -89,6 +90,8 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run lint: passed
+- npm run test: passed (194 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts src/stores/navigationStore.test.ts src/lib/pathDisplay.test.ts src/lib/colorThemePresets.test.ts src/features/settings/AppearanceSettings.test.tsx src/app/App.test.tsx src/components/app/appShellActions.test.tsx src/test/ui-css-contracts.test.ts: passed (62 tests)
 - npm run test -- src/features/settings/AppearanceSettings.test.tsx src/lib/colorThemePresets.test.ts: passed (5 tests)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
