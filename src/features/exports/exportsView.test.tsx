@@ -61,6 +61,56 @@ describe("ExportsView", () => {
     expect(screen.getByRole("button", { name: /Open folder/i })).toBeInTheDocument();
   });
 
+  it("toggles a succeeded export bookmark from the row action", () => {
+    const toggleBookmark = vi.fn();
+    useExportStore.getState().reset();
+    useExportStore.setState({
+      toggleBookmark,
+      records: [
+        {
+          id: "export-1",
+          exportType: "beautiful_read",
+          title: "Agent",
+          sourcePath: "wiki/concepts/agent.md",
+          outputPath: "exports/html/agent-1.html",
+          createdAt: "2026-06-20T10:00:00Z",
+          route: "byok",
+          status: "succeeded",
+          bookmarked: false,
+        },
+      ],
+    });
+    useProjectStore.setState({ currentProject: PROJECT });
+    render(<ExportsView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark export" }));
+
+    expect(toggleBookmark).toHaveBeenCalledWith("p", "/x", "export-1");
+  });
+
+  it("labels bookmarked rows as unbookmark actions", () => {
+    useExportStore.getState().reset();
+    useExportStore.setState({
+      records: [
+        {
+          id: "export-1",
+          exportType: "beautiful_read",
+          title: "Agent",
+          sourcePath: "wiki/concepts/agent.md",
+          outputPath: "exports/html/agent-1.html",
+          createdAt: "2026-06-20T10:00:00Z",
+          route: "byok",
+          status: "succeeded",
+          bookmarked: true,
+        },
+      ],
+    });
+    useProjectStore.setState({ currentProject: PROJECT });
+    render(<ExportsView />);
+
+    expect(screen.getByRole("button", { name: "Unbookmark export" })).toBeInTheDocument();
+  });
+
   it("renders failed exports with a danger badge and retry control", () => {
     useExportStore.getState().reset();
     useExportStore.setState({
@@ -84,6 +134,7 @@ describe("ExportsView", () => {
     expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /View logs/i })).toBeInTheDocument();
     // success-only actions must not appear for failed rows
+    expect(screen.queryByRole("button", { name: /Bookmark export/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Preview/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Open folder/i })).not.toBeInTheDocument();
   });

@@ -7,6 +7,7 @@ import {
   FolderOpen,
   List,
   Plus,
+  Star,
   type LucideIcon,
 } from "lucide-react";
 
@@ -54,6 +55,7 @@ export function ExportsView() {
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
   const loadPreview = useExportStore((state) => state.loadPreview);
   const clearPreview = useExportStore((state) => state.clearPreview);
+  const toggleBookmark = useExportStore((state) => state.toggleBookmark);
   const openFolder = useExportStore((state) => state.openFolder);
 
   const tasks = useTaskStore((state) => state.tasks);
@@ -170,6 +172,10 @@ export function ExportsView() {
       projectRootPath: rootPath,
       outputPath: record.outputPath,
     });
+  };
+
+  const handleToggleBookmark = (record: ExportRecord) => {
+    void toggleBookmark(projectId, rootPath, record.id);
   };
 
   const sortedRecords = useMemo(
@@ -293,6 +299,17 @@ export function ExportsView() {
                           </div>
                         ) : (
                           <div className="flex items-center justify-end gap-1">
+                            <IconButton
+                              label={t(record.bookmarked ? "exports.actions.unbookmark" : "exports.actions.bookmark")}
+                              onClick={() => handleToggleBookmark(record)}
+                              active={record.bookmarked}
+                            >
+                              <Star
+                                size={14}
+                                strokeWidth={1.5}
+                                fill={record.bookmarked ? "currentColor" : "none"}
+                              />
+                            </IconButton>
                             <IconButton
                               label={t("exports.actions.preview")}
                               onClick={() => handlePreview(record)}
