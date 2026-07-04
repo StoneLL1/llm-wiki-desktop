@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:07] Task 6 Step 4 完成：settings store 新增 color theme preset root/localStorage application helper，并在 load、optimistic save、saved response、rollback 中同步应用；focused settings store test 通过。
 - [2026-07-04 19:06] Task 6 Step 1/2/3 完成：新增 color theme preset 测试、TS settings preset 类型/defaultSettings 和 preset metadata/root application helper；focused preset test 通过。
 - [2026-07-04 19:03] Task 5 Step 5/6/7/8 完成：TopBar 使用 compact path 和 full-path title，recent menu 显示缺失状态与 openedAt meta，缺失项目不会打开，Arrow/Escape 键盘菜单行为和 compact switcher CSS 已覆盖；Task 5 前端 tests 与 cargo check 通过。
 - [2026-07-04 19:00] Task 5 Step 4 完成：TypeScript `RecentProject` DTO 新增 `missing` 字段并更新 project store fixture；focused projectStore test 通过。
@@ -60,6 +61,7 @@ Started: 2026-07-04 18:38
 - src/lib/colorThemePresets.ts
 - src/lib/colorThemePresets.test.ts
 - src/stores/settingsStore.ts
+- src/stores/settingsStore.test.ts
 - src/types/settings.ts
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
@@ -76,6 +78,8 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/stores/settingsStore.test.ts: passed (1 test)
+- npm run test -- src/stores/settingsStore.test.ts: failed as expected (document root preset not applied)
 - npm run test -- src/lib/colorThemePresets.test.ts: passed (3 tests)
 - npm run test -- src/lib/colorThemePresets.test.ts: failed as expected (missing ./colorThemePresets)
 - npm run test -- src/lib/pathDisplay.test.ts src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (43 tests)
