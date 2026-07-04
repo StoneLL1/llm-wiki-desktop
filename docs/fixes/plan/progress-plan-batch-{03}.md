@@ -10,7 +10,7 @@ Started: 2026-07-05 00:05
 - [x] Task 2 - Wire into Wiki scan/read/toggle
 - [x] Task 3 - Frontend Wiki bookmark state/tree star
 - [x] Task 4 - Export bookmark backend/store
-- [ ] Task 5 - Sidebar Favorites
+- [x] Task 5 - Sidebar Favorites
 - [ ] Task 6 - Export Favorites UI
 - [ ] Task 7 - Chinese natural question search retrieval fix
 - [ ] Task 8 - Pinned Page Chat DTO/backend
@@ -28,6 +28,7 @@ Started: 2026-07-05 00:05
 - [2026-07-05 00:43] 完成 Task 2：`SearchService::scan_wiki/read_page` 改为接收外部 bookmark path set，移除旧 writer/reader；Wiki IPC 继续保留 `toggle_bookmark` 但写入改由 `BookmarkService` 执行；graph/compile/lint/export 调用点完成迁移。
 - [2026-07-05 00:52] 完成 Task 3：新增 `updateTreeNodeBookmark`，Wiki bookmark toggle 同步更新 flat pages 与递归 tree node；WikiTree 对 `bookmarked || starred` 渲染固定槽星标。
 - [2026-07-05 01:08] 完成 Task 4：ExportRecord 增加派生 `bookmarked` 字段；新增 `toggle_export_bookmark` IPC；export list 从 BookmarkService join record id；exportStore 增加 `toggleBookmark` 并更新本地 records。
+- [2026-07-05 01:19] 完成 Task 5：新增 FavoriteSidebarItem 类型和 bookmark selector；LeftSidebar 增加 Favorites section，可打开 Wiki favorites 或 Export preview；补充 i18n 与收起侧栏样式。
 
 ## Changed Files
 
@@ -54,6 +55,13 @@ Started: 2026-07-05 00:05
 - src/stores/exportStore.test.ts
 - src/types/export.ts
 - src/features/exports/exportsView.test.tsx
+- src/features/bookmarks/bookmarkSelectors.ts
+- src/features/bookmarks/bookmarkSelectors.test.ts
+- src/types/bookmark.ts
+- src/components/app/LeftSidebar.tsx
+- src/i18n/locales/en.json
+- src/i18n/locales/zh-CN.json
+- src/styles.css
 
 ## Verification
 
@@ -67,6 +75,8 @@ Started: 2026-07-05 00:05
 - npm run test -- src/features/wiki/wiki.test.tsx: pass
 - npm run test -- src/stores/exportStore.test.ts src/features/exports/exportsView.test.tsx src/features/wiki/wiki.test.tsx: pass
 - cargo test --manifest-path src-tauri/Cargo.toml export_service --lib: blocked by STATUS_ENTRYPOINT_NOT_FOUND before assertions
+- npm run test -- src/features/bookmarks/bookmarkSelectors.test.ts src/features/exports/exportsView.test.tsx src/features/wiki/wiki.test.tsx: pass
+- npm run lint -- --quiet: pass
 
 ## Blockers
 
