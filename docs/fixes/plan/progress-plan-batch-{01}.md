@@ -17,17 +17,21 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 18:41] Task 1 Step 2 完成：新增 `useResizablePane` 布局常量、宽度 clamp、layout preference sanitize/read/write helper；单测已通过。
+- [2026-07-04 18:40] Task 1 Step 2 绿灯前发现计划文字与测试数据不一致：文字称 NaN 用 min/max 中点，但指定测试要求已知 pane 默认值；实现按测试契约处理，并把任意 min/max 中点作为兜底。`SPEC/gotchas.txt` 当前已有用户未提交改动且终端编码无法稳定 patch，未强行写入。
 - [2026-07-04 18:39] Task 1 Step 1 完成：新增 layout preference 红灯测试；`npm run test -- src/hooks/useResizablePane.test.ts` 按预期失败，原因是 `./useResizablePane` 尚不存在。
 - [2026-07-04 18:38] 开始阅读计划和项目规范；已读取 AGENTS.md、SPEC/PRD.md、SPEC/SPEC.md、SPEC/APP_flow.md、SPEC/TECH_STACK.md、SPEC/BACKEND_STRUCTURE.md、SPEC/FRONTEND_GUIDELINES.md、SPEC/DESIGN.md 和 UI-Frontend-design 参考文件。
 - [2026-07-04 18:38] 确认当前分支 task1-backend-contracts 存在既有未提交修改；后续仅提交计划相关文件并避免覆盖用户改动。
 
 ## Changed Files
 
+- src/hooks/useResizablePane.ts
 - src/hooks/useResizablePane.test.ts
 - docs/fixes/plan/progress-plan-batch-{01}.md
 
 ## Verification
 
+- npm run test -- src/hooks/useResizablePane.test.ts: passed (4 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: failed as expected (missing ./useResizablePane)
 - npm run test: not run
 - npm run lint: not run
