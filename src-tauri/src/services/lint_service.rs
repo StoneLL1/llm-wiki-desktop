@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::errors::BackendError;
+use crate::models::compile::CompileRoutePreference;
 use crate::models::confirmation::{ActionPreview, PendingAction, PendingActionType, RiskLevel};
 use crate::models::lint::{
-    Fixability, LintAgentIssue, LintBatchConfirmation, LintBatchOutcome, LintBatchSkip,
-    LintFixOutcome, LintFixOutcomeKind, LintIgnoreEntry, LintIgnoreFile, LintIssue, LintIssueSource,
-    LintIssueType, LintRange, LintReport, LintSeverity,
+    DeepLintReport, Fixability, LintAgentIssue, LintBatchConfirmation, LintBatchOutcome,
+    LintBatchSkip, LintFixOutcome, LintFixOutcomeKind, LintHistoryEntry, LintHistoryFile,
+    LintIgnoreEntry, LintIgnoreFile, LintIssue, LintIssueSource, LintIssueType, LintRange,
+    LintReport, LintReportKind, LintSeverity, PersistedLintReport,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{WikiPageMeta, WikiPageType};
@@ -17,6 +19,9 @@ use crate::utils::markdown_utils::{
 use crate::utils::time_utils::now_rfc3339;
 
 const DEEP_LINT_EXCERPT_CHARS: usize = 240;
+const LINT_HISTORY_PATH: &str = ".app/lint-history.json";
+pub(crate) const LINT_REPORTS_DIR: &str = ".app/lint-reports";
+const LINT_HISTORY_LIMIT: usize = 50;
 /// Persisted lint-ignore list, recording (path, rule) pairs the user has
 /// dismissed so `run_local_lint` skips them on subsequent scans.
 const LINT_IGNORE_PATH: &str = ".app/lint-ignore.json";
@@ -361,6 +366,126 @@ impl LintService {
     /// Return the current ignore list (empty when none persisted).
     pub fn list_ignores(&self, context: &ProjectContext) -> Result<LintIgnoreFile, BackendError> {
         Ok(self.load_ignores(context))
+    }
+
+    pub fn persist_local_report(
+        &self,
+        context: &ProjectContext,
+        report: &LintReport,
+    ) -> Result<LintHistoryEntry, BackendError> {
+        let id = format!("local-{}", uuid::Uuid::new_v4());
+        let entry = lint_history_entry_for_local(&id, report);
+        let persisted = PersistedLintReport {
+            entry: entry.clone(),
+            local_report: Some(report.clone()),
+            deep_report: None,
+        };
+        self.file_store.ensure_dir(context, LINT_REPORTS_DIR)?;
+        self.file_store.write_json_atomic(
+            context,
+            &format!("{LINT_REPORTS_DIR}/{id}.json"),
+            &persisted,
+        )?;
+        self.record_history_entry(context, entry.clone())?;
+        Ok(entry)
+    }
+
+    pub fn persist_deep_report(
+        &self,
+        context: &ProjectContext,
+        task_id: &str,
+        route: CompileRoutePreference,
+        report: &DeepLintReport,
+    ) -> Result<LintHistoryEntry, BackendError> {
+        let entry = lint_history_entry_for_deep(task_id, route, report);
+        let persisted = PersistedLintReport {
+            entry: entry.clone(),
+            local_report: None,
+            deep_report: Some(report.clone()),
+        };
+        self.file_store.ensure_dir(context, LINT_REPORTS_DIR)?;
+        self.file_store.write_json_atomic(
+            context,
+            &format!("{LINT_REPORTS_DIR}/{task_id}.json"),
+            &persisted,
+        )?;
+        self.record_history_entry(context, entry.clone())?;
+        Ok(entry)
+    }
+
+    pub fn list_lint_history(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<LintHistoryFile, BackendError> {
+        Ok(self.load_history(context))
+    }
+
+    pub fn read_lint_history_report(
+        &self,
+        context: &ProjectContext,
+        id: &str,
+    ) -> Result<PersistedLintReport, BackendError> {
+        reject_report_id(id)?;
+        let path = format!("{LINT_REPORTS_DIR}/{id}.json");
+        match self.file_store.read_json::<PersistedLintReport>(context, &path) {
+            Ok(report) => Ok(report),
+            Err(wrapper_error) => {
+                let legacy = self.file_store.read_json::<DeepLintReport>(context, &path);
+                legacy
+                    .map(|deep_report| PersistedLintReport {
+                        entry: lint_history_entry_for_deep(
+                            id,
+                            CompileRoutePreference::Auto,
+                            &deep_report,
+                        ),
+                        local_report: None,
+                        deep_report: Some(deep_report),
+                    })
+                    .map_err(|_| wrapper_error)
+            }
+        }
+    }
+
+    fn load_history(&self, context: &ProjectContext) -> LintHistoryFile {
+        match self
+            .file_store
+            .read_json::<LintHistoryFile>(context, LINT_HISTORY_PATH)
+        {
+            Ok(mut file) => {
+                file.version = 1;
+                file.entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                file.entries.truncate(LINT_HISTORY_LIMIT);
+                file
+            }
+            Err(err) if err.code == "FILE_READ_FAILED" => LintHistoryFile {
+                version: 1,
+                entries: Vec::new(),
+            },
+            Err(err) => {
+                eprintln!(
+                    "[lint] ignoring unreadable {LINT_HISTORY_PATH}: {}",
+                    err.message
+                );
+                LintHistoryFile {
+                    version: 1,
+                    entries: Vec::new(),
+                }
+            }
+        }
+    }
+
+    fn record_history_entry(
+        &self,
+        context: &ProjectContext,
+        entry: LintHistoryEntry,
+    ) -> Result<(), BackendError> {
+        let mut file = self.load_history(context);
+        file.entries.retain(|existing| existing.id != entry.id);
+        file.entries.insert(0, entry);
+        file.entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        file.entries.truncate(LINT_HISTORY_LIMIT);
+        self.file_store
+            .write_json_atomic(context, LINT_HISTORY_PATH, &file)
     }
 
     fn check_index_drift(
@@ -1167,6 +1292,69 @@ fn severity_rank(severity: LintSeverity) -> u8 {
         LintSeverity::Warning => 1,
         LintSeverity::Info => 2,
     }
+}
+
+fn lint_history_entry_for_local(id: &str, report: &LintReport) -> LintHistoryEntry {
+    let (error_count, warning_count, info_count) = count_issue_severities(&report.issues);
+    LintHistoryEntry {
+        id: id.to_string(),
+        kind: LintReportKind::Local,
+        created_at: report.generated_at.clone(),
+        issue_count: report.issues.len(),
+        error_count,
+        warning_count,
+        info_count,
+        scanned_pages: Some(report.scanned_pages),
+        task_id: None,
+        route: None,
+    }
+}
+
+fn lint_history_entry_for_deep(
+    task_id: &str,
+    route: CompileRoutePreference,
+    report: &DeepLintReport,
+) -> LintHistoryEntry {
+    let (error_count, warning_count, info_count) = count_issue_severities(&report.issues);
+    LintHistoryEntry {
+        id: task_id.to_string(),
+        kind: LintReportKind::Deep,
+        created_at: report.generated_at.clone(),
+        issue_count: report.issues.len(),
+        error_count,
+        warning_count,
+        info_count,
+        scanned_pages: None,
+        task_id: Some(task_id.to_string()),
+        route: Some(route),
+    }
+}
+
+fn reject_report_id(id: &str) -> Result<(), BackendError> {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(BackendError::new(
+            "LINT_HISTORY_ID_INVALID",
+            "Lint report id is invalid.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "id": id })));
+    }
+    Ok(())
+}
+
+fn count_issue_severities(issues: &[LintIssue]) -> (usize, usize, usize) {
+    let mut errors = 0;
+    let mut warnings = 0;
+    let mut infos = 0;
+    for issue in issues {
+        match issue.severity {
+            LintSeverity::Error => errors += 1,
+            LintSeverity::Warning => warnings += 1,
+            LintSeverity::Info => infos += 1,
+        }
+    }
+    (errors, warnings, infos)
 }
 
 fn yaml_scalar(value: &str) -> String {
