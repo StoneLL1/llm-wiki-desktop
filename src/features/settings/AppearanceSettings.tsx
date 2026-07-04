@@ -1,9 +1,11 @@
-import type { ThemePreference } from "../../types/settings";
+import type { ColorThemePresetId, ThemePreference } from "../../types/settings";
 import { useTranslation } from "react-i18next";
 
 interface AppearanceSettingsProps {
   theme: ThemePreference;
+  colorThemePreset: ColorThemePresetId;
   onChange: (theme: ThemePreference) => void;
+  onChangeColorThemePreset: (preset: ColorThemePresetId) => void;
 }
 
 const previews: Array<{
@@ -17,7 +19,12 @@ const previews: Array<{
   { value: "auto", tone: "linear-gradient(135deg, #ffffff 0%, #ffffff 50%, #0f1113 50%, #0f1113 100%)", surface: "#d7d7d7", text: "#3c3c3c" },
 ];
 
-export function AppearanceSettings({ theme, onChange }: AppearanceSettingsProps) {
+export function AppearanceSettings({
+  theme,
+  colorThemePreset: _colorThemePreset,
+  onChange,
+  onChangeColorThemePreset: _onChangeColorThemePreset,
+}: AppearanceSettingsProps) {
   const { t } = useTranslation();
 
   return (
