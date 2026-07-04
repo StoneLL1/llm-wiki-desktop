@@ -23,6 +23,7 @@ function errorMessage(error: unknown): string {
 export const defaultSettings: Settings = {
   language: "en",
   theme: "auto",
+  colorThemePreset: "codex",
   density: "standard",
   uiFont: "",
   readingFont: "",

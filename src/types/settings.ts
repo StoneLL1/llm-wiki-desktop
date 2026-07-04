@@ -3,6 +3,13 @@ import type { LlmProviderConfig, LlmProviderKind } from "./llm";
 import type { ProjectTemplate } from "./project";
 
 export type ThemePreference = "light" | "dark" | "auto";
+export type ColorThemePresetId =
+  | "codex"
+  | "paper"
+  | "graphite"
+  | "mint"
+  | "night"
+  | "highContrast";
 export type DensityPreference = "compact" | "standard" | "comfortable";
 export type CloseBehavior = "minimize_to_tray" | "ask" | "quit";
 export type AppLanguage = "en" | "zh-CN";
@@ -26,6 +33,7 @@ export interface Settings {
   // Global
   language: AppLanguage;
   theme: ThemePreference;
+  colorThemePreset: ColorThemePresetId;
   density: DensityPreference;
   uiFont: string;
   readingFont: string;
