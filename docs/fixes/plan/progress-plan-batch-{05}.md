@@ -9,12 +9,13 @@ Started: 2026-07-05 02:19
 - [x] Task 1 - Task Log Timeline Sorting
 - [x] Task 2 - Lint History Backend Persistence
 - [x] Task 3 - Lint History Frontend Restore UX
-- [ ] Task 4 - Native Directory Picker and New Project Parent Path
+- [x] Task 4 - Native Directory Picker and New Project Parent Path
 - [ ] Task 5 - Compact Project Start Page and Enriched Recents
 - [ ] Task 6 - Regression Coverage, Review, and Quality Gates
 
 ## Activity Log
 
+- [2026-07-05 03:38] Task 4 Step 7 完成：新增项目路径预览 CSS，projectPath/native picker/App 测试通过（保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 03:35] Task 4 Step 6 完成：补充新建项目父目录选择中英文文案，App 测试通过（保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 03:32] Task 4 Step 5 完成：NewProjectDialog 改为项目名 + 父目录选择 + 生成路径预览，App/projectPath 测试通过（保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 03:29] Task 4 Step 4 完成：实现项目文件夹名清洗与父目录拼接 helper，project/import picker 测试通过
@@ -71,9 +72,11 @@ Started: 2026-07-05 02:19
 - src/features/project/ProjectStartView.tsx
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
+- src/styles.css
 
 ## Verification
 
+- npm run test -- src/features/project/projectPath.test.ts src/features/import/nativeFilePicker.test.ts src/app/App.test.tsx: passed (43 tests; jsdom canvas getContext warnings; Task 4 Step 7)
 - npm run test -- src/app/App.test.tsx: passed (31 tests; jsdom canvas getContext warnings; Task 4 Step 6)
 - npm run test -- src/app/App.test.tsx src/features/project/projectPath.test.ts: passed (37 tests; jsdom canvas getContext warnings; Task 4 Step 5)
 - npm run test -- src/features/project/projectPath.test.ts src/features/import/nativeFilePicker.test.ts: passed (12 tests; Task 4 Step 4)
