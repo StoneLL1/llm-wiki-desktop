@@ -6,7 +6,7 @@ Started: 2026-07-05 02:19
 
 ## step Progress
 
-- [ ] Task 1 - Task Log Timeline Sorting
+- [x] Task 1 - Task Log Timeline Sorting
 - [ ] Task 2 - Lint History Backend Persistence
 - [ ] Task 3 - Lint History Frontend Restore UX
 - [ ] Task 4 - Native Directory Picker and New Project Parent Path
@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 02:31] Task 1 Step 5 完成：新增 TaskService updated_at 倒序回归测试，并通过 cargo check --lib --tests
 - [2026-07-05 02:25] Task 1 Step 4 完成：补充 TaskLogDrawer 默认时间排序和切换状态排序保持选中任务的测试
 - [2026-07-05 02:24] Task 1 Step 3 完成：TaskLogDrawer 接入排序偏好与 segmented control，补充中英文文案和 CSS
 - [2026-07-05 02:23] Task 1 Step 2 完成：实现 taskSort.ts，排序与偏好测试通过
@@ -33,9 +34,11 @@ Started: 2026-07-05 02:19
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
 - src/styles.css
+- src-tauri/src/tasks/task_service.rs
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
 - npm run test -- src/components/app/TaskLogDrawer.test.tsx src/components/app/taskSort.test.ts: passed (8 tests)
 - npm run test -- src/components/app/taskSort.test.ts: passed (5 tests)
 - npm run test -- src/components/app/TaskLogDrawer.test.tsx src/components/app/taskSort.test.ts: passed (6 tests)
@@ -44,7 +47,6 @@ Started: 2026-07-05 02:19
 - npm run test: not run
 - npm run lint: not run
 - npm run build: not run
-- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: not run
 
 ## Blockers
 

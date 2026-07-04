@@ -856,6 +856,30 @@ mod tests {
     }
 
     #[test]
+    fn test_list_tasks_orders_by_updated_time_desc() {
+        let (service, _events) = make_service();
+        let old = service.create_task(TaskType::Import, None, "Old".to_string(), true);
+        let new = service.create_task(TaskType::Export, None, "New".to_string(), true);
+
+        service
+            .transition_status(&old.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .append_log(&old.id, LogLevel::Info, "old update".to_string())
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        service
+            .transition_status(&new.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .append_log(&new.id, LogLevel::Info, "new update".to_string())
+            .unwrap();
+
+        let listed = service.list_tasks(None);
+        assert_eq!(listed[0].id, new.id);
+    }
+
+    #[test]
     fn test_persist_and_recover_tasks() {
         let temp = std::env::temp_dir().join("llm-wiki-task-test-persist");
         let _ = std::fs::remove_dir_all(&temp);
