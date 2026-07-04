@@ -25,6 +25,12 @@ interface ErrorDetails {
   actionId?: string;
 }
 
+export interface SendChatOptions {
+  agent?: AgentKind | null;
+  provider?: LlmProviderKind | null;
+  pinnedPagePath?: string | null;
+}
+
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -89,8 +95,7 @@ interface ChatState {
     sessionId: string,
     content: string,
     route: ChatRoutePreference,
-    agent?: AgentKind | null,
-    provider?: LlmProviderKind | null,
+    options?: SendChatOptions,
   ) => Promise<string | null>;
   clearSendTask: (error?: string | null) => void;
   /** Reload the active session (used by the view once the send task reaches terminal status). */
@@ -215,7 +220,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  send: async (projectId, rootPath, sessionId, content, route, agent, provider) => {
+  send: async (projectId, rootPath, sessionId, content, route, options) => {
     if (!hasTauri()) return null;
     const scope = captureProjectScope();
     set({ error: null });
@@ -227,8 +232,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           sessionId,
           content,
           route,
-          agent: agent ?? null,
-          provider: provider ?? null,
+          agent: options?.agent ?? null,
+          provider: options?.provider ?? null,
+          pinnedPagePath: options?.pinnedPagePath ?? null,
         },
       });
       if (!isProjectScopeCurrent(scope)) return null;

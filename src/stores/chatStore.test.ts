@@ -65,6 +65,24 @@ describe("chatStore", () => {
     expect(call[0]).toBe("send_chat_message");
     expect(call[1].request.route).toBe("auto");
     expect(call[1].request.content).toBe("Hello");
+    expect(call[1].request.pinnedPagePath).toBeNull();
+  });
+
+  it("send includes pinnedPagePath when provided", async () => {
+    invokeMock.mockResolvedValueOnce({ id: "task-pinned" });
+    const taskId = await useChatStore.getState().send(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "s1",
+      "Explain this page",
+      "auto",
+      { pinnedPagePath: "wiki/concepts/react-pattern.md" },
+    );
+
+    expect(taskId).toBe("task-pinned");
+    const call = invokeMock.mock.calls[0];
+    expect(call[0]).toBe("send_chat_message");
+    expect(call[1].request.pinnedPagePath).toBe("wiki/concepts/react-pattern.md");
   });
 
   it("saveAnswer surfaces FILE_ALREADY_EXISTS as an overwrite request", async () => {
