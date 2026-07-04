@@ -19,6 +19,8 @@ import type { ProviderStatus } from "../../types/llm";
 import type { ProjectTemplate } from "../../types/project";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import { useModalDialog } from "../../hooks/useModalDialog";
+import { pickDirectory } from "../import/nativeFilePicker";
+import { buildProjectRootPath, sanitizeProjectFolderName } from "./projectPath";
 
 const TEMPLATES: Array<{ key: ProjectTemplate; titleKey: string; descKey: string }> = [
   { key: "general", titleKey: "launch.template.general", descKey: "launch.template.generalDesc" },
@@ -484,16 +486,28 @@ function NewProjectDialog({
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState("");
-  const [rootPath, setRootPath] = useState("");
+  const [parentPath, setParentPath] = useState("");
   const [template, setTemplate] = useState<ProjectTemplate>("general");
   const [initGit, setInitGit] = useState(true);
   const nameRef = useRef<HTMLInputElement>(null);
   const dialogRef = useModalDialog({ onClose, initialFocusRef: nameRef });
+  const rootPath = buildProjectRootPath(parentPath, name);
+  const folderName = sanitizeProjectFolderName(name);
+  const canCreate = Boolean(name.trim() && parentPath.trim() && folderName && rootPath);
+
+  const chooseParent = async () => {
+    try {
+      const selected = await pickDirectory({ title: t("launch.dialog.chooseParent") });
+      if (selected) setParentPath(selected);
+    } catch {
+      setParentPath("");
+    }
+  };
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!name.trim() || !rootPath.trim()) return;
-    onCreate({ rootPath: rootPath.trim(), name: name.trim(), template, initGit });
+    if (!canCreate) return;
+    onCreate({ rootPath, name: name.trim(), template, initGit });
   };
 
   return (
@@ -532,14 +546,30 @@ function NewProjectDialog({
 
           <div className="formrow">
             <div>
-              <div className="formrow__label">{t("launch.dialog.location")}</div>
+              <div className="formrow__label">{t("launch.dialog.parent")}</div>
               <div className="formrow__hint">{t("launch.dialog.locationHint")}</div>
             </div>
             <div className="formrow__control">
               <div className="input-group">
                 <span className="input-group__lead"><FolderOpen size={14} aria-hidden="true" /></span>
-                <input className="input input--mono" value={rootPath} onChange={(event) => setRootPath(event.target.value)} placeholder={t("launch.dialog.locationPlaceholder")} />
+                <input
+                  className="input input--mono"
+                  readOnly
+                  value={parentPath}
+                  placeholder={t("launch.dialog.parentPlaceholder")}
+                  aria-label={t("launch.dialog.parent")}
+                />
+                <span className="input-group__trail">
+                  <button type="button" className="btn btn--sm btn--ghost" onClick={chooseParent}>
+                    {t("launch.dialog.browse")}
+                  </button>
+                </span>
               </div>
+              {rootPath ? (
+                <div className="project-path-preview" aria-label={t("launch.dialog.fullPath")}>
+                  {rootPath}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -580,7 +610,7 @@ function NewProjectDialog({
 
         <div className="flex items-center justify-end gap-2 border-t border-[var(--border-subtle)] px-5 py-3">
           <button type="button" className="btn" onClick={onClose}>{t("launch.dialog.cancel")}</button>
-          <button type="submit" className="btn btn--primary" disabled={busy || !name.trim() || !rootPath.trim()}>
+          <button type="submit" className="btn btn--primary" disabled={busy || !canCreate}>
             <Plus size={14} aria-hidden="true" />
             {t("launch.dialog.create")}
           </button>
