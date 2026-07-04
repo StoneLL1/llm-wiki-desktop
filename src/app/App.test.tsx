@@ -10,6 +10,7 @@ import type { ProjectSummary } from "../types/project";
 import type { BackendTask } from "../types/task";
 import type { WikiPageContent } from "../types/wiki";
 import { App } from "./App";
+import { PANE_WIDTH_LIMITS } from "../hooks/useResizablePane";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -60,9 +61,16 @@ const sampleProject = (overrides: Partial<ProjectSummary> = {}): ProjectSummary 
 
 beforeEach(() => {
   invokeMock.mockReset();
+  window.localStorage.clear();
   useToastStore.setState({ toasts: [] });
   useNavigationStore.getState().setActiveView("dashboard");
   useNavigationStore.getState().setRightPanelOpen(true);
+  useNavigationStore.getState().setSidebarCollapsed(false);
+  useNavigationStore.getState().resetPaneSize("sidebar");
+  useNavigationStore.getState().resetPaneSize("rightPanel");
+  useNavigationStore.getState().resetPaneSize("wikiTree");
+  useNavigationStore.getState().resetPaneSize("exportsList");
+  useNavigationStore.getState().resetPaneSize("lintList");
   useProjectStore.getState().setCurrentProject(
     sampleProject({
       rootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
@@ -207,6 +215,38 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Open context panel" })).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(screen.getByRole("button", { name: "Open context panel" }));
     expect(screen.getByRole("complementary", { name: "Project info" })).toBeInTheDocument();
+  });
+
+  it("collapses the sidebar while keeping primary navigation reachable", () => {
+    render(<App />);
+
+    expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
+    expect(screen.queryByRole("separator", { name: "Resize sidebar" })).not.toBeInTheDocument();
+    for (const label of ["Dashboard", "Wiki", "Chat", "Graph", "Agent", "Import", "Lint", "Exports"]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it("exposes keyboard-resizable shell splitters", () => {
+    render(<App />);
+
+    const sidebarSplitter = screen.getByRole("separator", { name: "Resize sidebar" });
+    const rightPanelSplitter = screen.getByRole("separator", { name: "Resize context panel" });
+
+    fireEvent.keyDown(sidebarSplitter, { key: "ArrowRight" });
+
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(
+      PANE_WIDTH_LIMITS.sidebar.defaultValue + 12,
+    );
+    expect(rightPanelSplitter).toHaveAttribute("aria-valuenow", String(PANE_WIDTH_LIMITS.rightPanel.defaultValue));
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse context panel" }));
+    expect(screen.queryByRole("separator", { name: "Resize context panel" })).not.toBeInTheDocument();
   });
 
   it("starts the project context panel closed on narrow viewports", () => {

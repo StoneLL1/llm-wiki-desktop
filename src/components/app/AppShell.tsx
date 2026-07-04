@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { PanelRightOpen } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import { ExportsView } from "../../features/exports/ExportsView";
@@ -19,6 +19,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useTaskStore, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
+import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import type { AgentInfo } from "../../types/agent";
 import type { PendingAction } from "../../types/backend";
 import type { AgentKind } from "../../types/agent";
@@ -33,6 +34,7 @@ import { BottomStatusBar } from "./BottomStatusBar";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import { CompileConflictDialog } from "./CompileConflictDialog";
 import { LeftSidebar } from "./LeftSidebar";
+import { ResizableSplitter } from "./ResizableSplitter";
 import { RightContextPanel } from "./RightContextPanel";
 import { TaskLogDrawer } from "./TaskLogDrawer";
 import { Toaster } from "./Toaster";
@@ -51,6 +53,10 @@ export function AppShell() {
   const activeView = useNavigationStore((state) => state.activeView);
   const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
   const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
+  const sidebarCollapsed = useNavigationStore((state) => state.sidebarCollapsed);
+  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const setPaneSize = useNavigationStore((state) => state.setPaneSize);
+  const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
   const cancelPendingAction = useProjectStore((state) => state.cancelPendingAction);
@@ -62,6 +68,10 @@ export function AppShell() {
   const compilePendingAction = tasks.find((task) => task.status === "waiting_for_confirmation" && task.result?.pendingAction)?.result?.pendingAction;
   const displayedPendingAction = pendingAction ?? compilePendingAction;
   const title = t(`nav.${activeView}`);
+  const shellStyle = {
+    "--sidebar-w-current": `${sidebarCollapsed ? 56 : paneSizes.sidebar}px`,
+    "--rightpanel-w-current": `${paneSizes.rightPanel}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     if (
@@ -124,14 +134,44 @@ export function AppShell() {
   ]);
 
   return (
-    <div className={`app-shell ${rightPanelOpen ? "is-right-open" : "is-right-collapsed"}`}>
+    <div
+      className={[
+        "app-shell",
+        rightPanelOpen ? "is-right-open" : "is-right-collapsed",
+        sidebarCollapsed ? "is-sidebar-collapsed" : "",
+      ].filter(Boolean).join(" ")}
+      style={shellStyle}
+    >
       <TopBar />
 
       <div className="app-shell__workbench">
         <LeftSidebar />
+        {!sidebarCollapsed ? (
+          <ResizableSplitter
+            paneId="sidebar"
+            label={t("shell.splitter.sidebar")}
+            min={PANE_WIDTH_LIMITS.sidebar.min}
+            max={PANE_WIDTH_LIMITS.sidebar.max}
+            value={paneSizes.sidebar}
+            onChange={(value) => setPaneSize("sidebar", value)}
+            onReset={() => resetPaneSize("sidebar")}
+          />
+        ) : null}
         <main className="app-shell__main">
           <WorkspaceView activeView={activeView} title={title} />
         </main>
+        {rightPanelOpen ? (
+          <ResizableSplitter
+            paneId="rightPanel"
+            label={t("shell.splitter.rightPanel")}
+            min={PANE_WIDTH_LIMITS.rightPanel.min}
+            max={PANE_WIDTH_LIMITS.rightPanel.max}
+            value={paneSizes.rightPanel}
+            direction={-1}
+            onChange={(value) => setPaneSize("rightPanel", value)}
+            onReset={() => resetPaneSize("rightPanel")}
+          />
+        ) : null}
         {rightPanelOpen ? <RightContextPanel /> : null}
         {rightPanelOpen ? (
           <button

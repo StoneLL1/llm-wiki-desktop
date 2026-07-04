@@ -42,4 +42,12 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toMatch(/\.resize-handle:focus-visible::before/s);
     expect(styles).toContain("body.is-resizing-pane");
   });
+
+  it("wires shell grid columns to persisted pane width variables", () => {
+    expect(styles).toContain("--sidebar-w-current");
+    expect(styles).toContain("--rightpanel-w-current");
+    expect(styles).toMatch(/grid-template-columns:\s*var\(--sidebar-w-current\) 6px minmax\(0, 1fr\) 6px var\(--rightpanel-w-current\)/s);
+    expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar");
+    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.resize-handle\[data-pane-id="sidebar"\]/s);
+  });
 });

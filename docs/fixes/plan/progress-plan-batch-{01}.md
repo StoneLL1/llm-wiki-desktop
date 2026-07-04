@@ -8,7 +8,7 @@ Started: 2026-07-04 18:38
 
 - [x] Task 1 - Layout State Model
 - [x] Task 2 - Accessible Splitter Primitive
-- [ ] Task 3 - Shell Splitters and Collapsible Sidebar
+- [x] Task 3 - Shell Splitters and Collapsible Sidebar
 - [ ] Task 4 - Wiki, Exports, and Lint Internal Splitters
 - [ ] Task 5 - Compact Project Switcher
 - [ ] Task 6 - Color Theme Presets and Settings Contract
@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 18:51] Task 3 完成：新增 shell 级 sidebar/right panel splitters、顶部栏侧边栏折叠按钮、折叠侧栏可访问导航名称、响应式 splitter 隐藏规则和中英文 i18n 键；focused App/CSS tests 通过。
 - [2026-07-04 18:46] Task 2 Step 3 完成：新增 `.resize-handle`、focus-visible/hover/drag 状态和 `body.is-resizing-pane` CSS contract；Task 2 focused tests 通过。
 - [2026-07-04 18:45] Task 2 Step 2 完成：新增 `ResizableSplitter` 组件，映射 separator role、aria value 属性、pane id、方向和 reset/change 回调。
 - [2026-07-04 18:44] Task 2 Step 1 完成：扩展 `useResizablePane` pointer/keyboard resize hook，覆盖 Arrow/Home/End/Enter、direction=-1 pointer delta、pointer cleanup 和 body resizing class。
@@ -31,7 +32,13 @@ Started: 2026-07-04 18:38
 
 - src/styles.css
 - src/test/ui-css-contracts.test.ts
+- src/app/App.test.tsx
+- src/components/app/AppShell.tsx
+- src/components/app/LeftSidebar.tsx
+- src/components/app/TopBar.tsx
 - src/components/app/ResizableSplitter.tsx
+- src/i18n/locales/en.json
+- src/i18n/locales/zh-CN.json
 - src/stores/navigationStore.ts
 - src/stores/navigationStore.test.ts
 - src/hooks/useResizablePane.ts
@@ -40,6 +47,7 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (33 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts src/test/ui-css-contracts.test.ts: passed (12 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: passed (6 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: passed (6 tests)
