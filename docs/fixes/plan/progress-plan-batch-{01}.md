@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:00] Task 5 Step 4 完成：TypeScript `RecentProject` DTO 新增 `missing` 字段并更新 project store fixture；focused projectStore test 通过。
 - [2026-07-04 18:58] Task 5 Step 3 完成：Rust `RecentProject` 新增 `missing` 默认字段，recent 列表按路径存在性动态标记，所有构造点显式写入 `missing: false`；`cargo test` 命中已知 Windows loader 0xc0000139，`cargo check --lib --tests` 通过。
 - [2026-07-04 18:56] Task 5 Step 1/2 完成：新增 `compactPath` 红灯测试与路径压缩 helper，覆盖 Windows drive、UNC、POSIX、短路径和 CJK leaf name；focused helper test 通过。
 - [2026-07-04 18:55] Task 4 完成：Wiki tree、Exports list、Lint issue list 接入 `ResizableSplitter`，新增内部 pane 宽度 CSS 变量、响应式隐藏规则和中英文 i18n 键；计划指定 focused tests 通过。
@@ -50,6 +51,8 @@ Started: 2026-07-04 18:38
 - src-tauri/src/commands/project_commands.rs
 - src-tauri/src/models/project.rs
 - src-tauri/src/services/project_service.rs
+- src/stores/projectStore.test.ts
+- src/types/project.ts
 - src/components/app/ResizableSplitter.tsx
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
@@ -61,6 +64,7 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/stores/projectStore.test.ts: passed (3 tests)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
 - cargo test --manifest-path src-tauri/Cargo.toml project::tests::recent_project_missing_defaults_to_false_for_legacy_json: failed due known Windows loader 0xc0000139 after successful compile
 - npm run test -- src/lib/pathDisplay.test.ts: passed (5 tests)

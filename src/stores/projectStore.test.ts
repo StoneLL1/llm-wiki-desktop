@@ -17,6 +17,7 @@ const recent: RecentProject = {
   rootPath: "D:/知识库/project-a",
   template: "general",
   openedAt: "2026-06-21T00:00:00Z",
+  missing: false,
 };
 
 const summary: ProjectSummary = {
