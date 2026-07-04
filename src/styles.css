@@ -2320,6 +2320,17 @@ select:focus-visible {
 }
 
 .task-drawer.is-expanded { width: min(760px, 100vw); }
+.task-drawer__sort {
+  flex-shrink: 0;
+}
+
+.task-drawer__sort button {
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .task-drawer:not(.is-expanded) .task-drawer__body { flex-direction: column; }
 .task-drawer:not(.is-expanded) .task-drawer__list {
   width: 100% !important;

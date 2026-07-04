@@ -17,7 +17,14 @@ import { useTaskStore } from "../../stores/taskStore";
 import { fetchTaskLogs, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { BackendTask, LogLine, TaskStatus } from "../../types/task";
-import { isTerminalStatus, TASK_STATUS_ORDER } from "../../types/task";
+import { isTerminalStatus } from "../../types/task";
+import {
+  DEFAULT_TASK_SORT_MODE,
+  readTaskSortModePreference,
+  sortTasks,
+  type TaskSortMode,
+  writeTaskSortModePreference,
+} from "./taskSort";
 
 const LEVEL_BADGE: Record<string, string> = {
   info: "INFO",
@@ -133,15 +140,20 @@ export function TaskLogDrawer() {
   const translationRef = useRef(t);
   translationRef.current = t;
   const [expanded, setExpanded] = useState(false);
+  const [sortMode, setSortMode] = useState<TaskSortMode>(() => {
+    if (typeof window === "undefined") return DEFAULT_TASK_SORT_MODE;
+    return readTaskSortModePreference();
+  });
 
-  const sorted = useMemo(() => {
-    return [...tasks].sort(
-      (a, b) => (TASK_STATUS_ORDER[a.status] ?? 99) - (TASK_STATUS_ORDER[b.status] ?? 99)
-    );
-  }, [tasks]);
+  const sorted = useMemo(() => sortTasks(tasks, sortMode), [tasks, sortMode]);
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
   const selectedLogs = selectedTaskId ? logs[selectedTaskId] ?? [] : [];
+
+  const selectSortMode = (mode: TaskSortMode) => {
+    setSortMode(mode);
+    writeTaskSortModePreference(mode);
+  };
 
   const loadLogs = useCallback((taskId: string) => {
     void fetchTaskLogs(taskId).catch((error) => {
@@ -200,12 +212,27 @@ export function TaskLogDrawer() {
   if (!drawerOpen) return null;
 
   return (
-    <div className={`task-drawer ${expanded ? "is-expanded" : ""}`}>
+      <div className={`task-drawer ${expanded ? "is-expanded" : ""}`}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 h-[44px] border-b border-[var(--border)] shrink-0">
-        <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
-          {t("task.drawer.title")}
-        </span>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+            {t("task.drawer.title")}
+          </span>
+          <div className="seg task-drawer__sort" role="group" aria-label={t("task.sort.label")}>
+            {(["execution_time", "updated_time", "status"] as TaskSortMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={sortMode === mode}
+                className={sortMode === mode ? "is-active" : ""}
+                onClick={() => selectSortMode(mode)}
+              >
+                {t(`task.sort.${mode}`)}
+              </button>
+            ))}
+          </div>
+        </div>
         <button
           onClick={closeDrawer}
           className="icon-button"
