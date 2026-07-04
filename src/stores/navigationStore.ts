@@ -18,13 +18,20 @@ export type AppView =
   | "exports"
   | "settings";
 
+export type RightPanelMode = "default" | "wikiAssistant";
+
 export interface NavigationState {
   activeView: AppView;
   rightPanelOpen: boolean;
+  rightPanelMode: RightPanelMode;
+  wikiAssistantPagePath: string | null;
   sidebarCollapsed: boolean;
   paneSizes: Record<ResizablePaneId, number>;
   setActiveView: (view: AppView) => void;
   setRightPanelOpen: (open: boolean) => void;
+  openWikiAssistant: (path: string) => void;
+  setWikiAssistantPagePath: (path: string | null) => void;
+  closeWikiAssistant: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapsed: () => void;
   setPaneSize: (pane: ResizablePaneId, width: number) => void;
@@ -36,10 +43,38 @@ const initialLayoutPreferences = readLayoutPreferenceSnapshot();
 export const useNavigationStore = create<NavigationState>((set) => ({
   activeView: "dashboard",
   rightPanelOpen: true,
+  rightPanelMode: "default",
+  wikiAssistantPagePath: null,
   sidebarCollapsed: initialLayoutPreferences.sidebarCollapsed,
   paneSizes: initialLayoutPreferences.paneSizes,
-  setActiveView: (activeView) => set({ activeView }),
+  setActiveView: (activeView) =>
+    set((state) => {
+      if (activeView === "wiki") {
+        return { activeView };
+      }
+      if (state.rightPanelMode === "default" && state.wikiAssistantPagePath === null) {
+        return { activeView };
+      }
+      return {
+        activeView,
+        rightPanelMode: "default",
+        wikiAssistantPagePath: null,
+      };
+    }),
   setRightPanelOpen: (rightPanelOpen) => set({ rightPanelOpen }),
+  openWikiAssistant: (wikiAssistantPagePath) =>
+    set({
+      activeView: "wiki",
+      rightPanelOpen: true,
+      rightPanelMode: "wikiAssistant",
+      wikiAssistantPagePath,
+    }),
+  setWikiAssistantPagePath: (wikiAssistantPagePath) => set({ wikiAssistantPagePath }),
+  closeWikiAssistant: () =>
+    set({
+      rightPanelMode: "default",
+      wikiAssistantPagePath: null,
+    }),
   setSidebarCollapsed: (sidebarCollapsed) =>
     set((state) => {
       const snapshot = sanitizeLayoutPreferences({
