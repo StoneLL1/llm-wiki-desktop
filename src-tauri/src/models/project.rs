@@ -67,12 +67,24 @@ pub enum IndexState {
     Missing,
 }
 
+impl Default for IndexState {
+    fn default() -> Self {
+        Self::Missing
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphState {
     Cached,
     Stale,
     Missing,
+}
+
+impl Default for GraphState {
+    fn default() -> Self {
+        Self::Missing
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,8 +112,19 @@ pub struct RecentProject {
     pub project_id: String,
     pub name: String,
     pub root_path: String,
+    #[serde(default)]
     pub template: ProjectTemplate,
     pub opened_at: String,
+    #[serde(default)]
+    pub wiki_page_count: usize,
+    #[serde(default)]
+    pub source_count: usize,
+    #[serde(default)]
+    pub task_count: usize,
+    #[serde(default)]
+    pub index_state: IndexState,
+    #[serde(default)]
+    pub graph_state: GraphState,
     #[serde(default)]
     pub missing: bool,
 }
@@ -290,5 +313,20 @@ mod tests {
         });
         let project: RecentProject = serde_json::from_value(raw).unwrap();
         assert!(!project.missing);
+    }
+
+    #[test]
+    fn recent_project_legacy_json_defaults_summary_fields() {
+        let raw = r#"{
+            "projectId":"p",
+            "name":"Project",
+            "rootPath":"D:/wiki",
+            "template":"general",
+            "openedAt":"2026-07-04T00:00:00Z"
+        }"#;
+        let recent: RecentProject = serde_json::from_str(raw).unwrap();
+        assert_eq!(recent.wiki_page_count, 0);
+        assert_eq!(recent.index_state, IndexState::Missing);
+        assert!(!recent.missing);
     }
 }

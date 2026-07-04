@@ -44,6 +44,11 @@ export interface RecentProject {
   rootPath: string;
   template: ProjectTemplate;
   openedAt: string;
+  wikiPageCount: number;
+  sourceCount: number;
+  taskCount: number;
+  indexState: IndexState;
+  graphState: GraphState;
   missing: boolean;
 }
 

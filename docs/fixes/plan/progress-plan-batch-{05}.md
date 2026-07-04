@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 03:45] Task 5 Step 1 完成：扩展 RecentProject 前后端 DTO、Index/Graph 默认值与 legacy serde 测试，cargo check 通过
 - [2026-07-05 03:38] Task 4 Step 7 完成：新增项目路径预览 CSS，projectPath/native picker/App 测试通过（保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 03:35] Task 4 Step 6 完成：补充新建项目父目录选择中英文文案，App 测试通过（保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 03:32] Task 4 Step 5 完成：NewProjectDialog 改为项目名 + 父目录选择 + 生成路径预览，App/projectPath 测试通过（保留既有 jsdom canvas getContext 噪声）
@@ -73,9 +74,14 @@ Started: 2026-07-05 02:19
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
 - src/styles.css
+- src/types/project.ts
+- src-tauri/src/models/project.rs
+- src-tauri/src/commands/project_commands.rs
+- src-tauri/src/services/project_service.rs
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 5 Step 1)
 - npm run test -- src/features/project/projectPath.test.ts src/features/import/nativeFilePicker.test.ts src/app/App.test.tsx: passed (43 tests; jsdom canvas getContext warnings; Task 4 Step 7)
 - npm run test -- src/app/App.test.tsx: passed (31 tests; jsdom canvas getContext warnings; Task 4 Step 6)
 - npm run test -- src/app/App.test.tsx src/features/project/projectPath.test.ts: passed (37 tests; jsdom canvas getContext warnings; Task 4 Step 5)

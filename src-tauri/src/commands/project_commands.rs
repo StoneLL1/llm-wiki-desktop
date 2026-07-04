@@ -48,6 +48,11 @@ pub fn create_project(
             root_path: summary.root_path.clone(),
             template: summary.template,
             opened_at: now_rfc3339(),
+            wiki_page_count: summary.wiki_page_count,
+            source_count: summary.source_count,
+            task_count: summary.task_count,
+            index_state: summary.index_state.clone(),
+            graph_state: summary.graph_state.clone(),
             missing: false,
         })?;
     let _ = recents;
@@ -81,6 +86,11 @@ pub fn open_project(
                     root_path: summary.root_path.clone(),
                     template: summary.template,
                     opened_at: now_rfc3339(),
+                    wiki_page_count: summary.wiki_page_count,
+                    source_count: summary.source_count,
+                    task_count: summary.task_count,
+                    index_state: summary.index_state.clone(),
+                    graph_state: summary.graph_state.clone(),
                     missing: false,
                 })?;
         }
@@ -145,6 +155,11 @@ pub fn remember_recent_project(
             root_path: context.root.to_string_lossy().into_owned(),
             template: request.template,
             opened_at: now_rfc3339(),
+            wiki_page_count: 0,
+            source_count: 0,
+            task_count: 0,
+            index_state: crate::models::project::IndexState::Missing,
+            graph_state: crate::models::project::GraphState::Missing,
             missing: false,
         })
 }
