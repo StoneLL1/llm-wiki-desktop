@@ -7,7 +7,7 @@ Started: 2026-07-05 02:19
 ## step Progress
 
 - [x] Task 1 - Task Log Timeline Sorting
-- [ ] Task 2 - Lint History Backend Persistence
+- [x] Task 2 - Lint History Backend Persistence
 - [ ] Task 3 - Lint History Frontend Restore UX
 - [ ] Task 4 - Native Directory Picker and New Project Parent Path
 - [ ] Task 5 - Compact Project Start Page and Enriched Recents
@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 02:59] Task 2 Step 4 完成：run_local_lint/deep lint 接入历史持久化，新增 list/read lint history commands 并注册，cargo check 无警告通过
 - [2026-07-05 02:53] Task 2 Step 3 完成：新增 Lint 历史本地持久化、50 条上限与单报告损坏回归测试，cargo check 通过
 - [2026-07-05 02:48] Task 2 Step 2 完成：LintService 增加历史索引、报告 wrapper 持久化、legacy deep report 兼容读取与 ID 校验，cargo check 通过
 - [2026-07-05 02:42] Task 2 Step 1 完成：新增 Lint 历史 DTO、默认值与 serde 省略报告体测试，cargo check 通过
@@ -40,9 +41,12 @@ Started: 2026-07-05 02:19
 - src-tauri/src/tasks/task_service.rs
 - src-tauri/src/models/lint.rs
 - src-tauri/src/services/lint_service.rs
+- src-tauri/src/commands/lint_commands.rs
+- src-tauri/src/lib.rs
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 4)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 3)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 2)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 1)
