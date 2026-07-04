@@ -1955,7 +1955,7 @@ select:focus-visible {
   display: none;
 }
 
-.app-shell.is-sidebar-collapsed .app-sidebar nav button,
+.app-shell.is-sidebar-collapsed .app-sidebar button,
 .app-shell.is-sidebar-collapsed .app-sidebar [aria-current] {
   justify-content: center;
   padding-inline: 0;
@@ -2255,7 +2255,7 @@ select:focus-visible {
   .app-sidebar__nav-label,
   .app-sidebar__agent-name,
   .app-sidebar__count { display: none; }
-  .app-sidebar nav button,
+  .app-sidebar button,
   .app-sidebar [aria-current] { justify-content: center; padding-inline: 0; }
   .app-topbar { gap: var(--sp-2); padding-inline: var(--sp-2); }
   .app-topbar__brand-name,

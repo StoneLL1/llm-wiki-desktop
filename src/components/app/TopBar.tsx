@@ -84,10 +84,19 @@ export function TopBar() {
     return () => window.removeEventListener("mousedown", handleClick);
   }, [menuOpen, recentProjects]);
 
-  const focusRelativeMenuItem = (current: HTMLButtonElement, direction: 1 | -1) => {
-    const enabled = menuItemRefs.current.filter(
+  const getEnabledMenuItems = () =>
+    menuItemRefs.current.filter(
       (item): item is HTMLButtonElement => Boolean(item && item.dataset.missing !== "true"),
     );
+
+  const focusMenuBoundaryItem = (boundary: "first" | "last") => {
+    const enabled = getEnabledMenuItems();
+    const target = boundary === "last" ? enabled.at(-1) : enabled[0];
+    target?.focus();
+  };
+
+  const focusRelativeMenuItem = (current: HTMLButtonElement, direction: 1 | -1) => {
+    const enabled = getEnabledMenuItems();
     if (enabled.length === 0) return;
     const currentIndex = enabled.indexOf(current);
     const nextIndex =
@@ -109,10 +118,20 @@ export function TopBar() {
   };
 
   const handleProjectButtonKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Escape" && menuOpen) {
+      event.preventDefault();
+      closeProjectMenu();
+      return;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      pendingMenuFocus.current = event.key === "ArrowUp" ? "last" : "first";
-      setMenuOpen(true);
+      const targetBoundary = event.key === "ArrowUp" ? "last" : "first";
+      if (menuOpen) {
+        focusMenuBoundaryItem(targetBoundary);
+      } else {
+        pendingMenuFocus.current = targetBoundary;
+        setMenuOpen(true);
+      }
     }
   };
 

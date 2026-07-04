@@ -26,4 +26,10 @@ describe("color theme presets", () => {
     expect(resolveColorThemeVariant(preset, "auto", false).mode).toBe("light");
     expect(resolveColorThemeVariant(preset, "auto", true).mode).toBe("dark");
   });
+
+  it("keeps brightness mode authoritative for every preset", () => {
+    const preset = getColorThemePreset("night");
+    expect(resolveColorThemeVariant(preset, "light", true).mode).toBe("light");
+    expect(resolveColorThemeVariant(preset, "dark", false).mode).toBe("dark");
+  });
 });

@@ -48,6 +48,8 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain("--rightpanel-w-current");
     expect(styles).toMatch(/grid-template-columns:\s*var\(--sidebar-w-current\) 6px minmax\(0, 1fr\) 6px var\(--rightpanel-w-current\)/s);
     expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar");
+    expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar button");
+    expect(styles).not.toContain(".app-sidebar nav button");
     expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.resize-handle\[data-pane-id="sidebar"\]/s);
   });
 

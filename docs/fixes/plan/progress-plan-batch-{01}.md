@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:52] Task 8 Step 6 review fixes 完成：合并 A/B review，修复 auto color preset 监听 OS dark preference、移除 night 强制 dark 特例、补 project switcher click-open 后 Escape/Arrow 键盘路径、修复 collapsed sidebar selector，并补 focused tests/CSS contract；review focused tests 通过。
 - [2026-07-04 19:42] Task 8 Step 5 完成：Rust `cargo check --lib --tests` 通过。
 - [2026-07-04 19:41] Task 8 Step 4 完成：PowerShell `console.log` 搜索无匹配。
 - [2026-07-04 19:39] Task 8 Step 3 完成：`npm run build` 首次因 `useResizablePane.test.ts` helper 使用过宽 `EventTarget` 类型失败；收窄为 Testing Library 接受的 DOM target 类型后，TypeScript/Vite build 通过。
@@ -93,6 +94,8 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/lib/colorThemePresets.test.ts src/stores/settingsStore.test.ts src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (45 tests)
+- npm run test -- src/lib/colorThemePresets.test.ts src/stores/settingsStore.test.ts src/app/App.test.tsx: failed as expected before review fixes (night forced dark, auto media change not applied, project menu Escape from button not handled)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
 - Get-ChildItem -LiteralPath src -Recurse -File | Select-String -Pattern 'console\\.log': passed (no matches)
 - npm run build: passed after narrowing test helper target type
