@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 04:14] Task 6 Step 2 完成：npm run test 通过（298 tests），npm run lint 初次发现 projectPath 控制字符正则后已改为 codePoint 过滤并重跑通过
 - [2026-07-05 04:10] Task 6 Step 1 完成：focused frontend tests 通过（85 tests；保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 04:07] Task 5 Step 6 完成：新增 launch CSS contract，并补 projcard metadata 样式，CSS contract 测试通过
 - [2026-07-05 04:03] Task 5 Step 5 完成：新增启动页三入口、native picker 打开已有项目、新建项目父目录生成路径回归测试，三组前端测试通过
@@ -86,9 +87,13 @@ Started: 2026-07-05 02:19
 - src-tauri/src/services/project_service.rs
 - src/app/App.test.tsx
 - src/test/ui-css-contracts.test.ts
+- src/features/project/projectPath.ts
 
 ## Verification
 
+- npm run test: passed (47 files, 298 tests; jsdom canvas getContext warnings; Task 6 Step 2 rerun)
+- npm run lint: passed (Task 6 Step 2 rerun after projectPath no-control-regex fix)
+- npm run lint: failed initially (no-control-regex in projectPath INVALID_FOLDER_CHARS)
 - npm run test -- src/components/app/taskSort.test.ts src/components/app/TaskLogDrawer.test.tsx src/features/import/nativeFilePicker.test.ts src/features/project/projectPath.test.ts src/features/lint/lintView.test.tsx src/stores/lintStore.test.ts src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (85 tests; Task 6 Step 1)
 - npm run test -- src/test/ui-css-contracts.test.ts: passed (13 tests; Task 5 Step 6)
 - npm run test -- src/app/App.test.tsx src/features/project/projectPath.test.ts src/features/import/nativeFilePicker.test.ts: passed (45 tests; jsdom canvas getContext warnings; Task 5 Step 5)
