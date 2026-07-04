@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
 import { AgentRightPanel } from "../../features/agent/AgentRightPanel";
+import { PageChatPanel } from "../../features/chat/PageChatPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
@@ -16,11 +17,13 @@ import { RightPanelHeader } from "./RightPanelHeader";
 export function RightContextPanel() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
+  const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const currentProject = useProjectStore((state) => state.currentProject);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const tasks = useTaskStore((state) => state.tasks);
-  const wikiPage = useWikiStore((state) => state.page?.meta ?? null);
+  const wikiContent = useWikiStore((state) => state.page);
+  const wikiPage = wikiContent?.meta ?? null;
   const wikiTree = useWikiStore((state) => state.tree);
   const openWikiPage = useWikiStore((state) => state.openPage);
   const requestWikiExport = useWikiStore((state) => state.requestExport);
@@ -186,6 +189,25 @@ export function RightContextPanel() {
   }
 
   if (activeView === "wiki") {
+    if (rightPanelMode === "wikiAssistant") {
+      return (
+        <aside
+          id="right-context-panel"
+          aria-label={t("wiki.askAi.panelTitle")}
+          className="right-panel"
+        >
+          <RightPanelHeader title={t("wiki.askAi.panelTitle")} />
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <PageChatPanel
+              page={wikiContent}
+              projectId={currentProject.projectId}
+              rootPath={currentProject.rootPath}
+            />
+          </div>
+        </aside>
+      );
+    }
+
     return (
       <aside
         id="right-context-panel"

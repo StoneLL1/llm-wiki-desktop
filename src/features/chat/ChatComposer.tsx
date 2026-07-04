@@ -9,6 +9,8 @@ interface ChatComposerProps {
   generating: boolean;
   onSend: (content: string) => void;
   onCancel: () => void;
+  placeholderKey?: string;
+  compact?: boolean;
 }
 
 const ROUTE_LABEL: Record<ChatRoute, string> = {
@@ -28,6 +30,8 @@ export function ChatComposer({
   generating,
   onSend,
   onCancel,
+  placeholderKey = "chat.composer.placeholder",
+  compact = false,
 }: ChatComposerProps) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
@@ -42,7 +46,7 @@ export function ChatComposer({
   const badgeKey = lastResolvedRoute ? ROUTE_LABEL[lastResolvedRoute] : PREFERENCE_LABEL[routePreference];
 
   return (
-    <div className="border-t border-[var(--border-subtle)] p-3">
+    <div className={`border-t border-[var(--border-subtle)] ${compact ? "p-2" : "p-3"}`}>
       <div className="mb-2 flex items-center gap-2">
         <span className="inline-flex h-[18px] items-center rounded-[var(--radius-pill)] bg-[var(--accent-soft)] px-2 text-[10.5px] font-medium text-[var(--accent-hover)]">
           {t(badgeKey)}
@@ -69,8 +73,8 @@ export function ChatComposer({
               submit();
             }
           }}
-          placeholder={t("chat.composer.placeholder")}
-          rows={2}
+          placeholder={t(placeholderKey)}
+          rows={compact ? 1 : 2}
           className="min-h-[44px] flex-1 resize-none rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[13px] leading-5 text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
         />
         <button
