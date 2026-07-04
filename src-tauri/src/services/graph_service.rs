@@ -499,6 +499,57 @@ mod tests {
     }
 
     #[test]
+    fn resolve_rebuilds_stale_empty_cache_when_live_pages_exist() {
+        let (context, root) = tmp_context("stale-empty");
+        let mut a = meta("wiki/A.md", "A", WikiPageType::Other);
+        a.wikilinks = vec!["B".to_string()];
+        let pages = vec![a, meta("wiki/B.md", "B", WikiPageType::Other)];
+        let service = GraphService::default();
+        let stale = GraphData {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            content_hash: "stale-hash".into(),
+            built_at: "2026-07-04T00:00:00Z".into(),
+            layout: None,
+        };
+        service.write_cache(&context, &stale).unwrap();
+
+        let result = service.resolve(&context, &pages).unwrap();
+
+        assert!(!result.cached);
+        assert!(result.layout_stale);
+        assert_eq!(result.data.nodes.len(), 2);
+        assert_eq!(result.data.edges.len(), 1);
+        assert_eq!(result.data.content_hash, service.content_hash(&pages));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_marks_layout_stale_when_positions_do_not_cover_nodes() {
+        let (context, root) = tmp_context("partial-layout");
+        let mut a = meta("wiki/A.md", "A", WikiPageType::Other);
+        a.wikilinks = vec!["B".to_string()];
+        let pages = vec![a, meta("wiki/B.md", "B", WikiPageType::Other)];
+        let service = GraphService::default();
+        let mut data = service.rebuild(&context, &pages).unwrap().data;
+
+        data.layout = Some(GraphLayout {
+            positions: HashMap::from([("wiki/A.md".to_string(), [1.0, 2.0])]),
+            communities: HashMap::new(),
+        });
+        service.write_cache(&context, &data).unwrap();
+
+        let result = service.resolve(&context, &pages).unwrap();
+
+        assert!(result.cached);
+        assert!(result.layout_stale);
+        assert_eq!(result.data.nodes.len(), 2);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn save_layout_persists_when_hash_matches_and_ignores_when_stale() {
         let (context, root) = tmp_context("layout");
         let pages = vec![meta("wiki/a.md", "A", WikiPageType::Other)];
