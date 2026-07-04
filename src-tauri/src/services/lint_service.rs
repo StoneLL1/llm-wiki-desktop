@@ -1411,7 +1411,9 @@ fn append_fix_log(context: &ProjectContext, relative_path: &str, action: &str) {
 #[cfg(test)]
 mod tests {
     use super::{strip_wikilink, LintService};
-    use crate::models::lint::{Fixability, LintFixOutcomeKind, LintIssueType, LintSeverity};
+    use crate::models::lint::{
+        Fixability, LintFixOutcomeKind, LintIssueType, LintReport, LintSeverity,
+    };
     use crate::models::paths::ProjectContext;
     use crate::services::{GitService, SearchService};
     use std::collections::HashMap;
@@ -2286,6 +2288,70 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.issue_type == LintIssueType::DeadLink));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_lint_report_is_persisted_with_history_index() {
+        let (context, root) = tmp_context("history-local");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let service = LintService::default();
+        let report = LintReport {
+            issues: Vec::new(),
+            generated_at: "2026-07-04T00:00:00Z".into(),
+            scanned_pages: 2,
+        };
+
+        let entry = service.persist_local_report(&context, &report).unwrap();
+        let history = service.list_lint_history(&context).unwrap();
+        let persisted = service.read_lint_history_report(&context, &entry.id).unwrap();
+
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].id, entry.id);
+        assert!(persisted.local_report.is_some());
+        assert!(context.app_dir.join("lint-history.json").exists());
+        assert!(context
+            .app_dir
+            .join("lint-reports")
+            .join(format!("{}.json", entry.id))
+            .exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lint_history_is_limited_to_newest_fifty_entries() {
+        let (context, root) = tmp_context("history-limit");
+        let service = LintService::default();
+        for index in 0..55 {
+            let report = LintReport {
+                issues: Vec::new(),
+                generated_at: format!("2026-07-04T00:{index:02}:00Z"),
+                scanned_pages: 1,
+            };
+            service.persist_local_report(&context, &report).unwrap();
+        }
+        let history = service.list_lint_history(&context).unwrap();
+        assert_eq!(history.entries.len(), 50);
+        assert!(history.entries[0].created_at > history.entries[49].created_at);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_single_lint_report_returns_a_report_error_not_a_history_crash() {
+        let (context, root) = tmp_context("history-corrupt-report");
+        write_file(&context, ".app/lint-history.json", r#"{"version":1,"entries":[{"id":"bad","kind":"local","createdAt":"2026-07-04T00:00:00Z","issueCount":1,"errorCount":1,"warningCount":0,"infoCount":0}]}"#);
+        write_file(&context, ".app/lint-reports/bad.json", "{ not valid json");
+
+        let service = LintService::default();
+        let history = service.list_lint_history(&context).unwrap();
+        let err = service
+            .read_lint_history_report(&context, "bad")
+            .expect_err("bad report should fail only when opened");
+
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(err.code, "JSON_PARSE_FAILED");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

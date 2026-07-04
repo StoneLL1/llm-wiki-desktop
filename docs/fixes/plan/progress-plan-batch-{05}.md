@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 02:53] Task 2 Step 3 完成：新增 Lint 历史本地持久化、50 条上限与单报告损坏回归测试，cargo check 通过
 - [2026-07-05 02:48] Task 2 Step 2 完成：LintService 增加历史索引、报告 wrapper 持久化、legacy deep report 兼容读取与 ID 校验，cargo check 通过
 - [2026-07-05 02:42] Task 2 Step 1 完成：新增 Lint 历史 DTO、默认值与 serde 省略报告体测试，cargo check 通过
 - [2026-07-05 02:31] Task 1 Step 5 完成：新增 TaskService updated_at 倒序回归测试，并通过 cargo check --lib --tests
@@ -42,6 +43,7 @@ Started: 2026-07-05 02:19
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 3)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 2)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 2 Step 1)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed
