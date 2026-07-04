@@ -14,9 +14,14 @@ import { App } from "./App";
 import { PANE_WIDTH_LIMITS } from "../hooks/useResizablePane";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const openDialogMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: openDialogMock,
 }));
 
 function mockTask(overrides: Partial<BackendTask> = {}): BackendTask {
@@ -62,6 +67,8 @@ const sampleProject = (overrides: Partial<ProjectSummary> = {}): ProjectSummary 
 
 beforeEach(() => {
   invokeMock.mockReset();
+  openDialogMock.mockReset();
+  delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   window.localStorage.clear();
   useToastStore.setState({ toasts: [] });
   useGraphStore.getState().reset();
@@ -111,9 +118,74 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Choose a project to start working" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open folder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /New empty project/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open folder as project/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open existing project/i })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /project path|open path|local file/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Import materials into existing project/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Primary" })).not.toBeInTheDocument();
+  });
+
+  it("opens existing projects through the native directory picker", async () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", rootPath: "" }));
+    openDialogMock.mockResolvedValue("D:\\知识库\\agent");
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "open_project") {
+        return Promise.resolve({
+          kind: "opened",
+          summary: sampleProject({ rootPath: "D:/知识库/agent" }),
+        });
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Open existing project/i }));
+
+    await waitFor(() =>
+      expect(openDialogMock).toHaveBeenCalledWith(
+        expect.objectContaining({ directory: true, multiple: false }),
+      ),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("open_project", {
+      request: { path: "D:\\知识库\\agent" },
+    });
+  });
+
+  it("creates a project from a parent folder and project name", async () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", rootPath: "" }));
+    openDialogMock.mockResolvedValue("D:\\资料库");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "create_project") {
+        return Promise.resolve(
+          sampleProject({ rootPath: "D:/资料库/中文知识库", name: "中文知识库" }),
+        );
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /New empty project/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "中文知识库" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    await screen.findByText("D:\\资料库\\中文知识库");
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("create_project", {
+        request: {
+          rootPath: "D:\\资料库\\中文知识库",
+          name: "中文知识库",
+          template: "general",
+        },
+      }),
+    );
   });
 
   it("collapses the launch setup panel without placeholder controls", () => {

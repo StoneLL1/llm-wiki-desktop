@@ -546,7 +546,13 @@ function NewProjectDialog({
               <div className="formrow__hint">{t("launch.dialog.nameHint")}</div>
             </div>
             <div className="formrow__control">
-              <input ref={nameRef} className="input" value={name} onChange={(event) => setName(event.target.value)} />
+              <input
+                ref={nameRef}
+                className="input"
+                value={name}
+                aria-label={t("launch.dialog.name")}
+                onChange={(event) => setName(event.target.value)}
+              />
             </div>
           </div>
 
