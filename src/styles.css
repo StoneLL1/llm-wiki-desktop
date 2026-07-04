@@ -1864,9 +1864,59 @@ select:focus-visible {
 
 .app-topbar__brand-name { color: var(--text-primary); font-size: 13px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
 .app-topbar__project { position: relative; min-width: 0; }
-.app-topbar__project-button { display: flex; width: min(360px, 32vw); min-width: 0; height: 30px; align-items: center; gap: var(--sp-2); border-radius: var(--radius-md); padding: 0 var(--sp-2); text-align: left; }
+.app-topbar__project-button { display: flex; width: min(300px, 28vw); min-width: 0; height: 30px; align-items: center; gap: var(--sp-2); border-radius: var(--radius-md); padding: 0 var(--sp-2); text-align: left; }
 .app-topbar__project-button:hover { background: var(--surface-muted); }
-.app-topbar__project-path { min-width: 0; flex: 1; overflow: hidden; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.app-topbar__project-text,
+.app-topbar__project-menu-copy {
+  display: grid;
+  min-width: 0;
+}
+.app-topbar__project-text { flex: 1; }
+.app-topbar__project-name,
+.app-topbar__project-menu-name {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-topbar__project-path,
+.app-topbar__project-menu-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-topbar__project-menu-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  width: 100%;
+  align-items: center;
+  gap: var(--sp-2);
+  border-radius: var(--radius-sm);
+  padding: 6px var(--sp-2);
+  text-align: left;
+}
+.app-topbar__project-menu-row:hover,
+.app-topbar__project-menu-row:focus-visible {
+  background: var(--surface-muted);
+}
+.app-topbar__project-menu-row.is-missing {
+  color: var(--text-disabled);
+}
+.app-topbar__project-menu-row.is-missing .app-topbar__project-menu-name,
+.app-topbar__project-menu-row.is-missing .app-topbar__project-menu-path {
+  color: var(--text-disabled);
+}
+.app-topbar__project-menu-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
 .app-topbar__search-wrap { position: relative; display: flex; min-width: 120px; max-width: 520px; flex: 1; }
 .app-topbar__search { display: flex; width: 100%; min-width: 0; height: 30px; align-items: center; gap: var(--sp-2); border-radius: var(--radius-md); background: var(--surface-muted); padding: 0 var(--sp-3); color: var(--text-muted); }
 .app-topbar__search:focus-within { background: var(--background); box-shadow: 0 0 0 3px rgba(16,163,127,0.12); }

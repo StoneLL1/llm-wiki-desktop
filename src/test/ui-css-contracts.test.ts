@@ -59,4 +59,10 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toMatch(/\.lint-view-layout\s*\{[^}]*grid-template-columns:\s*var\(--lint-list-w-current, 360px\) 6px minmax\(320px, 1fr\)/s);
     expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*\.resize-handle\[data-pane-id="exportsList"\][\s\S]*\.resize-handle\[data-pane-id="lintList"\]/s);
   });
+
+  it("defines compact project switcher rows", () => {
+    expect(styles).toContain(".app-topbar__project-text");
+    expect(styles).toContain(".app-topbar__project-menu-row");
+    expect(styles).toContain(".app-topbar__project-menu-row.is-missing");
+  });
 });

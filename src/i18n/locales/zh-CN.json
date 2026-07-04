@@ -120,6 +120,7 @@
   "shell.backToLaunch": "返回总览",
   "shell.current": "当前",
   "shell.projectMenu.recent": "最近项目",
+  "shell.projectMenu.missing": "缺失",
   "toast.dismiss": "关闭",
   "language.en": "EN",
   "language.zhCN": "中文",
