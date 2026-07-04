@@ -180,7 +180,12 @@ export function SettingsView({
           ) : null}
 
           {activeSection === "appearance" ? (
-            <AppearanceSettings theme={settings.theme} onChange={(theme) => void savePatch({ theme })} />
+            <AppearanceSettings
+              theme={settings.theme}
+              colorThemePreset={settings.colorThemePreset}
+              onChange={(theme) => void savePatch({ theme })}
+              onChangeColorThemePreset={(colorThemePreset) => void savePatch({ colorThemePreset })}
+            />
           ) : null}
 
           {activeSection === "language" ? (

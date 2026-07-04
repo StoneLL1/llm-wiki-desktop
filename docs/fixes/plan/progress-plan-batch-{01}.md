@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:20] Task 7 Step 1 完成：AppearanceSettings props 扩展为接收 `colorThemePreset` 与 preset change callback，SettingsView 通过现有 settings store savePatch 接线全局颜色主题偏好。
 - [2026-07-04 19:16] Task 6 Step 5 完成：Rust settings DTO 新增 global-only `colorThemePreset` 契约、legacy 默认值和 global/project split 测试；`cargo test` 编译后命中已知 Windows loader 0xc0000139，`cargo check --lib --tests` 通过。
 - [2026-07-04 19:07] Task 6 Step 4 完成：settings store 新增 color theme preset root/localStorage application helper，并在 load、optimistic save、saved response、rollback 中同步应用；focused settings store test 通过。
 - [2026-07-04 19:06] Task 6 Step 1/2/3 完成：新增 color theme preset 测试、TS settings preset 类型/defaultSettings 和 preset metadata/root application helper；focused preset test 通过。
@@ -59,6 +60,8 @@ Started: 2026-07-04 18:38
 - src/types/project.ts
 - src/app/App.test.tsx
 - src/components/app/TopBar.tsx
+- src/features/settings/AppearanceSettings.tsx
+- src/features/settings/SettingsView.tsx
 - src/lib/colorThemePresets.ts
 - src/lib/colorThemePresets.test.ts
 - src/stores/settingsStore.ts
