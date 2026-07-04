@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Book, Edit2, FileOutput, LoaderCircle, Star } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
+import { ResizableSplitter } from "../../components/app/ResizableSplitter";
+import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import { useExportStore } from "../../stores/exportStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
@@ -39,6 +42,9 @@ export function selectWikiPreviewRecord(
 export function WikiView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
+  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const setPaneSize = useNavigationStore((state) => state.setPaneSize);
+  const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const [pageForm, setPageForm] = useState<
     { mode: "create" | "rename"; path: string } | null
   >(null);
@@ -94,6 +100,9 @@ export function WikiView() {
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
+  const layoutStyle = {
+    "--wiki-tree-w-current": `${paneSizes.wikiTree}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     void scan(projectId, rootPath);
@@ -247,7 +256,7 @@ export function WikiView() {
   };
 
   return (
-    <div className="wiki-view-layout">
+    <div className="wiki-view-layout" style={layoutStyle}>
       {tree ? (
         <WikiTree
           root={tree.root}
@@ -268,6 +277,16 @@ export function WikiView() {
           )}
         </div>
       )}
+
+      <ResizableSplitter
+        paneId="wikiTree"
+        label={t("shell.splitter.wikiTree")}
+        min={PANE_WIDTH_LIMITS.wikiTree.min}
+        max={PANE_WIDTH_LIMITS.wikiTree.max}
+        value={paneSizes.wikiTree}
+        onChange={(value) => setPaneSize("wikiTree", value)}
+        onReset={() => resetPaneSize("wikiTree")}
+      />
 
       <div className="flex min-w-0 flex-1 flex-col bg-[var(--background)]">
         <div className="view-toolbar border-b border-[var(--border)] px-5">

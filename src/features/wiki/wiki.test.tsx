@@ -16,9 +16,10 @@ import { ConflictDiffDialog } from "./ConflictDiffDialog";
 import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
 import { HtmlPreviewPane as WikiHtmlPreviewPane } from "./HtmlPreviewPane";
 import { RelatedPagesPanel } from "./RelatedPagesPanel";
-import { selectWikiPreviewRecord } from "./WikiView";
+import { selectWikiPreviewRecord, WikiView } from "./WikiView";
 import { useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
+import { defaultProject, useProjectStore } from "../../stores/projectStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -692,6 +693,32 @@ describe("ConflictDiffDialog", () => {
 });
 
 describe("Wiki HTML preview", () => {
+  it("exposes a resizable wiki tree splitter", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+
+    render(<WikiView />);
+
+    expect(await screen.findByRole("separator", { name: "Resize wiki tree" })).toHaveAttribute("aria-valuemin", "220");
+  });
+
   it("does not reuse a preview generated for another page", () => {
     const records: ExportRecord[] = [
       {

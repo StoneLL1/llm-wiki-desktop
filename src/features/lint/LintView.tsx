@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 
+import { ResizableSplitter } from "../../components/app/ResizableSplitter";
+import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import { useLintStore } from "../../stores/lintStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { isTerminalStatus } from "../../types/task";
@@ -28,6 +31,9 @@ const PASSED_RULES: LintIssueType[] = [
 export function LintView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
+  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const setPaneSize = useNavigationStore((state) => state.setPaneSize);
+  const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
 
   const localReport = useLintStore((state) => state.localReport);
   const deepReport = useLintStore((state) => state.deepReport);
@@ -63,6 +69,9 @@ export function LintView() {
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
+  const layoutStyle = {
+    "--lint-list-w-current": `${paneSizes.lintList}px`,
+  } as CSSProperties;
   const localIssues = localReport?.issues ?? [];
   const deepIssues = deepReport?.issues ?? [];
   const allIssues = useMemo(
@@ -277,8 +286,8 @@ export function LintView() {
   );
 
   return (
-    <div className="lint-view-layout">
-      <div className="flex min-w-0 flex-col border-r border-[var(--border)]">
+    <div className="lint-view-layout" style={layoutStyle}>
+      <div className="lint-view__list-pane">
         <div className="view-toolbar border-b border-[var(--border)] px-4">
           <div className="seg" role="group" aria-label={t("view.lint.paneTitle")}>
             {segButton("all", t("lint.mode.all"), allIssues.length)}
@@ -362,6 +371,16 @@ export function LintView() {
           </div>
         ) : null}
       </div>
+
+      <ResizableSplitter
+        paneId="lintList"
+        label={t("shell.splitter.lintList")}
+        min={PANE_WIDTH_LIMITS.lintList.min}
+        max={PANE_WIDTH_LIMITS.lintList.max}
+        value={paneSizes.lintList}
+        onChange={(value) => setPaneSize("lintList", value)}
+        onReset={() => resetPaneSize("lintList")}
+      />
 
       <LintIssueDetails
         issue={selectedIssue}
