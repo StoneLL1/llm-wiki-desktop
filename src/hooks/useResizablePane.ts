@@ -1,3 +1,9 @@
+import { useCallback, useEffect, useRef } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
+
 export type ResizablePaneId =
   | "sidebar"
   | "rightPanel"
@@ -115,4 +121,148 @@ export function writeLayoutPreferenceSnapshot(snapshot: LayoutPreferences): void
     LAYOUT_STORAGE_KEY,
     JSON.stringify(sanitizeLayoutPreferences(snapshot)),
   );
+}
+
+export interface UseResizablePaneOptions {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  direction?: 1 | -1;
+  onChange: (value: number) => void;
+  onReset: () => void;
+}
+
+export interface UseResizablePaneResult {
+  separatorProps: {
+    onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
+    onDoubleClick: () => void;
+    onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
+  };
+}
+
+interface DragSnapshot {
+  element: HTMLElement;
+  pointerId: number;
+  startValue: number;
+  startX: number;
+}
+
+export function useResizablePane({
+  value,
+  min,
+  max,
+  step = 12,
+  direction = 1,
+  onChange,
+  onReset,
+}: UseResizablePaneOptions): UseResizablePaneResult {
+  const dragSnapshotRef = useRef<DragSnapshot | null>(null);
+  const valueRef = useRef(value);
+  const minRef = useRef(min);
+  const maxRef = useRef(max);
+  const stepRef = useRef(step);
+  const directionRef = useRef(direction);
+  const onChangeRef = useRef(onChange);
+  const onResetRef = useRef(onReset);
+
+  valueRef.current = value;
+  minRef.current = min;
+  maxRef.current = max;
+  stepRef.current = step;
+  directionRef.current = direction;
+  onChangeRef.current = onChange;
+  onResetRef.current = onReset;
+
+  const cleanupDrag = useCallback(() => {
+    const snapshot = dragSnapshotRef.current;
+    if (snapshot) {
+      snapshot.element.classList.remove("is-dragging");
+      snapshot.element.releasePointerCapture?.(snapshot.pointerId);
+    }
+
+    document.body.classList.remove("is-resizing-pane");
+    dragSnapshotRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const snapshot = dragSnapshotRef.current;
+      if (!snapshot) {
+        return;
+      }
+
+      const nextValue =
+        snapshot.startValue + (event.clientX - snapshot.startX) * directionRef.current;
+      onChangeRef.current(clampPaneWidth(nextValue, minRef.current, maxRef.current));
+    };
+
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", cleanupDrag);
+    document.addEventListener("pointercancel", cleanupDrag);
+
+    return () => {
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", cleanupDrag);
+      document.removeEventListener("pointercancel", cleanupDrag);
+      cleanupDrag();
+    };
+  }, [cleanupDrag]);
+
+  const onPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.currentTarget.classList.add("is-dragging");
+    document.body.classList.add("is-resizing-pane");
+    dragSnapshotRef.current = {
+      element: event.currentTarget,
+      pointerId: event.pointerId,
+      startValue: valueRef.current,
+      startX: event.clientX,
+    };
+  }, []);
+
+  const onDoubleClick = useCallback(() => {
+    onResetRef.current();
+  }, []);
+
+  const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLElement>) => {
+    const keyDelta: Record<string, number> = {
+      ArrowRight: stepRef.current * directionRef.current,
+      ArrowLeft: -stepRef.current * directionRef.current,
+    };
+
+    if (event.key in keyDelta) {
+      event.preventDefault();
+      onChangeRef.current(
+        clampPaneWidth(valueRef.current + keyDelta[event.key], minRef.current, maxRef.current),
+      );
+      return;
+    }
+
+    if (event.key === "Home") {
+      event.preventDefault();
+      onChangeRef.current(minRef.current);
+      return;
+    }
+
+    if (event.key === "End") {
+      event.preventDefault();
+      onChangeRef.current(maxRef.current);
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onResetRef.current();
+    }
+  }, []);
+
+  return {
+    separatorProps: {
+      onPointerDown,
+      onDoubleClick,
+      onKeyDown,
+    },
+  };
 }
