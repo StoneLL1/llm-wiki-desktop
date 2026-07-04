@@ -8,13 +8,14 @@ Started: 2026-07-05 02:19
 
 - [x] Task 1 - Task Log Timeline Sorting
 - [x] Task 2 - Lint History Backend Persistence
-- [ ] Task 3 - Lint History Frontend Restore UX
+- [x] Task 3 - Lint History Frontend Restore UX
 - [ ] Task 4 - Native Directory Picker and New Project Parent Path
 - [ ] Task 5 - Compact Project Start Page and Enriched Recents
 - [ ] Task 6 - Regression Coverage, Review, and Quality Gates
 
 ## Activity Log
 
+- [2026-07-05 03:20] Task 3 Step 6 完成：新增 LintView 历史恢复/损坏报告测试与 lintStore history payload 测试，前端测试通过
 - [2026-07-05 03:16] Task 3 Step 5 完成：补充 Lint 历史中英文文案，lintView 测试通过
 - [2026-07-05 03:13] Task 3 Step 4 完成：LintView 集成历史列表、加载历史并自动打开最新报告，lintView 测试通过
 - [2026-07-05 03:10] Task 3 Step 3 完成：新增 LintHistoryList 组件与紧凑历史列表 CSS，lintView 测试通过
@@ -55,9 +56,12 @@ Started: 2026-07-05 02:19
 - src/features/lint/LintView.tsx
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
+- src/features/lint/lintView.test.tsx
+- src/stores/lintStore.test.ts
 
 ## Verification
 
+- npm run test -- src/features/lint/lintView.test.tsx src/stores/lintStore.test.ts: passed (19 tests; Task 3 Step 6)
 - npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 5)
 - npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 4)
 - npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 3)

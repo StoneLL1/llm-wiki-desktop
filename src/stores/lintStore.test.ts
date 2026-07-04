@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { LintBatchOutcome, LintFixOutcome, LintIgnoreFile, LintIssue, LintReport } from "../types/lint";
+import type {
+  LintBatchOutcome,
+  LintFixOutcome,
+  LintHistoryFile,
+  LintIgnoreFile,
+  LintIssue,
+  LintReport,
+  PersistedLintReport,
+} from "../types/lint";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -217,5 +225,72 @@ describe("lintStore", () => {
     expect(ok).toBe(true);
     expect(useLintStore.getState().ignores).toHaveLength(1);
     expect(invokeMock.mock.calls[0][0]).toBe("add_lint_ignore");
+  });
+
+  it("loadHistory stores entries and sends the typed request payload", async () => {
+    const file: LintHistoryFile = {
+      version: 1,
+      entries: [
+        {
+          id: "local-1",
+          kind: "local",
+          createdAt: "2026-07-04T00:00:00Z",
+          issueCount: 1,
+          errorCount: 1,
+          warningCount: 0,
+          infoCount: 0,
+          scannedPages: 3,
+        },
+      ],
+    };
+    invokeMock.mockResolvedValueOnce(file);
+    const history = await useLintStore.getState().loadHistory({
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+    });
+    expect(history).toHaveLength(1);
+    expect(useLintStore.getState().history[0].id).toBe("local-1");
+    expect(invokeMock.mock.calls[0][0]).toBe("list_lint_history");
+    expect(invokeMock.mock.calls[0][1].request.projectRootPath).toBe(PROJECT.rootPath);
+  });
+
+  it("openHistoryReport restores a persisted deep report", async () => {
+    const persisted: PersistedLintReport = {
+      entry: {
+        id: "task-1",
+        kind: "deep",
+        createdAt: "2026-07-04T00:00:00Z",
+        issueCount: 1,
+        errorCount: 0,
+        warningCount: 1,
+        infoCount: 0,
+        taskId: "task-1",
+        route: "auto",
+      },
+      localReport: null,
+      deepReport: {
+        issues: [
+          localIssue({
+            id: "duplicate_topic:wiki/b.md",
+            source: "agent",
+            issueType: "duplicate_topic",
+          }),
+        ],
+        rawOutput: "raw",
+        generatedAt: "2026-07-04T00:00:00Z",
+      },
+    };
+    invokeMock.mockResolvedValueOnce(persisted);
+    const restored = await useLintStore.getState().openHistoryReport({
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+      id: "task-1",
+    });
+    expect(restored?.entry.id).toBe("task-1");
+    expect(useLintStore.getState().deepReport?.issues).toHaveLength(1);
+    expect(useLintStore.getState().localReport).toBeNull();
+    expect(useLintStore.getState().mode).toBe("agent");
+    expect(invokeMock.mock.calls[0][0]).toBe("read_lint_history_report");
+    expect(invokeMock.mock.calls[0][1].request.id).toBe("task-1");
   });
 });
