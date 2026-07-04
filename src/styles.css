@@ -195,6 +195,10 @@ body {
   grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr);
 }
 
+.app-shell.is-workspace-focused .app-shell__workbench {
+  grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr);
+}
+
 .app-shell__main {
   min-width: 0;
   min-height: 0;

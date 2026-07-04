@@ -62,6 +62,14 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*\.resize-handle\[data-pane-id="exportsList"\][\s\S]*\.resize-handle\[data-pane-id="lintList"\]/s);
   });
 
+  it("defines focused export preview and source-mode affordances", () => {
+    expect(styles).toContain(".app-shell.is-workspace-focused .app-shell__workbench");
+    expect(styles).toContain(".export-file-cell");
+    expect(styles).toContain(".export-row-actions");
+    expect(styles).toContain(".segmented-control button[aria-pressed=\"true\"]");
+    expect(styles).toMatch(/\.html-preview__source\s*\{[^}]*font-family:\s*var\(--font-mono\)[^}]*white-space:\s*pre-wrap/s);
+  });
+
   it("defines compact project switcher rows", () => {
     expect(styles).toContain(".app-topbar__project-text");
     expect(styles).toContain(".app-topbar__project-menu-row");

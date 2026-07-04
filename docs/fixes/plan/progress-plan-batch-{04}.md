@@ -12,7 +12,7 @@ Started: 2026-07-05 01:25
 - [x] Task 4 - AppShell focus integration
 - [x] Task 5 - Export rows, actions, and preview toolbar
 - [x] Task 6 - CSS and i18n
-- [ ] Task 7 - Frontend regression tests
+- [x] Task 7 - Frontend regression tests
 - [ ] Task 8 - Backend verification
 - [ ] Task 9 - Required checks and review workflow
 
@@ -31,6 +31,7 @@ Started: 2026-07-05 01:25
 - [2026-07-05 01:42] Task 5 红灯测试：新增导出行点击、浏览器打开、preview toolbar source/focus 用例
 - [2026-07-05 01:43] Task 5 实现：成功导出行支持点击预览，文件单元格内联动作，预览 toolbar 支持 source/inline、浏览器打开和 focus
 - [2026-07-05 01:45] Task 6 实现：补充导出行内动作、segmented control、HTML source preview 样式以及中英文导出预览翻译键
+- [2026-07-05 01:46] Task 7 实现：新增 CSS contract 覆盖 workspace focus、导出行内动作、segmented control 和 HTML source preview
 
 ## Changed Files
 
@@ -52,6 +53,7 @@ Started: 2026-07-05 01:25
 - src/styles.css
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
+- src/test/ui-css-contracts.test.ts
 
 ## Verification
 
@@ -61,6 +63,7 @@ Started: 2026-07-05 01:25
 - npm run test -- src/features/exports/exportsView.test.tsx: passed (Task 5)
 - npm run test -- src/features/exports/exportsView.test.tsx: passed (Task 6)
 - node JSON parse locale check: passed (Task 6)
+- npm run test -- src/features/exports/exportsView.test.tsx src/stores/exportStore.test.ts src/stores/navigationStore.test.ts src/components/app/appShellActions.test.tsx src/test/ui-css-contracts.test.ts: passed (Task 7)
 - npm run lint: not run
 - npm run build: not run
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 1, Task 2)
