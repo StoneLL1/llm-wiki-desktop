@@ -6,28 +6,17 @@ use crate::models::graph::{GraphBuildResult, GraphData, GraphRequest, SaveGraphL
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::tasks::task_model::LogLevel;
 
-/// Read the last completed graph cache without starting expensive work in the
-/// IPC handler. A missing cache is built through the cancellable task command.
+/// Resolve graph data against the current wiki pages. The graph cache is a
+/// recoverable acceleration layer: missing, corrupt, or stale cache content is
+/// repaired synchronously through GraphService::resolve.
 #[tauri::command]
 pub fn get_graph(
     state: State<'_, AppState>,
     request: GraphRequest,
 ) -> Result<GraphBuildResult, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let data = state.graph_service.read_cache(&context).ok_or_else(|| {
-        BackendError::new(
-            "GRAPH_BUILD_REQUIRED",
-            "No graph cache exists yet. Start a background graph build.",
-            true,
-            false,
-        )
-    })?;
-    let layout_stale = data.layout.is_none();
-    Ok(GraphBuildResult {
-        data,
-        cached: true,
-        layout_stale,
-    })
+    let tree = state.search_service.scan_wiki(&context)?;
+    state.graph_service.resolve(&context, &tree.pages)
 }
 
 /// Force a full rebuild in the background and return its cancellable task.
