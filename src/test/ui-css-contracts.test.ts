@@ -50,7 +50,25 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar");
     expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar button");
     expect(styles).not.toContain(".app-sidebar nav button");
-    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.resize-handle\[data-pane-id="sidebar"\]/s);
+    expect(styles).not.toContain('.resize-handle[data-pane-id="sidebar"] { display: none; }');
+    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*grid-template-columns:\s*var\(--sidebar-w-current\) 6px minmax\(0, 1fr\)/s);
+  });
+
+  it("uses the splitter as the single visual boundary next to the sidebar", () => {
+    expect(styles).not.toMatch(/\.app-sidebar\s*\{[^}]*border-right/s);
+    expect(styles).not.toMatch(/(?:^|\n)\.right-panel\s*\{[^}]*border-left/s);
+    expect(styles).toMatch(/@media \(max-width: 1180px\)[\s\S]*\.right-panel\s*\{[^}]*border-left:\s*1px solid var\(--border\)/s);
+    expect(styles).toMatch(/\.resize-handle::before\s*\{[^}]*width:\s*1px/s);
+    expect(styles).not.toMatch(/\.resize-handle:hover::before,[\s\S]*inset:\s*0 1px/s);
+  });
+
+  it("routes accent focus and ambient states through theme tokens", () => {
+    expect(styles).toContain("--accent-ring");
+    expect(styles).toContain("--accent-ring-soft");
+    expect(styles).toContain("--accent-ambient");
+    expect(styles).not.toMatch(/rgba\(16,\s*163,\s*127/s);
+    expect(styles).not.toContain("#10a37f");
+    expect(styles).not.toContain("#0a7a5e");
   });
 
   it("wires internal view splitters to pane width variables", () => {
@@ -76,5 +94,11 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".app-topbar__project-text");
     expect(styles).toContain(".app-topbar__project-menu-row");
     expect(styles).toContain(".app-topbar__project-menu-row.is-missing");
+  });
+
+  it("defines launch metadata and generated project path styles", () => {
+    expect(styles).toContain(".project-path-preview");
+    expect(styles).toContain(".projcard__meta");
+    expect(styles).toContain(".quickaction");
   });
 });
