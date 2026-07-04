@@ -1,6 +1,8 @@
 import type { ColorThemePresetId, ThemePreference } from "../../types/settings";
 import { useTranslation } from "react-i18next";
 
+import { COLOR_THEME_PRESETS } from "../../lib/colorThemePresets";
+
 interface AppearanceSettingsProps {
   theme: ThemePreference;
   colorThemePreset: ColorThemePresetId;
@@ -21,9 +23,9 @@ const previews: Array<{
 
 export function AppearanceSettings({
   theme,
-  colorThemePreset: _colorThemePreset,
+  colorThemePreset,
   onChange,
-  onChangeColorThemePreset: _onChangeColorThemePreset,
+  onChangeColorThemePreset,
 }: AppearanceSettingsProps) {
   const { t } = useTranslation();
 
@@ -63,6 +65,46 @@ export function AppearanceSettings({
             </button>
           );
         })}
+      </div>
+
+      <div className="grid gap-2">
+        <div className="text-[12px] font-medium text-[var(--text-secondary)]">{t("settings.appearance.colorTheme")}</div>
+        <div className="appearance-presets" role="radiogroup" aria-label={t("settings.appearance.colorTheme")}>
+          {COLOR_THEME_PRESETS.map((preset) => {
+            const selected = colorThemePreset === preset.id;
+            return (
+              <button
+                key={preset.id}
+                aria-checked={selected}
+                className={`appearance-preset ${selected ? "is-selected" : ""}`}
+                onClick={() => onChangeColorThemePreset(preset.id)}
+                role="radio"
+                type="button"
+              >
+                <span className="appearance-preset__copy">
+                  <span className="appearance-preset__name">{t(preset.labelKey)}</span>
+                  <span className="appearance-preset__description">{t(preset.descriptionKey)}</span>
+                </span>
+                <span className="appearance-preset__swatches" aria-hidden="true">
+                  {preset.swatches.map((swatch) => (
+                    <span key={swatch} style={{ background: swatch }} />
+                  ))}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="appearance-markdown-preview wiki-prose" aria-label={t("settings.appearance.markdownPreview")}>
+        <h1>{t("settings.appearance.previewTitle")}</h1>
+        <p>{t("settings.appearance.previewParagraph")}</p>
+        <p>
+          <a href="#preview">{t("settings.appearance.previewLink")}</a>
+        </p>
+        <pre>
+          <code>{`const wiki = "local-first";`}</code>
+        </pre>
       </div>
     </section>
   );
