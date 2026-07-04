@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 03:13] Task 3 Step 4 完成：LintView 集成历史列表、加载历史并自动打开最新报告，lintView 测试通过
 - [2026-07-05 03:10] Task 3 Step 3 完成：新增 LintHistoryList 组件与紧凑历史列表 CSS，lintView 测试通过
 - [2026-07-05 03:06] Task 3 Step 2 完成：lintStore 增加历史状态、load/open actions，并在 local/deep 报告成功后刷新历史，前端测试通过
 - [2026-07-05 03:02] Task 3 Step 1 完成：新增前端 Lint 历史 DTO，lintView 测试通过
@@ -50,9 +51,11 @@ Started: 2026-07-05 02:19
 - src/stores/lintStore.ts
 - src/features/lint/LintHistoryList.tsx
 - src/styles.css
+- src/features/lint/LintView.tsx
 
 ## Verification
 
+- npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 4)
 - npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 3)
 - npm run test -- src/stores/lintStore.test.ts src/features/lint/lintView.test.tsx: passed (15 tests; Task 3 Step 2)
 - npm run test -- src/features/lint/lintView.test.tsx: passed (5 tests; Task 3 Step 1)

@@ -12,6 +12,7 @@ import { isTerminalStatus } from "../../types/task";
 import type { LintIssue, LintIssueType, LintRoutePreference } from "../../types/lint";
 import type { WikiPageContent } from "../../types/wiki";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
+import { LintHistoryList } from "./LintHistoryList";
 import { LintIssueDetails } from "./LintIssueDetails";
 import { LintIssueList } from "./LintIssueList";
 import { LintPassedSection } from "./LintPassedSection";
@@ -48,6 +49,10 @@ export function LintView() {
   const batchRunning = useLintStore((state) => state.batchRunning);
   const batchConfirmations = useLintStore((state) => state.batchConfirmations);
   const safetyPrefs = useLintStore((state) => state.safetyPrefs);
+  const history = useLintStore((state) => state.history);
+  const historyLoading = useLintStore((state) => state.historyLoading);
+  const historyError = useLintStore((state) => state.historyError);
+  const activeHistoryId = useLintStore((state) => state.activeHistoryId);
 
   const runLocalLint = useLintStore((state) => state.runLocalLint);
   const startDeepLint = useLintStore((state) => state.startDeepLint);
@@ -56,6 +61,8 @@ export function LintView() {
   const selectIssue = useLintStore((state) => state.selectIssue);
   const setMode = useLintStore((state) => state.setMode);
   const setSafetyPrefs = useLintStore((state) => state.setSafetyPrefs);
+  const loadHistory = useLintStore((state) => state.loadHistory);
+  const openHistoryReport = useLintStore((state) => state.openHistoryReport);
   const loadIgnores = useLintStore((state) => state.loadIgnores);
   const addIgnore = useLintStore((state) => state.addIgnore);
   const applyFix = useLintStore((state) => state.applyFix);
@@ -112,6 +119,22 @@ export function LintView() {
   useEffect(() => {
     void loadIgnores({ projectId, projectRootPath: rootPath });
   }, [projectId, rootPath, loadIgnores]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadHistory({ projectId, projectRootPath: rootPath }).then((entries) => {
+      const hasLoadedReport =
+        useLintStore.getState().localReport || useLintStore.getState().deepReport;
+      if (cancelled || hasLoadedReport) return;
+      const latest = entries[0];
+      if (latest) {
+        void openHistoryReport({ projectId, projectRootPath: rootPath, id: latest.id });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, rootPath, loadHistory, openHistoryReport]);
 
   useEffect(() => {
     if (deepTask && isTerminalStatus(deepTask.status)) {
@@ -339,6 +362,16 @@ export function LintView() {
             {error}
           </div>
         ) : null}
+
+        <LintHistoryList
+          entries={history}
+          activeId={activeHistoryId}
+          loading={historyLoading}
+          error={historyError}
+          onOpen={(id) =>
+            void openHistoryReport({ projectId, projectRootPath: rootPath, id })
+          }
+        />
 
         {localReport ? (
           <LintSummaryCards issues={modeIssues} passedCount={passedRules.length} />
