@@ -203,7 +203,14 @@ impl ProjectService {
         }
         let store = FileStore;
         match store.read_json_file::<RecentProjectsFile>(&path) {
-            Ok(file) => Ok(file.projects),
+            Ok(file) => Ok(file
+                .projects
+                .into_iter()
+                .map(|mut project| {
+                    project.missing = !Path::new(&project.root_path).exists();
+                    project
+                })
+                .collect()),
             Err(_) => Ok(Vec::new()),
         }
     }
@@ -1076,6 +1083,7 @@ mod tests {
                 root_path: root_a.to_string_lossy().to_string(),
                 template: ProjectTemplate::General,
                 opened_at: "2026-06-19T00:00:00Z".into(),
+                missing: false,
             })
             .unwrap();
         let after = service
@@ -1085,6 +1093,7 @@ mod tests {
                 root_path: root_b.to_string_lossy().to_string(),
                 template: ProjectTemplate::Business,
                 opened_at: "2026-06-19T00:00:01Z".into(),
+                missing: false,
             })
             .unwrap();
 
@@ -1099,6 +1108,7 @@ mod tests {
                 root_path: root_a.to_string_lossy().to_string(),
                 template: ProjectTemplate::General,
                 opened_at: "2026-06-19T00:00:02Z".into(),
+                missing: false,
             })
             .unwrap();
         assert_eq!(merged.len(), 2);
