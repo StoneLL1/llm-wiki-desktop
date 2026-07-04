@@ -2,10 +2,14 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  Code2,
+  ExternalLink,
   Eye,
   FileOutput,
   FolderOpen,
   List,
+  Maximize2,
+  Minimize2,
   Plus,
   Star,
   type LucideIcon,
@@ -47,6 +51,7 @@ export function ExportsView() {
   const runningTaskId = useExportStore((state) => state.runningTaskId);
   const previewHtml = useExportStore((state) => state.previewHtml);
   const previewId = useExportStore((state) => state.previewId);
+  const previewMode = useExportStore((state) => state.previewMode);
   const error = useExportStore((state) => state.error);
 
   const loadExports = useExportStore((state) => state.loadExports);
@@ -55,8 +60,13 @@ export function ExportsView() {
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
   const loadPreview = useExportStore((state) => state.loadPreview);
   const clearPreview = useExportStore((state) => state.clearPreview);
+  const setPreviewMode = useExportStore((state) => state.setPreviewMode);
   const toggleBookmark = useExportStore((state) => state.toggleBookmark);
   const openFolder = useExportStore((state) => state.openFolder);
+  const openInBrowser = useExportStore((state) => state.openInBrowser);
+  const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
+  const focusWorkspace = useNavigationStore((state) => state.focusWorkspace);
+  const clearWorkspaceFocus = useNavigationStore((state) => state.clearWorkspaceFocus);
 
   const tasks = useTaskStore((state) => state.tasks);
   const upsertTask = useTaskStore((state) => state.upsertTask);
@@ -174,6 +184,22 @@ export function ExportsView() {
     });
   };
 
+  const handleOpenInBrowser = (record: ExportRecord) => {
+    void openInBrowser({
+      projectId,
+      projectRootPath: rootPath,
+      outputPath: record.outputPath,
+    });
+  };
+
+  const handleToggleFocus = () => {
+    if (workspaceFocus === "exportPreview") {
+      clearWorkspaceFocus();
+      return;
+    }
+    focusWorkspace("exportPreview");
+  };
+
   const handleToggleBookmark = (record: ExportRecord) => {
     void toggleBookmark(projectId, rootPath, record.id);
   };
@@ -183,6 +209,7 @@ export function ExportsView() {
       [...records].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     [records],
   );
+  const previewRecord = sortedRecords.find((record) => record.id === previewId) ?? null;
 
   return (
     <div className="exports-view-layout" style={layoutStyle}>
@@ -239,7 +266,23 @@ export function ExportsView() {
                   const failed = record.status === "failed";
                   const isPreviewing = previewId === record.id;
                   return (
-                    <tr key={record.id} className={isPreviewing ? "is-selected" : ""}>
+                    <tr
+                      key={record.id}
+                      aria-selected={isPreviewing}
+                      className={`${isPreviewing ? "is-selected" : ""} ${failed ? "" : "is-clickable"}`.trim()}
+                      tabIndex={failed ? undefined : 0}
+                      onClick={failed ? undefined : () => handlePreview(record)}
+                      onKeyDown={
+                        failed
+                          ? undefined
+                          : (event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                handlePreview(record);
+                              }
+                            }
+                      }
+                    >
                       <td className="col-icon">
                         <Icon
                           size={14}
@@ -252,8 +295,46 @@ export function ExportsView() {
                         />
                       </td>
                       <td>
-                        <div className="primary truncate">{record.title}</div>
-                        <div className="secondary font-mono">{record.outputPath}</div>
+                        <div className="export-file-cell">
+                          <div className="min-w-0">
+                            <div className="primary truncate">{record.title}</div>
+                            <div className="secondary font-mono">{record.outputPath}</div>
+                          </div>
+                          {!failed ? (
+                            <div className="export-row-actions">
+                              <IconButton
+                                label={t(record.bookmarked ? "exports.actions.unbookmark" : "exports.actions.bookmark")}
+                                onClick={() => handleToggleBookmark(record)}
+                                active={record.bookmarked}
+                              >
+                                <Star
+                                  size={14}
+                                  strokeWidth={1.5}
+                                  fill={record.bookmarked ? "currentColor" : "none"}
+                                />
+                              </IconButton>
+                              <IconButton
+                                label={t("exports.actions.preview")}
+                                onClick={() => handlePreview(record)}
+                                active={isPreviewing}
+                              >
+                                <Eye size={14} strokeWidth={1.5} />
+                              </IconButton>
+                              <IconButton
+                                label={t("exports.actions.openInBrowser", { defaultValue: "Open in browser" })}
+                                onClick={() => handleOpenInBrowser(record)}
+                              >
+                                <ExternalLink size={14} strokeWidth={1.5} />
+                              </IconButton>
+                              <IconButton
+                                label={t("exports.actions.openFolder")}
+                                onClick={() => handleOpenFolder(record)}
+                              >
+                                <FolderOpen size={14} strokeWidth={1.5} />
+                              </IconButton>
+                            </div>
+                          ) : null}
+                        </div>
                       </td>
                       <td>
                         <span className="badge">
@@ -298,32 +379,7 @@ export function ExportsView() {
                             </button>
                           </div>
                         ) : (
-                          <div className="flex items-center justify-end gap-1">
-                            <IconButton
-                              label={t(record.bookmarked ? "exports.actions.unbookmark" : "exports.actions.bookmark")}
-                              onClick={() => handleToggleBookmark(record)}
-                              active={record.bookmarked}
-                            >
-                              <Star
-                                size={14}
-                                strokeWidth={1.5}
-                                fill={record.bookmarked ? "currentColor" : "none"}
-                              />
-                            </IconButton>
-                            <IconButton
-                              label={t("exports.actions.preview")}
-                              onClick={() => handlePreview(record)}
-                              active={isPreviewing}
-                            >
-                              <Eye size={14} strokeWidth={1.5} />
-                            </IconButton>
-                            <IconButton
-                              label={t("exports.actions.openFolder")}
-                              onClick={() => handleOpenFolder(record)}
-                            >
-                              <FolderOpen size={14} strokeWidth={1.5} />
-                            </IconButton>
-                          </div>
+                          null
                         )}
                       </td>
                     </tr>
@@ -351,22 +407,69 @@ export function ExportsView() {
       />
 
       <aside className="exports-view__preview-pane">
-          <div className="view-toolbar border-b border-[var(--border)] px-4">
+        <div
+          className="view-toolbar border-b border-[var(--border)] px-4"
+          role="toolbar"
+          aria-label={t("exports.preview.tools", { defaultValue: "Preview tools" })}
+        >
           <span className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
             {t("exports.preview.title")}
           </span>
           {previewHtml ? (
-            <button
-              type="button"
-              onClick={clearPreview}
-              className="ml-auto text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-            >
-              {t("exports.actions.clearPreview")}
-            </button>
+            <div className="ml-auto flex items-center gap-1.5">
+              <div className="segmented-control" role="group" aria-label={t("exports.preview.mode", { defaultValue: "Preview mode" })}>
+                <button
+                  type="button"
+                  aria-pressed={previewMode === "inline"}
+                  onClick={() => setPreviewMode("inline")}
+                >
+                  <Eye size={13} strokeWidth={1.5} aria-hidden />
+                  {t("exports.preview.mode.inline", { defaultValue: "Preview" })}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={previewMode === "source"}
+                  onClick={() => setPreviewMode("source")}
+                >
+                  <Code2 size={13} strokeWidth={1.5} aria-hidden />
+                  {t("exports.preview.mode.source", { defaultValue: "HTML source" })}
+                </button>
+              </div>
+              {previewRecord ? (
+                <IconButton
+                  label={t("exports.actions.openInBrowser", { defaultValue: "Open in browser" })}
+                  onClick={() => handleOpenInBrowser(previewRecord)}
+                >
+                  <ExternalLink size={14} strokeWidth={1.5} />
+                </IconButton>
+              ) : null}
+              <IconButton
+                label={
+                  workspaceFocus === "exportPreview"
+                    ? t("exports.preview.exitFocus", { defaultValue: "Exit focus" })
+                    : t("exports.preview.focus", { defaultValue: "Focus preview" })
+                }
+                onClick={handleToggleFocus}
+                active={workspaceFocus === "exportPreview"}
+              >
+                {workspaceFocus === "exportPreview" ? (
+                  <Minimize2 size={14} strokeWidth={1.5} />
+                ) : (
+                  <Maximize2 size={14} strokeWidth={1.5} />
+                )}
+              </IconButton>
+              <button
+                type="button"
+                onClick={clearPreview}
+                className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              >
+                {t("exports.actions.clearPreview")}
+              </button>
+            </div>
           ) : null}
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          <HtmlPreviewPane html={previewHtml} />
+          <HtmlPreviewPane html={previewHtml} mode={previewMode} />
         </div>
       </aside>
 
@@ -394,7 +497,10 @@ function IconButton({ label, onClick, active, children }: IconButtonProps) {
       type="button"
       title={label}
       aria-label={label}
-      onClick={onClick}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
       className={`flex h-[26px] w-[26px] items-center justify-center rounded-[var(--radius-md)] text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] ${
         active ? "bg-[var(--surface-muted)] text-[var(--text-primary)]" : ""
       }`}
