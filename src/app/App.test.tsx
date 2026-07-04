@@ -235,6 +235,37 @@ describe("App", () => {
     expect(switcher).toHaveFocus();
   });
 
+  it("supports Escape and arrow navigation after the project menu is opened by click", async () => {
+    useProjectStore.getState().setRecentProjects([
+      {
+        projectId: "enabled-project",
+        name: "Enabled project",
+        rootPath: "D:/Users/Aletta/Documents/wiki/enabled-project",
+        template: "research",
+        openedAt: "2026-07-04T00:00:00Z",
+        missing: false,
+      },
+    ]);
+    render(<App />);
+
+    const switcher = screen.getByRole("button", { name: "Switch project" });
+    fireEvent.click(switcher);
+    switcher.focus();
+    expect(await screen.findByRole("menuitem", { name: /Enabled project/ })).toBeInTheDocument();
+
+    fireEvent.keyDown(switcher, { key: "Escape" });
+
+    expect(screen.queryByRole("menuitem", { name: /Enabled project/ })).not.toBeInTheDocument();
+    expect(switcher).toHaveFocus();
+
+    fireEvent.click(switcher);
+    switcher.focus();
+    const enabledRow = await screen.findByRole("menuitem", { name: /Enabled project/ });
+    fireEvent.keyDown(switcher, { key: "ArrowDown" });
+
+    await waitFor(() => expect(enabledRow).toHaveFocus());
+  });
+
   it("renders the desktop shell scaffold", () => {
     render(<App />);
 

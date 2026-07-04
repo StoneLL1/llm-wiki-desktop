@@ -248,7 +248,6 @@ export function resolveColorThemeVariant(
   theme: ThemePreference,
   prefersDark: boolean,
 ): ColorThemeVariant {
-  if (themePreset.id === "night") return themePreset.variants.dark;
   if (theme === "dark") return themePreset.variants.dark;
   if (theme === "auto" && prefersDark) return themePreset.variants.dark;
   return themePreset.variants.light;

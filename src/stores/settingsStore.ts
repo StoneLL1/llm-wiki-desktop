@@ -65,6 +65,41 @@ export const defaultSettings: Settings = {
   template: "general",
 };
 
+let activeColorThemePreference: Pick<Settings, "colorThemePreset" | "theme"> = {
+  colorThemePreset: defaultSettings.colorThemePreset,
+  theme: defaultSettings.theme,
+};
+let colorSchemeQueryList: MediaQueryList | null = null;
+let colorSchemeQueryListener: ((event: MediaQueryListEvent) => void) | null = null;
+
+function addColorSchemeChangeListener(
+  mediaQuery: MediaQueryList,
+  listener: (event: MediaQueryListEvent) => void,
+): boolean {
+  if (typeof mediaQuery.addEventListener === "function") {
+    mediaQuery.addEventListener("change", listener);
+    return true;
+  }
+  if (typeof mediaQuery.addListener === "function") {
+    mediaQuery.addListener(listener);
+    return true;
+  }
+  return false;
+}
+
+function removeColorSchemeChangeListener(
+  mediaQuery: MediaQueryList,
+  listener: (event: MediaQueryListEvent) => void,
+) {
+  if (typeof mediaQuery.removeEventListener === "function") {
+    mediaQuery.removeEventListener("change", listener);
+    return;
+  }
+  if (typeof mediaQuery.removeListener === "function") {
+    mediaQuery.removeListener(listener);
+  }
+}
+
 export function applyThemePreference(theme: ThemePreference) {
   if (typeof document === "undefined") return;
   document.documentElement.dataset.theme = theme;
@@ -80,11 +115,45 @@ export function applyColorThemePresetPreference(
   theme: ThemePreference,
 ) {
   if (typeof document === "undefined") return;
-  applyColorThemePresetToRoot(colorThemePreset, theme);
+  activeColorThemePreference = { colorThemePreset, theme };
+  const mediaQuery =
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
+      : null;
+  applyColorThemePresetToRoot(
+    colorThemePreset,
+    theme,
+    document.documentElement,
+    mediaQuery?.matches ?? false,
+  );
+  syncColorSchemePreferenceListener(theme, mediaQuery);
   try {
     window.localStorage.setItem(COLOR_THEME_STORAGE_KEY, colorThemePreset);
   } catch {
     // Ignore localStorage errors in restricted environments.
+  }
+}
+
+function syncColorSchemePreferenceListener(theme: ThemePreference, mediaQuery: MediaQueryList | null) {
+  if (colorSchemeQueryList && colorSchemeQueryListener) {
+    removeColorSchemeChangeListener(colorSchemeQueryList, colorSchemeQueryListener);
+    colorSchemeQueryList = null;
+    colorSchemeQueryListener = null;
+  }
+  if (theme !== "auto" || !mediaQuery) return;
+  colorSchemeQueryListener = (event) => {
+    if (typeof document === "undefined") return;
+    applyColorThemePresetToRoot(
+      activeColorThemePreference.colorThemePreset,
+      activeColorThemePreference.theme,
+      document.documentElement,
+      event.matches,
+    );
+  };
+  if (addColorSchemeChangeListener(mediaQuery, colorSchemeQueryListener)) {
+    colorSchemeQueryList = mediaQuery;
+  } else {
+    colorSchemeQueryListener = null;
   }
 }
 
