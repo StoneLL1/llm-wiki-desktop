@@ -1,13 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, FolderOpen, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Search, Settings } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { compactPath } from "../../lib/pathDisplay";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
+import type { RecentProject } from "../../types/project";
 import type { SearchResult, SearchResponse } from "../../types/wiki";
 import { TaskActivityButton } from "./TaskActivityButton";
+
+function formatOpenedAt(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString();
+}
 
 export function TopBar() {
   const { i18n, t } = useTranslation();
@@ -28,6 +36,9 @@ export function TopBar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const searchInput = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const projectButtonRef = useRef<HTMLButtonElement>(null);
+  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const pendingMenuFocus = useRef<"first" | "last" | null>(null);
   const requestSequence = useRef(0);
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const sidebarToggleLabel = t(sidebarCollapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse");
@@ -56,6 +67,14 @@ export function TopBar() {
 
   useEffect(() => {
     if (!menuOpen) return;
+    if (pendingMenuFocus.current) {
+      const enabled = menuItemRefs.current.filter(
+        (item): item is HTMLButtonElement => Boolean(item && item.dataset.missing !== "true"),
+      );
+      const target = pendingMenuFocus.current === "last" ? enabled.at(-1) : enabled[0];
+      pendingMenuFocus.current = null;
+      window.setTimeout(() => target?.focus(), 0);
+    }
     const handleClick = (event: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setMenuOpen(false);
@@ -63,7 +82,59 @@ export function TopBar() {
     };
     window.addEventListener("mousedown", handleClick);
     return () => window.removeEventListener("mousedown", handleClick);
-  }, [menuOpen]);
+  }, [menuOpen, recentProjects]);
+
+  const focusRelativeMenuItem = (current: HTMLButtonElement, direction: 1 | -1) => {
+    const enabled = menuItemRefs.current.filter(
+      (item): item is HTMLButtonElement => Boolean(item && item.dataset.missing !== "true"),
+    );
+    if (enabled.length === 0) return;
+    const currentIndex = enabled.indexOf(current);
+    const nextIndex =
+      currentIndex === -1
+        ? direction === 1 ? 0 : enabled.length - 1
+        : (currentIndex + direction + enabled.length) % enabled.length;
+    enabled[nextIndex]?.focus();
+  };
+
+  const closeProjectMenu = () => {
+    projectButtonRef.current?.focus();
+    setMenuOpen(false);
+  };
+
+  const openRecentProject = (project: RecentProject) => {
+    if (project.missing) return;
+    setMenuOpen(false);
+    void openProject(project.rootPath);
+  };
+
+  const handleProjectButtonKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      pendingMenuFocus.current = event.key === "ArrowUp" ? "last" : "first";
+      setMenuOpen(true);
+    }
+  };
+
+  const handleProjectMenuItemKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    project: RecentProject,
+  ) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeProjectMenu();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusRelativeMenuItem(event.currentTarget, event.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openRecentProject(project);
+    }
+  };
 
   const runSearch = async () => {
     const keyword = query.trim();
@@ -129,16 +200,22 @@ export function TopBar() {
 
       <div className="app-topbar__project" ref={menuRef}>
         <button
+          ref={projectButtonRef}
           aria-label={t("shell.switchProject")}
           aria-expanded={menuOpen}
           className="app-topbar__project-button"
           onClick={() => setMenuOpen((v) => !v)}
+          onKeyDown={handleProjectButtonKeyDown}
           title={t("shell.switchProject")}
           type="button"
         >
           <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={16} />
-          <span className="truncate text-[13px] font-medium">{currentProject.name}</span>
-          <span className="app-topbar__project-path">{currentProject.rootPath}</span>
+          <span className="app-topbar__project-text">
+            <span className="app-topbar__project-name">{currentProject.name}</span>
+            <span className="app-topbar__project-path" title={currentProject.rootPath}>
+              {compactPath(currentProject.rootPath)}
+            </span>
+          </span>
           <ChevronDown aria-hidden="true" className="shrink-0 text-[var(--text-muted)]" size={12} />
         </button>
         {menuOpen ? (
@@ -146,20 +223,35 @@ export function TopBar() {
             <div className="px-3 py-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
               {t("shell.projectMenu.recent")}
             </div>
-            {recentProjects.map((rp) => (
+            {recentProjects.map((rp, index) => (
               <button
                 key={rp.projectId}
+                ref={(node) => {
+                  menuItemRefs.current[index] = node;
+                }}
+                aria-disabled={rp.missing ? "true" : undefined}
+                data-missing={rp.missing ? "true" : undefined}
                 role="menuitem"
-                className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-3 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]"
-                onClick={() => { setMenuOpen(false); void openProject(rp.rootPath); }}
+                tabIndex={rp.missing ? -1 : 0}
+                className={`app-topbar__project-menu-row ${rp.missing ? "is-missing" : ""}`}
+                onClick={() => openRecentProject(rp)}
+                onKeyDown={(event) => handleProjectMenuItemKeyDown(event, rp)}
                 type="button"
               >
                 <FolderOpen aria-hidden="true" className="text-[var(--text-muted)]" size={14} />
-                <span className="truncate font-medium">{rp.name}</span>
-                <span className="truncate font-mono text-[11px] text-[var(--text-muted)]">{rp.rootPath}</span>
+                <span className="app-topbar__project-menu-copy">
+                  <span className="app-topbar__project-menu-name">{rp.name}</span>
+                  <span className="app-topbar__project-menu-path" title={rp.rootPath}>
+                    {compactPath(rp.rootPath)}
+                  </span>
+                </span>
                 {rp.projectId === currentProject.projectId ? (
                   <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-1.5 py-px text-[10px] font-medium text-[var(--accent-hover)]">{t("shell.current")}</span>
-                ) : null}
+                ) : (
+                  <span className="app-topbar__project-menu-meta">
+                    {rp.missing ? t("shell.projectMenu.missing") : formatOpenedAt(rp.openedAt)}
+                  </span>
+                )}
               </button>
             ))}
             <div className="my-1 border-t border-[var(--border-subtle)]" />

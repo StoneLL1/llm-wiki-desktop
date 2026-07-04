@@ -120,6 +120,7 @@
   "shell.backToLaunch": "Back to launch",
   "shell.current": "current",
   "shell.projectMenu.recent": "Recent projects",
+  "shell.projectMenu.missing": "Missing",
   "toast.dismiss": "Dismiss",
   "language.en": "EN",
   "language.zhCN": "中文",

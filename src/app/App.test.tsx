@@ -77,6 +77,7 @@ beforeEach(() => {
       agentRoute: "agent",
     }),
   );
+  useProjectStore.getState().setRecentProjects([]);
   useProjectStore.getState().setPendingAction(undefined);
   useTaskStore.getState().setTasks([
     mockTask({ id: "task-graph-refresh", title: "Refreshing graph cache", status: "running" }),
@@ -168,6 +169,70 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Choose a project to start working" })).toBeInTheDocument();
     expect(useWikiStore.getState().selectedPath).toBeNull();
     expect(useNavigationStore.getState().activeView).toBe("dashboard");
+  });
+
+  it("shows compact project paths in the topbar and full path in title", () => {
+    render(<App />);
+
+    const switcher = screen.getByRole("button", { name: "Switch project" });
+
+    expect(within(switcher).getByText("D:/.../wiki/agent-llm")).toHaveAttribute(
+      "title",
+      "D:/Users/Aletta/Documents/wiki/agent-llm",
+    );
+  });
+
+  it("marks missing recent projects without opening them", () => {
+    useProjectStore.getState().setRecentProjects([
+      {
+        projectId: "missing-project",
+        name: "Missing project",
+        rootPath: "D:/Users/Aletta/Documents/wiki/missing-project",
+        template: "general",
+        openedAt: "2026-07-04T00:00:00Z",
+        missing: true,
+      },
+    ]);
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch project" }));
+    const missingRow = screen.getByRole("menuitem", { name: /Missing project/ });
+    fireEvent.click(missingRow);
+
+    expect(missingRow).toHaveAttribute("aria-disabled", "true");
+    expect(useProjectStore.getState().currentProject.rootPath).toBe("D:/Users/Aletta/Documents/wiki/agent-llm");
+  });
+
+  it("opens the project menu with keyboard navigation and closes it with Escape", async () => {
+    useProjectStore.getState().setRecentProjects([
+      {
+        projectId: "missing-project",
+        name: "Missing project",
+        rootPath: "D:/Users/Aletta/Documents/wiki/missing-project",
+        template: "general",
+        openedAt: "2026-07-03T00:00:00Z",
+        missing: true,
+      },
+      {
+        projectId: "enabled-project",
+        name: "Enabled project",
+        rootPath: "D:/Users/Aletta/Documents/wiki/enabled-project",
+        template: "research",
+        openedAt: "2026-07-04T00:00:00Z",
+        missing: false,
+      },
+    ]);
+    render(<App />);
+
+    const switcher = screen.getByRole("button", { name: "Switch project" });
+    fireEvent.keyDown(switcher, { key: "ArrowDown" });
+    const enabledRow = await screen.findByRole("menuitem", { name: /Enabled project/ });
+
+    await waitFor(() => expect(enabledRow).toHaveFocus());
+    fireEvent.keyDown(enabledRow, { key: "Escape" });
+
+    expect(screen.queryByRole("menuitem", { name: /Enabled project/ })).not.toBeInTheDocument();
+    expect(switcher).toHaveFocus();
   });
 
   it("renders the desktop shell scaffold", () => {
