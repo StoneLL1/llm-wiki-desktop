@@ -242,6 +242,8 @@
   "dashboard.graph.state.cached": "Cached",
   "dashboard.graph.state.stale": "Stale",
   "dashboard.graph.state.missing": "Not built",
+  "dashboard.graphOverview.title": "Graph overview",
+  "dashboard.graphOverview.open": "Open Graph",
   "dashboard.recentProjects.title": "Recent projects",
   "dashboard.recentProjects.empty": "No recent projects yet.",
   "dashboard.recentTasks.title": "Recent tasks",

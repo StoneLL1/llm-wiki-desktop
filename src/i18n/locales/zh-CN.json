@@ -242,6 +242,8 @@
   "dashboard.graph.state.cached": "已缓存",
   "dashboard.graph.state.stale": "过期",
   "dashboard.graph.state.missing": "未构建",
+  "dashboard.graphOverview.title": "图谱概览",
+  "dashboard.graphOverview.open": "打开图谱",
   "dashboard.recentProjects.title": "最近项目",
   "dashboard.recentProjects.empty": "暂无最近项目。",
   "dashboard.recentTasks.title": "最近任务",

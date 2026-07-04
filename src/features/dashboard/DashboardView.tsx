@@ -14,24 +14,14 @@ import {
 } from "lucide-react";
 
 import { useNavigationStore } from "../../stores/navigationStore";
+import { useGraphStore } from "../../stores/graphStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useWikiStore } from "../wiki/wikiStore";
+import { PAGE_TYPE_COLORS } from "../../types/graph";
 import type { TaskType } from "../../types/task";
 import type { WikiPageType } from "../../types/wiki";
-
-const TYPE_COLORS: Record<WikiPageType, string> = {
-  concept: "#10a37f",
-  entity: "#0d0d0d",
-  source: "#2563eb",
-  synthesis: "#f5a623",
-  comparison: "#9b9b9b",
-  query: "#c4c4c4",
-  index: "#9b9b9b",
-  overview: "#10a37f",
-  log: "#9b9b9b",
-  other: "#c4c4c4",
-};
+import { buildDashboardGraphPreview, latestCompileTask } from "./dashboardGraphPreview";
 
 const TYPE_LABEL_KEYS: Record<WikiPageType, string> = {
   entity: "wiki.type.entity",
@@ -59,6 +49,8 @@ export function DashboardView() {
   const { t } = useTranslation();
   const project = useProjectStore((state) => state.currentProject);
   const tasks = useTaskStore((state) => state.tasks);
+  const graphData = useGraphStore((state) => state.data);
+  const graphStatus = useGraphStore((state) => state.status);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const tree = useWikiStore((state) => state.tree);
   const loadingTree = useWikiStore((state) => state.loadingTree);
@@ -118,7 +110,12 @@ export function DashboardView() {
       }));
   }, [tasks]);
 
-  const lastCompileTask = tasks.find((task) => task.taskType === "wiki_compile");
+  const graphPreview = useMemo(
+    () => buildDashboardGraphPreview(project, graphData, graphStatus, tasks, tree),
+    [project, graphData, graphStatus, tasks, tree],
+  );
+
+  const lastCompileTask = latestCompileTask(tasks);
   const lastCompileTime = lastCompileTask?.completedAt ?? lastCompileTask?.updatedAt ?? null;
 
   const pendingLint = tasks.filter(
@@ -155,6 +152,72 @@ export function DashboardView() {
           </div>
         </div>
 
+        {/* Graph overview */}
+        <div className="dash-section">
+          <section className="panel--rich dashboard-graph" aria-label={t("dashboard.graphOverview.title")}>
+            <div className="panel__head">
+              <span className="panel__title">{t("dashboard.graphOverview.title")}</span>
+              <span className="badge">{t(`dashboard.graph.state.${graphPreview.graphState}`)}</span>
+            </div>
+            <div className="panel__body dashboard-graph__body">
+              <div className="dashboard-graph__metrics">
+                <div>
+                  <span className="dashboard-graph__metric-value">{graphPreview.nodeCount.toLocaleString()}</span>
+                  {" "}
+                  <span className="dashboard-graph__metric-label">{t("graph.nodesLabel")}</span>
+                </div>
+                <div>
+                  <span className="dashboard-graph__metric-value">{graphPreview.edgeCount.toLocaleString()}</span>
+                  {" "}
+                  <span className="dashboard-graph__metric-label">{t("graph.edgesLabel")}</span>
+                </div>
+                {graphPreview.activeTaskLabel ? (
+                  <div className="dashboard-graph__task">{graphPreview.activeTaskLabel}</div>
+                ) : null}
+                {graphPreview.topTypes.length > 0 ? (
+                  <div className="dashboard-graph__types">
+                    {graphPreview.topTypes.map((row) => (
+                      <span key={row.type}>
+                        {t(TYPE_LABEL_KEYS[row.type as WikiPageType] ?? "wiki.type.other")} {row.count}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <button type="button" className="btn btn--sm" onClick={() => setActiveView("graph")}>
+                  {t("dashboard.graphOverview.open")}
+                </button>
+              </div>
+              <svg className="dashboard-graph__preview" viewBox="0 0 120 72" aria-hidden="true">
+                {graphPreview.previewEdges.map((edge) => {
+                  const source = graphPreview.previewNodes.find((node) => node.id === edge.source);
+                  const target = graphPreview.previewNodes.find((node) => node.id === edge.target);
+                  if (!source || !target) return null;
+                  return (
+                    <line
+                      key={`${edge.source}-${edge.target}`}
+                      className="dashboard-graph__edge"
+                      x1={source.x}
+                      y1={source.y}
+                      x2={target.x}
+                      y2={target.y}
+                    />
+                  );
+                })}
+                {graphPreview.previewNodes.map((node) => (
+                  <circle
+                    key={node.id}
+                    className="dashboard-graph__node"
+                    cx={node.x}
+                    cy={node.y}
+                    r="3"
+                    style={{ fill: PAGE_TYPE_COLORS[node.type as WikiPageType] ?? PAGE_TYPE_COLORS.other }}
+                  />
+                ))}
+              </svg>
+            </div>
+          </section>
+        </div>
+
         {/* Type distribution + recent activity */}
         <div className="dash-section">
           <div className="dash-grid" style={{ gridTemplateColumns: "1fr 1.4fr" }}>
@@ -169,12 +232,12 @@ export function DashboardView() {
                 ) : (
                   distribution.rows.map((row) => (
                     <div className="type-row" key={row.type}>
-                      <span className="type-row__swatch" style={{ background: TYPE_COLORS[row.type] }} />
+                      <span className="type-row__swatch" style={{ background: PAGE_TYPE_COLORS[row.type] }} />
                       <span className="type-row__label">{t(TYPE_LABEL_KEYS[row.type])}</span>
                       <span className="type-row__bar">
                         <span
                           className="type-row__bar-fill"
-                          style={{ width: `${Math.round((row.count / distribution.max) * 100)}%`, background: TYPE_COLORS[row.type] }}
+                          style={{ width: `${Math.round((row.count / distribution.max) * 100)}%`, background: PAGE_TYPE_COLORS[row.type] }}
                         />
                       </span>
                       <span className="type-row__count">{row.count}</span>
