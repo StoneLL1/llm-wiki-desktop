@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 03:35] Task 4 Step 6 完成：补充新建项目父目录选择中英文文案，App 测试通过（保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 03:32] Task 4 Step 5 完成：NewProjectDialog 改为项目名 + 父目录选择 + 生成路径预览，App/projectPath 测试通过（保留既有 jsdom canvas getContext 噪声）
 - [2026-07-05 03:29] Task 4 Step 4 完成：实现项目文件夹名清洗与父目录拼接 helper，project/import picker 测试通过
 - [2026-07-05 03:27] Task 4 Step 3 完成：新增 projectPath 红灯测试，验证因 projectPath.ts 缺失而失败
@@ -68,9 +69,12 @@ Started: 2026-07-05 02:19
 - src/features/project/projectPath.test.ts
 - src/features/project/projectPath.ts
 - src/features/project/ProjectStartView.tsx
+- src/i18n/locales/en.json
+- src/i18n/locales/zh-CN.json
 
 ## Verification
 
+- npm run test -- src/app/App.test.tsx: passed (31 tests; jsdom canvas getContext warnings; Task 4 Step 6)
 - npm run test -- src/app/App.test.tsx src/features/project/projectPath.test.ts: passed (37 tests; jsdom canvas getContext warnings; Task 4 Step 5)
 - npm run test -- src/features/project/projectPath.test.ts src/features/import/nativeFilePicker.test.ts: passed (12 tests; Task 4 Step 4)
 - npm run test -- src/features/project/projectPath.test.ts: failed as expected (missing ./projectPath; Task 4 Step 3)
