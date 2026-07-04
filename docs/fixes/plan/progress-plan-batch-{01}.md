@@ -6,7 +6,7 @@ Started: 2026-07-04 18:38
 
 ## Task Progress
 
-- [ ] Task 1 - Layout State Model
+- [x] Task 1 - Layout State Model
 - [ ] Task 2 - Accessible Splitter Primitive
 - [ ] Task 3 - Shell Splitters and Collapsible Sidebar
 - [ ] Task 4 - Wiki, Exports, and Lint Internal Splitters
@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 18:42] Task 1 Step 3 完成：扩展 `navigationStore` 的 `sidebarCollapsed`、`paneSizes`、collapse/pane setter 和 reset API；layout-changing setter 会写入 sanitized localStorage snapshot，active view/right panel open 不写 layout preferences。
 - [2026-07-04 18:41] Task 1 Step 2 完成：新增 `useResizablePane` 布局常量、宽度 clamp、layout preference sanitize/read/write helper；单测已通过。
 - [2026-07-04 18:40] Task 1 Step 2 绿灯前发现计划文字与测试数据不一致：文字称 NaN 用 min/max 中点，但指定测试要求已知 pane 默认值；实现按测试契约处理，并把任意 min/max 中点作为兜底。`SPEC/gotchas.txt` 当前已有用户未提交改动且终端编码无法稳定 patch，未强行写入。
 - [2026-07-04 18:39] Task 1 Step 1 完成：新增 layout preference 红灯测试；`npm run test -- src/hooks/useResizablePane.test.ts` 按预期失败，原因是 `./useResizablePane` 尚不存在。
@@ -25,12 +26,15 @@ Started: 2026-07-04 18:38
 
 ## Changed Files
 
+- src/stores/navigationStore.ts
+- src/stores/navigationStore.test.ts
 - src/hooks/useResizablePane.ts
 - src/hooks/useResizablePane.test.ts
 - docs/fixes/plan/progress-plan-batch-{01}.md
 
 ## Verification
 
+- npm run test -- src/stores/navigationStore.test.ts src/hooks/useResizablePane.test.ts: passed (6 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: passed (4 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: failed as expected (missing ./useResizablePane)
 - npm run test: not run
