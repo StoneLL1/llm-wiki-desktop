@@ -48,6 +48,7 @@ pub fn create_project(
             root_path: summary.root_path.clone(),
             template: summary.template,
             opened_at: now_rfc3339(),
+            missing: false,
         })?;
     let _ = recents;
     Ok(summary)
@@ -80,6 +81,7 @@ pub fn open_project(
                     root_path: summary.root_path.clone(),
                     template: summary.template,
                     opened_at: now_rfc3339(),
+                    missing: false,
                 })?;
         }
     }
@@ -143,5 +145,6 @@ pub fn remember_recent_project(
             root_path: context.root.to_string_lossy().into_owned(),
             template: request.template,
             opened_at: now_rfc3339(),
+            missing: false,
         })
 }

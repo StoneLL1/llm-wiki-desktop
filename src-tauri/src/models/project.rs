@@ -102,6 +102,8 @@ pub struct RecentProject {
     pub root_path: String,
     pub template: ProjectTemplate,
     pub opened_at: String,
+    #[serde(default)]
+    pub missing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,5 +277,18 @@ mod tests {
             json!("initialize_folder")
         );
         let _ = OpenProjectKind::Opened;
+    }
+
+    #[test]
+    fn recent_project_missing_defaults_to_false_for_legacy_json() {
+        let raw = serde_json::json!({
+            "projectId": "p",
+            "name": "Project",
+            "rootPath": "D:/missing",
+            "template": "general",
+            "openedAt": "2026-07-04T00:00:00Z"
+        });
+        let project: RecentProject = serde_json::from_value(raw).unwrap();
+        assert!(!project.missing);
     }
 }
