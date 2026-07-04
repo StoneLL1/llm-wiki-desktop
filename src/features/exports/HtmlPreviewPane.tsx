@@ -3,6 +3,7 @@ import { FileText } from "lucide-react";
 
 interface HtmlPreviewPaneProps {
   html: string | null;
+  mode?: "inline" | "source";
 }
 
 /**
@@ -11,7 +12,7 @@ interface HtmlPreviewPaneProps {
  * Skill or model emitted a `<script>`, it cannot execute or reach the app.
  * Uses `srcDoc` so no custom protocol or asset URL is required.
  */
-export function HtmlPreviewPane({ html }: HtmlPreviewPaneProps) {
+export function HtmlPreviewPane({ html, mode = "inline" }: HtmlPreviewPaneProps) {
   const { t } = useTranslation();
   if (!html) {
     return (
@@ -19,6 +20,13 @@ export function HtmlPreviewPane({ html }: HtmlPreviewPaneProps) {
         <FileText size={20} strokeWidth={1.5} />
         <span>{t("exports.preview.empty")}</span>
       </div>
+    );
+  }
+  if (mode === "source") {
+    return (
+      <pre className="html-preview__source">
+        <code>{html}</code>
+      </pre>
     );
   }
   return (

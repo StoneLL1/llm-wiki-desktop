@@ -10,7 +10,7 @@ Started: 2026-07-05 01:25
 - [x] Task 2 - Backend browser-open command
 - [x] Task 3 - Export store and navigation focus state
 - [x] Task 4 - AppShell focus integration
-- [ ] Task 5 - Export rows, actions, and preview toolbar
+- [x] Task 5 - Export rows, actions, and preview toolbar
 - [ ] Task 6 - CSS and i18n
 - [ ] Task 7 - Frontend regression tests
 - [ ] Task 8 - Backend verification
@@ -28,6 +28,8 @@ Started: 2026-07-05 01:25
 - [2026-07-05 01:34] Task 3 实现：新增导出预览模式、浏览器打开 action，以及 workspace focus 状态恢复逻辑
 - [2026-07-05 01:39] Task 4 红灯测试：新增 AppShell workspace focus 用例，确认缺少 focus class、reopen 隐藏和 Escape 退出逻辑
 - [2026-07-05 01:40] Task 4 实现：AppShell 使用 showRightPanel 派生右栏显示，并在 Escape 时优先清除 workspace focus
+- [2026-07-05 01:42] Task 5 红灯测试：新增导出行点击、浏览器打开、preview toolbar source/focus 用例
+- [2026-07-05 01:43] Task 5 实现：成功导出行支持点击预览，文件单元格内联动作，预览 toolbar 支持 source/inline、浏览器打开和 focus
 
 ## Changed Files
 
@@ -43,12 +45,16 @@ Started: 2026-07-05 01:25
 - src/stores/navigationStore.test.ts
 - src/components/app/AppShell.tsx
 - src/components/app/appShellActions.test.tsx
+- src/features/exports/ExportsView.tsx
+- src/features/exports/HtmlPreviewPane.tsx
+- src/features/exports/exportsView.test.tsx
 
 ## Verification
 
 - npm run test: not run
 - npm run test -- src/stores/exportStore.test.ts src/stores/navigationStore.test.ts: passed (Task 3)
 - npm run test -- src/components/app/appShellActions.test.tsx: passed (Task 4)
+- npm run test -- src/features/exports/exportsView.test.tsx: passed (Task 5)
 - npm run lint: not run
 - npm run build: not run
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 1, Task 2)
