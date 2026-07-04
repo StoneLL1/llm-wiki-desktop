@@ -8,6 +8,7 @@ import type {
   GraphStatus,
   SaveGraphLayoutRequest,
 } from "../types/graph";
+import { waitForTaskTerminal } from "../lib/waitForTaskTerminal";
 import type { WikiPageType } from "../types/wiki";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 import { useTaskStore } from "./taskStore";
@@ -21,6 +22,7 @@ interface GraphState {
   error: string | null;
   colorMode: GraphColorMode;
   selectedNodeId: string | null;
+  focusedNodeId: string | null;
   search: string;
   /** Page types hidden from the canvas. Unchecked types are omitted here. */
   typeFilter: Set<WikiPageType>;
@@ -44,11 +46,14 @@ interface GraphState {
   ) => Promise<void>;
   setColorMode: (mode: GraphColorMode) => void;
   setSelectedNode: (id: string | null) => void;
+  setFocusedNodeId: (nodeId: string | null) => void;
+  clearFocus: () => void;
   setSearch: (query: string) => void;
   toggleTypeFilter: (type: WikiPageType) => void;
   setDegreeThreshold: (value: number) => void;
   registerActions: (actions: { exportPng: (() => void) | null; recomputeLayout: (() => void) | null }) => void;
   reset: () => void;
+  projectKey: string | null;
 }
 
 const initial = {
@@ -59,18 +64,41 @@ const initial = {
   error: null as string | null,
   colorMode: "type" as GraphColorMode,
   selectedNodeId: null as string | null,
+  focusedNodeId: null as string | null,
   search: "",
   typeFilter: new Set<WikiPageType>(),
   degreeThreshold: 0,
   exportPng: null,
   recomputeLayout: null,
+  projectKey: null as string | null,
 };
 
 export const useGraphStore = create<GraphState>((set, get) => ({
   ...initial,
   load: async (projectId, rootPath) => {
     const scope = captureProjectScope();
-    set({ status: "loading", error: null });
+    const projectKey = createProjectKey(projectId, rootPath);
+    const state = get();
+    const sameProject = state.projectKey === projectKey;
+    if (!sameProject) {
+      set({
+        data: null,
+        cached: false,
+        layoutStale: false,
+        status: "loading",
+        error: null,
+        selectedNodeId: null,
+        focusedNodeId: null,
+        search: "",
+        typeFilter: new Set<WikiPageType>(),
+        degreeThreshold: 0,
+        projectKey,
+      });
+    } else if (!state.data) {
+      set({ status: "loading", error: null, projectKey });
+    } else {
+      set({ error: null, projectKey });
+    }
     try {
       const result = await invoke<GraphBuildResult>("get_graph", {
         request: { projectId, projectRootPath: rootPath },
@@ -80,30 +108,46 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         data: result.data,
         cached: result.cached,
         layoutStale: result.layoutStale,
-        status: "ready",
+        status: graphStatusForData(result.data),
+        error: null,
+        projectKey,
       });
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       if (errorCode(error) === "GRAPH_BUILD_REQUIRED") {
         try {
-          await runGraphBuild(projectId, rootPath, scope, set);
+          await runGraphBuild(projectId, rootPath, scope, projectKey);
         } catch (buildError) {
           if (!isProjectScopeCurrent(scope)) return;
-          set({ status: "error", error: errorMessage(buildError) });
+          set((state) => ({
+            status: state.data ? graphStatusForData(state.data) : "error",
+            error: errorMessage(buildError),
+          }));
         }
       } else {
-        set({ status: "error", error: errorMessage(error) });
+        set((state) => ({
+          status: state.data ? graphStatusForData(state.data) : "error",
+          error: errorMessage(error),
+        }));
       }
     }
   },
   rebuild: async (projectId, rootPath) => {
     const scope = captureProjectScope();
-    set({ status: "loading", error: null });
+    const projectKey = createProjectKey(projectId, rootPath);
+    set((state) => ({
+      status: state.data ? "rebuilding" : "loading",
+      error: null,
+      projectKey,
+    }));
     try {
-      await runGraphBuild(projectId, rootPath, scope, set);
+      await runGraphBuild(projectId, rootPath, scope, projectKey);
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
-      set({ status: "error", error: errorMessage(error) });
+      set((state) => ({
+        status: state.data ? graphStatusForData(state.data) : "error",
+        error: errorMessage(error),
+      }));
     }
   },
   saveLayout: async (projectId, rootPath, positions, communities) => {
@@ -128,7 +172,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
   },
   setColorMode: (colorMode) => set({ colorMode }),
-  setSelectedNode: (selectedNodeId) => set({ selectedNodeId }),
+  setSelectedNode: (selectedNodeId) =>
+    set((state) => ({
+      selectedNodeId,
+      focusedNodeId: selectedNodeId && selectedNodeId === state.selectedNodeId ? state.focusedNodeId : null,
+    })),
+  setFocusedNodeId: (focusedNodeId) => set({ focusedNodeId }),
+  clearFocus: () => set({ focusedNodeId: null }),
   setSearch: (search) => set({ search }),
   toggleTypeFilter: (type) =>
     set((state) => {
@@ -146,37 +196,46 @@ async function runGraphBuild(
   projectId: string,
   rootPath: string,
   scope: ReturnType<typeof captureProjectScope>,
-  set: (partial: Partial<GraphState>) => void,
+  projectKey: string,
 ): Promise<void> {
-  let task = await invoke<BackendTask>("build_graph", {
+  const task = await invoke<BackendTask>("build_graph", {
     request: { projectId, projectRootPath: rootPath },
   });
   useTaskStore.getState().upsertTask(task);
   useTaskStore.getState().openDrawer(task.id);
-  while (!isTerminalTask(task)) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    task = await invoke<BackendTask>("get_task", { request: { taskId: task.id } });
-    useTaskStore.getState().upsertTask(task);
-  }
+  const terminalTask = await waitForTaskTerminal(task);
+  useTaskStore.getState().upsertTask(terminalTask);
   if (!isProjectScopeCurrent(scope)) return;
-  if (task.status !== "succeeded") {
-    throw new Error(task.error?.message ?? `Graph build ${task.status}.`);
+  if (terminalTask.status !== "succeeded") {
+    useGraphStore.setState((state) => ({
+      status: state.data ? graphStatusForData(state.data) : "error",
+      error:
+        terminalTask.status === "cancelled"
+          ? "Graph build was cancelled."
+          : terminalTask.error?.message ?? "Graph build failed.",
+    }));
+    return;
   }
   const result = await invoke<GraphBuildResult>("get_graph", {
     request: { projectId, projectRootPath: rootPath },
   });
   if (!isProjectScopeCurrent(scope)) return;
-  set({
+  useGraphStore.setState({
     data: result.data,
     cached: result.cached,
     layoutStale: result.layoutStale,
-    status: "ready",
+    status: graphStatusForData(result.data),
     error: null,
+    projectKey,
   });
 }
 
-function isTerminalTask(task: BackendTask): boolean {
-  return task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
+function graphStatusForData(data: GraphData): GraphStatus {
+  return data.nodes.length === 0 ? "ready-empty" : "ready";
+}
+
+function createProjectKey(projectId: string, rootPath: string): string {
+  return `${projectId}\u0000${rootPath}`;
 }
 
 function errorMessage(error: unknown): string {
