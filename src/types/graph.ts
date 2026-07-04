@@ -51,7 +51,7 @@ export interface SaveGraphLayoutRequest {
 
 export type GraphColorMode = "type" | "community" | "plain";
 
-export type GraphStatus = "idle" | "loading" | "ready" | "error";
+export type GraphStatus = "idle" | "loading" | "rebuilding" | "ready" | "ready-empty" | "error";
 
 /** Stable palette for type coloring, aligned with the graph.html design swatches. */
 export const PAGE_TYPE_COLORS: Record<WikiPageType, string> = {
