@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use tauri::{AppHandle, Manager, State};
 
@@ -8,8 +9,9 @@ use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
 use crate::models::export::{
     ExportContentOptions, ExportRecord, ExportRoute, ExportRoutePreference, ExportType,
-    ListExportsRequest, OpenExportFolderRequest, ReadExportPreviewRequest, RegenerateExportRequest,
-    StartExportRequest, ToggleExportBookmarkRequest, ToggleExportBookmarkResponse,
+    ListExportsRequest, OpenExportFolderRequest, OpenExportInBrowserRequest,
+    ReadExportPreviewRequest, RegenerateExportRequest, StartExportRequest,
+    ToggleExportBookmarkRequest, ToggleExportBookmarkResponse,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
@@ -407,17 +409,32 @@ pub fn read_export_preview(
     state: State<'_, AppState>,
     request: ReadExportPreviewRequest,
 ) -> Result<String, BackendError> {
-    let path = &request.output_path;
-    if !path.starts_with("exports/html/") || path.contains("..") {
-        return Err(BackendError::new(
-            "EXPORT_PATH_INVALID",
-            "Preview may only read files under exports/html/.",
-            true,
-            true,
-        ));
-    }
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.file_store.read_markdown(&context, path)
+    let absolute = state
+        .export_service
+        .resolve_existing_html_export(&context, &request.output_path)?;
+    std::fs::read_to_string(&absolute).map_err(|err| {
+        BackendError::new(
+            "EXPORT_PREVIEW_READ_FAILED",
+            format!("Could not read export preview: {err}"),
+            true,
+            false,
+        )
+    })
+}
+
+/// Open an exported HTML file in the OS default browser. Backend-owned so the
+/// UI never spawns processes directly.
+#[tauri::command]
+pub fn open_export_in_browser(
+    state: State<'_, AppState>,
+    request: OpenExportInBrowserRequest,
+) -> Result<(), BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let absolute = state
+        .export_service
+        .resolve_existing_html_export(&context, &request.output_path)?;
+    open_in_default_browser(&absolute)
 }
 
 /// Reveal an exported file in the OS file manager. Backend-owned so the UI never
@@ -427,37 +444,47 @@ pub fn open_export_folder(
     state: State<'_, AppState>,
     request: OpenExportFolderRequest,
 ) -> Result<(), BackendError> {
-    let path = &request.output_path;
-    if !path.starts_with("exports/html/") || path.contains("..") {
-        return Err(BackendError::new(
-            "EXPORT_PATH_INVALID",
-            "Open may only target files under exports/html/.",
-            true,
-            true,
-        ));
-    }
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let absolute = context.resolve_project_path(path)?;
+    let absolute = state
+        .export_service
+        .resolve_existing_html_export(&context, &request.output_path)?;
     reveal_in_file_manager(&absolute)
 }
 
-fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), BackendError> {
+fn reveal_in_file_manager(path: &Path) -> Result<(), BackendError> {
     let result = if cfg!(target_os = "windows") {
-        std::process::Command::new("explorer")
-            .args(["/select,", &path.to_string_lossy()])
+        Command::new("explorer")
+            .args(["/select,"])
+            .arg(path)
             .spawn()
     } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
-            .args(["-R", &path.to_string_lossy()])
-            .spawn()
+        Command::new("open").args(["-R"]).arg(path).spawn()
     } else {
-        let parent = path.parent().unwrap_or(std::path::Path::new("."));
-        std::process::Command::new("xdg-open").arg(parent).spawn()
+        let parent = path.parent().unwrap_or(Path::new("."));
+        Command::new("xdg-open").arg(parent).spawn()
     };
     result.map(|_| ()).map_err(|err| {
         BackendError::new(
             "EXPORT_OPEN_FAILED",
             format!("Could not open the file manager: {err}"),
+            true,
+            false,
+        )
+    })
+}
+
+fn open_in_default_browser(path: &Path) -> Result<(), BackendError> {
+    let result = if cfg!(target_os = "windows") {
+        Command::new("explorer").arg(path).spawn()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(path).spawn()
+    } else {
+        Command::new("xdg-open").arg(path).spawn()
+    };
+    result.map(|_| ()).map_err(|err| {
+        BackendError::new(
+            "EXPORT_OPEN_FAILED",
+            format!("Could not open the export in a browser: {err}"),
             true,
             false,
         )

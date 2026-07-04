@@ -192,6 +192,7 @@ pub fn run() {
             commands::export_commands::list_exports,
             commands::export_commands::toggle_export_bookmark,
             commands::export_commands::read_export_preview,
+            commands::export_commands::open_export_in_browser,
             commands::export_commands::open_export_folder,
         ])
         .run(tauri::generate_context!())
