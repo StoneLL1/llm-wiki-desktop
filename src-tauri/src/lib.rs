@@ -182,6 +182,8 @@ pub fn run() {
             commands::lint_commands::run_local_lint,
             commands::lint_commands::start_deep_lint,
             commands::lint_commands::get_deep_lint_report,
+            commands::lint_commands::list_lint_history,
+            commands::lint_commands::read_lint_history_report,
             commands::lint_commands::apply_lint_fix,
             commands::lint_commands::apply_lint_fixes,
             commands::lint_commands::add_lint_ignore,

@@ -9,16 +9,16 @@ use crate::models::compile::CompileRoutePreference;
 use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus};
 use crate::models::lint::{
     AddLintIgnoreRequest, ApplyLintFixesBatchRequest, ApplyLintFixRequest, DeepLintReport,
-    GetDeepLintReportRequest, LintBatchOutcome, LintFixOutcome, LintIgnoreFile, LintReport,
-    ListLintIgnoresRequest, RemoveLintIgnoreRequest, RunLocalLintRequest, StartDeepLintRequest,
+    GetDeepLintReportRequest, LintBatchOutcome, LintFixOutcome, LintHistoryFile, LintIgnoreFile,
+    LintReport, ListLintHistoryRequest, ListLintIgnoresRequest, PersistedLintReport,
+    ReadLintHistoryReportRequest, RemoveLintIgnoreRequest, RunLocalLintRequest,
+    StartDeepLintRequest,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::{AgentService, LlmService};
 use crate::tasks::task_model::LogLevel;
-
-const LINT_REPORTS_DIR: &str = ".app/lint-reports";
 
 /// Run the deterministic local lint pass. Synchronous — it never calls a
 /// model and completes in a single wiki scan.
@@ -28,9 +28,11 @@ pub fn run_local_lint(
     request: RunLocalLintRequest,
 ) -> Result<LintReport, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
+    let report = state
         .lint_service
-        .run_local_lint(&context, &state.search_service)
+        .run_local_lint(&context, &state.search_service)?;
+    state.lint_service.persist_local_report(&context, &report)?;
+    Ok(report)
 }
 
 /// Start an Agent deep-lint run as a cancellable background task (Agent CLI
@@ -174,11 +176,10 @@ async fn run_deep_lint(
         raw_output: raw,
         generated_at: crate::utils::time_utils::now_rfc3339(),
     };
-    let report_path = format!("{LINT_REPORTS_DIR}/{task_id}.json");
-    state.file_store.ensure_dir(context, LINT_REPORTS_DIR)?;
-    state
-        .file_store
-        .write_json_atomic(context, &report_path, &report)?;
+    let entry = state
+        .lint_service
+        .persist_deep_report(context, task_id, request.route, &report)?;
+    let report_path = format!(".app/lint-reports/{}.json", entry.id);
 
     state
         .task_service
@@ -205,8 +206,37 @@ pub fn get_deep_lint_report(
     request: GetDeepLintReportRequest,
 ) -> Result<DeepLintReport, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let path = format!("{LINT_REPORTS_DIR}/{}.json", request.task_id);
-    state.file_store.read_json(&context, &path)
+    let persisted = state
+        .lint_service
+        .read_lint_history_report(&context, &request.task_id)?;
+    persisted.deep_report.ok_or_else(|| {
+        BackendError::new(
+            "LINT_DEEP_REPORT_MISSING",
+            "The selected lint history report is not a deep lint report.",
+            true,
+            true,
+        )
+    })
+}
+
+#[tauri::command]
+pub fn list_lint_history(
+    state: State<'_, AppState>,
+    request: ListLintHistoryRequest,
+) -> Result<LintHistoryFile, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.lint_service.list_lint_history(&context)
+}
+
+#[tauri::command]
+pub fn read_lint_history_report(
+    state: State<'_, AppState>,
+    request: ReadLintHistoryReportRequest,
+) -> Result<PersistedLintReport, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .lint_service
+        .read_lint_history_report(&context, &request.id)
 }
 
 /// Apply (or plan) a single lint fix. Safe fixes apply under a Git checkpoint;
@@ -462,12 +492,10 @@ fn task_error(message: String) -> BackendError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn report_path_is_task_scoped() {
         assert_eq!(
-            format!("{LINT_REPORTS_DIR}/task-1.json"),
+            format!(".app/lint-reports/{}.json", "task-1"),
             ".app/lint-reports/task-1.json"
         );
     }
