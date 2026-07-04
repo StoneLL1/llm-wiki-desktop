@@ -198,10 +198,19 @@ pub struct OpenExportFolderRequest {
     pub output_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenExportInBrowserRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub output_path: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ExportContentOptions, ExportRecord, ExportRoute, ExportStatus, ExportType,
+        OpenExportInBrowserRequest,
     };
 
     #[test]
@@ -291,5 +300,21 @@ mod tests {
         assert_eq!(value["embedImages"], serde_json::json!(true));
         let back: ExportContentOptions = serde_json::from_value(value).unwrap();
         assert_eq!(back, custom);
+    }
+
+    #[test]
+    fn open_export_in_browser_request_uses_camel_case() {
+        let request = OpenExportInBrowserRequest {
+            project_id: "project-1".into(),
+            project_root_path: "D:/Projects/wiki".into(),
+            output_path: "exports/html/报告.html".into(),
+        };
+
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(value["projectId"], serde_json::json!("project-1"));
+        assert_eq!(value["projectRootPath"], serde_json::json!("D:/Projects/wiki"));
+        assert_eq!(value["outputPath"], serde_json::json!("exports/html/报告.html"));
+        assert!(value.get("project_id").is_none());
     }
 }

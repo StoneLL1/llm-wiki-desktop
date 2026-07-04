@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::errors::BackendError;
 use crate::models::export::{
@@ -7,6 +8,7 @@ use crate::models::export::{
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
 use crate::services::SearchService;
+use crate::utils::path_utils::normalize_project_path;
 use crate::utils::time_utils::now_rfc3339;
 
 const EXPORTS_HTML_DIR: &str = "exports/html";
@@ -268,6 +270,40 @@ impl ExportService {
             ));
         }
         Ok(path)
+    }
+
+    /// Resolve an already-created HTML export for read/open operations.
+    /// User-provided paths must remain project-relative, under `exports/html/`,
+    /// point at `.html`, and already exist as a file.
+    pub fn resolve_existing_html_export(
+        &self,
+        context: &ProjectContext,
+        output_relative: &str,
+    ) -> Result<PathBuf, BackendError> {
+        let normalized = normalize_project_path(output_relative);
+        if !normalized.starts_with("exports/html/")
+            || normalized.contains("..")
+            || !normalized.to_ascii_lowercase().ends_with(".html")
+        {
+            return Err(BackendError::new(
+                "EXPORT_PATH_INVALID",
+                "Exports may only be read from exports/html/*.html.",
+                true,
+                true,
+            ));
+        }
+
+        let absolute = context.resolve_project_path(&normalized)?;
+        if !absolute.is_file() {
+            return Err(BackendError::new(
+                "EXPORT_NOT_FOUND",
+                "Export HTML file does not exist.",
+                true,
+                true,
+            ));
+        }
+
+        Ok(absolute)
     }
 
     /// Strip a single ```html / ``` fence if the model wrapped the document,
@@ -611,6 +647,60 @@ mod tests {
         )
         .unwrap();
         assert!(on_disk.starts_with("<!doctype html>"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_existing_html_export_accepts_valid_cjk_path() {
+        let (context, root) = tmp_context("resolve-cjk");
+        let service = ExportService::default();
+        write_file(&context, "exports/html/报告 index.html", "<!doctype html>");
+
+        let resolved = service
+            .resolve_existing_html_export(&context, "exports/html/报告 index.html")
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            context
+                .resolve_project_path("exports/html/报告 index.html")
+                .unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_existing_html_export_rejects_escape_and_non_html_paths() {
+        let (context, root) = tmp_context("resolve-invalid");
+        let service = ExportService::default();
+        write_file(&context, "exports/html/ok.html", "<!doctype html>");
+
+        let escape = service
+            .resolve_existing_html_export(&context, "exports/html/../../wiki/x.html")
+            .expect_err("path traversal must be rejected");
+        let wrong_dir = service
+            .resolve_existing_html_export(&context, "wiki/x.html")
+            .expect_err("non-export path must be rejected");
+        let wrong_ext = service
+            .resolve_existing_html_export(&context, "exports/html/x.txt")
+            .expect_err("non-html path must be rejected");
+
+        assert_eq!(escape.code, "EXPORT_PATH_INVALID");
+        assert_eq!(wrong_dir.code, "EXPORT_PATH_INVALID");
+        assert_eq!(wrong_ext.code, "EXPORT_PATH_INVALID");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_existing_html_export_requires_existing_file() {
+        let (context, root) = tmp_context("resolve-missing");
+        let service = ExportService::default();
+
+        let err = service
+            .resolve_existing_html_export(&context, "exports/html/missing.html")
+            .expect_err("missing export must be rejected");
+
+        assert_eq!(err.code, "EXPORT_NOT_FOUND");
         std::fs::remove_dir_all(root).unwrap();
     }
 
