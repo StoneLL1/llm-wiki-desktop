@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -16,6 +16,7 @@ beforeEach(async () => {
   await i18next.changeLanguage("en");
   useNavigationStore.getState().setActiveView("dashboard");
   useNavigationStore.getState().setRightPanelOpen(true);
+  useNavigationStore.setState({ workspaceFocus: null, rightPanelOpenBeforeFocus: null });
   useProjectStore.getState().setPendingAction(undefined);
   invokeMock.mockReset();
 });
@@ -45,6 +46,31 @@ describe("AppShell workspace header", () => {
     expect(
       screen.queryByText("Global preferences, project-scoped provider settings, and secure key status."),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("AppShell workspace focus", () => {
+  it("hides the right panel reopen control while the export preview is focused", () => {
+    useNavigationStore.getState().setActiveView("exports");
+    useNavigationStore.getState().focusWorkspace("exportPreview");
+
+    render(<AppShell />);
+
+    expect(document.querySelector(".app-shell")).toHaveClass("is-workspace-focused");
+    expect(workspaceHeader().queryByRole("button", { name: "Open context panel" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Collapse context panel" })).not.toBeInTheDocument();
+  });
+
+  it("clears workspace focus with Escape and restores the previous right panel state", () => {
+    useNavigationStore.getState().setActiveView("exports");
+    useNavigationStore.getState().setRightPanelOpen(true);
+    useNavigationStore.getState().focusWorkspace("exportPreview");
+
+    render(<AppShell />);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(useNavigationStore.getState().workspaceFocus).toBeNull();
+    expect(useNavigationStore.getState().rightPanelOpen).toBe(true);
   });
 });
 
