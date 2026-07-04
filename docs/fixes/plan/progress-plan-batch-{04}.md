@@ -13,7 +13,7 @@ Started: 2026-07-05 01:25
 - [x] Task 5 - Export rows, actions, and preview toolbar
 - [x] Task 6 - CSS and i18n
 - [x] Task 7 - Frontend regression tests
-- [ ] Task 8 - Backend verification
+- [x] Task 8 - Backend verification
 - [ ] Task 9 - Required checks and review workflow
 
 ## Activity Log
@@ -32,6 +32,7 @@ Started: 2026-07-05 01:25
 - [2026-07-05 01:43] Task 5 实现：成功导出行支持点击预览，文件单元格内联动作，预览 toolbar 支持 source/inline、浏览器打开和 focus
 - [2026-07-05 01:45] Task 6 实现：补充导出行内动作、segmented control、HTML source preview 样式以及中英文导出预览翻译键
 - [2026-07-05 01:46] Task 7 实现：新增 CSS contract 覆盖 workspace focus、导出行内动作、segmented control 和 HTML source preview
+- [2026-07-05 01:49] Task 8 验证：cargo test export 命中已知 Windows loader 0xc0000139；cargo check --lib --tests 通过
 
 ## Changed Files
 
@@ -66,8 +67,8 @@ Started: 2026-07-05 01:25
 - npm run test -- src/features/exports/exportsView.test.tsx src/stores/exportStore.test.ts src/stores/navigationStore.test.ts src/components/app/appShellActions.test.tsx src/test/ui-css-contracts.test.ts: passed (Task 7)
 - npm run lint: not run
 - npm run build: not run
-- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 1, Task 2)
-- cargo test --manifest-path src-tauri/Cargo.toml export: not run
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 1, Task 2, Task 8)
+- cargo test --manifest-path src-tauri/Cargo.toml export: failed to start test binary (0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND; known local loader issue)
 - console.log scan: not run
 
 ## Blockers
