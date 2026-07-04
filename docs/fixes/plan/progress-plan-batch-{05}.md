@@ -1,7 +1,7 @@
 # Progress - plan-batch-{05}
 
 Plan: D:\Users\Aletta\Desktop\Works\llm-wiki-desktop\docs\fixes\plan\plan-batch-{05}.md
-Status: in_progress
+Status: completed
 Started: 2026-07-05 02:19
 
 ## step Progress
@@ -11,10 +11,11 @@ Started: 2026-07-05 02:19
 - [x] Task 3 - Lint History Frontend Restore UX
 - [x] Task 4 - Native Directory Picker and New Project Parent Path
 - [x] Task 5 - Compact Project Start Page and Enriched Recents
-- [ ] Task 6 - Regression Coverage, Review, and Quality Gates
+- [x] Task 6 - Regression Coverage, Review, and Quality Gates
 
 ## Activity Log
 
+- [2026-07-05 04:40] Task 6 final verification completed: npm run test, npm run lint, npm run build, console.log scan, and cargo check --lib --tests passed; Status set to completed
 - [2026-07-05 04:33] Task 6 Step 6 review fixes completed: addressed subagent findings for missing recent bootstrap, picker rejection handling, mandatory Git UI, nested source counts, and empty graph cache detection; focused frontend tests passed and cargo check passed
 - [2026-07-05 04:27] Task 6 Step 6 review completed: Subagent A and B returned findings; accepted five scoped issues, with Git checkbox removed because backend requires Git initialization
 - [2026-07-05 04:22] Task 6 Step 5 完成：cargo check --manifest-path src-tauri/Cargo.toml --lib --tests 通过
@@ -99,6 +100,11 @@ Started: 2026-07-05 02:19
 
 ## Verification
 
+- cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (final verification)
+- console.log scan: passed (final verification; no matches)
+- npm run build: passed (final verification; Vite large chunk warning only)
+- npm run lint: passed (final verification)
+- npm run test: passed (47 files, 300 tests; jsdom canvas getContext warnings; final verification)
 - cargo check --manifest-path src-tauri/Cargo.toml --lib --tests: passed (Task 6 Step 6 review fix compile check)
 - cargo test --manifest-path src-tauri/Cargo.toml scan_project_counts_nested_sources_and_ignores_empty_graph_cache --lib: failed to execute test binary in this environment (STATUS_ENTRYPOINT_NOT_FOUND) after compilation
 - npm run test -- src/stores/projectStore.test.ts src/app/App.test.tsx: passed (38 tests; jsdom canvas getContext warnings; Task 6 Step 6 review fixes)

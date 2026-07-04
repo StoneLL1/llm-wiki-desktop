@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-05] batch-05 Project/Task/Health UX implementation - Implemented task timeline sorting, durable Lint history restore, native directory picker/new-project parent path, compact project launch actions, enriched recents, and review fixes - Key decision: Lint history persists in `.app/lint-history.json` + `.app/lint-reports/`; launch opens only native-picked folders and skips missing recents on bootstrap.
+
 [2026-07-05] batch-04 export workflow preview implementation - Implemented shared Rust HTML export resolver, open-in-browser command, row preview/actions, source preview mode, workspace focus/maximized preview, and review-driven focus/keyboard/error-code fixes - Key decision: React only calls typed Tauri commands; export HTML paths are validated in Rust; cargo test export remains blocked by local Windows loader 0xc0000139 while cargo check --lib --tests passes.
 
 [2026-07-05] batch-03 knowledge/chat/bookmarks implementation - Implemented app-owned wiki/export bookmarks, sidebar favorites, Chinese local-search normalization, pinned-page chat retrieval, Wiki Ask AI panel, pinned citation UI, integration tests, and review fixes - Key decision: user favorites stay in `.app/bookmarks.json`; Chat remains local retrieval plus Agent/BYOK answer flow; export/sidebar/page-chat async paths guard against project or page switches.
