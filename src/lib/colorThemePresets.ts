@@ -102,8 +102,8 @@ function preset(
 ): ColorThemePreset {
   return {
     id,
-    labelKey: `settings.appearance.preset.${id}`,
-    descriptionKey: `settings.appearance.preset.${id}Desc`,
+    labelKey: `themePreset.${id}.name`,
+    descriptionKey: `themePreset.${id}.description`,
     swatches,
     variants: {
       light: variant("light", { ...codexLight, ...light }),

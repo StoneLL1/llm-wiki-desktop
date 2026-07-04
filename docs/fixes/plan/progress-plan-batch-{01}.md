@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 19:29] Task 7 Step 4 完成：新增 Appearance color theme/Markdown preview 与 6 个 preset 的中英文 i18n 文案，preset metadata 改用计划要求的 `themePreset.*` key。
 - [2026-07-04 19:26] Task 7 Step 3 完成：新增 reading token 默认值，Wiki/Chat Markdown、HTML preview 外壳和 Appearance Markdown preview 改用 reading token，并补齐 preset grid 样式。
 - [2026-07-04 19:22] Task 7 Step 2 完成：AppearanceSettings 新增内置 color theme preset radiogroup、色块、选中状态和 Markdown reading preview 结构。
 - [2026-07-04 19:20] Task 7 Step 1 完成：AppearanceSettings props 扩展为接收 `colorThemePreset` 与 preset change callback，SettingsView 通过现有 settings store savePatch 接线全局颜色主题偏好。
