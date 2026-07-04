@@ -1,7 +1,10 @@
-const INVALID_FOLDER_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
+const INVALID_FOLDER_CHARS = /[<>:"/\\|?*]/g;
 
 export function sanitizeProjectFolderName(value: string): string {
-  return value
+  const withoutControlChars = Array.from(value)
+    .filter((char) => (char.codePointAt(0) ?? 0) >= 32)
+    .join("");
+  return withoutControlChars
     .trim()
     .replace(INVALID_FOLDER_CHARS, "")
     .replace(/[. ]+$/g, "")
