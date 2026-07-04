@@ -6,6 +6,7 @@ import type {
   WikiPageContent,
   WikiPageMeta,
   WikiTree,
+  WikiTreeNode,
 } from "../../types/wiki";
 import type { ExportRecord } from "../../types/export";
 import { MarkdownReader } from "./MarkdownReader";
@@ -17,7 +18,7 @@ import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
 import { HtmlPreviewPane as WikiHtmlPreviewPane } from "./HtmlPreviewPane";
 import { RelatedPagesPanel } from "./RelatedPagesPanel";
 import { selectWikiPreviewRecord, WikiView } from "./WikiView";
-import { useWikiStore } from "./wikiStore";
+import { updateTreeNodeBookmark, useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
 
@@ -74,6 +75,84 @@ describe("wikiStore", () => {
     expect(useWikiStore.getState().requestedExportType).toBe("knowledge_card");
     useWikiStore.getState().consumeExportRequest();
     expect(useWikiStore.getState().requestedExportType).toBeNull();
+  });
+
+  it("updates bookmark state in flat pages and recursive tree nodes", async () => {
+    const page = pageMeta({ bookmarked: false });
+    const tree: WikiTree = {
+      root: {
+        name: "wiki",
+        kind: "folder",
+        path: "wiki",
+        starred: false,
+        bookmarked: false,
+        fileCount: 1,
+        children: [{
+          name: "concepts",
+          kind: "folder",
+          path: "wiki/concepts",
+          starred: false,
+          bookmarked: false,
+          fileCount: 1,
+          children: [{
+            name: "transformer.md",
+            kind: "file",
+            path: page.path,
+            starred: false,
+            bookmarked: false,
+            fileCount: 1,
+            children: [],
+          }],
+        }],
+      },
+      pages: [page],
+      totalPages: 1,
+    };
+    useWikiStore.setState({
+      page: pageContent({ meta: page }),
+      tree,
+      selectedPath: page.path,
+    });
+    invokeMock.mockResolvedValueOnce({ relativePath: page.path, bookmarked: true });
+
+    await useWikiStore.getState().toggleBookmark("proj-1", "D:/wiki");
+
+    expect(useWikiStore.getState().tree?.pages[0]?.bookmarked).toBe(true);
+    expect(
+      useWikiStore.getState().tree?.root.children[0]?.children[0]?.bookmarked,
+    ).toBe(true);
+  });
+
+  it("updates a matching nested tree node bookmark flag", () => {
+    const root: WikiTreeNode = {
+      name: "wiki",
+      kind: "folder",
+      path: "wiki",
+      starred: false,
+      bookmarked: false,
+      fileCount: 1,
+      children: [{
+        name: "concepts",
+        kind: "folder",
+        path: "wiki/concepts",
+        starred: false,
+        bookmarked: false,
+        fileCount: 1,
+        children: [{
+          name: "transformer.md",
+          kind: "file",
+          path: "wiki/concepts/transformer.md",
+          starred: false,
+          bookmarked: false,
+          fileCount: 1,
+          children: [],
+        }],
+      }],
+    };
+
+    const next = updateTreeNodeBookmark(root, "wiki/concepts/transformer.md", true);
+
+    expect(next.children[0]?.children[0]?.bookmarked).toBe(true);
   });
 
   it("ignores a page response that arrives after the project scope changed", async () => {
@@ -565,6 +644,42 @@ describe("MarkdownReader", () => {
 });
 
 describe("WikiTree page lifecycle actions", () => {
+  it("renders a star for bookmarked file nodes", () => {
+    const page = pageMeta({ bookmarked: true, starred: false });
+    const root = {
+      name: "wiki",
+      kind: "folder" as const,
+      path: "wiki",
+      starred: false,
+      bookmarked: false,
+      fileCount: 1,
+      children: [{
+        name: "transformer.md",
+        kind: "file" as const,
+        path: page.path,
+        starred: false,
+        bookmarked: true,
+        fileCount: 1,
+        children: [],
+      }],
+    };
+
+    const { container } = render(
+      <WikiTreeView
+        root={root}
+        pages={[page]}
+        selectedPath={page.path}
+        onSelect={vi.fn()}
+        onRefresh={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".lucide-star")).not.toBeNull();
+  });
+
   it("exposes create, rename, and delete entry points", () => {
     const onCreate = vi.fn();
     const onRename = vi.fn();

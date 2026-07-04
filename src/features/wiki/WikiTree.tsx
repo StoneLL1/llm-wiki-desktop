@@ -252,9 +252,11 @@ function TreeRow({
           <span className="w-[14px] shrink-0" />
           {fileIconFor(node)}
           <span className="flex-1 truncate">{node.name}</span>
-          {node.starred ? (
-            <Star size={11} className="shrink-0 fill-[var(--accent)] text-[var(--accent)]" />
-          ) : null}
+          <span className="grid w-[18px] shrink-0 place-items-center">
+            {node.bookmarked || node.starred ? (
+              <Star size={11} fill="currentColor" className="text-[var(--accent)]" />
+            ) : null}
+          </span>
         </button>
         <button
           type="button"
