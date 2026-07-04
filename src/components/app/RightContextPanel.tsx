@@ -122,7 +122,14 @@ export function RightContextPanel() {
                         {index + 1}
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[12px] font-medium text-[var(--text-primary)]">{citation.title}</div>
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate text-[12px] font-medium text-[var(--text-primary)]">{citation.title}</span>
+                          {citation.isPinned ? (
+                            <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent-hover)]">
+                              {t("chat.citations.currentPage")}
+                            </span>
+                          ) : null}
+                        </div>
                         <div className="text-[10.5px] text-[var(--text-muted)] font-mono">{citation.pagePath}</div>
                       </div>
                     </button>
