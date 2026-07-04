@@ -15,6 +15,7 @@ Started: 2026-07-05 02:19
 
 ## Activity Log
 
+- [2026-07-05 04:20] Task 6 Step 4 完成：扫描 src 下 console.log，无命中
 - [2026-07-05 04:18] Task 6 Step 3 完成：npm run build 初次发现 RecentProject 测试 fixture 缺少 enriched metadata；补齐后重跑 npm run test、npm run lint、npm run build 均通过
 - [2026-07-05 04:14] Task 6 Step 2 完成：npm run test 通过（298 tests），npm run lint 初次发现 projectPath 控制字符正则后已改为 codePoint 过滤并重跑通过
 - [2026-07-05 04:10] Task 6 Step 1 完成：focused frontend tests 通过（85 tests；保留既有 jsdom canvas getContext 噪声）
@@ -93,6 +94,7 @@ Started: 2026-07-05 02:19
 
 ## Verification
 
+- console.log scan: passed (Get-ChildItem src -Recurse -File | Select-String 'console\.log' returned no matches; Task 6 Step 4)
 - npm run build: passed (Task 6 Step 3 rerun after RecentProject fixture update; Vite large chunk warning only)
 - npm run lint: passed (Task 6 Step 3 rerun)
 - npm run test: passed (47 files, 298 tests; jsdom canvas getContext warnings; Task 6 Step 3 rerun)
