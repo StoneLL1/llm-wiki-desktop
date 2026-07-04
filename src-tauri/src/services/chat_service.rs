@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::errors::BackendError;
@@ -191,13 +192,27 @@ impl ChatService {
         query: &str,
         session: &ChatSession,
         language: &str,
+        pinned_page_path: Option<&str>,
     ) -> Result<RetrievalContext, BackendError> {
-        let hits = search_service.retrieve_with_excerpts(
+        let mut hits = Vec::new();
+        if let Some(path) = pinned_page_path {
+            hits.push(self.pinned_retrieval_hit(context, search_service, path)?);
+        }
+        let mut seen_paths: HashSet<String> = hits.iter().map(|hit| hit.path.clone()).collect();
+        let search_hits = search_service.retrieve_with_excerpts(
             context,
             query,
             RETRIEVAL_LIMIT,
             EXCERPT_CHARS,
         )?;
+        for hit in search_hits {
+            if hits.len() >= RETRIEVAL_LIMIT {
+                break;
+            }
+            if seen_paths.insert(hit.path.clone()) {
+                hits.push(hit);
+            }
+        }
         let citations: Vec<ChatCitation> = hits
             .iter()
             .map(|hit| ChatCitation {
@@ -205,11 +220,30 @@ impl ChatService {
                 title: hit.title.clone(),
                 snippet: hit.snippet.clone(),
                 score: hit.score,
+                is_pinned: hit.is_pinned,
             })
             .collect();
         let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
         let prompt = self.assemble_prompt(query, session, &hits, purpose.as_deref(), language);
         Ok(RetrievalContext { citations, prompt })
+    }
+
+    fn pinned_retrieval_hit(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        path: &str,
+    ) -> Result<ChatRetrievalHit, BackendError> {
+        let normalized = validate_pinned_page_path(context, path)?;
+        let page = search_service.read_page(context, &normalized, &HashSet::new())?;
+        Ok(ChatRetrievalHit {
+            path: page.meta.path,
+            title: page.meta.title,
+            snippet: Some(first_prompt_line(&page.body_markdown)),
+            score: 10_000,
+            excerpt: Some(truncate_prompt_excerpt(&page.body_markdown, EXCERPT_CHARS)),
+            is_pinned: true,
+        })
     }
 
     fn assemble_prompt(
@@ -235,12 +269,19 @@ impl ChatService {
             prompt.push_str(purpose.trim());
             prompt.push('\n');
         }
-        prompt.push_str("\n--- Sources ---\n");
-        for hit in hits {
-            prompt.push_str(&format!("\n### {} ({})\n", hit.title, hit.path));
-            if let Some(excerpt) = &hit.excerpt {
-                prompt.push_str(excerpt.trim());
-                prompt.push('\n');
+        let pinned_hits: Vec<&ChatRetrievalHit> = hits.iter().filter(|hit| hit.is_pinned).collect();
+        if !pinned_hits.is_empty() {
+            prompt.push_str("\n--- Current Wiki page ---\n");
+            for hit in pinned_hits {
+                append_prompt_hit(&mut prompt, hit);
+            }
+        }
+        let source_hits: Vec<&ChatRetrievalHit> =
+            hits.iter().filter(|hit| !hit.is_pinned).collect();
+        if !source_hits.is_empty() || hits.is_empty() {
+            prompt.push_str("\n--- Sources ---\n");
+            for hit in source_hits {
+                append_prompt_hit(&mut prompt, hit);
             }
         }
         let history = session
@@ -411,6 +452,7 @@ impl ChatService {
     }
 }
 
+#[derive(Debug)]
 pub struct RetrievalContext {
     pub citations: Vec<ChatCitation>,
     pub prompt: String,
@@ -443,6 +485,67 @@ fn validate_query_path(path: &str) -> Result<String, BackendError> {
         .with_details(serde_json::json!({ "path": normalized })));
     }
     Ok(normalized)
+}
+
+fn validate_pinned_page_path(context: &ProjectContext, path: &str) -> Result<String, BackendError> {
+    let normalized = path.replace('\\', "/");
+    let absolute = context.resolve_project_path(&normalized)?;
+    if absolute.strip_prefix(&context.wiki_dir).is_err() || !normalized.starts_with("wiki/") {
+        return Err(BackendError::new(
+            "CHAT_PINNED_PAGE_INVALID",
+            "Pinned chat context must be a page under the wiki/ directory.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": normalized })));
+    }
+    if !normalized.ends_with(".md") {
+        return Err(BackendError::new(
+            "CHAT_PINNED_PAGE_INVALID",
+            "Pinned chat context must be a Markdown (.md) page.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": normalized })));
+    }
+    if !absolute.is_file() {
+        return Err(BackendError::new(
+            "FILE_NOT_FOUND",
+            "The pinned Wiki page no longer exists.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": normalized })));
+    }
+    Ok(normalized)
+}
+
+fn append_prompt_hit(prompt: &mut String, hit: &ChatRetrievalHit) {
+    prompt.push_str(&format!("\n### {} ({})\n", hit.title, hit.path));
+    if let Some(excerpt) = &hit.excerpt {
+        prompt.push_str(excerpt.trim());
+        prompt.push('\n');
+    }
+}
+
+fn first_prompt_line(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn truncate_prompt_excerpt(body: &str, max_chars: usize) -> String {
+    let trimmed = body.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut excerpt: String = trimmed.chars().take(max_chars).collect();
+    excerpt.push_str("...");
+    excerpt
 }
 
 fn invalidate_graph_cache(context: &ProjectContext) {
@@ -685,7 +788,7 @@ mod tests {
         }
 
         let ctx = service
-            .build_retrieval_context(&context, &search, "react pattern", &session, "en")
+            .build_retrieval_context(&context, &search, "react pattern", &session, "en", None)
             .unwrap();
 
         // Top citation is the title-matching page (title scores 100).
@@ -708,6 +811,89 @@ mod tests {
     }
 
     #[test]
+    fn retrieval_context_includes_pinned_page_first() {
+        let (context, root) = tmp_context("retrieval-pinned");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "agent memory",
+                &session,
+                "en",
+                Some("wiki/concepts/react-pattern.md"),
+            )
+            .unwrap();
+
+        assert_eq!(ctx.citations[0].page_path, "wiki/concepts/react-pattern.md");
+        assert!(ctx.citations[0].is_pinned);
+        assert_eq!(ctx.citations[0].score, 10_000);
+        assert!(ctx.prompt.contains("--- Current Wiki page ---"));
+        assert!(ctx.prompt.contains("ReAct Pattern"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_context_dedupes_pinned_page_from_search_hits() {
+        let (context, root) = tmp_context("retrieval-pinned-dedupe");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern",
+                &session,
+                "en",
+                Some("wiki/concepts/react-pattern.md"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            ctx.citations
+                .iter()
+                .filter(|citation| citation.page_path == "wiki/concepts/react-pattern.md")
+                .count(),
+            1
+        );
+        assert!(ctx.citations.len() <= super::RETRIEVAL_LIMIT);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_context_errors_when_pinned_page_missing() {
+        let (context, root) = tmp_context("retrieval-pinned-missing");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None).unwrap();
+
+        let err = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern",
+                &session,
+                "en",
+                Some("wiki/concepts/missing.md"),
+            )
+            .expect_err("missing pinned page must fail retrieval");
+
+        assert_eq!(err.code, "FILE_NOT_FOUND");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn build_answer_markdown_includes_frontmatter_and_sources() {
         let (context, root) = tmp_context("markdown");
         let service = ChatService::default();
@@ -723,6 +909,7 @@ mod tests {
                 title: "ReAct Pattern".into(),
                 snippet: None,
                 score: 100,
+                is_pinned: false,
             }],
             route: None,
             provider: None,

@@ -639,6 +639,7 @@ impl SearchService {
                 snippet: result.snippet,
                 score: result.score,
                 excerpt,
+                is_pinned: false,
             });
         }
         Ok(hits)

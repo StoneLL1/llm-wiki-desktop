@@ -31,6 +31,8 @@ pub struct ChatCitation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
     pub score: i64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,7 +78,7 @@ pub struct ChatSessionSummary {
 }
 
 /// One retrieved wiki page with a bounded body excerpt for the model prompt.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRetrievalHit {
     pub path: String,
@@ -86,6 +88,8 @@ pub struct ChatRetrievalHit {
     pub score: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excerpt: Option<String>,
+    #[serde(default)]
+    pub is_pinned: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,10 +146,16 @@ pub struct SendChatMessageRequest {
     pub agent: Option<AgentKind>,
     #[serde(default)]
     pub provider: Option<LlmProviderKind>,
+    #[serde(default)]
+    pub pinned_page_path: Option<String>,
 }
 
 fn default_route() -> CompileRoutePreference {
     CompileRoutePreference::Auto
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,10 +196,12 @@ mod tests {
             title: "A".into(),
             snippet: Some("snip".into()),
             score: 100,
+            is_pinned: false,
         };
         let value = serde_json::to_value(&citation).unwrap();
         assert_eq!(value["pagePath"], json!("wiki/concepts/a.md"));
         assert_eq!(value["score"], json!(100));
+        assert!(value.get("isPinned").is_none());
 
         let message = ChatMessage {
             id: "m1".into(),
@@ -238,5 +250,28 @@ mod tests {
         assert_eq!(request.route, CompileRoutePreference::Auto);
         assert!(request.agent.is_none());
         assert!(request.provider.is_none());
+        assert!(request.pinned_page_path.is_none());
+    }
+
+    #[test]
+    fn send_request_defaults_pinned_page_path_to_none() {
+        let raw = r#"{"projectId":"p","projectRootPath":"/x","sessionId":"s","content":"hi","route":"auto"}"#;
+        let request: SendChatMessageRequest = serde_json::from_str(raw).unwrap();
+        assert!(request.pinned_page_path.is_none());
+    }
+
+    #[test]
+    fn citation_serializes_is_pinned_when_true() {
+        let citation = ChatCitation {
+            page_path: "wiki/concepts/a.md".into(),
+            title: "A".into(),
+            snippet: None,
+            score: 10_000,
+            is_pinned: true,
+        };
+
+        let value = serde_json::to_value(&citation).unwrap();
+
+        assert_eq!(value["isPinned"], json!(true));
     }
 }

@@ -462,7 +462,14 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
 
     // Real local retrieval (no model) returns honest citations.
     let retrieval = chat
-        .build_retrieval_context(&context, &SearchService::default(), "cat", &session, "en")
+        .build_retrieval_context(
+            &context,
+            &SearchService::default(),
+            "cat",
+            &session,
+            "en",
+            None,
+        )
         .unwrap();
     assert!(
         retrieval
