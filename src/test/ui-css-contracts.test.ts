@@ -50,4 +50,13 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar");
     expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.resize-handle\[data-pane-id="sidebar"\]/s);
   });
+
+  it("wires internal view splitters to pane width variables", () => {
+    expect(styles).toContain("--wiki-tree-w-current");
+    expect(styles).toContain("--exports-list-w-current");
+    expect(styles).toContain("--lint-list-w-current");
+    expect(styles).toMatch(/\.exports-view-layout\s*\{[^}]*grid-template-columns:\s*var\(--exports-list-w-current, 360px\) 6px minmax\(320px, 1fr\)/s);
+    expect(styles).toMatch(/\.lint-view-layout\s*\{[^}]*grid-template-columns:\s*var\(--lint-list-w-current, 360px\) 6px minmax\(320px, 1fr\)/s);
+    expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*\.resize-handle\[data-pane-id="exportsList"\][\s\S]*\.resize-handle\[data-pane-id="lintList"\]/s);
+  });
 });

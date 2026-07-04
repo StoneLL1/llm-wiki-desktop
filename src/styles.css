@@ -1933,11 +1933,36 @@ select:focus-visible {
 }
 
 .chat-view-layout { grid-template-columns: minmax(220px, 260px) minmax(0, 1fr); }
-.exports-view-layout { grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); }
-.lint-view-layout { grid-template-columns: minmax(0, 1fr) minmax(320px, 360px); }
+.exports-view-layout { grid-template-columns: var(--exports-list-w-current, 360px) 6px minmax(320px, 1fr); }
+.lint-view-layout { grid-template-columns: var(--lint-list-w-current, 360px) 6px minmax(320px, 1fr); }
 .settings-view-layout { grid-template-columns: 240px minmax(0, 1fr); }
 .wiki-view-layout { display: flex; height: 100%; min-width: 0; min-height: 0; }
-.wiki-tree { display: flex; width: 260px; min-width: 0; flex-shrink: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
+.wiki-tree { display: flex; width: var(--wiki-tree-w-current, 260px); min-width: 0; flex-shrink: 0; flex-direction: column; background: var(--surface); }
+
+.exports-view__list-pane,
+.exports-view__preview-pane {
+  min-width: 0;
+  min-height: 0;
+}
+
+.exports-view__list-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.exports-view__preview-pane {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-raised);
+}
+
+.lint-view__list-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
 
 .wiki-editor__toolbar {
   display: flex;
@@ -2061,6 +2086,8 @@ select:focus-visible {
 @media (max-width: 980px) {
   .exports-view-layout,
   .lint-view-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(280px, 1fr) minmax(260px, 1fr); overflow-y: auto; }
+  .resize-handle[data-pane-id="exportsList"],
+  .resize-handle[data-pane-id="lintList"] { display: none; }
   .settings-view-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .settings-view__nav { overflow-x: auto; border-right: 0 !important; border-bottom: 1px solid var(--border); }
   .settings-view__tabs { display: flex !important; width: max-content; min-width: 100%; }

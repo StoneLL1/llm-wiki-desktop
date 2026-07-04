@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -10,7 +10,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { ResizableSplitter } from "../../components/app/ResizableSplitter";
+import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import { useExportStore } from "../../stores/exportStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { isTerminalStatus } from "../../types/task";
@@ -34,6 +37,9 @@ function formatTimestamp(iso: string): string {
 export function ExportsView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
+  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const setPaneSize = useNavigationStore((state) => state.setPaneSize);
+  const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
 
   const records = useExportStore((state) => state.records);
   const loading = useExportStore((state) => state.loading);
@@ -55,6 +61,9 @@ export function ExportsView() {
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
+  const layoutStyle = {
+    "--exports-list-w-current": `${paneSizes.exportsList}px`,
+  } as CSSProperties;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingPreviewTaskId, setPendingPreviewTaskId] = useState<string | null>(null);
   // Guards the terminal handler against re-running for the same task if the
@@ -170,8 +179,8 @@ export function ExportsView() {
   );
 
   return (
-    <div className="exports-view-layout">
-      <div className="flex min-w-0 flex-col border-r border-[var(--border)]">
+    <div className="exports-view-layout" style={layoutStyle}>
+      <div className="exports-view__list-pane">
         <div className="view-toolbar border-b border-[var(--border)] px-4">
           <div className="ml-auto flex items-center gap-2">
             {runningTaskId ? (
@@ -314,7 +323,17 @@ export function ExportsView() {
         </div>
       </div>
 
-      <aside className="flex min-h-0 flex-col bg-[var(--surface-raised)]">
+      <ResizableSplitter
+        paneId="exportsList"
+        label={t("shell.splitter.exportsList")}
+        min={PANE_WIDTH_LIMITS.exportsList.min}
+        max={PANE_WIDTH_LIMITS.exportsList.max}
+        value={paneSizes.exportsList}
+        onChange={(value) => setPaneSize("exportsList", value)}
+        onReset={() => resetPaneSize("exportsList")}
+      />
+
+      <aside className="exports-view__preview-pane">
           <div className="view-toolbar border-b border-[var(--border)] px-4">
           <span className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
             {t("exports.preview.title")}

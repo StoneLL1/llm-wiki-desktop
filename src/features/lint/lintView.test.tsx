@@ -26,6 +26,13 @@ describe("LintView", () => {
     expect(screen.getByText(/Run a lint pass to see findings/i)).toBeInTheDocument();
   });
 
+  it("exposes a resizable lint issue list splitter", () => {
+    useLintStore.getState().reset();
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+    render(<LintView />);
+    expect(screen.getByRole("separator", { name: "Resize lint issue list" })).toHaveAttribute("aria-valuenow", "360");
+  });
+
   it("renders grouped local findings with their type label and tags", () => {
     useLintStore.getState().reset();
     useLintStore.setState({

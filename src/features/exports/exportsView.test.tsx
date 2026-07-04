@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
 import { useExportStore } from "../../stores/exportStore";
-import { useProjectStore } from "../../stores/projectStore";
+import { defaultProject, useProjectStore } from "../../stores/projectStore";
+import type { ProjectSummary } from "../../types/project";
 import { ExportsView } from "./ExportsView";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -11,19 +12,27 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const PROJECT = {
+  ...defaultProject,
   projectId: "p",
   rootPath: "/x",
   name: "Test",
   agentRoute: "agent",
-};
+} satisfies ProjectSummary;
 
 describe("ExportsView", () => {
   it("renders the empty state and new-export control before any export", () => {
     useExportStore.getState().reset();
-    useProjectStore.setState({ currentProject: PROJECT } as never);
+    useProjectStore.setState({ currentProject: PROJECT });
     render(<ExportsView />);
     expect(screen.getByRole("button", { name: /New export/i })).toBeInTheDocument();
     expect(screen.getByText(/Run an export/i)).toBeInTheDocument();
+  });
+
+  it("exposes a resizable export list splitter", () => {
+    useExportStore.getState().reset();
+    useProjectStore.setState({ currentProject: PROJECT });
+    render(<ExportsView />);
+    expect(screen.getByRole("separator", { name: "Resize export list" })).toHaveAttribute("aria-valuemax", "480");
   });
 
   it("lists succeeded exports in the table with a success badge and preview action", () => {
@@ -42,7 +51,7 @@ describe("ExportsView", () => {
         },
       ],
     });
-    useProjectStore.setState({ currentProject: PROJECT } as never);
+    useProjectStore.setState({ currentProject: PROJECT });
     render(<ExportsView />);
     expect(screen.getByText("Agent")).toBeInTheDocument();
     expect(screen.getByText("exports/html/agent-1.html")).toBeInTheDocument();
@@ -59,7 +68,6 @@ describe("ExportsView", () => {
           id: "export-failed",
           exportType: "project_report",
           title: "Project report",
-          sourcePath: null,
           outputPath: "exports/html/project-report-1.html",
           createdAt: "2026-06-20T10:00:00Z",
           route: "agent",
@@ -68,7 +76,7 @@ describe("ExportsView", () => {
         },
       ],
     });
-    useProjectStore.setState({ currentProject: PROJECT } as never);
+    useProjectStore.setState({ currentProject: PROJECT });
     render(<ExportsView />);
     expect(screen.getByText("Failed")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
@@ -80,7 +88,7 @@ describe("ExportsView", () => {
 
   it("opens the new-export dialog with template and route controls", async () => {
     useExportStore.getState().reset();
-    useProjectStore.setState({ currentProject: PROJECT } as never);
+    useProjectStore.setState({ currentProject: PROJECT });
     render(<ExportsView />);
     fireEvent.click(screen.getByRole("button", { name: /New export/i }));
     expect(await screen.findByRole("heading", { name: "New export" })).toBeInTheDocument();

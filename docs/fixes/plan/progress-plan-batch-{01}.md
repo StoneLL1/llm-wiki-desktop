@@ -9,7 +9,7 @@ Started: 2026-07-04 18:38
 - [x] Task 1 - Layout State Model
 - [x] Task 2 - Accessible Splitter Primitive
 - [x] Task 3 - Shell Splitters and Collapsible Sidebar
-- [ ] Task 4 - Wiki, Exports, and Lint Internal Splitters
+- [x] Task 4 - Wiki, Exports, and Lint Internal Splitters
 - [ ] Task 5 - Compact Project Switcher
 - [ ] Task 6 - Color Theme Presets and Settings Contract
 - [ ] Task 7 - Appearance UI and Reading Tokens
@@ -17,6 +17,7 @@ Started: 2026-07-04 18:38
 
 ## Activity Log
 
+- [2026-07-04 18:55] Task 4 完成：Wiki tree、Exports list、Lint issue list 接入 `ResizableSplitter`，新增内部 pane 宽度 CSS 变量、响应式隐藏规则和中英文 i18n 键；计划指定 focused tests 通过。
 - [2026-07-04 18:51] Task 3 完成：新增 shell 级 sidebar/right panel splitters、顶部栏侧边栏折叠按钮、折叠侧栏可访问导航名称、响应式 splitter 隐藏规则和中英文 i18n 键；focused App/CSS tests 通过。
 - [2026-07-04 18:46] Task 2 Step 3 完成：新增 `.resize-handle`、focus-visible/hover/drag 状态和 `body.is-resizing-pane` CSS contract；Task 2 focused tests 通过。
 - [2026-07-04 18:45] Task 2 Step 2 完成：新增 `ResizableSplitter` 组件，映射 separator role、aria value 属性、pane id、方向和 reset/change 回调。
@@ -36,6 +37,12 @@ Started: 2026-07-04 18:38
 - src/components/app/AppShell.tsx
 - src/components/app/LeftSidebar.tsx
 - src/components/app/TopBar.tsx
+- src/features/exports/ExportsView.tsx
+- src/features/exports/exportsView.test.tsx
+- src/features/lint/LintView.tsx
+- src/features/lint/lintView.test.tsx
+- src/features/wiki/WikiView.tsx
+- src/features/wiki/wiki.test.tsx
 - src/components/app/ResizableSplitter.tsx
 - src/i18n/locales/en.json
 - src/i18n/locales/zh-CN.json
@@ -47,6 +54,7 @@ Started: 2026-07-04 18:38
 
 ## Verification
 
+- npm run test -- src/features/wiki/wiki.test.tsx src/features/exports/exportsView.test.tsx src/features/lint/lintView.test.tsx src/test/ui-css-contracts.test.ts: passed (51 tests)
 - npm run test -- src/app/App.test.tsx src/test/ui-css-contracts.test.ts: passed (33 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts src/test/ui-css-contracts.test.ts: passed (12 tests)
 - npm run test -- src/hooks/useResizablePane.test.ts: passed (6 tests)
