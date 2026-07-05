@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-05] Chat Convenience Models/Audit - Added deterministic chat intent classification, convenience edit DTOs, audit rules, and AppState service registration - Key decision: command routing integration intentionally deferred to the chat command integration task.
+
 [2026-07-05] Settings/Chat convenience authorization - Implemented global-only Chat convenience authorization model, SettingsService methods, Tauri commands, and settings store IPC helpers/tests - Key decision: project authorization is keyed by project id plus deterministic root-path fingerprint and is stored only in global machine settings.
 
 [2026-07-05] Chat convenience mode implementation plan - Wrote task-by-task plan for global local authorization, backend audit/rollback service, all-Agent convenience invocation, Chat command integration, frontend controls, settings revocation, and verification workflow - Key decision: implementation should preserve existing read-only Chat as default while adding direct-project write flow only for authorized write-intent turns.

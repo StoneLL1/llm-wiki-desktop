@@ -4,6 +4,8 @@
 
 [2026-07-05] Agent Chat run from the real project root can turn Q&A into an uncheckpointed file-operation surface - Moving chat cwd from an empty temp folder to `context.root` lets agents browse wiki/, but any CLI without a verified read-only mode may also mutate project files and bypass Git/PendingAction safety - Only route project-root Chat through verified read-only profiles (currently Claude with Read/Grep/Glob via stdin, Codex with ephemeral read-only ignore-rules); filter unsupported agents to BYOK or explicit unsupported errors.
 
+[2026-07-05] Vitest prints repeated jsdom HTMLCanvasElement.getContext errors while still passing graph tests - Sigma tries to create a WebGL canvas in jsdom without the canvas package - Treat the final Vitest summary and exit code as authoritative unless graph tests actually fail.
+
 [2026-07-05] Full page Ask prompts can exceed Windows command-line length when passed as argv - Page-level Ask needs complete pinned page content, but putting that full Markdown prompt into a CLI argument can fail before the agent starts - For Agent Chat, pass long prompts through stdin or have the agent read the page from wiki/; reserve inline full page bodies for BYOK/model prompt context.
 
 [2026-07-04] 现象 — `npm run build` 在 TypeScript 阶段报 `ExportRecord.sourcePath` 不能赋值为 `null`，但测试 fixture 里容易按 Rust `Option` 直觉写成 `sourcePath: null`。— 根因 — 后端 `Option<String>` 配合 `skip_serializing_if = "Option::is_none"` 序列化为字段缺省，不是 JSON null；前端类型 `sourcePath?: string` 正确表达的是 optional 字段。— 规避做法 — 测试 fixture 缺省 optional 字段时直接省略属性，并尽量用 `satisfies` 或显式类型校验 fixture，避免 `as never` 掩盖 Rust/TS DTO 漂移。
