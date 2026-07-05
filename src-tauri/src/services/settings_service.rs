@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::errors::BackendError;
 use crate::models::agent::{AgentConfig, AgentKind};
@@ -12,24 +12,19 @@ use crate::services::{FileStore, SecretService};
 
 pub struct SettingsService {
     config_dir: PathBuf,
-    global_settings_lock: Mutex<()>,
 }
 
 impl Default for SettingsService {
     fn default() -> Self {
         Self {
             config_dir: default_config_dir(),
-            global_settings_lock: Mutex::new(()),
         }
     }
 }
 
 impl SettingsService {
     pub fn with_config_dir(config_dir: PathBuf) -> Self {
-        Self {
-            config_dir,
-            global_settings_lock: Mutex::new(()),
-        }
+        Self { config_dir }
     }
 
     pub fn read_settings(&self, context: &ProjectContext) -> Result<Settings, BackendError> {
@@ -238,7 +233,7 @@ impl SettingsService {
     }
 
     fn lock_global_settings(&self) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
-        self.global_settings_lock.lock().map_err(|_| {
+        global_settings_lock().lock().map_err(|_| {
             BackendError::new(
                 "SETTINGS_LOCKED",
                 "Settings are currently unavailable.",
@@ -247,6 +242,11 @@ impl SettingsService {
             )
         })
     }
+}
+
+fn global_settings_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn default_config_dir() -> PathBuf {

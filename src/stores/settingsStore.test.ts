@@ -130,6 +130,21 @@ describe("settingsStore chat convenience authorization", () => {
     expect(useSettingsStore.getState().chatConvenienceAuthorization?.enabled).toBe(true);
   });
 
+  it("uses backend-style disabled fallback when Tauri is unavailable", async () => {
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+
+    const authorization = await useSettingsStore
+      .getState()
+      .setChatConvenienceAuthorization("project-1", "D:/wiki", false);
+
+    expect(authorization).toEqual({
+      enabled: false,
+      confirmedAt: "",
+      projectId: "project-1",
+      rootPathFingerprint: "",
+    });
+  });
+
   it("falls back to disabled authorization when setting fails", async () => {
     useSettingsStore.setState({
       chatConvenienceAuthorization: {
