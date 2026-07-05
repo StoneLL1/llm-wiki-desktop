@@ -2,6 +2,8 @@
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
+[2026-07-05] Git `diff --numstat` reports changed lines, not changed characters - Chat convenience audit limits per-file changed characters, but numstat turns a 5000-character single-line rewrite into `1 + 1`, letting oversized edits pass - For safety audits, estimate changed bytes from `HEAD:path` plus current worktree file bytes; use numstat only for display-level line summaries.
+
 [2026-07-05] Agent Chat run from the real project root can turn Q&A into an uncheckpointed file-operation surface - Moving chat cwd from an empty temp folder to `context.root` lets agents browse wiki/, but any CLI without a verified read-only mode may also mutate project files and bypass Git/PendingAction safety - Only route project-root Chat through verified read-only profiles (currently Claude with Read/Grep/Glob via stdin, Codex with ephemeral read-only ignore-rules); filter unsupported agents to BYOK or explicit unsupported errors.
 
 [2026-07-05] Vitest prints repeated jsdom HTMLCanvasElement.getContext errors while still passing graph tests - Sigma tries to create a WebGL canvas in jsdom without the canvas package - Treat the final Vitest summary and exit code as authoritative unless graph tests actually fail.

@@ -1,7 +1,6 @@
 #[derive(Default)]
 pub struct GitService;
 
-use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 
@@ -209,12 +208,8 @@ impl GitService {
         }
 
         let mut changes = status_changes(context)?;
-        let changed_chars = changed_chars_since_head(context)?;
         for change in &mut changes {
-            change.changed_chars = changed_chars
-                .get(&change.path)
-                .copied()
-                .unwrap_or_else(|| estimate_added_file_size(context, change));
+            change.changed_chars = estimate_changed_bytes(context, change);
         }
         changes.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(changes)
@@ -230,7 +225,15 @@ impl GitService {
             ));
         }
 
-        run_git(context, &["diff", "--no-ext-diff", "HEAD", "--"])
+        let mut diff = run_git(context, &["diff", "--no-ext-diff", "HEAD", "--"])?;
+        let untracked_diff = untracked_file_diff(context)?;
+        if !untracked_diff.is_empty() {
+            if !diff.is_empty() && !diff.ends_with('\n') {
+                diff.push('\n');
+            }
+            diff.push_str(&untracked_diff);
+        }
+        Ok(diff)
     }
 
     pub fn rollback_worktree_to_head(&self, context: &ProjectContext) -> Result<(), BackendError> {
@@ -243,7 +246,7 @@ impl GitService {
             ));
         }
 
-        run_git(context, &["reset", "--hard", "HEAD"])?;
+        run_git(context, &["restore", "--source=HEAD", "--staged", "--worktree", "--", "."])?;
         run_git(context, &["clean", "-fd", "--", "."])?;
         Ok(())
     }
@@ -335,13 +338,6 @@ fn status_changes(context: &ProjectContext) -> Result<Vec<GitChangedFile>, Backe
     Ok(parse_status_changes(&raw))
 }
 
-fn changed_chars_since_head(
-    context: &ProjectContext,
-) -> Result<HashMap<String, usize>, BackendError> {
-    let raw = run_git_bytes(context, &["diff", "--numstat", "-z", "HEAD", "--"])?;
-    Ok(parse_numstat_changed_chars(&raw))
-}
-
 fn parse_status_changes(raw: &[u8]) -> Vec<GitChangedFile> {
     let records: Vec<&[u8]> = raw
         .split(|byte| *byte == 0)
@@ -391,57 +387,66 @@ fn parse_status_changes(raw: &[u8]) -> Vec<GitChangedFile> {
     changes
 }
 
-fn parse_numstat_changed_chars(raw: &[u8]) -> HashMap<String, usize> {
-    let records: Vec<&[u8]> = raw
+fn untracked_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+    let raw = run_git_bytes(context, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    Ok(raw
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
-        .collect();
-    let mut changed_chars = HashMap::new();
-    let mut index = 0;
-    while index < records.len() {
-        let record = String::from_utf8_lossy(records[index]);
-        let mut columns = record.splitn(3, '\t');
-        let added = columns.next().map(parse_numstat_count).unwrap_or(0);
-        let deleted = columns.next().map(parse_numstat_count).unwrap_or(0);
-        let inline_path = columns.next().unwrap_or_default();
+        .map(|record| normalize_git_path(&String::from_utf8_lossy(record)))
+        .filter(|path| !path.is_empty())
+        .collect())
+}
 
-        let path = if inline_path.is_empty() && index + 2 < records.len() {
-            index += 2;
-            String::from_utf8_lossy(records[index]).to_string()
-        } else {
-            inline_path.to_string()
-        };
-
-        let normalized = normalize_git_path(&path);
-        if !normalized.is_empty() {
-            changed_chars.insert(normalized, added.saturating_add(deleted));
+fn untracked_file_diff(context: &ProjectContext) -> Result<String, BackendError> {
+    let mut diff = String::new();
+    for path in untracked_paths(context)? {
+        let bytes = fs::read(context.root.join(&path)).unwrap_or_default();
+        if !diff.is_empty() && !diff.ends_with('\n') {
+            diff.push('\n');
         }
-        index += 1;
+        diff.push_str(&render_added_file_diff(&path, &bytes));
     }
-    changed_chars
+    Ok(diff)
 }
 
-fn parse_numstat_count(value: &str) -> usize {
-    value.parse::<usize>().unwrap_or(0)
+fn render_added_file_diff(path: &str, bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    let line_count = text.lines().count().max(1);
+    let mut diff = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{line_count} @@\n"
+    );
+    if text.is_empty() {
+        diff.push('+');
+        diff.push('\n');
+        return diff;
+    }
+    for line in text.lines() {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    diff
 }
 
-fn estimate_added_file_size(context: &ProjectContext, change: &GitChangedFile) -> usize {
-    if !matches!(
-        change.kind,
-        GitChangedFileKind::Added | GitChangedFileKind::Modified | GitChangedFileKind::Renamed
-    ) {
-        return 0;
+fn estimate_changed_bytes(context: &ProjectContext, change: &GitChangedFile) -> usize {
+    let head_len = head_file_bytes(context, &change.path).map_or(0, |bytes| bytes.len());
+    let worktree_len = fs::read(context.root.join(&change.path)).map_or(0, |bytes| bytes.len());
+    match change.kind {
+        GitChangedFileKind::Added => worktree_len.max(head_len),
+        GitChangedFileKind::Deleted => head_len,
+        GitChangedFileKind::Modified | GitChangedFileKind::Renamed => {
+            head_len.saturating_add(worktree_len)
+        }
     }
+}
 
-    fs::metadata(context.root.join(&change.path))
-        .ok()
-        .filter(|metadata| metadata.is_file())
-        .map(|metadata| usize::try_from(metadata.len()).unwrap_or(usize::MAX))
-        .unwrap_or(0)
+fn head_file_bytes(context: &ProjectContext, path: &str) -> Result<Vec<u8>, BackendError> {
+    let spec = format!("HEAD:{path}");
+    run_git_bytes(context, &["show", spec.as_str()])
 }
 
 fn normalize_git_path(path: &str) -> String {
-    path.replace('\\', "/")
+    path.to_string()
 }
 
 #[cfg(test)]
@@ -451,7 +456,8 @@ mod tests {
     use crate::models::paths::ProjectContext;
     use std::collections::HashMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command as ProcessCommand;
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let stamp = std::time::SystemTime::now()
@@ -461,6 +467,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("llm-wiki-git-{label}-{stamp}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn run_git_in(root: &Path, args: &[&str]) {
+        let output = ProcessCommand::new("git")
+            .args(["-c", "core.quotepath=false"])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -567,6 +588,54 @@ mod tests {
     }
 
     #[test]
+    fn changed_files_since_head_counts_long_single_line_bytes() {
+        let root = unique_temp_dir("long-line");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki").join("page.md"), "short").unwrap();
+
+        let service = GitService;
+        service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap();
+
+        fs::write(root.join("wiki").join("page.md"), "x".repeat(5_000)).unwrap();
+
+        let changes = service.changed_files_since_head(&context).unwrap();
+        let page = changes
+            .iter()
+            .find(|change| change.path == "wiki/page.md")
+            .unwrap();
+        assert_eq!(page.kind, GitChangedFileKind::Modified);
+        assert!(page.changed_chars > 2_000);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn diff_since_head_includes_untracked_file_content() {
+        let root = unique_temp_dir("untracked-diff");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki").join("page.md"), "stable\n").unwrap();
+
+        let service = GitService;
+        service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap();
+
+        fs::write(root.join("wiki").join("new page.md"), "# New page\nBody\n").unwrap();
+
+        let diff = service.diff_since_head(&context).unwrap();
+        assert!(diff.contains("diff --git a/wiki/new page.md b/wiki/new page.md"));
+        assert!(diff.contains("+++ b/wiki/new page.md"));
+        assert!(diff.contains("+# New page"));
+        assert!(diff.contains("+Body"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn rollback_to_head_restores_worktree_after_agent_changes() {
         let root = unique_temp_dir("rollback");
         let context = ProjectContext::new("project-1", root.clone());
@@ -589,6 +658,43 @@ mod tests {
         assert_eq!(restored, "stable\n");
         assert!(!root.join("wiki").join("agent-new.md").exists());
         assert!(!service.repository_status(&context).unwrap().has_changes);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rollback_from_parent_repo_subdirectory_preserves_outside_files() {
+        let root = unique_temp_dir("parent-repo");
+        let project = root.join("project");
+        fs::create_dir_all(project.join("wiki")).unwrap();
+        fs::write(project.join("wiki").join("page.md"), "stable\n").unwrap();
+        fs::write(root.join("outside.txt"), "outside stable\n").unwrap();
+
+        run_git_in(&root, &["init"]);
+        run_git_in(&root, &["config", "user.name", "test"]);
+        run_git_in(&root, &["config", "user.email", "test@example.local"]);
+        run_git_in(&root, &["add", "--all"]);
+        run_git_in(&root, &["commit", "-m", "init"]);
+
+        fs::write(project.join("wiki").join("page.md"), "agent edit\n").unwrap();
+        fs::write(project.join("wiki").join("agent-new.md"), "draft\n").unwrap();
+        fs::write(root.join("outside.txt"), "outside edit\n").unwrap();
+
+        let service = GitService;
+        let context = ProjectContext::new("project-1", project.clone());
+        service.rollback_worktree_to_head(&context).unwrap();
+
+        let restored = fs::read_to_string(project.join("wiki").join("page.md"))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert_eq!(restored, "stable\n");
+        assert!(!project.join("wiki").join("agent-new.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("outside.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "outside edit\n"
+        );
 
         fs::remove_dir_all(root).ok();
     }
