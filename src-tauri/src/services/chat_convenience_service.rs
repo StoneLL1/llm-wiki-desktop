@@ -1,6 +1,8 @@
 const MAX_CONVENIENCE_FILES: usize = 3;
 const MAX_CONVENIENCE_CHANGED_CHARS: usize = 2000;
 
+use crate::models::git::{GitChangedFile, GitChangedFileKind};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatIntent {
     ReadOnly,
@@ -75,6 +77,10 @@ impl ChatConvenienceService {
         audit_changed_paths(changes)
     }
 
+    pub fn audit_git_changes(&self, changes: Vec<GitChangedFile>) -> ConvenienceAuditReport {
+        audit_git_changes(changes)
+    }
+
     pub fn convenience_prompt_suffix(&self) -> &'static str {
         convenience_prompt_suffix()
     }
@@ -111,6 +117,25 @@ pub fn classify_chat_intent(input: &str) -> ChatIntent {
     }
 
     ChatIntent::Ambiguous
+}
+
+pub fn audit_git_changes(changes: Vec<GitChangedFile>) -> ConvenienceAuditReport {
+    audit_changed_paths(
+        changes
+            .into_iter()
+            .map(|change| ChangedFile {
+                path: change.path,
+                kind: match change.kind {
+                    GitChangedFileKind::Added => ChangedFileKind::Added,
+                    GitChangedFileKind::Modified => ChangedFileKind::Modified,
+                    GitChangedFileKind::Deleted | GitChangedFileKind::Renamed => {
+                        ChangedFileKind::Deleted
+                    }
+                },
+                changed_chars: change.changed_chars,
+            })
+            .collect(),
+    )
 }
 
 pub fn audit_changed_paths(changes: Vec<ChangedFile>) -> ConvenienceAuditReport {
@@ -360,6 +385,7 @@ fn summarize_changes(count: usize, affected_paths: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::git::{GitChangedFile, GitChangedFileKind};
 
     #[test]
     fn classifies_read_only_write_and_ambiguous_intents() {
@@ -489,5 +515,29 @@ mod tests {
         let report = audit_changed_paths(Vec::new());
         assert_eq!(report.status, ConvenienceAuditStatus::SoftViolation);
         assert_eq!(report.affected_paths.len(), 0);
+    }
+
+    #[test]
+    fn audit_git_changes_reuses_convenience_rules() {
+        let raw_report = audit_git_changes(vec![GitChangedFile {
+            path: "raw/sources/source.md".to_string(),
+            kind: GitChangedFileKind::Modified,
+            changed_chars: 12,
+        }]);
+        assert_eq!(raw_report.status, ConvenienceAuditStatus::HardViolation);
+
+        let delete_report = audit_git_changes(vec![GitChangedFile {
+            path: "wiki/page.md".to_string(),
+            kind: GitChangedFileKind::Deleted,
+            changed_chars: 1,
+        }]);
+        assert_eq!(delete_report.status, ConvenienceAuditStatus::HardViolation);
+
+        let wiki_report = audit_git_changes(vec![GitChangedFile {
+            path: "wiki/page.md".to_string(),
+            kind: GitChangedFileKind::Modified,
+            changed_chars: 40,
+        }]);
+        assert_eq!(wiki_report.status, ConvenienceAuditStatus::Passed);
     }
 }

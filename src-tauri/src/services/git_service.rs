@@ -1,10 +1,15 @@
 #[derive(Default)]
 pub struct GitService;
 
+use std::collections::HashMap;
+use std::fs;
 use std::process::Command;
 
 use crate::errors::BackendError;
-use crate::models::git::{CheckpointPurpose, GitCheckpoint, GitDiff, GitRepositoryStatus};
+use crate::models::git::{
+    CheckpointPurpose, GitChangedFile, GitChangedFileKind, GitCheckpoint, GitDiff,
+    GitRepositoryStatus,
+};
 use crate::models::paths::ProjectContext;
 
 impl GitService {
@@ -189,9 +194,66 @@ impl GitService {
             affected_paths,
         })
     }
+
+    pub fn changed_files_since_head(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<Vec<GitChangedFile>, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before enumerating changes.",
+                true,
+                true,
+            ));
+        }
+
+        let mut changes = status_changes(context)?;
+        let changed_chars = changed_chars_since_head(context)?;
+        for change in &mut changes {
+            change.changed_chars = changed_chars
+                .get(&change.path)
+                .copied()
+                .unwrap_or_else(|| estimate_added_file_size(context, change));
+        }
+        changes.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(changes)
+    }
+
+    pub fn diff_since_head(&self, context: &ProjectContext) -> Result<String, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before generating a diff.",
+                true,
+                true,
+            ));
+        }
+
+        run_git(context, &["diff", "--no-ext-diff", "HEAD", "--"])
+    }
+
+    pub fn rollback_worktree_to_head(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before rolling back changes.",
+                true,
+                true,
+            ));
+        }
+
+        run_git(context, &["reset", "--hard", "HEAD"])?;
+        run_git(context, &["clean", "-fd", "--", "."])?;
+        Ok(())
+    }
 }
 
 fn run_git(context: &ProjectContext, args: &[&str]) -> Result<String, BackendError> {
+    run_git_bytes(context, args).map(|stdout| String::from_utf8_lossy(&stdout).to_string())
+}
+
+fn run_git_bytes(context: &ProjectContext, args: &[&str]) -> Result<Vec<u8>, BackendError> {
     let output = Command::new("git")
         .args(["-c", "core.quotepath=false"])
         .args(args)
@@ -200,7 +262,7 @@ fn run_git(context: &ProjectContext, args: &[&str]) -> Result<String, BackendErr
         .map_err(|err| BackendError::new("GIT_COMMAND_FAILED", err.to_string(), true, false))?;
 
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(output.stdout)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(BackendError::new(
@@ -259,33 +321,135 @@ fn commit_paths_with_message(
 }
 
 fn status_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-    let raw = run_git(context, &["status", "--porcelain", "-uall"])?;
-    let mut paths = Vec::new();
-    for line in raw.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let path_part = &line[3..];
-        let path = path_part
-            .split(" -> ")
-            .last()
-            .unwrap_or(path_part)
-            .trim_matches('"')
-            .replace('\\', "/");
-        if !path.is_empty() {
-            paths.push(path);
-        }
-    }
+    let mut paths: Vec<String> = status_changes(context)?
+        .into_iter()
+        .map(|change| change.path)
+        .collect();
     paths.sort();
     paths.dedup();
     Ok(paths)
 }
 
+fn status_changes(context: &ProjectContext) -> Result<Vec<GitChangedFile>, BackendError> {
+    let raw = run_git_bytes(context, &["status", "--porcelain=v1", "-z", "-uall"])?;
+    Ok(parse_status_changes(&raw))
+}
+
+fn changed_chars_since_head(
+    context: &ProjectContext,
+) -> Result<HashMap<String, usize>, BackendError> {
+    let raw = run_git_bytes(context, &["diff", "--numstat", "-z", "HEAD", "--"])?;
+    Ok(parse_numstat_changed_chars(&raw))
+}
+
+fn parse_status_changes(raw: &[u8]) -> Vec<GitChangedFile> {
+    let records: Vec<&[u8]> = raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .collect();
+    let mut changes = Vec::new();
+    let mut index = 0;
+    while index < records.len() {
+        let record = records[index];
+        if record.len() < 4 {
+            index += 1;
+            continue;
+        }
+
+        let index_status = record[0] as char;
+        let worktree_status = record[1] as char;
+        let path = normalize_git_path(&String::from_utf8_lossy(&record[3..]));
+        if path.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        let kind = if index_status == 'R' || worktree_status == 'R' {
+            index += 1;
+            GitChangedFileKind::Renamed
+        } else if index_status == 'D' || worktree_status == 'D' {
+            GitChangedFileKind::Deleted
+        } else if index_status == 'A'
+            || worktree_status == 'A'
+            || index_status == '?'
+            || worktree_status == '?'
+        {
+            GitChangedFileKind::Added
+        } else {
+            GitChangedFileKind::Modified
+        };
+
+        changes.push(GitChangedFile {
+            path,
+            kind,
+            changed_chars: 0,
+        });
+        index += 1;
+    }
+    changes.sort_by(|left, right| left.path.cmp(&right.path));
+    changes.dedup_by(|left, right| left.path == right.path);
+    changes
+}
+
+fn parse_numstat_changed_chars(raw: &[u8]) -> HashMap<String, usize> {
+    let records: Vec<&[u8]> = raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .collect();
+    let mut changed_chars = HashMap::new();
+    let mut index = 0;
+    while index < records.len() {
+        let record = String::from_utf8_lossy(records[index]);
+        let mut columns = record.splitn(3, '\t');
+        let added = columns.next().map(parse_numstat_count).unwrap_or(0);
+        let deleted = columns.next().map(parse_numstat_count).unwrap_or(0);
+        let inline_path = columns.next().unwrap_or_default();
+
+        let path = if inline_path.is_empty() && index + 2 < records.len() {
+            index += 2;
+            String::from_utf8_lossy(records[index]).to_string()
+        } else {
+            inline_path.to_string()
+        };
+
+        let normalized = normalize_git_path(&path);
+        if !normalized.is_empty() {
+            changed_chars.insert(normalized, added.saturating_add(deleted));
+        }
+        index += 1;
+    }
+    changed_chars
+}
+
+fn parse_numstat_count(value: &str) -> usize {
+    value.parse::<usize>().unwrap_or(0)
+}
+
+fn estimate_added_file_size(context: &ProjectContext, change: &GitChangedFile) -> usize {
+    if !matches!(
+        change.kind,
+        GitChangedFileKind::Added | GitChangedFileKind::Modified | GitChangedFileKind::Renamed
+    ) {
+        return 0;
+    }
+
+    fs::metadata(context.root.join(&change.path))
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| usize::try_from(metadata.len()).unwrap_or(usize::MAX))
+        .unwrap_or(0)
+}
+
+fn normalize_git_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::GitService;
-    use crate::models::git::CheckpointPurpose;
+    use crate::models::git::{CheckpointPurpose, GitChangedFileKind};
     use crate::models::paths::ProjectContext;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
 
@@ -353,6 +517,78 @@ mod tests {
         assert!(repo.is_repository);
         assert!(repo.head.is_some());
         assert!(!repo.has_changes);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn changed_files_since_head_reports_status_and_changed_chars() {
+        let root = unique_temp_dir("changed-files");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki").join("existing.md"), "alpha\n").unwrap();
+        fs::write(root.join("wiki").join("deleted.md"), "remove me\n").unwrap();
+
+        let service = GitService;
+        service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap();
+
+        fs::write(
+            root.join("wiki").join("existing.md"),
+            "alpha\nupdated line\n",
+        )
+        .unwrap();
+        fs::write(root.join("wiki").join("new.md"), "new page\n").unwrap();
+        fs::remove_file(root.join("wiki").join("deleted.md")).unwrap();
+
+        let changes = service.changed_files_since_head(&context).unwrap();
+        let by_path: HashMap<String, _> = changes
+            .into_iter()
+            .map(|change| (change.path.clone(), change))
+            .collect();
+
+        assert_eq!(
+            by_path.get("wiki/existing.md").map(|change| &change.kind),
+            Some(&GitChangedFileKind::Modified)
+        );
+        assert_eq!(
+            by_path.get("wiki/new.md").map(|change| &change.kind),
+            Some(&GitChangedFileKind::Added)
+        );
+        assert_eq!(
+            by_path.get("wiki/deleted.md").map(|change| &change.kind),
+            Some(&GitChangedFileKind::Deleted)
+        );
+        assert!(by_path["wiki/existing.md"].changed_chars > 0);
+        assert!(by_path["wiki/new.md"].changed_chars > 0);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rollback_to_head_restores_worktree_after_agent_changes() {
+        let root = unique_temp_dir("rollback");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki").join("page.md"), "stable\n").unwrap();
+
+        let service = GitService;
+        service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap();
+
+        fs::write(root.join("wiki").join("page.md"), "agent edit\n").unwrap();
+        fs::write(root.join("wiki").join("agent-new.md"), "draft\n").unwrap();
+
+        service.rollback_worktree_to_head(&context).unwrap();
+
+        let restored = fs::read_to_string(root.join("wiki").join("page.md"))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert_eq!(restored, "stable\n");
+        assert!(!root.join("wiki").join("agent-new.md").exists());
+        assert!(!service.repository_status(&context).unwrap().has_changes);
 
         fs::remove_dir_all(root).ok();
     }
