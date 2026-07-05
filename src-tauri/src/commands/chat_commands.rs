@@ -5,8 +5,8 @@ use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::chat::{
     ChatCitation, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute,
-    ChatSession, ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest,
-    ListChatsRequest, LoadChatRequest, RenameChatRequest, ResolveChatConvenienceEditRequest,
+    ChatSession, ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest, ListChatsRequest,
+    LoadChatRequest, RenameChatRequest, ResolveChatConvenienceEditRequest,
     RollbackLastChatConvenienceEditRequest, SaveAnswerResult, SaveAnswerToWikiRequest,
     SendChatMessageRequest,
 };
@@ -170,7 +170,13 @@ async fn run_chat_send(
         .classify_chat_intent(&request.content);
     if should_use_convenience_flow(request.convenience_enabled, intent) {
         return run_chat_convenience_send(
-            state, request, context, task_id, &mut session, retrieval, citations,
+            state,
+            request,
+            context,
+            task_id,
+            &mut session,
+            retrieval,
+            citations,
         )
         .await;
     }
@@ -408,11 +414,7 @@ async fn run_chat_convenience_send(
     let violation_reason = audit.violation_reason.clone();
 
     let (content, status, rollback_task_id) = match audit.status {
-        ConvenienceAuditStatus::Passed => (
-            answer,
-            ChatConvenienceEditStatus::Applied,
-            None,
-        ),
+        ConvenienceAuditStatus::Passed => (answer, ChatConvenienceEditStatus::Applied, None),
         ConvenienceAuditStatus::SoftViolation => (
             answer,
             ChatConvenienceEditStatus::SoftViolationPending,
@@ -555,7 +557,10 @@ fn resolve_convenience_agent(
             true,
         ));
     }
-    if let Some(kind) = agent_config.default_agent.filter(|kind| is_installed(*kind)) {
+    if let Some(kind) = agent_config
+        .default_agent
+        .filter(|kind| is_installed(*kind))
+    {
         return Ok(kind);
     }
     AgentKind::ALL

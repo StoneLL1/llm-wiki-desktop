@@ -339,7 +339,9 @@ impl AgentService {
                 stdin: Some(prompt_owned),
                 cwd,
             },
-            AgentKind::Openclaw | AgentKind::Hermes => return Err(unsupported_convenience_agent(kind)),
+            AgentKind::Openclaw | AgentKind::Hermes => {
+                return Err(unsupported_convenience_agent(kind))
+            }
         };
         Ok(invocation)
     }

@@ -788,7 +788,9 @@ mod tests {
         let settings_value = serde_json::to_value(&settings).unwrap();
         let global_value = serde_json::to_value(&global).unwrap();
         let project_value = serde_json::to_value(&project).unwrap();
-        assert!(settings_value.get("chatConvenienceAuthorizations").is_none());
+        assert!(settings_value
+            .get("chatConvenienceAuthorizations")
+            .is_none());
         assert!(global_value["chatConvenienceAuthorizations"].is_array());
         assert!(project_value.get("chatConvenienceAuthorizations").is_none());
         assert_eq!(global_value["density"], json!("comfortable"));
