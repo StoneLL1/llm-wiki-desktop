@@ -29,6 +29,13 @@ export interface SystemNotificationPrefs {
   onLongTaskProgress: boolean;
 }
 
+export interface ChatConvenienceAuthorization {
+  enabled: boolean;
+  confirmedAt: string;
+  projectId: string;
+  rootPathFingerprint: string;
+}
+
 export interface Settings {
   // Global
   language: AppLanguage;
@@ -52,6 +59,7 @@ export interface Settings {
   externalEditor: string;
   associateMdFiles: boolean;
   associateWikiFolders: boolean;
+  chatConvenienceAuthorizations: ChatConvenienceAuthorization[];
   // Project
   contextWindow: number;
   maxTokens: number;

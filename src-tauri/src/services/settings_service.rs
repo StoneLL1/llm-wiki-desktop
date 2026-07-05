@@ -1,10 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::errors::BackendError;
 use crate::models::agent::{AgentConfig, AgentKind};
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
-use crate::models::settings::{CloseBehavior, GlobalSettingsFile, ProjectSettingsFile, Settings};
+use crate::models::settings::{
+    ChatConvenienceAuthorization, CloseBehavior, GlobalSettingsFile, ProjectSettingsFile, Settings,
+};
 use crate::services::{FileStore, SecretService};
 
 pub struct SettingsService {
@@ -52,8 +54,12 @@ impl SettingsService {
     ) -> Result<Settings, BackendError> {
         let store = FileStore;
         store.ensure_absolute_dir(&self.config_dir)?;
-        store
-            .write_json_atomic_absolute(&self.global_settings_path(), &settings.to_global_file())?;
+        let mut global = settings.to_global_file();
+        global.chat_convenience_authorizations = self
+            .read_global_settings()
+            .map(|existing| existing.chat_convenience_authorizations)
+            .unwrap_or_default();
+        store.write_json_atomic_absolute(&self.global_settings_path(), &global)?;
         store.write_json_atomic(context, ".app/settings.json", &settings.to_project_file())?;
         store.write_json_atomic(
             context,
@@ -147,6 +153,68 @@ impl SettingsService {
             .unwrap_or_else(|_| "en".to_string())
     }
 
+    pub fn get_chat_convenience_authorization(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<ChatConvenienceAuthorization, BackendError> {
+        let root_path_fingerprint = project_root_fingerprint(&context.root);
+        let settings = self.read_global_settings()?;
+
+        Ok(settings
+            .chat_convenience_authorizations
+            .into_iter()
+            .rev()
+            .find(|authorization| {
+                authorization.project_id == context.project_id
+                    && authorization.root_path_fingerprint == root_path_fingerprint
+            })
+            .unwrap_or(ChatConvenienceAuthorization {
+                enabled: false,
+                confirmed_at: String::new(),
+                project_id: context.project_id.clone(),
+                root_path_fingerprint,
+            }))
+    }
+
+    pub fn set_chat_convenience_authorization(
+        &self,
+        context: &ProjectContext,
+        enabled: bool,
+    ) -> Result<ChatConvenienceAuthorization, BackendError> {
+        let mut settings = self.read_global_settings()?;
+        let root_path_fingerprint = project_root_fingerprint(&context.root);
+        settings
+            .chat_convenience_authorizations
+            .retain(|authorization| {
+                authorization.project_id != context.project_id
+                    || authorization.root_path_fingerprint != root_path_fingerprint
+            });
+
+        let authorization = ChatConvenienceAuthorization {
+            enabled,
+            confirmed_at: chrono::Utc::now().to_rfc3339(),
+            project_id: context.project_id.clone(),
+            root_path_fingerprint,
+        };
+        settings
+            .chat_convenience_authorizations
+            .push(authorization.clone());
+
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+
+        Ok(authorization)
+    }
+
+    pub fn revoke_all_chat_convenience_authorizations(&self) -> Result<(), BackendError> {
+        let mut settings = self.read_global_settings()?;
+        settings.chat_convenience_authorizations.clear();
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+    }
+
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
     }
@@ -163,6 +231,14 @@ fn default_config_dir() -> PathBuf {
         return PathBuf::from(home).join(".config").join("llm-wiki-desktop");
     }
     std::env::temp_dir().join("llm-wiki-desktop")
+}
+
+fn project_root_fingerprint(path: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let normalized = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[cfg(test)]
@@ -361,5 +437,85 @@ mod tests {
         let service = SettingsService::with_config_dir(config_dir.clone());
         // No settings file written.
         assert_eq!(service.read_language(), "en");
+    }
+
+    #[test]
+    fn chat_convenience_authorization_is_global_only() {
+        let (context, root, config_dir) = tmp_paths("chat-convenience-auth");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        let saved = service
+            .set_chat_convenience_authorization(&context, true)
+            .unwrap();
+
+        assert!(saved.enabled);
+        assert_eq!(saved.project_id, context.project_id);
+        assert!(saved.root_path_fingerprint.len() >= 16);
+
+        let global: serde_json::Value = FileStore
+            .read_json_file(&config_dir.join("settings.json"))
+            .unwrap();
+        assert!(global["chatConvenienceAuthorizations"].is_array());
+        assert!(!context
+            .resolve_project_path(".app/settings.json")
+            .unwrap()
+            .exists());
+
+        let loaded = service
+            .get_chat_convenience_authorization(&context)
+            .unwrap();
+        assert!(loaded.enabled);
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn chat_convenience_authorization_can_be_revoked_for_project() {
+        let (context, root, config_dir) = tmp_paths("chat-convenience-revoke");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        service
+            .set_chat_convenience_authorization(&context, true)
+            .unwrap();
+        let revoked = service
+            .set_chat_convenience_authorization(&context, false)
+            .unwrap();
+
+        assert!(!revoked.enabled);
+        assert!(
+            !service
+                .get_chat_convenience_authorization(&context)
+                .unwrap()
+                .enabled
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn save_settings_preserves_chat_convenience_authorizations() {
+        let (context, root, config_dir) = tmp_paths("chat-convenience-save-preserves");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        service
+            .set_chat_convenience_authorization(&context, true)
+            .unwrap();
+        let mut settings = service.read_settings(&context).unwrap();
+        settings.language = "zh-CN".into();
+        settings.chat_convenience_authorizations.clear();
+
+        service.save_settings(&context, &settings).unwrap();
+
+        assert!(
+            service
+                .get_chat_convenience_authorization(&context)
+                .unwrap()
+                .enabled
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 }

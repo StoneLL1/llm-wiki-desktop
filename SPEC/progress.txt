@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-05] Settings/Chat convenience authorization - Implemented global-only Chat convenience authorization model, SettingsService methods, Tauri commands, and settings store IPC helpers/tests - Key decision: project authorization is keyed by project id plus deterministic root-path fingerprint and is stored only in global machine settings.
+
 [2026-07-05] Chat convenience mode implementation plan - Wrote task-by-task plan for global local authorization, backend audit/rollback service, all-Agent convenience invocation, Chat command integration, frontend controls, settings revocation, and verification workflow - Key decision: implementation should preserve existing read-only Chat as default while adding direct-project write flow only for authorized write-intent turns.
 
 [2026-07-05] Chat convenience mode design - Wrote approved design spec for project-level Chat convenience mode with real-project Agent writes, per-turn Git checkpoints, post-write audit, hard-violation rollback, soft-violation keep/rollback prompts, global local authorization, and last-edit rollback - Key decision: prioritize convenience by supporting all installed Agents with best-effort constraints, while preserving hard stops for delete/raw/config/external-conflict cases.
