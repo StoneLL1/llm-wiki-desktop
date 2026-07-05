@@ -111,7 +111,7 @@ pub fn classify_chat_intent(input: &str) -> ChatIntent {
             "how",
         ],
     );
-    if has_read_only && !has_explicit_write_command(&normalized) {
+    if has_read_only {
         return ChatIntent::ReadOnly;
     }
 
@@ -199,34 +199,6 @@ pub fn convenience_prompt_suffix() -> &'static str {
 
 fn contains_any(input: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| input.contains(needle))
-}
-
-fn has_explicit_write_command(input: &str) -> bool {
-    [
-        "save this",
-        "save the",
-        "save as",
-        "write this",
-        "write the",
-        "edit this",
-        "edit the",
-        "update this",
-        "update the",
-        "create a",
-        "create the",
-        "add this",
-        "add the",
-        "append this",
-        "append the",
-        "delete this",
-        "delete the",
-        "remove this",
-        "remove the",
-        "rewrite this",
-        "rewrite the",
-    ]
-    .iter()
-    .any(|needle| input.contains(needle))
 }
 
 fn hard_violation_reason(changes: &[ChangedFile]) -> Option<String> {
@@ -330,6 +302,14 @@ mod tests {
         );
         assert_eq!(
             classify_chat_intent("what changed in this update?"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("how do I update this page?"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("why did you delete the note?"),
             ChatIntent::ReadOnly
         );
         assert_eq!(
