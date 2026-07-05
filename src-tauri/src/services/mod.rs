@@ -19,9 +19,8 @@ mod settings_service;
 pub use agent_service::{AgentInvocation, AgentService, ProcessRunner, SystemProcessRunner};
 pub use bookmark_service::BookmarkService;
 pub use chat_convenience_service::{
-    audit_changed_paths, classify_chat_intent, convenience_prompt_suffix, ChangedFile,
-    ChangedFileKind, ChatConvenienceService, ChatIntent, ConvenienceAuditReport,
-    ConvenienceAuditStatus,
+    audit_changed_paths, classify_chat_intent, ChangedFile, ChatConvenienceService, ChatIntent,
+    ConvenienceAuditReport, ConvenienceAuditStatus,
 };
 pub use chat_service::ChatService;
 pub use compile_service::CompileService;
