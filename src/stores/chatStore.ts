@@ -29,6 +29,7 @@ export interface SendChatOptions {
   agent?: AgentKind | null;
   provider?: LlmProviderKind | null;
   pinnedPagePath?: string | null;
+  convenienceEnabled?: boolean;
 }
 
 const hasTauri = (): boolean =>
@@ -109,6 +110,18 @@ interface ChatState {
   ) => Promise<SaveAnswerResult | null>;
   confirmOverwrite: (projectId: string, rootPath: string) => Promise<void>;
   cancelOverwrite: () => Promise<void>;
+  resolveConvenienceEdit: (
+    projectId: string,
+    rootPath: string,
+    sessionId: string,
+    messageId: string,
+    keep: boolean,
+  ) => Promise<void>;
+  rollbackLastConvenienceEdit: (
+    projectId: string,
+    rootPath: string,
+    sessionId: string,
+  ) => Promise<void>;
   appendStreamDelta: (taskId: string, delta: string, route: ChatRoute | null) => void;
   reset: () => void;
 }
@@ -235,6 +248,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           agent: options?.agent ?? null,
           provider: options?.provider ?? null,
           pinnedPagePath: options?.pinnedPagePath ?? null,
+          convenienceEnabled: options?.convenienceEnabled ?? false,
         },
       });
       if (!isProjectScopeCurrent(scope)) return null;
@@ -355,6 +369,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
         request: { actionId, status: "cancelled" },
       });
     } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  resolveConvenienceEdit: async (projectId, rootPath, sessionId, messageId, keep) => {
+    if (!hasTauri()) return;
+    const scope = captureProjectScope();
+    set({ error: null });
+    try {
+      const session = await invoke<ChatSession>("resolve_chat_convenience_edit", {
+        request: { projectId, projectRootPath: rootPath, sessionId, messageId, keep },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ activeSession: session, activeSessionId: session.id });
+      await get().loadSessions(projectId, rootPath);
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  rollbackLastConvenienceEdit: async (projectId, rootPath, sessionId) => {
+    if (!hasTauri()) return;
+    const scope = captureProjectScope();
+    set({ error: null });
+    try {
+      const session = await invoke<ChatSession>("rollback_last_chat_convenience_edit", {
+        request: { projectId, projectRootPath: rootPath, sessionId },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
+      set({ activeSession: session, activeSessionId: session.id });
+      await get().loadSessions(projectId, rootPath);
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return;
       set({ error: errorMessage(error) });
     }
   },

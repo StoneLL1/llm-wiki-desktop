@@ -932,9 +932,7 @@ fn verify_project_hash(
 fn validate_artifact_paths(context: &ProjectContext, paths: &[String]) -> Result<(), BackendError> {
     for path in paths {
         let normalized = path.replace('\\', "/");
-        if !normalized.starts_with("raw/extracted/")
-            && !normalized.starts_with("wiki/sources/")
-        {
+        if !normalized.starts_with("raw/extracted/") && !normalized.starts_with("wiki/sources/") {
             return Err(BackendError::new(
                 "SOURCE_ARTIFACT_PATH_INVALID",
                 "Source artifacts must remain under raw/extracted or wiki/sources.",
@@ -1649,7 +1647,10 @@ mod tests {
         // The verbatim Markdown original is promoted to wiki/sources/ so it is
         // browsable immediately, and source-index records that promoted path.
         let promoted = root.join("wiki/sources/notes.md");
-        assert!(promoted.exists(), "markdown original must be promoted to wiki/sources/");
+        assert!(
+            promoted.exists(),
+            "markdown original must be promoted to wiki/sources/"
+        );
         let promoted_body = fs::read_to_string(&promoted).unwrap();
         assert!(promoted_body.starts_with("---\n"));
         assert!(promoted_body.contains("type: source"));

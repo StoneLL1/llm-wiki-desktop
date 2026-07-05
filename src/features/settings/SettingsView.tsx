@@ -63,12 +63,19 @@ export function SettingsView({
   const loading = useSettingsStore((state) => state.loading);
   const saving = useSettingsStore((state) => state.saving);
   const error = useSettingsStore((state) => state.error);
+  const chatConvenienceAuthorization = useSettingsStore((state) => state.chatConvenienceAuthorization);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
+  const loadChatConvenienceAuthorization = useSettingsStore((state) => state.loadChatConvenienceAuthorization);
+  const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
+  const revokeAllChatConvenienceAuthorizations = useSettingsStore(
+    (state) => state.revokeAllChatConvenienceAuthorizations,
+  );
   const persistPatch = useSettingsStore((state) => state.persistPatch);
 
   useEffect(() => {
     void loadSettings(project.projectId, project.rootPath);
-  }, [project.projectId, project.rootPath, loadSettings]);
+    void loadChatConvenienceAuthorization(project.projectId, project.rootPath);
+  }, [project.projectId, project.rootPath, loadSettings, loadChatConvenienceAuthorization]);
 
   useEffect(() => {
     if (!hasTauri()) return;
@@ -220,11 +227,18 @@ export function SettingsView({
           {activeSection === "security" ? (
             <SecuritySettings
               providers={securityRows}
+              chatConvenienceAuthorization={chatConvenienceAuthorization}
               onDeleteSecret={(provider) => {
                 void (async () => {
                   await onDeleteSecret(provider);
                   await onRefreshCapabilities();
                 })();
+              }}
+              onRevokeChatConvenience={() => {
+                void setChatConvenienceAuthorization(project.projectId, project.rootPath, false);
+              }}
+              onRevokeAllChatConvenience={() => {
+                void revokeAllChatConvenienceAuthorizations();
               }}
             />
           ) : null}

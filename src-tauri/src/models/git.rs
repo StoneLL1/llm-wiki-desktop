@@ -34,9 +34,26 @@ pub struct GitDiff {
     pub affected_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitChangedFileKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitChangedFile {
+    pub path: String,
+    pub kind: GitChangedFileKind,
+    pub changed_chars: usize,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CheckpointPurpose, GitCheckpoint};
+    use super::{CheckpointPurpose, GitChangedFile, GitChangedFileKind, GitCheckpoint};
     use serde_json::json;
 
     #[test]
@@ -54,5 +71,20 @@ mod tests {
         assert_eq!(value["commitHash"], json!("abc123"));
         assert_eq!(value["purpose"], json!("high_risk_operation"));
         assert_eq!(value["affectedPaths"][0], json!("wiki/page.md"));
+    }
+
+    #[test]
+    fn serializes_git_changed_file_with_camel_case_fields() {
+        let change = GitChangedFile {
+            path: "wiki/page.md".to_string(),
+            kind: GitChangedFileKind::Modified,
+            changed_chars: 42,
+        };
+
+        let value = serde_json::to_value(change).unwrap();
+
+        assert_eq!(value["path"], json!("wiki/page.md"));
+        assert_eq!(value["kind"], json!("modified"));
+        assert_eq!(value["changedChars"], json!(42));
     }
 }

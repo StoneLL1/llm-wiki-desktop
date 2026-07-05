@@ -8,7 +8,7 @@ use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
 use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus};
 use crate::models::lint::{
-    AddLintIgnoreRequest, ApplyLintFixesBatchRequest, ApplyLintFixRequest, DeepLintReport,
+    AddLintIgnoreRequest, ApplyLintFixRequest, ApplyLintFixesBatchRequest, DeepLintReport,
     GetDeepLintReportRequest, LintBatchOutcome, LintFixOutcome, LintHistoryFile, LintIgnoreFile,
     LintReport, ListLintHistoryRequest, ListLintIgnoresRequest, PersistedLintReport,
     ReadLintHistoryReportRequest, RemoveLintIgnoreRequest, RunLocalLintRequest,
@@ -326,16 +326,14 @@ pub fn apply_lint_fixes(
         &request.expected_hashes,
     )?;
     for confirmation in &outcome.needs_confirmation {
-        state
-            .confirmation_registry
-            .register_with_execution(
-                confirmation.pending_action.clone(),
-                Some(ConfirmationExecution::LintFix {
-                    project_id: request.project_id.clone(),
-                    root_path: request.project_root_path.clone(),
-                    issue: confirmation.issue.clone(),
-                }),
-            )?;
+        state.confirmation_registry.register_with_execution(
+            confirmation.pending_action.clone(),
+            Some(ConfirmationExecution::LintFix {
+                project_id: request.project_id.clone(),
+                root_path: request.project_root_path.clone(),
+                issue: confirmation.issue.clone(),
+            }),
+        )?;
     }
     Ok(outcome)
 }

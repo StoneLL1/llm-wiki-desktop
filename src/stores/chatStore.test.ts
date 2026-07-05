@@ -66,6 +66,7 @@ describe("chatStore", () => {
     expect(call[1].request.route).toBe("auto");
     expect(call[1].request.content).toBe("Hello");
     expect(call[1].request.pinnedPagePath).toBeNull();
+    expect(call[1].request.convenienceEnabled).toBe(false);
   });
 
   it("send includes pinnedPagePath when provided", async () => {
@@ -83,6 +84,52 @@ describe("chatStore", () => {
     const call = invokeMock.mock.calls[0];
     expect(call[0]).toBe("send_chat_message");
     expect(call[1].request.pinnedPagePath).toBe("wiki/concepts/react-pattern.md");
+  });
+
+  it("send includes convenienceEnabled when requested", async () => {
+    invokeMock.mockResolvedValueOnce({ id: "task-convenience" });
+    await useChatStore.getState().send(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "s1",
+      "Update this page",
+      "agent",
+      { convenienceEnabled: true },
+    );
+
+    const call = invokeMock.mock.calls[0];
+    expect(call[0]).toBe("send_chat_message");
+    expect(call[1].request.convenienceEnabled).toBe(true);
+  });
+
+  it("resolves and rolls back convenience edits through backend commands", async () => {
+    invokeMock
+      .mockResolvedValueOnce(session({ messages: [{ id: "m1" } as never] }))
+      .mockResolvedValueOnce([sessionSummary()])
+      .mockResolvedValueOnce(session({ messages: [] }))
+      .mockResolvedValueOnce([sessionSummary()]);
+
+    await useChatStore
+      .getState()
+      .resolveConvenienceEdit(PROJECT.projectId, PROJECT.rootPath, "s1", "m1", true);
+    expect(invokeMock.mock.calls[0][0]).toBe("resolve_chat_convenience_edit");
+    expect(invokeMock.mock.calls[0][1].request).toMatchObject({
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+      sessionId: "s1",
+      messageId: "m1",
+      keep: true,
+    });
+
+    await useChatStore
+      .getState()
+      .rollbackLastConvenienceEdit(PROJECT.projectId, PROJECT.rootPath, "s1");
+    expect(invokeMock.mock.calls[2][0]).toBe("rollback_last_chat_convenience_edit");
+    expect(invokeMock.mock.calls[2][1].request).toMatchObject({
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+      sessionId: "s1",
+    });
   });
 
   it("saveAnswer surfaces FILE_ALREADY_EXISTS as an overwrite request", async () => {

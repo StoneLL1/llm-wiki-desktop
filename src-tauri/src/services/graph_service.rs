@@ -222,7 +222,9 @@ impl GraphService {
 }
 
 fn layout_covers_nodes(layout: &GraphLayout, nodes: &[GraphNode]) -> bool {
-    nodes.iter().all(|node| layout.positions.contains_key(&node.id))
+    nodes
+        .iter()
+        .all(|node| layout.positions.contains_key(&node.id))
 }
 
 /// Build a case-insensitive lookup from note-name/title/alias -> page path.

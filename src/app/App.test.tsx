@@ -448,10 +448,10 @@ describe("App", () => {
     expect(screen.getByRole("complementary", { name: "Project info" })).toBeInTheDocument();
   });
 
-  it("uses the sidebar splitter as the only collapse control and keeps navigation reachable", () => {
+  it("keeps the sidebar splitter and topbar collapse control navigation reachable", () => {
     render(<App />);
 
-    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Expand sidebar" })).not.toBeInTheDocument();
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
 

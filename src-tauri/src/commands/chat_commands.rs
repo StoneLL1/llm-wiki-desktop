@@ -1,24 +1,28 @@
-use std::path::PathBuf;
-
 use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::chat::{
-    ChatMessage, ChatRoute, ChatSession, ChatSessionSummary, CreateChatSessionRequest,
-    DeleteChatRequest, ListChatsRequest, LoadChatRequest, RenameChatRequest, SaveAnswerResult,
-    SaveAnswerToWikiRequest, SendChatMessageRequest,
+    ChatCitation, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute,
+    ChatSession, ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest, ListChatsRequest,
+    LoadChatRequest, RenameChatRequest, ResolveChatConvenienceEditRequest,
+    RollbackLastChatConvenienceEditRequest, SaveAnswerResult, SaveAnswerToWikiRequest,
+    SendChatMessageRequest,
 };
 use crate::models::compile::CompileRoutePreference;
 use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, ConfirmationStatus, PendingAction, PendingActionType,
     RiskLevel,
 };
+use crate::models::git::CheckpointPurpose;
+use crate::models::git::GitChangedFile;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
-use crate::services::{AgentService, LlmService};
+use crate::services::{
+    AgentService, ChatIntent, ConvenienceAuditStatus, LlmService, RetrievalContext,
+};
 use crate::tasks::task_model::LogLevel;
 
 #[tauri::command]
@@ -137,6 +141,7 @@ async fn run_chat_send(
         route: None,
         provider: None,
         task_id: None,
+        convenience_edit: None,
     };
     state
         .chat_service
@@ -160,6 +165,21 @@ async fn run_chat_send(
         request.pinned_page_path.as_deref(),
     )?;
     let citations = retrieval.citations.clone();
+    let intent = state
+        .chat_convenience_service
+        .classify_chat_intent(&request.content);
+    if should_use_convenience_flow(request.convenience_enabled, intent) {
+        return run_chat_convenience_send(
+            state,
+            request,
+            context,
+            task_id,
+            &mut session,
+            retrieval,
+            citations,
+        )
+        .await;
+    }
 
     let (route, answer, provider) = match resolve_route(
         state,
@@ -177,7 +197,7 @@ async fn run_chat_send(
                     format!("Running {}", kind.command()),
                 )
                 .map_err(task_error)?;
-            let workspace = create_chat_workspace(task_id)?;
+            let workspace = context.root.clone();
             let invocation = AgentService::chat_invocation(kind, &workspace, &retrieval.prompt)?;
             // Stream the agent's stdout lines to the task stream channel so the
             // chat UI can render the answer incrementally (uniform with BYOK).
@@ -198,7 +218,6 @@ async fn run_chat_send(
                 task_id,
                 &on_delta,
             )?;
-            let _ = std::fs::remove_dir_all(&workspace);
             (ChatRoute::Agent, captured.trim().to_string(), None)
         }
         ResolvedRoute::Byok(provider) => {
@@ -269,6 +288,7 @@ async fn run_chat_send(
         route: Some(route),
         provider,
         task_id: Some(task_id.to_string()),
+        convenience_edit: None,
     };
     // Re-check cancellation immediately before persisting: there is a window
     // between the post-generation check above and the write below where the
@@ -303,6 +323,259 @@ async fn run_chat_send(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_chat_convenience_send(
+    state: &AppState,
+    request: SendChatMessageRequest,
+    context: &ProjectContext,
+    task_id: &str,
+    session: &mut ChatSession,
+    retrieval: RetrievalContext,
+    citations: Vec<ChatCitation>,
+) -> Result<(), BackendError> {
+    let authorization = state
+        .settings_service
+        .get_chat_convenience_authorization(context)?;
+    if !authorization.enabled {
+        return Err(BackendError::new(
+            "CHAT_CONVENIENCE_UNAUTHORIZED",
+            "Chat convenience mode is not authorized for this project.",
+            true,
+            true,
+        ));
+    }
+
+    state
+        .task_service
+        .append_log(
+            task_id,
+            LogLevel::Info,
+            "Creating Git checkpoint before Chat convenience edit".into(),
+        )
+        .map_err(task_error)?;
+    let checkpoint = state.git_service.create_checkpoint(
+        context,
+        CheckpointPurpose::HighRiskOperation,
+        "Before Chat convenience edit",
+    )?;
+    let ignored_baseline = state.git_service.ignored_paths(context)?;
+
+    let kind = resolve_convenience_agent(state, context, request.agent)?;
+    state
+        .task_service
+        .append_log(
+            task_id,
+            LogLevel::Info,
+            format!("Running {} in Chat convenience mode", kind.command()),
+        )
+        .map_err(task_error)?;
+    let prompt = format!(
+        "{}{}",
+        retrieval.prompt,
+        state.chat_convenience_service.convenience_prompt_suffix()
+    );
+    let invocation = AgentService::chat_convenience_invocation(kind, &context.root, &prompt)?;
+    let task_service = &state.task_service;
+    let task_id_owned = task_id.to_string();
+    let on_delta = move |delta: &str| {
+        task_service.emit_stream_delta(
+            &task_id_owned,
+            crate::models::task::StreamDelta {
+                delta: delta.to_string(),
+                route: Some("agent".to_string()),
+            },
+        );
+    };
+    let answer = state
+        .agent_service
+        .run_task_streaming_with_delta(&invocation, &state.task_service, task_id, &on_delta)?
+        .trim()
+        .to_string();
+
+    if state.task_service.is_cancelled(task_id) {
+        return Err(BackendError::new(
+            "CHAT_CANCELLED",
+            "Chat was cancelled.",
+            true,
+            false,
+        ));
+    }
+
+    let mut changes = state
+        .git_service
+        .changed_files_since_head_with_ignored_baseline(context, &ignored_baseline)?;
+    changes.retain(|change| !is_current_task_runtime_path(task_id, change));
+    let audit = state.chat_convenience_service.audit_git_changes(changes);
+    let diff_text = state
+        .git_service
+        .diff_since_head(context)
+        .ok()
+        .map(|diff| filter_current_task_diff(task_id, &diff));
+    let violation_reason = audit.violation_reason.clone();
+
+    let (content, status, rollback_task_id) = match audit.status {
+        ConvenienceAuditStatus::Passed => (answer, ChatConvenienceEditStatus::Applied, None),
+        ConvenienceAuditStatus::SoftViolation => (
+            answer,
+            ChatConvenienceEditStatus::SoftViolationPending,
+            None,
+        ),
+        ConvenienceAuditStatus::HardViolation => {
+            let reason = violation_reason
+                .clone()
+                .unwrap_or_else(|| "Convenience edit violated project safety rules.".to_string());
+            match state
+                .git_service
+                .rollback_worktree_to_head_preserving_ignored(context, &ignored_baseline)
+            {
+                Ok(()) => (
+                    format!("Chat convenience edit was rolled back: {reason}"),
+                    ChatConvenienceEditStatus::RolledBack,
+                    Some(task_id.to_string()),
+                ),
+                Err(error) => (
+                    format!(
+                        "Chat convenience edit could not be rolled back: {}. Original violation: {reason}",
+                        error.message
+                    ),
+                    ChatConvenienceEditStatus::RollbackFailed,
+                    Some(task_id.to_string()),
+                ),
+            }
+        }
+    };
+
+    let assistant_message = ChatMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        role: crate::models::chat::ChatRole::Assistant,
+        content,
+        created_at: crate::utils::time_utils::now_rfc3339(),
+        citations,
+        route: Some(ChatRoute::Agent),
+        provider: None,
+        task_id: Some(task_id.to_string()),
+        convenience_edit: Some(ChatConvenienceEdit {
+            status,
+            checkpoint_hash: checkpoint.commit_hash,
+            affected_paths: audit.affected_paths.clone(),
+            diff_summary: audit.diff_summary.clone(),
+            diff_text: diff_text.filter(|diff| !diff.trim().is_empty()),
+            violation_reason,
+            rollback_task_id,
+            ignored_baseline_paths: ignored_baseline,
+        }),
+    };
+    if state.task_service.is_cancelled(task_id) {
+        return Err(BackendError::new(
+            "CHAT_CANCELLED",
+            "Chat was cancelled.",
+            true,
+            false,
+        ));
+    }
+    state
+        .chat_service
+        .append_message(context, session, assistant_message)?;
+
+    let mut affected_paths = vec![format!(".app/chats/{}.json", session.id)];
+    affected_paths.extend(audit.affected_paths);
+    state
+        .task_service
+        .set_result(
+            task_id,
+            TaskResult {
+                summary: "Chat convenience edit finished.".into(),
+                affected_paths,
+                pending_action: None,
+            },
+        )
+        .map_err(task_error)?;
+    state
+        .task_service
+        .transition_status(task_id, TaskStatus::Succeeded)
+        .map_err(task_error)?;
+    Ok(())
+}
+
+fn should_use_convenience_flow(enabled: bool, intent: ChatIntent) -> bool {
+    enabled && matches!(intent, ChatIntent::Write)
+}
+
+fn is_current_task_runtime_path(task_id: &str, change: &GitChangedFile) -> bool {
+    let path = change.path.replace('\\', "/");
+    path == format!(".app/tasks/{task_id}.json") || path == format!(".app/tasks/{task_id}.log")
+}
+
+fn filter_current_task_diff(task_id: &str, diff: &str) -> String {
+    let task_json = format!(".app/tasks/{task_id}.json");
+    let task_log = format!(".app/tasks/{task_id}.log");
+    let mut filtered = String::new();
+    let mut current_block = String::new();
+    let mut skip_current = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            if !skip_current {
+                filtered.push_str(&current_block);
+            }
+            current_block.clear();
+            skip_current = line.contains(&task_json) || line.contains(&task_log);
+        } else if current_block.is_empty() {
+            skip_current = line.contains(&task_json) || line.contains(&task_log);
+        }
+        current_block.push_str(line);
+        current_block.push('\n');
+    }
+    if !skip_current {
+        filtered.push_str(&current_block);
+    }
+    filtered
+}
+
+fn resolve_convenience_agent(
+    state: &AppState,
+    context: &ProjectContext,
+    explicit_agent: Option<AgentKind>,
+) -> Result<AgentKind, BackendError> {
+    let agent_config = AgentService::load_config(context)?;
+    let detected = state.agent_service.detect_agents(explicit_agent);
+    let is_installed = |kind: AgentKind| {
+        if !AgentService::supports_convenience_project_chat(kind) {
+            return false;
+        }
+        detected
+            .iter()
+            .any(|info| info.kind == kind && info.state == AgentDetectionState::Installed)
+    };
+    if let Some(kind) = explicit_agent {
+        if is_installed(kind) {
+            return Ok(kind);
+        }
+        return Err(BackendError::new(
+            "AGENT_UNAVAILABLE",
+            "The selected Agent CLI is not installed or not usable.",
+            true,
+            true,
+        ));
+    }
+    if let Some(kind) = agent_config
+        .default_agent
+        .filter(|kind| is_installed(*kind))
+    {
+        return Ok(kind);
+    }
+    AgentKind::ALL
+        .into_iter()
+        .find(|kind| is_installed(*kind))
+        .ok_or_else(|| {
+            BackendError::new(
+                "AGENT_UNAVAILABLE",
+                "No installed supported Agent CLI is available for Chat convenience mode. Use Claude or Codex.",
+                true,
+                true,
+            )
+        })
+}
+
 #[derive(Debug)]
 enum ResolvedRoute {
     Agent(AgentKind),
@@ -320,11 +593,12 @@ fn resolve_route(
     let providers = LlmService::list_providers(context)?;
     let selected_agent = explicit_agent.or(agent_config.default_agent);
     let usable_agent = selected_agent.filter(|kind| {
-        state
-            .agent_service
-            .detect_agents(Some(*kind))
-            .iter()
-            .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
+        AgentService::supports_read_only_project_chat(*kind)
+            && state
+                .agent_service
+                .detect_agents(Some(*kind))
+                .iter()
+                .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
     });
     let selected_provider = select_provider(explicit_provider, &providers, &state.secret_service)?;
     decide_route(preference, usable_agent, selected_provider)
@@ -402,24 +676,6 @@ fn select_provider(
         }
     }
     Ok(None)
-}
-
-/// Create an empty candidate-scoped workspace directory for the Agent run. The
-/// assembled prompt already carries every excerpt inline, so the agent never
-/// needs to touch project files; this dir only satisfies the candidate-root
-/// guard and gives the CLI a stable cwd.
-fn create_chat_workspace(task_id: &str) -> Result<PathBuf, BackendError> {
-    let workspace = std::env::temp_dir()
-        .join("llm-wiki-desktop")
-        .join(format!("chat-{task_id}"));
-    if workspace.exists() {
-        std::fs::remove_dir_all(&workspace).map_err(|err| {
-            BackendError::new("CHAT_WORKSPACE_FAILED", err.to_string(), true, false)
-        })?;
-    }
-    std::fs::create_dir_all(&workspace)
-        .map_err(|err| BackendError::new("CHAT_WORKSPACE_FAILED", err.to_string(), true, false))?;
-    Ok(workspace)
 }
 
 /// Save an assistant answer to `wiki/queries/` as a Markdown page.
@@ -586,6 +842,143 @@ pub fn save_answer_to_wiki(
     result
 }
 
+#[tauri::command]
+pub fn resolve_chat_convenience_edit(
+    state: State<'_, AppState>,
+    request: ResolveChatConvenienceEditRequest,
+) -> Result<ChatSession, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let mut session = state
+        .chat_service
+        .load_session(&context, &request.session_id)?;
+    let index = session
+        .messages
+        .iter()
+        .position(|message| message.id == request.message_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "CHAT_MESSAGE_NOT_FOUND",
+                "The selected chat message no longer exists.",
+                true,
+                true,
+            )
+        })?;
+
+    if request.keep {
+        let edit = session.messages[index]
+            .convenience_edit
+            .as_mut()
+            .ok_or_else(convenience_edit_missing)?;
+        if edit.status != ChatConvenienceEditStatus::SoftViolationPending {
+            return Err(BackendError::new(
+                "CHAT_CONVENIENCE_NOT_PENDING",
+                "This convenience edit is not waiting for a keep or rollback decision.",
+                true,
+                true,
+            ));
+        }
+        edit.status = ChatConvenienceEditStatus::KeptAfterSoftViolation;
+        state.chat_service.save_session(&context, &session)?;
+        return Ok(session);
+    }
+
+    rollback_convenience_message(&state, &context, &mut session, index)?;
+    state.chat_service.save_session(&context, &session)?;
+    Ok(session)
+}
+
+#[tauri::command]
+pub fn rollback_last_chat_convenience_edit(
+    state: State<'_, AppState>,
+    request: RollbackLastChatConvenienceEditRequest,
+) -> Result<ChatSession, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let mut session = state
+        .chat_service
+        .load_session(&context, &request.session_id)?;
+    let index = session
+        .messages
+        .iter()
+        .rposition(|message| {
+            message.convenience_edit.as_ref().is_some_and(|edit| {
+                matches!(
+                    edit.status,
+                    ChatConvenienceEditStatus::Applied
+                        | ChatConvenienceEditStatus::SoftViolationPending
+                        | ChatConvenienceEditStatus::KeptAfterSoftViolation
+                )
+            })
+        })
+        .ok_or_else(|| {
+            BackendError::new(
+                "CHAT_CONVENIENCE_EDIT_MISSING",
+                "No rollbackable Chat convenience edit was found in this session.",
+                true,
+                true,
+            )
+        })?;
+    rollback_convenience_message(&state, &context, &mut session, index)?;
+    state.chat_service.save_session(&context, &session)?;
+    Ok(session)
+}
+
+fn rollback_convenience_message(
+    state: &AppState,
+    context: &ProjectContext,
+    session: &mut ChatSession,
+    index: usize,
+) -> Result<(), BackendError> {
+    let edit = session.messages[index]
+        .convenience_edit
+        .as_mut()
+        .ok_or_else(convenience_edit_missing)?;
+    let checkpoint = edit.checkpoint_hash.clone().ok_or_else(|| {
+        BackendError::new(
+            "CHAT_ROLLBACK_CHECKPOINT_MISSING",
+            "This convenience edit has no Git checkpoint to roll back to.",
+            true,
+            true,
+        )
+    })?;
+    let current_head = state.git_service.repository_status(context)?.head;
+    if current_head.as_deref() != Some(checkpoint.as_str()) {
+        return Err(BackendError::new(
+            "CHAT_ROLLBACK_NOT_CURRENT",
+            "This convenience edit can only be rolled back while its checkpoint is the current Git HEAD.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "checkpoint": checkpoint,
+            "currentHead": current_head,
+        })));
+    }
+    let ignored_baseline = edit.ignored_baseline_paths.clone();
+    match state
+        .git_service
+        .rollback_worktree_to_head_preserving_ignored(context, &ignored_baseline)
+    {
+        Ok(()) => {
+            edit.status = ChatConvenienceEditStatus::RolledBack;
+            Ok(())
+        }
+        Err(error) => {
+            edit.status = ChatConvenienceEditStatus::RollbackFailed;
+            edit.violation_reason = Some(error.message.clone());
+            Ok(())
+        }
+    }
+}
+
+fn convenience_edit_missing() -> BackendError {
+    BackendError::new(
+        "CHAT_CONVENIENCE_EDIT_MISSING",
+        "The selected chat message has no convenience edit metadata.",
+        true,
+        true,
+    )
+}
+
 fn task_error(message: String) -> BackendError {
     BackendError::new("TASK_OPERATION_FAILED", message, true, false)
 }
@@ -604,6 +997,7 @@ fn truncate_title(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::git::{GitChangedFile, GitChangedFileKind};
     use crate::models::llm::LlmProviderConfig;
 
     fn byok(provider: LlmProviderKind) -> LlmProviderConfig {
@@ -692,5 +1086,51 @@ mod tests {
             ResolvedRoute::Byok(config) => assert_eq!(config.provider, LlmProviderKind::Ollama),
             other => panic!("expected BYOK fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn should_use_convenience_flow_only_when_enabled_and_write_intent() {
+        assert!(!should_use_convenience_flow(false, ChatIntent::Write));
+        assert!(!should_use_convenience_flow(true, ChatIntent::ReadOnly));
+        assert!(!should_use_convenience_flow(true, ChatIntent::Ambiguous));
+        assert!(should_use_convenience_flow(true, ChatIntent::Write));
+    }
+
+    #[test]
+    fn current_task_runtime_filter_is_scoped_to_current_task_files() {
+        let changed = |path: &str| GitChangedFile {
+            path: path.to_string(),
+            kind: GitChangedFileKind::Modified,
+            changed_chars: 1,
+        };
+        assert!(is_current_task_runtime_path(
+            "task-1",
+            &changed(".app/tasks/task-1.json")
+        ));
+        assert!(is_current_task_runtime_path(
+            "task-1",
+            &changed(".app/tasks/task-1.log")
+        ));
+        assert!(!is_current_task_runtime_path(
+            "task-1",
+            &changed(".app/tasks/task-2.json")
+        ));
+        assert!(!is_current_task_runtime_path(
+            "task-1",
+            &changed(".app/settings.json")
+        ));
+    }
+
+    #[test]
+    fn current_task_diff_filter_removes_only_current_task_block() {
+        let diff = "diff --git a/.app/tasks/task-1.json b/.app/tasks/task-1.json\n+runtime\n\
+diff --git a/wiki/page.md b/wiki/page.md\n+content\n\
+diff --git a/.app/tasks/task-2.json b/.app/tasks/task-2.json\n+other\n";
+
+        let filtered = filter_current_task_diff("task-1", diff);
+
+        assert!(!filtered.contains("task-1.json"));
+        assert!(filtered.contains("wiki/page.md"));
+        assert!(filtered.contains("task-2.json"));
     }
 }

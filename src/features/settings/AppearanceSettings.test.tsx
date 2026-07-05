@@ -15,7 +15,7 @@ describe("AppearanceSettings", () => {
       />,
     );
 
-    expect(screen.getByRole("radio", { name: /Codex/i })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: /Workbench/i })).toHaveAttribute("aria-checked", "true");
     expect(screen.getAllByRole("radio").length).toBeGreaterThanOrEqual(4);
     expect(screen.queryByLabelText(/hex|rgb|hsl|css variable/i)).not.toBeInTheDocument();
   });
@@ -31,7 +31,7 @@ describe("AppearanceSettings", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("radio", { name: /Paper/i }));
+    fireEvent.click(screen.getByRole("radio", { name: /Parchment/i }));
     expect(onChangeColorThemePreset).toHaveBeenCalledWith("paper");
   });
 });
