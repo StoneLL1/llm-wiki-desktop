@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
@@ -177,7 +175,7 @@ async fn run_chat_send(
                     format!("Running {}", kind.command()),
                 )
                 .map_err(task_error)?;
-            let workspace = create_chat_workspace(task_id)?;
+            let workspace = context.root.clone();
             let invocation = AgentService::chat_invocation(kind, &workspace, &retrieval.prompt)?;
             // Stream the agent's stdout lines to the task stream channel so the
             // chat UI can render the answer incrementally (uniform with BYOK).
@@ -198,7 +196,6 @@ async fn run_chat_send(
                 task_id,
                 &on_delta,
             )?;
-            let _ = std::fs::remove_dir_all(&workspace);
             (ChatRoute::Agent, captured.trim().to_string(), None)
         }
         ResolvedRoute::Byok(provider) => {
@@ -320,11 +317,12 @@ fn resolve_route(
     let providers = LlmService::list_providers(context)?;
     let selected_agent = explicit_agent.or(agent_config.default_agent);
     let usable_agent = selected_agent.filter(|kind| {
-        state
-            .agent_service
-            .detect_agents(Some(*kind))
-            .iter()
-            .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
+        AgentService::supports_read_only_project_chat(*kind)
+            && state
+                .agent_service
+                .detect_agents(Some(*kind))
+                .iter()
+                .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
     });
     let selected_provider = select_provider(explicit_provider, &providers, &state.secret_service)?;
     decide_route(preference, usable_agent, selected_provider)
@@ -402,24 +400,6 @@ fn select_provider(
         }
     }
     Ok(None)
-}
-
-/// Create an empty candidate-scoped workspace directory for the Agent run. The
-/// assembled prompt already carries every excerpt inline, so the agent never
-/// needs to touch project files; this dir only satisfies the candidate-root
-/// guard and gives the CLI a stable cwd.
-fn create_chat_workspace(task_id: &str) -> Result<PathBuf, BackendError> {
-    let workspace = std::env::temp_dir()
-        .join("llm-wiki-desktop")
-        .join(format!("chat-{task_id}"));
-    if workspace.exists() {
-        std::fs::remove_dir_all(&workspace).map_err(|err| {
-            BackendError::new("CHAT_WORKSPACE_FAILED", err.to_string(), true, false)
-        })?;
-    }
-    std::fs::create_dir_all(&workspace)
-        .map_err(|err| BackendError::new("CHAT_WORKSPACE_FAILED", err.to_string(), true, false))?;
-    Ok(workspace)
 }
 
 /// Save an assistant answer to `wiki/queries/` as a Markdown page.

@@ -259,7 +259,10 @@ impl AgentService {
         workspace: &Path,
         prompt: &str,
     ) -> Result<AgentInvocation, BackendError> {
-        validate_candidate_workspace(workspace)?;
+        validate_chat_workspace(workspace)?;
+        if !Self::supports_read_only_project_chat(kind) {
+            return Err(unsupported_chat_agent(kind));
+        }
         let cwd = workspace.to_path_buf();
         let prompt_owned = prompt.to_string();
         let invocation = match kind {
@@ -270,31 +273,36 @@ impl AgentService {
                     "--print".into(),
                     "--output-format".into(),
                     "text".into(),
-                    prompt_owned,
+                    "--permission-mode".into(),
+                    "dontAsk".into(),
+                    "--allowedTools=Read Grep Glob".into(),
                 ],
-                stdin: None,
+                stdin: Some(prompt_owned),
                 cwd,
             },
             AgentKind::Codex => AgentInvocation {
                 program: "codex".into(),
-                args: vec!["exec".into(), "-".into()],
+                args: vec![
+                    "exec".into(),
+                    "--ephemeral".into(),
+                    "--ignore-rules".into(),
+                    "--sandbox".into(),
+                    "read-only".into(),
+                    "--skip-git-repo-check".into(),
+                    "-C".into(),
+                    workspace.to_string_lossy().into_owned(),
+                    "-".into(),
+                ],
                 stdin: Some(prompt_owned),
                 cwd,
             },
-            AgentKind::Openclaw => AgentInvocation {
-                program: "openclaw".into(),
-                args: vec!["agent".into(), "--message".into(), prompt_owned],
-                stdin: None,
-                cwd,
-            },
-            AgentKind::Hermes => AgentInvocation {
-                program: "hermes".into(),
-                args: vec!["--prompt".into(), prompt_owned],
-                stdin: None,
-                cwd,
-            },
+            AgentKind::Openclaw | AgentKind::Hermes => unreachable!("filtered above"),
         };
         Ok(invocation)
+    }
+
+    pub fn supports_read_only_project_chat(kind: AgentKind) -> bool {
+        matches!(kind, AgentKind::Claude | AgentKind::Codex)
     }
 
     /// Build a plain-text Agent invocation for the `wiki-lint` deep-lint run.
@@ -942,6 +950,41 @@ fn validate_candidate_workspace(workspace: &Path) -> Result<(), BackendError> {
     Ok(())
 }
 
+fn validate_chat_workspace(workspace: &Path) -> Result<(), BackendError> {
+    let workspace = workspace.canonicalize().map_err(|error| {
+        BackendError::new("AGENT_WORKSPACE_INVALID", error.to_string(), true, false)
+    })?;
+    if !workspace.is_dir() {
+        return Err(BackendError::new(
+            "AGENT_WORKSPACE_INVALID",
+            "Chat Agent workspace must be a project directory.",
+            true,
+            true,
+        ));
+    }
+    if !workspace.join("wiki").is_dir() {
+        return Err(BackendError::new(
+            "AGENT_WORKSPACE_INVALID",
+            "Chat Agent workspace must contain a wiki/ directory.",
+            true,
+            true,
+        ));
+    }
+    Ok(())
+}
+
+fn unsupported_chat_agent(kind: AgentKind) -> BackendError {
+    BackendError::new(
+        "CHAT_AGENT_UNSUPPORTED",
+        format!(
+            "{} does not expose a verified read-only project chat profile. Use Claude, Codex, or BYOK for Chat.",
+            kind.command()
+        ),
+        true,
+        true,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,6 +1037,82 @@ mod tests {
     }
 
     #[test]
+    fn chat_invocation_runs_from_project_root_read_only() {
+        let workspace = std::env::temp_dir().join(format!(
+            "llm-wiki-chat-project-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(workspace.join("wiki")).unwrap();
+
+        let claude =
+            AgentService::chat_invocation(AgentKind::Claude, &workspace, "answer").unwrap();
+        assert_eq!(claude.cwd, workspace);
+        assert!(claude.args.contains(&"--bare".to_string()));
+        assert!(claude.args.contains(&"--permission-mode".to_string()));
+        assert!(claude.args.contains(&"dontAsk".to_string()));
+        assert_eq!(claude.stdin.as_deref(), Some("answer"));
+        assert!(!claude.args.contains(&"answer".to_string()));
+        assert!(
+            claude
+                .args
+                .iter()
+                .any(|arg| arg == "--allowedTools=Read Grep Glob"),
+            "chat should allow only read/search tools, got {:?}",
+            claude.args
+        );
+        assert!(
+            !claude
+                .args
+                .iter()
+                .any(|arg| arg.contains("Edit") || arg.contains("Write")),
+            "chat invocation must not pre-authorize write tools: {:?}",
+            claude.args
+        );
+
+        let _ = std::fs::remove_dir_all(&claude.cwd);
+    }
+
+    #[test]
+    fn codex_chat_invocation_is_ephemeral_read_only_and_ignores_project_rules() {
+        let workspace =
+            std::env::temp_dir().join(format!("llm-wiki-chat-codex-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(workspace.join("wiki")).unwrap();
+
+        let codex = AgentService::chat_invocation(AgentKind::Codex, &workspace, "answer").unwrap();
+
+        assert_eq!(codex.stdin.as_deref(), Some("answer"));
+        assert!(codex.args.contains(&"--ephemeral".to_string()));
+        assert!(codex.args.contains(&"--ignore-rules".to_string()));
+        assert!(codex
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(codex
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-C" && pair[1] == workspace.to_string_lossy()));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn chat_invocation_rejects_agents_without_verified_read_only_profile() {
+        let workspace = std::env::temp_dir().join(format!(
+            "llm-wiki-chat-unsupported-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(workspace.join("wiki")).unwrap();
+
+        for kind in [AgentKind::Openclaw, AgentKind::Hermes] {
+            let err = AgentService::chat_invocation(kind, &workspace, "answer")
+                .expect_err("unsupported chat agents must be rejected");
+            assert_eq!(err.code, "CHAT_AGENT_UNSUPPORTED");
+        }
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
     fn claude_invocations_isolate_from_user_session_state() {
         // Regression guard: every Claude invocation must pass --bare so
         // programmatic runs do not load the host's ~/.claude hooks, MCP
@@ -1002,7 +1121,7 @@ mod tests {
         // indefinitely during init when spawned from the GUI process, because
         // --print never reaches the model while MCP/SessionStart hooks stall.
         let workspace = std::env::temp_dir().join("llm-wiki-desktop/bare-invariant-test");
-        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(workspace.join("wiki")).unwrap();
         for invocation in [
             AgentService::invocation(AgentKind::Claude, &workspace, "compile").unwrap(),
             AgentService::chat_invocation(AgentKind::Claude, &workspace, "chat").unwrap(),
