@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-05] Chat convenience frontend - Added typed convenience edit metadata, store IPC methods, Chat toolbar/message controls, and Security revocation UI - Key decision: frontend only toggles global authorization and calls backend commands; filesystem writes and rollback remain backend-owned.
+
 [2026-07-05] Chat convenience command integration - Added all-Agent convenience invocation profiles, authorized write-intent Chat routing, per-turn checkpoint/audit/rollback handling, and keep/rollback commands - Key decision: default Chat remains read-only; direct project writes require backend authorization plus write intent and use Git HEAD as the rollback boundary.
 
 [2026-07-05] Chat convenience Git helpers - Added ignored-file baseline support for audit and rollback - Key decision: Chat integration can preserve pre-existing ignored files while treating new ignored Agent artifacts as added changes and removing them during rollback.

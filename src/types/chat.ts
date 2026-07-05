@@ -4,6 +4,12 @@ import type { LlmProviderKind } from "./llm";
 export type ChatRole = "user" | "assistant";
 export type ChatRoute = "agent" | "byok";
 export type ChatRoutePreference = "auto" | "agent" | "byok";
+export type ChatConvenienceEditStatus =
+  | "applied"
+  | "soft_violation_pending"
+  | "kept_after_soft_violation"
+  | "rolled_back"
+  | "rollback_failed";
 
 export interface ChatCitation {
   pagePath: string;
@@ -23,6 +29,18 @@ export interface ChatMessage {
   /** BYOK provider that produced this answer (absent for Agent route). */
   provider?: LlmProviderKind | null;
   taskId?: string;
+  convenienceEdit?: ChatConvenienceEdit | null;
+}
+
+export interface ChatConvenienceEdit {
+  status: ChatConvenienceEditStatus;
+  checkpointHash?: string | null;
+  affectedPaths: string[];
+  diffSummary: string;
+  diffText?: string | null;
+  violationReason?: string | null;
+  rollbackTaskId?: string | null;
+  ignoredBaselinePaths?: string[];
 }
 
 export interface ChatSession {
@@ -57,6 +75,7 @@ export interface SendChatMessageRequest {
   agent?: AgentKind | null;
   provider?: LlmProviderKind | null;
   pinnedPagePath?: string | null;
+  convenienceEnabled?: boolean;
 }
 
 export interface SaveAnswerToWikiRequest {
@@ -76,4 +95,18 @@ export interface ChatOverwriteRequest {
   path: string;
   currentHash: string;
   actionId: string;
+}
+
+export interface ResolveChatConvenienceEditRequest {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  messageId: string;
+  keep: boolean;
+}
+
+export interface RollbackLastChatConvenienceEditRequest {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
 }
