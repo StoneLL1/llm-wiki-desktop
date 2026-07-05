@@ -88,6 +88,30 @@ describe("settingsStore chat convenience authorization", () => {
     expect(useSettingsStore.getState().chatConvenienceAuthorization).toEqual(authorization);
   });
 
+  it("falls back to disabled authorization when loading fails", async () => {
+    useSettingsStore.setState({
+      chatConvenienceAuthorization: {
+        enabled: true,
+        confirmedAt: "2026-07-05T00:00:00Z",
+        projectId: "project-a",
+        rootPathFingerprint: "aaaaaaaaaaaaaaaa",
+      },
+    });
+    invokeMock.mockRejectedValueOnce(new Error("backend unavailable"));
+
+    const authorization = await useSettingsStore
+      .getState()
+      .loadChatConvenienceAuthorization("project-b", "D:/wiki-b");
+
+    expect(authorization).toMatchObject({
+      enabled: false,
+      confirmedAt: "",
+      projectId: "project-b",
+      rootPathFingerprint: "",
+    });
+    expect(useSettingsStore.getState().chatConvenienceAuthorization).toEqual(authorization);
+  });
+
   it("sets authorization through the backend command", async () => {
     invokeMock.mockResolvedValueOnce({
       enabled: true,
@@ -104,6 +128,30 @@ describe("settingsStore chat convenience authorization", () => {
       request: { projectId: "project-1", projectRootPath: "D:/wiki", enabled: true },
     });
     expect(useSettingsStore.getState().chatConvenienceAuthorization?.enabled).toBe(true);
+  });
+
+  it("falls back to disabled authorization when setting fails", async () => {
+    useSettingsStore.setState({
+      chatConvenienceAuthorization: {
+        enabled: true,
+        confirmedAt: "2026-07-05T00:00:00Z",
+        projectId: "project-a",
+        rootPathFingerprint: "aaaaaaaaaaaaaaaa",
+      },
+    });
+    invokeMock.mockRejectedValueOnce(new Error("backend unavailable"));
+
+    const authorization = await useSettingsStore
+      .getState()
+      .setChatConvenienceAuthorization("project-b", "D:/wiki-b", true);
+
+    expect(authorization).toMatchObject({
+      enabled: false,
+      confirmedAt: "",
+      projectId: "project-b",
+      rootPathFingerprint: "",
+    });
+    expect(useSettingsStore.getState().chatConvenienceAuthorization).toEqual(authorization);
   });
 
   it("revokes all authorizations through the backend command", async () => {

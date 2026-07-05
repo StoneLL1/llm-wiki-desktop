@@ -169,6 +169,15 @@ const FONT_FALLBACKS: Record<keyof FontPreference, string> = {
   code: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
 };
 
+function disabledChatConvenienceAuthorization(projectId: string): ChatConvenienceAuthorization {
+  return {
+    enabled: false,
+    confirmedAt: "",
+    projectId,
+    rootPathFingerprint: "",
+  };
+}
+
 export function applyDensityPreference(density: Settings["density"]) {
   if (typeof document === "undefined") return;
   document.documentElement.dataset.density = density;
@@ -288,36 +297,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         ? await invoke<ChatConvenienceAuthorization>("get_chat_convenience_authorization", {
             request: { projectId, projectRootPath },
           })
-        : {
-            enabled: false,
-            confirmedAt: "",
-            projectId,
-            rootPathFingerprint: "",
-          };
+        : disabledChatConvenienceAuthorization(projectId);
       if (!isProjectScopeCurrent(scope)) {
-        return (
-          get().chatConvenienceAuthorization ?? {
-            enabled: false,
-            confirmedAt: "",
-            projectId,
-            rootPathFingerprint: "",
-          }
-        );
+        return disabledChatConvenienceAuthorization(projectId);
       }
       set({ chatConvenienceAuthorization: authorization, error: null });
       return authorization;
     } catch (error) {
+      const fallback = disabledChatConvenienceAuthorization(projectId);
       if (isProjectScopeCurrent(scope)) {
-        set({ error: errorMessage(error) });
+        set({ chatConvenienceAuthorization: fallback, error: errorMessage(error) });
       }
-      return (
-        get().chatConvenienceAuthorization ?? {
-          enabled: false,
-          confirmedAt: "",
-          projectId,
-          rootPathFingerprint: "",
-        }
-      );
+      return fallback;
     }
   },
 
@@ -339,17 +330,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       }
       return authorization;
     } catch (error) {
+      const fallback = disabledChatConvenienceAuthorization(projectId);
       if (isProjectScopeCurrent(scope)) {
-        set({ error: errorMessage(error) });
+        set({ chatConvenienceAuthorization: fallback, error: errorMessage(error) });
       }
-      return (
-        get().chatConvenienceAuthorization ?? {
-          enabled: false,
-          confirmedAt: "",
-          projectId,
-          rootPathFingerprint: "",
-        }
-      );
+      return fallback;
     }
   },
 
