@@ -319,12 +319,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         ? await invoke<ChatConvenienceAuthorization>("set_chat_convenience_authorization", {
             request: { projectId, projectRootPath, enabled },
           })
-        : {
-            enabled,
-            confirmedAt: new Date().toISOString(),
-            projectId,
-            rootPathFingerprint: "",
-          };
+        : enabled
+          ? {
+              enabled: true,
+              confirmedAt: new Date().toISOString(),
+              projectId,
+              rootPathFingerprint: "",
+            }
+          : disabledChatConvenienceAuthorization(projectId);
       if (isProjectScopeCurrent(scope)) {
         set({ chatConvenienceAuthorization: authorization, error: null });
       }
