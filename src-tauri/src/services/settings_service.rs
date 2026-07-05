@@ -234,11 +234,14 @@ fn default_config_dir() -> PathBuf {
 }
 
 fn project_root_fingerprint(path: &Path) -> String {
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
+
     let normalized = path.to_string_lossy().replace('\\', "/").to_lowercase();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    normalized.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let digest = Sha256::digest(normalized.as_bytes());
+    digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -504,7 +507,6 @@ mod tests {
             .unwrap();
         let mut settings = service.read_settings(&context).unwrap();
         settings.language = "zh-CN".into();
-        settings.chat_convenience_authorizations.clear();
 
         service.save_settings(&context, &settings).unwrap();
 

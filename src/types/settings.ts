@@ -59,7 +59,6 @@ export interface Settings {
   externalEditor: string;
   associateMdFiles: boolean;
   associateWikiFolders: boolean;
-  chatConvenienceAuthorizations: ChatConvenienceAuthorization[];
   // Project
   contextWindow: number;
   maxTokens: number;

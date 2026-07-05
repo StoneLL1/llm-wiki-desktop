@@ -292,8 +292,6 @@ pub struct Settings {
     pub associate_md_files: bool,
     #[serde(default)]
     pub associate_wiki_folders: bool,
-    #[serde(default)]
-    pub chat_convenience_authorizations: Vec<ChatConvenienceAuthorization>,
     // --- Project (affects this project's Agent / Git / context behavior) ---
     #[serde(default = "default_context_window")]
     pub context_window: u64,
@@ -349,7 +347,6 @@ impl Default for Settings {
             external_editor: String::new(),
             associate_md_files: default_associate_md_files(),
             associate_wiki_folders: false,
-            chat_convenience_authorizations: Vec::new(),
             context_window: default_context_window(),
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
@@ -442,7 +439,7 @@ impl Default for GlobalSettingsFile {
             external_editor: settings.external_editor,
             associate_md_files: settings.associate_md_files,
             associate_wiki_folders: settings.associate_wiki_folders,
-            chat_convenience_authorizations: settings.chat_convenience_authorizations,
+            chat_convenience_authorizations: Vec::new(),
         }
     }
 }
@@ -503,7 +500,6 @@ impl Settings {
         self.external_editor = global.external_editor;
         self.associate_md_files = global.associate_md_files;
         self.associate_wiki_folders = global.associate_wiki_folders;
-        self.chat_convenience_authorizations = global.chat_convenience_authorizations;
     }
 
     pub fn apply_project(&mut self, project: ProjectSettingsFile) {
@@ -546,7 +542,7 @@ impl Settings {
             external_editor: self.external_editor.clone(),
             associate_md_files: self.associate_md_files,
             associate_wiki_folders: self.associate_wiki_folders,
-            chat_convenience_authorizations: self.chat_convenience_authorizations.clone(),
+            chat_convenience_authorizations: Vec::new(),
         }
     }
 
@@ -789,8 +785,12 @@ mod tests {
         let project = settings.to_project_file();
 
         // Global-only fields appear in the global file, not the project file.
+        let settings_value = serde_json::to_value(&settings).unwrap();
         let global_value = serde_json::to_value(&global).unwrap();
         let project_value = serde_json::to_value(&project).unwrap();
+        assert!(settings_value.get("chatConvenienceAuthorizations").is_none());
+        assert!(global_value["chatConvenienceAuthorizations"].is_array());
+        assert!(project_value.get("chatConvenienceAuthorizations").is_none());
         assert_eq!(global_value["density"], json!("comfortable"));
         assert_eq!(global_value["updateFrequency"], json!("never"));
         assert!(project_value.get("density").is_none());
