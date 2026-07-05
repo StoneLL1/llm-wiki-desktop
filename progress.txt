@@ -1,1 +1,0 @@
-[2026-07-05] Chat Convenience Models/Audit — Added deterministic chat intent classification, convenience edit DTOs, audit rules, and AppState service registration — Command routing integration intentionally deferred to later task.

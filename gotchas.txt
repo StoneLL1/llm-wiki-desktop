@@ -1,2 +1,0 @@
-Vitest prints repeated jsdom HTMLCanvasElement.getContext errors while still passing graph tests — Sigma tries to create a WebGL canvas in jsdom without the canvas package — Treat the final Vitest summary/exit code as authoritative unless graph tests actually fail.
-rg.exe fails with Access is denied in this Windows worktree — Local environment blocks ripgrep execution — Use PowerShell Get-ChildItem/Select-String fallback and avoid assuming rg is available.
