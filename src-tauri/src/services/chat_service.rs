@@ -643,6 +643,7 @@ mod tests {
             route: None,
             provider: None,
             task_id: None,
+            convenience_edit: None,
         }
     }
 
@@ -777,6 +778,7 @@ mod tests {
                 route: None,
                 provider: None,
                 task_id: None,
+                convenience_edit: None,
             });
         }
 
@@ -968,6 +970,7 @@ mod tests {
             route: None,
             provider: None,
             task_id: None,
+            convenience_edit: None,
         };
 
         let (slug, markdown) = service.build_answer_markdown(&session, &question, &answer);
