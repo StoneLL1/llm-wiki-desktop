@@ -313,8 +313,14 @@ mod tests {
         let value = serde_json::to_value(&request).unwrap();
 
         assert_eq!(value["projectId"], serde_json::json!("project-1"));
-        assert_eq!(value["projectRootPath"], serde_json::json!("D:/Projects/wiki"));
-        assert_eq!(value["outputPath"], serde_json::json!("exports/html/报告.html"));
+        assert_eq!(
+            value["projectRootPath"],
+            serde_json::json!("D:/Projects/wiki")
+        );
+        assert_eq!(
+            value["outputPath"],
+            serde_json::json!("exports/html/报告.html")
+        );
         assert!(value.get("project_id").is_none());
     }
 }

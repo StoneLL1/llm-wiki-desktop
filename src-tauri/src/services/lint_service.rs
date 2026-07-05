@@ -261,9 +261,7 @@ impl LintService {
             .map(|entry| (entry.path, entry.rule))
             .collect();
         if !ignored_keys.is_empty() {
-            issues.retain(|issue| {
-                !ignored_keys.contains(&(issue.path.clone(), issue.issue_type))
-            });
+            issues.retain(|issue| !ignored_keys.contains(&(issue.path.clone(), issue.issue_type)));
         }
 
         issues.sort_by(|a, b| {
@@ -427,7 +425,10 @@ impl LintService {
     ) -> Result<PersistedLintReport, BackendError> {
         reject_report_id(id)?;
         let path = format!("{LINT_REPORTS_DIR}/{id}.json");
-        match self.file_store.read_json::<PersistedLintReport>(context, &path) {
+        match self
+            .file_store
+            .read_json::<PersistedLintReport>(context, &path)
+        {
             Ok(report) => Ok(report),
             Err(wrapper_error) => {
                 let legacy = self.file_store.read_json::<DeepLintReport>(context, &path);
@@ -935,7 +936,10 @@ impl LintService {
             .map_err(|err| {
                 BackendError::new(
                     "GIT_CHECKPOINT_FAILED",
-                    format!("Could not create a Git checkpoint before fixing: {}", err.message),
+                    format!(
+                        "Could not create a Git checkpoint before fixing: {}",
+                        err.message
+                    ),
                     true,
                     true,
                 )
@@ -2048,7 +2052,10 @@ mod tests {
         for path in ["wiki/concepts/bare.md", "wiki/concepts/bare2.md"] {
             let on_disk =
                 std::fs::read_to_string(context.resolve_project_path(path).unwrap()).unwrap();
-            assert!(on_disk.starts_with("---\n"), "{path} should have frontmatter");
+            assert!(
+                on_disk.starts_with("---\n"),
+                "{path} should have frontmatter"
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2088,9 +2095,12 @@ mod tests {
             .needs_confirmation
             .iter()
             .any(|c| c.issue.issue_type == LintIssueType::DeadLink));
-        let agent_disk =
-            std::fs::read_to_string(context.resolve_project_path("wiki/concepts/agent.md").unwrap())
-                .unwrap();
+        let agent_disk = std::fs::read_to_string(
+            context
+                .resolve_project_path("wiki/concepts/agent.md")
+                .unwrap(),
+        )
+        .unwrap();
         assert!(agent_disk.contains("[[ghost]]"));
 
         // Safe fix skipped for lack of a hash.
@@ -2211,7 +2221,10 @@ mod tests {
         let service = LintService::default();
         let search = SearchService::default();
         let before = service.run_local_lint(&context, &search).unwrap();
-        assert!(before.issues.iter().any(|i| i.issue_type == LintIssueType::DeadLink));
+        assert!(before
+            .issues
+            .iter()
+            .any(|i| i.issue_type == LintIssueType::DeadLink));
         assert!(before
             .issues
             .iter()
@@ -2231,7 +2244,8 @@ mod tests {
             "ignored dead link must be suppressed"
         );
         assert!(
-            after.issues
+            after
+                .issues
                 .iter()
                 .any(|i| i.issue_type == LintIssueType::MissingFrontmatter),
             "unrelated issue must remain"
@@ -2279,7 +2293,11 @@ mod tests {
         );
         write_file(&context, "wiki/index.md", "# Index\n");
         write_file(&context, "wiki/log.md", "# Log\n");
-        write_file(&context, ".app/lint-ignore.json", "{ this is not valid json");
+        write_file(
+            &context,
+            ".app/lint-ignore.json",
+            "{ this is not valid json",
+        );
         // A corrupt ignore file must not crash linting; it is treated as empty.
         let report = LintService::default()
             .run_local_lint(&context, &SearchService::default())
@@ -2306,7 +2324,9 @@ mod tests {
 
         let entry = service.persist_local_report(&context, &report).unwrap();
         let history = service.list_lint_history(&context).unwrap();
-        let persisted = service.read_lint_history_report(&context, &entry.id).unwrap();
+        let persisted = service
+            .read_lint_history_report(&context, &entry.id)
+            .unwrap();
 
         assert_eq!(history.entries.len(), 1);
         assert_eq!(history.entries[0].id, entry.id);
@@ -2341,7 +2361,11 @@ mod tests {
     #[test]
     fn corrupt_single_lint_report_returns_a_report_error_not_a_history_crash() {
         let (context, root) = tmp_context("history-corrupt-report");
-        write_file(&context, ".app/lint-history.json", r#"{"version":1,"entries":[{"id":"bad","kind":"local","createdAt":"2026-07-04T00:00:00Z","issueCount":1,"errorCount":1,"warningCount":0,"infoCount":0}]}"#);
+        write_file(
+            &context,
+            ".app/lint-history.json",
+            r#"{"version":1,"entries":[{"id":"bad","kind":"local","createdAt":"2026-07-04T00:00:00Z","issueCount":1,"errorCount":1,"warningCount":0,"infoCount":0}]}"#,
+        );
         write_file(&context, ".app/lint-reports/bad.json", "{ not valid json");
 
         let service = LintService::default();

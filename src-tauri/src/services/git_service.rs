@@ -290,7 +290,17 @@ impl GitService {
             ));
         }
 
-        run_git(context, &["restore", "--source=HEAD", "--staged", "--worktree", "--", "."])?;
+        run_git(
+            context,
+            &[
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+        )?;
         run_git(context, &["clean", "-fd", "--", "."])?;
         remove_new_ignored_paths(context, preserved_ignored_paths)?;
         Ok(())
@@ -389,7 +399,9 @@ fn append_ignored_changes(
     preserved_ignored_paths: &[String],
 ) -> Result<(), BackendError> {
     for path in ignored_paths(context)? {
-        if preserved_ignored_paths.iter().any(|preserved| preserved == &path)
+        if preserved_ignored_paths
+            .iter()
+            .any(|preserved| preserved == &path)
             || changes.iter().any(|change| change.path == path)
         {
             continue;
@@ -453,7 +465,10 @@ fn parse_status_changes(raw: &[u8]) -> Vec<GitChangedFile> {
 }
 
 fn untracked_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-    let raw = run_git_bytes(context, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let raw = run_git_bytes(
+        context,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
     Ok(raw
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
@@ -465,7 +480,13 @@ fn untracked_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError
 fn ignored_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
     let raw = run_git_bytes(
         context,
-        &["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
     )?;
     Ok(raw
         .split(|byte| *byte == 0)
@@ -480,7 +501,10 @@ fn remove_new_ignored_paths(
     preserved_ignored_paths: &[String],
 ) -> Result<(), BackendError> {
     for path in ignored_paths(context)? {
-        if preserved_ignored_paths.iter().any(|preserved| preserved == &path) {
+        if preserved_ignored_paths
+            .iter()
+            .any(|preserved| preserved == &path)
+        {
             continue;
         }
         remove_project_path(context, &path)?;
@@ -489,13 +513,14 @@ fn remove_new_ignored_paths(
 }
 
 fn remove_project_path(context: &ProjectContext, path: &str) -> Result<(), BackendError> {
-    let root = context.root.canonicalize().map_err(|err| {
-        BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false)
-    })?;
+    let root = context
+        .root
+        .canonicalize()
+        .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))?;
     let target = context.root.join(path);
-    let target_abs = target.canonicalize().map_err(|err| {
-        BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false)
-    })?;
+    let target_abs = target
+        .canonicalize()
+        .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))?;
     if target_abs == root || !target_abs.starts_with(&root) {
         return Err(BackendError::new(
             "GIT_ROLLBACK_FAILED",
@@ -504,9 +529,8 @@ fn remove_project_path(context: &ProjectContext, path: &str) -> Result<(), Backe
             false,
         ));
     }
-    let metadata = fs::symlink_metadata(&target).map_err(|err| {
-        BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false)
-    })?;
+    let metadata = fs::symlink_metadata(&target)
+        .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))?;
     if metadata.is_dir() {
         fs::remove_dir_all(&target)
     } else {
