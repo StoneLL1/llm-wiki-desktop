@@ -301,7 +301,54 @@ impl AgentService {
         Ok(invocation)
     }
 
+    pub fn chat_convenience_invocation(
+        kind: AgentKind,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<AgentInvocation, BackendError> {
+        validate_chat_workspace(workspace)?;
+        let cwd = workspace.to_path_buf();
+        let prompt_owned = prompt.to_string();
+        let invocation = match kind {
+            AgentKind::Claude => AgentInvocation {
+                program: "claude".into(),
+                args: vec![
+                    "--bare".into(),
+                    "--print".into(),
+                    "--output-format".into(),
+                    "text".into(),
+                    "--permission-mode".into(),
+                    "dontAsk".into(),
+                    "--allowedTools=Read Grep Glob Edit Write Bash".into(),
+                ],
+                stdin: Some(prompt_owned),
+                cwd,
+            },
+            AgentKind::Codex => AgentInvocation {
+                program: "codex".into(),
+                args: vec![
+                    "exec".into(),
+                    "--ephemeral".into(),
+                    "--sandbox".into(),
+                    "workspace-write".into(),
+                    "--skip-git-repo-check".into(),
+                    "-C".into(),
+                    workspace.to_string_lossy().into_owned(),
+                    "-".into(),
+                ],
+                stdin: Some(prompt_owned),
+                cwd,
+            },
+            AgentKind::Openclaw | AgentKind::Hermes => return Err(unsupported_convenience_agent(kind)),
+        };
+        Ok(invocation)
+    }
+
     pub fn supports_read_only_project_chat(kind: AgentKind) -> bool {
+        matches!(kind, AgentKind::Claude | AgentKind::Codex)
+    }
+
+    pub fn supports_convenience_project_chat(kind: AgentKind) -> bool {
         matches!(kind, AgentKind::Claude | AgentKind::Codex)
     }
 
@@ -985,6 +1032,18 @@ fn unsupported_chat_agent(kind: AgentKind) -> BackendError {
     )
 }
 
+fn unsupported_convenience_agent(kind: AgentKind) -> BackendError {
+    BackendError::new(
+        "CHAT_AGENT_UNSUPPORTED",
+        format!(
+            "{} does not expose a supported Chat convenience profile without long prompt argv. Use Claude or Codex.",
+            kind.command()
+        ),
+        true,
+        true,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1096,6 +1155,51 @@ mod tests {
     }
 
     #[test]
+    fn convenience_chat_invocation_supports_stdin_agents_from_project_root() {
+        let workspace = std::env::temp_dir().join(format!(
+            "llm-wiki-convenience-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(workspace.join("wiki")).unwrap();
+
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            let invocation = AgentService::chat_convenience_invocation(kind, &workspace, "prompt")
+                .expect("stdin-capable agents should have a convenience profile");
+            assert_eq!(invocation.cwd, workspace);
+            assert_eq!(invocation.program, kind.command());
+            assert_eq!(invocation.stdin.as_deref(), Some("prompt"));
+        }
+
+        let claude =
+            AgentService::chat_convenience_invocation(AgentKind::Claude, &workspace, "prompt")
+                .unwrap();
+        assert!(
+            claude
+                .args
+                .iter()
+                .any(|arg| arg == "--allowedTools=Read Grep Glob Edit Write Bash"),
+            "convenience mode must allow bounded project edits: {:?}",
+            claude.args
+        );
+
+        let codex =
+            AgentService::chat_convenience_invocation(AgentKind::Codex, &workspace, "prompt")
+                .unwrap();
+        assert!(codex
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"]));
+
+        for kind in [AgentKind::Openclaw, AgentKind::Hermes] {
+            let err = AgentService::chat_convenience_invocation(kind, &workspace, "prompt")
+                .expect_err("argv-only agents are not safe for long convenience prompts");
+            assert_eq!(err.code, "CHAT_AGENT_UNSUPPORTED");
+        }
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
     fn chat_invocation_rejects_agents_without_verified_read_only_profile() {
         let workspace = std::env::temp_dir().join(format!(
             "llm-wiki-chat-unsupported-root-{}",
@@ -1125,6 +1229,8 @@ mod tests {
         for invocation in [
             AgentService::invocation(AgentKind::Claude, &workspace, "compile").unwrap(),
             AgentService::chat_invocation(AgentKind::Claude, &workspace, "chat").unwrap(),
+            AgentService::chat_convenience_invocation(AgentKind::Claude, &workspace, "edit")
+                .unwrap(),
             AgentService::lint_invocation(AgentKind::Claude, &workspace, "lint").unwrap(),
             AgentService::html_export_invocation(AgentKind::Claude, &workspace, "html").unwrap(),
         ] {

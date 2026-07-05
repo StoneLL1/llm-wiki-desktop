@@ -43,6 +43,8 @@ pub struct ChatConvenienceEdit {
     pub violation_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_baseline_paths: Vec<String>,
 }
 
 /// A retrieved context page attached to an assistant message. Citations are the
@@ -344,6 +346,7 @@ mod tests {
                 diff_text: Some("+summary".into()),
                 violation_reason: Some("too many files".into()),
                 rollback_task_id: None,
+                ignored_baseline_paths: vec!["keep.log".into()],
             }),
         };
 
@@ -359,6 +362,10 @@ mod tests {
             json!("wiki/a.md")
         );
         assert_eq!(value["convenienceEdit"]["diffText"], json!("+summary"));
+        assert_eq!(
+            value["convenienceEdit"]["ignoredBaselinePaths"][0],
+            json!("keep.log")
+        );
         assert!(value["convenienceEdit"].get("rollbackTaskId").is_none());
     }
 
