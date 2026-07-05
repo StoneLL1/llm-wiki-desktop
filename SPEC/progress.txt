@@ -1,4 +1,7 @@
 # 进度记录 (progress.txt)
+
+[2026-07-05] Chat convenience audit — Tightened write intent routing so ordinary questions containing add/update/delete stay read-only — Key decision: write keywords require an explicit request cue unless they begin the command.
+
 [2026-07-05] Chat convenience audit — Fixed mixed imperative/write intent classification so commands that also request explanation remain write actions — Explicit command prefixes now win before read-only cues.
 
 [2026-07-05] Chat Convenience Models/Audit - Added deterministic chat intent classification, convenience edit DTOs, audit rules, and AppState service registration - Key decision: command routing integration intentionally deferred to the chat command integration task.
