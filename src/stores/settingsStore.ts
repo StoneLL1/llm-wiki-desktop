@@ -49,7 +49,6 @@ export const defaultSettings: Settings = {
   externalEditor: "",
   associateMdFiles: true,
   associateWikiFolders: false,
-  chatConvenienceAuthorizations: [],
   contextWindow: 32_000,
   maxTokens: 4096,
   temperature: 0.3,
