@@ -3,7 +3,8 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::settings::{
-    ProviderSecretStatusRequest, SaveSettingsRequest, Settings, SettingsProjectRequest,
+    ChatConvenienceAuthorization, ProviderSecretStatusRequest, SaveSettingsRequest,
+    SetChatConvenienceAuthorizationRequest, Settings, SettingsProjectRequest,
 };
 
 #[tauri::command]
@@ -34,4 +35,35 @@ pub fn get_provider_secret_status(
     state
         .settings_service
         .get_provider_secret_status(&state.secret_service, request.provider)
+}
+
+#[tauri::command]
+pub fn get_chat_convenience_authorization(
+    state: State<'_, AppState>,
+    request: SettingsProjectRequest,
+) -> Result<ChatConvenienceAuthorization, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .settings_service
+        .get_chat_convenience_authorization(&context)
+}
+
+#[tauri::command]
+pub fn set_chat_convenience_authorization(
+    state: State<'_, AppState>,
+    request: SetChatConvenienceAuthorizationRequest,
+) -> Result<ChatConvenienceAuthorization, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .settings_service
+        .set_chat_convenience_authorization(&context, request.enabled)
+}
+
+#[tauri::command]
+pub fn revoke_all_chat_convenience_authorizations(
+    state: State<'_, AppState>,
+) -> Result<(), BackendError> {
+    state
+        .settings_service
+        .revoke_all_chat_convenience_authorizations()
 }

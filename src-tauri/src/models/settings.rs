@@ -209,7 +209,7 @@ impl NotificationClickBehavior {
 }
 
 /// Per-provider system-notification toggle set (design settings.html:536-547).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemNotificationPrefs {
     #[serde(default = "default_true")]
@@ -224,6 +224,26 @@ pub struct SystemNotificationPrefs {
 
 fn default_true() -> bool {
     true
+}
+
+impl Default for SystemNotificationPrefs {
+    fn default() -> Self {
+        Self {
+            on_task_completed: true,
+            on_task_failed: true,
+            on_confirmation_needed: true,
+            on_long_task_progress: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatConvenienceAuthorization {
+    pub enabled: bool,
+    pub confirmed_at: String,
+    pub project_id: String,
+    pub root_path_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -272,6 +292,8 @@ pub struct Settings {
     pub associate_md_files: bool,
     #[serde(default)]
     pub associate_wiki_folders: bool,
+    #[serde(default)]
+    pub chat_convenience_authorizations: Vec<ChatConvenienceAuthorization>,
     // --- Project (affects this project's Agent / Git / context behavior) ---
     #[serde(default = "default_context_window")]
     pub context_window: u64,
@@ -327,6 +349,7 @@ impl Default for Settings {
             external_editor: String::new(),
             associate_md_files: default_associate_md_files(),
             associate_wiki_folders: false,
+            chat_convenience_authorizations: Vec::new(),
             context_window: default_context_window(),
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
@@ -390,6 +413,8 @@ pub struct GlobalSettingsFile {
     pub associate_md_files: bool,
     #[serde(default)]
     pub associate_wiki_folders: bool,
+    #[serde(default)]
+    pub chat_convenience_authorizations: Vec<ChatConvenienceAuthorization>,
 }
 
 impl Default for GlobalSettingsFile {
@@ -417,6 +442,7 @@ impl Default for GlobalSettingsFile {
             external_editor: settings.external_editor,
             associate_md_files: settings.associate_md_files,
             associate_wiki_folders: settings.associate_wiki_folders,
+            chat_convenience_authorizations: settings.chat_convenience_authorizations,
         }
     }
 }
@@ -477,6 +503,7 @@ impl Settings {
         self.external_editor = global.external_editor;
         self.associate_md_files = global.associate_md_files;
         self.associate_wiki_folders = global.associate_wiki_folders;
+        self.chat_convenience_authorizations = global.chat_convenience_authorizations;
     }
 
     pub fn apply_project(&mut self, project: ProjectSettingsFile) {
@@ -519,6 +546,7 @@ impl Settings {
             external_editor: self.external_editor.clone(),
             associate_md_files: self.associate_md_files,
             associate_wiki_folders: self.associate_wiki_folders,
+            chat_convenience_authorizations: self.chat_convenience_authorizations.clone(),
         }
     }
 
@@ -555,6 +583,14 @@ pub struct SaveSettingsRequest {
     pub project_id: String,
     pub project_root_path: String,
     pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetChatConvenienceAuthorizationRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
