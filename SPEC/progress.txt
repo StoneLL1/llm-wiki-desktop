@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-05] Chat convenience Git helpers - Added ignored-file baseline support for audit and rollback - Key decision: Chat integration can preserve pre-existing ignored files while treating new ignored Agent artifacts as added changes and removing them during rollback.
+
 [2026-07-05] Chat convenience Git helpers - Hardened changed-size accounting, untracked diffs, and scoped rollback after review - Key decision: audit changed size uses HEAD/worktree byte estimates instead of Git numstat line counts; rollback uses scoped restore/clean so parent Git repos are not reset outside the project folder.
 
 [2026-07-05] Chat convenience Git helpers - Added Git changed-file DTOs, structured status/numstat parsing, diff-since-HEAD, rollback-to-HEAD cleanup, and Git-to-audit conversion tests - Key decision: service APIs stay on ProjectContext/BackendError while rollback runs only from the project root cwd.

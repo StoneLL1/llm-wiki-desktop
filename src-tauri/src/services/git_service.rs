@@ -208,6 +208,30 @@ impl GitService {
         }
 
         let mut changes = status_changes(context)?;
+        append_ignored_changes(context, &mut changes, &[])?;
+        for change in &mut changes {
+            change.changed_chars = estimate_changed_bytes(context, change);
+        }
+        changes.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(changes)
+    }
+
+    pub fn changed_files_since_head_with_ignored_baseline(
+        &self,
+        context: &ProjectContext,
+        preserved_ignored_paths: &[String],
+    ) -> Result<Vec<GitChangedFile>, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before enumerating changes.",
+                true,
+                true,
+            ));
+        }
+
+        let mut changes = status_changes(context)?;
+        append_ignored_changes(context, &mut changes, preserved_ignored_paths)?;
         for change in &mut changes {
             change.changed_chars = estimate_changed_bytes(context, change);
         }
@@ -237,6 +261,14 @@ impl GitService {
     }
 
     pub fn rollback_worktree_to_head(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        self.rollback_worktree_to_head_preserving_ignored(context, &[])
+    }
+
+    pub fn rollback_worktree_to_head_preserving_ignored(
+        &self,
+        context: &ProjectContext,
+        preserved_ignored_paths: &[String],
+    ) -> Result<(), BackendError> {
         if !self.repository_status(context)?.is_repository {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
@@ -248,6 +280,7 @@ impl GitService {
 
         run_git(context, &["restore", "--source=HEAD", "--staged", "--worktree", "--", "."])?;
         run_git(context, &["clean", "-fd", "--", "."])?;
+        remove_new_ignored_paths(context, preserved_ignored_paths)?;
         Ok(())
     }
 }
@@ -338,6 +371,26 @@ fn status_changes(context: &ProjectContext) -> Result<Vec<GitChangedFile>, Backe
     Ok(parse_status_changes(&raw))
 }
 
+fn append_ignored_changes(
+    context: &ProjectContext,
+    changes: &mut Vec<GitChangedFile>,
+    preserved_ignored_paths: &[String],
+) -> Result<(), BackendError> {
+    for path in ignored_paths(context)? {
+        if preserved_ignored_paths.iter().any(|preserved| preserved == &path)
+            || changes.iter().any(|change| change.path == path)
+        {
+            continue;
+        }
+        changes.push(GitChangedFile {
+            path,
+            kind: GitChangedFileKind::Added,
+            changed_chars: 0,
+        });
+    }
+    Ok(())
+}
+
 fn parse_status_changes(raw: &[u8]) -> Vec<GitChangedFile> {
     let records: Vec<&[u8]> = raw
         .split(|byte| *byte == 0)
@@ -395,6 +448,59 @@ fn untracked_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError
         .map(|record| normalize_git_path(&String::from_utf8_lossy(record)))
         .filter(|path| !path.is_empty())
         .collect())
+}
+
+fn ignored_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+    let raw = run_git_bytes(
+        context,
+        &["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+    )?;
+    Ok(raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| normalize_git_path(&String::from_utf8_lossy(record)))
+        .filter(|path| !path.is_empty())
+        .collect())
+}
+
+fn remove_new_ignored_paths(
+    context: &ProjectContext,
+    preserved_ignored_paths: &[String],
+) -> Result<(), BackendError> {
+    for path in ignored_paths(context)? {
+        if preserved_ignored_paths.iter().any(|preserved| preserved == &path) {
+            continue;
+        }
+        remove_project_path(context, &path)?;
+    }
+    Ok(())
+}
+
+fn remove_project_path(context: &ProjectContext, path: &str) -> Result<(), BackendError> {
+    let root = context.root.canonicalize().map_err(|err| {
+        BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false)
+    })?;
+    let target = context.root.join(path);
+    let target_abs = target.canonicalize().map_err(|err| {
+        BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false)
+    })?;
+    if target_abs == root || !target_abs.starts_with(&root) {
+        return Err(BackendError::new(
+            "GIT_ROLLBACK_FAILED",
+            format!("Refusing to remove path outside the project root: {path}"),
+            true,
+            false,
+        ));
+    }
+    let metadata = fs::symlink_metadata(&target).map_err(|err| {
+        BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false)
+    })?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(&target)
+    } else {
+        fs::remove_file(&target)
+    }
+    .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))
 }
 
 fn untracked_file_diff(context: &ProjectContext) -> Result<String, BackendError> {
@@ -636,6 +742,40 @@ mod tests {
     }
 
     #[test]
+    fn changed_files_since_head_with_ignored_baseline_reports_new_ignored_only() {
+        let root = unique_temp_dir("ignored-audit");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(root.join("wiki").join("page.md"), "stable\n").unwrap();
+        fs::write(root.join("keep.log"), "preexisting\n").unwrap();
+
+        let service = GitService;
+        service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap();
+
+        fs::write(root.join("agent.log"), "agent artifact\n").unwrap();
+
+        let changes = service
+            .changed_files_since_head_with_ignored_baseline(&context, &["keep.log".to_string()])
+            .unwrap();
+        let by_path: HashMap<String, _> = changes
+            .into_iter()
+            .map(|change| (change.path.clone(), change))
+            .collect();
+
+        assert!(!by_path.contains_key("keep.log"));
+        assert_eq!(
+            by_path.get("agent.log").map(|change| &change.kind),
+            Some(&GitChangedFileKind::Added)
+        );
+        assert!(by_path["agent.log"].changed_chars > 0);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn rollback_to_head_restores_worktree_after_agent_changes() {
         let root = unique_temp_dir("rollback");
         let context = ProjectContext::new("project-1", root.clone());
@@ -658,6 +798,37 @@ mod tests {
         assert_eq!(restored, "stable\n");
         assert!(!root.join("wiki").join("agent-new.md").exists());
         assert!(!service.repository_status(&context).unwrap().has_changes);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rollback_preserving_ignored_baseline_removes_new_ignored_only() {
+        let root = unique_temp_dir("ignored-rollback");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(root.join("wiki").join("page.md"), "stable\n").unwrap();
+        fs::write(root.join("keep.log"), "preexisting\n").unwrap();
+
+        let service = GitService;
+        service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap();
+
+        fs::write(root.join("wiki").join("page.md"), "agent edit\n").unwrap();
+        fs::write(root.join("agent.log"), "agent artifact\n").unwrap();
+
+        service
+            .rollback_worktree_to_head_preserving_ignored(&context, &["keep.log".to_string()])
+            .unwrap();
+
+        let restored = fs::read_to_string(root.join("wiki").join("page.md"))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert_eq!(restored, "stable\n");
+        assert!(root.join("keep.log").exists());
+        assert!(!root.join("agent.log").exists());
 
         fs::remove_dir_all(root).ok();
     }
