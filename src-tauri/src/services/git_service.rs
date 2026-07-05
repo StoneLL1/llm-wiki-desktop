@@ -239,6 +239,18 @@ impl GitService {
         Ok(changes)
     }
 
+    pub fn ignored_paths(&self, context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before listing ignored paths.",
+                true,
+                true,
+            ));
+        }
+        ignored_paths(context)
+    }
+
     pub fn diff_since_head(&self, context: &ProjectContext) -> Result<String, BackendError> {
         if !self.repository_status(context)?.is_repository {
             return Err(BackendError::new(

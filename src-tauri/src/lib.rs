@@ -182,6 +182,8 @@ pub fn run() {
             commands::chat_commands::delete_chat_session,
             commands::chat_commands::send_chat_message,
             commands::chat_commands::save_answer_to_wiki,
+            commands::chat_commands::resolve_chat_convenience_edit,
+            commands::chat_commands::rollback_last_chat_convenience_edit,
             commands::lint_commands::run_local_lint,
             commands::lint_commands::start_deep_lint,
             commands::lint_commands::get_deep_lint_report,

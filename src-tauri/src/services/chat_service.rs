@@ -170,7 +170,7 @@ impl ChatService {
         self.save_session(context, session)
     }
 
-    fn save_session(
+    pub fn save_session(
         &self,
         context: &ProjectContext,
         session: &ChatSession,
