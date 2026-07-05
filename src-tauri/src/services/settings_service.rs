@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::errors::BackendError;
 use crate::models::agent::{AgentConfig, AgentKind};
@@ -11,19 +12,24 @@ use crate::services::{FileStore, SecretService};
 
 pub struct SettingsService {
     config_dir: PathBuf,
+    global_settings_lock: Mutex<()>,
 }
 
 impl Default for SettingsService {
     fn default() -> Self {
         Self {
             config_dir: default_config_dir(),
+            global_settings_lock: Mutex::new(()),
         }
     }
 }
 
 impl SettingsService {
     pub fn with_config_dir(config_dir: PathBuf) -> Self {
-        Self { config_dir }
+        Self {
+            config_dir,
+            global_settings_lock: Mutex::new(()),
+        }
     }
 
     pub fn read_settings(&self, context: &ProjectContext) -> Result<Settings, BackendError> {
@@ -54,11 +60,10 @@ impl SettingsService {
     ) -> Result<Settings, BackendError> {
         let store = FileStore;
         store.ensure_absolute_dir(&self.config_dir)?;
+        let _guard = self.lock_global_settings()?;
         let mut global = settings.to_global_file();
-        global.chat_convenience_authorizations = self
-            .read_global_settings()
-            .map(|existing| existing.chat_convenience_authorizations)
-            .unwrap_or_default();
+        global.chat_convenience_authorizations =
+            self.read_global_settings()?.chat_convenience_authorizations;
         store.write_json_atomic_absolute(&self.global_settings_path(), &global)?;
         store.write_json_atomic(context, ".app/settings.json", &settings.to_project_file())?;
         store.write_json_atomic(
@@ -181,6 +186,7 @@ impl SettingsService {
         context: &ProjectContext,
         enabled: bool,
     ) -> Result<ChatConvenienceAuthorization, BackendError> {
+        let _guard = self.lock_global_settings()?;
         let mut settings = self.read_global_settings()?;
         let root_path_fingerprint = project_root_fingerprint(&context.root);
         settings
@@ -190,15 +196,26 @@ impl SettingsService {
                     || authorization.root_path_fingerprint != root_path_fingerprint
             });
 
-        let authorization = ChatConvenienceAuthorization {
-            enabled,
-            confirmed_at: chrono::Utc::now().to_rfc3339(),
-            project_id: context.project_id.clone(),
-            root_path_fingerprint,
+        let authorization = if enabled {
+            ChatConvenienceAuthorization {
+                enabled,
+                confirmed_at: chrono::Utc::now().to_rfc3339(),
+                project_id: context.project_id.clone(),
+                root_path_fingerprint,
+            }
+        } else {
+            ChatConvenienceAuthorization {
+                enabled: false,
+                confirmed_at: String::new(),
+                project_id: context.project_id.clone(),
+                root_path_fingerprint,
+            }
         };
-        settings
-            .chat_convenience_authorizations
-            .push(authorization.clone());
+        if enabled {
+            settings
+                .chat_convenience_authorizations
+                .push(authorization.clone());
+        }
 
         let store = FileStore;
         store.ensure_absolute_dir(&self.config_dir)?;
@@ -208,6 +225,7 @@ impl SettingsService {
     }
 
     pub fn revoke_all_chat_convenience_authorizations(&self) -> Result<(), BackendError> {
+        let _guard = self.lock_global_settings()?;
         let mut settings = self.read_global_settings()?;
         settings.chat_convenience_authorizations.clear();
         let store = FileStore;
@@ -217,6 +235,17 @@ impl SettingsService {
 
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
+    }
+
+    fn lock_global_settings(&self) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
+        self.global_settings_lock.lock().map_err(|_| {
+            BackendError::new(
+                "SETTINGS_LOCKED",
+                "Settings are currently unavailable.",
+                true,
+                false,
+            )
+        })
     }
 }
 
@@ -254,7 +283,7 @@ mod tests {
     use crate::models::agent::{AgentConfig, AgentKind};
     use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
     use crate::models::paths::ProjectContext;
-    use crate::models::settings::{CloseBehavior, GlobalSettingsFile};
+    use crate::models::settings::{CloseBehavior, GlobalSettingsFile, Settings};
     use crate::services::{AgentService, FileStore, SecretService};
 
     fn tmp_paths(suffix: &str) -> (ProjectContext, PathBuf, PathBuf) {
@@ -492,6 +521,16 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+        let global: serde_json::Value = FileStore
+            .read_json_file(&config_dir.join("settings.json"))
+            .unwrap();
+        assert_eq!(
+            global["chatConvenienceAuthorizations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
@@ -516,6 +555,26 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn save_settings_does_not_overwrite_unreadable_global_settings() {
+        let (context, root, config_dir) = tmp_paths("chat-convenience-corrupt-global");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let global_path = config_dir.join("settings.json");
+        std::fs::write(&global_path, "{not-json").unwrap();
+        let settings = Settings::default();
+
+        let error = service
+            .save_settings(&context, &settings)
+            .expect_err("corrupt global settings must not be overwritten");
+
+        assert_eq!(error.code, "JSON_PARSE_FAILED");
+        assert_eq!(std::fs::read_to_string(&global_path).unwrap(), "{not-json");
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
