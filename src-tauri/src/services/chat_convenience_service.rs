@@ -102,7 +102,7 @@ pub fn classify_chat_intent(input: &str) -> ChatIntent {
             "update", "create", "add", "append", "delete", "remove", "rewrite",
         ],
     );
-    if has_write {
+    if has_write && has_write_request_cue(&normalized) {
         return ChatIntent::Write;
     }
 
@@ -231,6 +231,11 @@ fn starts_with_write_command(input: &str) -> bool {
 
 fn starts_with_read_only_question(input: &str) -> bool {
     [
+        "can i ",
+        "could i ",
+        "should i ",
+        "do i ",
+        "is it ",
         "how ",
         "why ",
         "what ",
@@ -253,9 +258,31 @@ fn starts_with_read_only_question(input: &str) -> bool {
         "为什么",
         "是什么",
         "怎么样",
+        "如何",
+        "怎样",
+        "怎么",
+        "该如何",
+        "我该如何",
     ]
     .iter()
     .any(|prefix| input.starts_with(prefix))
+}
+
+fn has_write_request_cue(input: &str) -> bool {
+    [
+        "please ",
+        "help me ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "请",
+        "帮我",
+        "替我",
+        "麻烦",
+        "把",
+    ]
+    .iter()
+    .any(|cue| input.contains(cue))
 }
 
 fn contains_read_only_cue(input: &str) -> bool {
@@ -372,6 +399,26 @@ mod tests {
         assert_eq!(
             classify_chat_intent("why did you delete the note?"),
             ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("can I add a page?"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("should I delete this note?"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("如何更新这个页面？"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("怎样修改这一页？"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("can you update this page?"),
+            ChatIntent::Write
         );
         assert_eq!(
             classify_chat_intent("please update this page"),
