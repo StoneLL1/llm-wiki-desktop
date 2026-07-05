@@ -241,7 +241,7 @@ impl ChatService {
             title: page.meta.title,
             snippet: Some(first_prompt_line(&page.body_markdown)),
             score: 10_000,
-            excerpt: Some(truncate_prompt_excerpt(&page.body_markdown, EXCERPT_CHARS)),
+            excerpt: Some(page.body_markdown.trim().to_string()),
             is_pinned: true,
         })
     }
@@ -256,9 +256,12 @@ impl ChatService {
     ) -> String {
         let mut prompt = String::new();
         prompt.push_str(
-            "You are answering a question about a local Markdown wiki. Answer using only the \
-             provided context. Cite sources by their page path in parentheses. If the context is \
-             insufficient, say so explicitly.\n",
+            "You are answering a question about a local Markdown wiki. Cite sources by their page \
+             path in parentheses. When this prompt is executed by an Agent, the current working \
+             directory is the project root: you may read Markdown files under wiki/ to answer. If \
+             the keyword Sources section is empty or insufficient, inspect wiki/ before saying the \
+             context is insufficient. If you cannot access the filesystem, answer using only the \
+             provided context and say explicitly when it is insufficient. Do not modify files.\n",
         );
         // Steer the generated answer's language to the user's preference. Page
         // paths and the structural sections below stay as-is (paths, headings).
@@ -536,16 +539,6 @@ fn first_prompt_line(body: &str) -> String {
         .chars()
         .take(160)
         .collect()
-}
-
-fn truncate_prompt_excerpt(body: &str, max_chars: usize) -> String {
-    let trimmed = body.trim();
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-    let mut excerpt: String = trimmed.chars().take(max_chars).collect();
-    excerpt.push_str("...");
-    excerpt
 }
 
 fn invalidate_graph_cache(context: &ProjectContext) {
@@ -834,6 +827,67 @@ mod tests {
         assert_eq!(ctx.citations[0].score, 10_000);
         assert!(ctx.prompt.contains("--- Current Wiki page ---"));
         assert!(ctx.prompt.contains("ReAct Pattern"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_context_includes_full_pinned_page_body() {
+        let (context, root) = tmp_context("retrieval-pinned-full");
+        seed_vault(&context);
+        let long_body = format!(
+            "# Long Page\n\n{}\n\nTAIL_MARKER: all later sections are visible",
+            "middle paragraph with page details.\n".repeat(80)
+        );
+        write_file(
+            &context,
+            "wiki/concepts/long-page.md",
+            &format!("---\ntitle: Long Page\ntype: concept\n---\n\n{long_body}"),
+        );
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "summarize this page",
+                &session,
+                "en",
+                Some("wiki/concepts/long-page.md"),
+            )
+            .unwrap();
+
+        assert!(ctx
+            .prompt
+            .contains("TAIL_MARKER: all later sections are visible"));
+        assert!(!ctx
+            .prompt
+            .contains("middle paragraph with page details...."));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_prompt_tells_agent_to_read_wiki_when_sources_are_sparse() {
+        let (context, root) = tmp_context("retrieval-agent-read");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(&context, &search, "vibecoding", &session, "en", None)
+            .unwrap();
+
+        assert!(ctx
+            .prompt
+            .contains("current working directory is the project root"));
+        assert!(ctx.prompt.contains("read Markdown files under wiki/"));
+        assert!(ctx
+            .prompt
+            .contains("If the keyword Sources section is empty or insufficient"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
