@@ -86,32 +86,11 @@ pub fn classify_chat_intent(input: &str) -> ChatIntent {
         return ChatIntent::Ambiguous;
     }
 
-    let has_read_only = contains_any(
-        &normalized,
-        &[
-            "分析",
-            "解释",
-            "说明",
-            "看看",
-            "看一下",
-            "检查",
-            "评价",
-            "评估",
-            "问题",
-            "为什么",
-            "是什么",
-            "怎么样",
-            "analyze",
-            "explain",
-            "review",
-            "inspect",
-            "summarize",
-            "what",
-            "why",
-            "how",
-        ],
-    );
-    if has_read_only {
+    if starts_with_write_command(&normalized) {
+        return ChatIntent::Write;
+    }
+
+    if starts_with_read_only_question(&normalized) {
         return ChatIntent::ReadOnly;
     }
 
@@ -125,6 +104,10 @@ pub fn classify_chat_intent(input: &str) -> ChatIntent {
     );
     if has_write {
         return ChatIntent::Write;
+    }
+
+    if contains_read_only_cue(&normalized) {
+        return ChatIntent::ReadOnly;
     }
 
     ChatIntent::Ambiguous
@@ -199,6 +182,84 @@ pub fn convenience_prompt_suffix() -> &'static str {
 
 fn contains_any(input: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| input.contains(needle))
+}
+
+fn starts_with_write_command(input: &str) -> bool {
+    [
+        "please save",
+        "please write",
+        "please edit",
+        "please update",
+        "please create",
+        "please add",
+        "please append",
+        "please delete",
+        "please remove",
+        "please rewrite",
+        "save ",
+        "write ",
+        "edit ",
+        "update ",
+        "create ",
+        "add ",
+        "append ",
+        "delete ",
+        "remove ",
+        "rewrite ",
+        "保存",
+        "存成",
+        "写入",
+        "写成",
+        "新建",
+        "创建",
+        "新增",
+        "修改",
+        "更新",
+        "编辑",
+        "改写",
+        "重写",
+        "整理",
+        "补",
+        "添加",
+        "加入",
+        "删除",
+        "移除",
+    ]
+    .iter()
+    .any(|prefix| input.starts_with(prefix))
+}
+
+fn starts_with_read_only_question(input: &str) -> bool {
+    [
+        "how ",
+        "why ",
+        "what ",
+        "explain ",
+        "analyze ",
+        "review ",
+        "inspect ",
+        "summarize ",
+        "can you explain",
+        "could you explain",
+        "please explain",
+        "分析",
+        "解释",
+        "说明",
+        "看看",
+        "看一下",
+        "检查",
+        "评价",
+        "评估",
+        "为什么",
+        "是什么",
+        "怎么样",
+    ]
+    .iter()
+    .any(|prefix| input.starts_with(prefix))
+}
+
+fn contains_read_only_cue(input: &str) -> bool {
+    contains_any(input, &["看看", "看一下", "解释一下", "分析一下"])
 }
 
 fn hard_violation_reason(changes: &[ChangedFile]) -> Option<String> {
@@ -314,6 +375,14 @@ mod tests {
         );
         assert_eq!(
             classify_chat_intent("please update this page"),
+            ChatIntent::Write
+        );
+        assert_eq!(
+            classify_chat_intent("please update this page and explain what changed"),
+            ChatIntent::Write
+        );
+        assert_eq!(
+            classify_chat_intent("update this page, then summarize why"),
             ChatIntent::Write
         );
     }
