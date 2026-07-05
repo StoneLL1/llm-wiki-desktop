@@ -115,8 +115,11 @@ export function ChatView() {
 
   const handleSend = (content: string) => {
     if (!activeSessionId) return;
+    const canUseConvenience = routePreference !== "byok";
     void send(projectId, rootPath, activeSessionId, content, routePreference, {
-      convenienceEnabled: Boolean(chatConvenienceAuthorization?.enabled && !hasPendingConvenienceEdit(activeSession)),
+      convenienceEnabled: Boolean(
+        canUseConvenience && chatConvenienceAuthorization?.enabled && !hasPendingConvenienceEdit(activeSession),
+      ),
     });
   };
 
