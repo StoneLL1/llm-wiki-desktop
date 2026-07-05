@@ -86,18 +86,6 @@ pub fn classify_chat_intent(input: &str) -> ChatIntent {
         return ChatIntent::Ambiguous;
     }
 
-    let has_write = contains_any(
-        &normalized,
-        &[
-            "保存", "存成", "写入", "写成", "新建", "创建", "新增", "修改", "更新", "编辑", "改写",
-            "重写", "整理", "补", "添加", "加入", "删除", "移除", "save", "write", "edit",
-            "update", "create", "add", "append", "delete", "remove", "rewrite",
-        ],
-    );
-    if has_write {
-        return ChatIntent::Write;
-    }
-
     let has_read_only = contains_any(
         &normalized,
         &[
@@ -123,8 +111,20 @@ pub fn classify_chat_intent(input: &str) -> ChatIntent {
             "how",
         ],
     );
-    if has_read_only {
+    if has_read_only && !has_explicit_write_command(&normalized) {
         return ChatIntent::ReadOnly;
+    }
+
+    let has_write = contains_any(
+        &normalized,
+        &[
+            "保存", "存成", "写入", "写成", "新建", "创建", "新增", "修改", "更新", "编辑", "改写",
+            "重写", "整理", "补", "添加", "加入", "删除", "移除", "save", "write", "edit",
+            "update", "create", "add", "append", "delete", "remove", "rewrite",
+        ],
+    );
+    if has_write {
+        return ChatIntent::Write;
     }
 
     ChatIntent::Ambiguous
@@ -135,6 +135,15 @@ pub fn audit_changed_paths(changes: Vec<ChangedFile>) -> ConvenienceAuditReport 
         .iter()
         .map(|change| normalize_project_path(&change.path))
         .collect();
+
+    if changes.is_empty() {
+        return ConvenienceAuditReport {
+            status: ConvenienceAuditStatus::SoftViolation,
+            diff_summary: summarize_changes(0, &affected_paths),
+            affected_paths,
+            violation_reason: Some("Convenience edit produced no file changes.".to_string()),
+        };
+    }
 
     if let Some(reason) = hard_violation_reason(&changes) {
         return ConvenienceAuditReport {
@@ -192,33 +201,60 @@ fn contains_any(input: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| input.contains(needle))
 }
 
+fn has_explicit_write_command(input: &str) -> bool {
+    [
+        "save this",
+        "save the",
+        "save as",
+        "write this",
+        "write the",
+        "edit this",
+        "edit the",
+        "update this",
+        "update the",
+        "create a",
+        "create the",
+        "add this",
+        "add the",
+        "append this",
+        "append the",
+        "delete this",
+        "delete the",
+        "remove this",
+        "remove the",
+        "rewrite this",
+        "rewrite the",
+    ]
+    .iter()
+    .any(|needle| input.contains(needle))
+}
+
 fn hard_violation_reason(changes: &[ChangedFile]) -> Option<String> {
     for change in changes {
         let path = normalize_project_path(&change.path);
-        let lower_path = path.to_lowercase();
 
         if matches!(change.kind, ChangedFileKind::Deleted) {
             return Some(format!("Convenience edits cannot delete files: {path}"));
         }
-        if lower_path.starts_with("raw/sources/") {
+        if path.starts_with("raw/sources/") {
             return Some(format!(
                 "Convenience edits cannot modify raw sources: {path}"
             ));
         }
         if matches!(
-            lower_path.as_str(),
+            path.as_str(),
             ".app/settings.json" | ".app/agent-config.json"
         ) {
             return Some(format!(
                 "Convenience edits cannot modify protected app config: {path}"
             ));
         }
-        if !lower_path.starts_with("wiki/") {
+        if !path.starts_with("wiki/") {
             return Some(format!(
                 "Convenience edits must stay under wiki Markdown files: {path}"
             ));
         }
-        if !lower_path.ends_with(".md") {
+        if !path.ends_with(".md") {
             return Some(format!(
                 "Convenience edits can only modify Markdown files under wiki/: {path}"
             ));
@@ -228,10 +264,20 @@ fn hard_violation_reason(changes: &[ChangedFile]) -> Option<String> {
 }
 
 fn normalize_project_path(path: &str) -> String {
-    path.trim()
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .to_string()
+    let normalized = path.trim().replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    parts.push("..");
+                }
+            }
+            value => parts.push(value),
+        }
+    }
+    parts.join("/")
 }
 
 fn summarize_changes(count: usize, affected_paths: &[String]) -> String {
@@ -274,6 +320,22 @@ mod tests {
             ChatIntent::ReadOnly
         );
         assert_eq!(classify_chat_intent("帮我处理一下"), ChatIntent::Ambiguous);
+        assert_eq!(
+            classify_chat_intent("how do I add a page?"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("explain how to delete stale notes"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("what changed in this update?"),
+            ChatIntent::ReadOnly
+        );
+        assert_eq!(
+            classify_chat_intent("please update this page"),
+            ChatIntent::Write
+        );
     }
 
     #[test]
@@ -311,5 +373,25 @@ mod tests {
             let report = audit_changed_paths(vec![change]);
             assert_eq!(report.status, ConvenienceAuditStatus::HardViolation);
         }
+    }
+
+    #[test]
+    fn audit_hard_violates_dot_segments_case_variants_and_non_markdown() {
+        for change in [
+            ChangedFile::modified("wiki/../raw/sources/a.md", 10),
+            ChangedFile::modified("WIKI/a.md", 10),
+            ChangedFile::modified("wiki/assets/a.png", 10),
+            ChangedFile::modified("wiki\\..\\raw\\sources\\a.md", 10),
+        ] {
+            let report = audit_changed_paths(vec![change]);
+            assert_eq!(report.status, ConvenienceAuditStatus::HardViolation);
+        }
+    }
+
+    #[test]
+    fn audit_soft_violates_empty_change_sets() {
+        let report = audit_changed_paths(Vec::new());
+        assert_eq!(report.status, ConvenienceAuditStatus::SoftViolation);
+        assert_eq!(report.affected_paths.len(), 0);
     }
 }
