@@ -43,7 +43,9 @@ fn template_for(export_type: ExportType) -> &'static str {
 fn style_direction(template_name: &str) -> &'static str {
     match template_name {
         "modern-sans" => "modern sans-serif system font stack for body and headings",
-        "editorial-magazine" => "magazine feel: prominent display headings, generous measure, optional drop cap",
+        "editorial-magazine" => {
+            "magazine feel: prominent display headings, generous measure, optional drop cap"
+        }
         _ => "default serif treatment",
     }
 }
@@ -493,9 +495,9 @@ fn trim_trailing_prose(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::paths::ProjectContext;
     use crate::services::BookmarkService;
     use std::collections::HashSet;
-    use crate::models::paths::ProjectContext;
     use std::path::PathBuf;
 
     fn tmp_context(suffix: &str) -> (ProjectContext, PathBuf) {
@@ -770,7 +772,13 @@ mod tests {
             .list_records_with_bookmarks(&context, &bookmark_ids)
             .unwrap();
 
-        assert!(listed.iter().find(|record| record.id == second_id).unwrap().bookmarked);
+        assert!(
+            listed
+                .iter()
+                .find(|record| record.id == second_id)
+                .unwrap()
+                .bookmarked
+        );
         assert!(listed.iter().any(|record| !record.bookmarked));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -790,11 +798,16 @@ mod tests {
         let result = BookmarkService::default()
             .toggle_export_html(&context, &record)
             .unwrap();
-        let bookmark_ids = BookmarkService::default().export_record_ids(&context).unwrap();
+        let bookmark_ids = BookmarkService::default()
+            .export_record_ids(&context)
+            .unwrap();
 
         assert!(result.bookmarked);
         assert!(bookmark_ids.contains(&record.id));
-        assert!(!context.resolve_project_path(&record.output_path).unwrap().exists());
+        assert!(!context
+            .resolve_project_path(&record.output_path)
+            .unwrap()
+            .exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

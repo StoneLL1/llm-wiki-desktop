@@ -20,7 +20,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn make_context(slug: &str) -> (ProjectContext, PathBuf) {
-    let root = std::env::temp_dir().join(format!("sources-promo-{}-{}", slug, uuid::Uuid::new_v4()));
+    let root =
+        std::env::temp_dir().join(format!("sources-promo-{}-{}", slug, uuid::Uuid::new_v4()));
     fs::create_dir_all(root.join("wiki/sources")).unwrap();
     fs::create_dir_all(root.join("raw/extracted")).unwrap();
     fs::create_dir_all(root.join("raw/sources/markdown")).unwrap();
@@ -107,9 +108,7 @@ fn markdown_import_is_promoted_verbatim_to_wiki_sources() {
         "verbatim original body must be preserved"
     );
 
-    let index = ImportService
-        .read_source_index(&context, &store)
-        .unwrap();
+    let index = ImportService.read_source_index(&context, &store).unwrap();
     assert_eq!(
         index.sources.get("raw/sources/markdown/notes.md"),
         Some(&vec!["wiki/sources/notes.md".to_string()]),
@@ -159,9 +158,7 @@ fn extracted_text_import_is_promoted_and_transient_staging_removed() {
     // The immutable archived original stays in place.
     assert!(root.join("raw/sources/pdfs/report.pdf").exists());
 
-    let index = ImportService
-        .read_source_index(&context, &store)
-        .unwrap();
+    let index = ImportService.read_source_index(&context, &store).unwrap();
     assert_eq!(
         index.sources.get("raw/sources/pdfs/report.pdf"),
         Some(&vec!["wiki/sources/report.md".to_string()]),
@@ -238,7 +235,10 @@ fn colliding_clean_names_get_numeric_suffix() {
         .confirm_import(&context, &store, &preview)
         .unwrap();
 
-    assert!(root.join("wiki/sources/alpha.md").exists(), "first promotion takes the base name");
+    assert!(
+        root.join("wiki/sources/alpha.md").exists(),
+        "first promotion takes the base name"
+    );
     assert!(
         root.join("wiki/sources/alpha-2.md").exists(),
         "second promotion gets a -2 suffix"
@@ -295,11 +295,8 @@ fn manifest_from_workspace_excludes_wiki_sources_from_files_and_deletions() {
         "wiki/index.md".to_string(),
         "wiki/sources/keep.md".to_string(),
     ];
-    let manifest = CompileService::manifest_from_workspace(
-        &root,
-        original_paths.into_iter(),
-    )
-    .unwrap();
+    let manifest =
+        CompileService::manifest_from_workspace(&root, original_paths.into_iter()).unwrap();
 
     assert!(
         !manifest
@@ -375,7 +372,12 @@ fn extracted_markdown_files_reads_both_promoted_and_legacy_paths() {
     let files = CompileService::extracted_markdown_files(&context).unwrap();
     let rels: Vec<String> = files
         .iter()
-        .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"))
+        .map(|p| {
+            p.strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .collect();
     assert!(rels.contains(&"wiki/sources/promoted.md".to_string()));
     assert!(rels.contains(&"raw/extracted/legacy.md".to_string()));

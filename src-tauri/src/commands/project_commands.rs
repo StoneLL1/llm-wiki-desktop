@@ -147,7 +147,9 @@ pub fn remember_recent_project(
     request: RememberRecentProjectRequest,
 ) -> Result<Vec<RecentProject>, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.root_path)?;
-    let summary = state.project_service.scan_project(&context, Some(&request.name));
+    let summary = state
+        .project_service
+        .scan_project(&context, Some(&request.name));
     state
         .project_service
         .remember_recent_project(RecentProject {

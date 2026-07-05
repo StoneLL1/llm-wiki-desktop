@@ -29,6 +29,13 @@ export interface SystemNotificationPrefs {
   onLongTaskProgress: boolean;
 }
 
+export interface ChatConvenienceAuthorization {
+  enabled: boolean;
+  confirmedAt: string;
+  projectId: string;
+  rootPathFingerprint: string;
+}
+
 export interface Settings {
   // Global
   language: AppLanguage;

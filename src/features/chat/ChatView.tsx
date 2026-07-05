@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -11,6 +12,7 @@ import { isTerminalStatus } from "../../types/task";
 import type { ChatMessage, ChatRoutePreference } from "../../types/chat";
 import type { LlmProviderKind } from "../../types/llm";
 import { ChatComposer } from "./ChatComposer";
+import { ChatConveniencePanel } from "./ChatConveniencePanel";
 import { ChatSessionList } from "./ChatSessionList";
 import { MessageContent } from "./MessageContent";
 
@@ -33,6 +35,14 @@ export function formatTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function hasPendingConvenienceEdit(session: { messages: ChatMessage[] } | null): boolean {
+  return Boolean(
+    session?.messages.some(
+      (message) => message.convenienceEdit?.status === "soft_violation_pending",
+    ),
+  );
 }
 
 export function ChatView() {
@@ -62,6 +72,11 @@ export function ChatView() {
   const saveAnswer = useChatStore((state) => state.saveAnswer);
   const confirmOverwrite = useChatStore((state) => state.confirmOverwrite);
   const cancelOverwrite = useChatStore((state) => state.cancelOverwrite);
+  const resolveConvenienceEdit = useChatStore((state) => state.resolveConvenienceEdit);
+  const rollbackLastConvenienceEdit = useChatStore((state) => state.rollbackLastConvenienceEdit);
+  const chatConvenienceAuthorization = useSettingsStore((state) => state.chatConvenienceAuthorization);
+  const loadChatConvenienceAuthorization = useSettingsStore((state) => state.loadChatConvenienceAuthorization);
+  const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
 
   const tasks = useTaskStore((state) => state.tasks);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
@@ -78,7 +93,8 @@ export function ChatView() {
 
   useEffect(() => {
     void loadSessions(projectId, rootPath);
-  }, [projectId, rootPath, loadSessions]);
+    void loadChatConvenienceAuthorization(projectId, rootPath);
+  }, [projectId, rootPath, loadSessions, loadChatConvenienceAuthorization]);
 
   // When the send task reaches a terminal status, reload the session to surface
   // the persisted message, then clear the in-flight id without discarding a
@@ -99,7 +115,12 @@ export function ChatView() {
 
   const handleSend = (content: string) => {
     if (!activeSessionId) return;
-    void send(projectId, rootPath, activeSessionId, content, routePreference);
+    const canUseConvenience = routePreference !== "byok";
+    void send(projectId, rootPath, activeSessionId, content, routePreference, {
+      convenienceEnabled: Boolean(
+        canUseConvenience && chatConvenienceAuthorization?.enabled && !hasPendingConvenienceEdit(activeSession),
+      ),
+    });
   };
 
   const handleCancel = () => {
@@ -111,10 +132,20 @@ export function ChatView() {
 
   const latestAssistant = latestAssistantMessage(activeSession);
   const resolvedRoute = latestAssistant?.route ?? null;
+  const convenienceEnabled = Boolean(chatConvenienceAuthorization?.enabled);
+  const conveniencePending = hasPendingConvenienceEdit(activeSession);
 
   const openCitation = (path: string) => {
     setActiveView("wiki");
     void openWikiPage(projectId, rootPath, path);
+  };
+
+  const setConvenienceEnabled = (enabled: boolean) => {
+    if (enabled && !chatConvenienceAuthorization?.enabled) {
+      const ok = window.confirm(t("chat.convenience.confirmEnable"));
+      if (!ok) return;
+    }
+    void setChatConvenienceAuthorization(projectId, rootPath, enabled);
   };
 
   return (
@@ -148,6 +179,13 @@ export function ChatView() {
                 session={activeSession}
                 routePreference={routePreference}
                 onRouteChange={setRoutePreference}
+                convenienceEnabled={convenienceEnabled}
+                conveniencePending={conveniencePending}
+                onConvenienceEnabledChange={setConvenienceEnabled}
+                onRollbackLast={() => {
+                  if (!activeSessionId) return;
+                  void rollbackLastConvenienceEdit(projectId, rootPath, activeSessionId);
+                }}
                 t={t}
               />
               <div className="chat-stream mx-auto w-full max-w-[820px] px-4">
@@ -166,6 +204,14 @@ export function ChatView() {
                   onSave={() => {
                     if (!activeSessionId) return;
                     void saveAnswer(projectId, rootPath, activeSessionId, message.id);
+                  }}
+                  onKeepConvenience={() => {
+                    if (!activeSessionId) return;
+                    void resolveConvenienceEdit(projectId, rootPath, activeSessionId, message.id, true);
+                  }}
+                  onRollbackConvenience={() => {
+                    if (!activeSessionId) return;
+                    void resolveConvenienceEdit(projectId, rootPath, activeSessionId, message.id, false);
                   }}
                 />
               ))}
@@ -226,6 +272,8 @@ export interface MessageBubbleProps {
   onCitationClick: (index: number) => void;
   onOpenCitation: (path: string) => void;
   onSave: () => void;
+  onKeepConvenience?: () => void;
+  onRollbackConvenience?: () => void;
 }
 
 export function MessageBubble({
@@ -236,6 +284,8 @@ export function MessageBubble({
   onCitationClick,
   onOpenCitation,
   onSave,
+  onKeepConvenience,
+  onRollbackConvenience,
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const citations = message.citations ?? [];
@@ -294,6 +344,16 @@ export function MessageBubble({
                 <SaveAnswerButton status={saveStatus} disabled={generating} onSave={onSave} />
               </div>
             ) : null}
+            {message.convenienceEdit ? (
+              <ChatConveniencePanel
+                enabled
+                pending={message.convenienceEdit.status === "soft_violation_pending"}
+                edit={message.convenienceEdit}
+                onSetEnabled={() => {}}
+                onKeep={onKeepConvenience}
+                onRollback={onRollbackConvenience}
+              />
+            ) : null}
           </>
         )}
       </div>
@@ -305,10 +365,23 @@ interface SessionToolbarProps {
   session: { id: string; title: string; messages: unknown[]; updatedAt: string };
   routePreference: ChatRoutePreference;
   onRouteChange: (value: ChatRoutePreference) => void;
+  convenienceEnabled: boolean;
+  conveniencePending: boolean;
+  onConvenienceEnabledChange: (enabled: boolean) => void;
+  onRollbackLast: () => void;
   t: (k: string, opts?: Record<string, unknown>) => string;
 }
 
-function SessionToolbar({ session, routePreference, onRouteChange, t }: SessionToolbarProps) {
+function SessionToolbar({
+  session,
+  routePreference,
+  onRouteChange,
+  convenienceEnabled,
+  conveniencePending,
+  onConvenienceEnabledChange,
+  onRollbackLast,
+  t,
+}: SessionToolbarProps) {
   const rename = useChatStore((state) => state.renameSession);
   const del = useChatStore((state) => state.deleteSession);
   const { projectId, rootPath } = useProjectStore((state) => state.currentProject);
@@ -345,6 +418,12 @@ function SessionToolbar({ session, routePreference, onRouteChange, t }: SessionT
           </button>
         ))}
       </div>
+      <ChatConveniencePanel
+        enabled={convenienceEnabled}
+        pending={conveniencePending}
+        onSetEnabled={onConvenienceEnabledChange}
+        onRollbackLast={convenienceEnabled ? onRollbackLast : undefined}
+      />
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {editing ? (
           <input

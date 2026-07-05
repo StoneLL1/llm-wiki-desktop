@@ -1,5 +1,6 @@
 mod agent_service;
 mod bookmark_service;
+mod chat_convenience_service;
 mod chat_service;
 mod compile_service;
 mod export_service;
@@ -17,7 +18,11 @@ mod settings_service;
 
 pub use agent_service::{AgentInvocation, AgentService, ProcessRunner, SystemProcessRunner};
 pub use bookmark_service::BookmarkService;
-pub use chat_service::ChatService;
+pub use chat_convenience_service::{
+    audit_changed_paths, classify_chat_intent, ChangedFile, ChatConvenienceService, ChatIntent,
+    ConvenienceAuditReport, ConvenienceAuditStatus,
+};
+pub use chat_service::{ChatService, RetrievalContext};
 pub use compile_service::CompileService;
 pub use export_service::ExportService;
 pub use extraction_service::ExtractionService;

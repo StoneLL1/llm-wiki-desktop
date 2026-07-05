@@ -209,7 +209,7 @@ impl NotificationClickBehavior {
 }
 
 /// Per-provider system-notification toggle set (design settings.html:536-547).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemNotificationPrefs {
     #[serde(default = "default_true")]
@@ -224,6 +224,26 @@ pub struct SystemNotificationPrefs {
 
 fn default_true() -> bool {
     true
+}
+
+impl Default for SystemNotificationPrefs {
+    fn default() -> Self {
+        Self {
+            on_task_completed: true,
+            on_task_failed: true,
+            on_confirmation_needed: true,
+            on_long_task_progress: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatConvenienceAuthorization {
+    pub enabled: bool,
+    pub confirmed_at: String,
+    pub project_id: String,
+    pub root_path_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -390,6 +410,8 @@ pub struct GlobalSettingsFile {
     pub associate_md_files: bool,
     #[serde(default)]
     pub associate_wiki_folders: bool,
+    #[serde(default)]
+    pub chat_convenience_authorizations: Vec<ChatConvenienceAuthorization>,
 }
 
 impl Default for GlobalSettingsFile {
@@ -417,6 +439,7 @@ impl Default for GlobalSettingsFile {
             external_editor: settings.external_editor,
             associate_md_files: settings.associate_md_files,
             associate_wiki_folders: settings.associate_wiki_folders,
+            chat_convenience_authorizations: Vec::new(),
         }
     }
 }
@@ -519,6 +542,7 @@ impl Settings {
             external_editor: self.external_editor.clone(),
             associate_md_files: self.associate_md_files,
             associate_wiki_folders: self.associate_wiki_folders,
+            chat_convenience_authorizations: Vec::new(),
         }
     }
 
@@ -555,6 +579,14 @@ pub struct SaveSettingsRequest {
     pub project_id: String,
     pub project_root_path: String,
     pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetChatConvenienceAuthorizationRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -753,8 +785,14 @@ mod tests {
         let project = settings.to_project_file();
 
         // Global-only fields appear in the global file, not the project file.
+        let settings_value = serde_json::to_value(&settings).unwrap();
         let global_value = serde_json::to_value(&global).unwrap();
         let project_value = serde_json::to_value(&project).unwrap();
+        assert!(settings_value
+            .get("chatConvenienceAuthorizations")
+            .is_none());
+        assert!(global_value["chatConvenienceAuthorizations"].is_array());
+        assert!(project_value.get("chatConvenienceAuthorizations").is_none());
         assert_eq!(global_value["density"], json!("comfortable"));
         assert_eq!(global_value["updateFrequency"], json!("never"));
         assert!(project_value.get("density").is_none());

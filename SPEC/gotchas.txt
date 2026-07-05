@@ -2,6 +2,18 @@
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
+[2026-07-05] Git `diff --numstat` reports changed lines, not changed characters - Chat convenience audit limits per-file changed characters, but numstat turns a 5000-character single-line rewrite into `1 + 1`, letting oversized edits pass - For safety audits, estimate changed bytes from `HEAD:path` plus current worktree file bytes; use numstat only for display-level line summaries.
+
+[2026-07-05] Agent Chat run from the real project root can turn Q&A into an uncheckpointed file-operation surface - Moving chat cwd from an empty temp folder to `context.root` lets agents browse wiki/, but any CLI without a verified read-only mode may also mutate project files and bypass Git/PendingAction safety - Only route project-root Chat through verified read-only profiles (currently Claude with Read/Grep/Glob via stdin, Codex with ephemeral read-only ignore-rules); filter unsupported agents to BYOK or explicit unsupported errors.
+
+[2026-07-05] Vitest prints repeated jsdom HTMLCanvasElement.getContext errors while still passing graph tests - Sigma tries to create a WebGL canvas in jsdom without the canvas package - Treat the final Vitest summary and exit code as authoritative unless graph tests actually fail.
+
+[2026-07-05] Full page Ask prompts can exceed Windows command-line length when passed as argv - Page-level Ask needs complete pinned page content, but putting that full Markdown prompt into a CLI argument can fail before the agent starts - For Agent Chat, pass long prompts through stdin or have the agent read the page from wiki/; reserve inline full page bodies for BYOK/model prompt context.
+
+[2026-07-04] 现象 — `npm run build` 在 TypeScript 阶段报 `ExportRecord.sourcePath` 不能赋值为 `null`，但测试 fixture 里容易按 Rust `Option` 直觉写成 `sourcePath: null`。— 根因 — 后端 `Option<String>` 配合 `skip_serializing_if = "Option::is_none"` 序列化为字段缺省，不是 JSON null；前端类型 `sourcePath?: string` 正确表达的是 optional 字段。— 规避做法 — 测试 fixture 缺省 optional 字段时直接省略属性，并尽量用 `satisfies` 或显式类型校验 fixture，避免 `as never` 掩盖 Rust/TS DTO 漂移。
+
+[2026-07-04] 现象 — 在本仓库 PowerShell 中运行 `rg --files` 或 `rg -n ...` 直接报 `Program 'rg.exe' failed to run: Access is denied`，导致搜索命令无法执行。— 根因 — 本机环境对 `rg.exe` 执行访问被拒绝，和搜索表达式或仓库内容无关；`docs/fixes/00-codebase-audit.md` 里也记录过审计时同样改用 PowerShell 枚举。— 规避做法 — 遇到该错误不要继续排查 ripgrep 参数，直接改用 `Get-ChildItem -Recurse -File` 配合 `Select-String`，并控制 `max_output_tokens` 避免大仓库输出截断。
+
 [2026-06-29] 现象 — `cargo test --lib`（及 `cargo test`）在 Windows 上对测试 runner 二进制报 `error: test failed ... exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND`；直接执行 `target/debug/deps/llm_wiki_desktop_lib-*.exe` 返回 127（进程根本起不来），但 `cargo check --lib --tests` 全绿。— 根因 — Windows 加载器在**进程启动阶段**就找不到某个依赖 DLL 的入口点（Tauri v2 的 lib test runner 链接 `tauri`→`wry`/`tao`/`webview2-com`，本机 WebView2 运行时 / PATH 上的冲突 DLL 版本不匹配），与被测代码无关；纯逻辑改动（DTO、prompt 字符串拼装）不可能引发加载期入口点错误。注意区分两个不同问题：①运行中的桌面 app（`llm-wiki-desktop.exe`，PID 见 tasklist）会锁住**主 bin exe**，导致 `cargo test`（含 bin 集成测试）报"拒绝访问 (os error 5)"——关掉 app 即解；②本条是 **lib test runner 自身**的 DLL 入口点加载失败，与 app 是否运行**无关**，关 app 也修不好。— 规避做法 — 验证 Rust 正确性时先用 `cargo check --lib --tests`（编译/类型/借用全检，不受加载期问题影响）确认无误；`cargo test` 的运行期失败视为**环境问题**记录在案，不当作代码回归。根治需要修复本机 WebView2 运行时 / 清理 PATH 上的冲突 DLL，属基础设施工作、超出业务板块范围，需用户介入。收尾时如 app 已关闭可重跑一次 `cargo test` 区分①②。
 
 [2026-06-24] 现象 — 为防按钮文字溢出在全局 `button` 上加 `white-space: nowrap` 后，启动页 quick action 内的说明段落也变成不换行并穿出卡片。— 根因 — `white-space` 是可继承属性；按钮内的 `<p>`/标题会继承按钮的 nowrap，即使段落自身没有该规则。— 规避做法 — 只给真正的紧凑按钮原语（`.btn`、`Button`、seg 控件）加 nowrap；对承载标题+说明的复合按钮（`.quickaction`、`.projcard`）显式恢复 `white-space: normal` 和 `overflow-wrap: anywhere`，并必须做真实截图验收，不能只看 DOM/单测。
