@@ -20,6 +20,31 @@ pub enum ChatRoute {
     Byok,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatConvenienceEditStatus {
+    Applied,
+    SoftViolationPending,
+    KeptAfterSoftViolation,
+    RolledBack,
+    RollbackFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatConvenienceEdit {
+    pub status: ChatConvenienceEditStatus,
+    pub checkpoint_hash: Option<String>,
+    pub affected_paths: Vec<String>,
+    pub diff_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violation_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_task_id: Option<String>,
+}
+
 /// A retrieved context page attached to an assistant message. Citations are the
 /// pages actually fed to the model (the honest source-of-truth), not parsed out
 /// of model output, so they never drift from what the model could see.
@@ -52,6 +77,8 @@ pub struct ChatMessage {
     pub provider: Option<LlmProviderKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convenience_edit: Option<ChatConvenienceEdit>,
 }
 
 /// Persisted chat session at `.app/chats/{id}.json`.
@@ -148,6 +175,8 @@ pub struct SendChatMessageRequest {
     pub provider: Option<LlmProviderKind>,
     #[serde(default)]
     pub pinned_page_path: Option<String>,
+    #[serde(default)]
+    pub convenience_enabled: bool,
 }
 
 fn default_route() -> CompileRoutePreference {
@@ -173,6 +202,24 @@ pub struct SaveAnswerToWikiRequest {
     pub allow_overwrite: bool,
     #[serde(default)]
     pub action_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveChatConvenienceEditRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub keep: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackLastChatConvenienceEditRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -212,6 +259,7 @@ mod tests {
             route: Some(ChatRoute::Byok),
             provider: None,
             task_id: Some("task-1".into()),
+            convenience_edit: None,
         };
         let value = serde_json::to_value(&message).unwrap();
         assert_eq!(value["role"], json!("assistant"));
@@ -236,6 +284,7 @@ mod tests {
             route: None,
             provider: None,
             task_id: None,
+            convenience_edit: None,
         };
         let value = serde_json::to_value(&message).unwrap();
         assert!(value.get("citations").is_none() || value["citations"].is_null());
@@ -251,6 +300,7 @@ mod tests {
         assert!(request.agent.is_none());
         assert!(request.provider.is_none());
         assert!(request.pinned_page_path.is_none());
+        assert!(!request.convenience_enabled);
     }
 
     #[test]
@@ -273,5 +323,53 @@ mod tests {
         let value = serde_json::to_value(&citation).unwrap();
 
         assert_eq!(value["isPinned"], json!(true));
+    }
+
+    #[test]
+    fn message_serializes_convenience_edit_camel_case() {
+        let message = ChatMessage {
+            id: "m1".into(),
+            role: ChatRole::Assistant,
+            content: "updated".into(),
+            created_at: "2026-06-20T00:00:00Z".into(),
+            citations: Vec::new(),
+            route: None,
+            provider: None,
+            task_id: None,
+            convenience_edit: Some(ChatConvenienceEdit {
+                status: ChatConvenienceEditStatus::SoftViolationPending,
+                checkpoint_hash: Some("abc123".into()),
+                affected_paths: vec!["wiki/a.md".into()],
+                diff_summary: "1 wiki page changed".into(),
+                diff_text: Some("+summary".into()),
+                violation_reason: Some("too many files".into()),
+                rollback_task_id: None,
+            }),
+        };
+
+        let value = serde_json::to_value(&message).unwrap();
+
+        assert_eq!(
+            value["convenienceEdit"]["status"],
+            json!("soft_violation_pending")
+        );
+        assert_eq!(value["convenienceEdit"]["checkpointHash"], json!("abc123"));
+        assert_eq!(
+            value["convenienceEdit"]["affectedPaths"][0],
+            json!("wiki/a.md")
+        );
+        assert_eq!(value["convenienceEdit"]["diffText"], json!("+summary"));
+        assert!(value["convenienceEdit"].get("rollbackTaskId").is_none());
+    }
+
+    #[test]
+    fn send_request_defaults_convenience_enabled_to_false() {
+        let raw = r#"{"projectId":"p","projectRootPath":"/x","sessionId":"s","content":"hi"}"#;
+        let request: SendChatMessageRequest = serde_json::from_str(raw).unwrap();
+        assert!(!request.convenience_enabled);
+
+        let raw = r#"{"projectId":"p","projectRootPath":"/x","sessionId":"s","content":"hi","convenienceEnabled":true}"#;
+        let request: SendChatMessageRequest = serde_json::from_str(raw).unwrap();
+        assert!(request.convenience_enabled);
     }
 }

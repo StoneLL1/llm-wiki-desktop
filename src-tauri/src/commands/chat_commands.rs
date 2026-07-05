@@ -135,6 +135,7 @@ async fn run_chat_send(
         route: None,
         provider: None,
         task_id: None,
+        convenience_edit: None,
     };
     state
         .chat_service
@@ -266,6 +267,7 @@ async fn run_chat_send(
         route: Some(route),
         provider,
         task_id: Some(task_id.to_string()),
+        convenience_edit: None,
     };
     // Re-check cancellation immediately before persisting: there is a window
     // between the post-generation check above and the write below where the
