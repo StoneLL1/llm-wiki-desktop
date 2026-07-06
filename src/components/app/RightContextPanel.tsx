@@ -1,8 +1,8 @@
+import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
 import { AgentRightPanel } from "../../features/agent/AgentRightPanel";
-import { PageChatPanel } from "../../features/chat/PageChatPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
@@ -13,6 +13,16 @@ import { useTaskStore } from "../../stores/taskStore";
 import { useProjectStatus } from "../../hooks/useProjectStatus";
 import type { GraphState, IndexState } from "../../types/project";
 import { RightPanelHeader } from "./RightPanelHeader";
+import { ViewErrorBoundary } from "./ViewErrorBoundary";
+import { ViewFallback } from "./ViewFallback";
+
+// PageChatPanel imports ChatView's MessageBubble/StreamingBubble, which render
+// MessageContent (react-markdown + remark/rehype + katex + highlight). It is
+// only mounted in the Wiki "ask AI" assistant mode, so defer the whole chat
+// rendering chain out of the first-screen graph.
+const PageChatPanel = lazy(() =>
+  import("../../features/chat/PageChatPanel").then((m) => ({ default: m.PageChatPanel })),
+);
 
 export function RightContextPanel() {
   const { t } = useTranslation();
@@ -206,12 +216,16 @@ export function RightContextPanel() {
         >
           <RightPanelHeader title={t("wiki.askAi.panelTitle")} />
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <PageChatPanel
-              page={wikiContent}
-              projectId={currentProject.projectId}
-              rootPath={currentProject.rootPath}
-              onShowRelatedPages={closeWikiAssistant}
-            />
+            <ViewErrorBoundary>
+              <Suspense fallback={<ViewFallback />}>
+                <PageChatPanel
+                  page={wikiContent}
+                  projectId={currentProject.projectId}
+                  rootPath={currentProject.rootPath}
+                  onShowRelatedPages={closeWikiAssistant}
+                />
+              </Suspense>
+            </ViewErrorBoundary>
           </div>
         </aside>
       );
