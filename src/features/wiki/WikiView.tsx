@@ -1,9 +1,11 @@
-import { type CSSProperties, useEffect, useState } from "react";
+import { lazy, type CSSProperties, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Book, Edit2, FileOutput, LoaderCircle, MessageSquareText, Star } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
+import { ViewErrorBoundary } from "../../components/app/ViewErrorBoundary";
+import { ViewFallback } from "../../components/app/ViewFallback";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -18,10 +20,15 @@ import { MarkdownReader } from "./MarkdownReader";
 import { ConflictDiffDialog } from "./ConflictDiffDialog";
 import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
-import { WikiEditor } from "./WikiEditor";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
 import { useWikiStore } from "./wikiStore";
+
+// Milkdown + ProseMirror is the heaviest wiki dependency and is only needed
+// when the user enters edit mode. Read/preview modes never load it.
+const WikiEditor = lazy(() =>
+  import("./WikiEditor").then((m) => ({ default: m.WikiEditor })),
+);
 
 export function selectWikiPreviewRecord(
   records: ExportRecord[],
@@ -439,16 +446,20 @@ export function WikiView() {
             </div>
           ) : mode === "edit" ? (
             <div className="mx-auto flex h-full max-w-[760px] flex-col px-8 py-6">
-              <WikiEditor
-                key={selectedPath ?? undefined}
-                draft={draft}
-                saveState={saveState}
-                onDraftChange={setDraft}
-                onSave={() => void save(projectId, rootPath)}
-                onCancel={cancelEdit}
-                onReload={() => void reload(projectId, rootPath)}
-                onReviewConflict={() => setConflictDialogOpen(true)}
-              />
+              <ViewErrorBoundary>
+                <Suspense fallback={<ViewFallback />}>
+                  <WikiEditor
+                    key={selectedPath ?? undefined}
+                    draft={draft}
+                    saveState={saveState}
+                    onDraftChange={setDraft}
+                    onSave={() => void save(projectId, rootPath)}
+                    onCancel={cancelEdit}
+                    onReload={() => void reload(projectId, rootPath)}
+                    onReviewConflict={() => setConflictDialogOpen(true)}
+                  />
+                </Suspense>
+              </ViewErrorBoundary>
             </div>
           ) : mode === "preview" ? (
             <HtmlPreviewPane

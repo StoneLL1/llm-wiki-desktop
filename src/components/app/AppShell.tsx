@@ -1,17 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { PanelRightOpen } from "lucide-react";
-import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DashboardView } from "../../features/dashboard/DashboardView";
-import { ExportsView } from "../../features/exports/ExportsView";
-import { ImportView } from "../../features/import/ImportView";
-import { AgentView } from "../../features/agent/AgentView";
 import { RunAgentDialog, type AgentSkill, type RunAgentOptions } from "../../features/agent/RunAgentDialog";
-import { ChatView } from "../../features/chat/ChatView";
-import { GraphView } from "../../features/graph/GraphView";
-import { LintView } from "../../features/lint/LintView";
-import { SettingsView } from "../../features/settings/SettingsView";
-import { WikiView } from "../../features/wiki/WikiView";
 import { useImportStore } from "../../stores/importStore";
 import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -19,7 +11,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useTaskStore, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
-import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
+import { PANE_WIDTH_LIMITS, SIDEBAR_COLLAPSE_THRESHOLD } from "../../hooks/useResizablePane";
 import type { AgentInfo } from "../../types/agent";
 import type { PendingAction } from "../../types/backend";
 import type { AgentKind } from "../../types/agent";
@@ -28,7 +20,6 @@ import type { BackendTask } from "../../types/task";
 import type { ExportType } from "../../types/export";
 import type { ConfirmedImport, ImportedSource, ImportPreview } from "../../types/import";
 import type { FetchedImportUrl } from "../../types/import";
-import { articleToMarkdown, extractArticleFromHtml } from "../../lib/readability";
 import { waitForTaskTerminal } from "../../lib/waitForTaskTerminal";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { ConfirmationDialog } from "./ConfirmationDialog";
@@ -39,6 +30,38 @@ import { RightContextPanel } from "./RightContextPanel";
 import { TaskLogDrawer } from "./TaskLogDrawer";
 import { Toaster } from "./Toaster";
 import { TopBar } from "./TopBar";
+import { ViewErrorBoundary } from "./ViewErrorBoundary";
+import { ViewFallback } from "./ViewFallback";
+
+// Feature views are lazily loaded so the first screen (Dashboard) does not pay
+// for Graph/Sigma, Milkdown, the markdown renderer, or Readability. Each view
+// resolves its own async chunk on first open; subsequent opens are cached.
+const ChatView = lazy(() =>
+  import("../../features/chat/ChatView").then((m) => ({ default: m.ChatView })),
+);
+const ExportsView = lazy(() =>
+  import("../../features/exports/ExportsView").then((m) => ({ default: m.ExportsView })),
+);
+const GraphView = lazy(() =>
+  import("../../features/graph/GraphView").then((m) => ({ default: m.GraphView })),
+);
+const ImportView = lazy(() =>
+  import("../../features/import/ImportView").then((m) => ({ default: m.ImportView })),
+);
+const LintView = lazy(() =>
+  import("../../features/lint/LintView").then((m) => ({ default: m.LintView })),
+);
+const SettingsView = lazy(() =>
+  import("../../features/settings/SettingsView").then((m) => ({ default: m.SettingsView })),
+);
+const WikiView = lazy(() =>
+  import("../../features/wiki/WikiView").then((m) => ({ default: m.WikiView })),
+);
+// AgentView pulls in the provider/agent management UI; it is reached only via
+// the Agent nav item, so defer it from the Dashboard first paint.
+const AgentView = lazy(() =>
+  import("../../features/agent/AgentView").then((m) => ({ default: m.AgentView })),
+);
 
 function errorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
@@ -55,7 +78,6 @@ export function AppShell() {
   const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
   const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
   const clearWorkspaceFocus = useNavigationStore((state) => state.clearWorkspaceFocus);
-  const sidebarCollapsed = useNavigationStore((state) => state.sidebarCollapsed);
   const paneSizes = useNavigationStore((state) => state.paneSizes);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
@@ -70,9 +92,10 @@ export function AppShell() {
   const compilePendingAction = tasks.find((task) => task.status === "waiting_for_confirmation" && task.result?.pendingAction)?.result?.pendingAction;
   const displayedPendingAction = pendingAction ?? compilePendingAction;
   const title = t(`nav.${activeView}`);
+  const sidebarCollapsed = paneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD;
   const showRightPanel = rightPanelOpen && workspaceFocus === null;
   const shellStyle = {
-    "--sidebar-w-current": `${sidebarCollapsed ? 56 : paneSizes.sidebar}px`,
+    "--sidebar-w-current": `${paneSizes.sidebar}px`,
     "--rightpanel-w-current": `${paneSizes.rightPanel}px`,
   } as CSSProperties;
 
@@ -155,17 +178,15 @@ export function AppShell() {
 
       <div className="app-shell__workbench">
         <LeftSidebar />
-        {!sidebarCollapsed ? (
-          <ResizableSplitter
-            paneId="sidebar"
-            label={t("shell.splitter.sidebar")}
-            min={PANE_WIDTH_LIMITS.sidebar.min}
-            max={PANE_WIDTH_LIMITS.sidebar.max}
-            value={paneSizes.sidebar}
-            onChange={(value) => setPaneSize("sidebar", value)}
-            onReset={() => resetPaneSize("sidebar")}
-          />
-        ) : null}
+        <ResizableSplitter
+          paneId="sidebar"
+          label={t("shell.splitter.sidebar")}
+          min={PANE_WIDTH_LIMITS.sidebar.min}
+          max={PANE_WIDTH_LIMITS.sidebar.max}
+          value={paneSizes.sidebar}
+          onChange={(value) => setPaneSize("sidebar", value)}
+          onReset={() => resetPaneSize("sidebar")}
+        />
         <main className="app-shell__main">
           <WorkspaceView activeView={activeView} title={title} />
         </main>
@@ -399,6 +420,9 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
               url: value,
             },
           });
+          // Readability is only needed for the URL import path; load it on
+          // demand so the first screen never pays for @mozilla/readability.
+          const { extractArticleFromHtml, articleToMarkdown } = await import("../../lib/readability");
           const article = extractArticleFromHtml(fetched.html, fetched.url);
           if (!article) throw new Error(t("import.readabilityError"));
           content = articleToMarkdown(article, fetched.url);
@@ -627,79 +651,86 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
       </header>
 
       <div className={activeView === "wiki" || activeView === "graph" || activeView === "chat" || activeView === "lint" || activeView === "exports" ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-auto p-4"}>
-        {activeView === "dashboard" ? (
-          <DashboardView />
-        ) : activeView === "wiki" ? (
-          <WikiView />
-        ) : activeView === "chat" ? (
-          <ChatView />
-        ) : activeView === "graph" ? (
-          <GraphView />
-        ) : activeView === "lint" ? (
-          <LintView />
-        ) : activeView === "exports" ? (
-          <ExportsView />
-        ) : activeView === "import" ? (
-          <ImportView
-            isConfirming={isConfirmingImport}
-            onRequestPreview={requestImportPreview}
-            onRequestClipboard={(content) => { void requestTextImportPreview("clipboard", content); }}
-            onRequestUrl={(url) => { void requestTextImportPreview("url", url); }}
-            importedSources={importedSources}
-            onDeleteSource={(path) => { void requestSourceAction("delete", path); }}
-            onReplaceSource={(path, replacementPath) => { void requestSourceAction("replace", path, replacementPath); }}
-            onConfirm={confirmImportPreview}
-          />
-        ) : activeView === "agent" ? (
-          <AgentView
-            agents={agents}
-            providers={providers}
-            tasks={tasks.filter((task) => task.taskType === "wiki_compile" || task.taskType === "agent_run" || task.taskType === "llm_request" || task.taskType === "deep_lint" || task.taskType === "export")}
-            onOpenTask={openTaskDrawer}
-            onDetect={() => { void refreshCapabilities(); }}
-            onRunAgent={(preset) => openRunDialog(preset)}
-            onSetDefault={(agent) => { void setDefaultAgent(agent); }}
-            onCancelTask={(taskId) => { void cancelTask(taskId); }}
-            onNavigate={(view) => setActiveView(view)}
-          />
-        ) : activeView === "settings" ? (
-          <SettingsView
-            project={currentProject}
-            providers={providers}
-            agents={agents}
-            onRefreshCapabilities={refreshCapabilities}
-            onSaveProvider={saveProvider}
-            onSaveSecret={saveProviderSecret}
-            onDeleteSecret={deleteProviderSecret}
-            onTestProvider={testProvider}
-          />
-        ) : (
-          <div className="grid gap-3">
-          <div className="panel">
-            <div className="panel-header">
-              <span>{t(`view.${activeView as string}.paneTitle`)}</span>
+        {/* key by activeView so a chunk-load failure in one view resets when the
+            user navigates away and back, and so Suspense handles in-flight
+            cancellation naturally (no manual AbortController needed). */}
+        <ViewErrorBoundary key={activeView}>
+          <Suspense fallback={<ViewFallback />}>
+          {activeView === "dashboard" ? (
+            <DashboardView />
+          ) : activeView === "wiki" ? (
+            <WikiView />
+          ) : activeView === "chat" ? (
+            <ChatView />
+          ) : activeView === "graph" ? (
+            <GraphView />
+          ) : activeView === "lint" ? (
+            <LintView />
+          ) : activeView === "exports" ? (
+            <ExportsView />
+          ) : activeView === "import" ? (
+            <ImportView
+              isConfirming={isConfirmingImport}
+              onRequestPreview={requestImportPreview}
+              onRequestClipboard={(content) => { void requestTextImportPreview("clipboard", content); }}
+              onRequestUrl={(url) => { void requestTextImportPreview("url", url); }}
+              importedSources={importedSources}
+              onDeleteSource={(path) => { void requestSourceAction("delete", path); }}
+              onReplaceSource={(path, replacementPath) => { void requestSourceAction("replace", path, replacementPath); }}
+              onConfirm={confirmImportPreview}
+            />
+          ) : activeView === "agent" ? (
+            <AgentView
+              agents={agents}
+              providers={providers}
+              tasks={tasks.filter((task) => task.taskType === "wiki_compile" || task.taskType === "agent_run" || task.taskType === "llm_request" || task.taskType === "deep_lint" || task.taskType === "export")}
+              onOpenTask={openTaskDrawer}
+              onDetect={() => { void refreshCapabilities(); }}
+              onRunAgent={(preset) => openRunDialog(preset)}
+              onSetDefault={(agent) => { void setDefaultAgent(agent); }}
+              onCancelTask={(taskId) => { void cancelTask(taskId); }}
+              onNavigate={(view) => setActiveView(view)}
+            />
+          ) : activeView === "settings" ? (
+            <SettingsView
+              project={currentProject}
+              providers={providers}
+              agents={agents}
+              onRefreshCapabilities={refreshCapabilities}
+              onSaveProvider={saveProvider}
+              onSaveSecret={saveProviderSecret}
+              onDeleteSecret={deleteProviderSecret}
+              onTestProvider={testProvider}
+            />
+          ) : (
+            <div className="grid gap-3">
+            <div className="panel">
+              <div className="panel-header">
+                <span>{t(`view.${activeView as string}.paneTitle`)}</span>
+              </div>
+              <p className="m-0 mt-2 max-w-3xl text-[13px] leading-6 text-[var(--text-secondary)]">
+                {t(`view.${activeView as string}.emptyState`)}
+              </p>
             </div>
-            <p className="m-0 mt-2 max-w-3xl text-[13px] leading-6 text-[var(--text-secondary)]">
-              {t(`view.${activeView as string}.emptyState`)}
-            </p>
-          </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div className="panel">
-              <div className="panel-header">{t("view.shared.localFiles")}</div>
-              <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.localFilesCopy")}</p>
-            </div>
-            <div className="panel">
-              <div className="panel-header">{t("view.shared.taskState")}</div>
-              <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.taskStateCopy")}</p>
-            </div>
-            <div className="panel">
-              <div className="panel-header">{t("view.shared.gitSafety")}</div>
-              <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.gitSafetyCopy")}</p>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="panel">
+                <div className="panel-header">{t("view.shared.localFiles")}</div>
+                <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.localFilesCopy")}</p>
+              </div>
+              <div className="panel">
+                <div className="panel-header">{t("view.shared.taskState")}</div>
+                <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.taskStateCopy")}</p>
+              </div>
+              <div className="panel">
+                <div className="panel-header">{t("view.shared.gitSafety")}</div>
+                <p className="m-0 mt-2 text-[12px] leading-5 text-[var(--text-muted)]">{t("view.shared.gitSafetyCopy")}</p>
+              </div>
             </div>
           </div>
-        </div>
-        )}
+          )}
+        </Suspense>
+        </ViewErrorBoundary>
       </div>
       <RunAgentDialog
         open={runDialogOpen}

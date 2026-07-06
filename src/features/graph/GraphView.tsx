@@ -15,7 +15,6 @@ import {
   PAGE_TYPE_COLORS,
   type GraphColorMode,
   type GraphData,
-  type GraphNode,
 } from "../../types/graph";
 import type { WikiPageType } from "../../types/wiki";
 import { GraphControls } from "./GraphControls";
@@ -23,7 +22,8 @@ import { GraphCanvasControls } from "./GraphCanvasControls";
 import { GraphInfo } from "./GraphInfo";
 import { GraphLegend } from "./GraphLegend";
 import { exportGraphPng, exportGraphSvg } from "./graphExport";
-import { hiddenReasonForNode, visualForEdge, visualForNode, type GraphRenderOptions } from "./graphRenderStyle";
+import { visualForEdge, visualForNode } from "./graphRenderStyle";
+import { buildRenderSnapshot, type RenderSnapshot } from "./graphRenderModel";
 
 const EDGE_COLOR = "#d4d4d4";
 const PLAIN_COLOR = "#9b9b9b";
@@ -54,6 +54,18 @@ interface RenderRefs {
   layout: FA2LayoutSupervisor | null;
   layoutTimer: ReturnType<typeof setTimeout> | null;
   refreshTimer: ReturnType<typeof setInterval> | null;
+  /**
+   * Precomputed-once-per-refresh render model (options + hidden node set).
+   * Updated by `updateRenderSnapshot` before every `refresh()` so the sigma
+   * node/edge reducers read a fresh snapshot instead of recomputing options
+   * and scanning all nodes on every edge (the O(E*N) hot path from
+   * PERF-005). `null` only before the first renderer is constructed.
+   */
+  snapshot: RenderSnapshot | null;
+  /** Live graph data ref so module-level helpers can read current topology. */
+  dataRef: { current: GraphData | null };
+  /** Live render state ref so module-level helpers can read current state. */
+  stateRef: { current: RenderState };
 }
 
 interface RenderState {
@@ -98,7 +110,6 @@ export function GraphView() {
   const openWikiPage = useWikiStore((state) => state.openPage);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const refs = useRef<RenderRefs>({ graph: null, renderer: null, layout: null, layoutTimer: null, refreshTimer: null });
   const stateRef = useRef<RenderState>({
     hoveredNodeId: null,
     hoveredType: null,
@@ -109,6 +120,21 @@ export function GraphView() {
     degreeThreshold,
     neighborIds: new Set(),
   });
+  // Live pointer to the latest graph data so the snapshot builder (a
+  // module-level helper) can read the current topology without being an
+  // effect dependency that would re-create the renderer on every data change.
+  const dataRef = useRef<GraphData | null>(data);
+  dataRef.current = data;
+  const refs = useRef<RenderRefs>({
+    graph: null,
+    renderer: null,
+    layout: null,
+    layoutTimer: null,
+    refreshTimer: null,
+    snapshot: null,
+    dataRef,
+    stateRef,
+  });
   const [hoveredType, setHoveredType] = useState<WikiPageType | null>(null);
   const [canvasAvailable, setCanvasAvailable] = useState(true);
   const [zoom, setZoom] = useState<number | null>(null);
@@ -116,35 +142,44 @@ export function GraphView() {
   useEffect(() => {
     stateRef.current.selectedNodeId = selectedNodeId;
     syncNeighborIds(refs.current.graph, stateRef.current);
-    refresh(refs.current.renderer);
+    // Selection only dims/highlights visible nodes — hidden set and positions
+    // unchanged, so skip the spatial-index reindex. (PERF-005)
+    refreshVisuals(refs.current, refs.current.renderer);
   }, [selectedNodeId]);
 
   useEffect(() => {
     stateRef.current.focusedNodeId = focusedNodeId;
     syncNeighborIds(refs.current.graph, stateRef.current);
-    refresh(refs.current.renderer);
+    // Focus only dims/highlights visible nodes — hidden set and positions
+    // unchanged, so skip the spatial-index reindex. (PERF-005)
+    refreshVisuals(refs.current, refs.current.renderer);
   }, [focusedNodeId]);
 
   useEffect(() => {
     stateRef.current.hoveredType = hoveredType;
-    refresh(refs.current.renderer);
+    // Legend hover only dims non-matching visible nodes — hidden set and
+    // positions unchanged, so skip the spatial-index reindex. (PERF-005)
+    refreshVisuals(refs.current, refs.current.renderer);
   }, [hoveredType]);
 
   useEffect(() => {
     stateRef.current.search = search;
-    refresh(refs.current.renderer);
+    // Search hides/unhides nodes — spatial index must be rebuilt. (PERF-005)
+    refresh(refs.current, refs.current.renderer);
   }, [search]);
 
   // Filter changes (type checkboxes / degree slider) must re-run the node
   // reducer so hidden nodes drop out without rebuilding topology.
   useEffect(() => {
     stateRef.current.typeFilter = typeFilter;
-    refresh(refs.current.renderer);
+    // Type filter hides/unhides nodes — spatial index must be rebuilt.
+    refresh(refs.current, refs.current.renderer);
   }, [typeFilter]);
 
   useEffect(() => {
     stateRef.current.degreeThreshold = degreeThreshold;
-    refresh(refs.current.renderer);
+    // Degree filter hides/unhides nodes — spatial index must be rebuilt.
+    refresh(refs.current, refs.current.renderer);
   }, [degreeThreshold]);
 
   const projectId = currentProject.projectId;
@@ -170,7 +205,7 @@ export function GraphView() {
 
     let renderer: Sigma | null = null;
     try {
-      renderer = createRenderer(graph, data, container, stateRef);
+      renderer = createRenderer(graph, data, container, refs.current);
     } catch (err) {
       // sigma v3 needs a WebGL context; when `canvas.getContext("webgl2" /
       // "webgl" / "experimental-webgl")` all return null (headless, GPU
@@ -187,11 +222,11 @@ export function GraphView() {
     refs.current.renderer = renderer;
 
     applyColors(graph, colorMode);
-    refresh(renderer);
+    refresh(refs.current, renderer);
 
     if (computed) {
       startBackgroundLayout(refs.current, graph, () => {
-        refresh(renderer);
+        refresh(refs.current, renderer);
         void persistLayout(graph, data, projectId, rootPath, saveLayout);
       });
     }
@@ -205,12 +240,15 @@ export function GraphView() {
     const onEnter = ({ node }: { node: string }) => {
       stateRef.current.hoveredNodeId = node;
       syncNeighborIds(graph, stateRef.current);
-      refresh(renderer);
+      // Hover only dims/highlights visible nodes — hidden set and positions
+      // unchanged, so skip the spatial-index reindex. (PERF-005)
+      refreshVisuals(refs.current, renderer);
     };
     const onLeave = () => {
       stateRef.current.hoveredNodeId = null;
       syncNeighborIds(graph, stateRef.current);
-      refresh(renderer);
+      // Hover-end only restores opacities — skip the spatial-index reindex.
+      refreshVisuals(refs.current, renderer);
     };
     renderer.on("clickNode", onClick);
     renderer.on("doubleClickNode", onDoubleClick);
@@ -244,7 +282,9 @@ export function GraphView() {
     const graph = refs.current.graph;
     if (graph) {
       applyColors(graph, colorMode);
-      refresh(refs.current.renderer);
+      // Color mode only changes node base colors via applyColors — hidden set
+      // and positions unchanged, so skip the spatial-index reindex. (PERF-005)
+      refreshVisuals(refs.current, refs.current.renderer);
     }
   }, [colorMode]);
 
@@ -256,7 +296,7 @@ export function GraphView() {
     if (!graph) return;
     seedRandomPositions(graph);
     startBackgroundLayout(refs.current, graph, () => {
-      refresh(refs.current.renderer);
+      refresh(refs.current, refs.current.renderer);
       void persistLayout(graph, data, projectId, rootPath, saveLayout);
     });
   };
@@ -295,7 +335,7 @@ export function GraphView() {
       if (!graph) return;
       seedRandomPositions(graph);
       startBackgroundLayout(refs.current, graph, () => {
-        refresh(refs.current.renderer);
+        refresh(refs.current, refs.current.renderer);
         const live = useGraphStore.getState();
         void persistLayout(graph, live.data, projectId, rootPath, saveLayout);
       });
@@ -461,28 +501,32 @@ function createRenderer(
   graph: Graph,
   graphData: GraphData,
   container: HTMLElement,
-  stateRef: React.RefObject<RenderState>,
+  refs: RenderRefs,
 ): Sigma {
   const nodeById = new Map(graphData.nodes.map((node) => [node.id, node]));
   const edgeByKey = new Map(graphData.edges.map((edge) => [edgeKey(edge.source, edge.target), edge]));
-  const currentRenderOptions = (): GraphRenderOptions => ({
-    colorMode: useGraphStore.getState().colorMode,
-    selectedNodeId: stateRef.current.selectedNodeId,
-    hoveredNodeId: stateRef.current.hoveredNodeId,
-    focusedNodeId: stateRef.current.focusedNodeId,
-    search: stateRef.current.search,
-    typeFilter: visibleTypeFilter(graphData.nodes, stateRef.current.typeFilter),
-    degreeThreshold: stateRef.current.degreeThreshold,
-    neighborIds: stateRef.current.neighborIds,
-    hoveredType: stateRef.current.hoveredType,
-    communityByNodeId: new Map(Object.entries(graphData.layout?.communities ?? {})),
-  });
-  const hiddenNodeIds = (options: GraphRenderOptions): Set<string> =>
-    new Set(
-      graphData.nodes
-        .filter((node) => hiddenReasonForNode(node, options) !== null)
-        .map((node) => node.id),
-    );
+  // Empty fallback used if a reducer fires before `refresh()` has built a
+  // snapshot — sigma invokes reducers during `new Sigma()` construction, and
+  // `disposeRenderer` resets `refs.snapshot` to null so a recreated renderer
+  // does not read the previous graph's stale snapshot during that pass. Once
+  // the first `refresh()` runs, `refs.snapshot` is populated and every
+  // subsequent reducer call reads the precomputed snapshot.
+  const emptySnapshot: RenderSnapshot = {
+    options: {
+      colorMode: useGraphStore.getState().colorMode,
+      selectedNodeId: null,
+      hoveredNodeId: null,
+      focusedNodeId: null,
+      search: "",
+      typeFilter: new Set(),
+      degreeThreshold: 0,
+      neighborIds: new Set(),
+      hoveredType: null,
+      communityByNodeId: new Map(),
+    },
+    hiddenNodeIds: new Set(),
+  };
+  const snapshot = (): RenderSnapshot => refs.snapshot ?? emptySnapshot;
 
   const renderer = new Sigma(graph, container, {
     renderEdgeLabels: false,
@@ -496,7 +540,9 @@ function createRenderer(
   renderer.setSetting("nodeReducer", (node, data) => {
     const source = nodeById.get(node);
     if (!source) return data;
-    const visual = visualForNode(source, currentRenderOptions());
+    // Read the precomputed snapshot — no per-node options rebuild, no
+    // community Map construction, no hidden-set scan. (PERF-005)
+    const visual = visualForNode(source, snapshot().options);
     const baseSize = typeof data.size === "number" ? data.size : 1;
     return {
       ...data,
@@ -511,9 +557,11 @@ function createRenderer(
 
   renderer.setSetting("edgeReducer", (edge, data) => {
     const [src, tgt] = graph.extremities(edge);
-    const options = currentRenderOptions();
+    const snap = snapshot();
     const source = edgeByKey.get(edgeKey(src, tgt)) ?? { source: src, target: tgt, relation: "related", weight: 1 };
-    const visual = visualForEdge(source, options, hiddenNodeIds(options));
+    // Read the precomputed hidden set — no per-edge scan of all nodes.
+    // (PERF-005: this was the O(E*N) hot path.)
+    const visual = visualForEdge(source, snap.options, snap.hiddenNodeIds);
     return {
       ...data,
       hidden: visual.hidden,
@@ -532,12 +580,6 @@ function syncNeighborIds(graph: Graph | null, state: RenderState): void {
     return;
   }
   state.neighborIds = new Set(graph.neighbors(root));
-}
-
-function visibleTypeFilter(nodes: GraphNode[], hiddenTypes: Set<WikiPageType>): Set<WikiPageType> {
-  if (hiddenTypes.size === 0) return new Set();
-  void nodes;
-  return new Set((Object.keys(PAGE_TYPE_COLORS) as WikiPageType[]).filter((type) => !hiddenTypes.has(type)));
 }
 
 function edgeKey(source: string, target: string): string {
@@ -562,8 +604,56 @@ function baseColorFor(
   return PAGE_TYPE_COLORS[attrs.pageType as keyof typeof PAGE_TYPE_COLORS] ?? PLAIN_COLOR;
 }
 
-function refresh(renderer: Sigma | null): void {
+function refresh(refs: RenderRefs, renderer: Sigma | null): void {
+  // Reducers read the snapshot, so it must be rebuilt before each refresh.
+  // `skipIndexation: false` keeps sigma's spatial index in sync with the
+  // current hidden set — required for search/filter/degree changes where
+  // hidden nodes drop out of the renderable set. See PERF-005.
+  updateRenderSnapshot(refs);
   renderer?.refresh({ skipIndexation: false });
+}
+
+/**
+ * Visual-only refresh for changes that alter node/edge appearance (color,
+ * opacity, highlight, label) but NOT which nodes are hidden or where they are
+ * positioned. Skipping sigma's spatial-index rebuild (`skipIndexation: true`)
+ * is safe here because the quadtree's contents (visible nodes + positions)
+ * are unchanged — only display attributes differ. This is the hot path on
+ * hover/selection/legend-hover interactions, so avoiding the reindex matters.
+ *
+ * Verified-safe scopes: hover (enterNode/leaveNode), selectedNodeId,
+ * focusedNodeId, hoveredType, colorMode. NOT safe for search/typeFilter/
+ * degreeThreshold (hidden set changes) or layout/position changes.
+ */
+function refreshVisuals(refs: RenderRefs, renderer: Sigma | null): void {
+  updateRenderSnapshot(refs);
+  renderer?.refresh({ skipIndexation: true });
+}
+
+/**
+ * Rebuild the per-refresh render snapshot (options + hidden node set) from the
+ * live graph data + render state + current color mode. Pure: assigns to
+ * `refs.snapshot` and reads `useGraphStore.getState().colorMode` so it stays
+ * correct after color-mode changes without being a render-effect dependency.
+ */
+function updateRenderSnapshot(refs: RenderRefs): void {
+  const data = refs.dataRef.current;
+  if (!data) {
+    refs.snapshot = null;
+    return;
+  }
+  const state = refs.stateRef.current;
+  refs.snapshot = buildRenderSnapshot(data, {
+    colorMode: useGraphStore.getState().colorMode,
+    selectedNodeId: state.selectedNodeId,
+    hoveredNodeId: state.hoveredNodeId,
+    focusedNodeId: state.focusedNodeId,
+    search: state.search,
+    typeFilter: state.typeFilter,
+    degreeThreshold: state.degreeThreshold,
+    neighborIds: state.neighborIds,
+    hoveredType: state.hoveredType,
+  });
 }
 
 function disposeRenderer(refs: RenderRefs): void {
@@ -576,6 +666,10 @@ function disposeRenderer(refs: RenderRefs): void {
   refs.renderer?.kill();
   refs.renderer = null;
   refs.graph = null;
+  // Drop the render snapshot so the next renderer's pre-first-refresh
+  // construction pass uses the emptySnapshot fallback rather than a stale
+  // snapshot referencing the previous graph's node ids.
+  refs.snapshot = null;
 }
 
 function startBackgroundLayout(
@@ -597,7 +691,7 @@ function startBackgroundLayout(
   });
   refs.layout = layout;
   layout.start();
-  refs.refreshTimer = setInterval(() => refresh(refs.renderer), 50);
+  refs.refreshTimer = setInterval(() => refresh(refs, refs.renderer), 50);
   refs.layoutTimer = setTimeout(() => {
     layout.stop();
     layout.kill();

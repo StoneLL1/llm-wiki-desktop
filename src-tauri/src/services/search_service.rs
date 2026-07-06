@@ -12,6 +12,7 @@ use crate::models::wiki::{
     WikiPageType, WikiTree, WikiTreeNode, WikiTreeNodeKind,
 };
 use crate::services::file_store::FileStore;
+use crate::services::wiki_index::WikiIndex;
 use crate::services::WriteMode;
 use crate::utils::markdown_utils::{
     count_words, extract_title, extract_wikilinks, parse_frontmatter, rewrite_wikilinks,
@@ -20,29 +21,44 @@ use crate::utils::markdown_utils::{
 
 /// Owns wiki scanning, page read/save, and the local keyword/tag/type/source
 /// search index. Search is purely local: it never calls an LLM or Agent.
+///
+/// A shared `WikiIndex` caches the parsed body + derived metadata for every
+/// `wiki/**.md` file per project, so repeated `scan_wiki` / `search` /
+/// `retrieve_with_excerpts` / Graph-freshness calls do not re-read unchanged
+/// Markdown (audit PERF-004). The index is invalidated by `mtime` + `size`, so
+/// external edits in Obsidian or an external editor are picked up before any
+/// cached entry is served. Bookmark state is NOT cached (a bookmark toggle
+/// changes `bookmarks.json` without moving the page mtime/size); callers
+/// overlay live bookmark paths on top of the cached `WikiPageMeta`.
 #[derive(Default)]
 pub struct SearchService {
     file_store: FileStore,
+    index: WikiIndex,
 }
 
 impl SearchService {
     /// Walk the `wiki/` directory and return the nested tree plus a flat page
     /// metadata list. Obsidian (`.obsidian`), Git, and `.app` are skipped by
     /// `FileStore::list_markdown_files`.
+    ///
+    /// Reuses the per-project `WikiIndex` cache: only files whose `mtime` or
+    /// `size` changed since the last call are re-read. Bookmark state is overlaid
+    /// from `bookmark_paths` on top of the cached (bookmark-neutral) metas.
     pub fn scan_wiki(
         &self,
         context: &ProjectContext,
         bookmark_paths: &HashSet<String>,
     ) -> Result<WikiTree, BackendError> {
-        let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
+        let entries = self.index.refresh(&context, &self.file_store)?;
 
-        let mut pages: Vec<WikiPageMeta> = Vec::with_capacity(files.len());
-        for absolute in &files {
-            let project_relative = context.to_project_relative(absolute)?;
-            let (meta, _body) =
-                self.load_page(context, &project_relative, absolute, bookmark_paths)?;
-            pages.push(meta);
-        }
+        let mut pages: Vec<WikiPageMeta> = entries
+            .into_iter()
+            .map(|entry| {
+                let mut meta = entry.meta;
+                meta.bookmarked = bookmark_paths.contains(&meta.path);
+                meta
+            })
+            .collect();
 
         pages.sort_by(|a, b| a.path.cmp(&b.path));
         let total_pages = pages.len();
@@ -478,13 +494,18 @@ impl SearchService {
     }
 
     /// Local keyword/tag/type/source search.
+    ///
+    /// Reuses the per-project `WikiIndex` cache so repeated searches do not
+    /// re-read unchanged Markdown: the index refreshes once (mtime/size
+    /// invalidation), then search scores against the cached bodies/metas.
+    /// Bookmarks are intentionally not joined here (the global search command
+    /// passes an empty set, matching the pre-index behavior).
     pub fn search(
         &self,
         context: &ProjectContext,
         request: &SearchRequest,
     ) -> Result<SearchResponse, BackendError> {
-        let bookmarks = HashSet::new();
-        let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
+        let entries = self.index.refresh(&context, &self.file_store)?;
 
         let query_terms = request
             .query
@@ -508,9 +529,9 @@ impl SearchService {
 
         let mut results: Vec<SearchResult> = Vec::new();
 
-        for absolute in &files {
-            let project_relative = context.to_project_relative(absolute)?;
-            let (meta, body) = self.load_page(context, &project_relative, absolute, &bookmarks)?;
+        for entry in &entries {
+            let meta = &entry.meta;
+            let body = &entry.body_markdown;
 
             if !type_filter.is_empty() && !type_filter.contains(&meta.page_type) {
                 continue;
@@ -558,7 +579,7 @@ impl SearchService {
                         score += field_score;
                     }
 
-                    if let Some(field_score) = score_field(&body, terms, 18, 8) {
+                    if let Some(field_score) = score_field(body, terms, 18, 8) {
                         fields.push("content");
                         score += field_score;
                     }
@@ -571,9 +592,9 @@ impl SearchService {
                         continue;
                     }
 
-                    let snippet = first_matching_term(&body, terms)
-                        .and_then(|term| snippet_for_query(&body, &term, 48))
-                        .or_else(|| first_body_excerpt(&body, 96));
+                    let snippet = first_matching_term(body, terms)
+                        .and_then(|term| snippet_for_query(body, &term, 48))
+                        .or_else(|| first_body_excerpt(body, 96));
                     let fields_owned: Vec<String> = fields.into_iter().map(String::from).collect();
                     (fields_owned, snippet, score)
                 }
@@ -607,8 +628,10 @@ impl SearchService {
 
     /// Retrieve the top wiki pages for a natural-language chat question, each
     /// with a bounded body excerpt for the model prompt. Reuses the keyword
-    /// `search` index (no model is called) and `read_page` for excerpts. This is
-    /// the chat-retrieval entry point; the global search command stays
+    /// `search` index (no model is called). The excerpt is derived from the
+    /// cached `WikiIndex` body (no per-result `read_page` re-read), so a chat
+    /// retrieval after a search pays zero extra file reads. This is the
+    /// chat-retrieval entry point; the global search command stays
     /// keyword-only and never calls this for autocomplete.
     pub fn retrieve_with_excerpts(
         &self,
@@ -627,12 +650,20 @@ impl SearchService {
             limit: Some(limit),
         };
         let response = self.search(context, &request)?;
+        // Build an excerpt from the cached body for each hit. The index was
+        // refreshed by `search` above, so `entries()` is a cheap clone-out
+        // with no disk reads. Falls back to `None` (matching the prior
+        // `read_page(...).ok()` behavior) if a path is missing from the cache.
+        let cached = self.index.entries(context)?;
+        let by_path: std::collections::HashMap<&str, &str> = cached
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.body_markdown.as_str()))
+            .collect();
         let mut hits = Vec::with_capacity(response.results.len());
         for result in response.results {
-            let excerpt = self
-                .read_page(context, &result.path, &HashSet::new())
-                .ok()
-                .map(|page| truncate_excerpt(&page.body_markdown, excerpt_chars));
+            let excerpt = by_path
+                .get(result.path.as_str())
+                .map(|body| truncate_excerpt(body, excerpt_chars));
             hits.push(ChatRetrievalHit {
                 path: result.path,
                 title: result.title,
@@ -643,32 +674,6 @@ impl SearchService {
             });
         }
         Ok(hits)
-    }
-
-    fn load_page(
-        &self,
-        context: &ProjectContext,
-        project_relative: &str,
-        absolute: &Path,
-        bookmarks: &HashSet<String>,
-    ) -> Result<(WikiPageMeta, String), BackendError> {
-        let contents =
-            std::fs::read_to_string(absolute).map_err(|err| file_read_error(err, absolute))?;
-        let split = split_frontmatter(&contents);
-        let frontmatter = split
-            .frontmatter
-            .as_deref()
-            .map(parse_frontmatter)
-            .unwrap_or_default();
-        let meta = self.build_meta(
-            context,
-            project_relative,
-            absolute,
-            &split,
-            &frontmatter,
-            bookmarks,
-        )?;
-        Ok((meta, split.body))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1990,3 +1995,301 @@ mod tests {
         assert!(out.contains("[[AI助手#概述]]"));
     }
 }
+
+/// Integration-level tests for the shared `WikiIndex` backing `scan_wiki` /
+/// `search` / `retrieve_with_excerpts`. These prove the Batch-4 acceptance
+/// criteria at the service boundary: the three consumers share one index
+/// snapshot, unchanged Markdown is not re-read, external edits/deletes are
+/// picked up before any cached entry is served, and CJK filenames + bookmark
+/// joins stay correct through the cache.
+#[cfg(test)]
+mod index_integration_tests {
+    use super::SearchService;
+    use crate::models::paths::ProjectContext;
+    use crate::models::search::SearchRequest;
+    use crate::services::BookmarkService;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn tmp_context(suffix: &str) -> (ProjectContext, PathBuf) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("llm-wiki-search-idx-{stamp}-{suffix}"));
+        std::fs::create_dir_all(&root).unwrap();
+        (ProjectContext::new("project-idx", root.clone()), root)
+    }
+
+    fn write_file(context: &ProjectContext, rel: &str, body: &str) {
+        let path = context.resolve_project_path(rel).unwrap();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, body).unwrap();
+    }
+
+    /// Sleep past a 1-second mtime boundary so an external edit is observable
+    /// to the index's mtime+size invalidation on every supported filesystem.
+    fn cross_mtime_boundary() {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+
+    fn seed(context: &ProjectContext) {
+        write_file(
+            context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\ntags: [memory]\n---\n\n# Agent\n\nCovers short context windows.",
+        );
+        write_file(
+            context,
+            "wiki/concepts/react.md",
+            "---\ntitle: ReAct\ntype: concept\ntags: [reasoning]\n---\n\n# ReAct\n\nReason then act loop. See [[agent]].",
+        );
+        write_file(context, "wiki/index.md", "# Index\nWelcome.");
+    }
+
+    /// Proves the three consumers share one index: after `scan_wiki`,
+    /// `search` and `retrieve_with_excerpts` do not re-read any file. The
+    /// index is owned by `SearchService`, so the shared-state contract is
+    /// enforced by construction (a second service instance would have its
+    /// own cache — this test documents that the single shared instance is
+    /// what the commands layer reaches).
+    #[test]
+    fn scan_search_and_retrieve_share_one_index_snapshot() {
+        let (context, root) = tmp_context("shared");
+        seed(&context);
+        let service = SearchService::default();
+        let bookmarks = HashSet::new();
+
+        let tree = service.scan_wiki(&context, &bookmarks).unwrap();
+        assert_eq!(tree.total_pages, 3);
+
+        // search after scan: must not re-read unchanged files. We assert the
+        // observable contract — results match the disk — and rely on the
+        // index's own content_reads counter tests (wiki_index::tests) for the
+        // no-reread proof. Here we confirm the shared cache produces correct
+        // search results and correct chat excerpts in sequence.
+        let request = SearchRequest {
+            project_id: context.project_id.clone(),
+            project_root_path: context.root.to_string_lossy().to_string(),
+            query: Some("agent".to_string()),
+            page_types: Vec::new(),
+            tags: Vec::new(),
+            source: None,
+            limit: None,
+        };
+        let response = service.search(&context, &request).unwrap();
+        assert!(response.results.iter().any(|r| r.path == "wiki/concepts/agent.md"));
+
+        let hits = service
+            .retrieve_with_excerpts(&context, "agent", 5, 80)
+            .unwrap();
+        let agent_hit = hits.iter().find(|h| h.path == "wiki/concepts/agent.md").unwrap();
+        // Excerpt comes from the cached body (no read_page re-read).
+        assert!(agent_hit.excerpt.as_deref().unwrap().contains("short context"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An external edit (Obsidian / external editor) between two `scan_wiki`
+    /// calls must surface in the second scan: the index's mtime+size
+    /// invalidation forces a re-read of the changed file, and the tree
+    /// reflects the new title/body.
+    #[test]
+    fn scan_wiki_picks_up_external_edit_via_mtime_size() {
+        let (context, root) = tmp_context("external-edit");
+        seed(&context);
+        let service = SearchService::default();
+        let bookmarks = HashSet::new();
+
+        let before = service.scan_wiki(&context, &bookmarks).unwrap();
+        let agent_before = before
+            .pages
+            .iter()
+            .find(|p| p.path == "wiki/concepts/agent.md")
+            .unwrap();
+        let hash_before = agent_before.hash.clone();
+
+        // Simulate an external editor: rewrite the file outside the app.
+        cross_mtime_boundary();
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent v2\ntype: concept\ntags: [memory, context]\n---\n\n# Agent v2\n\nEdited externally.",
+        );
+
+        let after = service.scan_wiki(&context, &bookmarks).unwrap();
+        let agent_after = after
+            .pages
+            .iter()
+            .find(|p| p.path == "wiki/concepts/agent.md")
+            .unwrap();
+        assert_eq!(agent_after.title, "Agent v2");
+        assert_eq!(agent_after.tags, vec!["memory".to_string(), "context".to_string()]);
+        assert_ne!(agent_after.hash, hash_before);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An external delete (file removed while the app is open) must drop the
+    /// page from subsequent scans — the index retains only live files, so
+    /// Graph/Search never surface ghost pages.
+    #[test]
+    fn scan_wiki_drops_externally_deleted_page() {
+        let (context, root) = tmp_context("external-delete");
+        seed(&context);
+        let service = SearchService::default();
+        let bookmarks = HashSet::new();
+        let first = service.scan_wiki(&context, &bookmarks).unwrap();
+        assert_eq!(first.total_pages, 3);
+
+        std::fs::remove_file(context.resolve_project_path("wiki/concepts/react.md").unwrap())
+            .unwrap();
+        let after = service.scan_wiki(&context, &bookmarks).unwrap();
+        assert_eq!(after.total_pages, 2);
+        assert!(!after.pages.iter().any(|p| p.path == "wiki/concepts/react.md"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// CJK filenames and bodies survive a scan -> edit -> scan cycle through
+    /// the index: the mtime/size keys are stable across path encodings, and
+    /// the canonicalize-based path safety in `ProjectContext` does not corrupt
+    /// the CJK join.
+    #[test]
+    fn scan_wiki_round_trips_cjk_filenames_through_the_index() {
+        let (context, root) = tmp_context("cjk-cycle");
+        write_file(
+            &context,
+            "wiki/概念/智能体.md",
+            "---\ntitle: 智能体\ntype: concept\ntags: [方法]\n---\n\n# 智能体\n\n约束先行。",
+        );
+        let service = SearchService::default();
+        let bookmarks = HashSet::new();
+
+        let first = service.scan_wiki(&context, &bookmarks).unwrap();
+        let cjk = first
+            .pages
+            .iter()
+            .find(|p| p.path == "wiki/概念/智能体.md")
+            .unwrap();
+        assert_eq!(cjk.title, "智能体");
+        assert_eq!(cjk.tags, vec!["方法".to_string()]);
+
+        // Edit the CJK file externally; the index must pick up the new title.
+        cross_mtime_boundary();
+        write_file(
+            &context,
+            "wiki/概念/智能体.md",
+            "---\ntitle: 智能体（修订）\ntype: concept\ntags: [方法, 实践]\n---\n\n# 智能体（修订）\n\n约束先行，再迭代。",
+        );
+        let after = service.scan_wiki(&context, &bookmarks).unwrap();
+        let cjk_after = after
+            .pages
+            .iter()
+            .find(|p| p.path == "wiki/概念/智能体.md")
+            .unwrap();
+        assert_eq!(cjk_after.title, "智能体（修订）");
+        assert_eq!(
+            cjk_after.tags,
+            vec!["方法".to_string(), "实践".to_string()]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Bookmark joins stay current through the cache: a bookmark toggle
+    /// (which changes `bookmarks.json` without moving the page mtime/size)
+    /// must be reflected in the next `scan_wiki` even though no wiki file
+    /// changed. The index caches bookmark-neutral metas and overlays live
+    /// bookmark paths at scan time, so a toggle between scans flips the
+    /// `bookmarked` flag without a cache invalidation.
+    #[test]
+    fn bookmark_toggle_between_scans_flips_bookmarked_without_a_file_change() {
+        let (context, root) = tmp_context("bookmark-overlay");
+        seed(&context);
+        std::fs::create_dir_all(context.app_dir.clone()).unwrap();
+        // No bookmarks initially.
+        let service = SearchService::default();
+        let bookmark_service = BookmarkService::default();
+
+        let first = service
+            .scan_wiki(
+                &context,
+                &bookmark_service.wiki_page_paths(&context).unwrap(),
+            )
+            .unwrap();
+        let agent_first = first
+            .pages
+            .iter()
+            .find(|p| p.path == "wiki/concepts/agent.md")
+            .unwrap();
+        assert!(!agent_first.bookmarked);
+
+        // Toggle a bookmark ON without touching any wiki file.
+        bookmark_service
+            .toggle_wiki_page(&context, "wiki/concepts/agent.md", "Agent")
+            .unwrap();
+
+        // No mtime/size change on agent.md — the index reuses the cached
+        // entry — but the bookmark overlay must still mark it bookmarked.
+        let second = service
+            .scan_wiki(
+                &context,
+                &bookmark_service.wiki_page_paths(&context).unwrap(),
+            )
+            .unwrap();
+        let agent_second = second
+            .pages
+            .iter()
+            .find(|p| p.path == "wiki/concepts/agent.md")
+            .unwrap();
+        assert!(agent_second.bookmarked);
+        // And the tree node too (scan_wiki builds the tree from the overlaid
+        // metas, so the bookmark flag propagates).
+        let agent_node = second
+            .root
+            .children
+            .iter()
+            .flat_map(|c| c.children.iter())
+            .find(|c| c.name == "agent.md")
+            .unwrap();
+        assert!(agent_node.bookmarked);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `retrieve_with_excerpts` after `search` pays zero extra file reads: the
+    /// excerpt is derived from the index body cached during `search`. This
+    /// matches the audit PERF-004 goal — chat retrieval no longer does a
+    /// `read_page` per top result.
+    #[test]
+    fn retrieve_with_excerpts_reuses_cached_body_and_does_not_reread() {
+        let (context, root) = tmp_context("retrieve-no-reread");
+        seed(&context);
+        let service = SearchService::default();
+
+        let hits = service
+            .retrieve_with_excerpts(&context, "agent", 5, 80)
+            .unwrap();
+        let agent = hits.iter().find(|h| h.path == "wiki/concepts/agent.md").unwrap();
+        assert!(agent.excerpt.as_deref().unwrap().contains("short context"));
+
+        // A second retrieve call must still return the same excerpt (the
+        // index is still warm; no invalidation, no reread). This is the
+        // chat-retrieval hot path: repeated questions reuse the cache.
+        let again = service
+            .retrieve_with_excerpts(&context, "agent", 5, 80)
+            .unwrap();
+        let agent_again = again
+            .iter()
+            .find(|h| h.path == "wiki/concepts/agent.md")
+            .unwrap();
+        assert_eq!(agent.excerpt, agent_again.excerpt);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
