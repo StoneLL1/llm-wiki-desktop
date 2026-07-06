@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-06] P0 Batch 1/测试可信度 + Graph jsdom 噪声 — 修复 App.test.tsx 失败的 sidebar 断言（topbar 的 Collapse/Expand sidebar 按钮是用户未提交改动里故意删的，现在只能通过把 splitter 拖到 SIDEBAR_COLLAPSE_THRESHOLD 以下折叠）；在 src/test/setup.ts 里把 HTMLCanvasElement.prototype.getContext 重写为返回 null，消除 jsdom 反复打印的 "Not implemented: HTMLCanvasElement.prototype.getContext" 噪声（这是环境设置不是全局吞 console；GraphView 的 try/catch 会落到 "canvas unavailable" 占位）；新增回归测试用非枚举标记属性 __silencedJSDOMCanvasNoise + 端到端 fallback 文本 + GraphView 真实 console.warn 断言三重保护 — 关键决策：(1) 不用 vi.spyOn 去断言"噪声没了"，因为 jsdom 经 virtualConsole→runner stderr 路由，console.error/stderr.write/emit 的 spy 都抓不到（已记 gotchas）；(2) 不全局 suppress console.warn/error，改用 stub 从源头消除并保留 GraphView 真实 warn；(3) 跑了两个审查子代理（A 共享上下文、B 全新上下文），有效问题已修。验证：npm run test 314 通过零噪声、lint 0 警告、cargo check 0.62s、tsc exit 0、无 console.log。遗留：本轮未推进 Batch 2-5。
+
 [2026-07-05] Chat convenience frontend - Added typed convenience edit metadata, store IPC methods, Chat toolbar/message controls, and Security revocation UI - Key decision: frontend only toggles global authorization and calls backend commands; filesystem writes and rollback remain backend-owned.
 
 [2026-07-05] Chat convenience command integration - Added all-Agent convenience invocation profiles, authorized write-intent Chat routing, per-turn checkpoint/audit/rollback handling, and keep/rollback commands - Key decision: default Chat remains read-only; direct project writes require backend authorization plus write intent and use Git HEAD as the rollback boundary.

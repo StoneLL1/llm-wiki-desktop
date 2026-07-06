@@ -448,19 +448,89 @@ describe("App", () => {
     expect(screen.getByRole("complementary", { name: "Project info" })).toBeInTheDocument();
   });
 
-  it("keeps the sidebar splitter and topbar collapse control navigation reachable", () => {
+  it("keeps the sidebar splitter reachable when the sidebar pane size reaches the collapse threshold", () => {
+    // The topbar collapse button was intentionally removed; the sidebar now
+    // collapses only by resizing the splitter below SIDEBAR_COLLAPSE_THRESHOLD
+    // (derived in AppShell from paneSizes.sidebar). This pins that the manual
+    // collapse/expand controls stay removed and the splitter remains the single
+    // resize affordance. The pane size is set directly via the store rather than
+    // via simulated pointer events; useResizablePane's drag/clamp path has its
+    // own coverage in useResizablePane.test.ts.
     render(<App />);
 
-    expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Expand sidebar" })).not.toBeInTheDocument();
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
 
-    useNavigationStore.getState().setPaneSize("sidebar", 56);
+    useNavigationStore.getState().setPaneSize("sidebar", PANE_WIDTH_LIMITS.sidebar.min);
 
+    expect(useNavigationStore.getState().sidebarCollapsed).toBe(true);
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
     for (const label of ["Dashboard", "Wiki", "Chat", "Graph", "Agent", "Import", "Lint", "Exports"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
+  });
+
+  it("does not emit jsdom canvas getContext noise when the graph view renders", async () => {
+    // Sigma inits a WebGL renderer on a real <canvas>; in jsdom that used to
+    // log "Not implemented: HTMLCanvasElement.prototype.getContext" three
+    // times per render (once per webgl2/webgl/experimental-webgl probe).
+    // test/setup.ts overrides getContext to return null cleanly so GraphView
+    // falls back to its "canvas unavailable" placeholder without flooding the
+    // output.
+    //
+    // jsdom routes "Not implemented:" through window._virtualConsole and out
+    // to the test runner's stderr in a way that is not reliably capturable via
+    // vi.spyOn (the routing differs across jsdom versions and Vitest's jsdom
+    // env). So this regression guard uses three complementary checks:
+    //   1. Pin the stub itself — setup.ts tags its override with
+    //      `__silencedJSDOMCanvasNoise`. If someone removes the stub, this
+    //      fails immediately and the noise returns across every graph test.
+    //   2. Confirm the end-to-end fallback still renders, so we also catch a
+    //      stub that exists but no longer returns null.
+    //   3. Confirm GraphView's own `[graph] sigma renderer init failed:`
+    //      console.warn still fires — proving the stub removes jsdom noise
+    //      without suppressing GraphView's real diagnostics (Batch 1 goal:
+    //      do not mask real problems via global console suppression).
+    const getContext = HTMLCanvasElement.prototype.getContext as typeof HTMLCanvasElement.prototype.getContext & {
+      __silencedJSDOMCanvasNoise?: boolean;
+    };
+    expect(getContext.__silencedJSDOMCanvasNoise).toBe(true);
+    expect(document.createElement("canvas").getContext("webgl2")).toBeNull();
+
+    const warnSpy = vi.spyOn(console, "warn");
+    useNavigationStore.getState().setActiveView("graph");
+    useGraphStore.setState({
+      status: "ready",
+      data: {
+        nodes: [
+          { id: "a", path: "wiki/a.md", label: "Alpha", type: "concept", tags: [], starred: false, degree: 1 },
+          { id: "b", path: "wiki/b.md", label: "Beta", type: "entity", tags: [], starred: false, degree: 1 },
+        ],
+        edges: [{ source: "a", target: "b", relation: "related", weight: 1 }],
+        contentHash: "regression-canvas-noise-hash",
+        builtAt: "2026-07-04T00:00:00Z",
+        layout: { positions: { a: [0, 0], b: [1, 1] }, communities: { a: 0, b: 0 } },
+      },
+      load: async () => {},
+    });
+
+    render(<App />);
+    // GraphView is React.lazy behind the WorkspaceView Suspense boundary
+    // (Batch 3 bundle split), so the placeholder only appears after the async
+    // chunk resolves AND Sigma's init effect runs and catches. Under the full
+    // suite the lazy resolution plus React re-render can exceed findByText's
+    // 1000ms default, so allow a comfortable margin.
+    expect(
+      await screen.findByText(
+        "Graph canvas is unavailable in this environment.",
+        {},
+        { timeout: 5000 },
+      ),
+    ).toBeInTheDocument();
+    // GraphView's catch logs its own diagnostic; the stub must not suppress it.
+    expect(warnSpy).toHaveBeenCalledWith("[graph] sigma renderer init failed:", expect.any(Error));
+    warnSpy.mockRestore();
   });
 
   it("exposes keyboard-resizable shell splitters", () => {
