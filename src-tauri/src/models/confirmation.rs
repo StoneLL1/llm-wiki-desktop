@@ -99,6 +99,7 @@ pub enum ConfirmationExecution {
         root_path: String,
         task_id: String,
         route: crate::models::compile::CompileRoute,
+        plan: crate::models::compile::CompilePlan,
         manifest: crate::models::compile::CompileManifest,
         current_hashes: Vec<(String, String)>,
         checkpoint_hash: Option<String>,

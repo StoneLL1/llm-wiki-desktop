@@ -25,6 +25,15 @@ Build only **derived** pages that synthesize **across** sources:
 
 Name each derived page after the **concept** it covers, never after a source filename.
 
+## Decision Rules
+
+- **create** when the sources introduce a genuinely new concept, entity, synthesis, or comparison that is not already covered by an existing derived page.
+- **update** when new evidence materially changes, corrects, or extends an existing page.
+- **merge** when a new source has the same core thesis as an existing derived page; fold the evidence into that page instead of fragmenting the wiki.
+- **see-also** when content spans related but distinct topics; keep the pages separate and add cross-links both ways where useful.
+- **conflict** when sources disagree; annotate the disagreement with source-specific evidence instead of smoothing it into one unsupported claim.
+- **Cascade** after material changes: scan linked pages, overlapping source pages, `wiki/index.md`, and `wiki/overview.md`; update affected pages before appending the `wiki/log.md` entry.
+
 ## Cite sources (two ways, on every derived page)
 
 1. Frontmatter `sources: ["<original-source-filename>"]` — the machine join key the graph uses. List every original the page draws from.

@@ -6,7 +6,7 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::agent::AgentDetectionState;
 use crate::models::compile::{
-    CompileManifest, CompileRequest, CompileRoute, CompileRoutePreference,
+    CompileManifest, CompilePlan, CompileRequest, CompileRoute, CompileRoutePreference,
 };
 use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
@@ -120,13 +120,14 @@ async fn run_compile(
     let baseline = CompileService::snapshot_wiki(context)?;
     let workspace = CompileService::create_workspace(context, task_id)?;
     let outcome = async {
-        let (route, manifest) = generate_manifest(state, request, context, &workspace, task_id, &baseline).await?;
+        let (route, plan, manifest) =
+            generate_manifest(state, request, context, &workspace, task_id, &baseline).await?;
         ensure_checkpoint_head(state, context, checkpoint.commit_hash.as_deref())?;
         if state.task_service.is_cancelled(task_id) {
             return Err(BackendError::new("COMPILE_CANCELLED", "Wiki compile was cancelled.", true, false));
         }
         let backup = CompileService::backup_outputs(context, &manifest)?;
-        let applied = match CompileService::apply_manifest(context, &manifest, &baseline) {
+        let applied = match CompileService::apply_manifest(context, &manifest, Some(&plan), &baseline) {
             Ok(applied) => applied,
             Err(error) => {
                 let _ = CompileService::restore_outputs(context, &backup);
@@ -151,7 +152,7 @@ async fn run_compile(
             };
             state.confirmation_registry.register_with_execution(action.clone(), Some(ConfirmationExecution::CompileMerge {
                 project_id: request.project_id.clone(), root_path: request.project_root_path.clone(), task_id: task_id.into(), route,
-                manifest, current_hashes, checkpoint_hash: checkpoint.commit_hash.clone(),
+                plan, manifest, current_hashes, checkpoint_hash: checkpoint.commit_hash.clone(),
             }))?;
             state.task_service.set_result(task_id, TaskResult { summary: "Compile requires conflict confirmation.".into(), affected_paths: applied.affected_paths, pending_action: Some(action) }).map_err(task_error)?;
             state.task_service.transition_status(task_id, TaskStatus::WaitingForConfirmation).map_err(task_error)?;
@@ -177,7 +178,7 @@ async fn generate_manifest(
     workspace: &std::path::Path,
     task_id: &str,
     baseline: &HashMap<String, String>,
-) -> Result<(CompileRoute, CompileManifest), BackendError> {
+) -> Result<(CompileRoute, CompilePlan, CompileManifest), BackendError> {
     let agent_config = AgentService::load_config(context)?;
     let providers = LlmService::list_providers(context)?;
     let selected_agent = request.agent.or(agent_config.default_agent);
@@ -226,8 +227,16 @@ async fn generate_manifest(
             state
                 .agent_service
                 .run_task_streaming(&invocation, &state.task_service, task_id)?;
-            let manifest =
-                CompileService::manifest_from_workspace(workspace, baseline.keys().cloned())?;
+            let plan = read_agent_compile_plan(workspace)?;
+            validate_compile_plan(context, &plan, baseline)?;
+            let manifest = CompileService::manifest_from_workspace(workspace, baseline)?;
+            let known_sources = CompileService::known_source_refs(context)?;
+            CompileService::validate_manifest_semantics(
+                context,
+                &manifest,
+                Some(&plan),
+                &known_sources,
+            )?;
             // Guard against silent agent failure. The spawned CLI exits 0 even
             // when permission settings denied every write (e.g. sandbox
             // unsupported on Windows), so an end_turn looks "successful" while
@@ -247,7 +256,7 @@ async fn generate_manifest(
                     false,
                 ));
             }
-            Ok((route, manifest))
+            Ok((route, plan, manifest))
         }
         CompileRoute::Byok => {
             let provider = selected_provider.ok_or_else(|| {
@@ -264,18 +273,19 @@ async fn generate_manifest(
                 .append_log(
                     task_id,
                     LogLevel::Info,
-                    format!("Calling {:?}", provider.provider),
+                    format!("Calling {:?} for compile plan", provider.provider),
                 )
                 .map_err(task_error)?;
-            let prompt = CompileService::provider_prompt(workspace, &language)?;
-            let completion = state
-                .llm_service
-                .complete(&provider, secret.as_deref(), &prompt);
-            let raw = crate::tasks::byok_progress::poll_with_progress(
+            let plan_prompt = CompileService::provider_plan_prompt(workspace, &language)?;
+            let plan_completion =
+                state
+                    .llm_service
+                    .complete(&provider, secret.as_deref(), &plan_prompt);
+            let raw_plan = crate::tasks::byok_progress::poll_with_progress(
                 &state.task_service,
                 task_id,
-                "Generating",
-                completion,
+                "Planning",
+                plan_completion,
             )
             .await
             .map_err(|_| {
@@ -284,9 +294,72 @@ async fn generate_manifest(
                     "Wiki compile was cancelled.",
                 )
             })??;
-            Ok((route, CompileService::parse_manifest(&raw)?))
+            let plan = CompileService::parse_plan(&raw_plan)?;
+            validate_compile_plan(context, &plan, baseline)?;
+            state
+                .task_service
+                .append_log(
+                    task_id,
+                    LogLevel::Info,
+                    format!("Calling {:?} for compile manifest", provider.provider),
+                )
+                .map_err(task_error)?;
+            let manifest_prompt =
+                CompileService::provider_manifest_prompt(workspace, &language, Some(&plan))?;
+            let manifest_completion =
+                state
+                    .llm_service
+                    .complete(&provider, secret.as_deref(), &manifest_prompt);
+            let raw_manifest = crate::tasks::byok_progress::poll_with_progress(
+                &state.task_service,
+                task_id,
+                "Generating",
+                manifest_completion,
+            )
+            .await
+            .map_err(|_| {
+                crate::tasks::byok_progress::cancelled_error(
+                    "COMPILE_CANCELLED",
+                    "Wiki compile was cancelled.",
+                )
+            })??;
+            let manifest = CompileService::parse_manifest(&raw_manifest)?;
+            let known_sources = CompileService::known_source_refs(context)?;
+            CompileService::validate_manifest_semantics(
+                context,
+                &manifest,
+                Some(&plan),
+                &known_sources,
+            )?;
+            Ok((route, plan, manifest))
         }
     }
+}
+
+fn read_agent_compile_plan(workspace: &std::path::Path) -> Result<CompilePlan, BackendError> {
+    let plan_path = workspace.join("compile-plan.json");
+    let raw = std::fs::read_to_string(&plan_path).map_err(|error| {
+        BackendError::new(
+            "COMPILE_PLAN_MISSING",
+            format!(
+                "Agent compile must write compile-plan.json before candidate files are accepted: {error}"
+            ),
+            true,
+            false,
+        )
+        .with_details(serde_json::json!({ "path": plan_path.to_string_lossy() }))
+    })?;
+    CompileService::parse_plan(&raw)
+}
+
+fn validate_compile_plan(
+    context: &ProjectContext,
+    plan: &CompilePlan,
+    baseline: &HashMap<String, String>,
+) -> Result<(), BackendError> {
+    let known_sources = CompileService::known_source_refs(context)?;
+    let existing_pages: Vec<String> = baseline.keys().cloned().collect();
+    CompileService::validate_plan(context, plan, &existing_pages, &known_sources)
 }
 
 fn select_provider(
@@ -460,6 +533,7 @@ pub fn resolve_compile_conflict(
         root_path,
         task_id,
         route,
+        plan,
         manifest,
         current_hashes,
         checkpoint_hash,
@@ -507,18 +581,22 @@ pub fn resolve_compile_conflict(
         .map_err(task_error)?;
     let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
     let backup = CompileService::backup_outputs(&context, &resolved_manifest)?;
-    let affected_paths =
-        match CompileService::apply_confirmed_manifest(&context, &resolved_manifest, &hashes) {
-            Ok(paths) => paths,
-            Err(error) => {
-                let _ = CompileService::restore_outputs(&context, &backup);
-                let _ = state.task_service.set_error(&task_id, error.clone());
-                let _ = state
-                    .task_service
-                    .transition_status(&task_id, TaskStatus::Failed);
-                return Err(error);
-            }
-        };
+    let affected_paths = match CompileService::apply_confirmed_manifest(
+        &context,
+        &resolved_manifest,
+        Some(&plan),
+        &hashes,
+    ) {
+        Ok(paths) => paths,
+        Err(error) => {
+            let _ = CompileService::restore_outputs(&context, &backup);
+            let _ = state.task_service.set_error(&task_id, error.clone());
+            let _ = state
+                .task_service
+                .transition_status(&task_id, TaskStatus::Failed);
+            return Err(error);
+        }
+    };
     if let Err(error) = finish_compile(&state, &context, &task_id, route, affected_paths, None) {
         let _ = state
             .git_service
@@ -555,6 +633,7 @@ pub fn confirm_compile_action(
         root_path,
         task_id,
         route,
+        plan,
         manifest,
         current_hashes,
         checkpoint_hash,
@@ -609,7 +688,7 @@ pub fn confirm_compile_action(
     let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
     let backup = CompileService::backup_outputs(&context, &manifest)?;
     let affected_paths =
-        match CompileService::apply_confirmed_manifest(&context, &manifest, &hashes) {
+        match CompileService::apply_confirmed_manifest(&context, &manifest, Some(&plan), &hashes) {
             Ok(paths) => paths,
             Err(error) => {
                 let _ = CompileService::restore_outputs(&context, &backup);
