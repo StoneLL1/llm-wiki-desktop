@@ -4,8 +4,8 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::chat::{
-    ChatCitation, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute,
-    ChatSession, ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest, ListChatsRequest,
+    ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute, ChatSession,
+    ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest, ListChatsRequest,
     LoadChatRequest, RenameChatRequest, ResolveChatConvenienceEditRequest,
     RollbackLastChatConvenienceEditRequest, SaveAnswerResult, SaveAnswerToWikiRequest,
     SendChatMessageRequest,
@@ -31,9 +31,11 @@ pub fn create_chat_session(
     request: CreateChatSessionRequest,
 ) -> Result<ChatSession, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .chat_service
-        .create_session(&context, request.title.as_deref())
+    state.chat_service.create_session(
+        &context,
+        request.title.as_deref(),
+        request.context_page_path.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -142,6 +144,7 @@ async fn run_chat_send(
         provider: None,
         task_id: None,
         convenience_edit: None,
+        retrieval_diagnostics: None,
     };
     state
         .chat_service
@@ -156,19 +159,18 @@ async fn run_chat_send(
         .read_settings(context)
         .map(|settings| settings.language)
         .unwrap_or_else(|_| "en".to_string());
-    let retrieval = state.chat_service.build_retrieval_context(
-        context,
-        &state.search_service,
-        &request.content,
-        &session,
-        &language,
-        request.pinned_page_path.as_deref(),
-    )?;
-    let citations = retrieval.citations.clone();
     let intent = state
         .chat_convenience_service
         .classify_chat_intent(&request.content);
     if should_use_convenience_flow(request.convenience_enabled, intent) {
+        let retrieval = state.chat_service.build_convenience_retrieval_context(
+            context,
+            &state.search_service,
+            &request.content,
+            &session,
+            &language,
+            request.pinned_page_path.as_deref(),
+        )?;
         return run_chat_convenience_send(
             state,
             request,
@@ -176,18 +178,33 @@ async fn run_chat_send(
             task_id,
             &mut session,
             retrieval,
-            citations,
         )
         .await;
     }
 
-    let (route, answer, provider) = match resolve_route(
+    let resolved = resolve_route(
         state,
         context,
         request.route,
         request.agent,
         request.provider,
-    )? {
+    )?;
+    let (planned_route, context_window) = match &resolved {
+        ResolvedRoute::Agent(_) => (ChatRoute::Agent, None),
+        ResolvedRoute::Byok(provider) => (ChatRoute::Byok, Some(provider.context_window)),
+    };
+    let retrieval = state.chat_service.build_retrieval_context(
+        context,
+        &state.search_service,
+        &request.content,
+        &session,
+        &language,
+        planned_route,
+        context_window,
+        request.pinned_page_path.as_deref(),
+    )?;
+
+    let (route, answer, provider) = match resolved {
         ResolvedRoute::Agent(kind) => {
             state
                 .task_service
@@ -279,16 +296,23 @@ async fn run_chat_send(
         ));
     }
 
+    let parsed =
+        crate::services::ChatService::parse_model_citations(&answer, &retrieval.source_refs);
+    let mut diagnostics = retrieval.diagnostics;
+    diagnostics.invalid_citation_ids = parsed.invalid_source_ids;
+    diagnostics.has_unverified = parsed.has_unverified;
+
     let assistant_message = ChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: crate::models::chat::ChatRole::Assistant,
         content: answer,
         created_at: crate::utils::time_utils::now_rfc3339(),
-        citations,
+        citations: parsed.citations,
         route: Some(route),
         provider,
         task_id: Some(task_id.to_string()),
         convenience_edit: None,
+        retrieval_diagnostics: Some(diagnostics),
     };
     // Re-check cancellation immediately before persisting: there is a window
     // between the post-generation check above and the write below where the
@@ -331,7 +355,6 @@ async fn run_chat_convenience_send(
     task_id: &str,
     session: &mut ChatSession,
     retrieval: RetrievalContext,
-    citations: Vec<ChatCitation>,
 ) -> Result<(), BackendError> {
     let authorization = state
         .settings_service
@@ -445,12 +468,18 @@ async fn run_chat_convenience_send(
         }
     };
 
+    let parsed =
+        crate::services::ChatService::parse_model_citations(&content, &retrieval.source_refs);
+    let mut diagnostics = retrieval.diagnostics;
+    diagnostics.invalid_citation_ids = parsed.invalid_source_ids;
+    diagnostics.has_unverified = parsed.has_unverified;
+
     let assistant_message = ChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: crate::models::chat::ChatRole::Assistant,
         content,
         created_at: crate::utils::time_utils::now_rfc3339(),
-        citations,
+        citations: parsed.citations,
         route: Some(ChatRoute::Agent),
         provider: None,
         task_id: Some(task_id.to_string()),
@@ -464,6 +493,7 @@ async fn run_chat_convenience_send(
             rollback_task_id,
             ignored_baseline_paths: ignored_baseline,
         }),
+        retrieval_diagnostics: Some(diagnostics),
     };
     if state.task_service.is_cancelled(task_id) {
         return Err(BackendError::new(

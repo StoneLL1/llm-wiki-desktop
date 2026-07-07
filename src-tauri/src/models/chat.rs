@@ -47,12 +47,28 @@ pub struct ChatConvenienceEdit {
     pub ignored_baseline_paths: Vec<String>,
 }
 
-/// A retrieved context page attached to an assistant message. Citations are the
-/// pages actually fed to the model (the honest source-of-truth), not parsed out
-/// of model output, so they never drift from what the model could see.
+/// A numbered source supplied to the model prompt. These are retrieval/planner
+/// inputs, not persisted citations unless the model actually cites them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSourceRef {
+    pub id: String,
+    pub page_path: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+    pub score: i64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_pinned: bool,
+}
+
+/// A citation the model actually used, parsed from `[S#]` markers in the final
+/// answer. Retrieval hits that were merely available live in diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatCitation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     pub page_path: String,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +76,27 @@ pub struct ChatCitation {
     pub score: i64,
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_pinned: bool,
+}
+
+/// Retrieval diagnostics are for transparency/debugging only. They are not the
+/// answer's evidence list; persisted citations come solely from parsed markers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatRetrievalDiagnostics {
+    pub route: ChatRoute,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retrieval_hits: Vec<ChatRetrievalHit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_pages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omitted_pages: Vec<String>,
+    pub budget_chars: usize,
+    pub source_budget_chars: usize,
+    pub history_budget_chars: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalid_citation_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_unverified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +118,8 @@ pub struct ChatMessage {
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convenience_edit: Option<ChatConvenienceEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_diagnostics: Option<ChatRetrievalDiagnostics>,
 }
 
 /// Persisted chat session at `.app/chats/{id}.json`.
@@ -94,6 +133,11 @@ pub struct ChatSession {
     pub updated_at: String,
     #[serde(default)]
     pub messages: Vec<ChatMessage>,
+    /// Wiki page this session is scoped to (Wiki "Ask AI" sidebar). Absent for
+    /// global Chat-view sessions. Persisted as typed metadata on the session
+    /// JSON — no database. Defaults to None for older session files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_page_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -104,6 +148,10 @@ pub struct ChatSessionSummary {
     pub created_at: String,
     pub updated_at: String,
     pub message_count: usize,
+    /// Mirrors [`ChatSession::context_page_path`] so the session list can group
+    /// page-scoped chats without loading each full session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_page_path: Option<String>,
 }
 
 /// One retrieved wiki page with a bounded body excerpt for the model prompt.
@@ -128,6 +176,9 @@ pub struct CreateChatSessionRequest {
     pub project_root_path: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// Optional page path to scope this session to a wiki page (Wiki AI sidebar).
+    #[serde(default)]
+    pub context_page_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -241,6 +292,7 @@ mod tests {
     #[test]
     fn serializes_citation_and_message_camel_case() {
         let citation = ChatCitation {
+            source_id: Some("S1".into()),
             page_path: "wiki/concepts/a.md".into(),
             title: "A".into(),
             snippet: Some("snip".into()),
@@ -262,6 +314,7 @@ mod tests {
             provider: None,
             task_id: Some("task-1".into()),
             convenience_edit: None,
+            retrieval_diagnostics: None,
         };
         let value = serde_json::to_value(&message).unwrap();
         assert_eq!(value["role"], json!("assistant"));
@@ -287,6 +340,7 @@ mod tests {
             provider: None,
             task_id: None,
             convenience_edit: None,
+            retrieval_diagnostics: None,
         };
         let value = serde_json::to_value(&message).unwrap();
         assert!(value.get("citations").is_none() || value["citations"].is_null());
@@ -315,6 +369,7 @@ mod tests {
     #[test]
     fn citation_serializes_is_pinned_when_true() {
         let citation = ChatCitation {
+            source_id: Some("S1".into()),
             page_path: "wiki/concepts/a.md".into(),
             title: "A".into(),
             snippet: None,
@@ -325,6 +380,71 @@ mod tests {
         let value = serde_json::to_value(&citation).unwrap();
 
         assert_eq!(value["isPinned"], json!(true));
+        assert_eq!(value["sourceId"], json!("S1"));
+    }
+
+    #[test]
+    fn old_chat_message_json_defaults_new_citation_and_diagnostic_fields() {
+        let raw = r#"{
+            "id":"m1",
+            "role":"assistant",
+            "content":"old answer",
+            "createdAt":"2026-07-07T00:00:00Z",
+            "citations":[{"pagePath":"wiki/a.md","title":"A","score":1}]
+        }"#;
+
+        let message: ChatMessage = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(message.citations[0].source_id, None);
+        assert!(message.retrieval_diagnostics.is_none());
+    }
+
+    #[test]
+    fn retrieval_diagnostics_serializes_retrieval_hits_separately_from_citations() {
+        let message = ChatMessage {
+            id: "m1".into(),
+            role: ChatRole::Assistant,
+            content: "answer [S1]".into(),
+            created_at: "2026-07-07T00:00:00Z".into(),
+            citations: vec![ChatCitation {
+                source_id: Some("S1".into()),
+                page_path: "wiki/cited.md".into(),
+                title: "Cited".into(),
+                snippet: Some("used".into()),
+                score: 10,
+                is_pinned: false,
+            }],
+            route: Some(ChatRoute::Byok),
+            provider: None,
+            task_id: None,
+            convenience_edit: None,
+            retrieval_diagnostics: Some(ChatRetrievalDiagnostics {
+                route: ChatRoute::Byok,
+                retrieval_hits: vec![ChatRetrievalHit {
+                    path: "wiki/not-cited.md".into(),
+                    title: "Not Cited".into(),
+                    snippet: Some("retrieved".into()),
+                    score: 5,
+                    excerpt: Some("retrieved excerpt".into()),
+                    is_pinned: false,
+                }],
+                selected_pages: vec!["wiki/cited.md".into()],
+                omitted_pages: vec!["wiki/omitted.md".into()],
+                budget_chars: 24_000,
+                source_budget_chars: 14_400,
+                history_budget_chars: 6_000,
+                invalid_citation_ids: vec!["S9".into()],
+                has_unverified: true,
+            }),
+        };
+
+        let value = serde_json::to_value(&message).unwrap();
+
+        assert_eq!(
+            value["retrievalDiagnostics"]["retrievalHits"][0]["path"],
+            json!("wiki/not-cited.md")
+        );
+        assert_eq!(value["citations"][0]["pagePath"], json!("wiki/cited.md"));
     }
 
     #[test]
@@ -348,6 +468,7 @@ mod tests {
                 rollback_task_id: None,
                 ignored_baseline_paths: vec!["keep.log".into()],
             }),
+            retrieval_diagnostics: None,
         };
 
         let value = serde_json::to_value(&message).unwrap();
@@ -378,5 +499,62 @@ mod tests {
         let raw = r#"{"projectId":"p","projectRootPath":"/x","sessionId":"s","content":"hi","convenienceEnabled":true}"#;
         let request: SendChatMessageRequest = serde_json::from_str(raw).unwrap();
         assert!(request.convenience_enabled);
+    }
+
+    #[test]
+    fn session_defaults_context_page_path_for_existing_json() {
+        // Older session files written before page-scoped chat existed must
+        // still deserialize: context_page_path defaults to None.
+        let raw = r#"{
+            "id":"s1",
+            "title":"Old",
+            "projectId":"p",
+            "createdAt":"2026-07-07T00:00:00Z",
+            "updatedAt":"2026-07-07T00:00:00Z",
+            "messages":[]
+        }"#;
+        let session: ChatSession = serde_json::from_str(raw).unwrap();
+        assert!(session.context_page_path.is_none());
+    }
+
+    #[test]
+    fn session_round_trips_context_page_path_camel_case() {
+        let raw = r#"{
+            "id":"s1",
+            "title":"Page Chat",
+            "projectId":"p",
+            "createdAt":"2026-07-07T00:00:00Z",
+            "updatedAt":"2026-07-07T00:00:00Z",
+            "messages":[],
+            "contextPagePath":"wiki/concepts/react-pattern.md"
+        }"#;
+        let session: ChatSession = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            session.context_page_path.as_deref(),
+            Some("wiki/concepts/react-pattern.md")
+        );
+        // Serializes back to camelCase and omits the field when absent.
+        let value = serde_json::to_value(&ChatSession {
+            id: "s2".into(),
+            title: "No page".into(),
+            project_id: "p".into(),
+            created_at: "2026-07-07T00:00:00Z".into(),
+            updated_at: "2026-07-07T00:00:00Z".into(),
+            messages: Vec::new(),
+            context_page_path: None,
+        })
+        .unwrap();
+        assert!(value.get("contextPagePath").is_none());
+    }
+
+    #[test]
+    fn create_session_request_defaults_context_page_path_to_none() {
+        let raw = r#"{"projectId":"p","projectRootPath":"/x"}"#;
+        let request: CreateChatSessionRequest = serde_json::from_str(raw).unwrap();
+        assert!(request.context_page_path.is_none());
+
+        let raw = r#"{"projectId":"p","projectRootPath":"/x","contextPagePath":"wiki/a.md"}"#;
+        let request: CreateChatSessionRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(request.context_page_path.as_deref(), Some("wiki/a.md"));
     }
 }

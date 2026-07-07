@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::errors::BackendError;
 use crate::models::chat::{
-    ChatCitation, ChatMessage, ChatRetrievalHit, ChatSession, ChatSessionSummary, SaveAnswerResult,
+    ChatCitation, ChatMessage, ChatRetrievalDiagnostics, ChatRetrievalHit, ChatRoute, ChatSession,
+    ChatSessionSummary, ChatSourceRef, SaveAnswerResult,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
@@ -16,12 +17,16 @@ const CHATS_DIR: &str = ".app/chats";
 const DEFAULT_TITLE: &str = "New chat";
 const RETRIEVAL_LIMIT: usize = 6;
 const EXCERPT_CHARS: usize = 1200;
-const HISTORY_TURNS: usize = 8;
+const DEFAULT_CONTEXT_CHARS: usize = 24_000;
+const AGENT_CONTEXT_CHARS: usize = 48_000;
+const MIN_CONTEXT_CHARS: usize = 2_000;
+const MAX_CONTEXT_CHARS: usize = 120_000;
+const MIN_KEYWORD_SOURCE_CHARS: usize = 240;
 
 /// Persists chat sessions as JSON under `.app/chats/{id}.json` and assembles the
 /// retrieval context (local SearchService hits + purpose + bounded history) for
-/// the model prompt. Citations are the retrieved pages themselves, never parsed
-/// from model output.
+/// the model prompt. Persisted citations are parsed from model output after the
+/// answer is generated; retrieval hits remain diagnostics.
 #[derive(Default)]
 pub struct ChatService {
     file_store: FileStore,
@@ -32,8 +37,16 @@ impl ChatService {
         &self,
         context: &ProjectContext,
         title: Option<&str>,
+        context_page_path: Option<&str>,
     ) -> Result<ChatSession, BackendError> {
         let now = now_rfc3339();
+        // Normalize empty/whitespace page paths to None so a stray "" doesn't
+        // masquerade as page-scoped metadata. Backslashes are normalized to
+        // forward slashes for cross-platform consistency (CLAUDE.md path rule).
+        let normalized_page_path = context_page_path
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(|p| p.replace('\\', "/"));
         let session = ChatSession {
             id: uuid::Uuid::new_v4().to_string(),
             title: title
@@ -45,6 +58,7 @@ impl ChatService {
             created_at: now.clone(),
             updated_at: now,
             messages: Vec::new(),
+            context_page_path: normalized_page_path,
         };
         self.file_store.write_json_atomic_checked(
             context,
@@ -83,6 +97,7 @@ impl ChatService {
                     created_at: session.created_at,
                     updated_at: session.updated_at,
                     message_count: session.messages.len(),
+                    context_page_path: session.context_page_path,
                 }),
                 Err(err) => {
                     eprintln!(
@@ -192,13 +207,82 @@ impl ChatService {
         query: &str,
         session: &ChatSession,
         language: &str,
+        route: ChatRoute,
+        context_window: Option<u64>,
         pinned_page_path: Option<&str>,
     ) -> Result<RetrievalContext, BackendError> {
-        let mut hits = Vec::new();
-        if let Some(path) = pinned_page_path {
-            hits.push(self.pinned_retrieval_hit(context, search_service, path)?);
+        self.build_retrieval_context_with_mode(
+            context,
+            search_service,
+            query,
+            session,
+            language,
+            route,
+            context_window,
+            pinned_page_path,
+            AgentPromptMode::ReadOnly,
+        )
+    }
+
+    pub fn build_convenience_retrieval_context(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        query: &str,
+        session: &ChatSession,
+        language: &str,
+        pinned_page_path: Option<&str>,
+    ) -> Result<RetrievalContext, BackendError> {
+        self.build_retrieval_context_with_mode(
+            context,
+            search_service,
+            query,
+            session,
+            language,
+            ChatRoute::Agent,
+            None,
+            pinned_page_path,
+            AgentPromptMode::ConvenienceWrite,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_retrieval_context_with_mode(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        query: &str,
+        session: &ChatSession,
+        language: &str,
+        route: ChatRoute,
+        context_window: Option<u64>,
+        pinned_page_path: Option<&str>,
+        agent_prompt_mode: AgentPromptMode,
+    ) -> Result<RetrievalContext, BackendError> {
+        let (budget_chars, source_budget_chars, history_budget_chars) =
+            retrieval_budgets(route, context_window);
+        let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
+        let mut diagnostic_hits = Vec::new();
+        let mut candidates = Vec::new();
+        let mut seen_paths = HashSet::new();
+        if let Ok(index) = search_service.read_page(context, "wiki/index.md", &HashSet::new()) {
+            seen_paths.insert(index.meta.path.clone());
+            candidates.push(SourceCandidate {
+                path: index.meta.path,
+                title: index.meta.title,
+                excerpt: index.body_markdown.trim().to_string(),
+                score: 20_000,
+                is_pinned: false,
+                required: true,
+            });
         }
-        let mut seen_paths: HashSet<String> = hits.iter().map(|hit| hit.path.clone()).collect();
+        if let Some(path) = pinned_page_path {
+            let hit = self.pinned_retrieval_hit(context, search_service, path)?;
+            diagnostic_hits.push(hit.clone());
+            if seen_paths.insert(hit.path.clone()) {
+                candidates.push(SourceCandidate::from_hit(hit, true));
+            }
+        }
         let search_hits = search_service.retrieve_with_excerpts(
             context,
             query,
@@ -206,26 +290,91 @@ impl ChatService {
             EXCERPT_CHARS,
         )?;
         for hit in search_hits {
-            if hits.len() >= RETRIEVAL_LIMIT {
-                break;
-            }
+            diagnostic_hits.push(hit.clone());
             if seen_paths.insert(hit.path.clone()) {
-                hits.push(hit);
+                candidates.push(SourceCandidate::from_hit(hit, false));
             }
         }
-        let citations: Vec<ChatCitation> = hits
-            .iter()
-            .map(|hit| ChatCitation {
-                page_path: hit.path.clone(),
-                title: hit.title.clone(),
-                snippet: hit.snippet.clone(),
-                score: hit.score,
-                is_pinned: hit.is_pinned,
-            })
-            .collect();
-        let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
-        let prompt = self.assemble_prompt(query, session, &hits, purpose.as_deref(), language);
-        Ok(RetrievalContext { citations, prompt })
+        let mut remaining_source_chars = source_budget_chars;
+        let mut source_refs = Vec::new();
+        let mut omitted_pages = Vec::new();
+        for candidate in candidates {
+            let excerpt_len = char_len(&candidate.excerpt);
+            let can_include = candidate.required
+                || candidate.is_pinned
+                || (remaining_source_chars >= MIN_KEYWORD_SOURCE_CHARS
+                    && excerpt_len <= remaining_source_chars);
+            if !can_include {
+                omitted_pages.push(candidate.path);
+                continue;
+            }
+            let take = remaining_source_chars;
+            let (excerpt, used_chars) = take_chars(&candidate.excerpt, take);
+            remaining_source_chars = remaining_source_chars.saturating_sub(used_chars);
+            let page_path = candidate.path.clone();
+            source_refs.push(ChatSourceRef {
+                id: format!("S{}", source_refs.len() + 1),
+                page_path,
+                title: candidate.title,
+                excerpt: if excerpt.is_empty() {
+                    None
+                } else {
+                    Some(excerpt)
+                },
+                score: candidate.score,
+                is_pinned: candidate.is_pinned,
+            });
+            if used_chars < excerpt_len {
+                omitted_pages.push(candidate.path);
+            }
+        }
+        let diagnostics = ChatRetrievalDiagnostics {
+            route,
+            retrieval_hits: diagnostic_hits,
+            selected_pages: source_refs
+                .iter()
+                .map(|source| source.page_path.clone())
+                .collect(),
+            omitted_pages,
+            budget_chars,
+            source_budget_chars,
+            history_budget_chars,
+            invalid_citation_ids: Vec::new(),
+            has_unverified: false,
+        };
+        let prompt = match route {
+            ChatRoute::Byok => self.assemble_byok_prompt(
+                query,
+                session,
+                &source_refs,
+                purpose.as_deref(),
+                language,
+                history_budget_chars,
+            ),
+            ChatRoute::Agent => match agent_prompt_mode {
+                AgentPromptMode::ReadOnly => self.assemble_agent_prompt(
+                    query,
+                    session,
+                    &source_refs,
+                    purpose.as_deref(),
+                    language,
+                    history_budget_chars,
+                ),
+                AgentPromptMode::ConvenienceWrite => self.assemble_agent_convenience_prompt(
+                    query,
+                    session,
+                    &source_refs,
+                    purpose.as_deref(),
+                    language,
+                    history_budget_chars,
+                ),
+            },
+        };
+        Ok(RetrievalContext {
+            source_refs,
+            diagnostics,
+            prompt,
+        })
     }
 
     fn pinned_retrieval_hit(
@@ -246,71 +395,143 @@ impl ChatService {
         })
     }
 
-    fn assemble_prompt(
+    fn assemble_byok_prompt(
         &self,
         query: &str,
         session: &ChatSession,
-        hits: &[ChatRetrievalHit],
+        sources: &[ChatSourceRef],
         purpose: Option<&str>,
         language: &str,
+        history_budget_chars: usize,
     ) -> String {
         let mut prompt = String::new();
         prompt.push_str(
-            "You are answering a question about a local Markdown wiki. Cite sources by their page \
-             path in parentheses. When this prompt is executed by an Agent, the current working \
-             directory is the project root: you may read Markdown files under wiki/ to answer. If \
-             the keyword Sources section is empty or insufficient, inspect wiki/ before saying the \
-             context is insufficient. If you cannot access the filesystem, answer using only the \
-             provided context and say explicitly when it is insufficient. Do not modify files.\n",
+            "You are answering a question about a local Markdown wiki. You do not have filesystem \
+             access. You do not have tool access. Use only the numbered sources in this prompt. \
+             Respond with citation markers like [S1] or [S1, S2] for claims grounded in sources. \
+             If a claim is not supported by the numbered sources, mark it [unverified].\n",
         );
-        // Steer the generated answer's language to the user's preference. Page
-        // paths and the structural sections below stay as-is (paths, headings).
-        prompt.push_str(&crate::utils::i18n::language_instruction(language));
-        prompt.push('\n');
-        if let Some(purpose) = purpose {
-            prompt.push_str("\n--- Wiki purpose ---\n");
-            prompt.push_str(purpose.trim());
-            prompt.push('\n');
-        }
-        let pinned_hits: Vec<&ChatRetrievalHit> = hits.iter().filter(|hit| hit.is_pinned).collect();
-        if !pinned_hits.is_empty() {
-            prompt.push_str("\n--- Current Wiki page ---\n");
-            for hit in pinned_hits {
-                append_prompt_hit(&mut prompt, hit);
-            }
-        }
-        let source_hits: Vec<&ChatRetrievalHit> =
-            hits.iter().filter(|hit| !hit.is_pinned).collect();
-        if !source_hits.is_empty() || hits.is_empty() {
-            prompt.push_str("\n--- Sources ---\n");
-            for hit in source_hits {
-                append_prompt_hit(&mut prompt, hit);
-            }
-        }
-        let history = session
-            .messages
-            .iter()
-            .rev()
-            .take(HISTORY_TURNS)
-            .collect::<Vec<&ChatMessage>>()
-            .into_iter()
-            .rev();
-        let mut has_history = false;
-        for message in history {
-            if !has_history {
-                prompt.push_str("\n--- Conversation so far ---\n");
-                has_history = true;
-            }
-            let label = match message.role {
-                crate::models::chat::ChatRole::User => "User",
-                crate::models::chat::ChatRole::Assistant => "Assistant",
-            };
-            prompt.push_str(&format!("{label}: {}\n", message.content.trim()));
-        }
-        prompt.push_str("\n--- Latest question ---\n");
-        prompt.push_str(query.trim());
-        prompt.push('\n');
+        append_prompt_common(
+            &mut prompt,
+            query,
+            session,
+            sources,
+            purpose,
+            language,
+            history_budget_chars,
+        );
         prompt
+    }
+
+    fn assemble_agent_prompt(
+        &self,
+        query: &str,
+        session: &ChatSession,
+        sources: &[ChatSourceRef],
+        purpose: Option<&str>,
+        language: &str,
+        history_budget_chars: usize,
+    ) -> String {
+        let mut prompt = String::new();
+        prompt.push_str(
+            "You are answering a question about a local Markdown wiki in read-only mode. Start from \
+             wiki/index.md and the numbered sources below before reading more. You may read \
+             additional Markdown files under wiki/ if needed, but Do not modify files. Cite provided \
+             sources with markers like [S1] or [S1, S2]. If a claim depends only on additional files \
+             that are not among the numbered sources, mark it [unverified] unless a numbered source \
+             also supports it.\n",
+        );
+        append_prompt_common(
+            &mut prompt,
+            query,
+            session,
+            sources,
+            purpose,
+            language,
+            history_budget_chars,
+        );
+        prompt
+    }
+
+    fn assemble_agent_convenience_prompt(
+        &self,
+        query: &str,
+        session: &ChatSession,
+        sources: &[ChatSourceRef],
+        purpose: Option<&str>,
+        language: &str,
+        history_budget_chars: usize,
+    ) -> String {
+        let mut prompt = String::new();
+        prompt.push_str(
+            "You are preparing context for a local Markdown wiki convenience edit. Start from \
+             wiki/index.md and the numbered sources below before reading more. You may read \
+             additional Markdown files under wiki/ if needed. The appended convenience instructions \
+             define the narrow write scope; make only those small Markdown edits and leave original \
+             sources untouched. Cite provided sources in your final chat answer with markers like \
+             [S1] or [S1, S2]. If a claim depends only on additional files that are not among the \
+             numbered sources, mark it [unverified] unless a numbered source also supports it.\n",
+        );
+        append_prompt_common(
+            &mut prompt,
+            query,
+            session,
+            sources,
+            purpose,
+            language,
+            history_budget_chars,
+        );
+        prompt
+    }
+
+    pub fn parse_model_citations(answer: &str, sources: &[ChatSourceRef]) -> ParsedModelCitations {
+        let sources_by_id: HashMap<String, &ChatSourceRef> = sources
+            .iter()
+            .map(|source| (source.id.clone(), source))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut invalid_seen = HashSet::new();
+        let mut citations = Vec::new();
+        let mut invalid_source_ids = Vec::new();
+        let mut has_unverified = false;
+        let mut rest = answer;
+        while let Some(open) = rest.find('[') {
+            let after_open = &rest[open + 1..];
+            let Some(close) = after_open.find(']') else {
+                break;
+            };
+            let marker = after_open[..close].trim();
+            if marker.eq_ignore_ascii_case("unverified") {
+                has_unverified = true;
+                rest = &after_open[close + 1..];
+                continue;
+            }
+            for token in marker.replace(',', " ").split_whitespace() {
+                let id = token.trim().to_ascii_uppercase();
+                if !is_source_marker_id(&id) {
+                    continue;
+                }
+                match sources_by_id.get(&id) {
+                    Some(source) if seen.insert(id.clone()) => citations.push(ChatCitation {
+                        source_id: Some(id),
+                        page_path: source.page_path.clone(),
+                        title: source.title.clone(),
+                        snippet: source.excerpt.clone(),
+                        score: source.score,
+                        is_pinned: source.is_pinned,
+                    }),
+                    Some(_) => {}
+                    None if invalid_seen.insert(id.clone()) => invalid_source_ids.push(id),
+                    None => {}
+                }
+            }
+            rest = &after_open[close + 1..];
+        }
+        ParsedModelCitations {
+            citations,
+            invalid_source_ids,
+            has_unverified,
+        }
     }
 
     /// Render an assistant message as a `wiki/queries/` Markdown page with
@@ -457,8 +678,153 @@ impl ChatService {
 
 #[derive(Debug)]
 pub struct RetrievalContext {
-    pub citations: Vec<ChatCitation>,
+    pub source_refs: Vec<ChatSourceRef>,
+    pub diagnostics: ChatRetrievalDiagnostics,
     pub prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedModelCitations {
+    pub citations: Vec<ChatCitation>,
+    pub invalid_source_ids: Vec<String>,
+    pub has_unverified: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AgentPromptMode {
+    ReadOnly,
+    ConvenienceWrite,
+}
+
+struct SourceCandidate {
+    path: String,
+    title: String,
+    excerpt: String,
+    score: i64,
+    is_pinned: bool,
+    required: bool,
+}
+
+impl SourceCandidate {
+    fn from_hit(hit: ChatRetrievalHit, required: bool) -> Self {
+        let snippet = hit.snippet.clone();
+        Self {
+            path: hit.path,
+            title: hit.title,
+            excerpt: hit.excerpt.or(snippet).unwrap_or_default(),
+            score: hit.score,
+            is_pinned: hit.is_pinned,
+            required,
+        }
+    }
+}
+
+fn retrieval_budgets(route: ChatRoute, context_window: Option<u64>) -> (usize, usize, usize) {
+    let base = match (route, context_window) {
+        (ChatRoute::Byok, Some(window)) if window > 0 => (window as usize).saturating_mul(2),
+        (ChatRoute::Byok, _) => DEFAULT_CONTEXT_CHARS,
+        (ChatRoute::Agent, _) => AGENT_CONTEXT_CHARS,
+    }
+    .clamp(MIN_CONTEXT_CHARS, MAX_CONTEXT_CHARS);
+    let source_budget = base.saturating_mul(60) / 100;
+    let history_budget = base.saturating_mul(25) / 100;
+    (base, source_budget, history_budget)
+}
+
+fn append_prompt_common(
+    prompt: &mut String,
+    query: &str,
+    session: &ChatSession,
+    sources: &[ChatSourceRef],
+    purpose: Option<&str>,
+    language: &str,
+    history_budget_chars: usize,
+) {
+    prompt.push_str(&crate::utils::i18n::language_instruction(language));
+    prompt.push('\n');
+    if let Some(purpose) = purpose {
+        prompt.push_str("\n--- Wiki purpose ---\n");
+        prompt.push_str(purpose.trim());
+        prompt.push('\n');
+    }
+    if sources.is_empty() {
+        prompt.push_str("\n--- Numbered sources ---\nNo numbered sources were retrieved.\n");
+    } else {
+        prompt.push_str("\n--- Numbered sources ---\n");
+        for source in sources {
+            append_prompt_source(prompt, source);
+        }
+    }
+    append_prompt_history(prompt, session, history_budget_chars);
+    prompt.push_str("\n--- Latest question ---\n");
+    prompt.push_str(query.trim());
+    prompt.push('\n');
+}
+
+fn append_prompt_source(prompt: &mut String, source: &ChatSourceRef) {
+    prompt.push_str(&format!(
+        "\n### [{}] {} ({})\n",
+        source.id, source.title, source.page_path
+    ));
+    if let Some(excerpt) = &source.excerpt {
+        prompt.push_str(excerpt.trim());
+        prompt.push('\n');
+    }
+}
+
+fn append_prompt_history(prompt: &mut String, session: &ChatSession, budget_chars: usize) {
+    let history = session
+        .messages
+        .iter()
+        .rev()
+        .collect::<Vec<&ChatMessage>>()
+        .into_iter()
+        .rev();
+    let mut remaining = budget_chars;
+    let mut has_history = false;
+    for message in history {
+        if remaining == 0 {
+            break;
+        }
+        let label = match message.role {
+            crate::models::chat::ChatRole::User => "User",
+            crate::models::chat::ChatRole::Assistant => "Assistant",
+        };
+        let line = format!("{label}: {}\n", message.content.trim());
+        let (bounded, used) = take_chars(&line, remaining);
+        if bounded.trim().is_empty() {
+            break;
+        }
+        if !has_history {
+            prompt.push_str("\n--- Conversation so far ---\n");
+            has_history = true;
+        }
+        prompt.push_str(&bounded);
+        remaining = remaining.saturating_sub(used);
+    }
+}
+
+fn is_source_marker_id(value: &str) -> bool {
+    value
+        .strip_prefix('S')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn take_chars(value: &str, limit: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in value.chars() {
+        if used >= limit {
+            break;
+        }
+        out.push(ch);
+        used += 1;
+    }
+    (out, used)
+}
+
+fn char_len(value: &str) -> usize {
+    value.chars().count()
 }
 
 fn session_path(id: &str) -> String {
@@ -523,14 +889,6 @@ fn validate_pinned_page_path(context: &ProjectContext, path: &str) -> Result<Str
     Ok(normalized)
 }
 
-fn append_prompt_hit(prompt: &mut String, hit: &ChatRetrievalHit) {
-    prompt.push_str(&format!("\n### {} ({})\n", hit.title, hit.path));
-    if let Some(excerpt) = &hit.excerpt {
-        prompt.push_str(excerpt.trim());
-        prompt.push('\n');
-    }
-}
-
 fn first_prompt_line(body: &str) -> String {
     body.lines()
         .map(str::trim)
@@ -590,7 +948,7 @@ fn stem_of(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::ChatService;
-    use crate::models::chat::{ChatMessage, ChatRole};
+    use crate::models::chat::{ChatMessage, ChatRole, ChatRoute, ChatSourceRef};
     use crate::models::paths::ProjectContext;
     use crate::services::GitService;
     use crate::services::SearchService;
@@ -644,7 +1002,270 @@ mod tests {
             provider: None,
             task_id: None,
             convenience_edit: None,
+            retrieval_diagnostics: None,
         }
+    }
+
+    fn source_ref(id: &str, path: &str, title: &str) -> ChatSourceRef {
+        ChatSourceRef {
+            id: id.into(),
+            page_path: path.into(),
+            title: title.into(),
+            excerpt: Some(format!("{title} excerpt")),
+            score: 100,
+            is_pinned: false,
+        }
+    }
+
+    #[test]
+    fn citation_parser_accepts_single_marker() {
+        let refs = vec![source_ref("S1", "wiki/a.md", "A")];
+
+        let parsed = ChatService::parse_model_citations("Answer grounded in A [S1].", &refs);
+
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(parsed.citations[0].source_id.as_deref(), Some("S1"));
+        assert_eq!(parsed.citations[0].page_path, "wiki/a.md");
+        assert!(parsed.invalid_source_ids.is_empty());
+        assert!(!parsed.has_unverified);
+    }
+
+    #[test]
+    fn citation_parser_dedupes_duplicate_markers() {
+        let refs = vec![source_ref("S1", "wiki/a.md", "A")];
+
+        let parsed = ChatService::parse_model_citations("A [S1] and again [S1].", &refs);
+
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(parsed.citations[0].source_id.as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn citation_parser_accepts_multiple_ids_in_one_marker() {
+        let refs = vec![
+            source_ref("S1", "wiki/a.md", "A"),
+            source_ref("S2", "wiki/b.md", "B"),
+        ];
+
+        let parsed = ChatService::parse_model_citations("Compare both [S1, S2].", &refs);
+
+        let paths: Vec<&str> = parsed
+            .citations
+            .iter()
+            .map(|citation| citation.page_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["wiki/a.md", "wiki/b.md"]);
+    }
+
+    #[test]
+    fn citation_parser_reports_invalid_ids_but_does_not_persist_them() {
+        let refs = vec![source_ref("S1", "wiki/a.md", "A")];
+
+        let parsed =
+            ChatService::parse_model_citations("Unsupported [S9] but supported [S1].", &refs);
+
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(parsed.invalid_source_ids, vec!["S9"]);
+    }
+
+    #[test]
+    fn citation_parser_returns_no_citations_for_no_marker_or_unverified() {
+        let refs = vec![source_ref("S1", "wiki/a.md", "A")];
+
+        let no_marker = ChatService::parse_model_citations("No source marker here.", &refs);
+        let unverified =
+            ChatService::parse_model_citations("This is uncertain [unverified].", &refs);
+
+        assert!(no_marker.citations.is_empty());
+        assert!(unverified.citations.is_empty());
+        assert!(unverified.has_unverified);
+    }
+
+    #[test]
+    fn byok_prompt_has_no_filesystem_or_tool_access_and_uses_numbered_sources() {
+        let (context, root) = tmp_context("byok-prompt");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(8_000),
+                None,
+            )
+            .unwrap();
+
+        assert!(ctx.prompt.contains("You do not have filesystem access"));
+        assert!(ctx.prompt.contains("You do not have tool access"));
+        assert!(ctx.prompt.contains("[S1]"));
+        assert!(ctx.prompt.contains("Respond with citation markers"));
+        assert!(!ctx.prompt.contains("read Markdown files under wiki/"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_prompt_is_read_only_index_first_and_can_read_more() {
+        let (context, root) = tmp_context("agent-prompt");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern",
+                &session,
+                "en",
+                ChatRoute::Agent,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(ctx.prompt.contains("read-only"));
+        assert!(ctx.prompt.contains("Start from wiki/index.md"));
+        assert!(ctx
+            .prompt
+            .contains("read additional Markdown files under wiki/"));
+        assert!(ctx.prompt.contains("Do not modify files"));
+        assert!(ctx.prompt.contains("mark it [unverified]"));
+        assert!(ctx
+            .source_refs
+            .iter()
+            .any(|source| source.page_path == "wiki/index.md"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn convenience_agent_prompt_allows_scoped_writes_without_read_only_conflict() {
+        let (context, root) = tmp_context("agent-convenience-prompt");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_convenience_retrieval_context(
+                &context,
+                &search,
+                "update the ReAct page",
+                &session,
+                "en",
+                Some("wiki/concepts/react-pattern.md"),
+            )
+            .unwrap();
+
+        assert!(ctx.prompt.contains("Start from wiki/index.md"));
+        assert!(ctx.prompt.contains("read additional Markdown files under wiki/"));
+        assert!(ctx.prompt.contains("make only those small Markdown edits"));
+        assert!(!ctx.prompt.contains("read-only mode"));
+        assert!(!ctx.prompt.contains("Do not modify files"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_planner_includes_index_pinned_keyword_hits_and_omits_over_budget() {
+        let (context, root) = tmp_context("planner-budget");
+        seed_vault(&context);
+        write_file(
+            &context,
+            "wiki/concepts/long-keyword.md",
+            &format!(
+                "---\ntitle: Long Keyword\ntype: concept\n---\n\n# Long Keyword\n\n{}",
+                "react pattern details. ".repeat(400)
+            ),
+        );
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern long keyword",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(800),
+                Some("wiki/concepts/agent-memory.md"),
+            )
+            .unwrap();
+
+        assert_eq!(ctx.source_refs[0].page_path, "wiki/index.md");
+        assert!(ctx
+            .source_refs
+            .iter()
+            .any(|source| source.page_path == "wiki/concepts/agent-memory.md" && source.is_pinned));
+        assert!(ctx
+            .source_refs
+            .iter()
+            .any(|source| source.page_path == "wiki/concepts/react-pattern.md"));
+        assert!(!ctx.diagnostics.retrieval_hits.is_empty());
+        assert!(!ctx.diagnostics.omitted_pages.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_planner_keeps_required_and_pinned_excerpts_within_source_budget() {
+        let (context, root) = tmp_context("planner-required-budget");
+        seed_vault(&context);
+        write_file(
+            &context,
+            "wiki/index.md",
+            &format!("# Index\n\n{}", "index context. ".repeat(500)),
+        );
+        write_file(
+            &context,
+            "wiki/concepts/huge-pinned.md",
+            &format!(
+                "---\ntitle: Huge Pinned\ntype: concept\n---\n\n# Huge Pinned\n\n{}",
+                "pinned context. ".repeat(500)
+            ),
+        );
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "huge pinned",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(800),
+                Some("wiki/concepts/huge-pinned.md"),
+            )
+            .unwrap();
+
+        let excerpt_chars: usize = ctx
+            .source_refs
+            .iter()
+            .filter_map(|source| source.excerpt.as_deref())
+            .map(super::char_len)
+            .sum();
+        assert!(excerpt_chars <= ctx.diagnostics.source_budget_chars);
+        assert!(ctx
+            .diagnostics
+            .omitted_pages
+            .contains(&"wiki/concepts/huge-pinned.md".to_string()));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -652,7 +1273,9 @@ mod tests {
         let (context, root) = tmp_context("roundtrip");
         let service = ChatService::default();
 
-        let session = service.create_session(&context, Some("My Chat")).unwrap();
+        let session = service
+            .create_session(&context, Some("My Chat"), None)
+            .unwrap();
         assert_eq!(session.title, "My Chat");
         assert!(context
             .resolve_project_path(&format!(".app/chats/{}.json", session.id))
@@ -669,7 +1292,7 @@ mod tests {
     fn create_session_defaults_title_and_appends_message() {
         let (context, root) = tmp_context("append");
         let service = ChatService::default();
-        let mut session = service.create_session(&context, None).unwrap();
+        let mut session = service.create_session(&context, None, None).unwrap();
         assert_eq!(session.title, "New chat");
 
         service
@@ -686,7 +1309,7 @@ mod tests {
     fn rename_and_delete_session_update_disk() {
         let (context, root) = tmp_context("rename");
         let service = ChatService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
         let original_updated = session.updated_at.clone();
 
         let renamed = service
@@ -709,7 +1332,7 @@ mod tests {
     fn rename_rejects_empty_title() {
         let (context, root) = tmp_context("empty-title");
         let service = ChatService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
         let err = service
             .rename_session(&context, &session.id, "   ")
             .expect_err("empty title must be rejected");
@@ -721,7 +1344,9 @@ mod tests {
     fn list_sessions_skips_corrupt_files_without_panicking() {
         let (context, root) = tmp_context("list-corrupt");
         let service = ChatService::default();
-        let good = service.create_session(&context, Some("Good")).unwrap();
+        let good = service
+            .create_session(&context, Some("Good"), None)
+            .unwrap();
 
         // Seed a corrupt session file alongside the good one.
         write_file(&context, ".app/chats/corrupt.json", "{ not valid json");
@@ -762,8 +1387,9 @@ mod tests {
         let service = ChatService::default();
         let search = SearchService::default();
 
-        // Seed a session with > HISTORY_TURNS turns; older turns must be dropped.
-        let mut session = service.create_session(&context, None).unwrap();
+        // Seed a session with many short turns; budget, not a fixed turn cap,
+        // decides how much history is included.
+        let mut session = service.create_session(&context, None, None).unwrap();
         for i in 0..15 {
             session.messages.push(ChatMessage {
                 id: format!("old-{i}"),
@@ -779,16 +1405,29 @@ mod tests {
                 provider: None,
                 task_id: None,
                 convenience_edit: None,
+                retrieval_diagnostics: None,
             });
         }
 
         let ctx = service
-            .build_retrieval_context(&context, &search, "react pattern", &session, "en", None)
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(8_000),
+                None,
+            )
             .unwrap();
 
-        // Top citation is the title-matching page (title scores 100).
-        assert!(!ctx.citations.is_empty());
-        assert_eq!(ctx.citations[0].page_path, "wiki/concepts/react-pattern.md");
+        assert!(!ctx.source_refs.is_empty());
+        assert!(ctx
+            .source_refs
+            .iter()
+            .any(|source| source.page_path == "wiki/concepts/react-pattern.md"));
+        assert!(!ctx.diagnostics.retrieval_hits.is_empty());
         assert!(ctx.prompt.contains("Wiki purpose"));
         assert!(ctx.prompt.contains("This wiki explains agents."));
         assert!(ctx.prompt.contains("ReAct Pattern"));
@@ -796,11 +1435,10 @@ mod tests {
         assert!(ctx.prompt.contains("react pattern"));
         // Language preference is injected into the prompt.
         assert!(ctx.prompt.contains("Respond in English."));
-        // Only the last HISTORY_TURNS turns appear in the prompt.
-        // 15 messages (0..14) → last 8 are turns 7..=14.
+        // These short turns fit the conservative history budget, including
+        // turns older than the previous fixed 8-turn cap.
         assert!(ctx.prompt.contains("ancient turn number 14"));
-        assert!(ctx.prompt.contains("ancient turn number 7"));
-        assert!(!ctx.prompt.contains("ancient turn number 6"));
+        assert!(ctx.prompt.contains("ancient turn number 0"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -811,7 +1449,7 @@ mod tests {
         seed_vault(&context);
         let service = ChatService::default();
         let search = SearchService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
 
         let ctx = service
             .build_retrieval_context(
@@ -820,14 +1458,20 @@ mod tests {
                 "agent memory",
                 &session,
                 "en",
+                ChatRoute::Byok,
+                Some(8_000),
                 Some("wiki/concepts/react-pattern.md"),
             )
             .unwrap();
 
-        assert_eq!(ctx.citations[0].page_path, "wiki/concepts/react-pattern.md");
-        assert!(ctx.citations[0].is_pinned);
-        assert_eq!(ctx.citations[0].score, 10_000);
-        assert!(ctx.prompt.contains("--- Current Wiki page ---"));
+        let pinned = ctx
+            .source_refs
+            .iter()
+            .find(|source| source.page_path == "wiki/concepts/react-pattern.md")
+            .unwrap();
+        assert!(pinned.is_pinned);
+        assert_eq!(pinned.score, 10_000);
+        assert!(ctx.prompt.contains("Numbered sources"));
         assert!(ctx.prompt.contains("ReAct Pattern"));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -848,7 +1492,7 @@ mod tests {
         );
         let service = ChatService::default();
         let search = SearchService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
 
         let ctx = service
             .build_retrieval_context(
@@ -857,6 +1501,8 @@ mod tests {
                 "summarize this page",
                 &session,
                 "en",
+                ChatRoute::Agent,
+                None,
                 Some("wiki/concepts/long-page.md"),
             )
             .unwrap();
@@ -877,19 +1523,26 @@ mod tests {
         seed_vault(&context);
         let service = ChatService::default();
         let search = SearchService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
 
         let ctx = service
-            .build_retrieval_context(&context, &search, "vibecoding", &session, "en", None)
+            .build_retrieval_context(
+                &context,
+                &search,
+                "vibecoding",
+                &session,
+                "en",
+                ChatRoute::Agent,
+                None,
+                None,
+            )
             .unwrap();
 
+        assert!(ctx.prompt.contains("read-only"));
         assert!(ctx
             .prompt
-            .contains("current working directory is the project root"));
-        assert!(ctx.prompt.contains("read Markdown files under wiki/"));
-        assert!(ctx
-            .prompt
-            .contains("If the keyword Sources section is empty or insufficient"));
+            .contains("read additional Markdown files under wiki/"));
+        assert!(ctx.prompt.contains("Start from wiki/index.md"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -900,7 +1553,7 @@ mod tests {
         seed_vault(&context);
         let service = ChatService::default();
         let search = SearchService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
 
         let ctx = service
             .build_retrieval_context(
@@ -909,18 +1562,20 @@ mod tests {
                 "react pattern",
                 &session,
                 "en",
+                ChatRoute::Byok,
+                Some(8_000),
                 Some("wiki/concepts/react-pattern.md"),
             )
             .unwrap();
 
         assert_eq!(
-            ctx.citations
+            ctx.source_refs
                 .iter()
-                .filter(|citation| citation.page_path == "wiki/concepts/react-pattern.md")
+                .filter(|source| source.page_path == "wiki/concepts/react-pattern.md")
                 .count(),
             1
         );
-        assert!(ctx.citations.len() <= super::RETRIEVAL_LIMIT);
+        assert!(ctx.source_refs.len() <= super::RETRIEVAL_LIMIT + 1);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -931,7 +1586,7 @@ mod tests {
         seed_vault(&context);
         let service = ChatService::default();
         let search = SearchService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
 
         let err = service
             .build_retrieval_context(
@@ -940,6 +1595,8 @@ mod tests {
                 "react pattern",
                 &session,
                 "en",
+                ChatRoute::Byok,
+                Some(8_000),
                 Some("wiki/concepts/missing.md"),
             )
             .expect_err("missing pinned page must fail retrieval");
@@ -953,7 +1610,7 @@ mod tests {
     fn build_answer_markdown_includes_frontmatter_and_sources() {
         let (context, root) = tmp_context("markdown");
         let service = ChatService::default();
-        let session = service.create_session(&context, None).unwrap();
+        let session = service.create_session(&context, None, None).unwrap();
         let question = user_message("What is the ReAct pattern?");
         let answer = ChatMessage {
             id: "a-1".into(),
@@ -961,6 +1618,7 @@ mod tests {
             content: "It is a reason-then-act loop.".into(),
             created_at: "2026-06-20T00:00:00Z".into(),
             citations: vec![crate::models::chat::ChatCitation {
+                source_id: Some("S2".into()),
                 page_path: "wiki/concepts/react-pattern.md".into(),
                 title: "ReAct Pattern".into(),
                 snippet: None,
@@ -971,6 +1629,7 @@ mod tests {
             provider: None,
             task_id: None,
             convenience_edit: None,
+            retrieval_diagnostics: None,
         };
 
         let (slug, markdown) = service.build_answer_markdown(&session, &question, &answer);
@@ -982,6 +1641,39 @@ mod tests {
         assert!(markdown.contains("## Answer"));
         assert!(markdown.contains("reason-then-act loop"));
         assert!(markdown.contains("react-pattern"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_answer_markdown_sources_follow_parsed_model_citations_only() {
+        let (context, root) = tmp_context("markdown-parsed-only");
+        let service = ChatService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+        let question = user_message("Which page is cited?");
+        let refs = vec![
+            source_ref("S1", "wiki/retrieved-only.md", "Retrieved Only"),
+            source_ref("S2", "wiki/model-used.md", "Model Used"),
+        ];
+        let parsed =
+            ChatService::parse_model_citations("Only the second source is used [S2].", &refs);
+        let answer = ChatMessage {
+            id: "a-2".into(),
+            role: ChatRole::Assistant,
+            content: "Only the second source is used [S2].".into(),
+            created_at: "2026-06-20T00:00:00Z".into(),
+            citations: parsed.citations,
+            route: None,
+            provider: None,
+            task_id: None,
+            convenience_edit: None,
+            retrieval_diagnostics: None,
+        };
+
+        let (_slug, markdown) = service.build_answer_markdown(&session, &question, &answer);
+
+        assert!(markdown.contains("  - wiki/model-used.md"));
+        assert!(!markdown.contains("wiki/retrieved-only.md"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

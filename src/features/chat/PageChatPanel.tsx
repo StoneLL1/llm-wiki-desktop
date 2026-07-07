@@ -1,10 +1,11 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { BookOpenText } from "lucide-react";
+import { BookOpenText, Plus } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useTaskStore } from "../../stores/taskStore";
+import type { ChatMessage } from "../../types/chat";
 import { isTerminalStatus } from "../../types/task";
 import type { WikiPageContent } from "../../types/wiki";
 import { ChatComposer } from "./ChatComposer";
@@ -15,6 +16,9 @@ interface PageChatPanelProps {
   projectId: string;
   rootPath: string;
   onShowRelatedPages?: () => void;
+  /** Open a cited wiki page (e.g. navigate the wiki view to it). When
+   *  unset, citation clicks are no-ops. */
+  onOpenCitation?: (path: string) => void;
 }
 
 export function PageChatPanel({
@@ -22,6 +26,7 @@ export function PageChatPanel({
   projectId,
   rootPath,
   onShowRelatedPages,
+  onOpenCitation,
 }: PageChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((state) => state.activeSessionId);
@@ -32,7 +37,10 @@ export function PageChatPanel({
   const streamingText = useChatStore((state) => state.streamingText);
   const streamingRoute = useChatStore((state) => state.streamingRoute);
   const createSession = useChatStore((state) => state.createSession);
+  const ensurePageSession = useChatStore((state) => state.ensurePageSession);
   const send = useChatStore((state) => state.send);
+  const saveStatus = useChatStore((state) => state.saveStatus);
+  const saveAnswer = useChatStore((state) => state.saveAnswer);
   const reloadActive = useChatStore((state) => state.reloadActive);
 
   const tasks = useTaskStore((state) => state.tasks);
@@ -62,17 +70,40 @@ export function PageChatPanel({
     };
   }, [sendTask, projectId, rootPath, reloadActive, clearSendTask]);
 
-  const handleSend = async (content: string) => {
+  // Bind a chat session to the current wiki page: reuse an existing
+  // page-scoped session if one exists, otherwise create one. This is what
+  // stops different wiki pages from sharing a single global chat.
+  // Deps are the identity-relevant fields, NOT the whole `page` object — the
+  // wiki store returns a fresh page object reference on unrelated re-renders
+  // (scroll, frontmatter reparse), and depending on it would re-fire this
+  // effect (and a backend list/select round-trip) on every churn.
+  useEffect(() => {
     if (!page) return;
+    void ensurePageSession(projectId, rootPath, page.meta.path, page.meta.title, false);
+  }, [projectId, rootPath, page?.meta.path, page?.meta.title, ensurePageSession]);
+
+  const handleSend = async (content: string): Promise<boolean> => {
+    if (!page) return false;
     let sessionId = activeSessionId;
     if (!sessionId) {
-      const created = await createSession(projectId, rootPath, `Ask: ${page.meta.title}`);
+      const created = await createSession(
+        projectId,
+        rootPath,
+        `Ask: ${page.meta.title}`,
+        page.meta.path,
+      );
       sessionId = created?.id ?? useChatStore.getState().activeSessionId;
     }
-    if (!sessionId) return;
-    void send(projectId, rootPath, sessionId, content, "auto", {
+    if (!sessionId) return false;
+    const taskId = await send(projectId, rootPath, sessionId, content, "auto", {
       pinnedPagePath: page.meta.path,
     });
+    return Boolean(taskId);
+  };
+
+  const handleNewPageChat = () => {
+    if (!page) return;
+    void ensurePageSession(projectId, rootPath, page.meta.path, page.meta.title, true);
   };
 
   const handleCancel = () => {
@@ -91,7 +122,7 @@ export function PageChatPanel({
   }
 
   return (
-    <div className="page-chat flex h-full min-h-0 flex-col">
+    <div className="page-chat page-chat-shell flex h-full min-h-0 flex-col">
       <div className="page-chat__head border-b border-[var(--border-subtle)] px-4 py-3">
         <div className="flex items-start gap-2">
           <div className="min-w-0 flex-1">
@@ -102,6 +133,15 @@ export function PageChatPanel({
               {page.meta.path}
             </div>
           </div>
+          <button
+            aria-label={t("chat.sessions.new")}
+            className="icon-button shrink-0"
+            onClick={handleNewPageChat}
+            title={t("chat.sessions.new")}
+            type="button"
+          >
+            <Plus aria-hidden="true" size={15} />
+          </button>
           {onShowRelatedPages ? (
             <button
               aria-label={t("wiki.related.title")}
@@ -138,10 +178,18 @@ export function PageChatPanel({
                 message={message}
                 t={t}
                 generating={generating}
-                saveStatus="idle"
-                onCitationClick={() => {}}
-                onOpenCitation={() => {}}
-                onSave={() => {}}
+                saveStatus={saveStatus[message.id] ?? "idle"}
+                onCitationClick={(ref) => {
+                  const citation = resolveCitationRef(message.citations ?? [], ref);
+                  if (citation && onOpenCitation) onOpenCitation(citation.pagePath);
+                }}
+                onOpenCitation={(path) => {
+                  if (onOpenCitation) onOpenCitation(path);
+                }}
+                onSave={() => {
+                  if (!activeSessionId) return;
+                  void saveAnswer(projectId, rootPath, activeSessionId, message.id);
+                }}
               />
             ))}
             {generating ? (
@@ -167,4 +215,14 @@ export function PageChatPanel({
       />
     </div>
   );
+}
+
+function resolveCitationRef(citations: NonNullable<ChatMessage["citations"]>, ref: string) {
+  const normalized = ref.toUpperCase();
+  const bySourceId = citations.find(
+    (citation) => citation.sourceId?.toUpperCase() === normalized,
+  );
+  if (bySourceId) return bySourceId;
+  const index = Number.parseInt(ref, 10);
+  return Number.isFinite(index) ? citations[index - 1] : undefined;
 }
