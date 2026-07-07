@@ -215,7 +215,7 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
         files: vec![
             CompileFile::new(
                 "wiki/concepts/transformers.md",
-                "---\ntype: concept\ntitle: Transformers\n---\n\n# Transformers\n\nSee [[index]].\n",
+                "---\ntype: concept\ntitle: Transformers\nsources: [notes.md]\n---\n\n# Transformers\n\nTransformers connect attention patterns across the imported notes. See [[index]].\n\n> Sources: [[sources/notes]]\n",
             ),
             CompileFile::new("wiki/index.md", "# Index\n\n- [[transformers]]\n"),
             CompileFile::new("wiki/overview.md", &overview_disk),
@@ -228,7 +228,8 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
     // Confirmed apply: pass baseline hashes as the expected-current state so the
     // core pages overwrite cleanly (matching hash) and the new concept page is
     // created — no conflict abort, so the loop actually lands the page.
-    let applied = CompileService::apply_confirmed_manifest(&context, &manifest, &baseline).unwrap();
+    let applied =
+        CompileService::apply_confirmed_manifest(&context, &manifest, None, &baseline).unwrap();
     assert!(
         applied.iter().any(|p| p == "wiki/concepts/transformers.md"),
         "confirmed apply must report the created concept page: {applied:?}"
@@ -419,7 +420,8 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         "secret store must round-trip the key"
     );
     // ...but the persisted settings file carries NO secret material: no key,
-    // no auth header, no token-shaped field of any casing.
+    // no auth header, and no exact token field of any casing. Fields like
+    // maxTokens and temperature are ordinary model settings, not secret leaks.
     let raw = std::fs::read_to_string(context.app_dir.join("settings.json")).unwrap();
     assert!(raw.contains("claude-test"), "provider config must persist");
     let lowered = raw.to_ascii_lowercase();
@@ -430,7 +432,7 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         "apikey",
         "authorization",
         "bearer",
-        "token",
+        "\"token\"",
     ] {
         assert!(
             !lowered.contains(forbidden),
@@ -445,7 +447,7 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         "---\ntype: concept\ntitle: Cats\n---\n\n# Cats\n\nCats are mammals.\n",
     );
     let chat = ChatService::default();
-    let mut session = chat.create_session(&context, Some("Cats?")).unwrap();
+    let mut session = chat.create_session(&context, Some("Cats?"), None).unwrap();
     let now = llm_wiki_desktop_lib::utils::time_utils::now_rfc3339();
     let question = ChatMessage {
         id: "q1".into(),
@@ -457,6 +459,7 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         provider: None,
         task_id: None,
         convenience_edit: None,
+        retrieval_diagnostics: None,
     };
     chat.append_message(&context, &mut session, question.clone())
         .unwrap();
@@ -469,28 +472,41 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
             "cat",
             &session,
             "en",
+            ChatRoute::Byok,
+            None,
             None,
         )
         .unwrap();
     assert!(
         retrieval
-            .citations
+            .source_refs
             .iter()
-            .any(|c| c.page_path.contains("cats")),
+            .any(|source| source.page_path.contains("cats")),
         "retrieval must cite the relevant page"
     );
 
-    // Fake model answer carrying those citations.
+    // Fake model answer carrying a model-used citation marker. Retrieval is
+    // index-first, so cite the actual cats source id instead of assuming S1.
+    let cats_source_id = retrieval
+        .source_refs
+        .iter()
+        .find(|source| source.page_path.contains("cats"))
+        .expect("cats source should be retrievable")
+        .id
+        .clone();
+    let answer_content = format!("A cat is a mammal [{cats_source_id}].");
+    let parsed = ChatService::parse_model_citations(&answer_content, &retrieval.source_refs);
     let answer = ChatMessage {
         id: "a1".into(),
         role: ChatRole::Assistant,
-        content: "A cat is a mammal.".into(),
+        content: answer_content,
         created_at: now,
-        citations: retrieval.citations.clone(),
+        citations: parsed.citations,
         route: Some(ChatRoute::Byok),
         provider: None,
         task_id: None,
         convenience_edit: None,
+        retrieval_diagnostics: Some(retrieval.diagnostics),
     };
     chat.append_message(&context, &mut session, answer.clone())
         .unwrap();
@@ -581,7 +597,7 @@ fn safety_loop_compile_conflict_does_not_mutate_without_confirmation() {
         deletions: vec![],
         summary: "safety".into(),
     };
-    let result = CompileService::apply_manifest(&context, &manifest, &baseline).unwrap();
+    let result = CompileService::apply_manifest(&context, &manifest, None, &baseline).unwrap();
     assert!(
         result.conflicts.iter().any(|c| c == "wiki/index.md"),
         "externally-edited index must surface as a conflict: {:?}",
@@ -617,21 +633,40 @@ fn safety_loop_confirm_requires_matching_state_and_creates_checkpoint() {
 
     // A confirmed compile requires the wiki state to match what the user
     // confirmed (expected hashes). Drift must surface, not silently overwrite.
+    std::fs::create_dir_all(context.wiki_dir.join("sources")).unwrap();
+    std::fs::write(
+        context.wiki_dir.join("sources/source-a.md"),
+        "# Source A\n\nA confirmed source.",
+    )
+    .unwrap();
+    let overview_disk = std::fs::read_to_string(context.wiki_dir.join("overview.md")).unwrap();
+    let log_disk = std::fs::read_to_string(context.wiki_dir.join("log.md")).unwrap();
     let manifest = CompileManifest {
-        files: vec![CompileFile::new("wiki/concepts/new.md", "# New")],
+        files: vec![
+            CompileFile::new(
+                "wiki/concepts/new.md",
+                "---\ntype: concept\nsources: [source-a.md]\n---\n\n# New\n\nA derived concept page.\n\n> Sources: [[sources/source-a]]\n",
+            ),
+            CompileFile::new("wiki/index.md", "# Index\n\n- [[new]]\n"),
+            CompileFile::new("wiki/overview.md", &overview_disk),
+            CompileFile::new("wiki/log.md", &log_disk),
+        ],
         deletions: vec![],
         summary: "confirm".into(),
     };
-    let mut hashes = std::collections::HashMap::new();
+    let hashes = CompileService::snapshot_wiki(&context).unwrap();
     // No existing hash for a brand-new page → confirm creates it.
-    let applied = CompileService::apply_confirmed_manifest(&context, &manifest, &hashes).unwrap();
+    let applied =
+        CompileService::apply_confirmed_manifest(&context, &manifest, None, &hashes).unwrap();
     assert!(context.wiki_dir.join("concepts/new.md").exists());
     assert!(applied.iter().any(|p| p.contains("new.md")));
 
     // Now mutate the page after confirmation → confirm-state mismatch.
+    let confirmed_hashes = CompileService::snapshot_wiki(&context).unwrap();
     std::fs::write(context.wiki_dir.join("concepts/new.md"), "drift").unwrap();
-    hashes.insert("wiki/concepts/new.md".into(), "stale".into());
-    let err = CompileService::apply_confirmed_manifest(&context, &manifest, &hashes).unwrap_err();
+    let err =
+        CompileService::apply_confirmed_manifest(&context, &manifest, None, &confirmed_hashes)
+            .unwrap_err();
     assert_eq!(err.code, "CONFIRMATION_STATE_MISMATCH");
 
     std::fs::remove_dir_all(&root).ok();

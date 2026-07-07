@@ -424,15 +424,6 @@ impl CompileService {
     }
 
     pub fn validate_manifest(manifest: &CompileManifest) -> Result<(), BackendError> {
-        if !manifest.deletions.is_empty() {
-            return Err(BackendError::new(
-                "COMPILE_DELETE_FORBIDDEN",
-                "Compile cannot delete pages. Record obsolete pages in wiki/log.md for user review instead.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({ "deletions": manifest.deletions })));
-        }
         let mut seen = HashSet::new();
         for path in manifest
             .files
@@ -458,6 +449,15 @@ impl CompileService {
                 )
                 .with_details(serde_json::json!({ "path": path })));
             }
+        }
+        if !manifest.deletions.is_empty() {
+            return Err(BackendError::new(
+                "COMPILE_DELETE_FORBIDDEN",
+                "Compile cannot delete pages. Record obsolete pages in wiki/log.md for user review instead.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "deletions": manifest.deletions })));
         }
 
         for required in ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] {
