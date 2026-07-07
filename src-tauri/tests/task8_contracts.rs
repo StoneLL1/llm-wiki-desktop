@@ -160,7 +160,7 @@ fn compile_conflict_does_not_partially_modify_real_wiki() {
         deletions: vec![],
         summary: "compile".into(),
     };
-    let result = CompileService::apply_manifest(&context, &manifest, &baseline).unwrap();
+    let result = CompileService::apply_manifest(&context, &manifest, None, &baseline).unwrap();
     assert_eq!(
         result.conflicts,
         vec!["wiki/index.md", "wiki/log.md", "wiki/overview.md"]

@@ -87,6 +87,8 @@ pub struct ChatRetrievalDiagnostics {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retrieval_hits: Vec<ChatRetrievalHit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expanded_pages: Vec<ChatExpandedPage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_pages: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub omitted_pages: Vec<String>,
@@ -97,6 +99,23 @@ pub struct ChatRetrievalDiagnostics {
     pub invalid_citation_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_unverified: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSourceSelectionReason {
+    Index,
+    Pinned,
+    KeywordHit,
+    GraphNeighbor,
+    SourceOverlap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatExpandedPage {
+    pub path: String,
+    pub reason: ChatSourceSelectionReason,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -428,6 +447,10 @@ mod tests {
                     excerpt: Some("retrieved excerpt".into()),
                     is_pinned: false,
                 }],
+                expanded_pages: vec![ChatExpandedPage {
+                    path: "wiki/expanded.md".into(),
+                    reason: ChatSourceSelectionReason::GraphNeighbor,
+                }],
                 selected_pages: vec!["wiki/cited.md".into()],
                 omitted_pages: vec!["wiki/omitted.md".into()],
                 budget_chars: 24_000,
@@ -443,6 +466,10 @@ mod tests {
         assert_eq!(
             value["retrievalDiagnostics"]["retrievalHits"][0]["path"],
             json!("wiki/not-cited.md")
+        );
+        assert_eq!(
+            value["retrievalDiagnostics"]["expandedPages"][0]["reason"],
+            json!("graph_neighbor")
         );
         assert_eq!(value["citations"][0]["pagePath"], json!("wiki/cited.md"));
     }

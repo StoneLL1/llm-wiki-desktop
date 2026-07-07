@@ -29,9 +29,22 @@ export interface ChatRetrievalHit {
   isPinned?: boolean;
 }
 
+export type ChatSourceSelectionReason =
+  | "index"
+  | "pinned"
+  | "keyword_hit"
+  | "graph_neighbor"
+  | "source_overlap";
+
+export interface ChatExpandedPage {
+  path: string;
+  reason: ChatSourceSelectionReason;
+}
+
 export interface ChatRetrievalDiagnostics {
   route: ChatRoute;
   retrievalHits?: ChatRetrievalHit[];
+  expandedPages?: ChatExpandedPage[];
   selectedPages?: string[];
   omittedPages?: string[];
   budgetChars: number;

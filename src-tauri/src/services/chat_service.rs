@@ -3,13 +3,15 @@ use std::path::Path;
 
 use crate::errors::BackendError;
 use crate::models::chat::{
-    ChatCitation, ChatMessage, ChatRetrievalDiagnostics, ChatRetrievalHit, ChatRoute, ChatSession,
-    ChatSessionSummary, ChatSourceRef, SaveAnswerResult,
+    ChatCitation, ChatExpandedPage, ChatMessage, ChatRetrievalDiagnostics, ChatRetrievalHit,
+    ChatRoute, ChatSession, ChatSessionSummary, ChatSourceRef, ChatSourceSelectionReason,
+    SaveAnswerResult,
 };
 use crate::models::paths::ProjectContext;
+use crate::models::wiki::{WikiPageMeta, WikiPageType};
 use crate::services::file_store::FileStore;
 use crate::services::SearchService;
-use crate::services::{GitService, WriteMode};
+use crate::services::{GitService, GraphService, WriteMode};
 use crate::utils::markdown_utils::slugify_query;
 use crate::utils::time_utils::now_rfc3339;
 
@@ -22,6 +24,8 @@ const AGENT_CONTEXT_CHARS: usize = 48_000;
 const MIN_CONTEXT_CHARS: usize = 2_000;
 const MAX_CONTEXT_CHARS: usize = 120_000;
 const MIN_KEYWORD_SOURCE_CHARS: usize = 240;
+const MAX_GRAPH_EXPANSIONS: usize = 3;
+const MAX_SOURCE_OVERLAP_EXPANSIONS: usize = 3;
 
 /// Persists chat sessions as JSON under `.app/chats/{id}.json` and assembles the
 /// retrieval context (local SearchService hits + purpose + bounded history) for
@@ -265,6 +269,9 @@ impl ChatService {
         let mut diagnostic_hits = Vec::new();
         let mut candidates = Vec::new();
         let mut seen_paths = HashSet::new();
+        let mut seed_paths = Vec::new();
+        let mut expanded_pages = Vec::new();
+        let mut expanded_page_paths = HashSet::new();
         if let Ok(index) = search_service.read_page(context, "wiki/index.md", &HashSet::new()) {
             seen_paths.insert(index.meta.path.clone());
             candidates.push(SourceCandidate {
@@ -279,6 +286,7 @@ impl ChatService {
         if let Some(path) = pinned_page_path {
             let hit = self.pinned_retrieval_hit(context, search_service, path)?;
             diagnostic_hits.push(hit.clone());
+            seed_paths.push(hit.path.clone());
             if seen_paths.insert(hit.path.clone()) {
                 candidates.push(SourceCandidate::from_hit(hit, true));
             }
@@ -291,8 +299,42 @@ impl ChatService {
         )?;
         for hit in search_hits {
             diagnostic_hits.push(hit.clone());
+            seed_paths.push(hit.path.clone());
             if seen_paths.insert(hit.path.clone()) {
                 candidates.push(SourceCandidate::from_hit(hit, false));
+            }
+        }
+        let pages = search_service.scan_wiki(context, &HashSet::new())?.pages;
+        for expansion in graph_expand_candidates(&pages, &seed_paths, MAX_GRAPH_EXPANSIONS) {
+            if expanded_page_paths.insert(expansion.path.clone()) {
+                expanded_pages.push(ChatExpandedPage {
+                    path: expansion.path.clone(),
+                    reason: ChatSourceSelectionReason::GraphNeighbor,
+                });
+            }
+            if seen_paths.insert(expansion.path.clone()) {
+                if let Some(candidate) =
+                    candidate_from_page(context, search_service, &expansion.path, expansion.score)
+                {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        for expansion in
+            source_overlap_candidates(&pages, &seed_paths, MAX_SOURCE_OVERLAP_EXPANSIONS)
+        {
+            if expanded_page_paths.insert(expansion.path.clone()) {
+                expanded_pages.push(ChatExpandedPage {
+                    path: expansion.path.clone(),
+                    reason: ChatSourceSelectionReason::SourceOverlap,
+                });
+            }
+            if seen_paths.insert(expansion.path.clone()) {
+                if let Some(candidate) =
+                    candidate_from_page(context, search_service, &expansion.path, expansion.score)
+                {
+                    candidates.push(candidate);
+                }
             }
         }
         let mut remaining_source_chars = source_budget_chars;
@@ -331,6 +373,7 @@ impl ChatService {
         let diagnostics = ChatRetrievalDiagnostics {
             route,
             retrieval_hits: diagnostic_hits,
+            expanded_pages,
             selected_pages: source_refs
                 .iter()
                 .map(|source| source.page_path.clone())
@@ -719,6 +762,146 @@ impl SourceCandidate {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphExpansionCandidate {
+    pub path: String,
+    pub score: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOverlapCandidate {
+    pub path: String,
+    pub score: i64,
+}
+
+pub fn graph_expand_candidates(
+    pages: &[WikiPageMeta],
+    seed_paths: &[String],
+    max_neighbors: usize,
+) -> Vec<GraphExpansionCandidate> {
+    if seed_paths.is_empty() || max_neighbors == 0 {
+        return Vec::new();
+    }
+    let seed_set: HashSet<&str> = seed_paths.iter().map(String::as_str).collect();
+    let graph = GraphService::default().build_from_pages(pages);
+    let mut scores: HashMap<String, i64> = HashMap::new();
+    for edge in graph.edges {
+        let source_seed = seed_set.contains(edge.source.as_str());
+        let target_seed = seed_set.contains(edge.target.as_str());
+        let candidate = match (source_seed, target_seed) {
+            (true, false) => Some(edge.target),
+            (false, true) => Some(edge.source),
+            _ => None,
+        };
+        if let Some(path) = candidate {
+            if is_expandable_page(pages, &path) {
+                *scores.entry(path).or_insert(0) += (edge.weight as i64) * 1_000;
+            }
+        }
+    }
+    sorted_expansion_candidates(scores)
+        .into_iter()
+        .take(max_neighbors)
+        .map(|(path, score)| GraphExpansionCandidate { path, score })
+        .collect()
+}
+
+pub fn source_overlap_candidates(
+    pages: &[WikiPageMeta],
+    seed_paths: &[String],
+    max_candidates: usize,
+) -> Vec<SourceOverlapCandidate> {
+    if seed_paths.is_empty() || max_candidates == 0 {
+        return Vec::new();
+    }
+    let seed_set: HashSet<&str> = seed_paths.iter().map(String::as_str).collect();
+    let mut seed_sources = HashSet::new();
+    for page in pages
+        .iter()
+        .filter(|page| seed_set.contains(page.path.as_str()))
+    {
+        for source in &page.sources {
+            if let Some(key) = canonical_source_key(source) {
+                seed_sources.insert(key);
+            }
+        }
+    }
+    if seed_sources.is_empty() {
+        return Vec::new();
+    }
+    let mut scores = HashMap::new();
+    for page in pages {
+        if seed_set.contains(page.path.as_str()) || !is_expandable_page(pages, &page.path) {
+            continue;
+        }
+        let overlap = page
+            .sources
+            .iter()
+            .filter_map(|source| canonical_source_key(source))
+            .filter(|source| seed_sources.contains(source))
+            .count();
+        if overlap > 0 {
+            scores.insert(page.path.clone(), (overlap as i64) * 900);
+        }
+    }
+    sorted_expansion_candidates(scores)
+        .into_iter()
+        .take(max_candidates)
+        .map(|(path, score)| SourceOverlapCandidate { path, score })
+        .collect()
+}
+
+fn canonical_source_key(source: &str) -> Option<String> {
+    let normalized = source.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.starts_with("wiki/sources/") {
+        Some(normalized.to_ascii_lowercase())
+    } else if normalized.starts_with("sources/") {
+        Some(format!("wiki/{normalized}").to_ascii_lowercase())
+    } else if !normalized.contains('/') {
+        Some(format!("wiki/sources/{normalized}").to_ascii_lowercase())
+    } else {
+        Some(normalized.to_ascii_lowercase())
+    }
+}
+
+fn sorted_expansion_candidates(mut scores: HashMap<String, i64>) -> Vec<(String, i64)> {
+    let mut items: Vec<(String, i64)> = scores.drain().collect();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    items
+}
+
+fn is_expandable_page(pages: &[WikiPageMeta], path: &str) -> bool {
+    pages.iter().any(|page| {
+        page.path == path
+            && !matches!(page.page_type, WikiPageType::Source | WikiPageType::Query)
+            && !STRUCTURAL_SOURCE_PATHS.contains(&page.path.as_str())
+    })
+}
+
+const STRUCTURAL_SOURCE_PATHS: &[&str] = &["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
+
+fn candidate_from_page(
+    context: &ProjectContext,
+    search_service: &SearchService,
+    path: &str,
+    score: i64,
+) -> Option<SourceCandidate> {
+    let page = search_service
+        .read_page(context, path, &HashSet::new())
+        .ok()?;
+    Some(SourceCandidate {
+        path: page.meta.path,
+        title: page.meta.title,
+        excerpt: page.body_markdown.trim().to_string(),
+        score,
+        is_pinned: false,
+        required: false,
+    })
+}
+
 fn retrieval_budgets(route: ChatRoute, context_window: Option<u64>) -> (usize, usize, usize) {
     let base = match (route, context_window) {
         (ChatRoute::Byok, Some(window)) if window > 0 => (window as usize).saturating_mul(2),
@@ -948,7 +1131,9 @@ fn stem_of(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::ChatService;
-    use crate::models::chat::{ChatMessage, ChatRole, ChatRoute, ChatSourceRef};
+    use crate::models::chat::{
+        ChatMessage, ChatRole, ChatRoute, ChatSourceRef, ChatSourceSelectionReason,
+    };
     use crate::models::paths::ProjectContext;
     use crate::services::GitService;
     use crate::services::SearchService;
@@ -976,12 +1161,17 @@ mod tests {
         write_file(
             context,
             "wiki/concepts/react-pattern.md",
-            "---\ntitle: ReAct Pattern\ntype: concept\ntags: [reasoning]\n---\n\n# ReAct Pattern\n\nReason then act loop for agents.",
+            "---\ntitle: ReAct Pattern\ntype: concept\ntags: [reasoning]\nsources:\n  - wiki/sources/shared.md\n---\n\n# ReAct Pattern\n\nReason then act loop for agents. See [[agent-memory]].",
         );
         write_file(
             context,
             "wiki/concepts/agent-memory.md",
-            "---\ntitle: Agent Memory\ntype: concept\ntags: [memory]\n---\n\n# Agent Memory\n\nCovers short context windows and RAG.",
+            "---\ntitle: Agent Memory\ntype: concept\ntags: [memory]\nsources:\n  - wiki/sources/shared.md\n---\n\n# Agent Memory\n\nCovers short context windows and RAG.",
+        );
+        write_file(
+            context,
+            "wiki/sources/shared.md",
+            "---\ntitle: Shared Source\ntype: source\n---\n\n# Shared Source\n\nOriginal source.",
         );
         write_file(context, "wiki/index.md", "# Index\n");
         write_file(
@@ -1167,7 +1357,9 @@ mod tests {
             .unwrap();
 
         assert!(ctx.prompt.contains("Start from wiki/index.md"));
-        assert!(ctx.prompt.contains("read additional Markdown files under wiki/"));
+        assert!(ctx
+            .prompt
+            .contains("read additional Markdown files under wiki/"));
         assert!(ctx.prompt.contains("make only those small Markdown edits"));
         assert!(!ctx.prompt.contains("read-only mode"));
         assert!(!ctx.prompt.contains("Do not modify files"));
@@ -1266,6 +1458,154 @@ mod tests {
             .contains(&"wiki/concepts/huge-pinned.md".to_string()));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_planner_adds_one_hop_graph_neighbors_with_diagnostics() {
+        let (context, root) = tmp_context("planner-graph");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(8_000),
+                None,
+            )
+            .unwrap();
+
+        assert!(ctx
+            .source_refs
+            .iter()
+            .any(|source| source.page_path == "wiki/concepts/agent-memory.md"));
+        assert!(ctx.diagnostics.expanded_pages.iter().any(|expanded| {
+            expanded.path == "wiki/concepts/agent-memory.md"
+                && expanded.reason == ChatSourceSelectionReason::GraphNeighbor
+        }));
+        assert_eq!(
+            ctx.diagnostics
+                .expanded_pages
+                .iter()
+                .filter(|expanded| expanded.path == "wiki/concepts/agent-memory.md")
+                .count(),
+            1,
+            "diagnostics should list each expanded page once even if multiple expansion strategies find it"
+        );
+        assert_eq!(
+            ctx.source_refs
+                .iter()
+                .filter(|source| source.page_path == "wiki/concepts/agent-memory.md")
+                .count(),
+            1,
+            "graph-expanded pages must be deduped with keyword/index/pinned pages"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_planner_adds_source_overlap_candidates_with_diagnostics() {
+        let (context, root) = tmp_context("planner-source-overlap");
+        seed_vault(&context);
+        write_file(
+            &context,
+            "wiki/synthesis/shared-synthesis.md",
+            "---\ntitle: Shared Synthesis\ntype: synthesis\nsources:\n  - shared.md\n---\n\n# Shared Synthesis\n\nThis page shares source evidence without naming the seed terms.",
+        );
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(8_000),
+                None,
+            )
+            .unwrap();
+
+        assert!(ctx
+            .source_refs
+            .iter()
+            .any(|source| source.page_path == "wiki/synthesis/shared-synthesis.md"));
+        assert!(ctx.diagnostics.expanded_pages.iter().any(|expanded| {
+            expanded.path == "wiki/synthesis/shared-synthesis.md"
+                && expanded.reason == ChatSourceSelectionReason::SourceOverlap
+        }));
+        assert!(!ctx
+            .source_refs
+            .iter()
+            .any(|source| source.page_path.starts_with("wiki/sources/")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_planner_omits_expanded_pages_when_budget_is_exhausted() {
+        let (context, root) = tmp_context("planner-expanded-budget");
+        seed_vault(&context);
+        write_file(
+            &context,
+            "wiki/concepts/react-pattern.md",
+            &format!(
+                "---\ntitle: ReAct Pattern\ntype: concept\ntags: [reasoning]\nsources:\n  - wiki/sources/shared.md\n---\n\n# ReAct Pattern\n\n{}",
+                "react pattern details. ".repeat(300)
+            ),
+        );
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "react pattern details",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(800),
+                None,
+            )
+            .unwrap();
+
+        assert!(ctx.diagnostics.expanded_pages.iter().any(|expanded| {
+            expanded.reason == ChatSourceSelectionReason::GraphNeighbor
+                || expanded.reason == ChatSourceSelectionReason::SourceOverlap
+        }));
+        assert!(ctx
+            .diagnostics
+            .omitted_pages
+            .contains(&"wiki/concepts/agent-memory.md".to_string()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wiki_query_skill_contract_is_read_only_index_first_and_citation_required() {
+        let skill = include_str!("../../templates/skills/wiki-query/SKILL.md");
+
+        assert!(skill.contains("name: wiki-query"));
+        assert!(skill.contains("read-only"));
+        assert!(skill.contains("Read `wiki/index.md` first"));
+        assert!(skill.contains("numbered citations like `[S1]"));
+        assert!(skill.contains("Do not edit, create, delete, move, or rewrite"));
+        assert!(skill.contains("`wiki/`, `raw/`, `.app/`, `exports/`, or `skills/`"));
+        assert!(skill.contains("normal Search as local keyword/filter search only"));
+        assert!(skill.contains("future phase"));
+        assert!(skill.contains("no write endpoints"));
     }
 
     #[test]

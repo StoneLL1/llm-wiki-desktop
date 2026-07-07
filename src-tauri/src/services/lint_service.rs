@@ -18,7 +18,7 @@ use crate::utils::markdown_utils::{
 };
 use crate::utils::time_utils::now_rfc3339;
 
-const DEEP_LINT_EXCERPT_CHARS: usize = 240;
+const DEEP_LINT_EXCERPT_CHARS: usize = 1000;
 const LINT_HISTORY_PATH: &str = ".app/lint-history.json";
 pub(crate) const LINT_REPORTS_DIR: &str = ".app/lint-reports";
 const LINT_HISTORY_LIMIT: usize = 50;
@@ -63,6 +63,18 @@ impl LintService {
                 .unwrap_or_default();
             let split = split_frontmatter(&raw);
             let frontmatter_present = split.frontmatter.is_some();
+            let frontmatter = split
+                .frontmatter
+                .as_deref()
+                .map(parse_frontmatter)
+                .unwrap_or_default();
+
+            issues.extend(schema_source_issues(
+                context,
+                page,
+                &split.body,
+                &frontmatter,
+            ));
 
             // Dead links.
             for target in &page.wikilinks {
@@ -250,6 +262,7 @@ impl LintService {
 
         // Index drift (only when wiki/index.md exists).
         issues.extend(self.check_index_drift(context, &lookup));
+        issues.extend(check_structural_page_basics(context, &pages));
 
         // Drop issues the user has dismissed via `.app/lint-ignore.json`. The
         // match key is (path, rule): ignoring a rule on a page suppresses every
@@ -538,6 +551,7 @@ impl LintService {
         let tree = search_service.scan_wiki(context, &HashSet::new())?;
         let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
         let schema = self.file_store.read_markdown(context, "schema.md").ok();
+        let local_baseline = self.run_local_lint(context, search_service)?;
         // `language` is read by the command layer from SettingsService so this
         // service stays host-state-free and testable. The suggestion prose
         // follows the user's language; the JSON contract (issueType enum,
@@ -551,7 +565,13 @@ impl LintService {
              page paths exactly as given. Respond with ONLY a fenced JSON block (```json) \
              containing an array of objects with fields: issueType (one of the six above), \
              severity (error|warning|info), path, message, evidence, suggestion. If there \
-             are no issues, respond with an empty array.\n",
+             are no issues, respond with an empty array. Do not repeat deterministic local \
+             findings listed in the baseline section.\n\n\
+             Severity rubric: error means deterministic broken navigation, index, or \
+             source-traceability failure; warning means likely duplicate, merge, schema, \
+             citation, stale, or contradiction issue with concrete evidence; info means a \
+             suggestion or low-confidence gap without direct breakage. Evidence is required \
+             for error severity.\n",
         );
         prompt.push_str(&crate::utils::i18n::language_instruction(language));
         prompt.push_str(
@@ -567,6 +587,17 @@ impl LintService {
             prompt.push_str("\n--- Schema ---\n");
             prompt.push_str(schema.trim());
             prompt.push('\n');
+        }
+        prompt.push_str("\n--- Local deterministic findings already detected ---\n");
+        if local_baseline.issues.is_empty() {
+            prompt.push_str("None.\n");
+        } else {
+            for issue in &local_baseline.issues {
+                prompt.push_str(&format!(
+                    "- {} | {:?} | {:?} | {} | {}\n",
+                    issue.path, issue.issue_type, issue.severity, issue.id, issue.message
+                ));
+            }
         }
         prompt.push_str("\n--- Pages ---\n");
         for page in &tree.pages {
@@ -607,14 +638,56 @@ impl LintService {
                 false,
             )
         })?;
+        Ok(Self::normalize_agent_issues(parsed, None, &HashSet::new()))
+    }
+
+    pub fn parse_agent_issues_for_known_paths(
+        raw: &str,
+        known_paths: &HashSet<String>,
+        deterministic_issue_ids: &HashSet<String>,
+    ) -> Result<Vec<LintIssue>, BackendError> {
+        let json = extract_json_block(raw);
+        let Some(json) = json else {
+            return Ok(Vec::new());
+        };
+        let parsed: Vec<LintAgentIssue> = serde_json::from_str(&json).map_err(|err| {
+            BackendError::new(
+                "LINT_AGENT_OUTPUT_INVALID",
+                format!("Could not parse deep-lint JSON: {err}"),
+                true,
+                false,
+            )
+        })?;
+        Ok(Self::normalize_agent_issues(
+            parsed,
+            Some(known_paths),
+            deterministic_issue_ids,
+        ))
+    }
+
+    fn normalize_agent_issues(
+        parsed: Vec<LintAgentIssue>,
+        known_paths: Option<&HashSet<String>>,
+        deterministic_issue_ids: &HashSet<String>,
+    ) -> Vec<LintIssue> {
         // Disambiguate ids when the same issue type lands on the same page
         // multiple times (otherwise the frontend's fixStatus/selection map
         // collapses them). Append a per-(type,path) counter only when needed.
         let mut seen: HashMap<String, usize> = HashMap::new();
-        Ok(parsed
+        parsed
             .into_iter()
-            .map(|agent| {
-                let base = format!("{:?}:{}", agent.issue_type, agent.path).to_ascii_lowercase();
+            .filter_map(|agent| {
+                let path = agent.path.trim().replace('\\', "/");
+                if path.is_empty()
+                    || path.contains("..")
+                    || known_paths.is_some_and(|paths| !paths.contains(&path))
+                {
+                    return None;
+                }
+                let base = format!("{}:{path}", lint_issue_type_id(agent.issue_type));
+                if deterministic_issue_ids.contains(&base) {
+                    return None;
+                }
                 let count = seen.entry(base.clone()).or_insert(0);
                 *count += 1;
                 let id = if *count > 1 {
@@ -622,22 +695,31 @@ impl LintService {
                 } else {
                     base
                 };
-                LintIssue {
+                let evidence = agent.evidence.and_then(|value| {
+                    let trimmed = value.trim().to_string();
+                    (!trimmed.is_empty()).then_some(trimmed)
+                });
+                let severity = if agent.severity == LintSeverity::Error && evidence.is_none() {
+                    LintSeverity::Warning
+                } else {
+                    agent.severity
+                };
+                Some(LintIssue {
                     id,
                     source: LintIssueSource::Agent,
-                    severity: agent.severity,
+                    severity,
                     issue_type: agent.issue_type,
-                    path: agent.path,
+                    path,
                     range: None,
                     message: agent.message,
-                    evidence: agent.evidence,
+                    evidence,
                     target: None,
                     // Agent issues are judgment calls; none are auto-fixable.
                     fixability: Fixability::None,
                     suggested_action: agent.suggestion,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Apply (or plan) a fix for a single issue. Deterministic safe fixes
@@ -1240,10 +1322,262 @@ fn resource_exists(context: &ProjectContext, source: &str) -> bool {
     if normalized.contains("://") || normalized.starts_with('/') {
         return true;
     }
-    context
-        .resolve_project_path(&normalized)
-        .map(|p| p.exists())
-        .unwrap_or(false)
+    source_path_candidates(&normalized)
+        .into_iter()
+        .any(|candidate| {
+            context
+                .resolve_project_path(&candidate)
+                .map(|p| p.exists())
+                .unwrap_or(false)
+        })
+}
+
+fn source_path_candidates(source: &str) -> Vec<String> {
+    let normalized = source.trim().replace('\\', "/");
+    let mut candidates = vec![normalized.clone()];
+    if normalized.starts_with("sources/") {
+        candidates.push(format!("wiki/{normalized}"));
+    } else if !normalized.contains('/') {
+        candidates.push(format!("wiki/sources/{normalized}"));
+    }
+    candidates
+}
+
+fn schema_source_issues(
+    _context: &ProjectContext,
+    page: &WikiPageMeta,
+    body: &str,
+    frontmatter: &Frontmatter,
+) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    let path = page.path.as_str();
+    let type_field = frontmatter.get_scalar("type").unwrap_or_default();
+    let normalized_type = type_field.trim().to_ascii_lowercase();
+
+    if !is_structural_path(path) && !is_source_or_query_path(path) {
+        if normalized_type.is_empty() {
+            issues.push(local_issue(
+                LintIssueType::SchemaMismatch,
+                LintSeverity::Warning,
+                path,
+                "Derived page is missing frontmatter `type`.",
+                None,
+                None,
+            ));
+        } else if recognized_page_type(&normalized_type).is_none() {
+            issues.push(local_issue(
+                LintIssueType::InvalidPageType,
+                LintSeverity::Warning,
+                path,
+                &format!("Unknown page type `{}`.", type_field.trim()),
+                Some(type_field.trim().to_string()),
+                None,
+            ));
+        }
+    }
+
+    if let Some(expected) = expected_page_type_for_path(path) {
+        if let Some(actual) = recognized_page_type(&normalized_type) {
+            if actual != expected {
+                issues.push(local_issue(
+                    LintIssueType::InvalidPageType,
+                    LintSeverity::Warning,
+                    path,
+                    &format!(
+                        "Page type `{}` does not match the path expectation `{:?}`.",
+                        type_field.trim(),
+                        expected
+                    ),
+                    Some(type_field.trim().to_string()),
+                    None,
+                ));
+            }
+        }
+    }
+
+    if is_derived_page(page) {
+        let sources: Vec<String> = frontmatter
+            .get_list("sources")
+            .into_iter()
+            .map(|source| source.trim().to_string())
+            .filter(|source| !source.is_empty())
+            .collect();
+        if sources.is_empty() {
+            issues.push(local_issue(
+                LintIssueType::MissingSource,
+                LintSeverity::Error,
+                path,
+                "Derived page is missing non-empty frontmatter `sources`.",
+                None,
+                None,
+            ));
+        }
+        if !has_human_readable_sources_section(body) {
+            issues.push(local_issue(
+                LintIssueType::MissingSourceSection,
+                LintSeverity::Warning,
+                path,
+                "Derived page is missing a human-readable `> Sources:` section.",
+                None,
+                None,
+            ));
+        }
+    }
+
+    issues
+}
+
+fn local_issue(
+    issue_type: LintIssueType,
+    severity: LintSeverity,
+    path: &str,
+    message: &str,
+    evidence: Option<String>,
+    target: Option<String>,
+) -> LintIssue {
+    LintIssue {
+        id: format!("{}:{path}", lint_issue_type_id(issue_type)),
+        source: LintIssueSource::Local,
+        severity,
+        issue_type,
+        path: path.to_string(),
+        range: None,
+        message: message.to_string(),
+        evidence,
+        target,
+        fixability: Fixability::None,
+        suggested_action: None,
+    }
+}
+
+fn lint_issue_type_id(issue_type: LintIssueType) -> &'static str {
+    match issue_type {
+        LintIssueType::DeadLink => "dead_link",
+        LintIssueType::OrphanPage => "orphan_page",
+        LintIssueType::MissingFrontmatter => "missing_frontmatter",
+        LintIssueType::IndexDrift => "index_drift",
+        LintIssueType::EmptyPage => "empty_page",
+        LintIssueType::DuplicateFilename => "duplicate_filename",
+        LintIssueType::PathCase => "path_case",
+        LintIssueType::MissingResource => "missing_resource",
+        LintIssueType::MissingSourceSection => "missing_source_section",
+        LintIssueType::InvalidPageType => "invalid_page_type",
+        LintIssueType::DuplicateTopic => "duplicate_topic",
+        LintIssueType::WeakCrossReference => "weak_cross_reference",
+        LintIssueType::MissingSource => "missing_source",
+        LintIssueType::SchemaMismatch => "schema_mismatch",
+        LintIssueType::OutdatedContent => "outdated_content",
+        LintIssueType::Contradiction => "contradiction",
+    }
+}
+
+fn is_derived_page(page: &WikiPageMeta) -> bool {
+    !is_structural_path(&page.path)
+        && !matches!(page.page_type, WikiPageType::Source | WikiPageType::Query)
+        && !page.path.starts_with("wiki/sources/")
+        && !page.path.starts_with("wiki/queries/")
+}
+
+fn is_structural_path(path: &str) -> bool {
+    STRUCTURAL_FILES.contains(&path)
+}
+
+fn is_source_or_query_path(path: &str) -> bool {
+    path.starts_with("wiki/sources/") || path.starts_with("wiki/queries/")
+}
+
+fn recognized_page_type(normalized: &str) -> Option<WikiPageType> {
+    match normalized {
+        "entity" | "entities" => Some(WikiPageType::Entity),
+        "concept" | "concepts" => Some(WikiPageType::Concept),
+        "source" | "sources" => Some(WikiPageType::Source),
+        "synthesis" | "syntheses" => Some(WikiPageType::Synthesis),
+        "comparison" | "comparisons" => Some(WikiPageType::Comparison),
+        "query" | "queries" => Some(WikiPageType::Query),
+        "index" => Some(WikiPageType::Index),
+        "overview" => Some(WikiPageType::Overview),
+        "log" | "changelog" => Some(WikiPageType::Log),
+        _ => None,
+    }
+}
+
+fn expected_page_type_for_path(path: &str) -> Option<WikiPageType> {
+    let wiki_relative = path.strip_prefix("wiki/").unwrap_or(path);
+    let first = wiki_relative.split('/').next().unwrap_or("");
+    match first {
+        "entities" => Some(WikiPageType::Entity),
+        "concepts" => Some(WikiPageType::Concept),
+        "sources" => Some(WikiPageType::Source),
+        "synthesis" => Some(WikiPageType::Synthesis),
+        "comparisons" => Some(WikiPageType::Comparison),
+        "queries" => Some(WikiPageType::Query),
+        _ => match wiki_relative {
+            "index.md" => Some(WikiPageType::Index),
+            "overview.md" => Some(WikiPageType::Overview),
+            "log.md" => Some(WikiPageType::Log),
+            _ => None,
+        },
+    }
+}
+
+pub fn has_human_readable_sources_section(body: &str) -> bool {
+    body.lines().any(|line| {
+        let trimmed = line.trim().to_ascii_lowercase();
+        trimmed.starts_with("> sources:")
+            || trimmed == "## sources"
+            || trimmed == "### sources"
+            || trimmed.starts_with("sources:")
+    })
+}
+
+fn check_structural_page_basics(
+    context: &ProjectContext,
+    pages: &[WikiPageMeta],
+) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    let overview_path = context.resolve_project_path("wiki/overview.md").ok();
+    if let Some(path) = overview_path.filter(|path| path.exists()) {
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        if split_frontmatter(&raw).body.trim().is_empty() {
+            issues.push(local_issue(
+                LintIssueType::SchemaMismatch,
+                LintSeverity::Warning,
+                "wiki/overview.md",
+                "Structural overview page is empty.",
+                None,
+                None,
+            ));
+        }
+    }
+
+    let index_raw = context
+        .resolve_project_path("wiki/index.md")
+        .ok()
+        .filter(|path| path.exists())
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    if let Some(index) = index_raw {
+        for page in pages.iter().filter(|page| is_derived_page(page)) {
+            if let Some(stem) = file_stem(&page.path) {
+                if !index.contains(&format!("[[{stem}]]")) && !index.contains(&page.path) {
+                    issues.push(LintIssue {
+                        id: format!("index_drift:wiki/index.md:{stem}"),
+                        source: LintIssueSource::Local,
+                        severity: LintSeverity::Error,
+                        issue_type: LintIssueType::IndexDrift,
+                        path: "wiki/index.md".into(),
+                        range: None,
+                        message: format!("Index does not reference `{}`.", page.path),
+                        evidence: None,
+                        target: Some(stem),
+                        fixability: Fixability::HighRisk,
+                        suggested_action: Some("Regenerate the index.".into()),
+                    });
+                }
+            }
+        }
+    }
+
+    issues
 }
 
 /// Find the 1-based body line of the first `[[target]]` occurrence.
@@ -1416,11 +1750,11 @@ fn append_fix_log(context: &ProjectContext, relative_path: &str, action: &str) {
 mod tests {
     use super::{strip_wikilink, LintService};
     use crate::models::lint::{
-        Fixability, LintFixOutcomeKind, LintIssueType, LintReport, LintSeverity,
+        Fixability, LintFixOutcomeKind, LintIssueSource, LintIssueType, LintReport, LintSeverity,
     };
     use crate::models::paths::ProjectContext;
     use crate::services::{GitService, SearchService};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
 
     fn tmp_context(suffix: &str) -> (ProjectContext, PathBuf) {
@@ -1447,12 +1781,17 @@ mod tests {
         write_file(
             context,
             "wiki/concepts/agent.md",
-            "---\ntitle: Agent\ntype: concept\ntags: [ai]\n---\n\n# Agent\n\nLinks to [[react]].",
+            "---\ntitle: Agent\ntype: concept\ntags: [ai]\nsources:\n  - wiki/sources/source.md\n---\n\n# Agent\n\nLinks to [[react]].\n\n> Sources: [[source]]",
         );
         write_file(
             context,
             "wiki/concepts/react.md",
-            "---\ntitle: ReAct\ntype: concept\ntags: [ai]\n---\n\n# ReAct\n\nLinks back to [[agent]].",
+            "---\ntitle: ReAct\ntype: concept\ntags: [ai]\nsources:\n  - wiki/sources/source.md\n---\n\n# ReAct\n\nLinks back to [[agent]].\n\n> Sources: [[source]]",
+        );
+        write_file(
+            context,
+            "wiki/sources/source.md",
+            "---\ntitle: Source\ntype: source\n---\n\n# Source\n\nOriginal.",
         );
         write_file(
             context,
@@ -1469,7 +1808,7 @@ mod tests {
         let report = LintService::default()
             .run_local_lint(&context, &SearchService::default())
             .unwrap();
-        assert_eq!(report.scanned_pages, 4);
+        assert_eq!(report.scanned_pages, 5);
         assert!(
             report.issues.is_empty(),
             "expected no issues, got: {:?}",
@@ -1734,6 +2073,96 @@ mod tests {
     }
 
     #[test]
+    fn local_lint_catches_missing_and_empty_sources() {
+        let (context, root) = tmp_context("source-required");
+        write_file(
+            &context,
+            "wiki/concepts/missing.md",
+            "---\ntitle: Missing\ntype: concept\n---\n\n# Missing\n\n> Sources: later",
+        );
+        write_file(
+            &context,
+            "wiki/concepts/empty.md",
+            "---\ntitle: Empty\ntype: concept\nsources: []\n---\n\n# Empty\n\n> Sources: later",
+        );
+        write_file(
+            &context,
+            "wiki/index.md",
+            "# Index\n\n- [[missing]]\n- [[empty]]",
+        );
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+
+        assert!(report.issues.iter().any(|i| {
+            i.source == LintIssueSource::Local
+                && i.issue_type == LintIssueType::MissingSource
+                && i.path == "wiki/concepts/missing.md"
+        }));
+        assert!(report.issues.iter().any(|i| {
+            i.issue_type == LintIssueType::MissingSource && i.path == "wiki/concepts/empty.md"
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_lint_catches_bad_type_missing_source_section_and_bad_source_path() {
+        let (context, root) = tmp_context("schema-source");
+        write_file(
+            &context,
+            "wiki/concepts/bad-type.md",
+            "---\ntitle: Bad Type\ntype: entity\nsources:\n  - wiki/sources/missing.md\n---\n\n# Bad Type\n\nNo source section.",
+        );
+        write_file(
+            &context,
+            "wiki/sources/source-a.md",
+            "---\ntitle: Source A\ntype: source\n---\n\n# Source A\n\nOriginal.",
+        );
+        write_file(
+            &context,
+            "wiki/concepts/shorthand-source.md",
+            "---\ntitle: Shorthand Source\ntype: concept\nsources: [source-a.md]\n---\n\n# Shorthand Source\n\nUses a compile-style source basename.\n\n> Sources: [[sources/source-a]]",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n\n- [[bad-type]]");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+
+        assert!(report.issues.iter().any(|i| {
+            i.issue_type == LintIssueType::InvalidPageType && i.path == "wiki/concepts/bad-type.md"
+        }));
+        assert!(report.issues.iter().any(|i| {
+            i.issue_type == LintIssueType::MissingSourceSection
+                && i.path == "wiki/concepts/bad-type.md"
+        }));
+        assert!(report.issues.iter().any(|i| {
+            i.issue_type == LintIssueType::MissingResource
+                && i.target.as_deref() == Some("wiki/sources/missing.md")
+        }));
+        assert_eq!(
+            report
+                .issues
+                .iter()
+                .filter(|i| {
+                    i.id == "missing_resource:wiki/concepts/bad-type.md:wiki/sources/missing.md"
+                })
+                .count(),
+            1,
+            "local deterministic source-path checks should emit one stable issue id"
+        );
+        assert!(!report.issues.iter().any(|i| {
+            i.issue_type == LintIssueType::MissingResource
+                && i.path == "wiki/concepts/shorthand-source.md"
+                && i.target.as_deref() == Some("source-a.md")
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parse_agent_issues_extracts_fenced_json() {
         let raw = "Here is my analysis.\n\n```json\n[\n  {\"issueType\": \"duplicate_topic\", \"severity\": \"warning\", \"path\": \"wiki/a.md\", \"message\": \"Overlaps\", \"evidence\": \"x\", \"suggestion\": \"merge\"}\n]\n```\nThanks.";
         let issues = LintService::parse_agent_issues(raw).unwrap();
@@ -1763,9 +2192,29 @@ mod tests {
         assert!(prompt.contains("Explain agents."));
         assert!(prompt.contains("Schema"));
         assert!(prompt.contains("wiki/concepts/agent.md"));
+        assert!(prompt.contains("Local deterministic findings already detected"));
+        assert!(prompt.contains("Severity rubric"));
+        assert!(prompt.contains("Do not repeat deterministic local findings"));
         assert!(prompt.contains("```json"));
         assert!(prompt.contains("Respond in English."));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_issue_normalization_rejects_unknown_paths_and_downgrades_evidence_free_errors() {
+        let raw = "```json\n[\n  {\"issueType\":\"duplicate_topic\",\"severity\":\"error\",\"path\":\"wiki/concepts/agent.md\",\"message\":\"Overlap\",\"evidence\":\"\",\"suggestion\":\"merge\"},\n  {\"issueType\":\"contradiction\",\"severity\":\"warning\",\"path\":\"wiki/missing.md\",\"message\":\"Invented\",\"evidence\":\"x\",\"suggestion\":\"check\"},\n  {\"issueType\":\"missing_source\",\"severity\":\"warning\",\"path\":\"wiki/concepts/agent.md\",\"message\":\"Duplicate deterministic\",\"evidence\":\"x\",\"suggestion\":\"add source\"}\n]\n```";
+        let known_paths = HashSet::from(["wiki/concepts/agent.md".to_string()]);
+        let deterministic_ids =
+            HashSet::from(["missing_source:wiki/concepts/agent.md".to_string()]);
+
+        let issues =
+            LintService::parse_agent_issues_for_known_paths(raw, &known_paths, &deterministic_ids)
+                .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, "wiki/concepts/agent.md");
+        assert_eq!(issues[0].severity, LintSeverity::Warning);
+        assert_eq!(issues[0].issue_type, LintIssueType::DuplicateTopic);
     }
 
     #[test]
@@ -2172,7 +2621,10 @@ mod tests {
         let drift_count = report
             .issues
             .iter()
-            .filter(|i| i.issue_type == LintIssueType::IndexDrift)
+            .filter(|i| {
+                i.issue_type == LintIssueType::IndexDrift
+                    && matches!(i.target.as_deref(), Some("ghost1" | "ghost2"))
+            })
             .count();
         assert_eq!(drift_count, 2);
 

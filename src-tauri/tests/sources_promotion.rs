@@ -291,12 +291,14 @@ fn manifest_from_workspace_excludes_wiki_sources_from_files_and_deletions() {
     // An existing sources page is in the snapshot (so it could look like a
     // deletion if dropped); the manifest must neither emit it as a file nor
     // compute a deletion for it.
-    let original_paths = vec![
-        "wiki/index.md".to_string(),
-        "wiki/sources/keep.md".to_string(),
-    ];
-    let manifest =
-        CompileService::manifest_from_workspace(&root, original_paths.into_iter()).unwrap();
+    let original_paths = std::collections::HashMap::from([
+        ("wiki/index.md".to_string(), "index-hash".to_string()),
+        (
+            "wiki/sources/keep.md".to_string(),
+            "source-hash".to_string(),
+        ),
+    ]);
+    let manifest = CompileService::manifest_from_workspace(&root, &original_paths).unwrap();
 
     assert!(
         !manifest

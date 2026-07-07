@@ -22,8 +22,9 @@ pub enum LintIssueSource {
     Agent,
 }
 
-/// The specific rule that produced an issue. Local rules are deterministic
-/// (no model); Agent rules come from the `wiki-lint` Skill.
+/// The specific rule that produced an issue. `LintIssueSource` says whether a
+/// finding came from deterministic local checks or Agent deep lint; issue types
+/// such as `MissingSource` and `SchemaMismatch` may be emitted by either layer.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LintIssueType {
@@ -36,7 +37,9 @@ pub enum LintIssueType {
     DuplicateFilename,
     PathCase,
     MissingResource,
-    // Agent deep-lint rules.
+    MissingSourceSection,
+    InvalidPageType,
+    // Agent heuristic deep-lint rules.
     DuplicateTopic,
     WeakCrossReference,
     MissingSource,

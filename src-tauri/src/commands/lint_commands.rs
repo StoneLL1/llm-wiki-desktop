@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager, State};
@@ -169,7 +170,20 @@ async fn run_deep_lint(
         ));
     }
 
-    let issues = crate::services::LintService::parse_agent_issues(&raw)?;
+    let tree = state.search_service.scan_wiki(context, &HashSet::new())?;
+    let known_paths: HashSet<String> = tree.pages.iter().map(|page| page.path.clone()).collect();
+    let deterministic_issue_ids: HashSet<String> = state
+        .lint_service
+        .run_local_lint(context, &state.search_service)?
+        .issues
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect();
+    let issues = crate::services::LintService::parse_agent_issues_for_known_paths(
+        &raw,
+        &known_paths,
+        &deterministic_issue_ids,
+    )?;
     let issue_count = issues.len();
     let report = DeepLintReport {
         issues,
