@@ -55,4 +55,26 @@ describe("GraphView", () => {
     expect(screen.getAllByText(/Rebuilding graph/i).length).toBeGreaterThan(0);
     expect(document.querySelector(".graph-canvas")).toBeInTheDocument();
   });
+
+  it("shows rebuild progress in an overlay while keeping the graph surface mounted", () => {
+    useGraphStore.getState().reset();
+    useGraphStore.setState({
+      status: "rebuilding",
+      data: graphData,
+      buildUi: {
+        phase: "rebuilding",
+        taskId: "task-graph-1",
+        progress: 0.5,
+        label: "Building graph",
+        error: null,
+      },
+      load: async () => {},
+    } as Partial<ReturnType<typeof useGraphStore.getState>>);
+
+    render(<GraphView />);
+
+    expect(screen.getByRole("status", { name: /rebuilding graph/i })).toBeInTheDocument();
+    expect(screen.getByTestId("graph-canvas-surface")).toBeInTheDocument();
+    expect(screen.getByText("50%")).toBeInTheDocument();
+  });
 });

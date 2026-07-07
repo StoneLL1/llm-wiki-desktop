@@ -101,4 +101,12 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".projcard__meta");
     expect(styles).toContain(".quickaction");
   });
+
+  it("defines graph rebuild overlay and spinner affordances", () => {
+    const css = styles;
+    expect(css).toContain(".graph-canvas.is-rebuilding");
+    expect(css).toMatch(/\.graph-rebuild-overlay\s*\{[^}]*position:\s*absolute[^}]*place-content:\s*center/s);
+    expect(css).toMatch(/\.graph-rebuild-overlay__spinner\s*\{[^}]*animation:\s*graph-spin/s);
+    expect(css).toMatch(/\.graph-toolbar-spin\s*\{[^}]*animation:\s*graph-spin/s);
+  });
 });

@@ -176,6 +176,55 @@ describe("graphStore", () => {
     expect(useGraphStore.getState().error).toBe("Graph build was cancelled.");
   });
 
+  it("keeps previous data visible in build UI state when rebuild fails", async () => {
+    const existing = graphData({ contentHash: "existing" });
+    useGraphStore.setState({ data: existing, status: "ready", cached: true, layoutStale: false });
+    const started = task({ status: "running" });
+    const failed = task({
+      status: "failed",
+      completedAt: "2026-07-04T00:01:00Z",
+      error: {
+        code: "GRAPH_BUILD_FAILED",
+        message: "build failed",
+        details: null,
+        recoverable: true,
+        userActionRequired: false,
+      },
+    });
+    invokeMock.mockResolvedValue(started);
+    waitForTaskTerminalMock.mockResolvedValue(failed);
+
+    await useGraphStore.getState().rebuild("project-1", "D:/wiki");
+
+    const state = useGraphStore.getState();
+    expect(state.data).toEqual(existing);
+    expect(state.status).toBe("ready");
+    expect(state.buildUi.phase).toBe("failed");
+    expect(state.buildUi.error).toContain("build failed");
+  });
+
+  it("does not start a second rebuild while one is active", async () => {
+    const existing = graphData({ contentHash: "existing" });
+    useGraphStore.setState({ data: existing, status: "ready", cached: true, layoutStale: false });
+    const started = task({ status: "running" });
+    let resolveTerminal!: (value: BackendTask) => void;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "build_graph") return Promise.resolve(started);
+      if (command === "get_graph") return Promise.resolve({ data: existing, cached: true, layoutStale: false });
+      return Promise.resolve(null);
+    });
+    waitForTaskTerminalMock.mockReturnValue(new Promise<BackendTask>((resolve) => {
+      resolveTerminal = resolve;
+    }));
+
+    const first = useGraphStore.getState().rebuild("project-1", "D:/wiki");
+    const second = useGraphStore.getState().rebuild("project-1", "D:/wiki");
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    resolveTerminal(task({ status: "succeeded", completedAt: "2026-07-04T00:01:00Z" }));
+    await Promise.all([first, second]);
+  });
+
   it("ignores terminal task results from a previous project scope", async () => {
     const existing = graphData({ contentHash: "project-a" });
     const projectB = graphData({ contentHash: "project-b", nodes: [{ id: "wiki/b.md", path: "wiki/b.md", label: "B", type: "entity", tags: [], starred: false, degree: 0 }] });
