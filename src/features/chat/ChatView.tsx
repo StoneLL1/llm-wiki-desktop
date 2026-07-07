@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { Pencil, Trash2 } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -113,14 +114,20 @@ export function ChatView() {
     };
   }, [sendTask, projectId, rootPath, reloadActive, clearSendTask]);
 
-  const handleSend = (content: string) => {
-    if (!activeSessionId) return;
+  const handleSend = async (content: string): Promise<boolean> => {
+    let sessionId = activeSessionId;
+    if (!sessionId) {
+      const created = await createSession(projectId, rootPath);
+      sessionId = created?.id ?? useChatStore.getState().activeSessionId;
+    }
+    if (!sessionId) return false;
     const canUseConvenience = routePreference !== "byok";
-    void send(projectId, rootPath, activeSessionId, content, routePreference, {
+    const taskId = await send(projectId, rootPath, sessionId, content, routePreference, {
       convenienceEnabled: Boolean(
         canUseConvenience && chatConvenienceAuthorization?.enabled && !hasPendingConvenienceEdit(activeSession),
       ),
     });
+    return Boolean(taskId);
   };
 
   const handleCancel = () => {
@@ -158,37 +165,42 @@ export function ChatView() {
           onSelect={(sessionId) => void selectSession(projectId, rootPath, sessionId)}
           onCreate={() => void createSession(projectId, rootPath)}
           onRename={(sessionId, title) => void renameSession(projectId, rootPath, sessionId, title)}
-          onDelete={(sessionId) => void deleteSession(projectId, rootPath, sessionId)}
+          onDelete={(sessionId) => {
+            if (window.confirm(t("chat.sessions.deleteConfirm"))) {
+              void deleteSession(projectId, rootPath, sessionId);
+            }
+          }}
         />
       </div>
 
-      <div className="flex min-w-0 flex-col">
+      <div className="chat-stream-wrap flex min-h-0 min-w-0 flex-col overflow-hidden">
         {error ? (
           <div className="border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
             {error}
           </div>
         ) : null}
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4" role="log" aria-live="polite">
+        {activeSession ? (
+          <SessionToolbar
+            session={activeSession}
+            routePreference={routePreference}
+            onRouteChange={setRoutePreference}
+            convenienceEnabled={convenienceEnabled}
+            conveniencePending={conveniencePending}
+            onConvenienceEnabledChange={setConvenienceEnabled}
+            onRollbackLast={() => {
+              if (!activeSessionId) return;
+              void rollbackLastConvenienceEdit(projectId, rootPath, activeSessionId);
+            }}
+            t={t}
+          />
+        ) : null}
+        <div className="chat-scroll-region min-h-0 flex-1 overflow-y-auto px-6 py-4" role="log" aria-live="polite">
           {!activeSession ? (
             <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
               {t("chat.thread.empty")}
             </div>
           ) : (
-            <>
-              <SessionToolbar
-                session={activeSession}
-                routePreference={routePreference}
-                onRouteChange={setRoutePreference}
-                convenienceEnabled={convenienceEnabled}
-                conveniencePending={conveniencePending}
-                onConvenienceEnabledChange={setConvenienceEnabled}
-                onRollbackLast={() => {
-                  if (!activeSessionId) return;
-                  void rollbackLastConvenienceEdit(projectId, rootPath, activeSessionId);
-                }}
-                t={t}
-              />
-              <div className="chat-stream mx-auto w-full max-w-[820px] px-4">
+            <div className="chat-stream mx-auto w-full max-w-[820px] px-4">
               {activeSession.messages.map((message) => (
                 <MessageBubble
                   key={message.id}
@@ -196,8 +208,8 @@ export function ChatView() {
                   t={t}
                   generating={generating}
                   saveStatus={saveStatus[message.id] ?? "idle"}
-                  onCitationClick={(index) => {
-                    const citation = message.citations?.[index - 1];
+                  onCitationClick={(ref) => {
+                    const citation = resolveCitationRef(message.citations ?? [], ref);
                     if (citation) openCitation(citation.pagePath);
                   }}
                   onOpenCitation={(path) => openCitation(path)}
@@ -249,7 +261,6 @@ export function ChatView() {
                 </div>
               ) : null}
             </div>
-            </>
           )}
         </div>
         <ChatComposer
@@ -269,7 +280,7 @@ export interface MessageBubbleProps {
   t: (k: string, opts?: Record<string, unknown>) => string;
   generating: boolean;
   saveStatus: "idle" | "saving" | "saved" | "exists" | "error";
-  onCitationClick: (index: number) => void;
+  onCitationClick: (ref: string) => void;
   onOpenCitation: (path: string) => void;
   onSave: () => void;
   onKeepConvenience?: () => void;
@@ -315,6 +326,7 @@ export function MessageBubble({
             <MessageContent
               content={message.content}
               citationCount={citations.length}
+              citationIds={citations.flatMap((citation) => citation.sourceId ?? [])}
               onCitationClick={onCitationClick}
             />
             {!isUser && citations.length > 0 ? (
@@ -327,7 +339,7 @@ export function MessageBubble({
                     onClick={() => onOpenCitation(citation.pagePath)}
                     title={t("chat.citations.openPage")}
                   >
-                    <span className="msg__citation-idx">{index + 1}</span>
+                    <span className="msg__citation-idx">{citation.sourceId ?? index + 1}</span>
                     <span className="msg__citation-title">{citation.title}</span>
                     {citation.isPinned ? (
                       <span className="rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent-hover)]">
@@ -359,6 +371,16 @@ export function MessageBubble({
       </div>
     </div>
   );
+}
+
+function resolveCitationRef(citations: NonNullable<ChatMessage["citations"]>, ref: string) {
+  const normalized = ref.toUpperCase();
+  const bySourceId = citations.find(
+    (citation) => citation.sourceId?.toUpperCase() === normalized,
+  );
+  if (bySourceId) return bySourceId;
+  const index = Number.parseInt(ref, 10);
+  return Number.isFinite(index) ? citations[index - 1] : undefined;
 }
 
 interface SessionToolbarProps {
@@ -446,22 +468,28 @@ function SessionToolbar({
           {msgCount} · {time}
         </span>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <button
           type="button"
           onClick={handleEdit}
-          className="h-[26px] rounded-[var(--radius-sm)] px-2 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+          className="icon-button"
+          aria-label={t("chat.sessions.rename")}
+          title={t("chat.sessions.rename")}
         >
-          {t("chat.sessions.rename")}
+          <Pencil aria-hidden="true" size={14} />
         </button>
         <button
           type="button"
           onClick={() => {
-            void del(projectId, rootPath, session.id);
+            if (window.confirm(t("chat.sessions.deleteConfirm"))) {
+              void del(projectId, rootPath, session.id);
+            }
           }}
-          className="h-[26px] rounded-[var(--radius-sm)] px-2 text-[11px] text-[var(--danger)] hover:bg-[var(--surface-muted)]"
+          className="icon-button hover:text-[var(--danger)]"
+          aria-label={t("chat.sessions.delete")}
+          title={t("chat.sessions.delete")}
         >
-          {t("chat.sessions.delete")}
+          <Trash2 aria-hidden="true" size={14} />
         </button>
       </div>
     </div>

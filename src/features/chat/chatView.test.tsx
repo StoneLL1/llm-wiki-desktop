@@ -6,6 +6,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useWikiStore } from "../wiki/wikiStore";
 import type { ChatMessage, ChatSession } from "../../types/chat";
 import type { BackendTask } from "../../types/task";
 import { ChatView } from "./ChatView";
@@ -74,6 +75,70 @@ describe("ChatView", () => {
     render(<ChatView />);
     expect(screen.getByPlaceholderText(/Ask about this wiki/i)).toBeInTheDocument();
     expect(screen.getByText(/No chat sessions yet/i)).toBeInTheDocument();
+  });
+
+  it("renders design-aligned session search and icon controls", () => {
+    useChatStore.setState({
+      sessions: [
+        {
+          id: "s1",
+          title: "Agent Memory",
+          createdAt: "x",
+          updatedAt: "2026-07-07T10:00:00Z",
+          messageCount: 2,
+        },
+      ],
+      loadSessions: async () => {},
+    });
+    render(<ChatView />);
+
+    expect(screen.getByPlaceholderText(/Search chats/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /new chat/i })).toBeInTheDocument();
+    expect(screen.queryByText("鉁?")).not.toBeInTheDocument();
+    expect(screen.queryByText("脳")).not.toBeInTheDocument();
+  });
+
+  it("keeps the session toolbar outside the scrollable message region", () => {
+    seedActiveSession();
+    render(<ChatView />);
+
+    const log = screen.getByRole("log");
+    // The scrollable region owns the chat-scroll-region contract class.
+    expect(log).toHaveClass("chat-scroll-region");
+    // The session toolbar must not live inside the scrollable log region.
+    expect(log.querySelector(".view-toolbar")).toBeNull();
+    // It lives inside the fixed chat-stream-wrap column instead.
+    expect(document.querySelector(".chat-stream-wrap .view-toolbar")).toBeInTheDocument();
+  });
+
+  it("opens model source markers by source id rather than citation-card index", () => {
+    const openPage = vi.fn(async () => {});
+    useWikiStore.setState({ openPage: openPage as never });
+    seedActiveSession([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "Grounded in the source [S2].",
+        createdAt: "2026-07-07T00:00:00Z",
+        citations: [
+          {
+            sourceId: "S2",
+            pagePath: "wiki/concepts/react-pattern.md",
+            title: "ReAct Pattern",
+            score: 100,
+          },
+        ],
+      },
+    ]);
+
+    render(<ChatView />);
+    fireEvent.click(screen.getByRole("button", { name: /S2/i }));
+
+    expect(openPage).toHaveBeenCalledWith(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "wiki/concepts/react-pattern.md",
+    );
   });
 
   it("surfaces the backend error when a chat send task fails", async () => {
@@ -177,6 +242,23 @@ describe("ChatView", () => {
     );
   });
 
+  it("does not clear the composer when no session can accept the send", async () => {
+    useChatStore.setState({
+      activeSessionId: null,
+      activeSession: null,
+      sessions: [],
+      createSession: vi.fn(async () => null) as never,
+      loadSessions: async () => {},
+    });
+    render(<ChatView />);
+
+    const box = screen.getByPlaceholderText(/Ask about this wiki/i);
+    fireEvent.change(box, { target: { value: "Will this vanish?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(box).toHaveValue("Will this vanish?"));
+  });
+
   it("does not request convenience edits for explicit BYOK sends", () => {
     const sendSpy = seedActiveSession();
     render(<ChatView />);
@@ -195,5 +277,60 @@ describe("ChatView", () => {
       "byok",
       { convenienceEnabled: false },
     );
+  });
+
+  it("deletes the active session from the toolbar only after confirmation", () => {
+    const deleteSession = vi.fn(async () => {});
+    useChatStore.setState({
+      activeSessionId: "session-1",
+      activeSession: session(),
+      sessions: [],
+      deleteSession: deleteSession as never,
+      loadSessions: async () => {},
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ChatView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(deleteSession).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(deleteSession).toHaveBeenCalledWith(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "session-1",
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it("gates session-list deletion behind confirmation", () => {
+    const deleteSession = vi.fn(async () => {});
+    useChatStore.setState({
+      activeSessionId: null,
+      activeSession: null,
+      sessions: [
+        {
+          id: "s1",
+          title: "Agent Memory",
+          createdAt: "2026-07-07T00:00:00Z",
+          updatedAt: "2026-07-07T00:00:00Z",
+          messageCount: 1,
+        },
+      ],
+      deleteSession: deleteSession as never,
+      loadSessions: async () => {},
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { container } = render(<ChatView />);
+
+    // The list's trash button is hover-revealed (display:none in jsdom), so
+    // query it directly rather than via the accessible-tree role query.
+    const trashButton = container.querySelector('button[aria-label="Delete"]');
+    expect(trashButton).not.toBeNull();
+    fireEvent.click(trashButton as Element);
+
+    expect(deleteSession).toHaveBeenCalledWith(PROJECT.projectId, PROJECT.rootPath, "s1");
+    confirmSpy.mockRestore();
   });
 });

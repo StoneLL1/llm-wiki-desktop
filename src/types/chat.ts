@@ -12,11 +12,33 @@ export type ChatConvenienceEditStatus =
   | "rollback_failed";
 
 export interface ChatCitation {
+  sourceId?: string | null;
   pagePath: string;
   title: string;
   snippet?: string;
   score: number;
   isPinned?: boolean;
+}
+
+export interface ChatRetrievalHit {
+  path: string;
+  title: string;
+  snippet?: string | null;
+  score: number;
+  excerpt?: string | null;
+  isPinned?: boolean;
+}
+
+export interface ChatRetrievalDiagnostics {
+  route: ChatRoute;
+  retrievalHits?: ChatRetrievalHit[];
+  selectedPages?: string[];
+  omittedPages?: string[];
+  budgetChars: number;
+  sourceBudgetChars: number;
+  historyBudgetChars: number;
+  invalidCitationIds?: string[];
+  hasUnverified?: boolean;
 }
 
 export interface ChatMessage {
@@ -30,6 +52,7 @@ export interface ChatMessage {
   provider?: LlmProviderKind | null;
   taskId?: string;
   convenienceEdit?: ChatConvenienceEdit | null;
+  retrievalDiagnostics?: ChatRetrievalDiagnostics | null;
 }
 
 export interface ChatConvenienceEdit {
@@ -50,6 +73,10 @@ export interface ChatSession {
   createdAt: string;
   updatedAt: string;
   messages: ChatMessage[];
+  /** Wiki page this session is scoped to (Wiki "Ask AI" sidebar). Absent for
+   *  global Chat-view sessions. Persisted as typed metadata on the session
+   *  JSON, never as a separate database. */
+  contextPagePath?: string | null;
 }
 
 export interface ChatSessionSummary {
@@ -58,6 +85,9 @@ export interface ChatSessionSummary {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
+  /** Mirrors {@link ChatSession.contextPagePath} so the session list can group
+   *  page-scoped chats without loading each full session. */
+  contextPagePath?: string | null;
 }
 
 export interface SaveAnswerResult {
