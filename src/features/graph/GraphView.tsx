@@ -5,10 +5,12 @@ import FA2LayoutSupervisor from "graphology-layout-forceatlas2/worker";
 import Sigma from "sigma";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { RefreshCw } from "lucide-react";
 
 import { useGraphStore } from "../../stores/graphStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useTaskStore } from "../../stores/taskStore";
 import { useWikiStore } from "../wiki/wikiStore";
 import {
   COMMUNITY_PALETTE,
@@ -90,6 +92,7 @@ export function GraphView() {
   const data = useGraphStore((state) => state.data);
   const status = useGraphStore((state) => state.status);
   const error = useGraphStore((state) => state.error);
+  const buildUi = useGraphStore((state) => state.buildUi);
   const layoutStale = useGraphStore((state) => state.layoutStale);
   const colorMode = useGraphStore((state) => state.colorMode);
   const search = useGraphStore((state) => state.search);
@@ -104,6 +107,9 @@ export function GraphView() {
   const setSearch = useGraphStore((state) => state.setSearch);
   const saveLayout = useGraphStore((state) => state.saveLayout);
   const registerActions = useGraphStore((state) => state.registerActions);
+  const activeBuildTask = useTaskStore((state) =>
+    buildUi.taskId ? state.tasks.find((task) => task.id === buildUi.taskId) ?? null : null,
+  );
 
   const currentProject = useProjectStore((state) => state.currentProject);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
@@ -313,6 +319,11 @@ export function GraphView() {
       search,
     });
   };
+  const isGraphBuildActive = buildUi.phase === "loading" || buildUi.phase === "rebuilding";
+  const activeTaskProgress = progressRatio(activeBuildTask);
+  const activeProgress = activeTaskProgress ?? buildUi.progress;
+  const activeLabel = activeBuildTask?.progress?.label ?? buildUi.label;
+  const buildLabel = activeLabel?.startsWith("graph.") ? t(activeLabel) : activeLabel;
 
   // Publish live action hooks so the inspector (rendered in RightContextPanel,
   // which has no access to this component's refs) can export PNG and recompute
@@ -399,12 +410,14 @@ export function GraphView() {
         nodeCount={data.nodes.length}
         edgeCount={data.edges.length}
         status={status}
+        buildActive={isGraphBuildActive}
       />
       <div className="relative min-h-0 flex-1 p-[var(--sp-4)]">
-        <div ref={containerRef} className="graph-canvas h-full w-full">
-          {status === "rebuilding" ? (
-            <div className="graph-state-banner" role="status">{t("graph.status.rebuilding")}</div>
-          ) : null}
+        <div
+          ref={containerRef}
+          className={`graph-canvas h-full w-full${isGraphBuildActive ? " is-rebuilding" : ""}`}
+          data-testid="graph-canvas-surface"
+        >
           {status === "error" && error ? (
             <div className="graph-state-banner graph-state-banner--error" role="status">{error}</div>
           ) : null}
@@ -435,10 +448,26 @@ export function GraphView() {
               {t("graph.canvasUnavailable")}
             </div>
           )}
+          {isGraphBuildActive ? (
+            <div className="graph-rebuild-overlay" role="status" aria-label={t("graph.rebuildOverlay.title")}>
+              <RefreshCw className="graph-rebuild-overlay__spinner" aria-hidden="true" />
+              <div className="graph-rebuild-overlay__title">{t("graph.rebuildOverlay.title")}</div>
+              {buildLabel ? <div className="graph-rebuild-overlay__label">{buildLabel}</div> : null}
+              {typeof activeProgress === "number" ? (
+                <div className="graph-rebuild-overlay__progress">{Math.round(activeProgress * 100)}%</div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
   );
+}
+
+function progressRatio(task: { progress: { current: number; total: number | null } | null } | null): number | null {
+  const progress = task?.progress;
+  if (!progress || progress.total === null || progress.total <= 0) return null;
+  return Math.max(0, Math.min(1, progress.current / progress.total));
 }
 
 function buildGraph(data: GraphData, layoutStale = false): { graph: Graph; computed: boolean } {

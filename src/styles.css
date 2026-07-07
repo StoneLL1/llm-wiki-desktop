@@ -1824,6 +1824,12 @@ select:focus-visible {
 }
 /* Sigma's canvas/labels must stay inside the rounded card; the wrapper clips overflow. */
 .graph-canvas canvas { display: block; }
+.graph-canvas.is-rebuilding canvas,
+.graph-canvas.is-rebuilding .graph-float-controls,
+.graph-canvas.is-rebuilding .graph-info,
+.graph-canvas.is-rebuilding .graph-legend {
+  opacity: 0.45;
+}
 
 /* Floating vertical zoom controls, top-left (design .graph-controls). */
 .graph-float-controls {
@@ -1940,6 +1946,35 @@ select:focus-visible {
   color: var(--danger);
   border-color: var(--danger);
 }
+.graph-rebuild-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-content: center;
+  gap: var(--sp-2);
+  background: color-mix(in srgb, var(--surface) 62%, transparent);
+  color: var(--text-primary);
+  text-align: center;
+  pointer-events: none;
+}
+.graph-rebuild-overlay__spinner {
+  width: 18px;
+  height: 18px;
+  margin: 0 auto;
+  color: var(--accent);
+  animation: graph-spin 900ms linear infinite;
+}
+.graph-rebuild-overlay__title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.graph-rebuild-overlay__label,
+.graph-rebuild-overlay__progress {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
 .graph-toolbar-status {
   display: inline-flex;
   height: 22px;
@@ -1949,6 +1984,14 @@ select:focus-visible {
   padding: 0 var(--sp-2);
   font-size: 11px;
   color: var(--accent-hover);
+}
+.graph-toolbar-spin {
+  animation: graph-spin 900ms linear infinite;
+}
+@keyframes graph-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .graph-inspector__actions {
   display: flex;

@@ -26,6 +26,14 @@ interface GraphInspectorProps {
 }
 
 const NEIGHBOR_PREVIEW = 6;
+const GRAPH_STATUS_LABELS: Record<GraphStatus, string> = {
+  idle: "graph.status.idle",
+  loading: "graph.loading",
+  rebuilding: "graph.status.rebuilding",
+  ready: "graph.status.ready",
+  "ready-empty": "graph.status.readyEmpty",
+  error: "graph.error",
+};
 
 /**
  * Selected-node inspector (UI-Frontend-design/graph.html `.rightpanel` graph
@@ -176,7 +184,7 @@ export function GraphInspector({
             {cached ? t("graph.status.cached") : t("graph.status.fresh")}
           </dd>
           <dt className="font-medium text-[var(--text-muted)]">{t("graph.inspector.graphStatus")}</dt>
-          <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{status}</dd>
+          <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{t(GRAPH_STATUS_LABELS[status])}</dd>
         </dl>
       </div>
 

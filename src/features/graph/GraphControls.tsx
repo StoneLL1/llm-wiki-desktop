@@ -13,6 +13,7 @@ interface GraphControlsProps {
   nodeCount: number;
   edgeCount: number;
   status: GraphStatus;
+  buildActive?: boolean;
 }
 
 /**
@@ -31,9 +32,11 @@ export function GraphControls({
   nodeCount,
   edgeCount,
   status,
+  buildActive = false,
 }: GraphControlsProps) {
   const { t } = useTranslation();
   const modes: GraphColorMode[] = ["type", "community", "plain"];
+  const rebuildDisabled = buildActive || status === "loading" || status === "rebuilding";
   return (
     <div className="view-toolbar border-b border-[var(--border)] bg-[var(--surface)] px-3">
       <div className="seg flex items-center rounded-[var(--radius-md)] border border-[var(--border)] p-0.5">
@@ -73,9 +76,10 @@ export function GraphControls({
         <button
           type="button"
           onClick={onRebuild}
-          className="flex h-[28px] items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-2.5 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+          disabled={rebuildDisabled}
+          className="flex h-[28px] items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-2.5 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-60"
         >
-          <RotateCw size={13} />
+          <RotateCw size={13} className={rebuildDisabled ? "graph-toolbar-spin" : undefined} />
           {t("graph.rebuild")}
         </button>
         <button

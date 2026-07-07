@@ -14,12 +14,24 @@ import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
 import { useTaskStore } from "./taskStore";
 import type { BackendTask } from "../types/task";
 
+export type GraphBuildPhase = "idle" | "loading" | "rebuilding" | "succeeded" | "failed" | "canceled";
+
+export interface GraphBuildUiState {
+  phase: GraphBuildPhase;
+  taskId: string | null;
+  progress: number | null;
+  label: string | null;
+  error: string | null;
+}
+
 interface GraphState {
   data: GraphData | null;
   cached: boolean;
   layoutStale: boolean;
   status: GraphStatus;
   error: string | null;
+  buildUi: GraphBuildUiState;
+  activeBuildPromise: Promise<void> | null;
   colorMode: GraphColorMode;
   selectedNodeId: string | null;
   focusedNodeId: string | null;
@@ -62,6 +74,8 @@ const initial = {
   layoutStale: false,
   status: "idle" as GraphStatus,
   error: null as string | null,
+  buildUi: idleBuildUi(),
+  activeBuildPromise: null as Promise<void> | null,
   colorMode: "type" as GraphColorMode,
   selectedNodeId: null as string | null,
   focusedNodeId: null as string | null,
@@ -87,6 +101,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         layoutStale: false,
         status: "loading",
         error: null,
+        buildUi: { phase: "loading", taskId: null, progress: 0, label: null, error: null },
         selectedNodeId: null,
         focusedNodeId: null,
         search: "",
@@ -95,7 +110,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         projectKey,
       });
     } else if (!state.data) {
-      set({ status: "loading", error: null, projectKey });
+      set({
+        status: "loading",
+        error: null,
+        buildUi: { phase: "loading", taskId: null, progress: 0, label: null, error: null },
+        projectKey,
+      });
     } else {
       set({ error: null, projectKey });
     }
@@ -110,6 +130,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         layoutStale: result.layoutStale,
         status: graphStatusForData(result.data),
         error: null,
+        buildUi: idleBuildUi(),
         projectKey,
       });
     } catch (error) {
@@ -122,12 +143,26 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           set((state) => ({
             status: state.data ? graphStatusForData(state.data) : "error",
             error: errorMessage(buildError),
+            buildUi: {
+              phase: "failed",
+              taskId: state.buildUi.taskId,
+              progress: state.buildUi.progress,
+              label: state.buildUi.label,
+              error: errorMessage(buildError),
+            },
           }));
         }
       } else {
         set((state) => ({
           status: state.data ? graphStatusForData(state.data) : "error",
           error: errorMessage(error),
+          buildUi: {
+            phase: "failed",
+            taskId: state.buildUi.taskId,
+            progress: state.buildUi.progress,
+            label: state.buildUi.label,
+            error: errorMessage(error),
+          },
         }));
       }
     }
@@ -135,19 +170,37 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   rebuild: async (projectId, rootPath) => {
     const scope = captureProjectScope();
     const projectKey = createProjectKey(projectId, rootPath);
+    const current = get();
+    if ((current.buildUi.phase === "loading" || current.buildUi.phase === "rebuilding") && current.activeBuildPromise) {
+      return current.activeBuildPromise;
+    }
     set((state) => ({
       status: state.data ? "rebuilding" : "loading",
       error: null,
+      buildUi: {
+        phase: state.data ? "rebuilding" : "loading",
+        taskId: null,
+        progress: 0,
+        label: "graph.status.rebuilding",
+        error: null,
+      },
       projectKey,
     }));
+    const buildPromise = (async () => {
+      try {
+        await runGraphBuild(projectId, rootPath, scope, projectKey);
+      } catch (error) {
+        if (!isProjectScopeCurrent(scope)) return;
+        setBuildFailure(errorMessage(error));
+      }
+    })();
+    set({ activeBuildPromise: buildPromise });
     try {
-      await runGraphBuild(projectId, rootPath, scope, projectKey);
-    } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
-      set((state) => ({
-        status: state.data ? graphStatusForData(state.data) : "error",
-        error: errorMessage(error),
-      }));
+      await buildPromise;
+    } finally {
+      if (get().activeBuildPromise === buildPromise) {
+        set({ activeBuildPromise: null });
+      }
     }
   },
   saveLayout: async (projectId, rootPath, positions, communities) => {
@@ -189,7 +242,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }),
   setDegreeThreshold: (degreeThreshold) => set({ degreeThreshold: Math.max(0, Math.floor(degreeThreshold)) }),
   registerActions: (actions) => set({ exportPng: actions.exportPng, recomputeLayout: actions.recomputeLayout }),
-  reset: () => set({ ...initial, typeFilter: new Set<WikiPageType>() }),
+  reset: () => set({ ...initial, buildUi: idleBuildUi(), typeFilter: new Set<WikiPageType>() }),
 }));
 
 async function runGraphBuild(
@@ -202,17 +255,33 @@ async function runGraphBuild(
     request: { projectId, projectRootPath: rootPath },
   });
   useTaskStore.getState().upsertTask(task);
-  useTaskStore.getState().openDrawer(task.id);
+  useGraphStore.setState((state) => ({
+    buildUi: {
+      phase: state.data ? "rebuilding" : "loading",
+      taskId: task.id,
+      progress: progressRatio(task) ?? state.buildUi.progress,
+      label: task.progress?.label ?? state.buildUi.label,
+      error: null,
+    },
+  }));
   const terminalTask = await waitForTaskTerminal(task);
   useTaskStore.getState().upsertTask(terminalTask);
   if (!isProjectScopeCurrent(scope)) return;
   if (terminalTask.status !== "succeeded") {
+    const message =
+      terminalTask.status === "cancelled"
+        ? "Graph build was cancelled."
+        : terminalTask.error?.message ?? "Graph build failed.";
     useGraphStore.setState((state) => ({
       status: state.data ? graphStatusForData(state.data) : "error",
-      error:
-        terminalTask.status === "cancelled"
-          ? "Graph build was cancelled."
-          : terminalTask.error?.message ?? "Graph build failed.",
+      error: message,
+      buildUi: {
+        phase: terminalTask.status === "cancelled" ? "canceled" : "failed",
+        taskId: terminalTask.id,
+        progress: progressRatio(terminalTask) ?? state.buildUi.progress,
+        label: terminalTask.progress?.label ?? state.buildUi.label,
+        error: message,
+      },
     }));
     return;
   }
@@ -226,8 +295,45 @@ async function runGraphBuild(
     layoutStale: result.layoutStale,
     status: graphStatusForData(result.data),
     error: null,
+    buildUi: {
+      phase: "succeeded",
+      taskId: terminalTask.id,
+      progress: 1,
+      label: terminalTask.progress?.label ?? "graph.status.cached",
+      error: null,
+    },
     projectKey,
   });
+}
+
+function setBuildFailure(message: string): void {
+  useGraphStore.setState((state) => ({
+    status: state.data ? graphStatusForData(state.data) : "error",
+    error: message,
+    buildUi: {
+      phase: "failed",
+      taskId: state.buildUi.taskId,
+      progress: state.buildUi.progress,
+      label: state.buildUi.label,
+      error: message,
+    },
+  }));
+}
+
+function idleBuildUi(): GraphBuildUiState {
+  return {
+    phase: "idle",
+    taskId: null,
+    progress: null,
+    label: null,
+    error: null,
+  };
+}
+
+function progressRatio(task: BackendTask): number | null {
+  const progress = task.progress;
+  if (!progress || progress.total === null || progress.total <= 0) return null;
+  return Math.max(0, Math.min(1, progress.current / progress.total));
 }
 
 function graphStatusForData(data: GraphData): GraphStatus {

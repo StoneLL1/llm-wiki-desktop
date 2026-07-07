@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Component, Fragment, type ErrorInfo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 
@@ -8,6 +8,7 @@ interface ViewErrorBoundaryProps {
 
 interface ViewErrorBoundaryState {
   error: Error | null;
+  retryKey: number;
 }
 
 /**
@@ -18,9 +19,9 @@ interface ViewErrorBoundaryState {
  * state, this handles the *rejected* state.
  */
 export class ViewErrorBoundary extends Component<ViewErrorBoundaryProps, ViewErrorBoundaryState> {
-  state: ViewErrorBoundaryState = { error: null };
+  state: ViewErrorBoundaryState = { error: null, retryKey: 0 };
 
-  static getDerivedStateFromError(error: Error): ViewErrorBoundaryState {
+  static getDerivedStateFromError(error: Error): Partial<ViewErrorBoundaryState> {
     return { error };
   }
 
@@ -28,11 +29,18 @@ export class ViewErrorBoundary extends Component<ViewErrorBoundaryProps, ViewErr
     console.error("[shell] view failed to load", error, info);
   }
 
+  private handleRetry = () => {
+    this.setState((state) => ({
+      error: null,
+      retryKey: state.retryKey + 1,
+    }));
+  };
+
   render(): ReactNode {
     if (this.state.error) {
-      return <ViewLoadError onRetry={() => window.location.reload()} />;
+      return <ViewLoadError onRetry={this.handleRetry} />;
     }
-    return this.props.children;
+    return <Fragment key={this.state.retryKey}>{this.props.children}</Fragment>;
   }
 }
 
