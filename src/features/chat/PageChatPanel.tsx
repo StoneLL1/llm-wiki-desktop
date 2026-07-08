@@ -52,7 +52,13 @@ export function PageChatPanel({
     sendTask?.status === "running" ||
     sendTask?.status === "queued" ||
     sendTask?.status === "cancelling";
-  const latestAssistant = latestAssistantMessage(activeSession);
+  const activeSessionMatchesPage =
+    Boolean(page) &&
+    Boolean(activeSession) &&
+    normalizePagePath(activeSession?.contextPagePath ?? "") === normalizePagePath(page?.meta.path ?? "");
+  const pageSession = activeSessionMatchesPage ? activeSession : null;
+  const pageSessionId = activeSessionMatchesPage ? activeSessionId : null;
+  const latestAssistant = latestAssistantMessage(pageSession);
   const pinnedCitation = latestAssistant?.citations?.find(
     (citation) => citation.isPinned && citation.pagePath === page?.meta.path,
   );
@@ -84,7 +90,7 @@ export function PageChatPanel({
 
   const handleSend = async (content: string): Promise<boolean> => {
     if (!page) return false;
-    let sessionId = activeSessionId;
+    let sessionId = pageSessionId;
     if (!sessionId) {
       const created = await createSession(
         projectId,
@@ -166,13 +172,13 @@ export function PageChatPanel({
         </div>
       ) : null}
       <div className="page-chat__body min-h-0 flex-1 overflow-y-auto px-3 py-3" role="log" aria-live="polite">
-        {!activeSession ? (
+        {!pageSession ? (
           <div className="flex h-full items-center justify-center text-center text-[12px] text-[var(--text-muted)]">
             {t("wiki.askAi.currentPage")}
           </div>
         ) : (
           <div className="chat-stream w-full">
-            {activeSession.messages.map((message) => (
+            {pageSession.messages.map((message) => (
               <MessageBubble
                 key={message.id}
                 message={message}
@@ -187,8 +193,8 @@ export function PageChatPanel({
                   if (onOpenCitation) onOpenCitation(path);
                 }}
                 onSave={() => {
-                  if (!activeSessionId) return;
-                  void saveAnswer(projectId, rootPath, activeSessionId, message.id);
+                  if (!pageSessionId) return;
+                  void saveAnswer(projectId, rootPath, pageSessionId, message.id);
                 }}
               />
             ))}
@@ -225,4 +231,8 @@ function resolveCitationRef(citations: NonNullable<ChatMessage["citations"]>, re
   if (bySourceId) return bySourceId;
   const index = Number.parseInt(ref, 10);
   return Number.isFinite(index) ? citations[index - 1] : undefined;
+}
+
+function normalizePagePath(path: string): string {
+  return path.replace(/\\/g, "/").trim();
 }

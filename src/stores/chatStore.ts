@@ -76,11 +76,39 @@ interface ChatState {
   streamingText: string;
   streamingRoute: ChatRoute | null;
 
-  loadSessions: (projectId: string, rootPath: string) => Promise<void>;
+  /** Monotonic counter bumped each time ensurePageSession starts. An in-flight
+   *  ensure bails after any await if a newer page focus has superseded it,
+   *  so a slow list/select for page A can't drop page A's thread onto page B
+   *  after the user switched away. */
+  pageSessionEpoch: number;
+
+  loadSessions: (
+    projectId: string,
+    rootPath: string,
+    options?: { autoSelect?: boolean },
+  ) => Promise<void>;
   createSession: (
     projectId: string,
     rootPath: string,
     title?: string,
+    contextPagePath?: string | null,
+  ) => Promise<ChatSession | null>;
+  /** Resolve the chat session for a wiki page (Wiki AI sidebar). Lazy on
+   *  visit, explicit on send:
+   *  - `forceNew=false` (page focus): reuse an existing session scoped to
+   *    `pagePath` if one exists; otherwise clear any stale active session
+   *    and return null WITHOUT creating. The first send in PageChatPanel
+   *    creates the session (see handleSend). This stops a different page's
+   *    thread from bleeding onto the new page.
+   *  - `forceNew=true` (New Chat button): always create a fresh session
+   *    tagged with `contextPagePath`.
+   *  Returns the active session, or null if none applies / backend unavailable. */
+  ensurePageSession: (
+    projectId: string,
+    rootPath: string,
+    pagePath: string,
+    pageTitle: string,
+    forceNew: boolean,
   ) => Promise<ChatSession | null>;
   selectSession: (projectId: string, rootPath: string, sessionId: string) => Promise<void>;
   renameSession: (
@@ -139,13 +167,15 @@ const initial = {
   loadingSession: false,
   streamingText: "",
   streamingRoute: null as ChatRoute | null,
+  pageSessionEpoch: 0,
 };
 
 export const useChatStore = create<ChatState>((set, get) => ({
   ...initial,
 
-  loadSessions: async (projectId, rootPath) => {
+  loadSessions: async (projectId, rootPath, options) => {
     if (!hasTauri()) return;
+    const autoSelect = options?.autoSelect ?? true;
     const scope = captureProjectScope();
     set({ loadingSessions: true, error: null });
     try {
@@ -154,19 +184,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       if (!isProjectScopeCurrent(scope)) return;
       set({ sessions, loadingSessions: false });
+      // Auto-select the newest session (summaries are sorted newest-first by
+      // the backend) only when the user has not already selected one. This
+      // restores a usable composer when reopening Chat; an explicit selection
+      // survives a list refresh. Suppressed during page-session resolution,
+      // where ensurePageSession owns selection and a mid-flight auto-select
+      // could race a page switch.
+      if (autoSelect && !get().activeSessionId && sessions[0]) {
+        await get().selectSession(projectId, rootPath, sessions[0].id);
+        if (!isProjectScopeCurrent(scope)) return;
+      }
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       set({ loadingSessions: false, error: errorMessage(error) });
     }
   },
 
-  createSession: async (projectId, rootPath, title) => {
+  createSession: async (projectId, rootPath, title, contextPagePath) => {
     if (!hasTauri()) return null;
     const scope = captureProjectScope();
     set({ error: null });
     try {
       const session = await invoke<ChatSession>("create_chat_session", {
-        request: { projectId, projectRootPath: rootPath, title: title ?? null },
+        request: {
+          projectId,
+          projectRootPath: rootPath,
+          title: title ?? null,
+          contextPagePath: contextPagePath ?? null,
+        },
       });
       if (!isProjectScopeCurrent(scope)) return null;
       await get().loadSessions(projectId, rootPath);
@@ -174,6 +219,74 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return session;
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return null;
+      set({ error: errorMessage(error) });
+      return null;
+    }
+  },
+
+  ensurePageSession: async (projectId, rootPath, pagePath, pageTitle, forceNew) => {
+    if (!hasTauri()) return null;
+    const scope = captureProjectScope();
+    // Claim the latest page-focus slot. Any older in-flight ensure bails once
+    // it sees pageSessionEpoch has moved past its captured value, so a slow
+    // list/select for page A cannot drop page A's thread onto page B after a
+    // rapid switch.
+    const epoch = get().pageSessionEpoch + 1;
+    set({
+      pageSessionEpoch: epoch,
+      activeSessionId: null,
+      activeSession: null,
+      overwriteRequest: null,
+      error: null,
+    });
+    const superseded = () => get().pageSessionEpoch !== epoch;
+    try {
+      // Make sure the session list reflects disk before we search it, so a
+      // previously-created page session is reused rather than duplicated.
+      // autoSelect:false keeps loadSessions' newest-select side-effect from
+      // racing this resolution (it would otherwise fire before we can check
+      // the epoch below).
+      await get().loadSessions(projectId, rootPath, { autoSelect: false });
+      if (!isProjectScopeCurrent(scope) || superseded()) return null;
+      const normalized = pagePath.replace(/\\/g, "/").trim();
+      const existing = get().sessions.find(
+        (summary) => (summary.contextPagePath ?? "").replace(/\\/g, "/").trim() === normalized,
+      );
+      if (existing && !forceNew) {
+        // Load + commit inline. Going through selectSession would set
+        // activeSessionId synchronously and activeSession after its await —
+        // both without an epoch check — so a superseded call could drop
+        // page A's thread onto page B after a rapid switch. Committing here
+        // lets us re-check the epoch right before the set.
+        const loaded = await invoke<ChatSession>("load_chat_session", {
+          request: { projectId, projectRootPath: rootPath, sessionId: existing.id },
+        });
+        if (!isProjectScopeCurrent(scope) || superseded()) return null;
+        set({ activeSessionId: existing.id, activeSession: loaded, overwriteRequest: null });
+        return loaded;
+      }
+      if (!forceNew) {
+        // Lazy: do not create on visit. Clear any stale active session so a
+        // different page's thread does not bleed onto this page; the first
+        // send creates the session (PageChatPanel.handleSend).
+        set({ activeSessionId: null, activeSession: null });
+        return null;
+      }
+      // forceNew: create inline (createSession would selectSession internally,
+      // same supersession leak as the reuse branch). The session is written to
+      // disk tagged with contextPagePath regardless; we only skip selecting it
+      // onto a stale view if a newer page focus has superseded this one.
+      const title = pageTitle.trim() ? `Ask: ${pageTitle.trim()}` : "New page chat";
+      const created = await invoke<ChatSession>("create_chat_session", {
+        request: { projectId, projectRootPath: rootPath, title, contextPagePath: normalized },
+      });
+      if (!isProjectScopeCurrent(scope) || superseded()) return null;
+      await get().loadSessions(projectId, rootPath, { autoSelect: false });
+      if (!isProjectScopeCurrent(scope) || superseded()) return null;
+      set({ activeSessionId: created.id, activeSession: created, overwriteRequest: null });
+      return created;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope) || superseded()) return null;
       set({ error: errorMessage(error) });
       return null;
     }

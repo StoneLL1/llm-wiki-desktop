@@ -73,7 +73,13 @@ describe("PageChatPanel", () => {
   it("creates a page chat session when no active session exists", async () => {
     const createSession = vi.fn(async () => session({ id: "created-session" }));
     const send = vi.fn(async () => "task-1");
-    useChatStore.setState({ createSession, send, activeSessionId: null, activeSession: null });
+    useChatStore.setState({
+      createSession,
+      send,
+      activeSessionId: null,
+      activeSession: null,
+      ensurePageSession: vi.fn(async () => null),
+    });
 
     render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
     fireEvent.change(screen.getByPlaceholderText("Ask about this page..."), {
@@ -82,16 +88,78 @@ describe("PageChatPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
-      expect(createSession).toHaveBeenCalledWith("project-1", "/wiki", "Ask: ReAct Pattern");
+      expect(createSession).toHaveBeenCalledWith(
+        "project-1",
+        "/wiki",
+        "Ask: ReAct Pattern",
+        "wiki/concepts/react-pattern.md",
+      );
       expect(send).toHaveBeenCalled();
     });
+  });
+
+  it("creates a distinct page-scoped session when the wiki page changes", async () => {
+    const ensurePageSession = vi.fn(async () => session({ id: "react-session" }));
+    useChatStore.setState({ ensurePageSession: ensurePageSession as never });
+
+    const { rerender } = render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
+
+    const nextPage: WikiPageContent = {
+      ...page,
+      meta: { ...page.meta, path: "wiki/concepts/planning.md", title: "Planning" },
+    };
+    rerender(<PageChatPanel page={nextPage} projectId="project-1" rootPath="/wiki" />);
+
+    await waitFor(() => {
+      expect(ensurePageSession).toHaveBeenCalledWith(
+        "project-1",
+        "/wiki",
+        "wiki/concepts/planning.md",
+        "Planning",
+        false,
+      );
+    });
+  });
+
+  it("offers a new page chat action", async () => {
+    const ensurePageSession = vi.fn(async () => session({ id: "fresh-session" }));
+    useChatStore.setState({ ensurePageSession: ensurePageSession as never });
+    render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+
+    await waitFor(() => {
+      expect(ensurePageSession).toHaveBeenCalledWith(
+        "project-1",
+        "/wiki",
+        page.meta.path,
+        page.meta.title,
+        true,
+      );
+    });
+  });
+
+  it("keeps the draft when page chat session creation fails", async () => {
+    useChatStore.setState({
+      activeSessionId: null,
+      activeSession: null,
+      createSession: vi.fn(async () => null) as never,
+    });
+
+    render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
+
+    const box = screen.getByPlaceholderText("Ask about this page...");
+    fireEvent.change(box, { target: { value: "Do not clear me" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(box).toHaveValue("Do not clear me"));
   });
 
   it("sends with pinnedPagePath", async () => {
     const send = vi.fn(async () => "task-1");
     useChatStore.setState({
       activeSessionId: "session-1",
-      activeSession: session(),
+      activeSession: session({ contextPagePath: page.meta.path }),
       send,
     });
 
@@ -113,10 +181,63 @@ describe("PageChatPanel", () => {
     });
   });
 
+  it("does not show or send through a stale page-scoped session from another page", async () => {
+    const createSession = vi.fn(async () =>
+      session({ id: "created-for-current", contextPagePath: page.meta.path }),
+    );
+    const send = vi.fn(async () => "task-1");
+    useChatStore.setState({
+      activeSessionId: "old-session",
+      activeSession: session({
+        id: "old-session",
+        contextPagePath: "wiki/concepts/old-page.md",
+        messages: [
+          {
+            id: "old-answer",
+            role: "assistant",
+            content: "Old page answer",
+            createdAt: "2026-07-04T00:00:00Z",
+            citations: [],
+          },
+        ],
+      }),
+      createSession,
+      send,
+      ensurePageSession: vi.fn(async () => null),
+    });
+
+    render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
+
+    expect(screen.queryByText("Old page answer")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Ask about this page..."), {
+      target: { value: "Use current page only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(createSession).toHaveBeenCalledWith(
+        "project-1",
+        "/wiki",
+        "Ask: ReAct Pattern",
+        page.meta.path,
+      );
+      expect(send).toHaveBeenCalledWith(
+        "project-1",
+        "/wiki",
+        "created-for-current",
+        "Use current page only",
+        "auto",
+        { pinnedPagePath: page.meta.path },
+      );
+    });
+  });
+
   it("shows the pinned citation label", () => {
     useChatStore.setState({
       activeSessionId: "session-1",
       activeSession: session({
+        contextPagePath: page.meta.path,
         messages: [
           {
             id: "a1",
@@ -146,6 +267,7 @@ describe("PageChatPanel", () => {
     useChatStore.setState({
       activeSessionId: "session-1",
       activeSession: session({
+        contextPagePath: page.meta.path,
         messages: [
           {
             id: "a1",
@@ -180,5 +302,63 @@ describe("PageChatPanel", () => {
     render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
 
     expect(screen.getByText("No usable Agent CLI is configured.")).toBeInTheDocument();
+  });
+
+  it("opens cited wiki pages from page chat messages", () => {
+    const openCitation = vi.fn();
+    useChatStore.setState({
+      activeSessionId: "session-1",
+      activeSession: session({
+        contextPagePath: page.meta.path,
+        messages: [
+          {
+            id: "a1",
+            role: "assistant",
+            content: "See [1]",
+            createdAt: "2026-07-04T00:00:00Z",
+            citations: [{ pagePath: "wiki/a.md", title: "A", score: 1 }],
+          },
+        ],
+      }),
+    });
+    render(
+      <PageChatPanel
+        page={page}
+        projectId="project-1"
+        rootPath="/wiki"
+        onOpenCitation={openCitation}
+      />,
+    );
+
+    // Match on the citation path (unambiguous: only the citation card carries it).
+    fireEvent.click(screen.getByRole("button", { name: /wiki\/a\.md/i }));
+
+    expect(openCitation).toHaveBeenCalledWith("wiki/a.md");
+  });
+
+  it("saves an assistant answer through the chat store", () => {
+    const saveAnswer = vi.fn(async () => null);
+    useChatStore.setState({
+      activeSessionId: "session-1",
+      activeSession: session({
+        contextPagePath: page.meta.path,
+        messages: [
+          {
+            id: "a1",
+            role: "assistant",
+            content: "Answer",
+            createdAt: "2026-07-04T00:00:00Z",
+            citations: [],
+          },
+        ],
+      }),
+      saveAnswer: saveAnswer as never,
+    });
+
+    render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
+
+    fireEvent.click(screen.getByRole("button", { name: /save to wiki/i }));
+
+    expect(saveAnswer).toHaveBeenCalledWith("project-1", "/wiki", "session-1", "a1");
   });
 });

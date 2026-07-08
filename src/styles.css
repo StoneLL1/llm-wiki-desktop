@@ -1575,6 +1575,36 @@ select:focus-visible {
 .select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring-soft); }
 
 /* ---------- Chat: message stream ---------- */
+/* Scroll-boundary contract: the chat column owns overflow:hidden so the inner
+   chat-scroll-region (not a flex/grid child with default min-height:auto) is
+   the one element that scrolls. Without this, a long transcript grows the
+   grid item until the composer is pushed off-screen. Mirrors the
+   .chat-stream-wrap layout in UI-Frontend-design/chat.html. */
+.chat-stream-wrap {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-conversation {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.page-chat-shell {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-scroll-region {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
 .chat-stream {
   display: flex;
   flex-direction: column;
@@ -1811,15 +1841,14 @@ select:focus-visible {
 /* ---------- Graph: canvas + floating overlays (aligns UI-Frontend-design/assets/app.css §32) ---------- */
 .graph-canvas {
   position: relative;
-  background:
-    radial-gradient(circle at 50% 50%, var(--accent-ambient), transparent 70%),
-    var(--background);
+  background-color: var(--background);
   background-image:
-    linear-gradient(to right, rgba(0, 0, 0, 0.025) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(0, 0, 0, 0.025) 1px, transparent 1px);
-  background-size: 32px 32px;
+    linear-gradient(to right, color-mix(in srgb, var(--foreground) 2%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--foreground) 2%, transparent) 1px, transparent 1px);
+  background-size: 40px 40px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--surface-raised) 72%, transparent);
   overflow: hidden;
 }
 /* Sigma's canvas/labels must stay inside the rounded card; the wrapper clips overflow. */
@@ -1839,10 +1868,11 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
-  background: var(--background);
+  background: color-mix(in srgb, var(--background) 92%, transparent);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--sp-1);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 8%, transparent);
   z-index: 2;
 }
 .graph-float-controls button {
@@ -1863,13 +1893,14 @@ select:focus-visible {
   position: absolute;
   top: var(--sp-3);
   right: var(--sp-3);
-  background: var(--background);
+  background: color-mix(in srgb, var(--background) 92%, transparent);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--sp-3) var(--sp-4);
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--text-muted);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 8%, transparent);
   z-index: 2;
   line-height: 1.5;
 }
@@ -1882,11 +1913,12 @@ select:focus-visible {
   position: absolute;
   bottom: var(--sp-3);
   left: var(--sp-3);
-  background: var(--background);
+  background: color-mix(in srgb, var(--background) 92%, transparent);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--sp-3);
   font-size: 11.5px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 8%, transparent);
   z-index: 2;
   min-width: 168px;
 }
@@ -1940,7 +1972,7 @@ select:focus-visible {
   padding: var(--sp-1) var(--sp-3);
   font-size: 12px;
   color: var(--text-secondary);
-  box-shadow: var(--shadow-soft);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 .graph-state-banner--error {
   color: var(--danger);
@@ -2260,17 +2292,22 @@ select:focus-visible {
   outline-offset: -2px;
 }
 
-.export-file-cell {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--sp-2);
+.table .col-file {
+  width: 99%;
+  min-width: 0;
+}
+
+.table .col-export-actions {
+  width: 1px;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .export-row-actions {
   display: flex;
   flex-shrink: 0;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--sp-1);
   opacity: 0.72;
 }

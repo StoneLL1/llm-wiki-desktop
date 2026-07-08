@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, FolderOpen, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Search, Settings } from "lucide-react";
+import { ChevronDown, FolderOpen, LayoutDashboard, Search, Settings } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { compactPath } from "../../lib/pathDisplay";
@@ -20,8 +20,6 @@ function formatOpenedAt(iso: string): string {
 export function TopBar() {
   const { i18n, t } = useTranslation();
   const setActiveView = useNavigationStore((state) => state.setActiveView);
-  const sidebarCollapsed = useNavigationStore((state) => state.sidebarCollapsed);
-  const toggleSidebarCollapsed = useNavigationStore((state) => state.toggleSidebarCollapsed);
   const clearCurrentProject = useProjectStore((state) => state.clearCurrentProject);
   const currentProject = useProjectStore((state) => state.currentProject);
   const openProject = useProjectStore((state) => state.openProject);
@@ -41,7 +39,6 @@ export function TopBar() {
   const pendingMenuFocus = useRef<"first" | "last" | null>(null);
   const requestSequence = useRef(0);
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
-  const sidebarToggleLabel = t(sidebarCollapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse");
 
   const isMac = typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
   const kbdLabel = isMac ? "⌘K" : "Ctrl K";
@@ -198,19 +195,6 @@ export function TopBar() {
   return (
     <header className="app-topbar">
       <div className="app-topbar__brand">
-        <button
-          aria-label={sidebarToggleLabel}
-          className="icon-button app-topbar__sidebar-toggle"
-          onClick={toggleSidebarCollapsed}
-          title={sidebarToggleLabel}
-          type="button"
-        >
-          {sidebarCollapsed ? (
-            <PanelLeftOpen aria-hidden="true" size={16} />
-          ) : (
-            <PanelLeftClose aria-hidden="true" size={16} />
-          )}
-        </button>
         <div className="grid h-[22px] w-[22px] place-items-center rounded-[var(--radius-sm)] bg-[var(--foreground)] font-mono text-[11px] font-semibold text-[var(--text-inverse)]">
           LW
         </div>

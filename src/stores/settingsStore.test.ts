@@ -50,11 +50,11 @@ describe("settingsStore color theme preset", () => {
   it("reapplies auto color theme tokens when the OS dark preference changes", async () => {
     await useSettingsStore.getState().loadSettings("project-1", "D:/wiki");
 
-    expect(document.documentElement.style.getPropertyValue("--background")).toBe("#ffffff");
+    expect(document.documentElement.style.getPropertyValue("--background")).toBe("#fbfbfa");
 
     darkModeListener?.({ matches: true } as MediaQueryListEvent);
 
-    expect(document.documentElement.style.getPropertyValue("--background")).toBe("#111315");
+    expect(document.documentElement.style.getPropertyValue("--background")).toBe("#101312");
   });
 });
 

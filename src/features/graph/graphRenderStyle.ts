@@ -6,6 +6,7 @@ import {
   type GraphNode,
 } from "../../types/graph";
 import type { WikiPageType } from "../../types/wiki";
+import { edgeSizeForWeight, GRAPH_VISUAL_SCALE } from "./graphVisualScale";
 
 export type GraphHiddenReason = "type" | "degree" | "search" | null;
 
@@ -42,12 +43,12 @@ export interface EdgeVisual {
 }
 
 export const GRAPH_SELECTED_COLOR = "#0d9488";
+export const GRAPH_DEFAULT_EDGE_COLOR = "#b8c1cc";
 
 const PLAIN_COLOR = "#9b9b9b";
-const DEFAULT_EDGE_COLOR = "#d4d4d4";
-const DIMMED_NODE_OPACITY = 0.16;
-const HOVERED_TYPE_OPACITY = 0.28;
-const DIMMED_EDGE_OPACITY = 0.12;
+const DIMMED_NODE_OPACITY = 0.18;
+const HOVERED_TYPE_OPACITY = 0.32;
+const DIMMED_EDGE_OPACITY = 0.14;
 
 export function graphSearchMatches(node: GraphNode, search: string): boolean {
   const needle = search.trim().toLocaleLowerCase();
@@ -107,12 +108,24 @@ export function visualForNode(node: GraphNode, options: GraphRenderOptions): Nod
     hidden: false,
     hiddenReason: null,
     color,
-    sizeDelta: isSelected ? 2 : isHovered || isFocused ? 1 : 0,
+    sizeDelta: isSelected
+      ? GRAPH_VISUAL_SCALE.selectedSizeDelta
+      : isHovered || isFocused
+        ? GRAPH_VISUAL_SCALE.hoveredSizeDelta
+        : 0,
     opacity,
     highlighted,
     borderColor: isSelected ? GRAPH_SELECTED_COLOR : undefined,
     forceLabel: searchHit || isSelected || isHovered || isFocused,
   };
+}
+
+export function renderedNodeColor(
+  visual: Pick<NodeVisual, "borderColor" | "color" | "opacity">,
+  dimColor: string,
+): string {
+  if (visual.opacity < 1) return dimColor;
+  return visual.borderColor ?? visual.color;
 }
 
 export function visualForEdge(
@@ -121,7 +134,7 @@ export function visualForEdge(
   hiddenNodeIds: Set<string> = new Set(),
 ): EdgeVisual {
   if (hiddenNodeIds.has(edge.source) || hiddenNodeIds.has(edge.target)) {
-    return { hidden: true, color: DEFAULT_EDGE_COLOR, size: 0, opacity: 0 };
+    return { hidden: true, color: GRAPH_DEFAULT_EDGE_COLOR, size: 0, opacity: 0 };
   }
 
   const activeIds = new Set(
@@ -136,15 +149,15 @@ export function visualForEdge(
     return {
       hidden: false,
       color: GRAPH_SELECTED_COLOR,
-      size: 1.4,
+      size: GRAPH_VISUAL_SCALE.highlightedEdgeSize,
       opacity: 1,
     };
   }
 
   return {
     hidden: false,
-    color: DEFAULT_EDGE_COLOR,
-    size: Math.max(0.4, Math.min(1.4, 0.4 + edge.weight * 0.2)),
+    color: GRAPH_DEFAULT_EDGE_COLOR,
+    size: edgeSizeForWeight(edge.weight),
     opacity: hasFocusRoot ? DIMMED_EDGE_OPACITY : 1,
   };
 }

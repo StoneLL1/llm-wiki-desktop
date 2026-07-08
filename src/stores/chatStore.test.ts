@@ -31,6 +31,10 @@ const session = (overrides: Partial<ChatSession> = {}): ChatSession => ({
 
 const PROJECT = { projectId: "p", rootPath: "/x" };
 
+// Drain the microtask queue so an async store action advances to its next
+// await before the test continues.
+const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 beforeEach(() => {
   invokeMock.mockReset();
   useChatStore.getState().reset();
@@ -48,6 +52,38 @@ describe("chatStore", () => {
     await useChatStore.getState().selectSession(PROJECT.projectId, PROJECT.rootPath, "s1");
     expect(useChatStore.getState().activeSessionId).toBe("s1");
     expect(useChatStore.getState().activeSession?.id).toBe("s1");
+  });
+
+  it("auto-selects the newest session when loading sessions without an active session", async () => {
+    invokeMock
+      .mockResolvedValueOnce([
+        sessionSummary({ id: "new", title: "Newest", updatedAt: "2026-07-07T10:00:00Z" }),
+        sessionSummary({ id: "old", title: "Old", updatedAt: "2026-07-06T10:00:00Z" }),
+      ])
+      .mockResolvedValueOnce(session({ id: "new", title: "Newest" }));
+
+    await useChatStore.getState().loadSessions(PROJECT.projectId, PROJECT.rootPath);
+
+    expect(useChatStore.getState().activeSessionId).toBe("new");
+    expect(useChatStore.getState().activeSession?.id).toBe("new");
+    // The second invoke must be the session load (selectSession), not a re-list.
+    expect(invokeMock.mock.calls[1][0]).toBe("load_chat_session");
+    expect(invokeMock.mock.calls[1][1].request.sessionId).toBe("new");
+  });
+
+  it("does not replace an already selected session during list refresh", async () => {
+    useChatStore.setState({ activeSessionId: "old", activeSession: session({ id: "old" }) });
+    invokeMock.mockResolvedValueOnce([
+      sessionSummary({ id: "new", updatedAt: "2026-07-07T10:00:00Z" }),
+      sessionSummary({ id: "old", updatedAt: "2026-07-06T10:00:00Z" }),
+    ]);
+
+    await useChatStore.getState().loadSessions(PROJECT.projectId, PROJECT.rootPath);
+
+    expect(useChatStore.getState().activeSessionId).toBe("old");
+    // Only the list call was made; no auto-select load.
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock.mock.calls[0][0]).toBe("list_chat_sessions");
   });
 
   it("send stores the task id returned by the backend", async () => {
@@ -173,5 +209,230 @@ describe("chatStore", () => {
     expect(call[1].request.actionId).toBe("action-1");
     expect(useChatStore.getState().overwriteRequest).toBeNull();
     expect(useChatStore.getState().saveStatus.m1).toBe("saved");
+  });
+
+  describe("ensurePageSession (lazy / page-scoped)", () => {
+    // Pre-set a non-null active session so loadSessions' auto-select branch
+    // stays dormant and the ensurePageSession logic is what's under test.
+    function seedActive(activeId: string) {
+      useChatStore.setState({
+        activeSessionId: activeId,
+        activeSession: session({ id: activeId }),
+      });
+    }
+
+    function createWasCalled(): boolean {
+      return invokeMock.mock.calls.some((call) => call[0] === "create_chat_session");
+    }
+
+    it("reuses an existing page-scoped session instead of creating one", async () => {
+      seedActive("pre");
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "list_chat_sessions") {
+          return [
+            sessionSummary({ id: "page-a", contextPagePath: "wiki/a.md" }),
+            sessionSummary({ id: "other", contextPagePath: "wiki/other.md" }),
+          ];
+        }
+        if (cmd === "load_chat_session") {
+          return session({ id: "page-a", contextPagePath: "wiki/a.md" });
+        }
+        return undefined;
+      });
+
+      const result = await useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/a.md", "A", false);
+
+      expect(result?.id).toBe("page-a");
+      expect(useChatStore.getState().activeSessionId).toBe("page-a");
+      expect(createWasCalled()).toBe(false);
+    });
+
+    it("does not create a session when no page match exists, and clears the active session", async () => {
+      seedActive("pre");
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "list_chat_sessions") {
+          return [sessionSummary({ id: "other", contextPagePath: "wiki/other.md" })];
+        }
+        return undefined;
+      });
+
+      const result = await useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/a.md", "A", false);
+
+      expect(result).toBeNull();
+      expect(createWasCalled()).toBe(false);
+      // Clearing the stale active session stops a different page's thread from
+      // bleeding into this one (the original bug #4).
+      expect(useChatStore.getState().activeSessionId).toBeNull();
+      expect(useChatStore.getState().activeSession).toBeNull();
+    });
+
+    it("clears the previous page session immediately while resolving the new page", async () => {
+      seedActive("pre");
+      invokeMock.mockResolvedValueOnce([]);
+
+      const pending = useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/a.md", "A", false);
+
+      expect(useChatStore.getState().activeSessionId).toBeNull();
+      expect(useChatStore.getState().activeSession).toBeNull();
+
+      await pending;
+    });
+
+    it("forceNew=true always creates a fresh page-scoped session", async () => {
+      seedActive("pre");
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "list_chat_sessions") {
+          return [sessionSummary({ id: "page-a", contextPagePath: "wiki/a.md" })];
+        }
+        if (cmd === "create_chat_session") {
+          return session({ id: "fresh", contextPagePath: "wiki/a.md" });
+        }
+        if (cmd === "load_chat_session") {
+          return session({ id: "fresh", contextPagePath: "wiki/a.md" });
+        }
+        return undefined;
+      });
+
+      const result = await useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/a.md", "A", true);
+
+      expect(result?.id).toBe("fresh");
+      expect(createWasCalled()).toBe(true);
+    });
+
+    it("bails when a newer page focus supersedes an in-flight ensurePageSession", async () => {
+      seedActive("pre");
+      let listCall = 0;
+      const listResolvers: Array<(value: ChatSessionSummary[]) => void> = [];
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "list_chat_sessions") {
+          const idx = listCall++;
+          return new Promise<ChatSessionSummary[]>((resolve) => {
+            listResolvers[idx] = resolve;
+          });
+        }
+        if (cmd === "load_chat_session") {
+          return session({ id: "page-a", contextPagePath: "wiki/a.md" });
+        }
+        return undefined;
+      });
+
+      // A (page A) starts and awaits its session list.
+      const callA = useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/a.md", "A", false);
+
+      // User switches to page B before A's list resolves — B supersedes A.
+      const callB = useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/b.md", "B", false);
+
+      // B's list resolves first: only wiki/a.md exists, so B has no match and
+      // clears the stale active session.
+      expect(listResolvers[1]).toBeDefined();
+      listResolvers[1]([sessionSummary({ id: "page-a", contextPagePath: "wiki/a.md" })]);
+
+      // A's list resolves last. A would normally reuse wiki/a.md, but B has
+      // superseded it, so A must bail without selecting page-a onto page B.
+      expect(listResolvers[0]).toBeDefined();
+      listResolvers[0]([sessionSummary({ id: "page-a", contextPagePath: "wiki/a.md" })]);
+
+      const [resultA, resultB] = await Promise.all([callA, callB]);
+
+      expect(resultA).toBeNull();
+      expect(resultB).toBeNull();
+      // page-a's thread was never loaded onto the now-current page B.
+      expect(invokeMock.mock.calls.some((c) => c[0] === "load_chat_session")).toBe(false);
+      expect(useChatStore.getState().activeSessionId).toBeNull();
+    });
+
+    it("does not commit a reused session when superseded mid-load", async () => {
+      seedActive("pre");
+      const loadResolvers: Array<(value: ChatSession) => void> = [];
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "list_chat_sessions") {
+          return [sessionSummary({ id: "page-a", contextPagePath: "wiki/a.md" })];
+        }
+        if (cmd === "load_chat_session") {
+          return new Promise<ChatSession>((resolve) => {
+            loadResolvers.push(resolve);
+          });
+        }
+        return undefined;
+      });
+
+      // A (page A) finds a match and enters the session load.
+      const callA = useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/a.md", "A", false);
+      await flushMicrotasks();
+      expect(loadResolvers).toHaveLength(1);
+
+      // B (page B) supersedes A while A's load is still pending and clears
+      // the stale active session.
+      const callB = useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/b.md", "B", false);
+      await flushMicrotasks();
+      expect(useChatStore.getState().activeSessionId).toBeNull();
+
+      // A's load resolves last. A must NOT commit page-a's thread.
+      loadResolvers[0]?.(session({ id: "page-a", contextPagePath: "wiki/a.md" }));
+
+      const [resultA, resultB] = await Promise.all([callA, callB]);
+
+      expect(resultA).toBeNull();
+      expect(resultB).toBeNull();
+      expect(useChatStore.getState().activeSession).toBeNull();
+      expect(useChatStore.getState().activeSessionId).toBeNull();
+    });
+
+    it("does not commit a freshly created session when superseded mid-create", async () => {
+      seedActive("pre");
+      const createResolvers: Array<(value: ChatSession) => void> = [];
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "list_chat_sessions") {
+          return [sessionSummary({ id: "other", contextPagePath: "wiki/other.md" })];
+        }
+        if (cmd === "create_chat_session") {
+          return new Promise<ChatSession>((resolve) => {
+            createResolvers.push(resolve);
+          });
+        }
+        return undefined;
+      });
+
+      // A clicks "New Chat" on page A and reaches the create invoke.
+      const callA = useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/a.md", "A", true);
+      await flushMicrotasks();
+      expect(createResolvers).toHaveLength(1);
+
+      // B (page B) supersedes A and clears the stale active session.
+      const callB = useChatStore
+        .getState()
+        .ensurePageSession(PROJECT.projectId, PROJECT.rootPath, "wiki/b.md", "B", false);
+      await flushMicrotasks();
+      expect(useChatStore.getState().activeSessionId).toBeNull();
+
+      // A's create resolves. The session is written to disk, but A must NOT
+      // select it onto the now-current page B.
+      createResolvers[0]?.(session({ id: "new-a", contextPagePath: "wiki/a.md" }));
+
+      const [resultA, resultB] = await Promise.all([callA, callB]);
+
+      expect(resultA).toBeNull();
+      expect(resultB).toBeNull();
+      expect(useChatStore.getState().activeSession).toBeNull();
+      expect(useChatStore.getState().activeSessionId).toBeNull();
+    });
   });
 });

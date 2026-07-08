@@ -559,7 +559,52 @@ npm install remark-gfm remark-math rehype-katex rehype-highlight
 npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 ```
 
-## 16. 参考方向
+## 16. 当前实现对齐记录（2026-07-08）
+
+本节只记录已经落地或已经被测试固定的实现约束，不改变上文的核心产品方向；涉及产品范围、数据模型或安全边界的扩大仍需单独确认。
+
+### 16.1 已初始化工程结构
+
+- 当前仓库已是 Tauri v2 + React 19 + TypeScript + Vite 应用骨架，而不再只是文档与样本 Wiki。
+- 前端代码按 `components/app`、`components/ui`、`features/*`、`stores/*`、`types/*`、`hooks/*`、`services/*` 分层；领域视图已覆盖 Dashboard、Wiki、Chat、Graph、Agent、Import、Lint、Exports、Settings。
+- 后端代码已按 `commands/`、`services/`、`models/`、`errors/`、`tasks/`、`utils/` 拆分。Tauri command 继续保持薄层，业务逻辑集中在 service 层，数据通过 typed DTO 和 JSON/Markdown 文件传递。
+- 当前实现和测试仍遵循无数据库约束；项目内容继续以 Markdown、JSON 和本地文件为事实来源。
+
+### 16.2 Shell、布局与视觉约束
+
+- 主界面以 Codex-like 桌面工作台为准：左侧分区导航、中心工作面、右侧上下文面板、底部状态栏、紧凑顶栏。
+- `UI-Frontend-design/` 已作为 UI 对齐参照；实现侧通过 `src/styles.css` 的 CSS tokens、绝对 px 字号、固定 pane 高度和 CSS contract tests 固定视觉密度。
+- 布局偏好持久化在前端 layout preferences 中；侧栏折叠状态由实际宽度阈值推导，避免折叠标记与 pane 宽度不一致。
+- 外观设置已经不是单一亮/暗主题：当前支持 Codex、Paper、Graphite、Mint、Night、High Contrast 等 preset，每个 preset 提供 light/dark CSS 变量。新增主题必须补齐 tokens、测试和中英文可读性。
+
+### 16.3 Chat 与问答实现约束
+
+- Chat 会话持久化在 `.app/chats/{id}.json`，并允许可选 `contextPagePath`。该字段用于 Wiki 右侧 “Ask AI” 的页面级会话，不引入数据库或外部索引。
+- Wiki 页面侧栏 Chat 使用页面作用域会话：进入页面时只复用已有 `contextPagePath` 会话，不自动创建；首次发送或点击新建时才创建会话。快速切页必须通过 epoch/作用域守卫避免旧页面会话串到新页面。
+- 发送失败或未能创建会话时，输入草稿不得被清空。
+- 当前页作为 `pinnedPagePath` 进入检索上下文；固定页优先进入 prompt，且路径必须仍经过项目边界校验。
+- 检索命中、图邻居扩展和来源重叠扩展属于 diagnostics；持久化回答引用只来自模型实际输出中的 `[S#]` 标记。保存到 `wiki/queries/` 时只写入模型实际引用的来源。
+
+### 16.4 搜索、索引与图谱实现约束
+
+- SearchService 继续是本地关键词/过滤检索，不自动调用模型；问答只能进入 Chat/Agent/BYOK 流程。
+- Wiki 索引已采用项目级内存快照缓存，按文件 mtime/size 复用条目，并按项目数量设上限。缓存不得把 bookmark join 状态写死，因为 `.app/bookmarks.json` 变化不一定改变页面文件 mtime。
+- 图谱展示已固定为安静、紧凑、可读的分析画布：节点和边尺寸集中在 `graphVisualScale`，默认边颜色/最小线宽必须保持可见，hover/selection/focus 改变 size 或 z-index 时必须触发完整 refresh。
+- 图谱移动时不得隐藏边；重建或布局刷新应优先保留可用画面和进度反馈，避免用整页刷新替代局部恢复。
+
+### 16.5 导出与路径展示约束
+
+- Exports 已作为主导航一等视图；导出记录列表需要在表格中保留操作列，避免文件名、路径和操作按钮互相挤压。
+- 导出列表的次级路径行显示 basename；完整输出路径保留在 tooltip/title 中。跨平台路径展示统一通过 `pathDisplay` helpers 处理，不在组件内临时拆字符串。
+- 成功导出提供收藏、预览、浏览器打开、打开所在文件夹等 icon actions；失败导出保留日志和重试入口。
+
+### 16.6 任务、日志与审计约束
+
+- 后台任务、流式输出、取消、日志抽屉和通知已经成为核心交互的一部分。新增长任务必须接入统一 task 状态，而不是只在单个组件中放本地 loading。
+- `SPEC/progress.txt` 与 `SPEC/gotchas.txt` 是项目级协作账本。重要里程碑和易踩坑必须继续记录，并保持历史可追溯。
+- 样本 `wiki/wiki/` 仍是验证数据，不是应用源码；但其中 `.app/graph-cache.json` 等应用状态可作为测试真实项目行为的样本数据，提交前必须确认不含密钥或私人内容。
+
+## 17. 参考方向
 
 - Karpathy LLM Wiki：三层知识库模式，Raw Sources -> Wiki -> Schema。
 - `nashsu/llm_wiki`：页面级图谱、Wiki 自动编译、桌面应用化思路。

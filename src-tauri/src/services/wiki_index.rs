@@ -145,10 +145,7 @@ impl WikiIndex {
             live_paths.insert(project_relative.clone());
             let reuse = next.get(&project_relative).and_then(|entry| {
                 let (secs, nanos, size) = fs_tokens(absolute).ok()?;
-                if entry.mtime_secs == secs
-                    && entry.mtime_nanos == nanos
-                    && entry.size == size
-                {
+                if entry.mtime_secs == secs && entry.mtime_nanos == nanos && entry.size == size {
                     Some(entry.clone())
                 } else {
                     None
@@ -187,12 +184,7 @@ impl WikiIndex {
             let evicted_id = order.remove(0);
             snapshots.remove(&evicted_id);
         }
-        snapshots.insert(
-            context.project_id.clone(),
-            IndexSnapshot {
-                entries: next,
-            },
-        );
+        snapshots.insert(context.project_id.clone(), IndexSnapshot { entries: next });
 
         Ok(entries)
     }
@@ -231,10 +223,7 @@ impl WikiIndex {
 /// state. Keeping bookmark state out of the cache is load-bearing: a bookmark
 /// toggle changes `bookmarks.json` without moving the page's `mtime`/`size`,
 /// so caching `bookmarked` would deliver stale join results.
-fn build_entry(
-    absolute: &Path,
-    project_relative: &str,
-) -> Result<IndexEntry, BackendError> {
+fn build_entry(absolute: &Path, project_relative: &str) -> Result<IndexEntry, BackendError> {
     let bytes = std::fs::read(absolute).map_err(|err| file_read_error(err, absolute))?;
     let contents = String::from_utf8_lossy(&bytes).into_owned();
     let split = split_frontmatter(&contents);
@@ -254,8 +243,7 @@ fn build_entry(
 
     let title = extract_title(&split.body, &frontmatter, file_name);
     let type_field = frontmatter.get_scalar("type");
-    let page_type =
-        crate::models::wiki::WikiPageType::infer(type_field.as_deref(), wiki_relative);
+    let page_type = crate::models::wiki::WikiPageType::infer(type_field.as_deref(), wiki_relative);
     let starred = frontmatter
         .get_scalar("starred")
         .map(|value| value.eq_ignore_ascii_case("true"))
@@ -308,11 +296,7 @@ fn fs_tokens(path: &Path) -> Result<(u64, u32, u64), std::io::Error> {
     let duration = modified
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    Ok((
-        duration.as_secs(),
-        duration.subsec_nanos(),
-        metadata.len(),
-    ))
+    Ok((duration.as_secs(), duration.subsec_nanos(), metadata.len()))
 }
 
 fn mtime_tokens(path: &Path) -> Result<(u64, u32), std::io::Error> {
@@ -604,7 +588,9 @@ mod tests {
         let mut read_paths: Vec<String> = Vec::new();
         {
             let mut callback = |path: &str| read_paths.push(path.to_string());
-            let _ = index.refresh_internal(&context, &store, Some(&mut callback)).unwrap();
+            let _ = index
+                .refresh_internal(&context, &store, Some(&mut callback))
+                .unwrap();
         }
         let mut sorted = read_paths.clone();
         sorted.sort();
@@ -614,7 +600,9 @@ mod tests {
         read_paths.clear();
         {
             let mut callback = |path: &str| read_paths.push(path.to_string());
-            let _ = index.refresh_internal(&context, &store, Some(&mut callback)).unwrap();
+            let _ = index
+                .refresh_internal(&context, &store, Some(&mut callback))
+                .unwrap();
         }
         assert!(read_paths.is_empty(), "unchanged files must not be re-read");
 
@@ -625,7 +613,9 @@ mod tests {
         read_paths.clear();
         {
             let mut callback = |path: &str| read_paths.push(path.to_string());
-            let _ = index.refresh_internal(&context, &store, Some(&mut callback)).unwrap();
+            let _ = index
+                .refresh_internal(&context, &store, Some(&mut callback))
+                .unwrap();
         }
         assert_eq!(read_paths, vec!["wiki/b.md"]);
 
@@ -690,8 +680,7 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("llm-wiki-index-cap-{stamp}-{i}"));
+            let root = std::env::temp_dir().join(format!("llm-wiki-index-cap-{stamp}-{i}"));
             std::fs::create_dir_all(&root).unwrap();
             let context = ProjectContext::new(format!("project-cap-{i}"), root.clone());
             write_file(&context, "wiki/a.md", "# A in project {i}");
@@ -703,8 +692,10 @@ mod tests {
         // (project-cap-0 and project-cap-1) must have been evicted.
         let context_0 = ProjectContext::new("project-cap-0", roots[0].clone());
         let context_1 = ProjectContext::new("project-cap-1", roots[1].clone());
-        let context_last =
-            ProjectContext::new(format!("project-cap-{}", MAX_CACHED_PROJECTS + 1), roots.last().unwrap().clone());
+        let context_last = ProjectContext::new(
+            format!("project-cap-{}", MAX_CACHED_PROJECTS + 1),
+            roots.last().unwrap().clone(),
+        );
         assert!(index.entries(&context_0).unwrap().is_empty());
         assert!(index.entries(&context_1).unwrap().is_empty());
         assert!(!index.entries(&context_last).unwrap().is_empty());
@@ -727,8 +718,7 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("llm-wiki-index-promote-{stamp}-{i}"));
+            let root = std::env::temp_dir().join(format!("llm-wiki-index-promote-{stamp}-{i}"));
             std::fs::create_dir_all(&root).unwrap();
             let context = ProjectContext::new(format!("project-promote-{i}"), root.clone());
             write_file(&context, "wiki/a.md", "# A");

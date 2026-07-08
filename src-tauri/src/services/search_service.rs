@@ -2016,8 +2016,7 @@ mod index_integration_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("llm-wiki-search-idx-{stamp}-{suffix}"));
+        let root = std::env::temp_dir().join(format!("llm-wiki-search-idx-{stamp}-{suffix}"));
         std::fs::create_dir_all(&root).unwrap();
         (ProjectContext::new("project-idx", root.clone()), root)
     }
@@ -2081,14 +2080,24 @@ mod index_integration_tests {
             limit: None,
         };
         let response = service.search(&context, &request).unwrap();
-        assert!(response.results.iter().any(|r| r.path == "wiki/concepts/agent.md"));
+        assert!(response
+            .results
+            .iter()
+            .any(|r| r.path == "wiki/concepts/agent.md"));
 
         let hits = service
             .retrieve_with_excerpts(&context, "agent", 5, 80)
             .unwrap();
-        let agent_hit = hits.iter().find(|h| h.path == "wiki/concepts/agent.md").unwrap();
+        let agent_hit = hits
+            .iter()
+            .find(|h| h.path == "wiki/concepts/agent.md")
+            .unwrap();
         // Excerpt comes from the cached body (no read_page re-read).
-        assert!(agent_hit.excerpt.as_deref().unwrap().contains("short context"));
+        assert!(agent_hit
+            .excerpt
+            .as_deref()
+            .unwrap()
+            .contains("short context"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2127,7 +2136,10 @@ mod index_integration_tests {
             .find(|p| p.path == "wiki/concepts/agent.md")
             .unwrap();
         assert_eq!(agent_after.title, "Agent v2");
-        assert_eq!(agent_after.tags, vec!["memory".to_string(), "context".to_string()]);
+        assert_eq!(
+            agent_after.tags,
+            vec!["memory".to_string(), "context".to_string()]
+        );
         assert_ne!(agent_after.hash, hash_before);
 
         std::fs::remove_dir_all(root).unwrap();
@@ -2145,11 +2157,18 @@ mod index_integration_tests {
         let first = service.scan_wiki(&context, &bookmarks).unwrap();
         assert_eq!(first.total_pages, 3);
 
-        std::fs::remove_file(context.resolve_project_path("wiki/concepts/react.md").unwrap())
-            .unwrap();
+        std::fs::remove_file(
+            context
+                .resolve_project_path("wiki/concepts/react.md")
+                .unwrap(),
+        )
+        .unwrap();
         let after = service.scan_wiki(&context, &bookmarks).unwrap();
         assert_eq!(after.total_pages, 2);
-        assert!(!after.pages.iter().any(|p| p.path == "wiki/concepts/react.md"));
+        assert!(!after
+            .pages
+            .iter()
+            .any(|p| p.path == "wiki/concepts/react.md"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2192,10 +2211,7 @@ mod index_integration_tests {
             .find(|p| p.path == "wiki/概念/智能体.md")
             .unwrap();
         assert_eq!(cjk_after.title, "智能体（修订）");
-        assert_eq!(
-            cjk_after.tags,
-            vec!["方法".to_string(), "实践".to_string()]
-        );
+        assert_eq!(cjk_after.tags, vec!["方法".to_string(), "实践".to_string()]);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2274,7 +2290,10 @@ mod index_integration_tests {
         let hits = service
             .retrieve_with_excerpts(&context, "agent", 5, 80)
             .unwrap();
-        let agent = hits.iter().find(|h| h.path == "wiki/concepts/agent.md").unwrap();
+        let agent = hits
+            .iter()
+            .find(|h| h.path == "wiki/concepts/agent.md")
+            .unwrap();
         assert!(agent.excerpt.as_deref().unwrap().contains("short context"));
 
         // A second retrieve call must still return the same excerpt (the
@@ -2292,4 +2311,3 @@ mod index_integration_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-

@@ -17,6 +17,7 @@ import {
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
+import { pathBasename } from "../../lib/pathDisplay";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -269,13 +270,13 @@ export function ExportsView() {
               <thead>
                 <tr>
                   <th className="col-icon"></th>
-                  <th>{t("exports.table.file")}</th>
+                  <th className="col-file">{t("exports.table.file")}</th>
                   <th>{t("exports.table.type")}</th>
                   <th>{t("exports.table.source")}</th>
                   <th>{t("exports.table.time")}</th>
                   <th>{t("exports.table.route")}</th>
                   <th>{t("exports.table.status")}</th>
-                  <th></th>
+                  <th className="col-export-actions"></th>
                 </tr>
               </thead>
               <tbody>
@@ -312,46 +313,10 @@ export function ExportsView() {
                           }
                         />
                       </td>
-                      <td>
-                        <div className="export-file-cell">
-                          <div className="min-w-0">
-                            <div className="primary truncate">{record.title}</div>
-                            <div className="secondary font-mono">{record.outputPath}</div>
-                          </div>
-                          {!failed ? (
-                            <div className="export-row-actions">
-                              <IconButton
-                                label={t(record.bookmarked ? "exports.actions.unbookmark" : "exports.actions.bookmark")}
-                                onClick={() => handleToggleBookmark(record)}
-                                active={record.bookmarked}
-                              >
-                                <Star
-                                  size={14}
-                                  strokeWidth={1.5}
-                                  fill={record.bookmarked ? "currentColor" : "none"}
-                                />
-                              </IconButton>
-                              <IconButton
-                                label={t("exports.actions.preview")}
-                                onClick={() => handlePreview(record)}
-                                active={isPreviewing}
-                              >
-                                <Eye size={14} strokeWidth={1.5} />
-                              </IconButton>
-                              <IconButton
-                                label={t("exports.actions.openInBrowser", { defaultValue: "Open in browser" })}
-                                onClick={() => handleOpenInBrowser(record)}
-                              >
-                                <ExternalLink size={14} strokeWidth={1.5} />
-                              </IconButton>
-                              <IconButton
-                                label={t("exports.actions.openFolder")}
-                                onClick={() => handleOpenFolder(record)}
-                              >
-                                <FolderOpen size={14} strokeWidth={1.5} />
-                              </IconButton>
-                            </div>
-                          ) : null}
+                      <td className="col-file" title={record.outputPath}>
+                        <div className="min-w-0">
+                          <div className="primary truncate">{record.title}</div>
+                          <div className="secondary font-mono truncate">{pathBasename(record.outputPath)}</div>
                         </div>
                       </td>
                       <td>
@@ -379,8 +344,41 @@ export function ExportsView() {
                           </span>
                         )}
                       </td>
-                      <td>
-                        {failed ? (
+                      <td className="col-export-actions">
+                        {!failed ? (
+                          <div className="export-row-actions">
+                            <IconButton
+                              label={t(record.bookmarked ? "exports.actions.unbookmark" : "exports.actions.bookmark")}
+                              onClick={() => handleToggleBookmark(record)}
+                              active={record.bookmarked}
+                            >
+                              <Star
+                                size={14}
+                                strokeWidth={1.5}
+                                fill={record.bookmarked ? "currentColor" : "none"}
+                              />
+                            </IconButton>
+                            <IconButton
+                              label={t("exports.actions.preview")}
+                              onClick={() => handlePreview(record)}
+                              active={isPreviewing}
+                            >
+                              <Eye size={14} strokeWidth={1.5} />
+                            </IconButton>
+                            <IconButton
+                              label={t("exports.actions.openInBrowser", { defaultValue: "Open in browser" })}
+                              onClick={() => handleOpenInBrowser(record)}
+                            >
+                              <ExternalLink size={14} strokeWidth={1.5} />
+                            </IconButton>
+                            <IconButton
+                              label={t("exports.actions.openFolder")}
+                              onClick={() => handleOpenFolder(record)}
+                            >
+                              <FolderOpen size={14} strokeWidth={1.5} />
+                            </IconButton>
+                          </div>
+                        ) : (
                           <div className="flex items-center justify-end gap-1">
                             <IconButton
                               label={t("exports.actions.viewLogs")}
@@ -396,8 +394,6 @@ export function ExportsView() {
                               {t("exports.actions.retry")}
                             </button>
                           </div>
-                        ) : (
-                          null
                         )}
                       </td>
                     </tr>

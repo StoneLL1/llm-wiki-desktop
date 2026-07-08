@@ -56,7 +56,8 @@ describe("ExportsView", () => {
     useProjectStore.setState({ currentProject: PROJECT });
     render(<ExportsView />);
     expect(screen.getByText("Agent")).toBeInTheDocument();
-    expect(screen.getByText("exports/html/agent-1.html")).toBeInTheDocument();
+    expect(screen.getByText("agent-1.html")).toBeInTheDocument();
+    expect(screen.getByTitle("exports/html/agent-1.html")).toBeInTheDocument();
     expect(screen.getByText("Succeeded")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Preview/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Open in browser/i })).toBeInTheDocument();

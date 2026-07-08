@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { COMMUNITY_PALETTE, PAGE_TYPE_COLORS, type GraphData, type GraphNode } from "../../types/graph";
 import type { WikiPageType } from "../../types/wiki";
 import { buildRenderSnapshot, type RenderSnapshotInput } from "./graphRenderModel";
-import { GRAPH_SELECTED_COLOR, visualForEdge, visualForNode } from "./graphRenderStyle";
+import { GRAPH_DEFAULT_EDGE_COLOR, GRAPH_SELECTED_COLOR, visualForEdge, visualForNode } from "./graphRenderStyle";
+import { GRAPH_VISUAL_SCALE } from "./graphVisualScale";
 
 // The render snapshot's job is to compute, ONCE per refresh, the things that
 // the per-edge/per-node sigma reducers used to recompute on every call:
@@ -265,7 +266,7 @@ describe("buildRenderSnapshot", () => {
     expect(other.opacity).toBeLessThan(1);
   });
 
-  it("highlights the focused node with sizeDelta 1 and dims non-neighbors (parity with selectedNodeId)", () => {
+  it("highlights the focused node with modest growth and dims non-neighbors", () => {
     // Focus shares the `hasFocusRoot` branch with selection; pin it separately
     // so a future regression that breaks one but not the other is caught.
     const nodes = [
@@ -286,7 +287,7 @@ describe("buildRenderSnapshot", () => {
     const farVisual = visualForNode(nodes[2], snap.options);
 
     expect(focusVisual.highlighted).toBe(true);
-    expect(focusVisual.sizeDelta).toBe(1); // focused: 1 (selected: 2)
+    expect(focusVisual.sizeDelta).toBe(GRAPH_VISUAL_SCALE.hoveredSizeDelta);
     expect(focusVisual.forceLabel).toBe(true);
     expect(neighborVisual.highlighted).toBe(true);
     expect(farVisual.highlighted).toBe(false);
@@ -328,7 +329,7 @@ describe("buildRenderSnapshot", () => {
 
     expect(visual.hidden).toBe(false);
     expect(visual.opacity).toBe(1);
-    expect(visual.color).toBe("#d4d4d4");
+    expect(visual.color).toBe(GRAPH_DEFAULT_EDGE_COLOR);
   });
 
   it("recomputes a fresh snapshot when filters change (snapshot is not memoized across calls)", () => {

@@ -501,7 +501,7 @@ scope：
 - CLAUDE.md
 
 # 进度账本
-SPEC/plans/exports.md（不存在则从 roadmap 摘 P0/P1 建条目）。status: pending|in_progress|done|verified。
+SPEC/plans/exports.md（不存在则自己做计划）。status: pending|in_progress|done|verified。
 
 # 每次唤醒
 1. 读账本，找第一个非 verified 项；无 → 【收敛】。

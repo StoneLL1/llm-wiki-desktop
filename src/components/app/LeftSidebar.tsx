@@ -110,7 +110,7 @@ export function LeftSidebar() {
           title={t(item.labelKey)}
           type="button"
         >
-          <Icon aria-hidden="true" size={16} />
+          <Icon aria-hidden="true" className="shrink-0" size={16} />
           <span className="app-sidebar__nav-label truncate">{t(item.labelKey)}</span>
           {item.view === "wiki" ? (
             <span className={`app-sidebar__count ml-auto font-mono text-[10.5px] ${active ? "text-[var(--accent-hover)]" : "text-[var(--text-muted)]"}`}>{currentProject.wikiPageCount}</span>
@@ -145,7 +145,7 @@ export function LeftSidebar() {
       <div className="app-sidebar__favorites py-3">
         <div className="app-sidebar__section-label flex items-center justify-between">
           <span>{t("shell.favorites")}</span>
-          <Star aria-hidden="true" size={11} />
+          <Star aria-hidden="true" className="shrink-0" size={11} />
         </div>
         <div className="flex flex-col gap-[1px] px-2">
           {favorites.length === 0 ? (
@@ -164,7 +164,7 @@ export function LeftSidebar() {
                   title={item.missing ? t("shell.favorite.missingExport") : item.path}
                   type="button"
                 >
-                  <Icon aria-hidden="true" className={item.kind === "wiki_page" ? "text-[var(--accent)]" : "text-[var(--text-muted)]"} size={14} />
+                  <Icon aria-hidden="true" className="shrink-0 text-[var(--accent)]" size={14} />
                   <span className="truncate">{item.title}</span>
                 </button>
               );
@@ -192,7 +192,7 @@ export function LeftSidebar() {
                 title={page.path}
                 type="button"
               >
-                <FileText aria-hidden="true" className={index === 0 ? "text-[var(--accent)]" : "text-[var(--text-muted)]"} size={14} />
+                <FileText aria-hidden="true" className={`shrink-0 ${index === 0 ? "text-[var(--accent)]" : "text-[var(--text-secondary)]"}`} size={14} />
                 <span className="truncate">{page.title}</span>
               </button>
             ))
