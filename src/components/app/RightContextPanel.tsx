@@ -54,6 +54,10 @@ export function RightContextPanel() {
   const graphExportPng = useGraphStore((state) => state.exportPng);
   const graphRecomputeLayout = useGraphStore((state) => state.recomputeLayout);
   const chatSession = useChatStore((state) => state.activeSession);
+  // Subscribe (don't getState) so the save button re-renders when the
+  // per-message saveStatus map or the saveAnswer action identity changes.
+  const chatSaveStatus = useChatStore((state) => state.saveStatus);
+  const chatSaveAnswer = useChatStore((state) => state.saveAnswer);
 
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
@@ -75,9 +79,9 @@ export function RightContextPanel() {
     const provider = latestAssistant?.provider ?? null;
     const wikiCount = currentProject.wikiPageCount;
     const saveStatus = latestAssistant
-      ? (useChatStore.getState().saveStatus[latestAssistant.id] ?? "idle")
+      ? (chatSaveStatus[latestAssistant.id] ?? "idle")
       : "idle";
-    const saveAnswer = useChatStore.getState().saveAnswer;
+    const saveAnswer = chatSaveAnswer;
     const { projectId, rootPath } = currentProject;
 
     const handleSave = () => {
@@ -215,7 +219,7 @@ export function RightContextPanel() {
           className="right-panel"
         >
           <RightPanelHeader title={t("wiki.askAi.panelTitle")} />
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 overflow-hidden">
             <ViewErrorBoundary>
               <Suspense fallback={<ViewFallback />}>
                 <PageChatPanel
@@ -223,6 +227,7 @@ export function RightContextPanel() {
                   projectId={currentProject.projectId}
                   rootPath={currentProject.rootPath}
                   onShowRelatedPages={closeWikiAssistant}
+                  onOpenCitation={openPage}
                 />
               </Suspense>
             </ViewErrorBoundary>

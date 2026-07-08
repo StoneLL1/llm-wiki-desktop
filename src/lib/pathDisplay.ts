@@ -1,3 +1,10 @@
+export function pathBasename(path: string): string {
+  const trimmed = path.replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!trimmed) return "";
+  const parts = trimmed.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? "";
+}
+
 export function compactPath(path: string, maxSegments = 3): string {
   const normalized = path.replaceAll("\\", "/").replace(/\/+/g, "/");
   if (!normalized) return "";

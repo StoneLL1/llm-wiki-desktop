@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import type { GraphRenderOptions } from "./graphRenderStyle";
 import {
+  GRAPH_DEFAULT_EDGE_COLOR,
   GRAPH_SELECTED_COLOR,
   graphSearchMatches,
   hiddenReasonForNode,
+  renderedNodeColor,
   visibleNodeIdsForExport,
+  visualForEdge,
   visualForNode,
 } from "./graphRenderStyle";
+import { GRAPH_VISUAL_SCALE } from "./graphVisualScale";
 import { COMMUNITY_PALETTE, type GraphNode } from "../../types/graph";
 
 describe("graphRenderStyle", () => {
@@ -63,10 +67,36 @@ describe("graphRenderStyle", () => {
 
     expect(selected.highlighted).toBe(true);
     expect(selected.borderColor).toBe(GRAPH_SELECTED_COLOR);
-    expect(selected.sizeDelta).toBe(2);
+    expect(selected.sizeDelta).toBe(GRAPH_VISUAL_SCALE.selectedSizeDelta);
     expect(neighbor.opacity).toBe(1);
     expect(nonNeighbor.hidden).toBe(false);
     expect(nonNeighbor.opacity).toBeLessThan(0.2);
+  });
+
+  it("keeps hover and focus emphasis smaller than selected emphasis", () => {
+    const hovered = visualForNode(baseNode, options({ hoveredNodeId: baseNode.id }));
+    const focused = visualForNode(baseNode, options({ focusedNodeId: baseNode.id }));
+
+    expect(hovered.sizeDelta).toBe(GRAPH_VISUAL_SCALE.hoveredSizeDelta);
+    expect(focused.sizeDelta).toBe(GRAPH_VISUAL_SCALE.hoveredSizeDelta);
+    expect(hovered.sizeDelta).toBeLessThan(GRAPH_VISUAL_SCALE.selectedSizeDelta);
+  });
+
+  it("uses the selected accent as the rendered node color when a border program is unavailable", () => {
+    const selected = visualForNode(baseNode, options({ selectedNodeId: baseNode.id }));
+
+    expect(renderedNodeColor(selected, "#eeeeee")).toBe(GRAPH_SELECTED_COLOR);
+  });
+
+  it("keeps default edges visible on the quiet graph canvas", () => {
+    const visual = visualForEdge(
+      { source: "a", target: "b", relation: "related", weight: 1 },
+      options(),
+    );
+
+    expect(GRAPH_DEFAULT_EDGE_COLOR).toBe("#b8c1cc");
+    expect(visual.color).toBe(GRAPH_DEFAULT_EDGE_COLOR);
+    expect(visual.size).toBeGreaterThanOrEqual(0.6);
   });
 
   it("uses hovered type as a temporary highlight without hiding other visible nodes", () => {

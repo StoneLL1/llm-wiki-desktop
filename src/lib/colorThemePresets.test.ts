@@ -21,6 +21,23 @@ describe("color theme presets", () => {
     }
   });
 
+  it("uses redesigned reference-inspired accent families with clear separation", () => {
+    expect(COLOR_THEME_PRESETS.map((preset) => preset.id)).toEqual([
+      "codex",
+      "paper",
+      "graphite",
+      "mint",
+      "night",
+      "highContrast",
+    ]);
+    expect(getColorThemePreset("codex").variants.light.cssVars["--accent"]).toBe("#0f766e");
+    expect(getColorThemePreset("paper").variants.light.cssVars["--accent"]).toBe("#c2410c");
+    expect(getColorThemePreset("graphite").variants.light.cssVars["--accent"]).toBe("#5b5bd6");
+    expect(getColorThemePreset("mint").variants.light.cssVars["--accent"]).toBe("#059669");
+    expect(getColorThemePreset("night").variants.dark.cssVars["--accent"]).toBe("#8b5cf6");
+    expect(getColorThemePreset("highContrast").variants.dark.cssVars["--accent"]).toBe("#7dd3fc");
+  });
+
   it("resolves auto mode from system preference", () => {
     const preset = getColorThemePreset("codex");
     expect(resolveColorThemeVariant(preset, "auto", false).mode).toBe("light");

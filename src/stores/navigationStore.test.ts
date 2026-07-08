@@ -22,7 +22,6 @@ describe("navigationStore layout preferences", () => {
     });
   });
 
-
   it("starts with the default view and right panel mode", () => {
     expect(useNavigationStore.getState().activeView).toBe("dashboard");
     expect(useNavigationStore.getState().rightPanelOpen).toBe(true);
@@ -70,9 +69,26 @@ describe("navigationStore layout preferences", () => {
 
     expect(useNavigationStore.getState().activeView).toBe("graph");
     expect(useNavigationStore.getState().sidebarCollapsed).toBe(true);
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(56);
     expect(window.localStorage.getItem("llm-wiki-desktop.layout.v1")).toContain(
       "sidebarCollapsed",
     );
+  });
+
+  it("expands the sidebar to its default width through the compatibility API", () => {
+    useNavigationStore.getState().setSidebarCollapsed(true);
+    useNavigationStore.getState().setSidebarCollapsed(false);
+
+    expect(useNavigationStore.getState().sidebarCollapsed).toBe(false);
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(240);
+  });
+
+  it("allows dragging the sidebar back out after it collapsed to the icon rail", () => {
+    useNavigationStore.getState().setPaneSize("sidebar", 56);
+    useNavigationStore.getState().setPaneSize("sidebar", 160);
+
+    expect(useNavigationStore.getState().sidebarCollapsed).toBe(false);
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(160);
   });
 
   it("clamps and persists pane size changes", () => {

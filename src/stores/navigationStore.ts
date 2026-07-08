@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   type ResizablePaneId,
   PANE_WIDTH_LIMITS,
+  SIDEBAR_COLLAPSE_THRESHOLD,
   readLayoutPreferenceSnapshot,
   sanitizeLayoutPreferences,
   writeLayoutPreferenceSnapshot,
@@ -102,9 +103,17 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     })),
   setSidebarCollapsed: (sidebarCollapsed) =>
     set((state) => {
+      const nextSidebarWidth = sidebarCollapsed
+        ? PANE_WIDTH_LIMITS.sidebar.min
+        : state.paneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD
+          ? PANE_WIDTH_LIMITS.sidebar.defaultValue
+          : state.paneSizes.sidebar;
       const snapshot = sanitizeLayoutPreferences({
         sidebarCollapsed,
-        paneSizes: state.paneSizes,
+        paneSizes: {
+          ...state.paneSizes,
+          sidebar: nextSidebarWidth,
+        },
       });
       writeLayoutPreferenceSnapshot(snapshot);
 
@@ -115,9 +124,16 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     }),
   toggleSidebarCollapsed: () =>
     set((state) => {
+      const sidebarCollapsed = state.paneSizes.sidebar > SIDEBAR_COLLAPSE_THRESHOLD;
+      const nextSidebarWidth = sidebarCollapsed
+        ? PANE_WIDTH_LIMITS.sidebar.min
+        : PANE_WIDTH_LIMITS.sidebar.defaultValue;
       const snapshot = sanitizeLayoutPreferences({
-        sidebarCollapsed: !state.sidebarCollapsed,
-        paneSizes: state.paneSizes,
+        sidebarCollapsed,
+        paneSizes: {
+          ...state.paneSizes,
+          sidebar: nextSidebarWidth,
+        },
       });
       writeLayoutPreferenceSnapshot(snapshot);
 
@@ -128,13 +144,20 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     }),
   setPaneSize: (pane, width) =>
     set((state) => {
-      const snapshot = sanitizeLayoutPreferences({
-        sidebarCollapsed: state.sidebarCollapsed,
+      const sanitized = sanitizeLayoutPreferences({
+        sidebarCollapsed: pane === "sidebar" ? false : state.sidebarCollapsed,
         paneSizes: {
           ...state.paneSizes,
           [pane]: width,
         },
       });
+      const snapshot =
+        pane === "sidebar"
+          ? {
+              ...sanitized,
+              sidebarCollapsed: sanitized.paneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD,
+            }
+          : sanitized;
       writeLayoutPreferenceSnapshot(snapshot);
 
       return {
@@ -144,13 +167,20 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     }),
   resetPaneSize: (pane) =>
     set((state) => {
-      const snapshot = sanitizeLayoutPreferences({
-        sidebarCollapsed: state.sidebarCollapsed,
+      const sanitized = sanitizeLayoutPreferences({
+        sidebarCollapsed: pane === "sidebar" ? false : state.sidebarCollapsed,
         paneSizes: {
           ...state.paneSizes,
           [pane]: PANE_WIDTH_LIMITS[pane].defaultValue,
         },
       });
+      const snapshot =
+        pane === "sidebar"
+          ? {
+              ...sanitized,
+              sidebarCollapsed: sanitized.paneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD,
+            }
+          : sanitized;
       writeLayoutPreferenceSnapshot(snapshot);
 
       return {

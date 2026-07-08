@@ -1,4 +1,6 @@
 import { render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import "../../i18n";
@@ -76,5 +78,11 @@ describe("GraphView", () => {
     expect(screen.getByRole("status", { name: /rebuilding graph/i })).toBeInTheDocument();
     expect(screen.getByTestId("graph-canvas-surface")).toBeInTheDocument();
     expect(screen.getByText("50%")).toBeInTheDocument();
+  });
+
+  it("keeps graph edges visible while the user pans or zooms", () => {
+    const source = readFileSync(join(process.cwd(), "src", "features", "graph", "GraphView.tsx"), "utf8");
+
+    expect(source).toMatch(/hideEdgesOnMove:\s*false/);
   });
 });

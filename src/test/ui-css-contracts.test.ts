@@ -7,6 +7,10 @@ import { describe, expect, it } from "vitest";
 const stylesPath = join(process.cwd(), "src", "styles.css");
 const styles = readFileSync(stylesPath, "utf8");
 
+/** Re-read styles.css so a test observes the current file contents even when
+ *  other tests in the same run mutated the cached module-level `styles`. */
+const readStyles = (): string => readFileSync(stylesPath, "utf8");
+
 describe("responsive UI CSS contracts", () => {
   it("defines the desktop drawer and collapsed-sidebar breakpoints", () => {
     expect(styles).toContain("@media (max-width: 1180px)");
@@ -84,7 +88,7 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".app-shell.is-workspace-focused .app-shell__workbench");
     expect(styles).toContain(".exports-view-layout.is-preview-focused");
     expect(styles).toContain('.exports-view-layout.is-preview-focused > .resize-handle[data-pane-id="exportsList"]');
-    expect(styles).toContain(".export-file-cell");
+    expect(styles).toContain(".col-export-actions");
     expect(styles).toContain(".export-row-actions");
     expect(styles).toContain(".segmented-control button[aria-pressed=\"true\"]");
     expect(styles).toMatch(/\.html-preview__source\s*\{[^}]*font-family:\s*var\(--font-mono\)[^}]*white-space:\s*pre-wrap/s);
@@ -102,11 +106,28 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".quickaction");
   });
 
+  it("defines chat scroll containers with shrink-safe overflow boundaries", () => {
+    const css = readStyles();
+    expect(css).toContain(".chat-stream-wrap");
+    expect(css).toMatch(/\.chat-stream-wrap\s*\{[^}]*overflow:\s*hidden/s);
+    expect(css).toMatch(/\.chat-scroll-region\s*\{[^}]*overflow-y:\s*auto/s);
+    expect(css).toMatch(/\.chat-conversation\s*\{[^}]*min-height:\s*0/s);
+  });
+
   it("defines graph rebuild overlay and spinner affordances", () => {
     const css = styles;
     expect(css).toContain(".graph-canvas.is-rebuilding");
     expect(css).toMatch(/\.graph-rebuild-overlay\s*\{[^}]*position:\s*absolute[^}]*place-content:\s*center/s);
     expect(css).toMatch(/\.graph-rebuild-overlay__spinner\s*\{[^}]*animation:\s*graph-spin/s);
     expect(css).toMatch(/\.graph-toolbar-spin\s*\{[^}]*animation:\s*graph-spin/s);
+  });
+
+  it("keeps the graph canvas visually quiet with a light grid and raised overlays", () => {
+    const css = styles;
+    expect(css).toMatch(/\.graph-canvas\s*\{[^}]*background-color:\s*var\(--background\)/s);
+    expect(css).toMatch(/\.graph-canvas\s*\{[^}]*background-size:\s*40px 40px/s);
+    expect(css).toMatch(/\.graph-info\s*\{[^}]*background:\s*color-mix/s);
+    expect(css).toMatch(/\.graph-legend\s*\{[^}]*box-shadow:\s*0 8px 24px color-mix/s);
+    expect(css).not.toContain("--shadow-soft");
   });
 });

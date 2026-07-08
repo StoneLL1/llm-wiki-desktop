@@ -18,9 +18,10 @@ export interface PaneWidthLimit {
 }
 
 export const LAYOUT_STORAGE_KEY = "llm-wiki-desktop.layout.v1";
+export const SIDEBAR_COLLAPSE_THRESHOLD = 96;
 
 export const PANE_WIDTH_LIMITS: Record<ResizablePaneId, PaneWidthLimit> = {
-  sidebar: { min: 180, max: 360, defaultValue: 240 },
+  sidebar: { min: 56, max: 360, defaultValue: 240 },
   rightPanel: { min: 280, max: 520, defaultValue: 320 },
   wikiTree: { min: 220, max: 480, defaultValue: 260 },
   exportsList: { min: 220, max: 480, defaultValue: 360 },
@@ -78,20 +79,26 @@ export function sanitizeLayoutPreferences(snapshot: unknown): LayoutPreferences 
       ? (candidate.paneSizes as Partial<Record<ResizablePaneId, number>>)
       : {};
 
+  const sanitizedPaneSizes = PANE_IDS.reduce(
+    (sizes, paneId) => {
+      const limit = PANE_WIDTH_LIMITS[paneId];
+      sizes[paneId] = clampPaneWidth(
+        paneSizes[paneId] ?? limit.defaultValue,
+        limit.min,
+        limit.max,
+      );
+      return sizes;
+    },
+    {} as Record<ResizablePaneId, number>,
+  );
+
+  if (candidate.sidebarCollapsed === true) {
+    sanitizedPaneSizes.sidebar = PANE_WIDTH_LIMITS.sidebar.min;
+  }
+
   return {
-    sidebarCollapsed: candidate.sidebarCollapsed === true,
-    paneSizes: PANE_IDS.reduce(
-      (sizes, paneId) => {
-        const limit = PANE_WIDTH_LIMITS[paneId];
-        sizes[paneId] = clampPaneWidth(
-          paneSizes[paneId] ?? limit.defaultValue,
-          limit.min,
-          limit.max,
-        );
-        return sizes;
-      },
-      {} as Record<ResizablePaneId, number>,
-    ),
+    sidebarCollapsed: sanitizedPaneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD,
+    paneSizes: sanitizedPaneSizes,
   };
 }
 

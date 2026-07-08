@@ -5,18 +5,28 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   clampPaneWidth,
   DEFAULT_LAYOUT_PREFERENCES,
+  PANE_WIDTH_LIMITS,
   readLayoutPreferenceSnapshot,
   sanitizeLayoutPreferences,
+  SIDEBAR_COLLAPSE_THRESHOLD,
   useResizablePane,
   writeLayoutPreferenceSnapshot,
 } from "./useResizablePane";
 
 describe("clampPaneWidth", () => {
   it("clamps invalid and out-of-range widths", () => {
-    expect(clampPaneWidth(100, 180, 360)).toBe(180);
+    expect(clampPaneWidth(48, 56, 360)).toBe(56);
     expect(clampPaneWidth(420, 180, 360)).toBe(360);
-    expect(clampPaneWidth(Number.NaN, 180, 360)).toBe(240);
+    expect(clampPaneWidth(Number.NaN, 56, 360)).toBe(240);
     expect(clampPaneWidth(-20, 220, 480)).toBe(220);
+  });
+});
+
+describe("sidebar resize constants", () => {
+  it("allows the sidebar splitter to reach the icon rail threshold", () => {
+    expect(PANE_WIDTH_LIMITS.sidebar.min).toBe(56);
+    expect(SIDEBAR_COLLAPSE_THRESHOLD).toBe(96);
+    expect(PANE_WIDTH_LIMITS.sidebar.min).toBeLessThan(SIDEBAR_COLLAPSE_THRESHOLD);
   });
 });
 
@@ -41,11 +51,23 @@ describe("layout preference storage", () => {
     });
 
     expect(snapshot.sidebarCollapsed).toBe(true);
-    expect(snapshot.paneSizes.sidebar).toBe(360);
+    expect(snapshot.paneSizes.sidebar).toBe(56);
     expect(snapshot.paneSizes.rightPanel).toBe(280);
     expect(snapshot.paneSizes.wikiTree).toBe(260);
     expect(snapshot.paneSizes.exportsList).toBe(360);
     expect(snapshot.paneSizes.lintList).toBe(220);
+  });
+
+  it("derives sidebar collapse from the sanitized width", () => {
+    const snapshot = sanitizeLayoutPreferences({
+      sidebarCollapsed: false,
+      paneSizes: {
+        sidebar: 80,
+      },
+    });
+
+    expect(snapshot.sidebarCollapsed).toBe(true);
+    expect(snapshot.paneSizes.sidebar).toBe(80);
   });
 
   it("round-trips a valid snapshot", () => {
@@ -62,6 +84,7 @@ describe("layout preference storage", () => {
 
     expect(readLayoutPreferenceSnapshot().paneSizes.rightPanel).toBe(420);
     expect(readLayoutPreferenceSnapshot().sidebarCollapsed).toBe(true);
+    expect(readLayoutPreferenceSnapshot().paneSizes.sidebar).toBe(56);
   });
 });
 

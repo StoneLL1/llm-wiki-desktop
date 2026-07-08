@@ -24,13 +24,14 @@ import { GraphCanvasControls } from "./GraphCanvasControls";
 import { GraphInfo } from "./GraphInfo";
 import { GraphLegend } from "./GraphLegend";
 import { exportGraphPng, exportGraphSvg } from "./graphExport";
-import { visualForEdge, visualForNode } from "./graphRenderStyle";
+import { GRAPH_DEFAULT_EDGE_COLOR, renderedNodeColor, visualForEdge, visualForNode } from "./graphRenderStyle";
 import { buildRenderSnapshot, type RenderSnapshot } from "./graphRenderModel";
+import { edgeSizeForWeight, GRAPH_VISUAL_SCALE, nodeSizeForDegree } from "./graphVisualScale";
 
-const EDGE_COLOR = "#d4d4d4";
+const EDGE_COLOR = GRAPH_DEFAULT_EDGE_COLOR;
 const PLAIN_COLOR = "#9b9b9b";
-const DIM_COLOR = "#ececec";
-const DIM_EDGE_COLOR = "#ececec";
+const DIM_COLOR = "#e8edf2";
+const DIM_EDGE_COLOR = "#eef2f6";
 const FA2_ITERATIONS = 80;
 
 interface NodeShape {
@@ -148,17 +149,16 @@ export function GraphView() {
   useEffect(() => {
     stateRef.current.selectedNodeId = selectedNodeId;
     syncNeighborIds(refs.current.graph, stateRef.current);
-    // Selection only dims/highlights visible nodes — hidden set and positions
-    // unchanged, so skip the spatial-index reindex. (PERF-005)
-    refreshVisuals(refs.current, refs.current.renderer);
+    // Selection changes node size/z-index for the focus root and neighbors, so
+    // keep sigma's spatial/program ordering in sync.
+    refresh(refs.current, refs.current.renderer);
   }, [selectedNodeId]);
 
   useEffect(() => {
     stateRef.current.focusedNodeId = focusedNodeId;
     syncNeighborIds(refs.current.graph, stateRef.current);
-    // Focus only dims/highlights visible nodes — hidden set and positions
-    // unchanged, so skip the spatial-index reindex. (PERF-005)
-    refreshVisuals(refs.current, refs.current.renderer);
+    // Focus changes node size/z-index for the focus root and neighbors.
+    refresh(refs.current, refs.current.renderer);
   }, [focusedNodeId]);
 
   useEffect(() => {
@@ -246,15 +246,15 @@ export function GraphView() {
     const onEnter = ({ node }: { node: string }) => {
       stateRef.current.hoveredNodeId = node;
       syncNeighborIds(graph, stateRef.current);
-      // Hover only dims/highlights visible nodes — hidden set and positions
-      // unchanged, so skip the spatial-index reindex. (PERF-005)
-      refreshVisuals(refs.current, renderer);
+      // Hover changes node size/z-index; use a full refresh so picked/rendered
+      // item ordering stays aligned with the reducer output.
+      refresh(refs.current, renderer);
     };
     const onLeave = () => {
       stateRef.current.hoveredNodeId = null;
       syncNeighborIds(graph, stateRef.current);
-      // Hover-end only restores opacities — skip the spatial-index reindex.
-      refreshVisuals(refs.current, renderer);
+      // Hover-end restores node size/z-index.
+      refresh(refs.current, renderer);
     };
     renderer.on("clickNode", onClick);
     renderer.on("doubleClickNode", onDoubleClick);
@@ -487,7 +487,7 @@ function buildGraph(data: GraphData, layoutStale = false): { graph: Graph; compu
     if (graph.hasNode(edge.source) && graph.hasNode(edge.target) && !graph.hasEdge(edge.source, edge.target)) {
       graph.addEdge(edge.source, edge.target, {
         color: EDGE_COLOR,
-        size: Math.max(0.4, Math.min(1.4, 0.4 + edge.weight * 0.2)),
+        size: edgeSizeForWeight(edge.weight),
       });
     }
   }
@@ -523,7 +523,7 @@ function seedRandomPositions(graph: Graph): void {
 }
 
 function nodeSize(degree: number): number {
-  return 4 + Math.min(8, Math.sqrt(degree) * 1.6);
+  return nodeSizeForDegree(degree);
 }
 
 function createRenderer(
@@ -559,9 +559,15 @@ function createRenderer(
 
   const renderer = new Sigma(graph, container, {
     renderEdgeLabels: false,
-    labelDensity: 0.07,
-    labelGridCellSize: 80,
-    labelRenderedSizeThreshold: 6,
+    hideEdgesOnMove: false,
+    hideLabelsOnMove: true,
+    labelDensity: 0.045,
+    labelGridCellSize: 96,
+    labelRenderedSizeThreshold: 6.4,
+    labelSize: 11,
+    labelWeight: "500",
+    minEdgeThickness: GRAPH_VISUAL_SCALE.minRenderedEdgeThickness,
+    zIndex: true,
     defaultEdgeColor: EDGE_COLOR,
     labelColor: { color: "#6b7280" },
   });
@@ -576,9 +582,10 @@ function createRenderer(
     return {
       ...data,
       hidden: visual.hidden,
-      color: visual.opacity < 1 ? DIM_COLOR : visual.color,
+      color: renderedNodeColor(visual, DIM_COLOR),
       size: Math.max(1, baseSize + visual.sizeDelta),
       highlighted: visual.highlighted,
+      zIndex: visual.highlighted ? 2 : 0,
       forceLabel: visual.forceLabel,
       label: visual.hidden ? "" : data.label,
     };
@@ -596,6 +603,7 @@ function createRenderer(
       hidden: visual.hidden,
       color: visual.opacity < 1 ? DIM_EDGE_COLOR : visual.color,
       size: visual.size,
+      zIndex: visual.opacity === 1 ? 1 : 0,
     };
   });
 
@@ -643,16 +651,11 @@ function refresh(refs: RenderRefs, renderer: Sigma | null): void {
 }
 
 /**
- * Visual-only refresh for changes that alter node/edge appearance (color,
- * opacity, highlight, label) but NOT which nodes are hidden or where they are
- * positioned. Skipping sigma's spatial-index rebuild (`skipIndexation: true`)
- * is safe here because the quadtree's contents (visible nodes + positions)
- * are unchanged — only display attributes differ. This is the hot path on
- * hover/selection/legend-hover interactions, so avoiding the reindex matters.
+ * Visual-only refresh for changes that alter color, opacity, or labels without
+ * changing hidden nodes, positions, node size, or z-index.
  *
- * Verified-safe scopes: hover (enterNode/leaveNode), selectedNodeId,
- * focusedNodeId, hoveredType, colorMode. NOT safe for search/typeFilter/
- * degreeThreshold (hidden set changes) or layout/position changes.
+ * Verified-safe scopes: hoveredType and colorMode. Search/type filters change
+ * hidden sets, and selected/focused/hovered nodes change size/z-index.
  */
 function refreshVisuals(refs: RenderRefs, renderer: Sigma | null): void {
   updateRenderSnapshot(refs);

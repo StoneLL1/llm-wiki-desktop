@@ -1,5 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { compactPath } from "./pathDisplay";
+import { compactPath, pathBasename } from "./pathDisplay";
+
+describe("pathBasename", () => {
+  it("returns the last segment of a posix path", () => {
+    expect(pathBasename("exports/html/agent-1.html")).toBe("agent-1.html");
+  });
+
+  it("handles windows backslash paths", () => {
+    expect(pathBasename("D:\\Users\\Aletta\\agent.md")).toBe("agent.md");
+  });
+
+  it("handles mixed separators", () => {
+    expect(pathBasename("exports\\html/agent-1.html")).toBe("agent-1.html");
+  });
+
+  it("returns the whole string when there is no separator", () => {
+    expect(pathBasename("agent.md")).toBe("agent.md");
+  });
+
+  it("strips a trailing slash and returns the last non-empty segment", () => {
+    expect(pathBasename("exports/html/")).toBe("html");
+  });
+
+  it("ignores a leading slash", () => {
+    expect(pathBasename("/agent.md")).toBe("agent.md");
+  });
+
+  it("preserves CJK filenames", () => {
+    expect(pathBasename("导出/html/智能体.html")).toBe("智能体.html");
+  });
+
+  it("returns empty string for empty input", () => {
+    expect(pathBasename("")).toBe("");
+  });
+});
 
 describe("compactPath", () => {
   it("keeps short paths unchanged", () => {

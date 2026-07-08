@@ -101,6 +101,38 @@ describe("LeftSidebar favorites", () => {
     expect(favorites.compareDocumentPosition(recent)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
+  it("keeps favorite and recent page icons from shrinking beside long titles", () => {
+    const longTitle =
+      "A very long page title that should truncate without squeezing the leading file icon";
+    const longWikiPage = { ...wikiPage, path: "wiki/concepts/long-title.md", title: longTitle };
+    const longExportRecord = {
+      ...exportRecord,
+      id: "export-long-title",
+      title: "A very long exported favorite title that should not squeeze its icon",
+    };
+    useWikiStore.setState({
+      tree: { ...wikiTree, pages: [longWikiPage] },
+      recentPages: [longWikiPage],
+    });
+    useExportStore.setState({ records: [longExportRecord] });
+
+    render(<LeftSidebar />);
+
+    const wikiFavoriteIcon = screen
+      .getByRole("button", { name: `Open wiki favorite: ${longTitle}` })
+      .querySelector("svg");
+    const exportFavoriteIcon = screen
+      .getByRole("button", { name: `Open export favorite: ${longExportRecord.title}` })
+      .querySelector("svg");
+    const recentIcon = screen
+      .getByRole("button", { name: longTitle })
+      .querySelector("svg");
+
+    expect(wikiFavoriteIcon).toHaveClass("shrink-0");
+    expect(exportFavoriteIcon).toHaveClass("shrink-0");
+    expect(recentIcon).toHaveClass("shrink-0");
+  });
+
   it("opens a wiki favorite in the wiki view", () => {
     const openPage = vi.fn(async () => {});
     useWikiStore.setState({ openPage });

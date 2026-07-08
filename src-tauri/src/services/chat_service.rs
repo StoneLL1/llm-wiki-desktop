@@ -50,7 +50,8 @@ impl ChatService {
         let normalized_page_path = context_page_path
             .map(str::trim)
             .filter(|p| !p.is_empty())
-            .map(|p| p.replace('\\', "/"));
+            .map(|p| validate_context_page_path(context, p))
+            .transpose()?;
         let session = ChatSession {
             id: uuid::Uuid::new_v4().to_string(),
             title: title
@@ -1039,6 +1040,33 @@ fn validate_query_path(path: &str) -> Result<String, BackendError> {
     Ok(normalized)
 }
 
+fn validate_context_page_path(
+    context: &ProjectContext,
+    path: &str,
+) -> Result<String, BackendError> {
+    let normalized = path.replace('\\', "/");
+    let absolute = context.resolve_project_path(&normalized)?;
+    if absolute.strip_prefix(&context.wiki_dir).is_err() || !normalized.starts_with("wiki/") {
+        return Err(BackendError::new(
+            "CHAT_CONTEXT_PAGE_INVALID",
+            "Page-scoped chat sessions must reference a page under the wiki/ directory.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": normalized })));
+    }
+    if !normalized.ends_with(".md") {
+        return Err(BackendError::new(
+            "CHAT_CONTEXT_PAGE_INVALID",
+            "Page-scoped chat sessions must reference a Markdown (.md) page.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": normalized })));
+    }
+    Ok(normalized)
+}
+
 fn validate_pinned_page_path(context: &ProjectContext, path: &str) -> Result<String, BackendError> {
     let normalized = path.replace('\\', "/");
     let absolute = context.resolve_project_path(&normalized)?;
@@ -1624,6 +1652,42 @@ mod tests {
 
         let loaded = service.load_session(&context, &session.id).unwrap();
         assert_eq!(loaded, session);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_session_normalizes_and_validates_context_page_path() {
+        let (context, root) = tmp_context("context-page");
+        let service = ChatService::default();
+
+        let session = service
+            .create_session(
+                &context,
+                Some("Page Chat"),
+                Some("wiki\\concepts\\react-pattern.md"),
+            )
+            .unwrap();
+        assert_eq!(
+            session.context_page_path.as_deref(),
+            Some("wiki/concepts/react-pattern.md")
+        );
+
+        for invalid in [
+            "../wiki/concepts/a.md",
+            "/wiki/concepts/a.md",
+            "raw/sources/a.md",
+            "wiki/concepts/a.txt",
+        ] {
+            let err = service
+                .create_session(&context, Some("Bad"), Some(invalid))
+                .expect_err("invalid page-scoped chat metadata must be rejected");
+            assert!(
+                err.code == "CHAT_CONTEXT_PAGE_INVALID" || err.code.starts_with("PATH_"),
+                "unexpected error code for {invalid}: {}",
+                err.code
+            );
+        }
 
         std::fs::remove_dir_all(root).unwrap();
     }

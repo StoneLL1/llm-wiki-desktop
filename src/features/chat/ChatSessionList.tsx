@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import type { ChatSessionSummary } from "../../types/chat";
 
@@ -13,6 +14,14 @@ interface ChatSessionListProps {
   onDelete: (sessionId: string) => void;
 }
 
+/** Format an ISO timestamp as HH:MM (locale-independent, 24h). Mirrors the
+ *  ChatView helper; duplicated here to avoid a circular import. */
+function formatTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
 export function ChatSessionList({
   sessions,
   activeSessionId,
@@ -23,6 +32,7 @@ export function ChatSessionList({
   onDelete,
 }: ChatSessionListProps) {
   const { t } = useTranslation();
+  const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
@@ -38,18 +48,33 @@ export function ChatSessionList({
     setEditingId(null);
   };
 
+  const trimmedQuery = query.trim().toLowerCase();
+  const filtered = trimmedQuery
+    ? sessions.filter((session) => session.title.toLowerCase().includes(trimmedQuery))
+    : sessions;
+
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-[44px] items-center justify-between border-b border-[var(--border-subtle)] px-3">
-        <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
-          {t("chat.sessions.title")}
-        </span>
+      <div className="flex h-[44px] items-center gap-1.5 border-b border-[var(--border-subtle)] px-2">
+        <div className="flex h-[28px] min-w-0 flex-1 items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--background)] px-2">
+          <Search aria-hidden="true" size={13} className="shrink-0 text-[var(--text-muted)]" />
+          <input
+            type="text"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("chat.sessions.search")}
+            aria-label={t("chat.sessions.search")}
+            className="min-w-0 flex-1 bg-transparent text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+          />
+        </div>
         <button
           type="button"
           onClick={onCreate}
-          className="h-[24px] rounded-[var(--radius-sm)] px-2 text-[12px] font-medium text-[var(--accent-hover)] hover:bg-[var(--surface-muted)]"
+          className="icon-button shrink-0"
+          aria-label={t("chat.sessions.new")}
+          title={t("chat.sessions.new")}
         >
-          {t("chat.sessions.new")}
+          <Plus aria-hidden="true" size={15} />
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
@@ -57,14 +82,19 @@ export function ChatSessionList({
           <p className="m-0 px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("chat.sessions.loading")}</p>
         ) : sessions.length === 0 ? (
           <p className="m-0 px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("chat.sessions.empty")}</p>
+        ) : filtered.length === 0 ? (
+          <p className="m-0 px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("chat.sessions.noSearchResults")}</p>
         ) : (
-          sessions.map((session) => {
+          filtered.map((session) => {
             const isActive = session.id === activeSessionId;
             const isEditing = editingId === session.id;
+            const meta = `${formatTime(session.updatedAt)} · ${t("chat.sessions.messageCount", {
+              count: session.messageCount,
+            })}`;
             return (
               <div
                 key={session.id}
-                className={`group flex h-[30px] items-center gap-1 px-2 text-[13px] ${
+                className={`group flex items-center gap-1 px-2 py-1.5 text-[13px] ${
                   isActive
                     ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]"
                     : "text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
@@ -92,23 +122,26 @@ export function ChatSessionList({
                       className="min-w-0 flex-1 truncate text-left"
                       title={session.title}
                     >
-                      {session.title}
+                      <div className="truncate text-[12.5px] font-medium leading-tight">{session.title}</div>
+                      <div className="chat-session__meta">{meta}</div>
                     </button>
                     <button
                       type="button"
                       onClick={() => startEdit(session)}
-                      className="hidden h-[18px] w-[18px] items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] group-hover:flex"
+                      className="hidden h-[24px] w-[24px] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] group-hover:flex"
                       aria-label={t("chat.sessions.rename")}
+                      title={t("chat.sessions.rename")}
                     >
-                      ✎
+                      <Pencil aria-hidden="true" size={13} />
                     </button>
                     <button
                       type="button"
                       onClick={() => onDelete(session.id)}
-                      className="hidden h-[18px] w-[18px] items-center justify-center text-[var(--text-muted)] hover:text-[var(--danger)] group-hover:flex"
+                      className="hidden h-[24px] w-[24px] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--danger)] group-hover:flex"
                       aria-label={t("chat.sessions.delete")}
+                      title={t("chat.sessions.delete")}
                     >
-                      ×
+                      <Trash2 aria-hidden="true" size={13} />
                     </button>
                   </>
                 )}
