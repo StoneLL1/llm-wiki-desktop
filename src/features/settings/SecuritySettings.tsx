@@ -26,17 +26,17 @@ export function SecuritySettings({
   const chatConvenienceEnabled = Boolean(chatConvenienceAuthorization?.enabled);
 
   return (
-    <section className="grid gap-4">
+    <section className="settings-section-panel">
       <div>
         <h2 className="m-0 text-[16px] font-semibold">{t("settings.security.title")}</h2>
         <p className="mt-1 text-[12px] text-[var(--text-muted)]">{t("settings.security.description")}</p>
       </div>
 
       <div className="grid gap-2">
-        <div className="grid min-h-[52px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[var(--radius-md)] border border-[var(--border)] px-3 py-2">
+        <div className="settings-row-card settings-row-card--three">
           <div>
-            <div className="text-[13px] font-medium">{t("settings.security.chatConvenience")}</div>
-            <div className="mt-1 font-mono text-[11px] text-[var(--text-muted)]">
+            <div className="settings-row-card__title">{t("settings.security.chatConvenience")}</div>
+            <div className="settings-row-card__meta">
               {chatConvenienceEnabled
                 ? t("settings.security.chatConvenienceEnabled")
                 : t("settings.security.chatConvenienceDisabled")}
@@ -62,11 +62,11 @@ export function SecuritySettings({
         {providers.map((provider) => (
           <div
             key={provider.provider}
-            className="grid min-h-[52px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-[var(--radius-md)] border border-[var(--border)] px-3 py-2"
+            className="settings-row-card"
           >
             <div>
-              <div className="text-[13px] font-medium">{provider.provider}</div>
-              <div className="mt-1 font-mono text-[11px] text-[var(--text-muted)]">
+              <div className="settings-row-card__title">{provider.provider}</div>
+              <div className="settings-row-card__meta">
                 {provider.hasSecret ? t("provider.configured") : t("settings.security.notConfigured")}
               </div>
             </div>

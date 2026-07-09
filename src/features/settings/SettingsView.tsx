@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  Bot,
   Clock,
   Cpu,
   Globe,
@@ -17,11 +16,10 @@ import type { AgentInfo } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
 import type { ProjectSummary } from "../../types/project";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { AgentSettings } from "./AgentSettings";
+import { AiSettings } from "./AiSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { BackgroundTaskSettings } from "./BackgroundTaskSettings";
 import { LanguageSettings } from "./LanguageSettings";
-import { LlmProviderSettings } from "./LlmProviderSettings";
 import { SecuritySettings, type ProviderSecretRow } from "./SecuritySettings";
 import { UpdateSettings } from "./UpdateSettings";
 
@@ -40,8 +38,7 @@ type SettingsSectionKey =
   | "general"
   | "appearance"
   | "language"
-  | "agent"
-  | "providers"
+  | "ai"
   | "security"
   | "background"
   | "updates";
@@ -71,8 +68,7 @@ const NAV_GROUPS: SettingsNavGroup[] = [
   {
     labelKey: "settings.nav.group.ai",
     items: [
-      { key: "agent", labelKey: "settings.nav.agent", icon: Bot },
-      { key: "providers", labelKey: "settings.nav.providers", icon: Cpu },
+      { key: "ai", labelKey: "settings.nav.ai", icon: Cpu },
     ],
   },
   {
@@ -242,18 +238,14 @@ export function SettingsView({
             <LanguageSettings language={settings.language} onChange={(language) => void savePatch({ language })} />
           ) : null}
 
-          {activeSection === "agent" ? (
-            <AgentSettings
+          {activeSection === "ai" ? (
+            <AiSettings
               agents={agents}
-              agentDefault={settings.agentDefault}
-              onRefresh={() => { void onRefreshCapabilities(); }}
-              onChangeDefault={(agentDefault) => { void savePatch({ agentDefault }, true); }}
-            />
-          ) : null}
-
-          {activeSection === "providers" ? (
-            <LlmProviderSettings
               providers={providerStatuses}
+              agentDefault={settings.agentDefault}
+              contextWindow={settings.contextWindow}
+              onRefreshAgents={() => { void onRefreshCapabilities(); }}
+              onChangeDefault={(agentDefault) => { void savePatch({ agentDefault }, true); }}
               onSaveProvider={(config) => onSaveProvider({ ...config, contextWindow: settings.contextWindow })}
               onSaveSecret={async (provider, secret) => {
                 await onSaveSecret(provider, secret);
