@@ -50,6 +50,7 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
   const loadSettings = useSettingsStore((state) => state.loadSettings);
   const persistPatch = useSettingsStore((state) => state.persistPatch);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const openSettings = useNavigationStore((state) => state.openSettings);
 
   useEffect(() => {
     if (project.projectId) {
@@ -227,7 +228,7 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
               type="button"
               className="btn btn--sm"
               style={{ justifyContent: "flex-start" }}
-              onClick={() => setActiveView("settings")}
+              onClick={() => openSettings()}
             >
               <SettingsIcon size={12} aria-hidden />
               {t("agent.rightPanel.action.settings")}

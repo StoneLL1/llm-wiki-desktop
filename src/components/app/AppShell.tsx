@@ -27,6 +27,7 @@ import { CompileConflictDialog } from "./CompileConflictDialog";
 import { LeftSidebar } from "./LeftSidebar";
 import { ResizableSplitter } from "./ResizableSplitter";
 import { RightContextPanel } from "./RightContextPanel";
+import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { TaskLogDrawer } from "./TaskLogDrawer";
 import { Toaster } from "./Toaster";
 import { TopBar } from "./TopBar";
@@ -50,9 +51,6 @@ const ImportView = lazy(() =>
 );
 const LintView = lazy(() =>
   import("../../features/lint/LintView").then((m) => ({ default: m.LintView })),
-);
-const SettingsView = lazy(() =>
-  import("../../features/settings/SettingsView").then((m) => ({ default: m.SettingsView })),
 );
 const WikiView = lazy(() =>
   import("../../features/wiki/WikiView").then((m) => ({ default: m.WikiView })),
@@ -81,6 +79,7 @@ export function AppShell() {
   const paneSizes = useNavigationStore((state) => state.paneSizes);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
+  const toggleSettings = useNavigationStore((state) => state.toggleSettings);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
   const cancelPendingAction = useProjectStore((state) => state.cancelPendingAction);
@@ -127,6 +126,28 @@ export function AppShell() {
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [clearWorkspaceFocus, rightPanelOpen, setRightPanelOpen, workspaceFocus]);
+
+  useEffect(() => {
+    const toggleSettingsOnComma = (event: KeyboardEvent) => {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key === "," &&
+        !event.defaultPrevented &&
+        !document.querySelector('[aria-modal="true"]')
+      ) {
+        // Let any focused input keep the literal character.
+        const target = event.target as HTMLElement | null;
+        const tag = target?.tagName?.toLowerCase();
+        if (tag === "input" || tag === "textarea" || target?.isContentEditable) {
+          return;
+        }
+        event.preventDefault();
+        toggleSettings();
+      }
+    };
+    document.addEventListener("keydown", toggleSettingsOnComma);
+    return () => document.removeEventListener("keydown", toggleSettingsOnComma);
+  }, [toggleSettings]);
 
   const confirmProjectAction = useCallback(async () => {
     const action = pendingAction;
@@ -261,6 +282,8 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
   const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
   const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
+  const settingsOpen = useNavigationStore((state) => state.settingsOpen);
+  const closeSettings = useNavigationStore((state) => state.closeSettings);
   const currentProject = useProjectStore((state) => state.currentProject);
   const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
   const setPendingAction = useProjectStore((state) => state.setPendingAction);
@@ -330,12 +353,10 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
   }, [currentProject.projectId, currentProject.rootPath, hasTauri, setCurrentProject]);
 
   useEffect(() => {
-    if (activeView === "agent") {
-      void refreshCapabilities();
-    } else if (activeView === "settings") {
+    if (activeView === "agent" || settingsOpen) {
       void refreshCapabilities();
     }
-  }, [activeView, refreshCapabilities]);
+  }, [activeView, settingsOpen, refreshCapabilities]);
 
   // Detect agents/providers once per project switch so the dashboard first
   // screen doesn't read as "Agent not detected" before the user opens the
@@ -691,17 +712,6 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
               onCancelTask={(taskId) => { void cancelTask(taskId); }}
               onNavigate={(view) => setActiveView(view)}
             />
-          ) : activeView === "settings" ? (
-            <SettingsView
-              project={currentProject}
-              providers={providers}
-              agents={agents}
-              onRefreshCapabilities={refreshCapabilities}
-              onSaveProvider={saveProvider}
-              onSaveSecret={saveProviderSecret}
-              onDeleteSecret={deleteProviderSecret}
-              onTestProvider={testProvider}
-            />
           ) : (
             <div className="grid gap-3">
             <div className="panel">
@@ -740,6 +750,18 @@ function WorkspaceView({ activeView, title }: WorkspaceViewProps) {
         providers={providers}
         defaultAgentKind={defaultAgentKind}
         presetSkill={runDialogPreset}
+      />
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={closeSettings}
+        project={currentProject}
+        providers={providers}
+        agents={agents}
+        onRefreshCapabilities={refreshCapabilities}
+        onSaveProvider={saveProvider}
+        onSaveSecret={saveProviderSecret}
+        onDeleteSecret={deleteProviderSecret}
+        onTestProvider={testProvider}
       />
     </section>
   );
