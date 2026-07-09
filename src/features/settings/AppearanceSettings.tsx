@@ -30,13 +30,13 @@ export function AppearanceSettings({
   const { t } = useTranslation();
 
   return (
-    <section className="grid gap-4">
+    <section className="settings-section-panel">
       <div>
         <h2 className="m-0 text-[16px] font-semibold">{t("settings.appearance.title")}</h2>
         <p className="mt-1 text-[12px] text-[var(--text-muted)]">{t("settings.appearance.description")}</p>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="settings-choice-grid">
         {previews.map((preview) => {
           const selected = theme === preview.value;
           return (
@@ -44,9 +44,7 @@ export function AppearanceSettings({
               key={preview.value}
               type="button"
               onClick={() => onChange(preview.value)}
-              className={`grid gap-3 rounded-[var(--radius-lg)] border p-3 text-left ${
-                selected ? "border-[var(--accent)] shadow-[0_0_0_1px_var(--accent)]" : "border-[var(--border)]"
-              }`}
+              className={`settings-choice-card grid gap-3${selected ? " is-selected" : ""}`}
             >
               <div
                 className="h-[120px] rounded-[var(--radius-md)] border border-[var(--border-subtle)] p-3"

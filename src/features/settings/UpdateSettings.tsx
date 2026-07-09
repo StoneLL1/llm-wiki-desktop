@@ -56,22 +56,22 @@ export function UpdateSettings({ checkUpdates, onToggle }: UpdateSettingsProps) 
   };
 
   return (
-    <section className="grid gap-4">
+    <section className="settings-section-panel">
       <div>
         <h2 className="m-0 text-[16px] font-semibold">{t("settings.updates.title")}</h2>
         <p className="mt-1 text-[12px] text-[var(--text-muted)]">{t("settings.updates.description")}</p>
       </div>
 
-      <label className="flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--border)] p-3">
+      <label className="settings-row-card">
         <div>
-          <div className="text-[13px] font-medium">{t("settings.updates.autoCheck")}</div>
-          <div className="mt-1 text-[11px] text-[var(--text-muted)]">{t("settings.updates.autoCheckHelp")}</div>
+          <div className="settings-row-card__title">{t("settings.updates.autoCheck")}</div>
+          <div className="settings-row-card__meta">{t("settings.updates.autoCheckHelp")}</div>
         </div>
         <input type="checkbox" checked={checkUpdates} onChange={(event) => onToggle(event.target.checked)} />
       </label>
 
-      <div className="grid gap-2 rounded-[var(--radius-md)] border border-[var(--border)] p-3">
-        <div className="flex items-center justify-between gap-3">
+      <div className="settings-detail-card">
+        <div className="settings-detail-card__metrics">
           <div>
             <div className="text-[12px] text-[var(--text-muted)]">{t("settings.updates.currentVersion")}</div>
             <div className="font-mono text-[13px]">{currentVersion}</div>
@@ -81,7 +81,7 @@ export function UpdateSettings({ checkUpdates, onToggle }: UpdateSettingsProps) 
             <div className="font-mono text-[13px]">{latestVersion ?? t("settings.updates.notChecked")}</div>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="settings-detail-card__actions">
           <button type="button" className="settings-button" disabled={checking} onClick={() => void checkNow()}>
             {checking ? t("settings.updates.checking") : t("settings.updates.checkNow")}
           </button>
