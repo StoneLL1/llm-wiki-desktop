@@ -10,6 +10,7 @@ import { useWikiStore } from "../../features/wiki/wikiStore";
 import type { RecentProject } from "../../types/project";
 import type { SearchResult, SearchResponse } from "../../types/wiki";
 import { TaskActivityButton } from "./TaskActivityButton";
+import appLogoUrl from "../../assets/app-logo.png";
 
 function formatOpenedAt(iso: string): string {
   const date = new Date(iso);
@@ -20,6 +21,7 @@ function formatOpenedAt(iso: string): string {
 export function TopBar() {
   const { i18n, t } = useTranslation();
   const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const openSettings = useNavigationStore((state) => state.openSettings);
   const clearCurrentProject = useProjectStore((state) => state.clearCurrentProject);
   const currentProject = useProjectStore((state) => state.currentProject);
   const openProject = useProjectStore((state) => state.openProject);
@@ -42,6 +44,7 @@ export function TopBar() {
 
   const isMac = typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
   const kbdLabel = isMac ? "⌘K" : "Ctrl K";
+  const settingsKbdHint = isMac ? "⌘," : "Ctrl+,";
 
   const setLanguage = (language: "en" | "zh-CN") => {
     void persistPatch(currentProject.projectId, currentProject.rootPath, { language });
@@ -195,9 +198,7 @@ export function TopBar() {
   return (
     <header className="app-topbar">
       <div className="app-topbar__brand">
-        <div className="grid h-[22px] w-[22px] place-items-center rounded-[var(--radius-sm)] bg-[var(--foreground)] font-mono text-[11px] font-semibold text-[var(--text-inverse)]">
-          LW
-        </div>
+        <img alt="" aria-hidden="true" className="h-[24px] w-[24px] shrink-0 rounded-[var(--radius-sm)]" src={appLogoUrl} />
         <strong className="app-topbar__brand-name">{t("app.title")}</strong>
       </div>
 
@@ -329,9 +330,10 @@ export function TopBar() {
         </div>
         <button
           aria-label={t("nav.settings")}
+          aria-keyshortcuts={isMac ? "Meta+Comma" : "Control+Comma"}
           className="icon-button"
-          onClick={() => setActiveView("settings")}
-          title={t("nav.settings")}
+          onClick={() => openSettings()}
+          title={`${t("nav.settings")} (${settingsKbdHint})`}
           type="button"
         >
           <Settings aria-hidden="true" size={16} />

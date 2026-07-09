@@ -16,6 +16,7 @@ beforeEach(async () => {
   await i18next.changeLanguage("en");
   useNavigationStore.getState().setActiveView("dashboard");
   useNavigationStore.getState().setRightPanelOpen(true);
+  useNavigationStore.getState().closeSettings();
   useNavigationStore.setState({ workspaceFocus: null, rightPanelOpenBeforeFocus: null });
   useProjectStore.getState().setPendingAction(undefined);
   invokeMock.mockReset();
@@ -39,13 +40,17 @@ describe("AppShell workspace header", () => {
     expect(screen.getByRole("button", { name: "Collapse context panel" })).toBeInTheDocument();
   });
 
-  it("does not repeat a generic settings title inside the settings section", () => {
-    useNavigationStore.getState().setActiveView("settings");
+  it("opens settings as a floating dialog without leaving the active workspace view", () => {
+    useNavigationStore.getState().setActiveView("dashboard");
+    useNavigationStore.getState().openSettings();
     render(<AppShell />);
 
-    expect(
-      screen.queryByText("Global preferences, project-scoped provider settings, and secure key status."),
-    ).not.toBeInTheDocument();
+    // Settings renders as a modal dialog layered over the workspace.
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    // The workspace behind is preserved (still Dashboard, not swapped out).
+    expect(workspaceHeader().getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    expect(useNavigationStore.getState().activeView).toBe("dashboard");
+    expect(useNavigationStore.getState().settingsOpen).toBe(true);
   });
 });
 

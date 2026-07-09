@@ -16,8 +16,7 @@ export type AppView =
   | "agent"
   | "import"
   | "lint"
-  | "exports"
-  | "settings";
+  | "exports";
 
 export type RightPanelMode = "default" | "wikiAssistant";
 
@@ -32,6 +31,7 @@ export interface NavigationState {
   rightPanelOpenBeforeFocus: boolean | null;
   sidebarCollapsed: boolean;
   paneSizes: Record<ResizablePaneId, number>;
+  settingsOpen: boolean;
   setActiveView: (view: AppView) => void;
   setRightPanelOpen: (open: boolean) => void;
   openWikiAssistant: (path: string) => void;
@@ -43,6 +43,9 @@ export interface NavigationState {
   toggleSidebarCollapsed: () => void;
   setPaneSize: (pane: ResizablePaneId, width: number) => void;
   resetPaneSize: (pane: ResizablePaneId) => void;
+  openSettings: () => void;
+  closeSettings: () => void;
+  toggleSettings: () => void;
 }
 
 const initialLayoutPreferences = readLayoutPreferenceSnapshot();
@@ -56,6 +59,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   rightPanelOpenBeforeFocus: null,
   sidebarCollapsed: initialLayoutPreferences.sidebarCollapsed,
   paneSizes: initialLayoutPreferences.paneSizes,
+  settingsOpen: false,
   setActiveView: (activeView) =>
     set((state) => {
       if (activeView === "wiki") {
@@ -188,4 +192,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
         paneSizes: snapshot.paneSizes,
       };
     }),
+  openSettings: () => set({ settingsOpen: true }),
+  closeSettings: () => set({ settingsOpen: false }),
+  toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
 }));

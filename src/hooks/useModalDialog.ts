@@ -35,10 +35,17 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
       ? Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
       : [];
 
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
     (initialFocusRef?.current ?? focusable()[0] ?? dialog)?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        // Only the topmost modal reacts, so dismissing a nested dialog
+        // doesn't also close the one beneath it.
+        const modals = document.querySelectorAll("[aria-modal='true']");
+        if (modals.length > 0 && modals[modals.length - 1] !== dialog) return;
         event.preventDefault();
         onCloseRef.current();
         return;
@@ -72,6 +79,7 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("focusin", keepFocusInside);
+      document.body.style.overflow = prevOverflow;
       trigger?.focus();
     };
   }, [initialFocusRef, open]);

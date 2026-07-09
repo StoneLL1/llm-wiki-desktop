@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import {
+  Bot,
+  Clock,
+  Cpu,
+  Globe,
+  RefreshCw,
+  Settings as SettingsIcon,
+  Shield,
+  Sun,
+  type LucideIcon,
+} from "lucide-react";
 
 import type { AgentInfo } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
@@ -14,7 +25,7 @@ import { LlmProviderSettings } from "./LlmProviderSettings";
 import { SecuritySettings, type ProviderSecretRow } from "./SecuritySettings";
 import { UpdateSettings } from "./UpdateSettings";
 
-interface SettingsViewProps {
+export interface SettingsViewProps {
   project: ProjectSummary;
   providers: ProviderStatus[];
   agents: AgentInfo[];
@@ -34,6 +45,47 @@ type SettingsSectionKey =
   | "security"
   | "background"
   | "updates";
+
+interface SettingsNavItem {
+  key: SettingsSectionKey;
+  labelKey: string;
+  icon: LucideIcon;
+}
+
+interface SettingsNavGroup {
+  labelKey: string;
+  items: SettingsNavItem[];
+}
+
+// Settings IA mirrors UI-Frontend-design/settings.html: three labelled groups
+// (Application / AI / System) instead of a flat 8-item list.
+const NAV_GROUPS: SettingsNavGroup[] = [
+  {
+    labelKey: "settings.nav.group.app",
+    items: [
+      { key: "general", labelKey: "settings.nav.general", icon: SettingsIcon },
+      { key: "appearance", labelKey: "settings.nav.appearance", icon: Sun },
+      { key: "language", labelKey: "settings.nav.language", icon: Globe },
+    ],
+  },
+  {
+    labelKey: "settings.nav.group.ai",
+    items: [
+      { key: "agent", labelKey: "settings.nav.agent", icon: Bot },
+      { key: "providers", labelKey: "settings.nav.providers", icon: Cpu },
+    ],
+  },
+  {
+    labelKey: "settings.nav.group.system",
+    items: [
+      { key: "security", labelKey: "settings.nav.security", icon: Shield },
+      { key: "background", labelKey: "settings.nav.background", icon: Clock },
+      { key: "updates", labelKey: "settings.nav.updates", icon: RefreshCw },
+    ],
+  },
+];
+
+const navGroupId = (labelKey: string): string => `settings-nav-group-${labelKey.replace(/\./g, "-")}`;
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -93,24 +145,6 @@ export function SettingsView({
       .catch(() => undefined);
   }, [providers]);
 
-  const sections = useMemo(
-    () =>
-      ([
-        "general",
-        "appearance",
-        "language",
-        "agent",
-        "providers",
-        "security",
-        "background",
-        "updates",
-      ] as const).map((key) => ({
-        key,
-        label: t(`settings.nav.${key}`),
-      })),
-    [t],
-  );
-
   const savePatch = async (patch: Partial<typeof settings>, refreshCapabilities = false) => {
     await persistPatch(project.projectId, project.rootPath, patch);
     if (refreshCapabilities) {
@@ -133,54 +167,63 @@ export function SettingsView({
 
   return (
     <div className="settings-view-layout">
-      <aside className="settings-view__nav border-r border-[var(--border)] bg-[var(--surface)] p-3">
-        <div className="mb-3 px-2">
-          <div className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">{t("settings.nav.label")}</div>
-          <div className="mt-1 text-[13px] font-medium">{project.name}</div>
+      <aside className="settings-view__nav" aria-label={t("settings.nav.label")}>
+        <div className="settings-view__nav-head">
+          <div className="settings-view__nav-label">{t("settings.nav.label")}</div>
+          <div className="settings-view__nav-project" title={project.rootPath}>{project.name}</div>
         </div>
-        <nav className="settings-view__tabs grid gap-1" aria-label={t("nav.settings")}>
-          {sections.map((section) => (
-            <button
-              key={section.key}
-              type="button"
-              className={`flex h-[30px] items-center rounded-[var(--radius-md)] px-2 text-[13px] ${
-                activeSection === section.key
-                  ? "bg-[var(--surface-raised)] font-medium text-[var(--text-primary)] shadow-[0_0_0_1px_var(--border)]"
-                  : "text-[var(--text-muted)] hover:bg-[var(--surface-raised)] hover:text-[var(--text-primary)]"
-              }`}
-              onClick={() => setActiveSection(section.key)}
-            >
-              {section.label}
-            </button>
+        <nav className="settings-view__nav-body">
+          {NAV_GROUPS.map((group) => (
+            <div className="settings-view__nav-group" key={group.labelKey} role="group" aria-labelledby={navGroupId(group.labelKey)}>
+              <div id={navGroupId(group.labelKey)} className="settings-view__nav-group-label">{t(group.labelKey)}</div>
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                const active = activeSection === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    aria-current={active ? "true" : undefined}
+                    className={`settings-view__nav-item${active ? " is-active" : ""}`}
+                    onClick={() => setActiveSection(item.key)}
+                  >
+                    <Icon aria-hidden="true" className="settings-view__nav-icon" size={14} />
+                    <span className="truncate">{t(item.labelKey)}</span>
+                  </button>
+                );
+              })}
+            </div>
           ))}
         </nav>
       </aside>
 
-      <div className="min-h-0 overflow-auto p-5">
-        <div className="mx-auto grid max-w-[920px] gap-5">
+      <div className="settings-view__content">
+        <div className="settings-view__content-inner">
           {loading || saving ? (
-            <div className="flex justify-end gap-2 text-[11px] text-[var(--text-muted)]" role="status">
+            <div className="settings-view__status" role="status">
               {loading ? <span>{t("settings.state.loading")}</span> : null}
               {saving ? <span>{t("settings.state.saving")}</span> : null}
             </div>
           ) : null}
 
-          {error ? <div className="rounded-[var(--radius-md)] border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[12px] text-[var(--danger)]">{error}</div> : null}
+          {error ? (
+            <div className="settings-view__error" role="alert">{error}</div>
+          ) : null}
 
           {activeSection === "general" ? (
-            <section className="grid gap-4">
+            <section className="settings-view__section">
               <div>
-                <h2 className="m-0 text-[16px] font-semibold">{t("settings.general.title")}</h2>
-                <p className="mt-1 text-[12px] text-[var(--text-muted)]">{t("settings.general.description")}</p>
+                <h2 className="settings-view__section-title">{t("settings.general.title")}</h2>
+                <p className="settings-view__section-desc">{t("settings.general.description")}</p>
               </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-[var(--radius-md)] border border-[var(--border)] p-3">
-                  <div className="text-[12px] text-[var(--text-muted)]">{t("settings.general.projectRoot")}</div>
-                  <div className="mt-1 font-mono text-[11px] text-[var(--text-secondary)]">{project.rootPath}</div>
+              <div className="settings-view__cards">
+                <div className="settings-view__card">
+                  <div className="settings-view__card-label">{t("settings.general.projectRoot")}</div>
+                  <div className="settings-view__card-value settings-view__card-value--mono">{project.rootPath}</div>
                 </div>
-                <div className="rounded-[var(--radius-md)] border border-[var(--border)] p-3">
-                  <div className="text-[12px] text-[var(--text-muted)]">{t("settings.general.scope")}</div>
-                  <div className="mt-1 text-[13px]">{t("settings.general.scopeCopy")}</div>
+                <div className="settings-view__card">
+                  <div className="settings-view__card-label">{t("settings.general.scope")}</div>
+                  <div className="settings-view__card-value">{t("settings.general.scopeCopy")}</div>
                 </div>
               </div>
             </section>
