@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::errors::BackendError;
 use crate::models::chat::{
-    ChatExpandedPage, ChatMessage, ChatRetrievalDiagnostics, ChatRetrievalHit, ChatRoute,
-    ChatSession, ChatSourceRef, ChatSourceSelectionReason,
+    ChatExpandedPage, ChatRetrievalDiagnostics, ChatRetrievalHit, ChatRoute, ChatSession,
+    ChatSourceRef, ChatSourceSelectionReason,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{WikiPageMeta, WikiPageType};
@@ -100,8 +100,16 @@ impl ChatService {
         let mut seen_paths = HashSet::new();
         let mut seed_paths = Vec::new();
         let mut expanded_pages = Vec::new();
+        // Diagnostics record every primary selection reason. A path may appear
+        // more than once when, for example, it is both pinned and a keyword
+        // hit. Graph/source expansion keeps its existing path-level dedupe and
+        // graph-before-source-overlap precedence.
         let mut expanded_page_paths = HashSet::new();
         if let Ok(index) = search_service.read_page(context, "wiki/index.md", &HashSet::new()) {
+            expanded_pages.push(ChatExpandedPage {
+                path: index.meta.path.clone(),
+                reason: ChatSourceSelectionReason::Index,
+            });
             seen_paths.insert(index.meta.path.clone());
             candidates.push(SourceCandidate {
                 path: index.meta.path,
@@ -114,6 +122,10 @@ impl ChatService {
         }
         if let Some(path) = pinned_page_path {
             let hit = self.pinned_retrieval_hit(context, search_service, path)?;
+            expanded_pages.push(ChatExpandedPage {
+                path: hit.path.clone(),
+                reason: ChatSourceSelectionReason::Pinned,
+            });
             diagnostic_hits.push(hit.clone());
             seed_paths.push(hit.path.clone());
             if seen_paths.insert(hit.path.clone()) {
@@ -127,6 +139,10 @@ impl ChatService {
             EXCERPT_CHARS,
         )?;
         for hit in search_hits {
+            expanded_pages.push(ChatExpandedPage {
+                path: hit.path.clone(),
+                reason: ChatSourceSelectionReason::KeywordHit,
+            });
             diagnostic_hits.push(hit.clone());
             seed_paths.push(hit.path.clone());
             if seen_paths.insert(hit.path.clone()) {
@@ -580,16 +596,11 @@ fn append_prompt_source(prompt: &mut String, source: &ChatSourceRef) {
 }
 
 fn append_prompt_history(prompt: &mut String, session: &ChatSession, budget_chars: usize) {
-    let history = session
-        .messages
-        .iter()
-        .rev()
-        .collect::<Vec<&ChatMessage>>()
-        .into_iter()
-        .rev();
     let mut remaining = budget_chars;
-    let mut has_history = false;
-    for message in history {
+    let mut selected = Vec::new();
+    // Spend the budget newest-first so recent context is never displaced by
+    // old turns, then reverse the selected suffix for chronological rendering.
+    for message in session.messages.iter().rev() {
         if remaining == 0 {
             break;
         }
@@ -602,12 +613,15 @@ fn append_prompt_history(prompt: &mut String, session: &ChatSession, budget_char
         if bounded.trim().is_empty() {
             break;
         }
-        if !has_history {
-            prompt.push_str("\n--- Conversation so far ---\n");
-            has_history = true;
-        }
-        prompt.push_str(&bounded);
+        selected.push(bounded);
         remaining = remaining.saturating_sub(used);
+    }
+    if selected.is_empty() {
+        return;
+    }
+    prompt.push_str("\n--- Conversation so far ---\n");
+    for line in selected.into_iter().rev() {
+        prompt.push_str(&line);
     }
 }
 
@@ -821,6 +835,25 @@ mod tests {
         let index_position = ctx.prompt.find("wiki/index.md").unwrap();
         let pinned_position = ctx.prompt.find("wiki/concepts/agent-memory.md").unwrap();
         assert!(purpose_position < index_position && index_position < pinned_position);
+        for (path, reason) in [
+            ("wiki/index.md", ChatSourceSelectionReason::Index),
+            (
+                "wiki/concepts/agent-memory.md",
+                ChatSourceSelectionReason::Pinned,
+            ),
+            (
+                "wiki/concepts/react-pattern.md",
+                ChatSourceSelectionReason::KeywordHit,
+            ),
+        ] {
+            assert!(
+                ctx.diagnostics
+                    .expanded_pages
+                    .iter()
+                    .any(|selected| selected.path == path && selected.reason == reason),
+                "diagnostics must preserve the {reason:?} selection reason for {path}"
+            );
+        }
         assert!(!ctx.diagnostics.retrieval_hits.is_empty());
         assert!(!ctx.diagnostics.omitted_pages.is_empty());
 
@@ -1052,10 +1085,16 @@ mod tests {
         let service = ChatService::default();
         let search = SearchService::default();
 
-        // Seed a session with many short turns; budget, not a fixed turn cap,
-        // decides how much history is included.
+        // Seed history that genuinely exceeds the minimum 500-character
+        // history budget. Selection must keep the newest turns, then render
+        // the selected suffix in chronological order.
         let mut session = service.create_session(&context, None, None).unwrap();
         for i in 0..15 {
+            let marker = match i {
+                0 => "OLDEST_TURN_0",
+                14 => "RECENT_TURN_14",
+                _ => "MIDDLE_TURN",
+            };
             session.messages.push(ChatMessage {
                 id: format!("old-{i}"),
                 role: if i % 2 == 0 {
@@ -1063,7 +1102,7 @@ mod tests {
                 } else {
                     ChatRole::Assistant
                 },
-                content: format!("ancient turn number {i}"),
+                content: format!("{marker} {i}: {}", "history detail ".repeat(50)),
                 created_at: "2026-06-01T00:00:00Z".into(),
                 citations: Vec::new(),
                 route: None,
@@ -1082,7 +1121,7 @@ mod tests {
                 &session,
                 "en",
                 ChatRoute::Byok,
-                Some(8_000),
+                Some(800),
                 None,
             )
             .unwrap();
@@ -1100,10 +1139,8 @@ mod tests {
         assert!(ctx.prompt.contains("react pattern"));
         // Language preference is injected into the prompt.
         assert!(ctx.prompt.contains("Respond in English."));
-        // These short turns fit the conservative history budget, including
-        // turns older than the previous fixed 8-turn cap.
-        assert!(ctx.prompt.contains("ancient turn number 14"));
-        assert!(ctx.prompt.contains("ancient turn number 0"));
+        assert!(ctx.prompt.contains("RECENT_TURN_14"));
+        assert!(!ctx.prompt.contains("OLDEST_TURN_0"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
