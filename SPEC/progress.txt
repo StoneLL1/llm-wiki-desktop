@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-10] Search catalog and page use-case modularization — Split the SearchService catalog/read and page mutation use cases into focused directory modules while preserving the public facade and existing characterization coverage — Key decision: keep one shared WikiIndex and live bookmark overlay; preserve optimistic hash/checkpoint/reference rollback contracts.
+
 [2026-07-10] Import service modularization — Split read-only preview, confirmation/rollback, and source delete/replace use cases from the ImportService facade into focused modules with their existing regression tests — Key decision: keep the public facade and command/DTO contracts unchanged while preserving confirm preflight-before-write/rollback/staging cleanup and source-action revalidation/checkpoint/mutation/commit-or-restore safety order.
 
 [2026-07-10] Runtime cleanup — After explicit confirmation, restored tracked `.app` files to HEAD and moved untracked runtime state out to `D:\Users\Aletta\Desktop\Works\llm-wiki-desktop-runtime-backup-2026-07-10` — Key decision: retain all runtime bytes in the external backup while keeping the shared baseline free of task/settings/graph-cache state.
