@@ -8,50 +8,8 @@ use crate::models::import::{
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
 
-use super::{classify_file, file_hash_fast};
-
-fn collect_source_files(
-    path: &Path,
-    files: &mut Vec<std::path::PathBuf>,
-) -> Result<(), BackendError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            return Err(BackendError::new(
-                "IMPORT_SOURCE_NOT_FOUND",
-                "The selected import source does not exist or cannot be read.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({
-                "path": path.to_string_lossy(),
-                "error": error.to_string(),
-            })));
-        }
-    };
-    if metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-    if metadata.is_file() {
-        files.push(path.to_path_buf());
-        return Ok(());
-    }
-    if metadata.is_dir() {
-        let mut entries = fs::read_dir(path)
-            .map_err(|error| {
-                BackendError::new("FILE_ENUMERATE_FAILED", error.to_string(), true, false)
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                BackendError::new("FILE_ENUMERATE_FAILED", error.to_string(), true, false)
-            })?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            collect_source_files(&entry.path(), files)?;
-        }
-    }
-    Ok(())
-}
+use super::classify_file;
+use super::preview::{collect_source_files, file_hash_fast};
 
 impl super::ImportService {
     pub fn validate_imported_source_path(
