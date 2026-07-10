@@ -52,6 +52,22 @@ beforeEach(() => {
 });
 
 describe("useTaskLauncher", () => {
+  it("tracks a stale project task without opening it over the current project", async () => {
+    let resolveTask!: (value: BackendTask) => void;
+    invokeMock.mockReturnValue(new Promise<BackendTask>((resolve) => { resolveTask = resolve; }));
+    const projectB = { ...project, projectId: "p2", rootPath: "/wiki/p2" };
+    const { result, rerender } = renderHook(({ current }) => useTaskLauncher(current), {
+      initialProps: { current: project },
+    });
+    const pending = result.current.startCompile();
+    rerender({ current: projectB });
+    resolveTask(task);
+    await act(async () => pending);
+
+    expect(useTaskStore.getState().tasks).toContainEqual(task);
+    expect(useTaskStore.getState()).toMatchObject({ drawerOpen: false, selectedTaskId: null });
+  });
+
   it("starts compile tasks and tracks them in the shared drawer", async () => {
     invokeMock.mockResolvedValue(task);
     const { result } = renderHook(() => useTaskLauncher(project));

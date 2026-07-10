@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
@@ -55,6 +55,9 @@ export function useAgentWorkflow(
   const { t } = useTranslation();
   const projectId = project.projectId;
   const rootPath = project.rootPath;
+  const projectKey = `${projectId}\0${rootPath}`;
+  const latestProjectKey = useRef(projectKey);
+  latestProjectKey.current = projectKey;
   const agents = capabilities.agents;
   const refreshCapabilities = capabilities.refresh;
   const startCompile = taskLauncher.startCompile;
@@ -64,6 +67,11 @@ export function useAgentWorkflow(
   const pushToast = useToastStore((state) => state.pushToast);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogPreset, setDialogPreset] = useState<AgentSkill | undefined>();
+
+  useEffect(() => {
+    setDialogOpen(false);
+    setDialogPreset(undefined);
+  }, [projectKey]);
 
   const defaultAgentKind = useMemo<AgentKind | null>(
     () =>
@@ -85,23 +93,29 @@ export function useAgentWorkflow(
   const setDefaultAgent = useCallback(
     async (agent: AgentKind) => {
       if (!hasTauri()) return;
+      const requestKey = projectKey;
       try {
         await invoke("set_default_agent", {
           request: { projectId, projectRootPath: rootPath, agent },
         });
+        if (latestProjectKey.current !== requestKey) return;
         await useSettingsStore.getState().loadSettings(projectId, rootPath);
+        if (latestProjectKey.current !== requestKey) return;
         await refreshCapabilities();
       } catch (error) {
-        pushToast("error", errorMessage(error));
+        if (latestProjectKey.current === requestKey) {
+          pushToast("error", errorMessage(error));
+        }
       }
     },
-    [projectId, pushToast, refreshCapabilities, rootPath],
+    [projectId, projectKey, pushToast, refreshCapabilities, rootPath],
   );
 
   const runAgent = useCallback(
     async (options: RunAgentOptions) => {
       setDialogOpen(false);
       if (!hasTauri()) return;
+      const requestKey = projectKey;
       const launchOptions: TaskLaunchOptions = {
         route: options.route,
         agent: options.agent,
@@ -111,6 +125,7 @@ export function useAgentWorkflow(
       try {
         if (options.skill === "wiki-ingest") {
           await startCompile(launchOptions);
+          if (latestProjectKey.current !== requestKey) return;
           pushToast(
             "info",
             t("agent.task.skillLoaded", { skill: "wiki-ingest" }),
@@ -119,6 +134,7 @@ export function useAgentWorkflow(
         }
         if (options.skill === "wiki-lint") {
           await startDeepLint(launchOptions);
+          if (latestProjectKey.current !== requestKey) return;
           setActiveView("lint");
           return;
         }
@@ -136,12 +152,15 @@ export function useAgentWorkflow(
           return;
         }
         await startExport(exportType, null, launchOptions);
+        if (latestProjectKey.current !== requestKey) return;
         setActiveView("exports");
       } catch (error) {
-        pushToast("error", errorMessage(error));
+        if (latestProjectKey.current === requestKey) {
+          pushToast("error", errorMessage(error));
+        }
       }
     },
-    [pushToast, setActiveView, startCompile, startDeepLint, startExport, t],
+    [projectKey, pushToast, setActiveView, startCompile, startDeepLint, startExport, t],
   );
 
   return {

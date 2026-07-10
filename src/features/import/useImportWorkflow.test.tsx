@@ -300,6 +300,23 @@ describe("useImportWorkflow", () => {
     });
   });
 
+  it("does not let an older same-project text preview replace the latest preview", async () => {
+    const first = deferred<ImportPreview>();
+    const latest = { ...preview, summary: { ...preview.summary, totalFiles: 2 } };
+    mocks.invoke.mockReturnValueOnce(first.promise).mockResolvedValueOnce(latest);
+    const { result } = renderHook(() =>
+      useImportWorkflow(projectA, "dashboard", taskLauncher),
+    );
+
+    const olderRequest = result.current.requestClipboard("older");
+    await act(async () => result.current.requestClipboard("latest"));
+    expect(useImportStore.getState().preview).toEqual(latest);
+    first.resolve(preview);
+    await act(async () => olderRequest);
+
+    expect(useImportStore.getState().preview).toEqual(latest);
+  });
+
   it("confirms before scanning and optionally compiling, then clears confirming state", async () => {
     const order: string[] = [];
     mocks.invoke.mockImplementation((command: string) => {

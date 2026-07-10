@@ -48,6 +48,20 @@ beforeEach(() => {
 });
 
 describe("useProviderWorkflow", () => {
+  it("does not refresh capabilities for a mutation that completed after project switch", async () => {
+    let resolve!: (value: void) => void;
+    invokeMock.mockReturnValue(new Promise<void>((next) => { resolve = next; }));
+    const projectB = { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" };
+    const { result, rerender } = renderHook(({ current }) => useProviderWorkflow(current, capabilities), {
+      initialProps: { current: project },
+    });
+    const pending = result.current.saveProvider(config);
+    rerender({ current: projectB });
+    resolve();
+    await act(async () => pending);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
   it("saves config and refreshes capabilities exactly once", async () => {
     invokeMock.mockResolvedValue(undefined);
     const { result } = renderHook(() =>

@@ -2,6 +2,7 @@ import { lazy, Suspense, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { useModalDialog } from "../../hooks/useModalDialog";
+import { ViewErrorBoundary } from "../../components/app/ViewErrorBoundary";
 import type { AgentInfo } from "../../types/agent";
 import type {
   LlmProviderConfig,
@@ -69,11 +70,13 @@ export function SettingsDialog({ open, onClose, ...settingsProps }: SettingsDial
           </button>
         </header>
         <div className="settings-dialog__body">
-          <Suspense
-            fallback={<div className="settings-dialog__fallback">{t("settings.state.loading")}</div>}
-          >
-            <SettingsView {...settingsProps} />
-          </Suspense>
+          <ViewErrorBoundary>
+            <Suspense
+              fallback={<div className="settings-dialog__fallback">{t("settings.state.loading")}</div>}
+            >
+              <SettingsView {...settingsProps} />
+            </Suspense>
+          </ViewErrorBoundary>
         </div>
       </section>
     </div>

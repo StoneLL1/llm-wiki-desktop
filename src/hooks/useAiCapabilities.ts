@@ -42,6 +42,7 @@ export function useAiCapabilities(
   const projectKey = `${projectId}\0${rootPath}`;
   const latestProjectKey = useRef(projectKey);
   latestProjectKey.current = projectKey;
+  const requestEpoch = useRef(0);
   const visibleRef = useRef(refreshWhenVisible);
   const setAgentRoute = useProjectStore((state) => state.setAgentRoute);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -51,6 +52,7 @@ export function useAiCapabilities(
   const refresh = useCallback(async () => {
     if (!hasTauri() || !projectId) return;
     const requestKey = projectKey;
+    const epoch = ++requestEpoch.current;
     setRefreshing(true);
     try {
       const request = { projectId, projectRootPath: rootPath };
@@ -58,7 +60,7 @@ export function useAiCapabilities(
         invoke<AgentInfo[]>("detect_agents", { request }),
         invoke<ProviderStatus[]>("list_llm_providers", { request }),
       ]);
-      if (latestProjectKey.current !== requestKey) return;
+      if (latestProjectKey.current !== requestKey || requestEpoch.current !== epoch) return;
       setAgents(detectedAgents);
       setProviders(providerStatuses);
       setAgentRoute(
@@ -67,7 +69,7 @@ export function useAiCapabilities(
         resolveRoute(detectedAgents, providerStatuses),
       );
     } finally {
-      if (latestProjectKey.current === requestKey) {
+      if (latestProjectKey.current === requestKey && requestEpoch.current === epoch) {
         setRefreshing(false);
       }
     }

@@ -156,6 +156,29 @@ describe("useAiCapabilities", () => {
     });
   });
 
+  it("keeps only the latest same-project capability refresh", async () => {
+    const firstAgents = deferred<AgentInfo[]>();
+    const firstProviders = deferred<ProviderStatus[]>();
+    invokeMock
+      .mockReturnValueOnce(firstAgents.promise)
+      .mockReturnValueOnce(firstProviders.promise)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([provider("ollama", true, false)]);
+    const { result } = renderHook(() => useAiCapabilities(projectA, false));
+
+    await act(async () => result.current.refresh());
+    await waitFor(() => expect(result.current.providers).toEqual([provider("ollama", true, false)]));
+    act(() => {
+      firstAgents.resolve([installedAgent]);
+      firstProviders.resolve([]);
+    });
+    await act(async () => Promise.all([firstAgents.promise, firstProviders.promise]));
+
+    expect(result.current.agents).toEqual([]);
+    expect(result.current.providers).toEqual([provider("ollama", true, false)]);
+    expect(useProjectStore.getState().currentProject.agentRoute).toBe("byok");
+  });
+
   it("refreshes once when capability management becomes visible", async () => {
     invokeMock.mockResolvedValue([]);
     const { result, rerender } = renderHook(
