@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use super::{ChatService, ParsedModelCitations};
-use crate::models::chat::{ChatCitation, ChatMessage, ChatSession, ChatSourceRef};
-use crate::utils::markdown_utils::slugify_query;
+use crate::models::chat::{ChatCitation, ChatSourceRef};
 
 impl ChatService {
     pub fn parse_model_citations(answer: &str, sources: &[ChatSourceRef]) -> ParsedModelCitations {
@@ -55,58 +53,6 @@ impl ChatService {
             has_unverified,
         }
     }
-
-    /// Render an assistant message as a `wiki/queries/` Markdown page. Sources
-    /// are taken only from citations already parsed from actual model markers.
-    pub fn build_answer_markdown(
-        &self,
-        session: &ChatSession,
-        question: &ChatMessage,
-        answer: &ChatMessage,
-    ) -> (String, String) {
-        let title = format!(
-            "Q: {}",
-            first_line(&question.content)
-                .chars()
-                .take(80)
-                .collect::<String>()
-        );
-        let slug = slugify_query(&question.content, &answer.id);
-        let sources: Vec<&str> = answer
-            .citations
-            .iter()
-            .map(|citation| citation.page_path.as_str())
-            .collect();
-        let mut markdown = String::new();
-        markdown.push_str("---\n");
-        markdown.push_str("type: query\n");
-        markdown.push_str(&format!("title: {}\n", yaml_scalar(&title)));
-        markdown.push_str(&format!("created: {}\n", answer.created_at));
-        markdown.push_str(&format!("session: {}\n", session.id));
-        markdown.push_str("sources:\n");
-        if sources.is_empty() {
-            markdown.push_str("[]\n");
-        } else {
-            for source in &sources {
-                markdown.push_str(&format!("  - {}\n", yaml_scalar(source)));
-            }
-        }
-        markdown.push_str("---\n\n");
-        markdown.push_str(&format!("# {}\n\n", title));
-        markdown.push_str("## Question\n\n");
-        markdown.push_str(question.content.trim());
-        markdown.push_str("\n\n## Answer\n\n");
-        markdown.push_str(answer.content.trim());
-        markdown.push_str("\n\n## Sources\n\n");
-        if sources.is_empty() {
-            markdown.push_str("_No citations._\n");
-        } else {
-            for source in &sources {
-                markdown.push_str(&format!("- [[{}]]\n", stem_of(source)));
-            }
-        }
-        (slug, markdown)
-    }
 }
 
 fn is_source_marker_id(value: &str) -> bool {
@@ -115,35 +61,10 @@ fn is_source_marker_id(value: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-fn first_line(content: &str) -> String {
-    content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .to_string()
-}
-
-fn yaml_scalar(value: &str) -> String {
-    if value.contains(':') || value.contains('[') || value.contains(']') {
-        format!("\"{}\"", value.replace('"', "\\\""))
-    } else {
-        value.to_string()
-    }
-}
-
-fn stem_of(path: &str) -> &str {
-    Path::new(path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(path)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{source_ref, tmp_context, user_message};
+    use super::super::test_support::source_ref;
     use super::ChatService;
-    use crate::models::chat::{ChatCitation, ChatMessage, ChatRole};
 
     #[test]
     fn citation_parser_accepts_single_marker() {
@@ -197,72 +118,5 @@ mod tests {
         assert!(no_marker.citations.is_empty());
         assert!(unverified.citations.is_empty());
         assert!(unverified.has_unverified);
-    }
-
-    #[test]
-    fn build_answer_markdown_includes_frontmatter_and_sources() {
-        let (context, root) = tmp_context("markdown");
-        let service = ChatService::default();
-        let session = service.create_session(&context, None, None).unwrap();
-        let question = user_message("What is the ReAct pattern?");
-        let answer = ChatMessage {
-            id: "a-1".into(),
-            role: ChatRole::Assistant,
-            content: "It is a reason-then-act loop.".into(),
-            created_at: "2026-06-20T00:00:00Z".into(),
-            citations: vec![ChatCitation {
-                source_id: Some("S2".into()),
-                page_path: "wiki/concepts/react-pattern.md".into(),
-                title: "ReAct Pattern".into(),
-                snippet: None,
-                score: 100,
-                is_pinned: false,
-            }],
-            route: None,
-            provider: None,
-            task_id: None,
-            convenience_edit: None,
-            retrieval_diagnostics: None,
-        };
-        let (slug, markdown) = service.build_answer_markdown(&session, &question, &answer);
-        assert!(slug.contains("react"));
-        assert!(markdown.starts_with("---\n"));
-        assert!(markdown.contains("type: query"));
-        assert!(markdown.contains("## Question"));
-        assert!(markdown.contains("What is the ReAct pattern?"));
-        assert!(markdown.contains("## Answer"));
-        assert!(markdown.contains("reason-then-act loop"));
-        assert!(markdown.contains("react-pattern"));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn build_answer_markdown_sources_follow_parsed_model_citations_only() {
-        let (context, root) = tmp_context("markdown-parsed-only");
-        let service = ChatService::default();
-        let session = service.create_session(&context, None, None).unwrap();
-        let question = user_message("Which page is cited?");
-        let refs = vec![
-            source_ref("S1", "wiki/retrieved-only.md", "Retrieved Only"),
-            source_ref("S2", "wiki/model-used.md", "Model Used"),
-        ];
-        let parsed =
-            ChatService::parse_model_citations("Only the second source is used [S2].", &refs);
-        let answer = ChatMessage {
-            id: "a-2".into(),
-            role: ChatRole::Assistant,
-            content: "Only the second source is used [S2].".into(),
-            created_at: "2026-06-20T00:00:00Z".into(),
-            citations: parsed.citations,
-            route: None,
-            provider: None,
-            task_id: None,
-            convenience_edit: None,
-            retrieval_diagnostics: None,
-        };
-        let (_, markdown) = service.build_answer_markdown(&session, &question, &answer);
-        assert!(markdown.contains("  - wiki/model-used.md"));
-        assert!(!markdown.contains("wiki/retrieved-only.md"));
-        std::fs::remove_dir_all(root).unwrap();
     }
 }
