@@ -8,6 +8,7 @@ import { defaultProject } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AgentInfo } from "../../types/agent";
+import type { Settings } from "../../types/settings";
 import type { BackendTask } from "../../types/task";
 import type { AgentSkill, RunAgentOptions } from "./RunAgentDialog";
 
@@ -51,8 +52,10 @@ const task: BackendTask = {
 
 let capabilities: AiCapabilitiesWorkflow;
 let taskLauncher: TaskLauncher;
-let refresh: ReturnType<typeof vi.fn>;
-let loadSettings: ReturnType<typeof vi.fn>;
+let refresh: ReturnType<typeof vi.fn<() => Promise<void>>>;
+let loadSettings: ReturnType<
+  typeof vi.fn<(projectId: string, rootPath: string) => Promise<Settings>>
+>;
 
 const options = (skill: AgentSkill): RunAgentOptions => ({
   skill,
@@ -69,7 +72,7 @@ beforeEach(() => {
     value: {},
     configurable: true,
   });
-  refresh = vi.fn().mockResolvedValue(undefined);
+  refresh = vi.fn(async () => undefined);
   capabilities = {
     agents: [installedAgent],
     providers: [],
@@ -82,7 +85,7 @@ beforeEach(() => {
     startExport: vi.fn().mockResolvedValue({ ...task, taskType: "export" }),
     cancel: vi.fn(),
   };
-  loadSettings = vi.fn().mockResolvedValue(undefined);
+  loadSettings = vi.fn(async () => useSettingsStore.getState().settings);
   useSettingsStore.setState({ loadSettings });
   useNavigationStore.setState({ activeView: "dashboard" });
   useToastStore.setState({ toasts: [] });
