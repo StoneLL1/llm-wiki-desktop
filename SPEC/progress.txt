@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-10] Import workflow extraction — Added a focused import hook covering project-scoped source lists, tracked file preview tasks, clipboard/URL previews with on-demand Readability, guarded source actions, and confirm → Wiki scan → optional compile sequencing — Key decision: every awaited UI-state commit checks projectId + rootPath; old project tasks remain globally trackable but cannot mutate the new project's Import staging.
+
 [2026-07-10] Typed task launcher workflow — Centralized compile, deep-lint, export, tracking, shared drawer selection, and cancellation error handling in useTaskLauncher — Key decision: expose only typed task methods, never an arbitrary command launcher, so all new long tasks continue through the existing taskStore and TaskLogDrawer.
 
 [2026-07-10] Guarded AI capability workflow — Added atomic project-scoped agentRoute updates and a shared capability probe hook with initial/visibility refresh, Agent-first routing, BYOK fallback, and stale-project result rejection — Key decision: compare projectId + rootPath both in the hook ref guard and the store action so delayed project A probes cannot mutate project B.
