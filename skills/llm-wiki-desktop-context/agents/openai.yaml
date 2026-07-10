@@ -1,0 +1,4 @@
+interface:
+  display_name: "LLM Wiki Desktop Context"
+  short_description: "Project onboarding and context map"
+  default_prompt: "Use $llm-wiki-desktop-context to orient yourself before working in this project."

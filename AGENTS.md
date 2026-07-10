@@ -70,15 +70,12 @@ The entire `UI-Frontend-design/` folder is the design spec — not just `app.css
 
 ## Required Checks
 
-After every completed task, automatically run all available checks:
+After every completed task, automatically run the unified local check:
 
-1. `npm run test` - all tests must pass.
-2. `npm run lint` - code style must pass.
-3. Confirm no unintended `console.log` remains.
-4. Verify all import paths resolve.
-5. If any check fails, fix the issue and rerun all checks from the beginning.
+1. `npm run check` - runs tests, lint, build/import resolution, console-log scan, Tauri GUI Rust compile, and Rust no-default-features tests.
+2. If the check fails, fix the issue and rerun `npm run check` from the beginning.
 
-If the project is not initialized yet and a command does not exist, report that clearly instead of pretending it passed.
+If the project is not initialized yet or `npm run check` does not exist, report the exact missing file or script clearly instead of pretending it passed.
 
 
 
@@ -86,13 +83,13 @@ If the project is not initialized yet and a command does not exist, report that 
 
 After each feature or meaningful fix:
 
-1. Run lint + tests.
+1. Run `npm run check`.
 2. Launch two review subagents:
    - Subagent A with shared context: review design intent, logic, consistency, and integration with existing docs.
    - Subagent B with fresh context: review with no assumptions, look for blind spots, missing tests, and unclear behavior.
 3. Merge both review results.
 4. Fix all valid issues.
-5. Rerun all checks.
+5. Rerun `npm run check`.
 6. Only then deliver.
 
 If subagents are unavailable in the current environment, perform the two reviews manually and say so in the final report.
