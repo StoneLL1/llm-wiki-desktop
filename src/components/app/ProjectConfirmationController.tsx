@@ -74,6 +74,13 @@ export function ProjectConfirmationController() {
     try {
       await startCompile({ route: "auto", agent: null, provider: null });
     } catch (error) {
+      const latestProject = useProjectStore.getState().currentProject;
+      if (
+        latestProject.projectId !== requestProjectId ||
+        latestProject.rootPath !== requestRootPath
+      ) {
+        return;
+      }
       pushToast(
         "error",
         t("import.sourceCompileError", { message: errorMessage(error) }),

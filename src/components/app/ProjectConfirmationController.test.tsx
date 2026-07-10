@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
@@ -211,5 +211,28 @@ describe("ProjectConfirmationController", () => {
     resolve({ action: sourceAction, status: "confirmed", checkpointExists: true, projectSummary: project });
     await waitFor(() => expect(confirmPendingAction).toHaveBeenCalled());
     expect(mocks.startCompile).not.toHaveBeenCalled();
+  });
+
+  it("does not toast a source compile failure after the project changed", async () => {
+    let rejectCompile!: (reason: Error) => void;
+    mocks.startCompile.mockImplementation(
+      () => new Promise((_, reject) => { rejectCompile = reject; }),
+    );
+    useProjectStore.setState({ pendingAction: sourceAction });
+    render(<ProjectConfirmationController />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
+    await waitFor(() => expect(mocks.startCompile).toHaveBeenCalledTimes(1));
+
+    useProjectStore.getState().setCurrentProject({
+      ...project,
+      projectId: "project-b",
+      rootPath: "D:/wiki/project-b",
+    });
+    await act(async () => {
+      rejectCompile(new Error("old project compile failed"));
+    });
+
+    expect(useToastStore.getState().toasts).toEqual([]);
   });
 });

@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] Integration preflight stale-toast fix — Guarded the source-action follow-up compile error path so a rejection settling after project switch cannot toast into the newly active project, with a deferred RED→GREEN controller regression — Key decision: every post-await UI effect, including error reporting, must revalidate both projectId and rootPath; old-project task registry updates remain allowed.
+
 [2026-07-10] Workflow controller review hardening — Added post-await project/epoch guards for confirmation, task drawer, Agent, Provider, capability probes, and Import previews; isolated Settings lazy failures and removed duplicate secret refreshes — Key decision: old-project tasks remain in the unified task registry, but stale requests cannot change the active project, open current UI, navigate, toast, replace staging, or start follow-on compile work.
 
 [2026-07-10] AppShell reduced to layout wiring — Replaced the 768-line mixed shell/workflow component with a 154-line layout shell that retains pane sizing, responsive panel collapse, global shortcuts, frame components, confirmation controller, task drawer, and toaster — Key decision: AppShell imports no Tauri invoke, feature DTO/store, Readability, terminal waiter, lazy view, or business command; WorkspaceController owns workspace composition.
