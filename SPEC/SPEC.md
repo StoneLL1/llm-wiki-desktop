@@ -559,7 +559,7 @@ npm install remark-gfm remark-math rehype-katex rehype-highlight
 npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 ```
 
-## 16. 当前实现对齐记录（2026-07-08）
+## 16. 当前实现对齐记录（2026-07-10）
 
 本节只记录已经落地或已经被测试固定的实现约束，不改变上文的核心产品方向；涉及产品范围、数据模型或安全边界的扩大仍需单独确认。
 
