@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] Import 2.0 architecture design — Consolidated the approved file/folder, exact-URL, capability-pack, OCR/ASR, legacy Office conversion, balanced Agent, versioned-source, security, migration, and hard acceptance decisions into a formal design spec — Key decision: implement five independently validated packages, then replace the legacy importer once after complete regression; UI visual implementation remains deferred for a separate design.
+
 [2026-07-10] Runtime cleanup — After explicit confirmation, restored tracked `.app` files to HEAD and moved untracked runtime state out to `D:\Users\Aletta\Desktop\Works\llm-wiki-desktop-runtime-backup-2026-07-10` — Key decision: retain all runtime bytes in the external backup while keeping the shared baseline free of task/settings/graph-cache state.
 
 [2026-07-10] Git baseline audit — Created and switched to `codex/p1-base` at `bc0dabba`, preserved `task1-backend-contracts`, audited tracked/untracked work, and backed up runtime state outside the repository — Key decision: source/docs/validation/icon assets can be committed in scoped commits; `.app` runtime files remain pending explicit user confirmation.
