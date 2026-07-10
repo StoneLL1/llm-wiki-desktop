@@ -459,9 +459,9 @@ impl ChatService {
 
 #[derive(Debug)]
 pub struct RetrievalContext {
-    pub prompt: String,
     pub source_refs: Vec<ChatSourceRef>,
     pub diagnostics: ChatRetrievalDiagnostics,
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,6 +1,6 @@
 # 进度记录 (progress.txt)
 
-[2026-07-11] Task 8 Chat sessions/citations modularization — Split session CRUD/path validation and model citation parsing/answer Markdown into focused modules while preserving the ChatService facade and all 32 baseline Chat tests — Key decision: keep retrieval and saved-answer orchestration in the facade for Task 9, preserve recoverable corrupt-session handling and model-marker-only persisted citations, and adjust the moved wiki-query include path for the deeper Rust module directory.
+[2026-07-10] Task 8 Chat sessions/citations modularization — Split session CRUD/path validation and model citation parsing/answer Markdown into focused modules while preserving the ChatService facade and all 32 baseline Chat tests — Key decision: keep retrieval and saved-answer orchestration in the facade for Task 9, preserve recoverable corrupt-session handling and model-marker-only persisted citations, and adjust the moved wiki-query include path for the deeper Rust module directory.
 
 [2026-07-10] Task 7 Lint full modularization — Moved deep-lint prompt/parsing/normalization and checkpoint-protected single/batch fix orchestration with their tests into focused modules, leaving `mod.rs` as the 19-line LintService facade while preserving all 30 baseline Lint tests — Key decision: keep rules helpers and report constants at the narrowest `pub(super)` visibility, reject unknown/out-of-scope paths before writes, and preserve evidence-free error downgrades plus hash/PendingAction/checkpoint/graph invalidation/fix-log contracts.
 
