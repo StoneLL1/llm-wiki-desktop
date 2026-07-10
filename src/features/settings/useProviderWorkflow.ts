@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
@@ -32,39 +32,46 @@ export function useProviderWorkflow(
   const { t } = useTranslation();
   const projectId = project.projectId;
   const rootPath = project.rootPath;
+  const projectKey = `${projectId}\0${rootPath}`;
+  const latestProjectKey = useRef(projectKey);
+  latestProjectKey.current = projectKey;
+  const testEpoch = useRef(0);
   const refresh = capabilities.refresh;
 
   const saveProvider = useCallback(
     async (config: LlmProviderConfig) => {
       if (!hasTauri()) return;
+      const requestKey = projectKey;
       await invoke("save_llm_provider", {
         request: { projectId, projectRootPath: rootPath, config },
       });
-      await refresh();
+      if (latestProjectKey.current === requestKey) await refresh();
     },
-    [projectId, refresh, rootPath],
+    [projectId, projectKey, refresh, rootPath],
   );
 
   const saveSecret = useCallback(
     async (provider: LlmProviderKind, secret: string) => {
       if (!hasTauri()) return;
+      const requestKey = projectKey;
       await invoke("store_provider_secret", {
         request: { provider, secret },
       });
-      await refresh();
+      if (latestProjectKey.current === requestKey) await refresh();
     },
-    [refresh],
+    [projectKey, refresh],
   );
 
   const deleteSecret = useCallback(
     async (provider: LlmProviderKind) => {
       if (!hasTauri()) return;
+      const requestKey = projectKey;
       await invoke("delete_provider_secret", {
         request: { provider, secret: null },
       });
-      await refresh();
+      if (latestProjectKey.current === requestKey) await refresh();
     },
-    [refresh],
+    [projectKey, refresh],
   );
 
   const testProvider = useCallback(
@@ -72,11 +79,17 @@ export function useProviderWorkflow(
       if (!hasTauri()) {
         return { ok: false, message: t("provider.testUnavailable") };
       }
-      return invoke<ProviderTestResult>("test_llm_provider", {
+      const requestKey = projectKey;
+      const epoch = ++testEpoch.current;
+      const result = await invoke<ProviderTestResult>("test_llm_provider", {
         request: { projectId, projectRootPath: rootPath, config },
       });
+      if (latestProjectKey.current !== requestKey || testEpoch.current !== epoch) {
+        return { ok: false, message: t("provider.testUnavailable") };
+      }
+      return result;
     },
-    [projectId, rootPath, t],
+    [projectId, projectKey, rootPath, t],
   );
 
   return {

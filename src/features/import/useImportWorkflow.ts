@@ -59,6 +59,10 @@ export function useImportWorkflow(
   const sourceCount = project.sourceCount;
   const projectKey = `${projectId}\0${rootPath}`;
   const latestProjectKey = useRef(projectKey);
+  const previewEpoch = useRef(0);
+  if (latestProjectKey.current !== projectKey) {
+    previewEpoch.current += 1;
+  }
   latestProjectKey.current = projectKey;
   const importedSources = useImportStore((state) => state.importedSources);
   const isConfirming = useImportStore((state) => state.isConfirming);
@@ -73,6 +77,15 @@ export function useImportWorkflow(
 
   const isCurrent = useCallback(
     (requestKey: string) => latestProjectKey.current === requestKey,
+    [],
+  );
+  const beginPreview = useCallback(
+    () => ({ requestKey: projectKey, epoch: ++previewEpoch.current }),
+    [projectKey],
+  );
+  const isPreviewCurrent = useCallback(
+    (requestKey: string, epoch: number) =>
+      latestProjectKey.current === requestKey && previewEpoch.current === epoch,
     [],
   );
 
@@ -116,11 +129,12 @@ export function useImportWorkflow(
         .map((path) => path.trim())
         .filter((path) => path.length > 0);
       if (sourcePaths.length === 0) {
+        previewEpoch.current += 1;
         setPreview(null);
         return;
       }
 
-      const requestKey = projectKey;
+      const { requestKey, epoch } = beginPreview();
       void (async () => {
         try {
           const started = await invoke<BackendTask>("preview_import", {
@@ -133,12 +147,12 @@ export function useImportWorkflow(
             },
           });
           upsertTask(started);
+          if (!isPreviewCurrent(requestKey, epoch)) return;
           openTaskDrawer(started.id);
-          if (!isCurrent(requestKey)) return;
 
           const terminal = await waitForTaskTerminal(started);
           upsertTask(terminal);
-          if (!isCurrent(requestKey)) return;
+          if (!isPreviewCurrent(requestKey, epoch)) return;
           if (terminal.status !== "succeeded") {
             throw new Error(
               terminal.error?.message ?? `Import preview ${terminal.status}.`,
@@ -152,9 +166,9 @@ export function useImportWorkflow(
               taskId: terminal.id,
             },
           });
-          if (isCurrent(requestKey)) setPreview(nextPreview);
+          if (isPreviewCurrent(requestKey, epoch)) setPreview(nextPreview);
         } catch (error) {
-          if (!isCurrent(requestKey)) return;
+          if (!isPreviewCurrent(requestKey, epoch)) return;
           setPreview(null);
           pushToast(
             "error",
@@ -164,7 +178,8 @@ export function useImportWorkflow(
       })();
     },
     [
-      isCurrent,
+      beginPreview,
+      isPreviewCurrent,
       openTaskDrawer,
       projectId,
       projectKey,
@@ -178,7 +193,7 @@ export function useImportWorkflow(
 
   const requestTextPreview = useCallback(
     async (kind: "clipboard" | "url", value: string) => {
-      const requestKey = projectKey;
+      const { requestKey, epoch } = beginPreview();
       try {
         let content = value;
         let sourceName = "clipboard-import";
@@ -189,11 +204,11 @@ export function useImportWorkflow(
           const fetched = await invoke<FetchedImportUrl>("fetch_import_url", {
             request: { projectId, projectRootPath: rootPath, url: value },
           });
-          if (!isCurrent(requestKey)) return;
+          if (!isPreviewCurrent(requestKey, epoch)) return;
           const { extractArticleFromHtml, articleToMarkdown } = await import(
             "../../lib/readability"
           );
-          if (!isCurrent(requestKey)) return;
+          if (!isPreviewCurrent(requestKey, epoch)) return;
           const article = extractArticleFromHtml(fetched.html, fetched.url);
           if (!article) throw new Error(t("import.readabilityError"));
           content = articleToMarkdown(article, fetched.url);
@@ -213,9 +228,9 @@ export function useImportWorkflow(
             author,
           },
         });
-        if (isCurrent(requestKey)) setPreview(nextPreview);
+        if (isPreviewCurrent(requestKey, epoch)) setPreview(nextPreview);
       } catch (error) {
-        if (!isCurrent(requestKey)) return;
+        if (!isPreviewCurrent(requestKey, epoch)) return;
         setPreview(null);
         pushToast(
           "error",
@@ -223,7 +238,7 @@ export function useImportWorkflow(
         );
       }
     },
-    [isCurrent, projectId, projectKey, pushToast, rootPath, setPreview, t],
+    [beginPreview, isPreviewCurrent, projectId, pushToast, rootPath, setPreview, t],
   );
 
   const requestSourceAction = useCallback(

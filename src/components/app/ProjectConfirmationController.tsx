@@ -34,6 +34,7 @@ export function ProjectConfirmationController() {
   const { startCompile } = useTaskLauncher(currentProject);
   const compilePendingAction = tasks.find(
     (task) =>
+      task.projectId === currentProject.projectId &&
       task.status === "waiting_for_confirmation" &&
       task.result?.pendingAction,
   )?.result?.pendingAction;
@@ -52,12 +53,21 @@ export function ProjectConfirmationController() {
 
   const confirmProjectAction = useCallback(async () => {
     const action = pendingAction;
+    const requestProjectId = currentProject.projectId;
+    const requestRootPath = currentProject.rootPath;
     const confirmed = await confirmPendingAction();
     if (
       !confirmed ||
       !action ||
       (action.actionType !== "delete_source" &&
         action.actionType !== "replace_source")
+    ) {
+      return;
+    }
+    const latestProject = useProjectStore.getState().currentProject;
+    if (
+      latestProject.projectId !== requestProjectId ||
+      latestProject.rootPath !== requestRootPath
     ) {
       return;
     }
@@ -69,7 +79,7 @@ export function ProjectConfirmationController() {
         t("import.sourceCompileError", { message: errorMessage(error) }),
       );
     }
-  }, [confirmPendingAction, pendingAction, pushToast, startCompile, t]);
+  }, [confirmPendingAction, currentProject.projectId, currentProject.rootPath, pendingAction, pushToast, startCompile, t]);
 
   if (!displayedPendingAction) return null;
 

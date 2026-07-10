@@ -89,6 +89,7 @@ export function WorkspaceController() {
       </div>
 
       <RunAgentDialog
+        key={`agent:${currentProject.projectId}\0${currentProject.rootPath}`}
         open={agentWorkflow.dialogOpen}
         onClose={agentWorkflow.closeRunDialog}
         onRun={(options) => {
@@ -100,6 +101,7 @@ export function WorkspaceController() {
         presetSkill={agentWorkflow.dialogPreset}
       />
       <SettingsDialog
+        key={`settings:${currentProject.projectId}\0${currentProject.rootPath}`}
         open={settingsOpen}
         onClose={closeSettings}
         project={currentProject}

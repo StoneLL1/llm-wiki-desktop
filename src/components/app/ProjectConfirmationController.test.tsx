@@ -193,4 +193,23 @@ describe("ProjectConfirmationController", () => {
 
     expect(useTaskStore.getState().tasks).toEqual([task]);
   });
+
+  it("ignores waiting compile confirmations owned by another project", () => {
+    useProjectStore.setState({ currentProject: { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" } });
+    useTaskStore.setState({ tasks: [task] });
+    render(<ProjectConfirmationController />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("does not compile after a confirmed source action when the project changed", async () => {
+    let resolve!: (value: ConfirmedAction) => void;
+    confirmPendingAction.mockImplementation(() => new Promise((next) => { resolve = next; }));
+    useProjectStore.setState({ pendingAction: sourceAction });
+    render(<ProjectConfirmationController />);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
+    useProjectStore.getState().setCurrentProject({ ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" });
+    resolve({ action: sourceAction, status: "confirmed", checkpointExists: true, projectSummary: project });
+    await waitFor(() => expect(confirmPendingAction).toHaveBeenCalled());
+    expect(mocks.startCompile).not.toHaveBeenCalled();
+  });
 });

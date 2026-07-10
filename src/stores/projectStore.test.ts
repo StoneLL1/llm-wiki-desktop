@@ -63,6 +63,26 @@ beforeEach(() => {
 });
 
 describe("projectStore bootstrap", () => {
+  it("does not let a delayed confirmation replace a newer project or its pending action", async () => {
+    let resolveConfirmation!: (value: import("../types/backend").ConfirmedAction) => void;
+    const confirmation = new Promise<import("../types/backend").ConfirmedAction>((resolve) => {
+      resolveConfirmation = resolve;
+    });
+    const actionA = { id: "a", actionType: "delete_source" as const, title: "A", message: "A", riskLevel: "destructive" as const, affectedPaths: [], preview: null, expiresAt: null };
+    const actionB = { ...actionA, id: "b", title: "B" };
+    const projectB = { ...summary, projectId: "project-b", rootPath: "D:/wiki/project-b" };
+    useProjectStore.setState({ currentProject: summary, pendingAction: actionA });
+    invokeMock.mockReturnValue(confirmation);
+
+    const pending = useProjectStore.getState().confirmPendingAction();
+    useProjectStore.getState().setCurrentProject(projectB);
+    useProjectStore.getState().setPendingAction(actionB);
+    resolveConfirmation({ action: actionA, status: "confirmed", checkpointExists: true, projectSummary: summary });
+    await pending;
+
+    expect(useProjectStore.getState()).toMatchObject({ currentProject: projectB, pendingAction: actionB });
+  });
+
   it("ignores an agent route update for a project that is no longer active", () => {
     const projectA = summary;
     const projectB = {

@@ -92,6 +92,34 @@ beforeEach(() => {
 });
 
 describe("useAgentWorkflow", () => {
+  it("does not navigate or toast when an old-project task starts after project switch", async () => {
+    let resolve!: (value: BackendTask) => void;
+    vi.mocked(taskLauncher.startDeepLint).mockReturnValue(new Promise((next) => { resolve = next; }));
+    const projectB = { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" };
+    const { result, rerender } = renderHook(({ current }) =>
+      useAgentWorkflow(current, capabilities, taskLauncher), { initialProps: { current: project } });
+    const pending = result.current.runAgent(options("wiki-lint"));
+    rerender({ current: projectB });
+    resolve({ ...task, taskType: "deep_lint" });
+    await act(async () => pending);
+    expect(useNavigationStore.getState().activeView).toBe("dashboard");
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
+  it("does not refresh or toast after an old-project default-Agent request settles", async () => {
+    let reject!: (reason: Error) => void;
+    invokeMock.mockReturnValue(new Promise((_, next) => { reject = next; }));
+    const projectB = { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" };
+    const { result, rerender } = renderHook(({ current }) =>
+      useAgentWorkflow(current, capabilities, taskLauncher), { initialProps: { current: project } });
+    const pending = result.current.setDefaultAgent("codex");
+    rerender({ current: projectB });
+    reject(new Error("old project failure"));
+    await act(async () => pending);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
   it("owns dialog preset state and derives the installed default Agent", () => {
     const { result } = renderHook(() =>
       useAgentWorkflow(project, capabilities, taskLauncher),
@@ -105,6 +133,16 @@ describe("useAgentWorkflow", () => {
     });
     act(() => result.current.closeRunDialog());
     expect(result.current.dialogOpen).toBe(false);
+  });
+
+  it("closes project-scoped Agent dialog state when the project changes", () => {
+    const projectB = { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" };
+    const { result, rerender } = renderHook(({ current }) =>
+      useAgentWorkflow(current, capabilities, taskLauncher), { initialProps: { current: project } });
+    act(() => result.current.openRunDialog("wiki-lint"));
+    rerender({ current: projectB });
+    expect(result.current.dialogOpen).toBe(false);
+    expect(result.current.dialogPreset).toBeUndefined();
   });
 
   it("sets the default Agent then reloads settings and capabilities", async () => {

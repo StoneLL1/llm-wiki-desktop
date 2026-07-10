@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import { cancelTaskRequest, useTaskStore } from "../stores/taskStore";
@@ -47,14 +47,19 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
   const { t } = useTranslation();
   const projectId = project.projectId;
   const rootPath = project.rootPath;
+  const projectKey = `${projectId}\0${rootPath}`;
+  const latestProjectKey = useRef(projectKey);
+  latestProjectKey.current = projectKey;
   const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const pushToast = useToastStore((state) => state.pushToast);
 
   const track = useCallback(
-    (task: BackendTask) => {
+    (task: BackendTask, requestKey: string) => {
       upsertTask(task);
-      openTaskDrawer(task.id);
+      if (latestProjectKey.current === requestKey) {
+        openTaskDrawer(task.id);
+      }
       return task;
     },
     [openTaskDrawer, upsertTask],
@@ -70,9 +75,9 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
           ...options,
         },
       });
-      return track(task);
+      return track(task, projectKey);
     },
-    [projectId, rootPath, track],
+    [projectId, projectKey, rootPath, track],
   );
 
   const startDeepLint = useCallback(
@@ -84,9 +89,9 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
           ...options,
         },
       });
-      return track(task);
+      return track(task, projectKey);
     },
-    [projectId, rootPath, track],
+    [projectId, projectKey, rootPath, track],
   );
 
   const startExport = useCallback(
@@ -104,9 +109,9 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
           ...options,
         },
       });
-      return track(task);
+      return track(task, projectKey);
     },
-    [projectId, rootPath, track],
+    [projectId, projectKey, rootPath, track],
   );
 
   const cancel = useCallback(

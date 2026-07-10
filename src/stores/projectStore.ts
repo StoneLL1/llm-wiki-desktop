@@ -155,27 +155,52 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!action) {
       return undefined;
     }
+    const requestEpoch = selectionEpoch;
+    const requestProject = get().currentProject;
     if (!hasTauri()) {
-      set({ pendingAction: undefined });
+      if (
+        requestEpoch === selectionEpoch &&
+        get().pendingAction?.id === action.id
+      ) {
+        set({ pendingAction: undefined });
+      }
       return { action, status: "confirmed", checkpointExists: false, projectSummary: null };
     }
     const confirmed = await invoke<ConfirmedAction>("confirm_pending_action", {
       request: { actionId: action.id, status: "confirmed" },
     });
-    set({
-      currentProject: confirmed.projectSummary ?? get().currentProject,
-      pendingAction: undefined,
-    });
+    const state = get();
+    if (
+      requestEpoch === selectionEpoch &&
+      state.currentProject.projectId === requestProject.projectId &&
+      state.currentProject.rootPath === requestProject.rootPath &&
+      state.pendingAction?.id === action.id
+    ) {
+      set({
+        currentProject: confirmed.projectSummary ?? state.currentProject,
+        pendingAction: undefined,
+      });
+    }
     return confirmed;
   },
   cancelPendingAction: async () => {
     const action = get().pendingAction;
+    const requestEpoch = selectionEpoch;
+    const requestProject = get().currentProject;
     if (action && hasTauri()) {
       await invoke<ConfirmedAction>("confirm_pending_action", {
         request: { actionId: action.id, status: "cancelled" },
       });
     }
-    set({ pendingAction: undefined });
+    const state = get();
+    if (
+      requestEpoch === selectionEpoch &&
+      state.currentProject.projectId === requestProject.projectId &&
+      state.currentProject.rootPath === requestProject.rootPath &&
+      state.pendingAction?.id === action?.id
+    ) {
+      set({ pendingAction: undefined });
+    }
   },
   bootstrap: async () => {
     if (get().initialized || get().initializing) return;
