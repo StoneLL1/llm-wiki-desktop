@@ -2,6 +2,8 @@
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
+Symptom — Chat history 按 newest-first 选取后再反转为 chronological order 时，较旧消息若恰好被字符预算截断，会与下一条较新消息的 `User:` / `Assistant:` 标签粘成一行。— Root cause — 每条原始 line 自带尾随换行，但 `take_chars` 截断时会把该换行裁掉；最终直接 `push_str` selected chunks，没有额外分隔符。— How to avoid — truncated chunk 必须在原预算内保留分隔：用最后一个已预算字符替换为 `\n`，不要额外追加导致超预算；测试要让 newest 完整、older partial，并同时断言 chronological order、角色前换行和总 history chars 不超 budget。
+
 Symptom — Import 错误提示测试在 `App.test.tsx` 单文件中通过，却在全套 Vitest 中反复抓到 lazy `Loading…` status 或等不到业务错误。 — Root cause — 测试用通用 `findByRole("status")` 与懒加载 status 竞争，同时 `mockRejectedValueOnce` 把失败绑定到“下一次任意 invoke”，全套并发/后台调用可能先消费该 rejection。 — How to avoid — 先等待懒加载后的业务输入，按具体 command（如 `preview_import`）配置 mock，并等待具体错误文本，不用通用 status 角色或全局 next-call 时序表达业务断言。
 
 [2026-07-10] 现象 — 用字符串 `StartsWith(repoPath)` 判断仓库外备份目录时，名称带有仓库目录前缀的 sibling path 被误判为仓库内路径。— 根因 — 路径边界缺少目录分隔符，`llm-wiki-desktop-runtime-backup-*` 也会匹配 `llm-wiki-desktop` 前缀。— 规避做法 — 先规范化路径，再用 `repoPath.TrimEnd('\\') + '\\'` 作为目录边界前缀，或使用 `Path.GetRelativePath` 验证目标不以 `..` 开头。
