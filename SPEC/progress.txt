@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] Task 7 Lint full modularization — Moved deep-lint prompt/parsing/normalization and checkpoint-protected single/batch fix orchestration with their tests into focused modules, leaving `mod.rs` as the 19-line LintService facade while preserving all 30 baseline Lint tests — Key decision: keep rules helpers and report constants at the narrowest `pub(super)` visibility, reject unknown/out-of-scope paths before writes, and preserve evidence-free error downgrades plus hash/PendingAction/checkpoint/graph invalidation/fix-log contracts.
+
 [2026-07-10] Task 6 Lint rules/ignores/reports modularization — Split deterministic local rules, ignore CRUD persistence, and report/history persistence into focused modules while preserving the LintService facade and all 30 baseline Lint tests — Key decision: keep SearchService read-only catalog semantics and existing ignore/report corruption tolerance, while leaving deep analysis and fix orchestration in the facade for Task 7.
 
 [2026-07-10] Task 5 Search full modularization — Moved local query tokenization, field scoring, and deterministic sorting into `query.rs`, and cached retrieval, first-body excerpt, and truncation into `excerpts.rs`, leaving `mod.rs` as the SearchService facade with shared fields — Key decision: keep one shared WikiIndex snapshot/cache with bookmark-neutral entries, and derive retrieval excerpts from cached bodies without Markdown rereads.
