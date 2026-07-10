@@ -6,11 +6,11 @@ use crate::models::import::{ConflictResolution, ImportFileEntry, ImportPreview};
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
 
+use super::artifacts::remove_project_files;
 use super::classification::{deterministic_rename, target_archive_dir};
 use super::classify_file;
 use super::preview::file_hash_fast;
 use super::promotion::remap_extracted_paths;
-use super::source_actions::remove_project_files;
 
 impl super::ImportService {
     pub fn confirm_import(
@@ -195,42 +195,6 @@ fn rollback_import_targets(paths: &[PathBuf]) {
     for path in paths.iter().rev() {
         let _ = fs::remove_file(path);
     }
-}
-
-pub(super) fn verify_project_hash(
-    file_store: &FileStore,
-    context: &ProjectContext,
-    path: &str,
-    expected: &str,
-) -> Result<(), BackendError> {
-    if file_store.file_hash(context, path)? != expected {
-        return Err(BackendError::new(
-            "CONFIRMATION_STATE_MISMATCH",
-            "The original source changed after preview.",
-            true,
-            true,
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_artifact_paths(
-    context: &ProjectContext,
-    paths: &[String],
-) -> Result<(), BackendError> {
-    for path in paths {
-        let normalized = path.replace('\\', "/");
-        if !normalized.starts_with("raw/extracted/") && !normalized.starts_with("wiki/sources/") {
-            return Err(BackendError::new(
-                "SOURCE_ARTIFACT_PATH_INVALID",
-                "Source artifacts must remain under raw/extracted or wiki/sources.",
-                false,
-                true,
-            ));
-        }
-        context.resolve_project_path(&normalized)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

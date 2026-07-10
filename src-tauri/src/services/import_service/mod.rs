@@ -1,3 +1,4 @@
+mod artifacts;
 mod classification;
 mod confirmation;
 mod preview;

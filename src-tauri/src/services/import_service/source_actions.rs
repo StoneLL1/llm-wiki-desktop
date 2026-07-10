@@ -7,7 +7,7 @@ use crate::models::git::CheckpointPurpose;
 use crate::models::paths::ProjectContext;
 use crate::services::{file_store::FileStore, GitService};
 
-use super::confirmation::{validate_artifact_paths, verify_project_hash};
+use super::artifacts::{remove_project_files, validate_artifact_paths, verify_project_hash};
 
 type FileBackup = Vec<(PathBuf, Option<Vec<u8>>)>;
 
@@ -152,14 +152,6 @@ impl super::ImportService {
             self.cleanup_replacement_artifacts(context, old_artifacts, new_artifacts);
         }
         operation
-    }
-}
-
-pub(super) fn remove_project_files(context: &ProjectContext, paths: &[String]) {
-    for path in paths {
-        if let Ok(absolute) = context.resolve_project_path(path) {
-            let _ = fs::remove_file(absolute);
-        }
     }
 }
 

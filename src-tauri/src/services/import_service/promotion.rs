@@ -7,7 +7,7 @@ use crate::models::import::{ConflictResolution, ImportPreview};
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
 
-use super::source_actions::remove_project_files;
+use super::artifacts::remove_project_files;
 
 impl super::ImportService {
     /// Promote each confirmed source's browsable text into

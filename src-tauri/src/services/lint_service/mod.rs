@@ -9,7 +9,7 @@ mod test_support;
 
 use crate::services::file_store::FileStore;
 
-pub(super) const LINT_REPORTS_DIR: &str = ".app/lint-reports";
+pub(crate) const LINT_REPORTS_DIR: &str = ".app/lint-reports";
 
 /// Facade for deterministic lint rules, deep analysis, report persistence,
 /// ignore persistence, and checkpoint-protected fix orchestration.
