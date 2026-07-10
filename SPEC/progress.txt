@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-10] Import service modularization — Split read-only preview, confirmation/rollback, and source delete/replace use cases from the ImportService facade into focused modules with their existing regression tests — Key decision: keep the public facade and command/DTO contracts unchanged while preserving confirm preflight-before-write/rollback/staging cleanup and source-action revalidation/checkpoint/mutation/commit-or-restore safety order.
+
 [2026-07-10] Runtime cleanup — After explicit confirmation, restored tracked `.app` files to HEAD and moved untracked runtime state out to `D:\Users\Aletta\Desktop\Works\llm-wiki-desktop-runtime-backup-2026-07-10` — Key decision: retain all runtime bytes in the external backup while keeping the shared baseline free of task/settings/graph-cache state.
 
 [2026-07-10] Git baseline audit — Created and switched to `codex/p1-base` at `bc0dabba`, preserved `task1-backend-contracts`, audited tracked/untracked work, and backed up runtime state outside the repository — Key decision: source/docs/validation/icon assets can be committed in scoped commits; `.app` runtime files remain pending explicit user confirmation.
