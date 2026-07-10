@@ -609,7 +609,16 @@ fn append_prompt_history(prompt: &mut String, session: &ChatSession, budget_char
             crate::models::chat::ChatRole::Assistant => "Assistant",
         };
         let line = format!("{label}: {}\n", message.content.trim());
-        let (bounded, used) = take_chars(&line, remaining);
+        let (mut bounded, used) = take_chars(&line, remaining);
+        if used < char_len(&line) && !bounded.ends_with('\n') {
+            // A truncated older chunk will be rendered before newer selected
+            // turns. Replace its final budgeted character with a separator so
+            // role labels cannot concatenate, without exceeding the budget.
+            bounded.pop();
+            if !bounded.is_empty() {
+                bounded.push('\n');
+            }
+        }
         if bounded.trim().is_empty() {
             break;
         }
@@ -1090,10 +1099,11 @@ mod tests {
         // the selected suffix in chronological order.
         let mut session = service.create_session(&context, None, None).unwrap();
         for i in 0..15 {
-            let marker = match i {
-                0 => "OLDEST_TURN_0",
-                14 => "RECENT_TURN_14",
-                _ => "MIDDLE_TURN",
+            let content = match i {
+                0 => format!("OLDEST_TURN_0: {}", "old history ".repeat(50)),
+                13 => format!("PARTIAL_OLDER_13: {}", "partial history ".repeat(50)),
+                14 => "RECENT_TURN_14: short newest turn".to_string(),
+                _ => format!("MIDDLE_TURN_{i}: {}", "middle history ".repeat(50)),
             };
             session.messages.push(ChatMessage {
                 id: format!("old-{i}"),
@@ -1102,7 +1112,7 @@ mod tests {
                 } else {
                     ChatRole::Assistant
                 },
-                content: format!("{marker} {i}: {}", "history detail ".repeat(50)),
+                content,
                 created_at: "2026-06-01T00:00:00Z".into(),
                 citations: Vec::new(),
                 route: None,
@@ -1139,8 +1149,23 @@ mod tests {
         assert!(ctx.prompt.contains("react pattern"));
         // Language preference is injected into the prompt.
         assert!(ctx.prompt.contains("Respond in English."));
-        assert!(ctx.prompt.contains("RECENT_TURN_14"));
-        assert!(!ctx.prompt.contains("OLDEST_TURN_0"));
+        let conversation = ctx
+            .prompt
+            .split("--- Conversation so far ---\n")
+            .nth(1)
+            .unwrap()
+            .split("\n--- Latest question ---")
+            .next()
+            .unwrap();
+        let older_position = conversation.find("PARTIAL_OLDER_13").unwrap();
+        let recent_position = conversation.find("RECENT_TURN_14").unwrap();
+        assert!(older_position < recent_position);
+        assert!(
+            conversation.contains("\nUser: RECENT_TURN_14"),
+            "a partial older message must end before the newest role label: {conversation:?}"
+        );
+        assert!(conversation.chars().count() <= ctx.diagnostics.history_budget_chars);
+        assert!(!conversation.contains("OLDEST_TURN_0"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
