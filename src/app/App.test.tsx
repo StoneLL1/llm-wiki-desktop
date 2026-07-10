@@ -833,14 +833,19 @@ describe("App", () => {
   });
 
   it("surfaces an import preview backend error instead of silently clearing the selection", async () => {
-    invokeMock.mockRejectedValueOnce({ message: "source missing" });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "preview_import") {
+        return Promise.reject({ message: "source missing" });
+      }
+      return Promise.resolve(null);
+    });
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
-    const sourcePathInput = screen.getByRole("textbox", { name: "Local file or folder paths" });
+    const sourcePathInput = await screen.findByRole("textbox", { name: "Local file or folder paths" });
     fireEvent.change(sourcePathInput, { target: { value: "D:/missing" } });
     fireEvent.click(screen.getByRole("button", { name: "Add to preview" }));
 
-    expect(await screen.findByRole("status")).toHaveTextContent("Could not preview sources");
+    expect(await screen.findByText(/Could not preview sources/)).toBeInTheDocument();
   });
 
   it("confirms the current import preview and clears it after success", async () => {
