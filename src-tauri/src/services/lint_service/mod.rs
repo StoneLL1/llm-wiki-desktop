@@ -39,10 +39,6 @@ pub struct LintService {
     pub(super) file_store: FileStore,
 }
 
-pub fn has_human_readable_sources_section(body: &str) -> bool {
-    rules::has_human_readable_sources_section(body)
-}
-
 impl LintService {
     /// Assemble the prompt for the `wiki-lint` Skill: purpose, schema, and a
     /// per-page summary with a bounded excerpt. No secret or API key is ever

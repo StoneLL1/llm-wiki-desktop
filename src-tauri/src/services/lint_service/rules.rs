@@ -572,7 +572,7 @@ fn expected_page_type_for_path(path: &str) -> Option<WikiPageType> {
     }
 }
 
-pub(super) fn has_human_readable_sources_section(body: &str) -> bool {
+fn has_human_readable_sources_section(body: &str) -> bool {
     body.lines().any(|line| {
         let trimmed = line.trim().to_ascii_lowercase();
         trimmed.starts_with("> sources:")
