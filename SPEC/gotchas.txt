@@ -2,6 +2,8 @@
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
+[2026-07-10] 现象 — `WorkspaceRouter` lazy-reject 测试单文件运行通过，但完整 Vitest 套件中偶发渲染先前成功的 AgentView mock，导致找不到 `role="alert"`。— 根因 — 同一测试模块先用 `vi.doMock` 加载成功 lazy module，再以 `resetModules + doMock` 改成 reject；React.lazy 与 Vite worker 的模块 Promise 缓存使第二次定义依赖测试顺序，定向运行掩盖了不稳定性。— 规避做法 — lazy import reject 场景放到独立测试文件，顶层固定一个会 throw/reject 的模块 mock；不要在同一模块内重复定义已被 React.lazy 缓存的 chunk。必须用完整 `npm run test` 验证模块隔离测试。
+
 [2026-07-10] 现象 — 新增 hook/controller 的 Vitest 全绿，但 `npm run build` 在测试文件报 `Mock<Procedure | Constructable>` 不能赋给具体 async callback，或字面量 props 不能从 dashboard 切到 import。— 根因 — `let mock: ReturnType<typeof vi.fn>` 会丢掉可调用签名并保留“函数或构造器”宽联合；`renderHook` 的 initialProps 又会把字符串推断成单一字面量。Vitest 运行时转译不暴露这些问题，`tsc -b` 才会失败。— 规避做法 — 跨赋值/传入 typed store 的 mock 使用 `ReturnType<typeof vi.fn<(args) => Promise<Result>>>` 或 typed async wrapper；会 rerender 的 props 显式标注 union（如 `AppView`）；完成新增测试后必须跑 build，不能以 Vitest 绿色代替类型构建。
 
 [2026-07-10] 现象 — 用字符串 `StartsWith(repoPath)` 判断仓库外备份目录时，名称带有仓库目录前缀的 sibling path 被误判为仓库内路径。— 根因 — 路径边界缺少目录分隔符，`llm-wiki-desktop-runtime-backup-*` 也会匹配 `llm-wiki-desktop` 前缀。— 规避做法 — 先规范化路径，再用 `repoPath.TrimEnd('\\') + '\\'` 作为目录边界前缀，或使用 `Path.GetRelativePath` 验证目标不以 `..` 开头。
