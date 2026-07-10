@@ -568,6 +568,7 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 - 当前仓库已是 Tauri v2 + React 19 + TypeScript + Vite 应用骨架，而不再只是文档与样本 Wiki。
 - 前端代码按 `components/app`、`components/ui`、`features/*`、`stores/*`、`types/*`、`hooks/*`、`services/*` 分层；领域视图已覆盖 Dashboard、Wiki、Chat、Graph、Agent、Import、Lint、Exports、Settings。
 - 后端代码已按 `commands/`、`services/`、`models/`、`errors/`、`tasks/`、`utils/` 拆分。Tauri command 继续保持薄层，业务逻辑集中在 service 层，数据通过 typed DTO 和 JSON/Markdown 文件传递。
+- LintService 已将确定性 rules、ignore persistence 与 report/history persistence 拆入独立模块，同时保持 `LintService::default()` facade、SearchService 只读目录依赖以及既有 Lint command/DTO 契约不变；deep analysis 与 fixes 仍由后续任务继续拆分。
 - 当前实现和测试仍遵循无数据库约束；项目内容继续以 Markdown、JSON 和本地文件为事实来源。
 
 ### 16.2 Shell、布局与视觉约束
