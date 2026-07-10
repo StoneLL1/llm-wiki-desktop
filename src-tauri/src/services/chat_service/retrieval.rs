@@ -403,18 +403,18 @@ impl SourceCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphExpansionCandidate {
-    pub path: String,
-    pub score: i64,
+struct GraphExpansionCandidate {
+    path: String,
+    score: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceOverlapCandidate {
-    pub path: String,
-    pub score: i64,
+struct SourceOverlapCandidate {
+    path: String,
+    score: i64,
 }
 
-pub fn graph_expand_candidates(
+fn graph_expand_candidates(
     pages: &[WikiPageMeta],
     seed_paths: &[String],
     max_neighbors: usize,
@@ -446,7 +446,7 @@ pub fn graph_expand_candidates(
         .collect()
 }
 
-pub fn source_overlap_candidates(
+fn source_overlap_candidates(
     pages: &[WikiPageMeta],
     seed_paths: &[String],
     max_candidates: usize,

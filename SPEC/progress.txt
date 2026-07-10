@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] Final service modularization review fixes — Restored the planned Lint report-directory visibility, narrowed Chat retrieval-only candidates, and centralized Import artifact validation/removal helpers without changing facade APIs or write safety ordering — Key decision: keep `LINT_REPORTS_DIR` at the exact planned `pub(crate)` scope, keep rules helpers private to the Lint module tree, and route Import confirmation/promotion/source actions one-way through a private artifacts module.
+
 [2026-07-10] Service use-case modularization — Split Import, Search, Lint, and Chat internals into facade-preserving Rust modules with unchanged IPC/DTO/persistence contracts — Key decision: keep AppState and command call sites stable; chat convenience audit and WikiIndex remain separate security/cache boundaries.
 
 [2026-07-10] Task 9 Chat full modularization history separator fix — Preserved a newline between a budget-truncated older history chunk and the next newer role label without exceeding the history character budget, backed by a real multi-message RED→GREEN boundary test — Key decision: spend one already-budgeted trailing character on the separator; an extremely small budget that cannot preserve meaningful text omits the history section.
@@ -10,7 +12,7 @@
 
 [2026-07-10] Task 8 Chat sessions/citations modularization — Split session CRUD/path validation and model citation parsing/answer Markdown into focused modules while preserving the ChatService facade and all 32 baseline Chat tests — Key decision: keep retrieval and saved-answer orchestration in the facade for Task 9, preserve recoverable corrupt-session handling and model-marker-only persisted citations, and adjust the moved wiki-query include path for the deeper Rust module directory.
 
-[2026-07-10] Task 7 Lint full modularization — Moved deep-lint prompt/parsing/normalization and checkpoint-protected single/batch fix orchestration with their tests into focused modules, leaving `mod.rs` as the 19-line LintService facade while preserving all 30 baseline Lint tests — Key decision: keep rules helpers and report constants at the narrowest `pub(super)` visibility, reject unknown/out-of-scope paths before writes, and preserve evidence-free error downgrades plus hash/PendingAction/checkpoint/graph invalidation/fix-log contracts.
+[2026-07-10] Task 7 Lint full modularization — Moved deep-lint prompt/parsing/normalization and checkpoint-protected single/batch fix orchestration with their tests into focused modules, leaving `mod.rs` as the 19-line LintService facade while preserving all 30 baseline Lint tests — Key decision: keep rules helpers at the narrowest module visibility and preserve the planned `pub(crate)` visibility of `LINT_REPORTS_DIR`, reject unknown/out-of-scope paths before writes, and preserve evidence-free error downgrades plus hash/PendingAction/checkpoint/graph invalidation/fix-log contracts.
 
 [2026-07-10] Task 6 Lint rules/ignores/reports modularization — Split deterministic local rules, ignore CRUD persistence, and report/history persistence into focused modules while preserving the LintService facade and all 30 baseline Lint tests — Key decision: keep SearchService read-only catalog semantics and existing ignore/report corruption tolerance, while leaving deep analysis and fix orchestration in the facade for Task 7.
 
