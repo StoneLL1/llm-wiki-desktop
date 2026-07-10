@@ -3,6 +3,7 @@ import { create } from "zustand";
 
 import type { ConfirmedAction } from "../types/backend";
 import type {
+  AgentRoute,
   OpenProjectResponse,
   ProjectSummary,
   ProjectTemplate,
@@ -25,6 +26,7 @@ interface ProjectState {
   initialized: boolean;
   error: string | null;
   setCurrentProject: (project: ProjectSummary) => void;
+  setAgentRoute: (projectId: string, rootPath: string, agentRoute: AgentRoute) => void;
   clearCurrentProject: () => void;
   setRecentProjects: (projects: RecentProject[]) => void;
   setPendingAction: (action: OpenProjectResponse["pendingAction"]) => void;
@@ -90,6 +92,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     set({ currentProject });
   },
+  setAgentRoute: (projectId, rootPath, agentRoute) =>
+    set((state) => {
+      if (
+        state.currentProject.projectId !== projectId ||
+        state.currentProject.rootPath !== rootPath
+      ) {
+        return state;
+      }
+      return {
+        currentProject: { ...state.currentProject, agentRoute },
+      };
+    }),
   clearCurrentProject: () => {
     selectionEpoch += 1;
     invalidateProjectScope();
