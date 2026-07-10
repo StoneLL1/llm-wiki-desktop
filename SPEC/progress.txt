@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-10] Workspace router and controller — Added a static-Dashboard/lazy-feature router with colocated Suspense + ViewErrorBoundary and a composition controller that wires capability, task, Import, Provider, and Agent workflows into existing views/dialogs — Key decision: routing performs no IPC and controller composition stays feature-separated rather than becoming a monolithic workspace hook.
+
 [2026-07-10] Project confirmation controller — Moved source delete/replace confirmation, post-confirm compile launch, waiting compile actions, and merge-conflict task updates into a global controller — Key decision: AppShell will render one controller only; confirmation semantics and checkpoint display stay in the existing dialogs while all returned tasks remain in taskStore.
 
 [2026-07-10] Agent workflow extraction — Added a focused Agent hook for dialog presets, installed-default derivation, default Agent persistence, and explicit wiki-ingest/lint/query/single-page export/project-report routing — Key decision: task-producing skills call only the typed shared launcher; single-page exports navigate to their picker and never invent a source path.
