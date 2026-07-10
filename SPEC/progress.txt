@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-10] Agent workflow extraction — Added a focused Agent hook for dialog presets, installed-default derivation, default Agent persistence, and explicit wiki-ingest/lint/query/single-page export/project-report routing — Key decision: task-producing skills call only the typed shared launcher; single-page exports navigate to their picker and never invent a source path.
+
 [2026-07-10] Provider workflow extraction — Added a focused provider hook for config save, OS-credential secret save/delete, provider tests, and shared capability refresh — Key decision: secret material is an ephemeral IPC argument only; it is never returned from the workflow or written to React/Zustand state, logs, snapshots, or toast messages.
 
 [2026-07-10] Import workflow extraction — Added a focused import hook covering project-scoped source lists, tracked file preview tasks, clipboard/URL previews with on-demand Readability, guarded source actions, and confirm → Wiki scan → optional compile sequencing — Key decision: every awaited UI-state commit checks projectId + rootPath; old project tasks remain globally trackable but cannot mutate the new project's Import staging.
