@@ -2481,6 +2481,9 @@ select:focus-visible {
   padding-right: var(--sp-3);
 }
 
+.app-topbar__logo {
+  display: block;
+}
 
 .app-topbar__brand-name { color: var(--text-primary); font-size: 13px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
 .app-topbar__project { position: relative; min-width: 0; }

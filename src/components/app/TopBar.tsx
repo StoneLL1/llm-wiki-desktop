@@ -198,7 +198,7 @@ export function TopBar() {
   return (
     <header className="app-topbar">
       <div className="app-topbar__brand">
-        <img alt="" aria-hidden="true" className="h-[24px] w-[24px] shrink-0 rounded-[var(--radius-sm)]" src={appLogoUrl} />
+        <img alt="" aria-hidden="true" className="app-topbar__logo h-[24px] w-[24px] shrink-0 rounded-[var(--radius-sm)]" src={appLogoUrl} />
         <strong className="app-topbar__brand-name">{t("app.title")}</strong>
       </div>
 
