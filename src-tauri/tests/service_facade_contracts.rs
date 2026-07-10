@@ -3,7 +3,7 @@ use std::path::Path;
 use llm_wiki_desktop_lib::models::chat::ChatSourceRef;
 use llm_wiki_desktop_lib::models::import::SourceFileType;
 use llm_wiki_desktop_lib::services::{
-    classify_file, ChatService, ImportService, LintService, SearchService,
+    classify_file, ChatService, ImportService, LintService, RetrievalContext, SearchService,
 };
 
 #[test]
@@ -12,6 +12,7 @@ fn service_facades_keep_their_public_construction_contract() {
     let _lint = LintService::default();
     let _chat = ChatService::default();
     let _search = SearchService::default();
+    let _: Option<RetrievalContext> = None;
 }
 
 #[test]
