@@ -82,13 +82,11 @@ React UI  ->  Frontend State (Zustand stores)  ->  Tauri IPC Commands (薄层，
 
 ## 任务完成检查清单（每个功能完成后强制执行）
 
-应用脚手架建好（有 `package.json`、lint、test 脚本）后，**每个任务完成后自动运行以下检查**：
+应用脚手架建好（有 `package.json` 和 `check` 脚本）后，**每个任务完成后自动运行统一检查**：
 
-1. `npm run test` — 确保全部通过
-2. `npm run lint` — 检查代码风格
-3. 确认无 `console.log` 残留（前端调试日志）
-4. 验证所有 `import` 路径存在
-5. 任一检查失败 → 修复后重新运行**所有**检查（不要只补跑失败的那项）
+1. `npm run check` — 统一覆盖 tests、lint、build/import 路径解析、`console.log` 扫描、Tauri GUI Rust compile、Rust no-default-features tests
+2. 任一检查失败 → 修复后重新运行 `npm run check`（不要只补跑失败的那项）
+3. 如果项目尚未初始化或 `npm run check` 不存在，明确报告缺失的文件或脚本，不要假装通过
 
 
 
@@ -99,7 +97,7 @@ React UI  ->  Frontend State (Zustand stores)  ->  Tauri IPC Commands (薄层，
 - **子代理 A（共享上下文）**：理解本次设计意图 → 逻辑审查 → 与设计意图的一致性检查。
 - **子代理 B（全新上下文，零偏见）**：以新鲜视角发现盲点、隐性 bug、被忽略的边界。
 
-合并两个审查结果 → 修复所有问题 → 重新跑上面的检查清单 → 交付。
+合并两个审查结果 → 修复所有问题 → 重新跑 `npm run check` → 交付。
 
 ## 持续记录机制（强制）
 
