@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-10] Typed task launcher workflow — Centralized compile, deep-lint, export, tracking, shared drawer selection, and cancellation error handling in useTaskLauncher — Key decision: expose only typed task methods, never an arbitrary command launcher, so all new long tasks continue through the existing taskStore and TaskLogDrawer.
+
 [2026-07-10] Guarded AI capability workflow — Added atomic project-scoped agentRoute updates and a shared capability probe hook with initial/visibility refresh, Agent-first routing, BYOK fallback, and stale-project result rejection — Key decision: compare projectId + rootPath both in the hook ref guard and the store action so delayed project A probes cannot mutate project B.
 
 [2026-07-10] AppShell workflow boundary baseline — Added a static architecture contract that fails while Tauri/import/task/provider orchestration remains in AppShell and reverified the existing eight shell interaction regressions before extraction — Key decision: preserve current DOM, Settings modal, focus, panel, checkpoint, and dashboard capability behavior while moving workflows behind controllers.
