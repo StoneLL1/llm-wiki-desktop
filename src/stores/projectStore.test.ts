@@ -63,6 +63,23 @@ beforeEach(() => {
 });
 
 describe("projectStore bootstrap", () => {
+  it("ignores an agent route update for a project that is no longer active", () => {
+    const projectA = summary;
+    const projectB = {
+      ...summary,
+      projectId: "project-b",
+      name: "Project B",
+      rootPath: "D:/知识库/project-b",
+    };
+
+    useProjectStore.getState().setCurrentProject(projectB);
+    useProjectStore
+      .getState()
+      .setAgentRoute(projectA.projectId, projectA.rootPath, "agent");
+
+    expect(useProjectStore.getState().currentProject).toEqual(projectB);
+  });
+
   it("does not invalidate in-flight work for a metadata-only update to the same project", () => {
     useProjectStore.getState().setCurrentProject(summary);
     const scope = captureProjectScope();
