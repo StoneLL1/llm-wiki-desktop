@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-10] Runtime cleanup — After explicit confirmation, restored tracked `.app` files to HEAD and moved untracked runtime state out to `D:\Users\Aletta\Desktop\Works\llm-wiki-desktop-runtime-backup-2026-07-10` — Key decision: retain all runtime bytes in the external backup while keeping the shared baseline free of task/settings/graph-cache state.
+
 [2026-07-10] Git baseline audit — Created and switched to `codex/p1-base` at `bc0dabba`, preserved `task1-backend-contracts`, audited tracked/untracked work, and backed up runtime state outside the repository — Key decision: source/docs/validation/icon assets can be committed in scoped commits; `.app` runtime files remain pending explicit user confirmation.
 
 [2026-07-10] Architecture improvement planning — Reviewed audit section 4.1 against current Rust services, AppShell orchestration, SPEC constraints, progress history, and gotchas; wrote separate implementation plans for facade-preserving service use-case modules and feature workflow controllers — Key decision: both P1 recommendations are valid, but implementation must be incremental, keep IPC/AppState contracts stable, preserve chat convenience and WikiIndex as separate boundaries, and prevent AppShell refactoring from becoming one new monolithic hook.

@@ -2,6 +2,8 @@
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
+[2026-07-10] 现象 — 用字符串 `StartsWith(repoPath)` 判断仓库外备份目录时，名称带有仓库目录前缀的 sibling path 被误判为仓库内路径。— 根因 — 路径边界缺少目录分隔符，`llm-wiki-desktop-runtime-backup-*` 也会匹配 `llm-wiki-desktop` 前缀。— 规避做法 — 先规范化路径，再用 `repoPath.TrimEnd('\\') + '\\'` 作为目录边界前缀，或使用 `Path.GetRelativePath` 验证目标不以 `..` 开头。
+
 [2026-07-09] Symptom — PowerShell displayed UTF-8 locale strings as mojibake, making valid `en.json` / `zh-CN.json` lines look corrupted and causing patch context guesses to fail. — Root cause — `Get-Content` used the shell's default decoding in this environment instead of UTF-8. — How to avoid — Read locale/docs files with `Get-Content -Encoding UTF8` before patching or copying exact context; treat mojibake output as a terminal decoding issue until UTF-8 read proves otherwise.
 
 [2026-07-09] 现象 — Added `.settings-view-layout { display:flex; ... }` but the two-pane layout rendered correctly while my flex props were inert and a competing `display:grid` rule elsewhere actually governed. — 根因 — A pre-existing shared rule (`.chat/.exports/.lint/.settings-view-layout { display:grid }`) already owned the layout; my earlier-in-source `display:flex` was overridden by source order, so it worked by accident while dead/conflicting declarations piled up. — 规避做法 — Before adding a layout rule to an existing selector, grep for ALL its declarations across the file (CSS cascade by source order is silent); consolidate instead of appending a competing display model.
