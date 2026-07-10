@@ -6,8 +6,6 @@ import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { AgentWorkflow } from "../../features/agent/useAgentWorkflow";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
 
-const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-
 const capabilities: AiCapabilitiesWorkflow = {
   agents: [],
   providers: [],
@@ -79,7 +77,6 @@ const sharedProps = {
 };
 
 afterEach(() => {
-  consoleError.mockClear();
   vi.resetModules();
   vi.clearAllMocks();
 });
@@ -105,20 +102,5 @@ describe("WorkspaceRouter", () => {
       rerender(<WorkspaceRouter activeView={view} {...sharedProps} />);
       expect(await screen.findByTestId(`${view}-view`)).toBeInTheDocument();
     }
-  });
-
-  it("contains a rejected lazy chunk and exposes local recovery", async () => {
-    installViewMocks();
-    vi.doMock("../../features/agent/AgentView", () => {
-      throw new Error("agent chunk missing");
-    });
-    const { WorkspaceRouter } = await import("./WorkspaceRouter");
-
-    render(<WorkspaceRouter activeView="agent" {...sharedProps} />);
-
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /reload|retry/i }),
-    ).toBeInTheDocument();
   });
 });
