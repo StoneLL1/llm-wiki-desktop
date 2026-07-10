@@ -464,7 +464,7 @@ fn schema_source_issues(
                 None,
             ));
         }
-        if !super::has_human_readable_sources_section(body) {
+        if !has_human_readable_sources_section(body) {
             issues.push(local_issue(
                 LintIssueType::MissingSourceSection,
                 LintSeverity::Warning,
