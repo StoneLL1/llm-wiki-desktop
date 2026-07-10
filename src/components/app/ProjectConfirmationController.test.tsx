@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
-import type { PendingAction } from "../../types/backend";
+import type { ConfirmedAction, PendingAction } from "../../types/backend";
 import type { BackendTask } from "../../types/task";
 
 const mocks = vi.hoisted(() => ({
@@ -94,24 +94,26 @@ const task: BackendTask = {
   error: null,
 };
 
-let confirmPendingAction: ReturnType<typeof vi.fn>;
-let cancelPendingAction: ReturnType<typeof vi.fn>;
+let confirmPendingAction: ReturnType<
+  typeof vi.fn<() => Promise<ConfirmedAction | undefined>>
+>;
+let cancelPendingAction: ReturnType<typeof vi.fn<() => Promise<void>>>;
 
 beforeEach(() => {
   mocks.invoke.mockReset();
   mocks.startCompile.mockReset().mockResolvedValue(task);
-  confirmPendingAction = vi.fn().mockResolvedValue({
+  confirmPendingAction = vi.fn(async () => ({
     action: sourceAction,
     status: "confirmed",
     checkpointExists: true,
     projectSummary: project,
-  });
-  cancelPendingAction = vi.fn().mockResolvedValue(undefined);
+  }));
+  cancelPendingAction = vi.fn(async () => undefined);
   useProjectStore.setState({
     currentProject: project,
     pendingAction: undefined,
-    confirmPendingAction,
-    cancelPendingAction,
+    confirmPendingAction: async () => confirmPendingAction(),
+    cancelPendingAction: async () => cancelPendingAction(),
   });
   useTaskStore.setState({
     tasks: [],

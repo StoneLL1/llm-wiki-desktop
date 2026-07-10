@@ -6,6 +6,7 @@ import { useImportStore } from "../../stores/importStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
+import type { AppView } from "../../stores/navigationStore";
 import type { PendingAction } from "../../types/backend";
 import type { ImportedSource, ImportPreview } from "../../types/import";
 import type { BackendTask } from "../../types/task";
@@ -96,7 +97,9 @@ function deferred<T>() {
 }
 
 let taskLauncher: TaskLauncher;
-let scanMock: ReturnType<typeof vi.fn>;
+let scanMock: ReturnType<
+  typeof vi.fn<(projectId: string, rootPath: string) => Promise<void>>
+>;
 
 beforeEach(() => {
   mocks.invoke.mockReset();
@@ -118,8 +121,12 @@ beforeEach(() => {
     runningCount: 0,
   });
   useToastStore.setState({ toasts: [] });
-  scanMock = vi.fn().mockResolvedValue(undefined);
-  useWikiStore.setState({ scan: scanMock });
+  scanMock = vi.fn(async () => undefined);
+  useWikiStore.setState({
+    scan: async (projectId, rootPath) => {
+      await scanMock(projectId, rootPath);
+    },
+  });
   taskLauncher = {
     startCompile: vi.fn().mockResolvedValue(finishedTask),
     startDeepLint: vi.fn(),
@@ -160,8 +167,9 @@ describe("useImportWorkflow", () => {
   it("loads imported sources only while the Import view is active", async () => {
     mocks.invoke.mockResolvedValue([]);
     const { rerender } = renderHook(
-      ({ activeView }) => useImportWorkflow(projectA, activeView, taskLauncher),
-      { initialProps: { activeView: "dashboard" as const } },
+      ({ activeView }: { activeView: AppView }) =>
+        useImportWorkflow(projectA, activeView, taskLauncher),
+      { initialProps: { activeView: "dashboard" as AppView } },
     );
     expect(mocks.invoke).not.toHaveBeenCalled();
 

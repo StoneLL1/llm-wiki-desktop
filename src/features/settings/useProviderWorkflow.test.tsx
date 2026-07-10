@@ -29,7 +29,7 @@ const status: ProviderStatus = {
   secretMask: null,
 };
 
-let refresh: ReturnType<typeof vi.fn>;
+let refresh: ReturnType<typeof vi.fn<() => Promise<void>>>;
 let capabilities: AiCapabilitiesWorkflow;
 
 beforeEach(() => {
@@ -38,7 +38,7 @@ beforeEach(() => {
     value: {},
     configurable: true,
   });
-  refresh = vi.fn().mockResolvedValue(undefined);
+  refresh = vi.fn(async () => undefined);
   capabilities = {
     agents: [],
     providers: [status],
