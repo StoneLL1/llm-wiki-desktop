@@ -72,6 +72,8 @@ enum JournalState {
 struct Journal {
     state: JournalState,
     entries: Vec<JournalEntry>,
+    #[serde(default)]
+    recovery_artifacts: Vec<String>,
 }
 
 pub struct FileTransaction {
@@ -84,6 +86,7 @@ pub struct FileTransaction {
     project_root: Option<PathBuf>,
     journal_path: Option<PathBuf>,
     journal_entries: Vec<JournalEntry>,
+    journal_artifacts: Vec<String>,
     finished: bool,
 }
 
@@ -105,6 +108,7 @@ impl FileTransaction {
             project_root: None,
             journal_path: None,
             journal_entries: Vec::new(),
+            journal_artifacts: Vec::new(),
             finished: false,
         }
     }
@@ -165,6 +169,16 @@ impl FileTransaction {
                     }
                 }
             }
+            for relative in &journal.recovery_artifacts {
+                let artifact = safe_journal_target(root, relative)?;
+                let name = artifact.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+                if !(name.contains(".tmp") || name.contains(".wiki-guard-")) { return Err(staging_safe_io_error()); }
+                match std::fs::remove_file(&artifact) {
+                    Ok(()) => if let Some(parent) = artifact.parent() { sync_parent(parent)?; },
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(error) => return Err(io_error(error, &artifact)),
+                }
+            }
             std::fs::remove_file(&path).map_err(|error| io_error(error, &path))?;
             sync_parent(&directory)?;
         }
@@ -181,9 +195,17 @@ impl FileTransaction {
             ".app/import-v2-journal/{}.json", uuid::Uuid::new_v4()
         ))).clone();
         if let Some(parent) = journal_path.parent() { std::fs::create_dir_all(parent).map_err(|error| io_error(error, parent))?; }
-        let bytes = serde_json::to_vec(&Journal { state: JournalState::InProgress, entries: self.journal_entries.clone() })
+        let bytes = serde_json::to_vec(&Journal { state: JournalState::InProgress, entries: self.journal_entries.clone(), recovery_artifacts: self.journal_artifacts.clone() })
             .map_err(|_| staging_safe_io_error())?;
         write_atomic_bytes(&journal_path, &bytes)
+    }
+
+    fn record_recovery_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
+        let Some(root) = self.project_root.as_deref() else { return Ok(()); };
+        self.journal_artifacts.push(path.strip_prefix(root).map_err(|_| staging_safe_io_error())?.to_string_lossy().replace('\\', "/"));
+        let journal_path = self.journal_path.as_deref().ok_or_else(staging_safe_io_error)?;
+        let bytes = serde_json::to_vec(&Journal { state: JournalState::InProgress, entries: self.journal_entries.clone(), recovery_artifacts: self.journal_artifacts.clone() }).map_err(|_| staging_safe_io_error())?;
+        write_atomic_bytes(journal_path, &bytes)
     }
 
     fn mark_journal_committed(&self) -> Result<(), BackendError> {
@@ -191,6 +213,7 @@ impl FileTransaction {
         let bytes = serde_json::to_vec(&Journal {
             state: JournalState::Committed,
             entries: self.journal_entries.clone(),
+            recovery_artifacts: self.journal_artifacts.clone(),
         }).map_err(|_| staging_safe_io_error())?;
         // Atomic write syncs the marker file and then its containing directory.
         write_atomic_bytes(path, &bytes)
@@ -234,6 +257,7 @@ impl FileTransaction {
         let temporary = write_synced_temp(parent, path, bytes)?;
         self.record_intent(path, None, bytes)?;
         self.recovery_artifacts.push(temporary.clone());
+        self.record_recovery_artifact(&temporary)?;
         #[cfg(test)]
         BEFORE_NEW_INSTALL_HOOK.with(|slot| {
             let mut borrowed = slot.borrow_mut();
@@ -362,6 +386,8 @@ impl FileTransaction {
             return Err(conflict_error());
         }
         self.record_intent(path, Some(previous_before.clone()), bytes)?;
+        self.record_recovery_artifact(&temporary)?;
+        self.record_recovery_artifact(&guard)?;
         if let Err(error) = replace_existing(&temporary, path) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);
@@ -1220,6 +1246,13 @@ mod tests {
             transaction.simulate_process_crash();
             FileTransaction::reconcile_project(&root).unwrap();
             assert!(targets.iter().all(|relative| !root.join(relative).exists()), "kill point {kill_after}");
+            let mut pending = vec![root.clone()];
+            while let Some(directory) = pending.pop() {
+                for entry in std::fs::read_dir(directory).unwrap().filter_map(Result::ok) {
+                    if entry.path().is_dir() { pending.push(entry.path()); }
+                    else { assert!(!entry.file_name().to_string_lossy().contains(".tmp"), "orphan temp at kill point {kill_after}"); }
+                }
+            }
             std::fs::remove_dir_all(root).unwrap();
         }
     }

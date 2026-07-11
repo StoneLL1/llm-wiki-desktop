@@ -621,10 +621,22 @@ fn verified_artifact(
     Ok(bytes)
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
     use std::os::unix::io::AsRawFd;
     std::fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).is_ok_and(|path| path == canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    unsafe extern "C" { fn fcntl(fd: i32, command: i32, buffer: *mut std::ffi::c_void) -> i32; }
+    const F_GETPATH: i32 = 50;
+    let mut buffer = vec![0u8; 1024];
+    // SAFETY: the descriptor is live and the buffer is writable for MAXPATHLEN bytes.
+    if unsafe { fcntl(file.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr().cast()) } == -1 { return false; }
+    let length = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+    std::str::from_utf8(&buffer[..length]).is_ok_and(|path| Path::new(path) == canonical)
 }
 
 #[cfg(windows)]
@@ -639,13 +651,17 @@ fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
     let length = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle().cast(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
     if length == 0 || length as usize >= buffer.len() { return false; }
     let resolved = String::from_utf16_lossy(&buffer[..length as usize]);
-    let resolved = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
+    let resolved = if let Some(unc) = resolved.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        resolved.strip_prefix(r"\\?\").unwrap_or(&resolved).to_string()
+    };
     let canonical_text = canonical.to_string_lossy();
     let canonical_text = canonical_text.strip_prefix(r"\\?\").unwrap_or(&canonical_text);
     resolved.replace('/', "\\").eq_ignore_ascii_case(&canonical_text.replace('/', "\\"))
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
 fn opened_file_matches_path(_file: &std::fs::File, _canonical: &Path) -> bool {
     false
 }
