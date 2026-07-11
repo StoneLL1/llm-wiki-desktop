@@ -1,0 +1,1 @@
+[2026-07-11] Import v2 engine protocol — Added typed engine contracts, thread-safe engine selection, staging-contained output validation, and JSON-RPC 2.0 response validation — Artifact existence, SHA-256, and size checks remain orchestrator responsibilities by design.
