@@ -132,4 +132,4 @@
 **遗留风险**
 
 - Dashboard 重构需要后端提供活动流（`wiki/log.md` + `.app/tasks/`），目前无对应 IPC。
-- 启动页 Agent 检测需要 `detect_agents` 在无 project 上下文下可调用，当前签名带 projectId（`AppShell.tsx:227`），启动页场景需调整。
+- 启动页 Agent 检测需要 `detect_agents` 在无 project 上下文下可调用，当前实现只能复用最近项目的 projectId/rootPath；没有 recent project 时无法检测（`src/features/project/ProjectStartView.tsx:114-135`），启动页场景需调整。
