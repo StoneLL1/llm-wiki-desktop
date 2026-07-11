@@ -541,11 +541,12 @@ fn portable_wiki_stem(stem: &str) -> String {
     let slug = slug.trim_matches([' ', '.', '-']);
     let slug = if slug.is_empty() { "source" } else { slug };
     let upper = slug.to_ascii_uppercase();
-    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (upper.len() == 4
-            && (upper.starts_with("COM") || upper.starts_with("LPT"))
-            && upper.as_bytes()[3].is_ascii_digit()
-            && upper.as_bytes()[3] != b'0');
+    let device_basename = upper.split('.').next().unwrap_or_default();
+    let reserved = matches!(device_basename, "CON" | "PRN" | "AUX" | "NUL")
+        || (device_basename.len() == 4
+            && (device_basename.starts_with("COM") || device_basename.starts_with("LPT"))
+            && device_basename.as_bytes()[3].is_ascii_digit()
+            && device_basename.as_bytes()[3] != b'0');
     let portable = if reserved {
         format!("source-{slug}")
     } else {
@@ -1013,6 +1014,44 @@ mod tests {
                 error.code, IMPORT_V2_SOURCE_INDEX_INVALID,
                 "portable filename should be rejected: {name:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reserved_device_basename_with_extra_extension_is_never_a_wiki_target() {
+        for (name, hash) in [
+            ("CON.foo.docx", "hash-con-dot"),
+            ("COM1.backup.docx", "hash-com-dot"),
+        ] {
+            let generated = SourceRegistry
+                .build_commit_plan(
+                    &SourceIndex::default_v2(),
+                    None,
+                    &fixture_input(&format!("file:/{name}"), hash, name),
+                )
+                .unwrap();
+            assert!(
+                generated.wiki_path.contains("/source-"),
+                "generated target must prefix reserved device basename: {name:?}"
+            );
+
+            let wiki_name = name.trim_end_matches(".docx");
+            let existing = SourceManifest {
+                schema_version: 2,
+                source_id: "source-1".into(),
+                origins: vec!["file:/a.docx".into()],
+                versions: vec![fixture_version("version-1", "hash-a")],
+                current_version_id: "version-1".into(),
+                wiki_path: format!("wiki/sources/files/{wiki_name}.md"),
+            };
+            let error = SourceRegistry
+                .build_commit_plan(
+                    &SourceIndex::default_v2(),
+                    Some(&existing),
+                    &fixture_input("file:/a.docx", "hash-b", "a.docx"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, IMPORT_V2_SOURCE_INDEX_INVALID);
         }
     }
 }
