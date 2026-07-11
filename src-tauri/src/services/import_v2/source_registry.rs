@@ -175,6 +175,7 @@ pub struct SourceCommitPlan {
     pub source_id: String,
     pub version_id: String,
     pub raw_path: String,
+    pub asset_root_path: String,
     pub baseline_path: String,
     pub wiki_path: String,
     pub manifest_path: String,
@@ -358,10 +359,12 @@ impl SourceRegistry {
             .insert(input.content_hash.clone(), pointer.clone());
         next_index.by_locator.insert(locator, pointer);
 
+        let asset_root_path = format!("raw/sources/{source_id}/{version_id}/assets");
         let plan = SourceCommitPlan {
             source_id: source_id.clone(),
             version_id,
             raw_path,
+            asset_root_path,
             baseline_path,
             wiki_path,
             manifest_path: format!(".app/sources/{source_id}.json"),
@@ -446,6 +449,8 @@ fn validate_commit_plan(plan: &SourceCommitPlan) -> Result<(), BackendError> {
     if !is_safe_id(&plan.source_id)
         || !is_safe_id(&plan.version_id)
         || !valid_raw_path(&plan.raw_path, &plan.source_id, &plan.version_id)
+        || plan.asset_root_path
+            != format!("raw/sources/{}/{}/assets", plan.source_id, plan.version_id)
         || plan.baseline_path
             != format!(
                 ".app/source-artifacts/{}/{}/baseline.md",
@@ -455,6 +460,7 @@ fn validate_commit_plan(plan: &SourceCommitPlan) -> Result<(), BackendError> {
         || plan.manifest_path != manifest_path
         || [
             &plan.raw_path,
+            &plan.asset_root_path,
             &plan.baseline_path,
             &plan.wiki_path,
             &plan.manifest_path,

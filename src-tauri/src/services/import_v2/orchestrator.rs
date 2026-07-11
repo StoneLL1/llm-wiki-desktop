@@ -20,10 +20,10 @@ use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
 pub struct ImportV2Service {
-    sessions: SessionStore,
+    pub(super) sessions: SessionStore,
     engines: EngineRegistry,
     quality: QualityGate,
-    mutation_lock: Mutex<()>,
+    pub(super) mutation_lock: Mutex<()>,
 }
 
 impl Default for ImportV2Service {
@@ -475,7 +475,7 @@ fn issue_from_engine_error(error: &BackendError, stage: ImportStage) -> ImportIs
         user_action_required: error.user_action_required,
     }
 }
-fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus {
+pub(super) fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus {
     use ImportItemStatus::*;
     let has =
         |statuses: &[ImportItemStatus]| items.iter().any(|item| statuses.contains(&item.status));
