@@ -1,5 +1,6 @@
 pub mod engine;
 pub mod pack_protocol;
+pub mod quality_gate;
 mod session_store;
 pub mod source_registry;
 
