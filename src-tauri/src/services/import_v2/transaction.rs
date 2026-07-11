@@ -62,8 +62,15 @@ struct JournalEntry {
     desired_hash: String,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+enum JournalState {
+    InProgress,
+    Committed,
+}
+
 #[derive(Deserialize, Serialize)]
 struct Journal {
+    state: JournalState,
     entries: Vec<JournalEntry>,
 }
 
@@ -81,6 +88,12 @@ pub struct FileTransaction {
 }
 
 impl FileTransaction {
+    #[cfg(test)]
+    fn simulate_process_crash(mut self) {
+        // A real process death closes ownership anchors but skips Drop/rollback.
+        self.installed_ownership.clear();
+        std::mem::forget(self);
+    }
     pub fn new() -> Self {
         Self {
             backups: Vec::new(),
@@ -104,18 +117,26 @@ impl FileTransaction {
 
     pub fn reconcile_project(root: &Path) -> Result<(), BackendError> {
         let directory = root.join(".app/import-v2-journal");
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
+        let entries: Vec<PathBuf> = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.path()).map_err(|error| io_error(error, &directory)))
+                .collect::<Result<_, _>>()?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(io_error(error, &directory)),
         };
-        for entry in entries {
-            let path = entry.map_err(|error| io_error(error, &directory))?.path();
+        // Collect first so Windows' ReadDirectoryChanges/read-directory handle is
+        // closed before we reopen the directory for a durable metadata flush.
+        for path in entries {
             if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
             let journal: Journal = serde_json::from_slice(
                 &std::fs::read(&path).map_err(|error| io_error(error, &path))?,
             ).map_err(|_| staging_safe_io_error())?;
-            for intent in journal.entries.iter().rev() {
+            let intents: Box<dyn Iterator<Item = &JournalEntry>> = if journal.state == JournalState::Committed {
+                Box::new(journal.entries.iter())
+            } else {
+                Box::new(journal.entries.iter().rev())
+            };
+            for intent in intents {
                 let target = safe_journal_target(root, &intent.relative_path)?;
                 let current = match std::fs::read(&target) {
                     Ok(bytes) => Some(bytes),
@@ -123,18 +144,25 @@ impl FileTransaction {
                     Err(error) => return Err(io_error(error, &target)),
                 };
                 let current_hash = current.as_deref().map(digest_bytes);
-                let previous_hash = intent.previous.as_deref().map(digest_bytes);
-                if current_hash == previous_hash { continue; }
-                if current_hash.as_deref() != Some(&intent.desired_hash) {
-                    return Err(conflict_error());
+                if journal.state == JournalState::Committed {
+                    if current_hash.as_deref() != Some(&intent.desired_hash) {
+                        return Err(conflict_error());
+                    }
+                    continue;
                 }
-                match &intent.previous {
-                    Some(bytes) => write_atomic_bytes(&target, bytes)?,
-                    None => match std::fs::remove_file(&target) {
-                        Ok(()) => if let Some(parent) = target.parent() { sync_parent(parent)?; },
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                        Err(error) => return Err(io_error(error, &target)),
-                    },
+                let previous_hash = intent.previous.as_deref().map(digest_bytes);
+                if current_hash != previous_hash {
+                    if current_hash.as_deref() != Some(&intent.desired_hash) {
+                        return Err(conflict_error());
+                    }
+                    match &intent.previous {
+                        Some(bytes) => write_atomic_bytes(&target, bytes)?,
+                        None => match std::fs::remove_file(&target) {
+                            Ok(()) => if let Some(parent) = target.parent() { sync_parent(parent)?; },
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                            Err(error) => return Err(io_error(error, &target)),
+                        },
+                    }
                 }
             }
             std::fs::remove_file(&path).map_err(|error| io_error(error, &path))?;
@@ -153,9 +181,19 @@ impl FileTransaction {
             ".app/import-v2-journal/{}.json", uuid::Uuid::new_v4()
         ))).clone();
         if let Some(parent) = journal_path.parent() { std::fs::create_dir_all(parent).map_err(|error| io_error(error, parent))?; }
-        let bytes = serde_json::to_vec(&Journal { entries: self.journal_entries.clone() })
+        let bytes = serde_json::to_vec(&Journal { state: JournalState::InProgress, entries: self.journal_entries.clone() })
             .map_err(|_| staging_safe_io_error())?;
         write_atomic_bytes(&journal_path, &bytes)
+    }
+
+    fn mark_journal_committed(&self) -> Result<(), BackendError> {
+        let Some(path) = self.journal_path.as_deref() else { return Ok(()); };
+        let bytes = serde_json::to_vec(&Journal {
+            state: JournalState::Committed,
+            entries: self.journal_entries.clone(),
+        }).map_err(|_| staging_safe_io_error())?;
+        // Atomic write syncs the marker file and then its containing directory.
+        write_atomic_bytes(path, &bytes)
     }
 
     fn finish_journal(&mut self) -> Result<(), BackendError> {
@@ -349,6 +387,7 @@ impl FileTransaction {
                 return Err(self.rollback_after(error));
             }
         }
+        self.mark_journal_committed()?;
         self.finish_journal()?;
         self.finished = true;
         Ok(())
@@ -615,18 +654,17 @@ fn replace_existing(temporary: &Path, path: &Path) -> Result<(), std::io::Error>
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn ReplaceFileW(replaced: *const u16, replacement: *const u16, backup: *const u16, flags: u32, exclude: *mut std::ffi::c_void, reserved: *mut std::ffi::c_void) -> i32;
+        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
     }
-    let replaced: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let replacement: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let existing: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    let new_name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: both paths are valid NUL-terminated UTF-16 buffers for the duration
-    // of the synchronous Win32 call; optional pointers are null as documented.
-    let result = unsafe {
-        ReplaceFileW(
-            replaced.as_ptr(), replacement.as_ptr(), std::ptr::null(), 0,
-            std::ptr::null_mut(), std::ptr::null_mut(),
-        )
-    };
+    // of the synchronous call. MoveFileExW with REPLACE_EXISTING performs the
+    // same-volume namespace swap without an unlink/visibility gap; WRITE_THROUGH
+    // asks Windows not to return before the move reaches durable storage.
+    let result = unsafe { MoveFileExW(existing.as_ptr(), new_name.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
     if result == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
 }
 
@@ -638,8 +676,30 @@ fn sync_parent(parent: &Path) -> Result<(), BackendError> {
 }
 
 #[cfg(windows)]
-fn sync_parent(_parent: &Path) -> Result<(), BackendError> {
-    Ok(())
+fn sync_parent(parent: &Path) -> Result<(), BackendError> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateFileW(name: *const u16, access: u32, share: u32, security: *mut std::ffi::c_void, creation: u32, flags: u32, template: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn FlushFileBuffers(handle: *mut std::ffi::c_void) -> i32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let name: Vec<u16> = parent.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `name` is a live NUL-terminated UTF-16 buffer. BACKUP_SEMANTICS is
+    // required to obtain a directory handle. The handle is closed on every path.
+    let handle = unsafe { CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_ALL, std::ptr::null_mut(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, std::ptr::null_mut()) };
+    if handle as isize == -1 { return Err(io_error(std::io::Error::last_os_error(), parent)); }
+    // SAFETY: `handle` was returned by CreateFileW and remains owned here.
+    let flushed = unsafe { FlushFileBuffers(handle) };
+    let flush_error = (flushed == 0).then(std::io::Error::last_os_error);
+    // SAFETY: closing the valid owned handle exactly once.
+    unsafe { CloseHandle(handle); }
+    flush_error.map_or(Ok(()), |error| Err(io_error(error, parent)))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1081,7 +1141,7 @@ mod tests {
         let mut transaction = FileTransaction::new_for_project(&root);
         transaction.write_new(&formal, b"formal").unwrap();
         transaction.write_if_hash_matches(&session, b"after", &expected).unwrap();
-        std::mem::forget(transaction);
+        transaction.simulate_process_crash();
 
         assert_eq!(std::fs::read(&formal).unwrap(), b"formal");
         assert_eq!(std::fs::read(&session).unwrap(), b"after");
@@ -1098,12 +1158,56 @@ mod tests {
         let target = root.join("wiki/new.md");
         let mut transaction = FileTransaction::new_for_project(&root);
         transaction.write_new(&target, b"committed").unwrap();
-        std::mem::forget(transaction);
+        transaction.simulate_process_crash();
         std::fs::write(&target, b"external").unwrap();
 
         let error = FileTransaction::reconcile_project(&root).unwrap_err();
         assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
         assert_eq!(std::fs::read(&target).unwrap(), b"external");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_marker_survives_crash_before_journal_delete_and_never_rolls_back() {
+        let root = std::env::temp_dir().join(format!("import-v2-journal-{}", uuid::Uuid::new_v4()));
+        let created = root.join("wiki/new.md");
+        let existing = root.join(".app/import-sessions/s1/session.json");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"before").unwrap();
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&created, b"created").unwrap();
+        transaction.write_if_hash_matches(&existing, b"after", &digest_bytes(b"before")).unwrap();
+        transaction.mark_journal_committed().unwrap();
+        transaction.simulate_process_crash();
+
+        FileTransaction::reconcile_project(&root).unwrap();
+        assert_eq!(std::fs::read(&created).unwrap(), b"created");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"after");
+        assert_eq!(std::fs::read_dir(root.join(".app/import-v2-journal")).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_import_target_kill_point_recovers_all_or_nothing() {
+        let targets = [
+            "raw/sources/s/v/original.bin",
+            "wiki/page.md",
+            ".app/sources/s.json",
+            ".app/source-index-v2.json",
+            ".app/import-history/b.json",
+            ".app/import-sessions/s/items/i.json",
+            ".app/import-sessions/s/session.json",
+        ];
+        for kill_after in 1..=targets.len() {
+            let root = std::env::temp_dir().join(format!("import-v2-kill-{kill_after}-{}", uuid::Uuid::new_v4()));
+            let mut transaction = FileTransaction::new_for_project(&root);
+            for relative in targets.iter().take(kill_after) {
+                transaction.write_new(&root.join(relative), relative.as_bytes()).unwrap();
+            }
+            transaction.simulate_process_crash();
+            FileTransaction::reconcile_project(&root).unwrap();
+            assert!(targets.iter().all(|relative| !root.join(relative).exists()), "kill point {kill_after}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }
