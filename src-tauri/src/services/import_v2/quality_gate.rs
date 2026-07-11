@@ -182,19 +182,18 @@ fn strip_code_contexts(markdown: &str) -> String {
     let mut rendered = String::with_capacity(markdown.len());
     let mut fence: Option<(char, usize)> = None;
     for line in markdown.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let marker = fence_marker(trimmed);
+        let marker = fence_marker(line);
         if let Some((active_char, active_len)) = fence {
-            if marker
-                .is_some_and(|(character, length)| character == active_char && length >= active_len)
-            {
+            if marker.is_some_and(|(character, length, whitespace_tail)| {
+                character == active_char && length >= active_len && whitespace_tail
+            }) {
                 fence = None;
             }
             rendered.extend(std::iter::repeat_n(' ', line.len()));
             continue;
         }
-        if let Some(marker) = marker {
-            fence = Some(marker);
+        if let Some((character, length, _)) = marker {
+            fence = Some((character, length));
             rendered.extend(std::iter::repeat_n(' ', line.len()));
             continue;
         }
@@ -203,13 +202,22 @@ fn strip_code_contexts(markdown: &str) -> String {
     rendered
 }
 
-fn fence_marker(line: &str) -> Option<(char, usize)> {
-    let character = line
+fn fence_marker(line: &str) -> Option<(char, usize, bool)> {
+    let indentation = line.chars().take_while(|value| *value == ' ').count();
+    if indentation > 3 {
+        return None;
+    }
+    let candidate = &line[indentation..];
+    let character = candidate
         .chars()
         .next()
         .filter(|value| matches!(value, '`' | '~'))?;
-    let length = line.chars().take_while(|value| *value == character).count();
-    (length >= 3).then_some((character, length))
+    let length = candidate
+        .chars()
+        .take_while(|value| *value == character)
+        .count();
+    let whitespace_tail = candidate[length..].chars().all(char::is_whitespace);
+    (length >= 3).then_some((character, length, whitespace_tail))
 }
 
 fn strip_inline_code_and_escaped_images(line: &str) -> String {
@@ -898,6 +906,29 @@ mod tests {
     fn shorter_fence_does_not_close_a_longer_fence() {
         let fixture = quality_fixture(
             "````markdown\ncode\n```\n![not rendered](assets/missing.png)\n````\n# visible",
+        );
+        let preview = QualityGate::default()
+            .evaluate(&fixture.root, &fixture.result)
+            .unwrap();
+        assert_eq!(preview.quality.level, QualityLevel::Pass);
+    }
+
+    #[test]
+    fn four_space_indentation_does_not_open_a_fence_or_hide_unsafe_html() {
+        let fixture = quality_fixture("    ```html\n<script>alert(1)</script>\n```");
+        assert_eq!(
+            QualityGate::default()
+                .evaluate(&fixture.root, &fixture.result)
+                .unwrap_err()
+                .code,
+            IMPORT_V2_QUALITY_FAILED
+        );
+    }
+
+    #[test]
+    fn trailing_non_whitespace_does_not_close_a_fence() {
+        let fixture = quality_fixture(
+            "```markdown\n``` trailing text\n![not rendered](assets/missing.png)\n```\n# visible",
         );
         let preview = QualityGate::default()
             .evaluate(&fixture.root, &fixture.result)
