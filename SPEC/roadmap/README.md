@@ -27,7 +27,7 @@
 | Lint | ~55% | 2 | [lint.md](lint.md) | **批量自动修复编排**、**severity 分级 + lint-ignore**、UI 摘要卡/分段控件 |
 | Chat | ~55% | 1 | [chat.md](chat.md) | **流式输出**、消息 Markdown 渲染/avatar/citation 角标、Agent/BYOK 路由切换器 |
 | Settings | ~55% | 1 | [settings.md](settings.md) | 多 section 内容错位/缺失、`formrow`/`seg`/`toggle` 样式族、更新检查 mock；Provider 行/掩码/状态与 Ollama 可达性已实现 |
-| Shell + Dashboard + 启动页 | ~55% | 2 | [shell-dashboard.md](shell-dashboard.md) | **Dashboard 退化为状态表**（缺健康行/统计/时间线/快速操作）、**启动页未对齐三栏布局**；关闭拦截已实现，仍有托盘 i18n/进度等跨切面收尾 |
+| Shell + Dashboard + 启动页 | ~55% | 2 | [shell-dashboard.md](shell-dashboard.md) | **Dashboard 退化为状态表**（缺健康行/统计/时间线/快速操作）、**启动页未对齐三栏布局**；关闭拦截与托盘启动时本地化已实现，菜单语言热更新需重启（P2） |
 | Wiki | ~50% | 4 | [wiki.md](wiki.md) | **frontmatter 卡片化**、**Milkdown 工具条**、**新建/重命名/删除前端 UI 接线**、**冲突 Diff 对话框**；后端生命周期命令已注册，HTML 预览第三态仍缺 |
 | Exports | ~45% | 1 | [exports.md](exports.md) | **新建导出对话框**、已生成列表表格化/失败重试、模板选择端到端参数传递 |
 | Agent | ~40% | 1 | [agent.md](agent.md) | **运行 Agent 的 checkpoint/background 选项尚未接入实际任务**、核心操作四宫格、BYOK 卡片化、右面板 Agent 配置区、CLI 行/任务行样式族 |
@@ -42,7 +42,7 @@
 按"违反硬边界 / 阻塞核心流程"程度排序。括号内为所属板块文件。
 
 1. **i18n：Agent/LLM 生成内容未按用户语言偏好输出** `[cross-cutting]`
-   chat/compile/export/lint 五个 prompt 构造点全是英文 system instruction，未读 `settings.language`；托盘菜单硬编码英文。违反 `CLAUDE.md` "i18n：Agent 生成内容按用户语言偏好输出"。
+   chat/compile/export/lint 五个 prompt 构造点全是英文 system instruction，未读 `settings.language`。托盘菜单的启动时本地化已完成，不属于此 P0；该缺口仍违反 `CLAUDE.md` "i18n：Agent 生成内容按用户语言偏好输出"。
 2. **Wiki：新建/重命名/删除页面 + Git 检查点** `[wiki]`
    后端 `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page` 已实现并注册；剩余 P0 是把文件树的新建/重命名/删除 UI 接到现有 store/commands 与 `ConfirmationDialog`。
 3. **Wiki：frontmatter 卡片化 + Milkdown 工具条** `[wiki]`
@@ -63,7 +63,7 @@
 ## 建议实施顺序（按依赖与性价比）
 
 ### 第 1 波：硬边界红线（并行可做，互相独立）
-- `cross-cutting` P0-1 i18n prompt 注入（5 个构造点 + 托盘菜单）
+- `cross-cutting` P0-1 i18n prompt 注入（5 个构造点；托盘启动时本地化已完成）
 - `agent` P0 将 RunAgentDialog 的 checkpoint/background 选项接入真实任务语义
 - `import` P0 把 checkpoint 移到任何 confirm import 写入之前
 - `settings` P0 更新检查去 mock（小而独立）
@@ -84,7 +84,7 @@
 - `graph` 画布悬浮层（图例/信息卡）+ 6 类型筛选 + SVG/PNG 导出
 - `exports` 新建导出对话框 + 失败重试
 - `shell-dashboard` Dashboard 信息密度 + 启动页三栏布局
-- `settings` 样式族（`apikey-row`/`formrow`/`seg`/`toggle`）+ section 内容归位
+- `settings` 样式族（`formrow`/`seg`/`toggle`）+ section 内容归位
 - `wiki` P1 HTML 预览第三态（依赖 `skills/html-*`）
 
 ---
