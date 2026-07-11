@@ -150,6 +150,23 @@ impl FileTransaction {
 
     pub fn reconcile_project(root: &Path) -> Result<(), BackendError> {
         let directory = root.join(".app/import-v2-journal");
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata)
+                if !metadata.is_dir()
+                    || metadata.file_type().is_symlink()
+                    || transaction_is_reparse_point(&metadata) =>
+            {
+                return Err(staging_safe_io_error());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_error(error, &directory)),
+        }
+        // Retain the journal parent namespace while enumerating, reading, and
+        // deleting entries. Windows denies a directory swap because this handle
+        // omits FILE_SHARE_DELETE; Unix journal entries are additionally opened
+        // with O_NOFOLLOW below.
+        let journal_binding = bind_recovery_parent(root, &directory.join("entry"))?;
         let entries: Vec<PathBuf> = match std::fs::read_dir(&directory) {
             Ok(entries) => entries
                 .map(|entry| {
@@ -167,10 +184,17 @@ impl FileTransaction {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let journal: Journal = serde_json::from_slice(
-                &std::fs::read(&path).map_err(|error| io_error(error, &path))?,
-            )
-            .map_err(|_| staging_safe_io_error())?;
+            let metadata =
+                std::fs::symlink_metadata(&path).map_err(|error| io_error(error, &path))?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || transaction_is_reparse_point(&metadata)
+            {
+                return Err(staging_safe_io_error());
+            }
+            let journal: Journal =
+                serde_json::from_slice(&read_regular_nofollow(&journal_binding, &path)?)
+                    .map_err(|_| staging_safe_io_error())?;
             let intents: Box<dyn Iterator<Item = &JournalEntry>> =
                 if journal.state == JournalState::Committed {
                     Box::new(journal.entries.iter())
@@ -203,14 +227,11 @@ impl FileTransaction {
                     }
                     match &intent.previous {
                         Some(bytes) => {
-                            run_before_recovery_mutation_hook(&target);
-                            revalidate_recovery_parent(&parent_binding)?;
-                            write_atomic_bytes(&target, bytes)?;
+                            bound_restore_bytes(&parent_binding, &target, bytes)?;
                         }
                         None => {
                             run_before_recovery_mutation_hook(&target);
-                            revalidate_recovery_parent(&parent_binding)?;
-                            match std::fs::remove_file(&target) {
+                            match bound_remove_file(&parent_binding, &target) {
                                 Ok(()) => {
                                     if let Some(parent) = target.parent() {
                                         sync_parent(parent)?;
@@ -234,8 +255,7 @@ impl FileTransaction {
                     return Err(staging_safe_io_error());
                 }
                 run_before_recovery_mutation_hook(&artifact);
-                revalidate_recovery_parent(&parent_binding)?;
-                match std::fs::remove_file(&artifact) {
+                match bound_remove_file(&parent_binding, &artifact) {
                     Ok(()) => {
                         if let Some(parent) = artifact.parent() {
                             sync_parent(parent)?;
@@ -245,7 +265,7 @@ impl FileTransaction {
                     Err(error) => return Err(io_error(error, &artifact)),
                 }
             }
-            std::fs::remove_file(&path).map_err(|error| io_error(error, &path))?;
+            bound_remove_file(&journal_binding, &path).map_err(|error| io_error(error, &path))?;
             sync_parent(&directory)?;
         }
         Ok(())
@@ -256,6 +276,7 @@ impl FileTransaction {
         path: &Path,
         previous: Option<Vec<u8>>,
         bytes: &[u8],
+        candidate_identity: FileIdentity,
     ) -> Result<(), BackendError> {
         let Some(root) = self.project_root.as_deref() else {
             return Ok(());
@@ -276,7 +297,10 @@ impl FileTransaction {
             relative_path: relative.clone(),
             previous,
             desired_hash: digest_bytes(bytes),
-            installed_identity: None,
+            // The same-volume install primitives below preserve the candidate's
+            // native identity. Persist it before the namespace mutation so a
+            // crash immediately after install is still recoverable.
+            installed_identity: Some(candidate_identity),
         });
         let journal_path = self
             .journal_path
@@ -379,9 +403,11 @@ impl FileTransaction {
         self.ensure_parent(path)?;
         let parent = path.parent().unwrap();
         let temporary = write_synced_temp(parent, path, bytes)?;
-        self.record_intent(path, None, bytes)?;
+        let candidate_identity = file_identity(&temporary)?;
+        self.record_intent(path, None, bytes, candidate_identity)?;
         self.recovery_artifacts.push(temporary.clone());
         self.record_recovery_artifact(&temporary)?;
+        let parent_binding = self.bind_mutation_parent(path)?;
         #[cfg(test)]
         BEFORE_NEW_INSTALL_HOOK.with(|slot| {
             let mut borrowed = slot.borrow_mut();
@@ -391,7 +417,7 @@ impl FileTransaction {
                 }
             }
         });
-        if let Err(error) = install_candidate(&temporary, path) {
+        if let Err(error) = install_candidate(&parent_binding, &temporary, path) {
             let cleanup = self.cleanup_artifact(&temporary);
             return match cleanup {
                 Ok(()) => Err(io_error(error, path)),
@@ -402,11 +428,11 @@ impl FileTransaction {
             };
         }
         self.backups.push((path.to_path_buf(), None));
-        self.capture_installed(path, bytes)?;
         #[cfg(test)]
         if let Some(entry) = self.journal_entries.last() {
             commit_fault_boundary("installed", Some(entry.relative_path.as_str()));
         }
+        self.capture_installed_expected(path, bytes, candidate_identity)?;
         // Keep the linked staging name tracked until commit so cleanup failure is
         // a transaction failure and rollback can retry it deterministically.
         Ok(())
@@ -426,6 +452,26 @@ impl FileTransaction {
             }
         }
         Ok(())
+    }
+
+    fn bind_mutation_parent(&self, path: &Path) -> Result<RecoveryParentBinding, BackendError> {
+        if let Some(root) = self.project_root.as_deref() {
+            return bind_recovery_parent(root, path);
+        }
+        let parent = path.parent().ok_or_else(staging_safe_io_error)?;
+        let metadata =
+            std::fs::symlink_metadata(parent).map_err(|error| io_error(error, parent))?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || transaction_is_reparse_point(&metadata)
+        {
+            return Err(staging_safe_io_error());
+        }
+        Ok(RecoveryParentBinding {
+            components: vec![(parent.to_path_buf(), namespace_identity(parent)?)],
+            parent: parent.to_path_buf(),
+            _anchor: open_directory_anchor(parent)?,
+        })
     }
 
     fn cleanup_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -487,8 +533,9 @@ impl FileTransaction {
         let temporary = write_synced_temp(parent, path, bytes)?;
         let guard = parent.join(format!(".wiki-guard-{}", uuid::Uuid::new_v4()));
         self.recovery_artifacts.push(temporary.clone());
+        let parent_binding = self.bind_mutation_parent(path)?;
         run_before_checked_displace_hook(path);
-        if let Err(error) = std::fs::hard_link(path, &guard) {
+        if let Err(error) = bound_hard_link(&parent_binding, path, &guard) {
             let _ = self.cleanup_artifact(&temporary);
             return Err(io_error(error, path));
         }
@@ -513,19 +560,30 @@ impl FileTransaction {
             let _ = self.cleanup_artifact(&guard);
             return Err(conflict_error());
         }
-        self.record_intent(path, Some(previous_before.clone()), bytes)?;
+        let candidate_identity = file_identity(&temporary)?;
+        self.record_intent(
+            path,
+            Some(previous_before.clone()),
+            bytes,
+            candidate_identity,
+        )?;
         self.record_recovery_artifact(&temporary)?;
         self.record_recovery_artifact(&guard)?;
-        if let Err(error) = replace_existing(&temporary, path) {
+        if let Err(error) = bound_replace_existing(&parent_binding, &temporary, path) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);
             return Err(io_error(error, path));
+        }
+        #[cfg(test)]
+        if let Some(entry) = self.journal_entries.last() {
+            commit_fault_boundary("installed", Some(entry.relative_path.as_str()));
         }
         self.recovery_artifacts
             .retain(|candidate| candidate != &temporary);
         let previous = std::fs::read(&guard).map_err(|_| staging_safe_io_error())?;
         if format!("{:x}", Sha256::digest(&previous)) != expected_hash {
-            replace_existing(&guard, path).map_err(|error| io_error(error, path))?;
+            bound_replace_existing(&parent_binding, &guard, path)
+                .map_err(|error| io_error(error, path))?;
             self.recovery_artifacts
                 .retain(|candidate| candidate != &guard);
             sync_parent(parent)?;
@@ -533,11 +591,7 @@ impl FileTransaction {
         }
         sync_parent(parent)?;
         self.backups.push((path.to_path_buf(), Some(previous)));
-        self.capture_installed(path, bytes)?;
-        #[cfg(test)]
-        if let Some(entry) = self.journal_entries.last() {
-            commit_fault_boundary("installed", Some(entry.relative_path.as_str()));
-        }
+        self.capture_installed_expected(path, bytes, candidate_identity)?;
         self.cleanup_artifact(&temporary)?;
         self.cleanup_artifact(&guard)
     }
@@ -559,6 +613,16 @@ impl FileTransaction {
     }
 
     fn capture_installed(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
+        let identity = file_identity(path)?;
+        self.capture_installed_expected(path, bytes, identity)
+    }
+
+    fn capture_installed_expected(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        expected_identity: FileIdentity,
+    ) -> Result<(), BackendError> {
         self.unverified_installs.insert(path.to_path_buf());
         #[cfg(test)]
         if FAIL_NEXT_IDENTITY_QUERY.with(|flag| flag.replace(false)) {
@@ -569,6 +633,9 @@ impl FileTransaction {
         }
         let anchor = std::fs::File::open(path).map_err(|error| io_error(error, path))?;
         let identity = file_identity_from_file(&anchor, path)?;
+        if identity != expected_identity {
+            return Err(conflict_error());
+        }
         self.installed_ownership.insert(
             path.to_path_buf(),
             InstalledOwnership {
@@ -806,12 +873,16 @@ fn write_synced_temp(parent: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf
     result
 }
 
-fn install_candidate(temporary: &Path, path: &Path) -> Result<(), std::io::Error> {
+fn install_candidate(
+    binding: &RecoveryParentBinding,
+    temporary: &Path,
+    path: &Path,
+) -> Result<(), std::io::Error> {
     #[cfg(test)]
     if FAIL_NEXT_CANDIDATE_INSTALL.with(|flag| flag.replace(false)) {
         return Err(std::io::Error::other("injected candidate install failure"));
     }
-    std::fs::hard_link(temporary, path)?;
+    bound_hard_link(binding, temporary, path)?;
     if let Some(parent) = path.parent() {
         sync_parent(parent).map_err(|error| std::io::Error::other(error.message))?;
     }
@@ -865,6 +936,8 @@ fn safe_journal_target(root: &Path, relative: &str) -> Result<PathBuf, BackendEr
 
 struct RecoveryParentBinding {
     components: Vec<(PathBuf, FileIdentity)>,
+    parent: PathBuf,
+    _anchor: std::fs::File,
 }
 
 fn bind_recovery_parent(root: &Path, target: &Path) -> Result<RecoveryParentBinding, BackendError> {
@@ -886,7 +959,259 @@ fn bind_recovery_parent(root: &Path, target: &Path) -> Result<RecoveryParentBind
         }
         components.push((current.clone(), namespace_identity(&current)?));
     }
-    Ok(RecoveryParentBinding { components })
+    let anchor = open_directory_anchor(parent)?;
+    let anchored_identity = file_identity_from_file(&anchor, parent)?;
+    if components.last().map(|(_, identity)| *identity) != Some(anchored_identity) {
+        return Err(conflict_error());
+    }
+    Ok(RecoveryParentBinding {
+        components,
+        parent: parent.to_path_buf(),
+        _anchor: anchor,
+    })
+}
+
+#[cfg(unix)]
+fn open_directory_anchor(path: &Path) -> Result<std::fs::File, BackendError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(target_os = "linux")]
+    const O_DIRECTORY: i32 = 0x10000;
+    #[cfg(target_os = "linux")]
+    const O_NOFOLLOW: i32 = 0x20000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_DIRECTORY: i32 = 0x100000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_NOFOLLOW: i32 = 0x100;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| io_error(error, path))
+}
+
+#[cfg(windows)]
+fn open_directory_anchor(path: &Path) -> Result<std::fs::File, BackendError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    // Deliberately omit FILE_SHARE_DELETE: the validated parent cannot be
+    // renamed or replaced until the mutation completes.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| io_error(error, path))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_directory_anchor(path: &Path) -> Result<std::fs::File, BackendError> {
+    std::fs::File::open(path).map_err(|error| io_error(error, path))
+}
+
+#[cfg(unix)]
+fn bound_remove_file(binding: &RecoveryParentBinding, path: &Path) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn unlinkat(dirfd: i32, pathname: *const std::ffi::c_char, flags: i32) -> i32;
+    }
+    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
+    let name = std::ffi::CString::new(path.file_name().unwrap().as_bytes())?;
+    // SAFETY: dirfd is a retained open directory and name is a live NUL-terminated
+    // single component. flags=0 removes only a non-directory entry.
+    if unsafe { unlinkat(binding._anchor.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn bound_hard_link(
+    binding: &RecoveryParentBinding,
+    existing: &Path,
+    new_path: &Path,
+) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn linkat(
+            olddirfd: i32,
+            oldpath: *const std::ffi::c_char,
+            newdirfd: i32,
+            newpath: *const std::ffi::c_char,
+            flags: i32,
+        ) -> i32;
+    }
+    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
+    let old = std::ffi::CString::new(existing.file_name().unwrap().as_bytes())?;
+    let new = std::ffi::CString::new(new_path.file_name().unwrap().as_bytes())?;
+    // SAFETY: both are single components relative to the same retained parent.
+    if unsafe {
+        linkat(
+            binding._anchor.as_raw_fd(),
+            old.as_ptr(),
+            binding._anchor.as_raw_fd(),
+            new.as_ptr(),
+            0,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn bound_hard_link(
+    binding: &RecoveryParentBinding,
+    existing: &Path,
+    new_path: &Path,
+) -> Result<(), std::io::Error> {
+    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
+    std::fs::hard_link(existing, new_path)
+}
+
+#[cfg(not(unix))]
+fn bound_remove_file(binding: &RecoveryParentBinding, path: &Path) -> Result<(), std::io::Error> {
+    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
+    std::fs::remove_file(path)
+}
+
+fn bound_restore_bytes(
+    binding: &RecoveryParentBinding,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), BackendError> {
+    let temporary = write_synced_temp(&binding.parent, path, bytes)?;
+    run_before_recovery_mutation_hook(path);
+    revalidate_recovery_parent(binding)?;
+    bound_replace_existing(binding, &temporary, path).map_err(|error| io_error(error, path))?;
+    sync_parent(&binding.parent)
+}
+
+#[cfg(unix)]
+fn bound_replace_existing(
+    binding: &RecoveryParentBinding,
+    temporary: &Path,
+    path: &Path,
+) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn renameat(
+            olddirfd: i32,
+            oldpath: *const std::ffi::c_char,
+            newdirfd: i32,
+            newpath: *const std::ffi::c_char,
+        ) -> i32;
+    }
+    let old = std::ffi::CString::new(temporary.file_name().unwrap().as_bytes())?;
+    let new = std::ffi::CString::new(path.file_name().unwrap().as_bytes())?;
+    // SAFETY: both names are single live NUL-terminated components and both
+    // dirfds refer to the same retained validated parent.
+    if unsafe {
+        renameat(
+            binding._anchor.as_raw_fd(),
+            old.as_ptr(),
+            binding._anchor.as_raw_fd(),
+            new.as_ptr(),
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn bound_replace_existing(
+    _binding: &RecoveryParentBinding,
+    temporary: &Path,
+    path: &Path,
+) -> Result<(), std::io::Error> {
+    replace_existing(temporary, path)
+}
+
+#[cfg(unix)]
+fn read_regular_nofollow(
+    binding: &RecoveryParentBinding,
+    path: &Path,
+) -> Result<Vec<u8>, BackendError> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn openat(dirfd: i32, pathname: *const std::ffi::c_char, flags: i32, mode: u32) -> i32;
+    }
+    const O_RDONLY: i32 = 0;
+    #[cfg(target_os = "linux")]
+    const O_NOFOLLOW: i32 = 0x20000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_NOFOLLOW: i32 = 0x100;
+    let name = std::ffi::CString::new(path.file_name().unwrap().as_bytes())
+        .map_err(|_| staging_safe_io_error())?;
+    // SAFETY: dirfd is a retained directory and name is one live NUL-terminated
+    // component. On success ownership of the returned fd transfers to File.
+    let fd = unsafe {
+        openat(
+            binding._anchor.as_raw_fd(),
+            name.as_ptr(),
+            O_RDONLY | O_NOFOLLOW,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(io_error(std::io::Error::last_os_error(), path));
+    }
+    // SAFETY: openat returned a new owned descriptor exactly once.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if !file
+        .metadata()
+        .map_err(|error| io_error(error, path))?
+        .is_file()
+    {
+        return Err(staging_safe_io_error());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| io_error(error, path))?;
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn read_regular_nofollow(
+    _binding: &RecoveryParentBinding,
+    path: &Path,
+) -> Result<Vec<u8>, BackendError> {
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| io_error(error, path))?;
+    let metadata = file.metadata().map_err(|error| io_error(error, path))?;
+    if !metadata.is_file() || transaction_is_reparse_point(&metadata) {
+        return Err(staging_safe_io_error());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| io_error(error, path))?;
+    Ok(bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_regular_nofollow(
+    _binding: &RecoveryParentBinding,
+    path: &Path,
+) -> Result<Vec<u8>, BackendError> {
+    std::fs::read(path).map_err(|error| io_error(error, path))
 }
 
 fn revalidate_recovery_parent(binding: &RecoveryParentBinding) -> Result<(), BackendError> {
@@ -1606,21 +1931,120 @@ mod tests {
 
         let hook_root = root.clone();
         let hook_displaced = displaced.clone();
+        let swapped = std::rc::Rc::new(std::cell::Cell::new(false));
+        let hook_swapped = swapped.clone();
         set_before_recovery_mutation_hook(move |_| {
-            std::fs::rename(hook_root.join("wiki"), &hook_displaced).unwrap();
-            std::fs::create_dir_all(hook_root.join("wiki")).unwrap();
-            std::fs::write(hook_root.join("wiki/new.md"), b"outside replacement").unwrap();
+            if std::fs::rename(hook_root.join("wiki"), &hook_displaced).is_ok() {
+                hook_swapped.set(true);
+                std::fs::create_dir_all(hook_root.join("wiki")).unwrap();
+                std::fs::write(hook_root.join("wiki/new.md"), b"outside replacement").unwrap();
+            }
         });
 
-        let error = FileTransaction::reconcile_project(&root).unwrap_err();
-        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
-        assert_eq!(
-            std::fs::read(displaced.join("new.md")).unwrap(),
-            b"installed"
-        );
-        assert_eq!(std::fs::read(&target).unwrap(), b"outside replacement");
+        FileTransaction::reconcile_project(&root).unwrap();
+        if swapped.get() {
+            // Unix renameat/unlinkat remains bound to the displaced validated
+            // parent and never touches the attacker replacement namespace.
+            assert!(!displaced.join("new.md").exists());
+            assert_eq!(std::fs::read(&target).unwrap(), b"outside replacement");
+        } else {
+            // Windows' retained no-FILE_SHARE_DELETE handle denies the swap;
+            // rollback therefore removes the installed file in-place.
+            assert!(!target.exists());
+            assert!(!displaced.exists());
+        }
 
         std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_dir_all(displaced).unwrap();
+        if displaced.exists() {
+            std::fs::remove_dir_all(displaced).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_symlinked_journal_directory_without_outside_deletion() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("import-v2-journal-link-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!(
+            "import-v2-journal-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".app")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.json"), b"outside").unwrap();
+        symlink(&outside, root.join(".app/import-v2-journal")).unwrap();
+
+        FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(
+            std::fs::read(outside.join("keep.json")).unwrap(),
+            b"outside"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_symlinked_journal_file_without_read_or_delete() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-journal-file-link-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "import-v2-journal-file-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let journal = root.join(".app/import-v2-journal");
+        std::fs::create_dir_all(&journal).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.json"), b"outside").unwrap();
+        symlink(outside.join("keep.json"), journal.join("evil.json")).unwrap();
+
+        FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(
+            std::fs::read(outside.join("keep.json")).unwrap(),
+            b"outside"
+        );
+        assert!(journal.join("evil.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_rejects_windows_journal_reparse_without_outside_deletion() {
+        use std::os::windows::fs::symlink_dir;
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-journal-reparse-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "import-v2-journal-reparse-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".app")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.json"), b"outside").unwrap();
+        if let Err(error) = symlink_dir(&outside, root.join(".app/import-v2-journal")) {
+            // Symlink creation legitimately requires Developer Mode or the
+            // platform privilege; exercise this regression wherever supported.
+            assert!(
+                matches!(error.kind(), std::io::ErrorKind::PermissionDenied)
+                    || error.raw_os_error() == Some(1314)
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            std::fs::remove_dir_all(outside).unwrap();
+            return;
+        }
+
+        FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(
+            std::fs::read(outside.join("keep.json")).unwrap(),
+            b"outside"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 }
