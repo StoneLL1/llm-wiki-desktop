@@ -34,7 +34,7 @@ Wiki 板块已具备核心骨架但远未对齐设计稿。左侧文件树（`Wi
 | 右侧"相关页面"反链列表 | `relpage` 行带 icon + 标题 + 反链次数 | 有 backlinks 列表，**缺"反链次数"计数**；缺"查看全部 N 个反链"链接 | 🟡部分实现 | P1 | `src/features/wiki/RelatedPagesPanel.tsx:95-119` |
 | 右侧"编辑历史" | 时间 + 作者（claude/你）+ 摘要 + 增删行数 | **完全未实现** | ❌缺失 | P2 | 无 |
 | 右侧"操作"区（生成 HTML / 生成卡片 / 图谱中查看 / 复制 wikilink） | 4 个 block 按钮 | **完全未实现**（生成 HTML 入口在中间顶栏也缺失） | ❌缺失 | P1 | 无 |
-| 页面级操作：新建/重命名/删除/星标/复制路径 | "+" 新建、星标按钮、复制路径按钮；重命名/删除（设计稿未直接画出，但 PRD-READ-004 / Git 检查点硬边界隐含） | 星标（bookmarked）已实现；**新建/重命名/删除/复制路径全部缺失** | ❌缺失 | P0 | `src/features/wiki/WikiTree.tsx:80-88`；`src-tauri/src/commands/wiki_commands.rs`（仅 scan/read/save/toggle_bookmark） |
+| 页面级操作：新建/重命名/删除/星标/复制路径 | "+" 新建、星标按钮、复制路径按钮；重命名/删除（设计稿未直接画出，但 PRD-READ-004 / Git 检查点硬边界隐含） | 后端 `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page` 已实现并在 `lib.rs` 注册，`wikiStore` 也有对应调用；星标已实现。**剩余缺口是文件树/页面操作 UI 接线与复制路径入口** | 🟡部分实现 | P0 | `src/features/wiki/WikiTree.tsx:80-88`、`src/features/wiki/wikiStore.ts:398-457`、`src-tauri/src/commands/wiki_commands.rs:73-182`、`src-tauri/src/lib.rs:164-166` |
 | 搜索快捷键 ⌘K | 顶栏全局搜索框带 `⌘K` 提示 | 不在 wiki 板块内部（在 `AppShell` 顶栏）；wiki.html 设计稿把搜索放在 topbar | 🟡部分实现 | P1 | `src/components/app/AppShell.tsx`（顶栏） |
 
 ## 2. 功能落差（PRD 对照）
@@ -79,7 +79,7 @@ Wiki 板块已具备核心骨架但远未对齐设计稿。左侧文件树（`Wi
 
 1. **P0 - frontmatter 卡片化 + wikilink 样式落地**（`MarkdownReader.tsx` + `styles.css`）：低成本、立竿见影对齐设计 token；同时把 `.prose` 全套排版迁到 `.wiki-prose`。
 2. **P0 - Milkdown 编辑器格式工具条**（`WikiEditor.tsx`）：加粗/斜体/标题/链接/代码/引用/撤销/重做，把已有 Milkdown 能力暴露成 UI；与设计稿 `.editor__toolbar` 对齐。
-3. **P0 - 新建/重命名/删除页面 + Git 检查点**（前端 store + 树 UI + 后端新命令）：打通 PRD-READ-001 的完整生命周期；删除走 `ConfirmationDialog` + `GitService`。
+3. **P0 - 新建/重命名/删除页面前端 UI 接线**（文件树/页面操作入口）：复用 `wikiStore` 与已注册的 `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page`，把新建、重命名和删除确认暴露到 UI；删除走 `ConfirmationDialog`，后端继续负责 Git checkpoint。
 4. **P0 - 外部修改冲突 Diff 对话框**（`ConflictDiffDialog.tsx` + 后端扩 `FILE_HASH_MISMATCH` 返回 baseline/agent 文本）：满足 PRD-WIKI-004 / PRD-GIT-004 验收。
 5. **P1 - HTML 预览态 + 模板选择器 + 生成入口**（`HtmlPreviewPane.tsx` + `GenerateHtmlDialog.tsx` + 后端 skill 调用）：闭合设计稿第三态；与 `skills/html-*` 联动。
 6. **P1 - 右侧"操作"区 + citation 编号化 + 反链计数**：补齐 RelatedPagesPanel 的引用/反链视觉与跳转入口。
