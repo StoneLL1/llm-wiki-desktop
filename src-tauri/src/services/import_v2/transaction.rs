@@ -14,6 +14,24 @@ thread_local! {
     static BEFORE_NEW_INSTALL_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path) -> bool>>> = std::cell::RefCell::new(None);
     static FAIL_NEXT_CLEANUP: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
     static FAIL_NEXT_IDENTITY_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BEFORE_RECOVERY_MUTATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_before_recovery_mutation_hook(hook: impl FnOnce(&Path) + 'static) {
+    BEFORE_RECOVERY_MUTATION_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_before_recovery_mutation_hook(path: &Path) {
+    #[cfg(test)]
+    BEFORE_RECOVERY_MUTATION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = path;
 }
 
 #[cfg(test)]
@@ -152,6 +170,7 @@ impl FileTransaction {
                 };
             for intent in intents {
                 let target = safe_journal_target(root, &intent.relative_path)?;
+                let parent_binding = bind_recovery_parent(root, &target)?;
                 let current = match std::fs::read(&target) {
                     Ok(bytes) => Some(bytes),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -174,21 +193,30 @@ impl FileTransaction {
                         return Err(conflict_error());
                     }
                     match &intent.previous {
-                        Some(bytes) => write_atomic_bytes(&target, bytes)?,
-                        None => match std::fs::remove_file(&target) {
-                            Ok(()) => {
-                                if let Some(parent) = target.parent() {
-                                    sync_parent(parent)?;
+                        Some(bytes) => {
+                            run_before_recovery_mutation_hook(&target);
+                            revalidate_recovery_parent(&parent_binding)?;
+                            write_atomic_bytes(&target, bytes)?;
+                        }
+                        None => {
+                            run_before_recovery_mutation_hook(&target);
+                            revalidate_recovery_parent(&parent_binding)?;
+                            match std::fs::remove_file(&target) {
+                                Ok(()) => {
+                                    if let Some(parent) = target.parent() {
+                                        sync_parent(parent)?;
+                                    }
                                 }
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(error) => return Err(io_error(error, &target)),
                             }
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(error) => return Err(io_error(error, &target)),
-                        },
+                        }
                     }
                 }
             }
             for relative in &journal.recovery_artifacts {
                 let artifact = safe_journal_target(root, relative)?;
+                let parent_binding = bind_recovery_parent(root, &artifact)?;
                 let name = artifact
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -196,6 +224,8 @@ impl FileTransaction {
                 if !(name.contains(".tmp") || name.contains(".wiki-guard-")) {
                     return Err(staging_safe_io_error());
                 }
+                run_before_recovery_mutation_hook(&artifact);
+                revalidate_recovery_parent(&parent_binding)?;
                 match std::fs::remove_file(&artifact) {
                     Ok(()) => {
                         if let Some(parent) = artifact.parent() {
@@ -803,6 +833,84 @@ fn safe_journal_target(root: &Path, relative: &str) -> Result<PathBuf, BackendEr
     Ok(target)
 }
 
+struct RecoveryParentBinding {
+    components: Vec<(PathBuf, FileIdentity)>,
+}
+
+fn bind_recovery_parent(root: &Path, target: &Path) -> Result<RecoveryParentBinding, BackendError> {
+    let parent = target.parent().ok_or_else(staging_safe_io_error)?;
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| staging_safe_io_error())?;
+    let mut current = root.to_path_buf();
+    let mut components = vec![(current.clone(), namespace_identity(&current)?)];
+    for part in relative.components() {
+        current.push(part.as_os_str());
+        let metadata =
+            std::fs::symlink_metadata(&current).map_err(|error| io_error(error, &current))?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || transaction_is_reparse_point(&metadata)
+        {
+            return Err(staging_safe_io_error());
+        }
+        components.push((current.clone(), namespace_identity(&current)?));
+    }
+    Ok(RecoveryParentBinding { components })
+}
+
+fn revalidate_recovery_parent(binding: &RecoveryParentBinding) -> Result<(), BackendError> {
+    for (path, expected) in &binding.components {
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| conflict_error())?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || transaction_is_reparse_point(&metadata)
+            || namespace_identity(path).map_err(|_| conflict_error())? != *expected
+        {
+            return Err(conflict_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn namespace_identity(path: &Path) -> Result<FileIdentity, BackendError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| io_error(error, path))?;
+    Ok(FileIdentity(metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn namespace_identity(path: &Path) -> Result<FileIdentity, BackendError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2 | 0x4)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| io_error(error, path))?;
+    file_identity_from_file(&file, path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn namespace_identity(path: &Path) -> Result<FileIdentity, BackendError> {
+    file_identity(path)
+}
+
+#[cfg(windows)]
+fn transaction_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn transaction_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 fn staging_safe_io_error() -> BackendError {
     BackendError::new(
         "FILE_READ_FAILED",
@@ -1046,8 +1154,8 @@ fn io_error(error: std::io::Error, path: &Path) -> BackendError {
 mod tests {
     use super::{
         digest_bytes, set_before_checked_displace_hook, set_before_new_install_hook,
-        set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
-        FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
+        set_before_recovery_mutation_hook, set_fail_next_candidate_install, set_fail_next_cleanup,
+        set_fail_next_identity_query, FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
     };
     use sha2::Digest;
 
@@ -1451,6 +1559,39 @@ mod tests {
             0
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_recovery_rejects_parent_directory_swap_before_delete() {
+        let root =
+            std::env::temp_dir().join(format!("import-v2-parent-swap-{}", uuid::Uuid::new_v4()));
+        let displaced = std::env::temp_dir().join(format!(
+            "import-v2-parent-displaced-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = root.join("wiki/new.md");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&target, b"installed").unwrap();
+        transaction.simulate_process_crash();
+
+        let hook_root = root.clone();
+        let hook_displaced = displaced.clone();
+        set_before_recovery_mutation_hook(move |_| {
+            std::fs::rename(hook_root.join("wiki"), &hook_displaced).unwrap();
+            std::fs::create_dir_all(hook_root.join("wiki")).unwrap();
+            std::fs::write(hook_root.join("wiki/new.md"), b"outside replacement").unwrap();
+        });
+
+        let error = FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
+        assert_eq!(
+            std::fs::read(displaced.join("new.md")).unwrap(),
+            b"installed"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside replacement");
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(displaced).unwrap();
     }
 
     #[test]
