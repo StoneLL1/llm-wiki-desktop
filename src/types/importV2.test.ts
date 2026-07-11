@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { AddImportItemsV2Request, CommitImportSessionRequest, CreateImportSessionV2Request, GetImportSessionV2Request, ImportSession, SetImportItemSelectionV2Request, StartImportItemsV2Request } from "./importV2";
+import type { TaskResult, TaskResultReference } from "./task";
 
 describe("Import V2 contract", () => {
+  it("mirrors the typed Rust import preview task reference", () => {
+    const reference = { type: "import_preview", sessionId: "session-1", itemId: "item-1" } satisfies TaskResultReference;
+    const result = { summary: "Preview ready", affectedPaths: [], reference } satisfies TaskResult;
+    expect(result.reference).toEqual(reference);
+  });
   it("accepts the Rust camelCase session shape without writable target paths", () => {
     const session = { schemaVersion: 2, sessionId: "session-1", projectId: "project-1", status: "draft", resourceMode: "balanced", createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:00:00Z", items: [] } satisfies ImportSession;
     expect(session.schemaVersion).toBe(2);
