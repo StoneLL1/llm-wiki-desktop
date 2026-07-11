@@ -12,6 +12,7 @@ thread_local! {
     static FAIL_NEXT_CANDIDATE_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_NEW_INSTALL_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path) -> bool>>> = std::cell::RefCell::new(None);
     static FAIL_NEXT_CLEANUP: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static FAIL_NEXT_IDENTITY_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -27,6 +28,11 @@ pub(super) fn set_before_new_install_hook(hook: impl FnMut(&Path) -> bool + 'sta
 #[cfg(test)]
 fn set_fail_next_cleanup(kind: &str) {
     FAIL_NEXT_CLEANUP.with(|slot| *slot.borrow_mut() = Some(kind.to_string()));
+}
+
+#[cfg(test)]
+fn set_fail_next_identity_query() {
+    FAIL_NEXT_IDENTITY_QUERY.with(|flag| flag.set(true));
 }
 
 #[cfg(test)]
@@ -54,6 +60,8 @@ pub struct FileTransaction {
     recovery_artifacts: Vec<PathBuf>,
     installed_ownership: std::collections::HashMap<PathBuf, InstalledOwnership>,
     unverified_installs: std::collections::HashSet<PathBuf>,
+    guard_by_destination: std::collections::HashMap<PathBuf, PathBuf>,
+    project_root: Option<PathBuf>,
     finished: bool,
 }
 
@@ -65,8 +73,16 @@ impl FileTransaction {
             recovery_artifacts: Vec::new(),
             installed_ownership: std::collections::HashMap::new(),
             unverified_installs: std::collections::HashSet::new(),
+            guard_by_destination: std::collections::HashMap::new(),
+            project_root: None,
             finished: false,
         }
+    }
+
+    pub fn new_for_project(root: &Path) -> Self {
+        let mut transaction = Self::new();
+        transaction.project_root = Some(root.to_path_buf());
+        transaction
     }
 
     pub fn write(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
@@ -200,6 +216,8 @@ impl FileTransaction {
             return Err(io_error(error, path));
         }
         self.recovery_artifacts.push(guard.clone());
+        self.guard_by_destination
+            .insert(path.to_path_buf(), guard.clone());
         let previous = match std::fs::read(&guard) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -268,6 +286,13 @@ impl FileTransaction {
 
     fn capture_installed(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
         self.unverified_installs.insert(path.to_path_buf());
+        #[cfg(test)]
+        if FAIL_NEXT_IDENTITY_QUERY.with(|flag| flag.replace(false)) {
+            return Err(io_error(
+                std::io::Error::other("injected identity query failure"),
+                path,
+            ));
+        }
         let anchor = std::fs::File::open(path).map_err(|error| io_error(error, path))?;
         let identity = file_identity_from_file(&anchor, path)?;
         self.installed_ownership.insert(
@@ -329,6 +354,19 @@ impl FileTransaction {
             }
         }
         for artifact in self.recovery_artifacts.clone().iter().rev() {
+            if self
+                .guard_by_destination
+                .iter()
+                .any(|(destination, guard)| {
+                    guard == artifact && self.unverified_installs.contains(destination)
+                })
+            {
+                failures.push(format!(
+                    "{}: retained original recovery guard after unverified install",
+                    self.actionable_path(artifact)
+                ));
+                continue;
+            }
             if let Err(error) = self.cleanup_artifact(artifact) {
                 failures.push(format!("{}: {}", artifact.display(), error.message));
             }
@@ -349,6 +387,14 @@ impl FileTransaction {
                 failures,
             ))
         }
+    }
+
+    fn actionable_path(&self, path: &Path) -> String {
+        self.project_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"))
     }
 
     pub(super) fn rollback_after(&mut self, primary: BackendError) -> BackendError {
@@ -581,7 +627,8 @@ fn io_error(error: std::io::Error, path: &Path) -> BackendError {
 mod tests {
     use super::{
         set_before_checked_displace_hook, set_before_new_install_hook,
-        set_fail_next_candidate_install, set_fail_next_cleanup, FileTransaction,
+        set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
+        FileTransaction,
     };
     use sha2::Digest;
 
@@ -841,5 +888,41 @@ mod tests {
         transaction.rollback().unwrap_err();
         assert!(!path.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn identity_failure_preserves_candidate_and_original_guard_with_actionable_path() {
+        let outer = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        let root = outer.join("wiki/projects/demo");
+        let wiki_dir = root.join("wiki/notes");
+        std::fs::create_dir_all(&wiki_dir).unwrap();
+        let path = wiki_dir.join("page.md");
+        std::fs::write(&path, b"original").unwrap();
+        let expected = format!("{:x}", sha2::Sha256::digest(b"original"));
+        set_fail_next_identity_query();
+        let mut transaction = FileTransaction::new_for_project(&root);
+        let primary = transaction
+            .write_if_hash_matches(&path, b"candidate", &expected)
+            .unwrap_err();
+        let error = transaction.rollback_after(primary);
+        assert_eq!(error.code, crate::errors::IMPORT_V2_COMMIT_FAILED);
+        assert_eq!(std::fs::read(&path).unwrap(), b"candidate");
+        let guards: Vec<_> = std::fs::read_dir(&wiki_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("wiki-guard")
+            })
+            .collect();
+        assert_eq!(guards.len(), 1);
+        assert_eq!(std::fs::read(&guards[0]).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&wiki_dir).unwrap().count(), 2);
+        let details = error.details.unwrap();
+        assert!(details.to_string().contains("wiki/notes/.wiki-guard-"));
+        std::fs::remove_dir_all(outer).unwrap();
     }
 }
