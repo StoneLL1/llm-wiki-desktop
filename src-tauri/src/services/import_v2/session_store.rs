@@ -192,6 +192,10 @@ impl SessionStore {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         let mut session = self.load(context, file_store, session_id)?;
+        let inputs = inputs
+            .into_iter()
+            .map(public_import_input)
+            .collect::<Result<Vec<_>, _>>()?;
         session.items.extend(
             inputs
                 .into_iter()
@@ -240,6 +244,53 @@ impl SessionStore {
     }
 }
 
+fn public_import_input(mut input: ImportInput) -> Result<ImportInput, BackendError> {
+    if input.kind != crate::models::import_v2::ImportInputKind::Url {
+        return Ok(input);
+    }
+    let mut locator =
+        url::Url::parse(&input.locator).map_err(|_| invalid_session("Import URL is invalid."))?;
+    if !matches!(locator.scheme(), "http" | "https") || locator.host_str().is_none() {
+        return Err(invalid_session(
+            "Import URL must be a public HTTP or HTTPS locator.",
+        ));
+    }
+    locator
+        .set_username("")
+        .map_err(|_| invalid_session("Import URL credentials could not be removed."))?;
+    locator
+        .set_password(None)
+        .map_err(|_| invalid_session("Import URL credentials could not be removed."))?;
+    locator.set_fragment(None);
+    let public_query: Vec<(String, String)> = locator
+        .query_pairs()
+        .filter(|(key, _)| !sensitive_query_key(key))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    locator.set_query(None);
+    if !public_query.is_empty() {
+        locator
+            .query_pairs_mut()
+            .extend_pairs(public_query.iter().map(|(key, value)| (key, value)));
+    }
+    let public = locator.to_string();
+    input.locator = public.clone();
+    input.normalized_locator = Some(public);
+    Ok(input)
+}
+
+fn sensitive_query_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace('-', "_");
+    key == "sig"
+        || key.contains("token")
+        || key.contains("signature")
+        || key.contains("secret")
+        || key.contains("password")
+        || key.contains("credential")
+        || key.contains("api_key")
+        || key.contains("authorization")
+}
+
 #[cfg(test)]
 mod tests {
     use crate::errors::IMPORT_V2_SESSION_INVALID;
@@ -248,6 +299,55 @@ mod tests {
     use crate::services::FileStore;
 
     use super::SessionStore;
+
+    #[test]
+    fn url_credentials_sensitive_query_and_fragment_never_reach_session_files() {
+        let (context, root) = test_context("session-url-secrets");
+        let files = FileStore::default();
+        let store = SessionStore::default();
+        let session = store
+            .create(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let secret = "must-not-persist";
+        let session = store
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![crate::models::import_v2::ImportInput {
+                    kind: crate::models::import_v2::ImportInputKind::Url,
+                    display_name: "公开页面".into(),
+                    locator: format!("https://user:{secret}@例子.测试/文档?lang=zh&token={secret}&signature={secret}#access_token={secret}"),
+                    normalized_locator: None,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.items[0].input.locator,
+            "https://xn--fsqu00a.xn--0zwm56d/%E6%96%87%E6%A1%A3?lang=zh"
+        );
+        assert_eq!(
+            session.items[0].input.normalized_locator.as_deref(),
+            Some("https://xn--fsqu00a.xn--0zwm56d/%E6%96%87%E6%A1%A3?lang=zh")
+        );
+        let session_root = root.join(".app/import-sessions").join(&session.session_id);
+        for path in [
+            session_root.join("session.json"),
+            session_root
+                .join("items")
+                .join(format!("{}.json", session.items[0].item_id)),
+        ] {
+            let persisted = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !persisted.contains(secret),
+                "secret leaked into {}",
+                path.display()
+            );
+            assert!(!persisted.contains("access_token"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn session_round_trip_restores_items_after_new_store_instance() {
