@@ -59,7 +59,19 @@ pub struct TaskResult {
     pub summary: String,
     pub affected_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<TaskResultReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_action: Option<crate::models::confirmation::PendingAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum TaskResultReference {
+    ImportPreview { session_id: String, item_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -172,6 +184,7 @@ mod tests {
             result: Some(TaskResult {
                 summary: "Started".to_string(),
                 affected_paths: vec![".app/graph-cache.json".to_string()],
+                reference: None,
                 pending_action: None,
             }),
             error: Some(BackendError::new("TASK_TEST", "Example", true, false)),

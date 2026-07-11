@@ -336,6 +336,7 @@ async fn run_chat_send(
             TaskResult {
                 summary: "Chat answer ready.".into(),
                 affected_paths: vec![format!(".app/chats/{}.json", session.id)],
+                reference: None,
                 pending_action: None,
             },
         )
@@ -516,6 +517,7 @@ async fn run_chat_convenience_send(
             TaskResult {
                 summary: "Chat convenience edit finished.".into(),
                 affected_paths,
+                reference: None,
                 pending_action: None,
             },
         )

@@ -202,6 +202,7 @@ async fn run_deep_lint(
             TaskResult {
                 summary: format!("Deep lint found {issue_count} issue(s)."),
                 affected_paths: vec![report_path],
+                reference: None,
                 pending_action: None,
             },
         )

@@ -9,7 +9,7 @@ use crate::models::import_v2::{
     ImportSessionStatus, ImportStage,
 };
 use crate::models::paths::ProjectContext;
-use crate::models::task::{TaskResult, TaskStatus, TaskType};
+use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineOperation, EngineRegistry, EngineRequest, ImportEngine,
 };
@@ -81,11 +81,17 @@ impl ImportV2Service {
                     | ImportItemStatus::Extracting
                     | ImportItemStatus::Validating
             ) {
-                let interrupted = item
+                let recovered_status = item
                     .task_id
                     .as_deref()
                     .and_then(|id| tasks.get_task(id))
-                    .is_none_or(|task| task.status == TaskStatus::Failed);
+                    .map(|task| task.status);
+                if recovered_status == Some(TaskStatus::Cancelled) {
+                    transition_item(item, ImportItemStatus::Cancelled)?;
+                    continue;
+                }
+                let interrupted =
+                    recovered_status.is_none_or(|status| status == TaskStatus::Failed);
                 if interrupted {
                     transition_item(item, ImportItemStatus::Failed)?;
                     item.issue = Some(ImportIssue {
@@ -142,34 +148,11 @@ impl ImportV2Service {
             return Err(task_error("Task is not compatible with this import item."));
         }
         let pre_cancelled = tasks.is_cancelled(task_id);
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            if !matches!(
-                item.status,
-                ImportItemStatus::Queued | ImportItemStatus::Failed
-            ) || item
-                .task_id
-                .as_deref()
-                .is_some_and(|bound| bound != task_id && item.status != ImportItemStatus::Failed)
-            {
-                return Err(task_error(
-                    "Import item is already claimed by another task.",
-                ));
-            }
-            item.task_id = Some(task_id.to_string());
-            item.issue = None;
-            transition_item(
-                item,
-                if pre_cancelled {
-                    ImportItemStatus::Cancelled
-                } else {
-                    ImportItemStatus::Inspecting
-                },
-            )
-        })?;
+        self.claim_item_for_run(context, files, session_id, item_id, task_id, pre_cancelled)?;
         if pre_cancelled {
             return Err(cancelled_error());
         }
-        task_call(tasks.transition_status(task_id, TaskStatus::Running))?;
+        self.start_claimed_task(context, files, tasks, session_id, item_id, task_id)?;
         task_call(tasks.update_progress(task_id, 0, Some(4), Some("Inspecting input".into())))?;
         let input = self
             .load_session(context, files, session_id)?
@@ -278,13 +261,81 @@ impl ImportV2Service {
         task_call(tasks.set_result(
             task_id,
             TaskResult {
-                summary: format!("Import preview ready for session {session_id}, item {item_id}"),
-                affected_paths: vec![staging_root],
+                summary: "Import preview ready.".into(),
+                affected_paths: Vec::new(),
+                reference: Some(TaskResultReference::ImportPreview {
+                    session_id: session_id.into(),
+                    item_id: item_id.into(),
+                }),
                 pending_action: None,
             },
         ))?;
         task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
         Ok(item)
+    }
+
+    fn claim_item_for_run(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        pre_cancelled: bool,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if !matches!(
+                item.status,
+                ImportItemStatus::Queued | ImportItemStatus::Failed
+            ) || item
+                .task_id
+                .as_deref()
+                .is_some_and(|bound| bound != task_id && item.status != ImportItemStatus::Failed)
+            {
+                return Err(task_error(
+                    "Import item is already claimed by another task.",
+                ));
+            }
+            item.task_id = Some(task_id.to_string());
+            item.issue = None;
+            transition_item(
+                item,
+                if pre_cancelled {
+                    ImportItemStatus::Cancelled
+                } else {
+                    ImportItemStatus::Inspecting
+                },
+            )
+        })
+    }
+
+    fn start_claimed_task(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<(), BackendError> {
+        if tasks.is_cancelled(task_id) {
+            return self
+                .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                .map(|_| ());
+        }
+        if let Err(error) = tasks.transition_status(task_id, TaskStatus::Running) {
+            if tasks.is_cancelled(task_id)
+                || tasks
+                    .get_task(task_id)
+                    .is_some_and(|task| task.status == TaskStatus::Cancelled)
+            {
+                return self
+                    .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                    .map(|_| ());
+            }
+            return Err(task_call::<()>(Err(error)).unwrap_err());
+        }
+        Ok(())
     }
 
     fn finish_cancelled(
@@ -1151,5 +1202,101 @@ mod tests {
             restarted.get_logs(&task.id).unwrap()[0].message,
             "Import engine failed."
         );
+    }
+
+    #[test]
+    fn restart_reconciles_in_flight_item_with_cancelled_task() {
+        let fixture = OrchestratorFixture::new("recover-cancelled");
+        let (session, _, task) = fixture.seed_one_item();
+        fixture
+            .tasks
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        let mut persisted = fixture
+            .service
+            .load_session(&fixture.context, &fixture.files, &session.session_id)
+            .unwrap();
+        persisted.items[0].status = ImportItemStatus::Extracting;
+        persisted.items[0].task_id = Some(task.id.clone());
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &persisted)
+            .unwrap();
+        fixture.tasks.cancel_task(&task.id).unwrap();
+        let restarted_tasks = TaskService::default();
+        restarted_tasks.recover_tasks(&fixture.root).unwrap();
+        let recovered = ImportV2Service::default()
+            .recover_session(
+                &fixture.context,
+                &fixture.files,
+                &restarted_tasks,
+                &session.session_id,
+            )
+            .unwrap();
+        assert_eq!(recovered.items[0].status, ImportItemStatus::Cancelled);
+        assert_eq!(recovered.status, ImportSessionStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_after_claim_cannot_leave_item_processing() {
+        let fixture = OrchestratorFixture::new("cancel-race");
+        let (session, item, task) = fixture.seed_one_item();
+        fixture
+            .service
+            .claim_item_for_run(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                false,
+            )
+            .unwrap();
+        fixture.tasks.cancel_task(&task.id).unwrap();
+        let error = fixture
+            .service
+            .start_claimed_task(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_CANCELLED);
+        assert_eq!(
+            fixture.reopen().items[0].status,
+            ImportItemStatus::Cancelled
+        );
+        assert_eq!(fixture.reopen().status, ImportSessionStatus::Cancelled);
+    }
+
+    #[test]
+    fn preview_task_result_serializes_typed_reference() {
+        let fixture = OrchestratorFixture::new("typed-result");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        let value = serde_json::to_value(fixture.tasks.get_task(&task.id).unwrap().result.unwrap())
+            .unwrap();
+        assert_eq!(value["reference"]["type"], "import_preview");
+        assert_eq!(value["reference"]["sessionId"], session.session_id);
+        assert_eq!(value["reference"]["itemId"], item.item_id);
+        assert_eq!(value["affectedPaths"], serde_json::json!([]));
     }
 }

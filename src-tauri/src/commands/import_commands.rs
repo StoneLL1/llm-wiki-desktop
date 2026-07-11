@@ -399,6 +399,7 @@ fn run_import_preview(
             TaskResult {
                 summary: format!("Previewed {} source files.", preview.summary.total_files),
                 affected_paths: vec![preview_path],
+                reference: None,
                 pending_action: None,
             },
         )
