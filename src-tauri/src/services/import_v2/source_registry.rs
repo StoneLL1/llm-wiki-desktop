@@ -489,13 +489,14 @@ fn valid_raw_path(path: &str, source_id: &str, version_id: &str) -> bool {
 
 fn valid_wiki_path(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
+    let filename = parts.get(3).copied().unwrap_or_default();
+    let stem = filename.strip_suffix(".md").unwrap_or_default();
     parts.len() == 4
         && parts[0] == "wiki"
         && parts[1] == "sources"
         && matches!(parts[2], "files" | "web" | "video")
-        && parts[3].ends_with(".md")
-        && parts[3].len() > 3
-        && !parts[3].contains(['\\', ':'])
+        && !stem.is_empty()
+        && portable_wiki_stem(stem) == stem
 }
 
 fn safe_extension(extension: &str) -> String {
@@ -523,6 +524,11 @@ fn derive_wiki_path(input: &SourceCommitInput) -> String {
         .rsplit_once('.')
         .map(|(stem, _)| stem)
         .unwrap_or(&input.display_name);
+    let slug = portable_wiki_stem(stem);
+    format!("wiki/sources/{category}/{slug}.md")
+}
+
+fn portable_wiki_stem(stem: &str) -> String {
     let slug: String = stem
         .trim()
         .chars()
@@ -552,12 +558,12 @@ fn derive_wiki_path(input: &SourceCommitInput) -> String {
         }
         bounded.push(ch);
     }
-    let slug = if bounded.is_empty() {
+    if bounded.is_empty() {
         "source"
     } else {
         &bounded
-    };
-    format!("wiki/sources/{category}/{slug}.md")
+    }
+    .to_string()
 }
 
 #[cfg(test)]
@@ -974,5 +980,39 @@ mod tests {
             )
             .unwrap();
         assert!(long.wiki_path.len() < 240);
+    }
+
+    #[test]
+    fn existing_manifest_wiki_filename_must_be_portable() {
+        let invalid_names = [
+            "CON.md".to_string(),
+            "bad?.md".to_string(),
+            "bad\u{0007}.md".to_string(),
+            "trailing..md".to_string(),
+            "trailing .md".to_string(),
+            format!("{}.md", "a".repeat(121)),
+        ];
+
+        for name in invalid_names {
+            let existing = SourceManifest {
+                schema_version: 2,
+                source_id: "source-1".into(),
+                origins: vec!["file:/a.docx".into()],
+                versions: vec![fixture_version("version-1", "hash-a")],
+                current_version_id: "version-1".into(),
+                wiki_path: format!("wiki/sources/files/{name}"),
+            };
+            let error = SourceRegistry
+                .build_commit_plan(
+                    &SourceIndex::default_v2(),
+                    Some(&existing),
+                    &fixture_input("file:/a.docx", "hash-b", "a.docx"),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.code, IMPORT_V2_SOURCE_INDEX_INVALID,
+                "portable filename should be rejected: {name:?}"
+            );
+        }
     }
 }
