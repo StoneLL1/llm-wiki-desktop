@@ -107,23 +107,34 @@ pub fn start_import_items_v2(
             return Err(task_error("Import item was not found."));
         }
     }
-    let mut tasks = Vec::with_capacity(request.item_ids.len());
-    for item_id in request.item_ids {
-        let item = session
-            .items
-            .iter()
-            .find(|item| item.item_id == item_id)
-            .expect("all item ids were validated before task creation");
-        let task = state
-            .task_service
-            .create_project_task(
-                TaskType::Import,
-                request.project_id.clone(),
-                context.root.clone(),
-                format!("Import {}", item.input.display_name),
-                true,
-            )
-            .map_err(|error| task_error(&error))?;
+    let prepared = prepare_all(
+        request.item_ids,
+        |item_id| {
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == item_id)
+                .expect("all item ids were validated before task creation");
+            state
+                .task_service
+                .create_project_task(
+                    TaskType::Import,
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    format!("Import {}", item.input.display_name),
+                    true,
+                )
+                .map_err(|error| task_error(&error))
+        },
+        |task| {
+            state
+                .task_service
+                .discard_unstarted_tasks(std::slice::from_ref(&task.id))
+                .map_err(|error| task_error(&error))
+        },
+    )?;
+    let mut tasks = Vec::with_capacity(prepared.len());
+    for (item_id, task) in prepared {
         let (app, project_id, root, session_id, task_id) = (
             app.clone(),
             request.project_id.clone(),
@@ -152,6 +163,29 @@ pub fn start_import_items_v2(
         tasks.push(task);
     }
     Ok(tasks)
+}
+
+fn prepare_all<T>(
+    item_ids: Vec<String>,
+    mut create: impl FnMut(&str) -> Result<T, BackendError>,
+    mut rollback: impl FnMut(&T) -> Result<(), BackendError>,
+) -> Result<Vec<(String, T)>, BackendError> {
+    let mut prepared = Vec::with_capacity(item_ids.len());
+    for item_id in item_ids {
+        match create(&item_id) {
+            Ok(task) => prepared.push((item_id, task)),
+            Err(error) => {
+                let mut rollback_error = None;
+                for (_, task) in &prepared {
+                    if let Err(error) = rollback(task) {
+                        rollback_error.get_or_insert(error);
+                    }
+                }
+                return Err(rollback_error.unwrap_or(error));
+            }
+        }
+    }
+    Ok(prepared)
 }
 
 #[tauri::command]
@@ -251,5 +285,32 @@ mod tests {
         assert_eq!(value["sessionId"], "s1");
         assert!(value.get("targetPath").is_none());
         assert!(value.get("wikiPath").is_none());
+    }
+
+    #[test]
+    fn task_preparation_rolls_back_every_created_task_on_later_failure() {
+        let mut attempts = 0;
+        let mut rolled_back = Vec::new();
+        let result = prepare_all(
+            ["first", "second", "third"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            |_| {
+                attempts += 1;
+                if attempts == 3 {
+                    Err(task_error("injected persistence failure"))
+                } else {
+                    Ok(attempts)
+                }
+            },
+            |task| {
+                rolled_back.push(*task);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(rolled_back, vec![1, 2]);
     }
 }
