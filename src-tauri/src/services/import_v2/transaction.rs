@@ -126,7 +126,7 @@ impl FileTransaction {
                 Ok(()) => Err(io_error(error, path)),
                 Err(cleanup) => Err(rollback_failure(
                     "New-file install failed and temporary cleanup failed.",
-                    vec![error.to_string(), cleanup.message],
+                    vec!["candidate install failed".to_string(), cleanup.message],
                 )),
             };
         }
@@ -211,63 +211,46 @@ impl FileTransaction {
         let guard = parent.join(format!(".wiki-guard-{}", uuid::Uuid::new_v4()));
         self.recovery_artifacts.push(temporary.clone());
         run_before_checked_displace_hook(path);
-        if let Err(error) = std::fs::rename(path, &guard) {
+        if let Err(error) = std::fs::hard_link(path, &guard) {
             let _ = self.cleanup_artifact(&temporary);
             return Err(io_error(error, path));
         }
         self.recovery_artifacts.push(guard.clone());
         self.guard_by_destination
             .insert(path.to_path_buf(), guard.clone());
-        let previous = match std::fs::read(&guard) {
+        let before_identity = file_identity(path)?;
+        let guard_identity = file_identity(&guard)?;
+        let previous_before = match std::fs::read(&guard) {
             Ok(bytes) => bytes,
             Err(error) => {
                 let primary = io_error(error, &guard);
-                let restore = restore_displaced(&guard, path);
                 let _ = self.cleanup_artifact(&temporary);
-                return match restore {
-                    Ok(()) => Err(primary),
-                    Err(rollback) => Err(rollback_failure(
-                        "Displaced Wiki could not be read or restored.",
-                        vec![primary.message, rollback.message],
-                    )),
-                };
+                let _ = self.cleanup_artifact(&guard);
+                return Err(primary);
             }
         };
+        if before_identity != guard_identity
+            || format!("{:x}", Sha256::digest(&previous_before)) != expected_hash
+        {
+            let _ = self.cleanup_artifact(&temporary);
+            let _ = self.cleanup_artifact(&guard);
+            return Err(conflict_error());
+        }
+        if let Err(error) = replace_existing(&temporary, path) {
+            let _ = self.cleanup_artifact(&temporary);
+            let _ = self.cleanup_artifact(&guard);
+            return Err(io_error(error, path));
+        }
+        self.recovery_artifacts
+            .retain(|candidate| candidate != &temporary);
+        let previous = std::fs::read(&guard).map_err(|_| staging_safe_io_error())?;
         if format!("{:x}", Sha256::digest(&previous)) != expected_hash {
-            let restore = restore_displaced(&guard, path);
-            if restore.is_ok() {
-                self.recovery_artifacts
-                    .retain(|candidate| candidate != &guard);
-            }
-            let _ = self.cleanup_artifact(&temporary);
-            return match restore {
-                Ok(()) => Err(BackendError::new(
-                    IMPORT_V2_COMMIT_CONFLICT,
-                    "Wiki changed after preview.",
-                    true,
-                    true,
-                )),
-                Err(rollback) => Err(rollback_failure(
-                    "Wiki changed and its displaced file could not be restored.",
-                    vec![rollback.message],
-                )),
-            };
+            replace_existing(&guard, path).map_err(|error| io_error(error, path))?;
+            self.recovery_artifacts.retain(|candidate| candidate != &guard);
+            sync_parent(parent)?;
+            return Err(conflict_error());
         }
-        if let Err(error) = install_candidate(&temporary, path) {
-            let _ = self.cleanup_artifact(&temporary);
-            let restore = restore_displaced(&guard, path);
-            if restore.is_ok() {
-                self.recovery_artifacts
-                    .retain(|candidate| candidate != &guard);
-            }
-            return match restore {
-                Ok(()) => Err(io_error(error, path)),
-                Err(rollback) => Err(rollback_failure(
-                    "Checked Wiki replacement failed and recovery was incomplete.",
-                    vec![error.to_string(), rollback.message],
-                )),
-            };
-        }
+        sync_parent(parent)?;
         self.backups.push((path.to_path_buf(), Some(previous)));
         self.capture_installed(path, bytes)?;
         self.cleanup_artifact(&temporary)?;
@@ -311,14 +294,14 @@ impl FileTransaction {
         let mut failures = Vec::new();
         for (path, previous) in self.backups.iter().rev() {
             if self.unverified_installs.contains(path) {
-                failures.push(format!("{}: installed ownership could not be verified; preserved instead of rolling back", path.display()));
+                failures.push(format!("{}: installed ownership could not be verified; preserved instead of rolling back", self.actionable_path(path)));
                 continue;
             }
             if let Some(ownership) = self.installed_ownership.get(path) {
                 if !path.exists() {
                     failures.push(format!(
                         "{}: destination was deleted externally; preserved instead of rolling back",
-                        path.display()
+                        self.actionable_path(path)
                     ));
                     continue;
                 } else {
@@ -332,7 +315,7 @@ impl FileTransaction {
                     if identity_changed || content_changed {
                         failures.push(format!(
                             "{}: destination changed externally; preserved instead of rolling back",
-                            path.display()
+                            self.actionable_path(path)
                         ));
                         continue;
                     }
@@ -340,14 +323,14 @@ impl FileTransaction {
             }
             match previous {
                 Some(bytes) => {
-                    if let Err(error) = write_atomic_bytes(path, bytes) {
-                        failures.push(format!("{}: {}", path.display(), error.message));
+                    if let Err(_error) = write_atomic_bytes(path, bytes) {
+                        failures.push(format!("{}: rollback write failed", self.actionable_path(path)));
                     }
                 }
                 None => {
                     if let Err(error) = std::fs::remove_file(path) {
                         if error.kind() != std::io::ErrorKind::NotFound {
-                            failures.push(format!("{}: {error}", path.display()));
+                            failures.push(format!("{}: rollback removal failed", self.actionable_path(path)));
                         }
                     }
                 }
@@ -367,14 +350,14 @@ impl FileTransaction {
                 ));
                 continue;
             }
-            if let Err(error) = self.cleanup_artifact(artifact) {
-                failures.push(format!("{}: {}", artifact.display(), error.message));
+            if let Err(_error) = self.cleanup_artifact(artifact) {
+                failures.push(format!("{}: recovery cleanup failed", self.actionable_path(artifact)));
             }
         }
         for directory in self.created_dirs.iter().rev() {
             if let Err(error) = std::fs::remove_dir(directory) {
                 if error.kind() != std::io::ErrorKind::NotFound {
-                    failures.push(format!("{}: {error}", directory.display()));
+                    failures.push(format!("{}: directory cleanup failed", self.actionable_path(directory)));
                 }
             }
         }
@@ -446,9 +429,11 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
         file.sync_all()
             .map_err(|error| io_error(error, &temporary))?;
         if path.exists() {
-            std::fs::remove_file(path).map_err(|error| io_error(error, path))?;
+            replace_existing(&temporary, path).map_err(|error| io_error(error, path))?;
+        } else {
+            std::fs::rename(&temporary, path).map_err(|error| io_error(error, path))?;
         }
-        std::fs::rename(&temporary, path).map_err(|error| io_error(error, path))
+        sync_parent(parent)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -477,35 +462,76 @@ fn write_synced_temp(parent: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf
     result
 }
 
-fn restore_displaced(guard: &Path, path: &Path) -> Result<(), BackendError> {
-    let mut target_created = false;
-    let result = (|| {
-        let mut source = std::fs::File::open(guard).map_err(|error| io_error(error, guard))?;
-        let mut target = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|error| io_error(error, path))?;
-        target_created = true;
-        std::io::copy(&mut source, &mut target).map_err(|error| io_error(error, path))?;
-        target.sync_all().map_err(|error| io_error(error, path))?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        if target_created {
-            let _ = std::fs::remove_file(path);
-        }
-        return Err(error);
-    }
-    std::fs::remove_file(guard).map_err(|error| io_error(error, guard))
-}
-
 fn install_candidate(temporary: &Path, path: &Path) -> Result<(), std::io::Error> {
     #[cfg(test)]
     if FAIL_NEXT_CANDIDATE_INSTALL.with(|flag| flag.replace(false)) {
         return Err(std::io::Error::other("injected candidate install failure"));
     }
-    std::fs::hard_link(temporary, path)
+    std::fs::hard_link(temporary, path)?;
+    if let Some(parent) = path.parent() {
+        sync_parent(parent).map_err(|error| std::io::Error::other(error.message))?;
+    }
+    Ok(())
+}
+
+fn conflict_error() -> BackendError {
+    BackendError::new(
+        IMPORT_V2_COMMIT_CONFLICT,
+        "A commit target changed concurrently.",
+        true,
+        true,
+    )
+}
+
+fn staging_safe_io_error() -> BackendError {
+    BackendError::new(
+        "FILE_READ_FAILED",
+        "A project file could not be read safely.",
+        true,
+        true,
+    )
+}
+
+#[cfg(unix)]
+fn replace_existing(temporary: &Path, path: &Path) -> Result<(), std::io::Error> {
+    std::fs::rename(temporary, path)
+}
+
+#[cfg(windows)]
+fn replace_existing(temporary: &Path, path: &Path) -> Result<(), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ReplaceFileW(replaced: *const u16, replacement: *const u16, backup: *const u16, flags: u32, exclude: *mut std::ffi::c_void, reserved: *mut std::ffi::c_void) -> i32;
+    }
+    let replaced: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replacement: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both paths are valid NUL-terminated UTF-16 buffers for the duration
+    // of the synchronous Win32 call; optional pointers are null as documented.
+    let result = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(), replacement.as_ptr(), std::ptr::null(), 0,
+            std::ptr::null_mut(), std::ptr::null_mut(),
+        )
+    };
+    if result == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+}
+
+#[cfg(unix)]
+fn sync_parent(parent: &Path) -> Result<(), BackendError> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_error(error, parent))
+}
+
+#[cfg(windows)]
+fn sync_parent(_parent: &Path) -> Result<(), BackendError> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_parent(_parent: &Path) -> Result<(), BackendError> {
+    Ok(())
 }
 
 fn rollback_failure(message: &str, failures: Vec<String>) -> BackendError {
@@ -619,8 +645,13 @@ fn file_identity_from_file(
 }
 
 fn io_error(error: std::io::Error, path: &Path) -> BackendError {
-    BackendError::new("FILE_WRITE_FAILED", error.to_string(), true, false)
-        .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
+    let _ = (error, path);
+    BackendError::new(
+        "FILE_WRITE_FAILED",
+        "A project file operation failed.",
+        true,
+        true,
+    )
 }
 
 #[cfg(test)]
