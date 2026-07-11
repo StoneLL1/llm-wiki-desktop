@@ -171,7 +171,7 @@ export function PageChatPanel({
           {error}
         </div>
       ) : null}
-      <div className="page-chat__body min-h-0 flex-1 overflow-y-auto px-3 py-3" role="log" aria-live="polite">
+      <div className="page-chat__body app-pane-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3" role="log" aria-live="polite">
         {!pageSession ? (
           <div className="flex h-full items-center justify-center text-center text-[12px] text-[var(--text-muted)]">
             {t("wiki.askAi.currentPage")}

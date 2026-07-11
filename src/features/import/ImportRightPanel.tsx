@@ -69,7 +69,7 @@ export function ImportRightPanel() {
       className="right-panel"
     >
       <RightPanelHeader title={t("import.rightpanel.title")} />
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto">
         {!file ? (
           <p className="px-4 py-3 text-[12px] text-[var(--text-muted)]">{t("import.rightpanel.noSelection")}</p>
         ) : (

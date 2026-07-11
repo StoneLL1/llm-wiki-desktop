@@ -101,6 +101,27 @@ describe("LeftSidebar favorites", () => {
     expect(favorites.compareDocumentPosition(recent)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
+  it("scrolls all upper sections together while keeping the Agent footer fixed", () => {
+    render(<LeftSidebar />);
+
+    const sectionLabels = [
+      screen.getByText("Main views"),
+      screen.getByText("Workflow"),
+      screen.getByText("Favorites"),
+      screen.getByText("Recent pages"),
+    ];
+    const scrollRegion = sectionLabels[0].closest(".app-sidebar__scroll-region");
+
+    expect(scrollRegion).not.toBeNull();
+    sectionLabels.forEach((label) => {
+      expect(label.closest(".app-sidebar__scroll-region")).toBe(scrollRegion);
+    });
+    const agentButton = screen.getByTitle("Agent settings");
+    const agentFooter = agentButton.closest("div");
+    expect(scrollRegion as HTMLElement).not.toContainElement(agentButton);
+    expect(agentFooter).toHaveClass("shrink-0");
+  });
+
   it("keeps favorite and recent page icons from shrinking beside long titles", () => {
     const longTitle =
       "A very long page title that should truncate without squeezing the leading file icon";

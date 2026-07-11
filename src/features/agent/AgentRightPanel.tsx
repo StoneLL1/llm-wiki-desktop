@@ -74,7 +74,7 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
     >
       <RightPanelHeader title={t("agent.rightPanel.title")} />
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {/* Default Agent meta */}
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">

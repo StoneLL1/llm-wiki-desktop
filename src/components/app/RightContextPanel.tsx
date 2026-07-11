@@ -109,7 +109,7 @@ export function RightContextPanel() {
         className="right-panel"
       >
         <RightPanelHeader title={t("chat.citations.title")} />
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto">
           <div className="px-4 py-3">
             {/* 引用与来源 */}
             <div className="border-b border-[var(--border-subtle)] py-3">
@@ -243,7 +243,7 @@ export function RightContextPanel() {
         className="right-panel"
       >
         <RightPanelHeader title={t("wiki.related.title")} />
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto">
           <RelatedPagesPanel
             page={wikiPage}
             pages={wikiTree?.pages ?? []}
@@ -270,7 +270,7 @@ export function RightContextPanel() {
         className="right-panel"
       >
         <RightPanelHeader title={t("graph.inspector.title")} />
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto">
           {graphData ? (
             <GraphInspector
               node={selectedNode}
@@ -345,7 +345,7 @@ export function RightContextPanel() {
     >
       <RightPanelHeader title={t("shell.projectInfo")} />
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {/* 路径 */}
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.paths")}</h4>
