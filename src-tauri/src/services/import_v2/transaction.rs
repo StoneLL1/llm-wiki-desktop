@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::errors::{BackendError, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED};
 
@@ -60,6 +60,8 @@ struct JournalEntry {
     relative_path: String,
     previous: Option<Vec<u8>>,
     desired_hash: String,
+    #[serde(default)]
+    installed_identity: Option<FileIdentity>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -123,7 +125,11 @@ impl FileTransaction {
         let directory = root.join(".app/import-v2-journal");
         let entries: Vec<PathBuf> = match std::fs::read_dir(&directory) {
             Ok(entries) => entries
-                .map(|entry| entry.map(|entry| entry.path()).map_err(|error| io_error(error, &directory)))
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.path())
+                        .map_err(|error| io_error(error, &directory))
+                })
                 .collect::<Result<_, _>>()?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(io_error(error, &directory)),
@@ -131,15 +137,19 @@ impl FileTransaction {
         // Collect first so Windows' ReadDirectoryChanges/read-directory handle is
         // closed before we reopen the directory for a durable metadata flush.
         for path in entries {
-            if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
             let journal: Journal = serde_json::from_slice(
                 &std::fs::read(&path).map_err(|error| io_error(error, &path))?,
-            ).map_err(|_| staging_safe_io_error())?;
-            let intents: Box<dyn Iterator<Item = &JournalEntry>> = if journal.state == JournalState::Committed {
-                Box::new(journal.entries.iter())
-            } else {
-                Box::new(journal.entries.iter().rev())
-            };
+            )
+            .map_err(|_| staging_safe_io_error())?;
+            let intents: Box<dyn Iterator<Item = &JournalEntry>> =
+                if journal.state == JournalState::Committed {
+                    Box::new(journal.entries.iter())
+                } else {
+                    Box::new(journal.entries.iter().rev())
+                };
             for intent in intents {
                 let target = safe_journal_target(root, &intent.relative_path)?;
                 let current = match std::fs::read(&target) {
@@ -149,21 +159,29 @@ impl FileTransaction {
                 };
                 let current_hash = current.as_deref().map(digest_bytes);
                 if journal.state == JournalState::Committed {
-                    if current_hash.as_deref() != Some(&intent.desired_hash) {
+                    if current_hash.as_deref() != Some(&intent.desired_hash)
+                        || !journal_identity_matches(&target, intent)?
+                    {
                         return Err(conflict_error());
                     }
                     continue;
                 }
                 let previous_hash = intent.previous.as_deref().map(digest_bytes);
                 if current_hash != previous_hash {
-                    if current_hash.as_deref() != Some(&intent.desired_hash) {
+                    if current_hash.as_deref() != Some(&intent.desired_hash)
+                        || !journal_identity_matches(&target, intent)?
+                    {
                         return Err(conflict_error());
                     }
                     match &intent.previous {
                         Some(bytes) => write_atomic_bytes(&target, bytes)?,
                         None => match std::fs::remove_file(&target) {
-                            Ok(()) => if let Some(parent) = target.parent() { sync_parent(parent)?; },
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                            Ok(()) => {
+                                if let Some(parent) = target.parent() {
+                                    sync_parent(parent)?;
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                             Err(error) => return Err(io_error(error, &target)),
                         },
                     }
@@ -171,11 +189,20 @@ impl FileTransaction {
             }
             for relative in &journal.recovery_artifacts {
                 let artifact = safe_journal_target(root, relative)?;
-                let name = artifact.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-                if !(name.contains(".tmp") || name.contains(".wiki-guard-")) { return Err(staging_safe_io_error()); }
+                let name = artifact
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                if !(name.contains(".tmp") || name.contains(".wiki-guard-")) {
+                    return Err(staging_safe_io_error());
+                }
                 match std::fs::remove_file(&artifact) {
-                    Ok(()) => if let Some(parent) = artifact.parent() { sync_parent(parent)?; },
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                    Ok(()) => {
+                        if let Some(parent) = artifact.parent() {
+                            sync_parent(parent)?;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(io_error(error, &artifact)),
                 }
             }
@@ -185,36 +212,87 @@ impl FileTransaction {
         Ok(())
     }
 
-    fn record_intent(&mut self, path: &Path, previous: Option<Vec<u8>>, bytes: &[u8]) -> Result<(), BackendError> {
-        let Some(root) = self.project_root.as_deref() else { return Ok(()); };
-        let relative = path.strip_prefix(root).map_err(|_| BackendError::new(
-            "PATH_INVALID", "Commit target is outside the project.", false, true,
-        ))?.to_string_lossy().replace('\\', "/");
-        self.journal_entries.push(JournalEntry { relative_path: relative, previous, desired_hash: digest_bytes(bytes) });
-        let journal_path = self.journal_path.get_or_insert_with(|| root.join(format!(
-            ".app/import-v2-journal/{}.json", uuid::Uuid::new_v4()
-        ))).clone();
-        if let Some(parent) = journal_path.parent() { std::fs::create_dir_all(parent).map_err(|error| io_error(error, parent))?; }
-        let bytes = serde_json::to_vec(&Journal { state: JournalState::InProgress, entries: self.journal_entries.clone(), recovery_artifacts: self.journal_artifacts.clone() })
-            .map_err(|_| staging_safe_io_error())?;
+    fn record_intent(
+        &mut self,
+        path: &Path,
+        previous: Option<Vec<u8>>,
+        bytes: &[u8],
+    ) -> Result<(), BackendError> {
+        let Some(root) = self.project_root.as_deref() else {
+            return Ok(());
+        };
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| {
+                BackendError::new(
+                    "PATH_INVALID",
+                    "Commit target is outside the project.",
+                    false,
+                    true,
+                )
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        self.journal_entries.push(JournalEntry {
+            relative_path: relative,
+            previous,
+            desired_hash: digest_bytes(bytes),
+            installed_identity: None,
+        });
+        let journal_path = self
+            .journal_path
+            .get_or_insert_with(|| {
+                root.join(format!(
+                    ".app/import-v2-journal/{}.json",
+                    uuid::Uuid::new_v4()
+                ))
+            })
+            .clone();
+        if let Some(parent) = journal_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| io_error(error, parent))?;
+        }
+        let bytes = serde_json::to_vec(&Journal {
+            state: JournalState::InProgress,
+            entries: self.journal_entries.clone(),
+            recovery_artifacts: self.journal_artifacts.clone(),
+        })
+        .map_err(|_| staging_safe_io_error())?;
         write_atomic_bytes(&journal_path, &bytes)
     }
 
     fn record_recovery_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
-        let Some(root) = self.project_root.as_deref() else { return Ok(()); };
-        self.journal_artifacts.push(path.strip_prefix(root).map_err(|_| staging_safe_io_error())?.to_string_lossy().replace('\\', "/"));
-        let journal_path = self.journal_path.as_deref().ok_or_else(staging_safe_io_error)?;
-        let bytes = serde_json::to_vec(&Journal { state: JournalState::InProgress, entries: self.journal_entries.clone(), recovery_artifacts: self.journal_artifacts.clone() }).map_err(|_| staging_safe_io_error())?;
+        let Some(root) = self.project_root.as_deref() else {
+            return Ok(());
+        };
+        self.journal_artifacts.push(
+            path.strip_prefix(root)
+                .map_err(|_| staging_safe_io_error())?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+        let journal_path = self
+            .journal_path
+            .as_deref()
+            .ok_or_else(staging_safe_io_error)?;
+        let bytes = serde_json::to_vec(&Journal {
+            state: JournalState::InProgress,
+            entries: self.journal_entries.clone(),
+            recovery_artifacts: self.journal_artifacts.clone(),
+        })
+        .map_err(|_| staging_safe_io_error())?;
         write_atomic_bytes(journal_path, &bytes)
     }
 
     fn mark_journal_committed(&self) -> Result<(), BackendError> {
-        let Some(path) = self.journal_path.as_deref() else { return Ok(()); };
+        let Some(path) = self.journal_path.as_deref() else {
+            return Ok(());
+        };
         let bytes = serde_json::to_vec(&Journal {
             state: JournalState::Committed,
             entries: self.journal_entries.clone(),
             recovery_artifacts: self.journal_artifacts.clone(),
-        }).map_err(|_| staging_safe_io_error())?;
+        })
+        .map_err(|_| staging_safe_io_error())?;
         // Atomic write syncs the marker file and then its containing directory.
         write_atomic_bytes(path, &bytes)
     }
@@ -222,8 +300,12 @@ impl FileTransaction {
     fn finish_journal(&mut self) -> Result<(), BackendError> {
         if let Some(path) = self.journal_path.take() {
             match std::fs::remove_file(&path) {
-                Ok(()) => if let Some(parent) = path.parent() { sync_parent(parent)?; },
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Ok(()) => {
+                    if let Some(parent) = path.parent() {
+                        sync_parent(parent)?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(io_error(error, &path)),
             }
         }
@@ -398,7 +480,8 @@ impl FileTransaction {
         let previous = std::fs::read(&guard).map_err(|_| staging_safe_io_error())?;
         if format!("{:x}", Sha256::digest(&previous)) != expected_hash {
             replace_existing(&guard, path).map_err(|error| io_error(error, path))?;
-            self.recovery_artifacts.retain(|candidate| candidate != &guard);
+            self.recovery_artifacts
+                .retain(|candidate| candidate != &guard);
             sync_parent(parent)?;
             return Err(conflict_error());
         }
@@ -440,6 +523,29 @@ impl FileTransaction {
                 _anchor: anchor,
             },
         );
+        if let (Some(root), Some(journal_path)) =
+            (self.project_root.as_deref(), self.journal_path.as_deref())
+        {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| staging_safe_io_error())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let entry = self
+                .journal_entries
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.relative_path == relative)
+                .ok_or_else(staging_safe_io_error)?;
+            entry.installed_identity = Some(identity);
+            let journal = serde_json::to_vec(&Journal {
+                state: JournalState::InProgress,
+                entries: self.journal_entries.clone(),
+                recovery_artifacts: self.journal_artifacts.clone(),
+            })
+            .map_err(|_| staging_safe_io_error())?;
+            write_atomic_bytes(journal_path, &journal)?;
+        }
         self.unverified_installs.remove(path);
         Ok(())
     }
@@ -450,7 +556,11 @@ impl FileTransaction {
         for (path, ownership) in &self.installed_ownership {
             let valid = path.exists()
                 && file_identity(path).ok().as_ref() == Some(&ownership.identity)
-                && std::fs::read(path).ok().map(|bytes| digest_bytes(&bytes)).as_ref() == Some(&ownership.hash);
+                && std::fs::read(path)
+                    .ok()
+                    .map(|bytes| digest_bytes(&bytes))
+                    .as_ref()
+                    == Some(&ownership.hash);
             ownership_valid.insert(path.clone(), valid);
         }
         // Windows std File anchors intentionally deny replacement/deletion. They
@@ -481,13 +591,19 @@ impl FileTransaction {
             match previous {
                 Some(bytes) => {
                     if let Err(_error) = write_atomic_bytes(path, bytes) {
-                        failures.push(format!("{}: rollback write failed", self.actionable_path(path)));
+                        failures.push(format!(
+                            "{}: rollback write failed",
+                            self.actionable_path(path)
+                        ));
                     }
                 }
                 None => {
                     if let Err(error) = std::fs::remove_file(path) {
                         if error.kind() != std::io::ErrorKind::NotFound {
-                            failures.push(format!("{}: rollback removal failed", self.actionable_path(path)));
+                            failures.push(format!(
+                                "{}: rollback removal failed",
+                                self.actionable_path(path)
+                            ));
                         }
                     }
                 }
@@ -508,13 +624,19 @@ impl FileTransaction {
                 continue;
             }
             if let Err(_error) = self.cleanup_artifact(artifact) {
-                failures.push(format!("{}: recovery cleanup failed", self.actionable_path(artifact)));
+                failures.push(format!(
+                    "{}: recovery cleanup failed",
+                    self.actionable_path(artifact)
+                ));
             }
         }
         for directory in self.created_dirs.iter().rev() {
             if let Err(error) = std::fs::remove_dir(directory) {
                 if error.kind() != std::io::ErrorKind::NotFound {
-                    failures.push(format!("{}: directory cleanup failed", self.actionable_path(directory)));
+                    failures.push(format!(
+                        "{}: directory cleanup failed",
+                        self.actionable_path(directory)
+                    ));
                 }
             }
         }
@@ -649,19 +771,34 @@ fn safe_journal_target(root: &Path, relative: &str) -> Result<PathBuf, BackendEr
     if relative.is_empty()
         || relative.contains('\\')
         || relative.contains(':')
-        || Path::new(relative).components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || Path::new(relative)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
     {
-        return Err(BackendError::new("PATH_INVALID", "Recovery target is invalid.", false, true));
+        return Err(BackendError::new(
+            "PATH_INVALID",
+            "Recovery target is invalid.",
+            false,
+            true,
+        ));
     }
     let canonical_root = std::fs::canonicalize(root).map_err(|error| io_error(error, root))?;
     let target = root.join(relative);
-    let existing_anchor = target.ancestors().find(|candidate| candidate.exists()).ok_or_else(|| {
-        BackendError::new("PATH_INVALID", "Recovery target is invalid.", false, true)
-    })?;
-    let canonical_anchor = std::fs::canonicalize(existing_anchor)
-        .map_err(|error| io_error(error, existing_anchor))?;
+    let existing_anchor = target
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| {
+            BackendError::new("PATH_INVALID", "Recovery target is invalid.", false, true)
+        })?;
+    let canonical_anchor =
+        std::fs::canonicalize(existing_anchor).map_err(|error| io_error(error, existing_anchor))?;
     if !canonical_anchor.starts_with(&canonical_root) {
-        return Err(BackendError::new("PATH_INVALID", "Recovery target is invalid.", false, true));
+        return Err(BackendError::new(
+            "PATH_INVALID",
+            "Recovery target is invalid.",
+            false,
+            true,
+        ));
     }
     Ok(target)
 }
@@ -703,8 +840,18 @@ fn replace_existing(temporary: &Path, path: &Path) -> Result<(), std::io::Error>
     // of the synchronous call. MoveFileExW with REPLACE_EXISTING performs the
     // same-volume namespace swap without an unlink/visibility gap; WRITE_THROUGH
     // asks Windows not to return before the move reaches durable storage.
-    let result = unsafe { MoveFileExW(existing.as_ptr(), new_name.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
-    if result == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+    let result = unsafe {
+        MoveFileExW(
+            existing.as_ptr(),
+            new_name.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -719,7 +866,15 @@ fn sync_parent(parent: &Path) -> Result<(), BackendError> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn CreateFileW(name: *const u16, access: u32, share: u32, security: *mut std::ffi::c_void, creation: u32, flags: u32, template: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *mut std::ffi::c_void,
+            creation: u32,
+            flags: u32,
+            template: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void;
         fn FlushFileBuffers(handle: *mut std::ffi::c_void) -> i32;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     }
@@ -731,13 +886,27 @@ fn sync_parent(parent: &Path) -> Result<(), BackendError> {
     let name: Vec<u16> = parent.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: `name` is a live NUL-terminated UTF-16 buffer. BACKUP_SEMANTICS is
     // required to obtain a directory handle. The handle is closed on every path.
-    let handle = unsafe { CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_ALL, std::ptr::null_mut(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, std::ptr::null_mut()) };
-    if handle as isize == -1 { return Err(io_error(std::io::Error::last_os_error(), parent)); }
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_ALL,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle as isize == -1 {
+        return Err(io_error(std::io::Error::last_os_error(), parent));
+    }
     // SAFETY: `handle` was returned by CreateFileW and remains owned here.
     let flushed = unsafe { FlushFileBuffers(handle) };
     let flush_error = (flushed == 0).then(std::io::Error::last_os_error);
     // SAFETY: closing the valid owned handle exactly once.
-    unsafe { CloseHandle(handle); }
+    unsafe {
+        CloseHandle(handle);
+    }
     flush_error.map_or(Ok(()), |error| Err(io_error(error, parent)))
 }
 
@@ -755,8 +924,15 @@ fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 struct FileIdentity(u64, u64);
+
+fn journal_identity_matches(path: &Path, entry: &JournalEntry) -> Result<bool, BackendError> {
+    let Some(expected) = entry.installed_identity else {
+        return Ok(false);
+    };
+    file_identity(path).map(|actual| actual == expected)
+}
 
 struct InstalledOwnership {
     identity: FileIdentity,
@@ -869,9 +1045,9 @@ fn io_error(error: std::io::Error, path: &Path) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::{
-        set_before_checked_displace_hook, set_before_new_install_hook,
+        digest_bytes, set_before_checked_displace_hook, set_before_new_install_hook,
         set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
-        digest_bytes, FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
+        FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
     };
     use sha2::Digest;
 
@@ -1105,6 +1281,43 @@ mod tests {
     }
 
     #[test]
+    fn restart_recovery_preserves_same_content_external_new_replacement() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("new.bin");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&path, b"same bytes").unwrap();
+        transaction.simulate_process_crash();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"same bytes").unwrap();
+
+        let error = FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
+        assert_eq!(std::fs::read(&path).unwrap(), b"same bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_recovery_preserves_same_content_external_overwrite_replacement() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("existing.bin");
+        std::fs::write(&path, b"before").unwrap();
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction
+            .write_if_hash_matches(&path, b"after", &digest_bytes(b"before"))
+            .unwrap();
+        transaction.simulate_process_crash();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"after").unwrap();
+
+        let error = FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
+        assert_eq!(std::fs::read(&path).unwrap(), b"after");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn overwrite_rollback_preserves_post_write_external_replacement() {
         let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1179,7 +1392,9 @@ mod tests {
         let expected = digest_bytes(b"before");
         let mut transaction = FileTransaction::new_for_project(&root);
         transaction.write_new(&formal, b"formal").unwrap();
-        transaction.write_if_hash_matches(&session, b"after", &expected).unwrap();
+        transaction
+            .write_if_hash_matches(&session, b"after", &expected)
+            .unwrap();
         transaction.simulate_process_crash();
 
         assert_eq!(std::fs::read(&formal).unwrap(), b"formal");
@@ -1187,7 +1402,12 @@ mod tests {
         FileTransaction::reconcile_project(&root).unwrap();
         assert!(!formal.exists());
         assert_eq!(std::fs::read(&session).unwrap(), b"before");
-        assert_eq!(std::fs::read_dir(root.join(".app/import-v2-journal")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(root.join(".app/import-v2-journal"))
+                .unwrap()
+                .count(),
+            0
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1215,14 +1435,21 @@ mod tests {
         std::fs::write(&existing, b"before").unwrap();
         let mut transaction = FileTransaction::new_for_project(&root);
         transaction.write_new(&created, b"created").unwrap();
-        transaction.write_if_hash_matches(&existing, b"after", &digest_bytes(b"before")).unwrap();
+        transaction
+            .write_if_hash_matches(&existing, b"after", &digest_bytes(b"before"))
+            .unwrap();
         transaction.mark_journal_committed().unwrap();
         transaction.simulate_process_crash();
 
         FileTransaction::reconcile_project(&root).unwrap();
         assert_eq!(std::fs::read(&created).unwrap(), b"created");
         assert_eq!(std::fs::read(&existing).unwrap(), b"after");
-        assert_eq!(std::fs::read_dir(root.join(".app/import-v2-journal")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(root.join(".app/import-v2-journal"))
+                .unwrap()
+                .count(),
+            0
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1238,19 +1465,33 @@ mod tests {
             ".app/import-sessions/s/session.json",
         ];
         for kill_after in 1..=targets.len() {
-            let root = std::env::temp_dir().join(format!("import-v2-kill-{kill_after}-{}", uuid::Uuid::new_v4()));
+            let root = std::env::temp_dir().join(format!(
+                "import-v2-kill-{kill_after}-{}",
+                uuid::Uuid::new_v4()
+            ));
             let mut transaction = FileTransaction::new_for_project(&root);
             for relative in targets.iter().take(kill_after) {
-                transaction.write_new(&root.join(relative), relative.as_bytes()).unwrap();
+                transaction
+                    .write_new(&root.join(relative), relative.as_bytes())
+                    .unwrap();
             }
             transaction.simulate_process_crash();
             FileTransaction::reconcile_project(&root).unwrap();
-            assert!(targets.iter().all(|relative| !root.join(relative).exists()), "kill point {kill_after}");
+            assert!(
+                targets.iter().all(|relative| !root.join(relative).exists()),
+                "kill point {kill_after}"
+            );
             let mut pending = vec![root.clone()];
             while let Some(directory) = pending.pop() {
                 for entry in std::fs::read_dir(directory).unwrap().filter_map(Result::ok) {
-                    if entry.path().is_dir() { pending.push(entry.path()); }
-                    else { assert!(!entry.file_name().to_string_lossy().contains(".tmp"), "orphan temp at kill point {kill_after}"); }
+                    if entry.path().is_dir() {
+                        pending.push(entry.path());
+                    } else {
+                        assert!(
+                            !entry.file_name().to_string_lossy().contains(".tmp"),
+                            "orphan temp at kill point {kill_after}"
+                        );
+                    }
                 }
             }
             std::fs::remove_dir_all(root).unwrap();
