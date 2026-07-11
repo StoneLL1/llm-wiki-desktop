@@ -302,7 +302,7 @@ impl ImportV2Service {
         history.committed_count =
             history.items.iter().filter(|entry| entry.committed).count() as u32;
         history.failed_count = history.items.len() as u32 - history.committed_count;
-        let mut transaction = FileTransaction::new();
+        let mut transaction = FileTransaction::new_for_project(&context.root);
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
                 transaction.write_new(&context.resolve_project_path(&plan.raw_path)?, &source)?;
