@@ -124,6 +124,7 @@ impl ImportV2Service {
                 decision,
                 &history_path,
                 &batch,
+                &history_hash_before,
             ) {
                 Ok(result) => result,
                 Err(error) => ImportItemCommitResult {
@@ -155,6 +156,7 @@ impl ImportV2Service {
         decision: &CommitItemDecision,
         history_path: &str,
         prior_batch: &ImportBatchResult,
+        history_expected_hash: &str,
     ) -> Result<ImportItemCommitResult, BackendError> {
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -351,16 +353,12 @@ impl ImportV2Service {
         history.committed_count =
             history.items.iter().filter(|entry| entry.committed).count() as u32;
         history.failed_count = history.items.len() as u32 - history.committed_count;
-        let history_expected_hash = files.file_hash(context, history_path)?;
         let session_expected_hashes: std::collections::HashMap<_, _> = self
             .sessions
             .serialized_writes(&session)?
             .into_iter()
-            .map(|(path, _)| {
-                let hash = files.file_hash(context, &path)?;
-                Ok((path, hash))
-            })
-            .collect::<Result<_, BackendError>>()?;
+            .map(|(path, bytes)| (path, format!("{:x}", Sha256::digest(&bytes))))
+            .collect();
         let mut transaction = FileTransaction::new_for_project(&context.root);
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
@@ -409,7 +407,7 @@ impl ImportV2Service {
             transaction.write_if_hash_matches(
                 &context.resolve_project_path(history_path)?,
                 &json_bytes(&history)?,
-                &history_expected_hash,
+                history_expected_hash,
             )?;
             session.items[item_position].status = ImportItemStatus::Committing;
             session.items[item_position].status = ImportItemStatus::Completed;

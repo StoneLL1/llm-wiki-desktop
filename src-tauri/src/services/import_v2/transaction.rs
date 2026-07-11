@@ -117,7 +117,11 @@ impl FileTransaction {
             ).map_err(|_| staging_safe_io_error())?;
             for intent in journal.entries.iter().rev() {
                 let target = safe_journal_target(root, &intent.relative_path)?;
-                let current = std::fs::read(&target).ok();
+                let current = match std::fs::read(&target) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(io_error(error, &target)),
+                };
                 let current_hash = current.as_deref().map(digest_bytes);
                 let previous_hash = intent.previous.as_deref().map(digest_bytes);
                 if current_hash == previous_hash { continue; }
