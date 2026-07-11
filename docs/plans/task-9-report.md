@@ -13,8 +13,13 @@
 - Added restart recovery regressions for same-byte external namespace replacements of both new and overwritten destinations; recovery returns `IMPORT_V2_COMMIT_CONFLICT` and preserves the external file.
 - Focused Rust tests compile successfully with a fresh Cargo target. Executing the Windows test binary is currently blocked by `STATUS_ENTRYPOINT_NOT_FOUND` in this environment; the original worktree target also contains stale absolute Tauri build paths.
 
-## Remaining Review B work
+## 2026-07-12 final Review B closure
 
-- Replace the synthetic target-loop crash test with commit-service fault injection across every persistence boundary.
-- Add deterministic recovery directory-swap/symlink TOCTOU coverage and harden the final mutation primitive if the test confirms the race.
-- Run full Rust and `npm run check` after the Windows runtime issue is resolved.
+- Journal recovery rejects symlink/reparse `.app`, journal directories, and journal files. Journal files are opened no-follow relative to the retained journal parent on Unix, while Windows retains the journal parent without `FILE_SHARE_DELETE`; cleanup is relative/handle-protected and cannot delete an outside replacement.
+- New and checked-replace writes persist the candidate's native identity in the durable intent before the first OS install primitive. Same-volume `linkat`/rename preserves that identity, the immediate post-install fault hook runs before any later journal write, and reopening verifies the installed target identity.
+- Final mutations are namespace-bound: Unix retains the validated parent fd and uses narrow `openat`, `linkat`, `unlinkat`, and `renameat` FFI; Windows retains a directory handle opened without `FILE_SHARE_DELETE` while the existing same-volume primitives run. Directory-swap injection proves an outside replacement remains untouched.
+- Real commit-service crash coverage passes for every observed persistence boundary for both new writes and checked Wiki replacement. Focused transaction coverage passes on Windows, including supported reparse behavior; Unix-only symlink directory/file regressions compile under their platform gates.
+
+## Verification
+
+- Clean-target `cargo test --no-default-features`: library `563/563` and Import V2 integration `3/3` passed; the first sandboxed run reached `mvp_flow` with `8/9`, where the sole failure was an environment denial writing the test settings file under `%APPDATA%`. An elevated full rerun and unified `npm run check` are recorded in the delivery evidence.
