@@ -1,7 +1,7 @@
 # LLM Wiki Desktop Frontend Guidelines
 
-> Purpose: Define the frontend design system for LLM Wiki Desktop.
-> Visual reference: `DESIGN.md` plus the Codex desktop app. The target is a highly Codex-like desktop workbench, adapted to a local wiki product.
+> Purpose: Define the frontend design system and implementation guardrails for LLM Wiki Desktop.
+> Implementation authority: the entire `UI-Frontend-design/` folder is authoritative for exact DOM hierarchy, interaction structure, CSS tokens, absolute-pixel font sizes, and component heights. `DESIGN.md` remains a high-level visual reference; when exact values or structure differ, follow `UI-Frontend-design/`.
 > Stack target: React 19, TypeScript, Tailwind CSS v4, shadcn/ui, Lucide React.
 
 ## 1. Design Intent
@@ -88,11 +88,15 @@ Bottom Status Bar
 
 ### 3.2 Layout Dimensions
 
-- App minimum target width: 1120px.
+- Reference desktop canvas: 1280px wide; responsive collapse follows the canonical breakpoints below.
 - Left sidebar: 240px default, 56px collapsed.
 - Right panel: 320px default, 380px for diff or source-heavy views.
 - Top bar height: 48px.
+- Main workspace header height: 52px.
+- Right context panel header height: 52px.
+- Functional panel header height: 44px.
 - Bottom status bar height: 28px.
+- Primary navigation row height: 30px; compact tree/recent rows: 26px.
 - Main content padding: 16px for dense tool views, 24px for reading and dashboard views.
 - Splitter handles must be visible on hover and keyboard accessible.
 - Treat panes as part of the application frame, not as floating cards.
@@ -102,14 +106,44 @@ Bottom Status Bar
 
 This is a desktop-first app. Smaller windows should preserve the workbench model rather than transform into a mobile landing layout.
 
-- Under 960px: right panel collapses into a drawer.
-- Under 760px: left sidebar collapses to icons, and global search becomes a command button.
+- At 1180px and below: right panel collapses into a drawer.
+- At 820px and below: left sidebar collapses to icons, global search is hidden or becomes a command action, and long project/brand labels collapse as defined by the design CSS.
 - Never scale font size with viewport width.
 - Avoid layout shifts when task labels, file names, or status text update.
 
+### 3.4 Frontend Ownership Map
+
+The implemented call chain is `AppShell -> WorkspaceController -> WorkspaceRouter -> lazy feature views`. Preserve these boundaries:
+
+| Layer | Ownership |
+|---|---|
+| `AppShell` | Application frame, pane sizing, responsive behavior, global keyboard shortcuts, and mounting global controllers/overlays. |
+| `WorkspaceController` | Project-scoped workflow composition and modal wiring. |
+| `WorkspaceRouter` | Active-view dispatch and the lazy-view boundary. |
+| `ProjectConfirmationController` | `PendingAction` and compile-conflict orchestration. |
+| Feature workflows | Domain-specific state and effects only. |
+
+The five current domain workflows remain separate: `useAiCapabilities`, `useTaskLauncher`, `useImportWorkflow`, `useProviderWorkflow`, and `useAgentWorkflow`. Do not move workflow logic back into `AppShell`, and do not consolidate these responsibilities into one giant controller or hook. New cross-view coordination belongs in a focused domain workflow composed by `WorkspaceController`; view-specific behavior stays with its feature.
+
+### 3.5 Async Project-Scope Safety
+
+Every asynchronous UI commit must prove that it still belongs to the active project using `projectId + rootPath`, or an equivalent stable project key captured when the operation starts. This check applies at each commit point, not only when a request begins.
+
+- Supersedable requests, such as capability refreshes, previews, and tests, must use a request epoch or equivalent monotonic guard so only the latest request may commit.
+- When the project changes or a newer request supersedes an older one, suppress stale commits to view state, navigation, drawer opening, and toasts.
+- Backend task records are global history: stale project-scoped presentation must be suppressed, but valid task records still enter `taskStore` and remain inspectable from the task UI.
+- Do not infer project scope from the currently rendered view after awaiting; compare against the captured stable key before every stateful UI effect.
+
+### 3.6 Secrets, Long Tasks, and Bundle Boundaries
+
+- Raw provider secrets pass directly from the form callback through typed Tauri IPC to OS credential storage. They must never enter Zustand, logs, task payloads, error details, analytics, or toast text.
+- Every long-running operation and its result enters `taskStore` so progress, logs, cancellation, completion, and failure remain globally visible in the task drawer across navigation.
+- `WorkspaceRouter` owns lazy active-view dispatch. Keep each lazy view wrapped by colocated `Suspense` and `ViewErrorBoundary` boundaries so loading and render/import failures are isolated per active view.
+- Controller imports must not pull heavy feature implementations or their transitive async chunks into the initial bundle. Pass typed workflow facades into lazy views, use type-only imports where applicable, and keep view-only heavy dependencies behind the lazy import boundary.
+
 ## 4. Color System
 
-Use `DESIGN.md` as the source palette, adapted for an app shell.
+Use `UI-Frontend-design/assets/app.css` `:root` as the exact token source, including spacing and `--text-inverse`; mirror it through `src/styles.css` and reference tokens from components. Use `DESIGN.md` only for high-level palette intent.
 
 ### 4.1 Core Tokens
 
@@ -165,35 +199,33 @@ Dark mode must not become a blue-black neon theme. Keep saturation low and use t
 
 ```css
 --font-ui: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
---font-display: "Source Serif Pro", Georgia, serif;
+--font-reading: "Source Serif Pro", Georgia, serif;
 --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 ```
 
-If Sohne or Signifier are legally available in the implementation environment, they may replace Inter and Source Serif Pro. Do not block implementation on proprietary fonts.
+Bundle Inter, JetBrains Mono, and Source Serif Pro with `@fontsource`; do not use a CDN or substitute proprietary fonts in the implementation.
 
 ### 5.2 Type Scale
 
-| Role | Size | Weight | Line Height | Use |
-|---|---:|---:|---:|---|
-| App title | 24px | 600 | 1.2 | Project landing, major empty states |
-| View title | 20px | 600 | 1.3 | Dashboard, Chat, Import, Lint |
-| Section title | 16px | 600 | 1.35 | Panel groups |
-| Body | 14px | 400 | 1.55 | Default UI text |
-| Body small | 13px | 400 | 1.45 | Dense rows, metadata |
-| Label | 12px | 500 | 1.35 | Control labels, badges |
-| Caption | 11px | 500 | 1.35 | Status bar and tiny metadata |
-| Reading body | 16px | 400 | 1.7 | Markdown article reading |
-| Reading heading | 28px | 600 | 1.2 | Markdown H1 rendered content |
-| Code | 13px | 400 | 1.55 | Code, paths, terminal output |
+| Role | Size | Use |
+|---|---:|---|
+| UI body / controls | 13px | Default app chrome, rows, buttons, inputs, panel titles |
+| Secondary UI | 12px | Supporting labels, hints, table metadata |
+| Muted / mono | 11px | Paths, timestamps, task/status metadata |
+| Micro-label | 10.5px | Uppercase section labels and compact badges |
+| Reading body | 14-15px | Markdown articles, reports, and message prose |
+
+Larger titles and feature-specific text must copy the exact pixel values from the corresponding `UI-Frontend-design/` page/CSS selector. Do not derive them from a generic responsive type scale.
 
 ### 5.3 Typography Rules
 
 - Use sans-serif for all app chrome and controls.
 - Use serif only inside reading, report preview, or editorial empty states.
-- Keep letter spacing at `0` unless using tiny uppercase labels, where `0.02em` is acceptable.
+- Use `10.5px`, uppercase, `0.08em` letter spacing for shell section labels; otherwise follow the corresponding design selector.
 - Avoid weights above 600.
 - Use monospace for file paths, CLI output, code blocks, JSON snippets, and exact command names.
 - Chinese and English text must both fit naturally. Avoid narrow fixed-width controls for translated labels.
+- Express implementation sizes as absolute Tailwind values such as `text-[13px]`, not semantic aliases such as `text-sm` whose value may drift.
 
 ## 6. Spacing, Radius, and Borders
 
@@ -316,7 +348,7 @@ Primary navigation belongs in the left sidebar:
 - Exports
 - Settings
 
-Use Lucide icons plus text in expanded mode, icons only in collapsed mode. Active state uses `--accent-soft` background and `--accent` icon/text. Keep navigation rows 32px high with 6px radius.
+Use Lucide icons plus text in expanded mode, icons only in collapsed mode. Active state uses `--accent-soft` background and `--accent` icon/text. Keep primary navigation rows 30px high and compact recent/tree rows 26px high, with 6px radius.
 
 ### 7.4 Panels
 
@@ -413,7 +445,7 @@ Reading surface:
 
 - White background.
 - Max reading width around 760px.
-- Markdown body uses 16px text and generous line height.
+- Markdown body uses 14-15px text and the line height defined by the canonical design CSS.
 - Code blocks use muted background and copy action.
 - Wikilinks should be visually distinct but not loud.
 
