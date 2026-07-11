@@ -22,6 +22,87 @@ use crate::services::import_v2::ImportV2Service;
 use crate::services::{FileStore, GitService};
 
 #[cfg(test)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum CommitPersistenceBoundary {
+    JournalIntent(CommitPersistenceTarget),
+    TargetInstalled(CommitPersistenceTarget),
+    CommittedMarkerPersisted,
+    JournalDeleted,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum CommitPersistenceTarget {
+    RawSnapshot,
+    Baseline,
+    Asset(String),
+    Wiki,
+    Manifest,
+    Index,
+    History,
+    SessionItem,
+    SessionSummary,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMMIT_PERSISTENCE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&CommitPersistenceBoundary) -> bool>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn classify_commit_target(relative: &str) -> CommitPersistenceTarget {
+    if relative.contains("/assets/") {
+        CommitPersistenceTarget::Asset(relative.rsplit('/').next().unwrap_or(relative).into())
+    } else if relative.starts_with("raw/sources/") {
+        CommitPersistenceTarget::RawSnapshot
+    } else if relative.starts_with(".app/source-artifacts/") {
+        CommitPersistenceTarget::Baseline
+    } else if relative.starts_with("wiki/") {
+        CommitPersistenceTarget::Wiki
+    } else if relative.starts_with(".app/sources/") {
+        CommitPersistenceTarget::Manifest
+    } else if relative == ".app/source-index-v2.json" {
+        CommitPersistenceTarget::Index
+    } else if relative.starts_with(".app/import-history/") {
+        CommitPersistenceTarget::History
+    } else if relative.contains("/items/") && relative.ends_with(".json") {
+        CommitPersistenceTarget::SessionItem
+    } else if relative.starts_with(".app/import-sessions/") && relative.ends_with("/session.json") {
+        CommitPersistenceTarget::SessionSummary
+    } else {
+        panic!("unclassified Import V2 commit persistence target: {relative}");
+    }
+}
+
+#[cfg(test)]
+pub(super) fn run_commit_persistence_hook(phase: &str, relative: Option<&str>) -> bool {
+    COMMIT_PERSISTENCE_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(hook) = slot.as_mut() else {
+            return false;
+        };
+        let boundary = match phase {
+            "intent" => CommitPersistenceBoundary::JournalIntent(classify_commit_target(
+                relative.expect("journal intent requires a relative target"),
+            )),
+            "installed" => CommitPersistenceBoundary::TargetInstalled(classify_commit_target(
+                relative.expect("installed target requires a relative path"),
+            )),
+            "committed" => CommitPersistenceBoundary::CommittedMarkerPersisted,
+            "deleted" => CommitPersistenceBoundary::JournalDeleted,
+            _ => panic!("unknown persistence phase: {phase}"),
+        };
+        hook(&boundary)
+    })
+}
+
+#[cfg(test)]
+fn set_commit_persistence_hook(hook: impl FnMut(&CommitPersistenceBoundary) -> bool + 'static) {
+    COMMIT_PERSISTENCE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
 thread_local! {
     static BEFORE_FAILED_HISTORY_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
@@ -31,7 +112,11 @@ thread_local! {
 
 #[cfg(test)]
 fn run_before_artifact_open_hook(path: &Path) {
-    BEFORE_ARTIFACT_OPEN_HOOK.with(|slot| if let Some(hook) = slot.borrow_mut().take() { hook(path) });
+    BEFORE_ARTIFACT_OPEN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path)
+        }
+    });
 }
 
 #[cfg(not(test))]
@@ -624,18 +709,26 @@ fn verified_artifact(
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
     use std::os::unix::io::AsRawFd;
-    std::fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).is_ok_and(|path| path == canonical)
+    std::fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .is_ok_and(|path| path == canonical)
 }
 
 #[cfg(target_os = "macos")]
 fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
     use std::os::unix::io::AsRawFd;
-    unsafe extern "C" { fn fcntl(fd: i32, command: i32, buffer: *mut std::ffi::c_void) -> i32; }
+    unsafe extern "C" {
+        fn fcntl(fd: i32, command: i32, buffer: *mut std::ffi::c_void) -> i32;
+    }
     const F_GETPATH: i32 = 50;
     let mut buffer = vec![0u8; 1024];
     // SAFETY: the descriptor is live and the buffer is writable for MAXPATHLEN bytes.
-    if unsafe { fcntl(file.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr().cast()) } == -1 { return false; }
-    let length = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+    if unsafe { fcntl(file.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr().cast()) } == -1 {
+        return false;
+    }
+    let length = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
     std::str::from_utf8(&buffer[..length]).is_ok_and(|path| Path::new(path) == canonical)
 }
 
@@ -644,24 +737,50 @@ fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
     use std::os::windows::io::AsRawHandle;
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GetFinalPathNameByHandleW(handle: *mut std::ffi::c_void, path: *mut u16, size: u32, flags: u32) -> u32;
+        fn GetFinalPathNameByHandleW(
+            handle: *mut std::ffi::c_void,
+            path: *mut u16,
+            size: u32,
+            flags: u32,
+        ) -> u32;
     }
     let mut buffer = vec![0u16; 32768];
     // SAFETY: the file owns a live handle and buffer is writable for its full declared size.
-    let length = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle().cast(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
-    if length == 0 || length as usize >= buffer.len() { return false; }
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle().cast(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            0,
+        )
+    };
+    if length == 0 || length as usize >= buffer.len() {
+        return false;
+    }
     let resolved = String::from_utf16_lossy(&buffer[..length as usize]);
     let resolved = if let Some(unc) = resolved.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{unc}")
     } else {
-        resolved.strip_prefix(r"\\?\").unwrap_or(&resolved).to_string()
+        resolved
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&resolved)
+            .to_string()
     };
     let canonical_text = canonical.to_string_lossy();
-    let canonical_text = canonical_text.strip_prefix(r"\\?\").unwrap_or(&canonical_text);
-    resolved.replace('/', "\\").eq_ignore_ascii_case(&canonical_text.replace('/', "\\"))
+    let canonical_text = canonical_text
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical_text);
+    resolved
+        .replace('/', "\\")
+        .eq_ignore_ascii_case(&canonical_text.replace('/', "\\"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    windows
+)))]
 fn opened_file_matches_path(_file: &std::fs::File, _canonical: &Path) -> bool {
     false
 }
@@ -722,14 +841,14 @@ fn asset_collision_key(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use sha2::{Digest, Sha256};
 
     use crate::errors::IMPORT_V2_COMMIT_CONFLICT;
     use crate::models::import_v2::{
         CommitConflictAction, CommitImportSessionRequest, CommitItemDecision, ImportInput,
-        ImportInputKind, ImportResourceMode,
+        ImportInputKind, ImportItemStatus, ImportResourceMode,
     };
     use crate::models::paths::ProjectContext;
     use crate::models::task::TaskType;
@@ -742,7 +861,11 @@ mod tests {
     use crate::tasks::TaskService;
 
     use super::super::ImportV2Service;
-    use super::{asset_collision_key, set_before_artifact_open_hook, set_before_failed_history_write_hook, verified_artifact};
+    use super::{
+        asset_collision_key, set_before_artifact_open_hook, set_before_failed_history_write_hook,
+        set_commit_persistence_hook, verified_artifact, CommitPersistenceBoundary,
+        CommitPersistenceTarget,
+    };
     use crate::services::import_v2::transaction::set_before_checked_displace_hook;
     use crate::services::import_v2::transaction::set_before_new_install_hook;
 
@@ -1533,7 +1656,8 @@ mod tests {
 
     #[test]
     fn staged_artifact_replacement_after_open_cannot_redirect_bound_handle() {
-        let root = std::env::temp_dir().join(format!("import-v2-artifact-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("import-v2-artifact-{}", uuid::Uuid::new_v4()));
         let path = root.join("staging/item.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"expected").unwrap();
@@ -1543,8 +1667,205 @@ mod tests {
             std::fs::remove_file(path).unwrap();
             std::fs::rename(replacement, path).unwrap();
         });
-        assert_eq!(verified_artifact(&root, "staging/item.md", &format!("{:x}", Sha256::digest(b"expected"))).unwrap(), b"expected");
+        assert_eq!(
+            verified_artifact(
+                &root,
+                "staging/item.md",
+                &format!("{:x}", Sha256::digest(b"expected"))
+            )
+            .unwrap(),
+            b"expected"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"attacker");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn observed_item_commit_boundaries(fixture: &CommitFixture) -> Vec<CommitPersistenceBoundary> {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let armed = Rc::new(Cell::new(false));
+        let captured = observed.clone();
+        let hook_armed = armed.clone();
+        set_commit_persistence_hook(move |boundary| {
+            if matches!(
+                boundary,
+                CommitPersistenceBoundary::JournalIntent(CommitPersistenceTarget::RawSnapshot)
+            ) {
+                hook_armed.set(true);
+            }
+            if hook_armed.get() {
+                captured.borrow_mut().push(boundary.clone());
+            }
+            false
+        });
+        fixture.commit_with(None, None);
+        set_commit_persistence_hook(|_| false);
+        Rc::try_unwrap(observed).unwrap().into_inner()
+    }
+
+    fn abort_at_item_boundary(
+        fixture: &CommitFixture,
+        target: CommitPersistenceBoundary,
+        occurrence: usize,
+        overwrite: bool,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let armed = Rc::new(Cell::new(false));
+        let hook_armed = armed.clone();
+        let expected = target.clone();
+        let mut seen = 0usize;
+        let checked_wiki = overwrite.then(|| {
+            let manifest = fixture.manifest();
+            let path = fixture.root.join(&manifest.wiki_path);
+            let original = std::fs::read(&path).unwrap();
+            (path, original, b"# updated.pdf".to_vec())
+        });
+        set_commit_persistence_hook(move |boundary| {
+            if matches!(
+                boundary,
+                CommitPersistenceBoundary::JournalIntent(CommitPersistenceTarget::RawSnapshot)
+            ) {
+                hook_armed.set(true);
+            }
+            if hook_armed.get() && boundary == &expected {
+                seen += 1;
+                seen == occurrence
+            } else {
+                false
+            }
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if overwrite {
+                let manifest = fixture.manifest();
+                let hash = fixture
+                    .files
+                    .file_hash(&fixture.context, &manifest.wiki_path)
+                    .unwrap();
+                fixture.commit_with(
+                    Some(CommitConflictAction::ApplyMergedCandidate),
+                    Some(&hash),
+                );
+            } else {
+                fixture.commit_with(None, None);
+            }
+        }));
+        assert!(
+            result.is_err(),
+            "fault boundary was not reached: {target:?}"
+        );
+        set_commit_persistence_hook(|_| false);
+
+        let drift = fixture.root.join("wiki/external-drift.md");
+        std::fs::create_dir_all(drift.parent().unwrap()).unwrap();
+        std::fs::write(&drift, b"external drift before recovery").unwrap();
+        let reopened = ImportV2Service::default();
+        let session = reopened
+            .load_session(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        let forward = matches!(
+            target,
+            CommitPersistenceBoundary::CommittedMarkerPersisted
+                | CommitPersistenceBoundary::JournalDeleted
+        );
+        assert_eq!(
+            session.items[0].status == ImportItemStatus::Completed,
+            forward
+        );
+        if let Some((wiki, original, candidate)) = checked_wiki {
+            assert_eq!(
+                std::fs::read(wiki).unwrap(),
+                if forward { candidate } else { original },
+                "checked Wiki overwrite must recover to the exact old or new bytes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(drift).unwrap(),
+            b"external drift before recovery"
+        );
+        let journals = fixture.root.join(".app/import-v2-journal");
+        assert!(
+            !journals.exists() || std::fs::read_dir(journals).unwrap().next().is_none(),
+            "normal preflight must finish reconciliation"
+        );
+    }
+
+    #[test]
+    fn real_new_import_commit_recovers_at_every_persistence_boundary() {
+        let mut discovery = CommitFixture::two_ready_items();
+        discovery.second_item_id = None;
+        let boundaries = observed_item_commit_boundaries(&discovery);
+        assert!(
+            boundaries.contains(&CommitPersistenceBoundary::TargetInstalled(
+                CommitPersistenceTarget::Asset("asset.png".into())
+            ))
+        );
+        assert!(boundaries.iter().any(|boundary| matches!(
+            boundary,
+            CommitPersistenceBoundary::TargetInstalled(CommitPersistenceTarget::SessionItem)
+        )));
+        let mut occurrences = std::collections::HashMap::new();
+        for boundary in boundaries {
+            let occurrence = occurrences
+                .entry(boundary.clone())
+                .and_modify(|value| *value += 1)
+                .or_insert(1);
+            let mut fixture = CommitFixture::two_ready_items();
+            fixture.second_item_id = None;
+            abort_at_item_boundary(&fixture, boundary, *occurrence, false);
+        }
+    }
+
+    #[test]
+    fn real_checked_wiki_overwrite_recovers_at_every_persistence_boundary() {
+        let discovery = CommitFixture::updated_source();
+        let manifest = discovery.manifest();
+        let hash = discovery
+            .files
+            .file_hash(&discovery.context, &manifest.wiki_path)
+            .unwrap();
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let armed = Rc::new(Cell::new(false));
+        let captured = observed.clone();
+        let hook_armed = armed.clone();
+        set_commit_persistence_hook(move |boundary| {
+            if matches!(
+                boundary,
+                CommitPersistenceBoundary::JournalIntent(CommitPersistenceTarget::RawSnapshot)
+            ) {
+                hook_armed.set(true);
+            }
+            if hook_armed.get() {
+                captured.borrow_mut().push(boundary.clone());
+            }
+            false
+        });
+        discovery.commit_with(
+            Some(CommitConflictAction::ApplyMergedCandidate),
+            Some(&hash),
+        );
+        set_commit_persistence_hook(|_| false);
+        let boundaries = Rc::try_unwrap(observed).unwrap().into_inner();
+        assert!(
+            boundaries.contains(&CommitPersistenceBoundary::TargetInstalled(
+                CommitPersistenceTarget::Wiki
+            ))
+        );
+        let mut occurrences = std::collections::HashMap::new();
+        for boundary in boundaries {
+            let occurrence = occurrences
+                .entry(boundary.clone())
+                .and_modify(|value| *value += 1)
+                .or_insert(1);
+            abort_at_item_boundary(
+                &CommitFixture::updated_source(),
+                boundary,
+                *occurrence,
+                true,
+            );
+        }
     }
 }

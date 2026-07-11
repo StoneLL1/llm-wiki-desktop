@@ -16,6 +16,15 @@ thread_local! {
     static FAIL_NEXT_IDENTITY_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_RECOVERY_MUTATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
+    static SIMULATED_PROCESS_ABORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn commit_fault_boundary(phase: &str, relative: Option<&str>) {
+    if super::commit::run_commit_persistence_hook(phase, relative) {
+        SIMULATED_PROCESS_ABORT.with(|flag| flag.set(true));
+        panic!("simulated Import V2 process abort at {phase}");
+    }
 }
 
 #[cfg(test)]
@@ -264,7 +273,7 @@ impl FileTransaction {
             .to_string_lossy()
             .replace('\\', "/");
         self.journal_entries.push(JournalEntry {
-            relative_path: relative,
+            relative_path: relative.clone(),
             previous,
             desired_hash: digest_bytes(bytes),
             installed_identity: None,
@@ -287,7 +296,10 @@ impl FileTransaction {
             recovery_artifacts: self.journal_artifacts.clone(),
         })
         .map_err(|_| staging_safe_io_error())?;
-        write_atomic_bytes(&journal_path, &bytes)
+        write_atomic_bytes(&journal_path, &bytes)?;
+        #[cfg(test)]
+        commit_fault_boundary("intent", Some(&relative));
+        Ok(())
     }
 
     fn record_recovery_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -391,6 +403,10 @@ impl FileTransaction {
         }
         self.backups.push((path.to_path_buf(), None));
         self.capture_installed(path, bytes)?;
+        #[cfg(test)]
+        if let Some(entry) = self.journal_entries.last() {
+            commit_fault_boundary("installed", Some(entry.relative_path.as_str()));
+        }
         // Keep the linked staging name tracked until commit so cleanup failure is
         // a transaction failure and rollback can retry it deterministically.
         Ok(())
@@ -518,6 +534,10 @@ impl FileTransaction {
         sync_parent(parent)?;
         self.backups.push((path.to_path_buf(), Some(previous)));
         self.capture_installed(path, bytes)?;
+        #[cfg(test)]
+        if let Some(entry) = self.journal_entries.last() {
+            commit_fault_boundary("installed", Some(entry.relative_path.as_str()));
+        }
         self.cleanup_artifact(&temporary)?;
         self.cleanup_artifact(&guard)
     }
@@ -529,7 +549,11 @@ impl FileTransaction {
             }
         }
         self.mark_journal_committed()?;
+        #[cfg(test)]
+        commit_fault_boundary("committed", None);
         self.finish_journal()?;
+        #[cfg(test)]
+        commit_fault_boundary("deleted", None);
         self.finished = true;
         Ok(())
     }
@@ -715,6 +739,12 @@ impl FileTransaction {
 
 impl Drop for FileTransaction {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if SIMULATED_PROCESS_ABORT.with(|flag| flag.replace(false)) {
+            self.installed_ownership.clear();
+            self.finished = true;
+            return;
+        }
         if !self.finished {
             let _ = self.rollback();
         }
@@ -1592,50 +1622,5 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(displaced).unwrap();
-    }
-
-    #[test]
-    fn every_import_target_kill_point_recovers_all_or_nothing() {
-        let targets = [
-            "raw/sources/s/v/original.bin",
-            "wiki/page.md",
-            ".app/sources/s.json",
-            ".app/source-index-v2.json",
-            ".app/import-history/b.json",
-            ".app/import-sessions/s/items/i.json",
-            ".app/import-sessions/s/session.json",
-        ];
-        for kill_after in 1..=targets.len() {
-            let root = std::env::temp_dir().join(format!(
-                "import-v2-kill-{kill_after}-{}",
-                uuid::Uuid::new_v4()
-            ));
-            let mut transaction = FileTransaction::new_for_project(&root);
-            for relative in targets.iter().take(kill_after) {
-                transaction
-                    .write_new(&root.join(relative), relative.as_bytes())
-                    .unwrap();
-            }
-            transaction.simulate_process_crash();
-            FileTransaction::reconcile_project(&root).unwrap();
-            assert!(
-                targets.iter().all(|relative| !root.join(relative).exists()),
-                "kill point {kill_after}"
-            );
-            let mut pending = vec![root.clone()];
-            while let Some(directory) = pending.pop() {
-                for entry in std::fs::read_dir(directory).unwrap().filter_map(Result::ok) {
-                    if entry.path().is_dir() {
-                        pending.push(entry.path());
-                    } else {
-                        assert!(
-                            !entry.file_name().to_string_lossy().contains(".tmp"),
-                            "orphan temp at kill point {kill_after}"
-                        );
-                    }
-                }
-            }
-            std::fs::remove_dir_all(root).unwrap();
-        }
     }
 }
