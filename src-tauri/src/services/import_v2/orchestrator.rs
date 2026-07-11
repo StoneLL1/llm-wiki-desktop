@@ -14,6 +14,7 @@ use crate::services::import_v2::engine::{
     validate_engine_result, EngineOperation, EngineRegistry, EngineRequest, ImportEngine,
 };
 use crate::services::import_v2::quality_gate::QualityGate;
+use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::import_v2::SessionStore;
 use crate::services::FileStore;
 use crate::tasks::task_model::LogLevel;
@@ -45,6 +46,7 @@ impl ImportV2Service {
         mode: ImportResourceMode,
     ) -> Result<ImportSession, BackendError> {
         let _guard = self.lock()?;
+        self.preflight_locked(context)?;
         self.sessions.create(context, files, mode)
     }
     pub fn add_inputs(
@@ -55,6 +57,7 @@ impl ImportV2Service {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         let _guard = self.lock()?;
+        self.preflight_locked(context)?;
         self.sessions.add_inputs(context, files, session_id, inputs)
     }
     pub fn load_session(
@@ -63,6 +66,8 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
         self.sessions.load(context, files, session_id)
     }
     pub fn recover_session(
@@ -73,6 +78,7 @@ impl ImportV2Service {
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
         let _guard = self.lock()?;
+        self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         for item in &mut session.items {
             if matches!(
@@ -121,6 +127,7 @@ impl ImportV2Service {
         selected: bool,
     ) -> Result<ImportItem, BackendError> {
         let _guard = self.lock()?;
+        self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = find_item_mut(&mut session, item_id)?;
         item.selected = selected;
@@ -391,6 +398,7 @@ impl ImportV2Service {
         F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
     {
         let _guard = self.lock()?;
+        self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = find_item_mut(&mut session, item_id)?;
         mutation(item)?;
@@ -402,6 +410,10 @@ impl ImportV2Service {
         self.mutation_lock
             .lock()
             .map_err(|_| task_error("Import session mutation lock is unavailable."))
+    }
+
+    fn preflight_locked(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        FileTransaction::reconcile_project(&context.root)
     }
 }
 
