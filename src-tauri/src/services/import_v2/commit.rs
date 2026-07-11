@@ -89,9 +89,24 @@ impl ImportV2Service {
             items: Vec::new(),
         };
         file_store.write_json_atomic(context, &history_path, &batch)?;
-        for decision in &request.decisions {
+        for (position, decision) in request.decisions.iter().enumerate() {
             if is_cancelled() {
-                break;
+                for unprocessed in &request.decisions[position..] {
+                    batch.items.push(ImportItemCommitResult {
+                        item_id: unprocessed.item_id.clone(),
+                        source_id: None,
+                        version_id: None,
+                        wiki_path: None,
+                        committed: false,
+                        error_code: Some(crate::errors::IMPORT_V2_CANCELLED.into()),
+                    });
+                }
+                batch.failed_count = batch.items.len() as u32 - batch.committed_count;
+                file_store.write_json_atomic(context, &history_path, &batch)?;
+                return Err(commit_error(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import commit was cancelled.",
+                ));
             }
             let provisional = match self.commit_one(
                 context,
@@ -231,7 +246,7 @@ impl ImportV2Service {
             .and_then(|value| value.to_str())
             .unwrap_or("bin")
             .to_string();
-        let plan = SourceRegistry.build_commit_plan(
+        let mut plan = SourceRegistry.build_commit_plan(
             &index,
             existing_manifest.as_ref(),
             &SourceCommitInput {
@@ -256,6 +271,14 @@ impl ImportV2Service {
             resolution,
             SourceResolution::ExactDuplicate { .. } | SourceResolution::SameContentNewOrigin { .. }
         );
+        let wiki_exists = files.exists(context, &plan.wiki_path);
+        if wiki_exists
+            && !duplicate
+            && decision.conflict_action == Some(CommitConflictAction::CreateNew)
+        {
+            plan.wiki_path = collision_free_wiki_path(context, &plan.wiki_path)?;
+            plan.next_manifest.wiki_path = plan.wiki_path.clone();
+        }
         let wiki_exists = files.exists(context, &plan.wiki_path);
         let overwrite_wiki = wiki_exists
             && decision.conflict_action == Some(CommitConflictAction::ApplyMergedCandidate);
@@ -391,6 +414,56 @@ impl ImportV2Service {
         transaction.commit()?;
         Ok(result)
     }
+}
+
+fn collision_free_wiki_path(
+    context: &ProjectContext,
+    preferred: &str,
+) -> Result<String, BackendError> {
+    let preferred_path = Path::new(preferred);
+    let parent = preferred_path.parent().ok_or_else(|| {
+        commit_error(IMPORT_V2_COMMIT_FAILED, "Wiki target directory is invalid.")
+    })?;
+    let stem = preferred_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| commit_error(IMPORT_V2_COMMIT_FAILED, "Wiki target name is invalid."))?;
+    let absolute_parent =
+        context.resolve_project_path(&parent.to_string_lossy().replace('\\', "/"))?;
+    let existing = if absolute_parent.is_dir() {
+        std::fs::read_dir(&absolute_parent)
+            .map_err(|_| {
+                commit_error(
+                    IMPORT_V2_COMMIT_FAILED,
+                    "Wiki target directory could not be inspected.",
+                )
+            })?
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_str().map(|name| name.to_lowercase()))
+            .collect::<std::collections::HashSet<_>>()
+    } else {
+        std::collections::HashSet::new()
+    };
+    for suffix in 2u32.. {
+        let suffix = format!("-{suffix}");
+        let max_stem_bytes = 120usize.saturating_sub(suffix.len());
+        let mut bounded = String::new();
+        for ch in stem.chars() {
+            if bounded.len() + ch.len_utf8() > max_stem_bytes {
+                break;
+            }
+            bounded.push(ch);
+        }
+        let filename = format!("{bounded}{suffix}.md");
+        if !existing.contains(&filename.to_lowercase()) {
+            return Ok(format!(
+                "{}/{}",
+                parent.to_string_lossy().replace('\\', "/"),
+                filename
+            ));
+        }
+    }
+    unreachable!()
 }
 
 fn validate_complete_decision_set(
@@ -792,6 +865,122 @@ mod tests {
             1,
             "failed item must not leave a raw source directory"
         );
+    }
+
+    #[test]
+    fn cancellation_before_first_item_returns_typed_error_and_accounts_all_decisions() {
+        let fixture = CommitFixture::two_ready_items();
+        let request = fixture.request(vec![
+            CommitItemDecision {
+                item_id: fixture.first_item_id.clone(),
+                conflict_action: None,
+                expected_wiki_hash: None,
+            },
+            CommitItemDecision {
+                item_id: fixture.second_item_id.clone().unwrap(),
+                conflict_action: None,
+                expected_wiki_hash: None,
+            },
+        ]);
+        let error = fixture
+            .service
+            .commit_items_cancellable(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &request,
+                || true,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
+        let history = std::fs::read_dir(fixture.root.join(".app/import-history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let batch: crate::models::import_v2::ImportBatchResult =
+            serde_json::from_slice(&std::fs::read(history).unwrap()).unwrap();
+        assert_eq!(batch.items.len(), 2);
+        assert!(batch
+            .items
+            .iter()
+            .all(|item| item.error_code.as_deref() == Some(crate::errors::IMPORT_V2_CANCELLED)));
+        assert_eq!((batch.committed_count, batch.failed_count), (0, 2));
+    }
+
+    #[test]
+    fn cancellation_between_items_commits_first_and_accounts_remaining_decision() {
+        let fixture = CommitFixture::two_ready_items();
+        let request = fixture.request(vec![
+            CommitItemDecision {
+                item_id: fixture.first_item_id.clone(),
+                conflict_action: None,
+                expected_wiki_hash: None,
+            },
+            CommitItemDecision {
+                item_id: fixture.second_item_id.clone().unwrap(),
+                conflict_action: None,
+                expected_wiki_hash: None,
+            },
+        ]);
+        let checks = std::cell::Cell::new(0);
+        let error = fixture
+            .service
+            .commit_items_cancellable(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &request,
+                || {
+                    let next = checks.get() + 1;
+                    checks.set(next);
+                    next > 1
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
+        let history = std::fs::read_dir(fixture.root.join(".app/import-history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let batch: crate::models::import_v2::ImportBatchResult =
+            serde_json::from_slice(&std::fs::read(history).unwrap()).unwrap();
+        assert_eq!(batch.items.len(), 2);
+        assert!(batch.items[0].committed);
+        assert_eq!(
+            batch.items[1].error_code.as_deref(),
+            Some(crate::errors::IMPORT_V2_CANCELLED)
+        );
+        assert_eq!((batch.committed_count, batch.failed_count), (1, 1));
+    }
+
+    #[test]
+    fn create_new_derives_collision_free_cjk_portable_wiki_path() {
+        let fixture = CommitFixture::updated_source();
+        let manifest = fixture.manifest();
+        let original = fixture.root.join(&manifest.wiki_path);
+        std::fs::write(&original, "external edit").unwrap();
+        let colliding = original.with_file_name(format!(
+            "{}-2.md",
+            original.file_stem().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&colliding, "existing collision").unwrap();
+        let result = fixture.commit_with(Some(CommitConflictAction::CreateNew), None);
+        assert!(result.items[0].committed);
+        let created = result.items[0].wiki_path.as_deref().unwrap();
+        assert!(
+            created.ends_with("-3.md"),
+            "unexpected derived path: {created}"
+        );
+        assert_eq!(std::fs::read_to_string(original).unwrap(), "external edit");
+        assert_eq!(
+            std::fs::read_to_string(colliding).unwrap(),
+            "existing collision"
+        );
+        assert!(fixture.root.join(created).is_file());
     }
 
     #[test]
