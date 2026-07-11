@@ -53,6 +53,17 @@ Raw Sources
 
 实现不要提前假设 URL 路由名称。文档中的视图名称是产品职责，不是强制路径。
 
+### 3.1 当前已实现的跨视图编排
+
+本节记录已经落地的 orchestration 事实，不替代下文的产品流程、安全确认、持久化或审计要求：
+
+- 导入确认链路：`Import preview -> confirm_import_preview -> wikiStore.scan -> optional start_wiki_compile`。确认成功后先刷新当前项目 Wiki；只有用户选择导入后编译时，才继续启动 Wiki 编译任务。
+- 任务启动链路：`Task launch -> backend task -> taskStore upsert -> current-project drawer open`。后端返回的任务始终写入全局任务状态；仅当请求所属项目仍是当前项目时，才自动打开并选中任务抽屉。
+- 高风险确认链路：`PendingAction -> ProjectConfirmationController -> backend revalidation/checkpoint -> result task/update`。`ProjectConfirmationController` 统一承接项目 PendingAction 和编译冲突；后端在真正执行前重新验证项目、目标状态和既有执行计划，并按操作要求创建或确认 Git checkpoint，随后返回任务或项目/文件状态更新。
+- 项目切换链路：`Project switch -> project key/epoch invalidation -> stale UI commits and toasts suppressed`。异步 workflow 在提交视图状态、打开抽屉、切换视图或发送 toast 前校验项目 key / epoch，旧项目结果不得覆盖新项目 UI。
+
+项目切换只抑制过期的 UI commit、抽屉自动打开和 toast，不丢弃后台任务。其他项目的任务继续持久化在各自项目的 `.app/tasks/`，并保留在全局任务列表和任务抽屉中可见、可查看、可取消。
+
 ## 4. 启动与项目选择流程
 
 ### 4.1 正常启动
