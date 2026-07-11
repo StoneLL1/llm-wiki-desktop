@@ -1,0 +1,308 @@
+use serde::{Deserialize, Serialize};
+
+use crate::models::task::TaskProgress;
+
+pub const IMPORT_V2_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportResourceMode {
+    Balanced,
+    Performance,
+    Saver,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportInputKind {
+    File,
+    Folder,
+    Url,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSessionStatus {
+    Draft,
+    Processing,
+    WaitingForConfirmation,
+    PartiallyCommitted,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportItemStatus {
+    Queued,
+    Inspecting,
+    WaitingCapability,
+    WaitingLogin,
+    Extracting,
+    Validating,
+    PreviewReady,
+    NeedsMerge,
+    Committing,
+    Completed,
+    Paused,
+    Cancelled,
+    Skipped,
+    Failed,
+}
+
+impl ImportItemStatus {
+    pub fn can_transition_to(&self, next: &Self) -> bool {
+        use ImportItemStatus::*;
+        matches!(
+            (self, next),
+            (Queued, Inspecting | Cancelled | Skipped)
+                | (
+                    Inspecting,
+                    WaitingCapability | WaitingLogin | Extracting | Failed | Cancelled
+                )
+                | (WaitingCapability, Extracting | Cancelled | Failed)
+                | (WaitingLogin, Extracting | Cancelled | Failed)
+                | (Extracting, Validating | Failed | Cancelled)
+                | (Validating, PreviewReady | Failed | Cancelled)
+                | (PreviewReady, NeedsMerge | Committing | Skipped | Cancelled)
+                | (NeedsMerge, PreviewReady | Committing | Skipped | Cancelled)
+                | (Committing, Completed | Failed)
+                | (Paused, Inspecting | Extracting | Cancelled)
+                | (Failed, Inspecting | Skipped | Cancelled)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportStage {
+    Inspect,
+    Route,
+    Extract,
+    Validate,
+    Commit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityLevel {
+    Pass,
+    Warning,
+    Fail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    SourceSnapshot,
+    Markdown,
+    Image,
+    Attachment,
+    Subtitle,
+    Metadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportInput {
+    pub kind: ImportInputKind,
+    pub display_name: String,
+    pub locator: String,
+    pub normalized_locator: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityMetric {
+    pub code: String,
+    pub actual: f64,
+    pub minimum: f64,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityReport {
+    pub level: QualityLevel,
+    pub metrics: Vec<QualityMetric>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportArtifact {
+    pub kind: ArtifactKind,
+    pub relative_path: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptRecord {
+    pub route: String,
+    pub engine_id: String,
+    pub engine_version: String,
+    pub stage: ImportStage,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub outcome: AttemptOutcome,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportIssue {
+    pub code: String,
+    pub message: String,
+    pub stage: ImportStage,
+    pub retryable: bool,
+    pub user_action_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreviewArtifact {
+    pub markdown: ImportArtifact,
+    pub assets: Vec<ImportArtifact>,
+    pub source_snapshot: ImportArtifact,
+    pub quality: QualityReport,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItem {
+    pub item_id: String,
+    pub input: ImportInput,
+    pub status: ImportItemStatus,
+    pub selected: bool,
+    pub task_id: Option<String>,
+    pub progress: Option<TaskProgress>,
+    pub attempts: Vec<AttemptRecord>,
+    pub preview: Option<ImportPreviewArtifact>,
+    pub issue: Option<ImportIssue>,
+}
+
+impl ImportItem {
+    pub fn queued(item_id: &str, input: ImportInput) -> Self {
+        Self {
+            item_id: item_id.to_string(),
+            input,
+            status: ImportItemStatus::Queued,
+            selected: true,
+            task_id: None,
+            progress: None,
+            attempts: Vec::new(),
+            preview: None,
+            issue: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSession {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub project_id: String,
+    pub status: ImportSessionStatus,
+    pub resource_mode: ImportResourceMode,
+    pub created_at: String,
+    pub updated_at: String,
+    pub items: Vec<ImportItem>,
+}
+
+impl ImportSession {
+    pub fn new(session_id: &str, project_id: &str, resource_mode: ImportResourceMode) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            schema_version: IMPORT_V2_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            project_id: project_id.to_string(),
+            status: ImportSessionStatus::Draft,
+            resource_mode,
+            created_at: now.clone(),
+            updated_at: now,
+            items: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitConflictAction {
+    CreateNew,
+    KeepWiki,
+    ApplyMergedCandidate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitItemDecision {
+    pub item_id: String,
+    pub conflict_action: Option<CommitConflictAction>,
+    pub expected_wiki_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitImportSessionRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub decisions: Vec<CommitItemDecision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItemCommitResult {
+    pub item_id: String,
+    pub source_id: Option<String>,
+    pub version_id: Option<String>,
+    pub wiki_path: Option<String>,
+    pub committed: bool,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBatchResult {
+    pub batch_id: String,
+    pub session_id: String,
+    pub committed_count: u32,
+    pub failed_count: u32,
+    pub items: Vec<ImportItemCommitResult>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn import_v2_contract_is_versioned_and_camel_case() {
+        let session = ImportSession::new("session-1", "project-1", ImportResourceMode::Balanced);
+        let value = serde_json::to_value(session).unwrap();
+        assert_eq!(value["schemaVersion"], json!(2));
+        assert_eq!(value["sessionId"], json!("session-1"));
+        assert_eq!(value["resourceMode"], json!("balanced"));
+        assert!(value.get("session_id").is_none());
+    }
+
+    #[test]
+    fn item_state_machine_rejects_preview_to_complete_shortcut() {
+        assert!(ImportItemStatus::Queued.can_transition_to(&ImportItemStatus::Inspecting));
+        assert!(ImportItemStatus::Validating.can_transition_to(&ImportItemStatus::PreviewReady));
+        assert!(!ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Completed));
+        assert!(ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Committing));
+    }
+}
