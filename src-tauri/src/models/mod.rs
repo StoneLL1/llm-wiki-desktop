@@ -7,6 +7,7 @@ pub mod export;
 pub mod git;
 pub mod graph;
 pub mod import;
+pub mod import_v2;
 pub mod lint;
 pub mod llm;
 pub mod paths;
