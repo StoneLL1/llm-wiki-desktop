@@ -9,7 +9,7 @@ use crate::models::import_v2::{
     ImportSessionStatus, ImportStage,
 };
 use crate::models::paths::ProjectContext;
-use crate::models::task::{TaskResult, TaskStatus};
+use crate::models::task::{TaskResult, TaskStatus, TaskType};
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineOperation, EngineRegistry, EngineRequest, ImportEngine,
 };
@@ -65,6 +65,44 @@ impl ImportV2Service {
     ) -> Result<ImportSession, BackendError> {
         self.sessions.load(context, files, session_id)
     }
+    pub fn recover_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+    ) -> Result<ImportSession, BackendError> {
+        let _guard = self.lock()?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        for item in &mut session.items {
+            if matches!(
+                item.status,
+                ImportItemStatus::Inspecting
+                    | ImportItemStatus::Extracting
+                    | ImportItemStatus::Validating
+            ) {
+                let interrupted = item
+                    .task_id
+                    .as_deref()
+                    .and_then(|id| tasks.get_task(id))
+                    .is_none_or(|task| task.status == TaskStatus::Failed);
+                if interrupted {
+                    transition_item(item, ImportItemStatus::Failed)?;
+                    item.issue = Some(ImportIssue {
+                        code: "TASK_RECOVERY".into(),
+                        message: "Import was interrupted and can be retried.".into(),
+                        stage: ImportStage::Extract,
+                        retryable: true,
+                        user_action_required: false,
+                    });
+                }
+            }
+        }
+        session.status = derive_session_status(&session.items);
+        session.updated_at = chrono::Utc::now().to_rfc3339();
+        self.sessions.save(context, files, &session)?;
+        Ok(session)
+    }
     pub fn register_engine(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
         self.engines.register(engine)
     }
@@ -94,21 +132,45 @@ impl ImportV2Service {
         item_id: &str,
         task_id: &str,
     ) -> Result<ImportItem, BackendError> {
+        let task = tasks
+            .get_task(task_id)
+            .ok_or_else(|| task_error("Import task was not found."))?;
+        if task.task_type != TaskType::Import
+            || task.project_id.as_deref() != Some(context.project_id.as_str())
+            || !matches!(task.status, TaskStatus::Queued | TaskStatus::Cancelled)
+        {
+            return Err(task_error("Task is not compatible with this import item."));
+        }
+        let pre_cancelled = tasks.is_cancelled(task_id);
         self.mutate_item(context, files, session_id, item_id, |item| {
+            if !matches!(
+                item.status,
+                ImportItemStatus::Queued | ImportItemStatus::Failed
+            ) || item
+                .task_id
+                .as_deref()
+                .is_some_and(|bound| bound != task_id && item.status != ImportItemStatus::Failed)
+            {
+                return Err(task_error(
+                    "Import item is already claimed by another task.",
+                ));
+            }
             item.task_id = Some(task_id.to_string());
-            Ok(())
+            item.issue = None;
+            transition_item(
+                item,
+                if pre_cancelled {
+                    ImportItemStatus::Cancelled
+                } else {
+                    ImportItemStatus::Inspecting
+                },
+            )
         })?;
-        if tasks.is_cancelled(task_id) {
-            self.mutate_item(context, files, session_id, item_id, |item| {
-                transition_item(item, ImportItemStatus::Cancelled)
-            })?;
+        if pre_cancelled {
             return Err(cancelled_error());
         }
         task_call(tasks.transition_status(task_id, TaskStatus::Running))?;
         task_call(tasks.update_progress(task_id, 0, Some(4), Some("Inspecting input".into())))?;
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::Inspecting)
-        })?;
         let input = self
             .load_session(context, files, session_id)?
             .items
@@ -261,9 +323,9 @@ impl ImportV2Service {
             item.issue = Some(issue_from_engine_error(&error, stage));
             Ok(())
         })?;
-        let _ = tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into());
-        let _ = tasks.set_error(task_id, issue_safe_error(&error));
-        let _ = tasks.transition_status(task_id, TaskStatus::Failed);
+        task_call(tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into()))?;
+        task_call(tasks.set_error(task_id, issue_safe_error(&error)))?;
+        task_call(tasks.transition_status(task_id, TaskStatus::Failed))?;
         Err(issue_safe_error(&error))
     }
     fn mutate_item<F>(
@@ -394,7 +456,7 @@ fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex};
 
     use crate::errors::{
         BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_UNAVAILABLE, IMPORT_V2_STATE_INVALID,
@@ -460,6 +522,69 @@ mod tests {
                 table_cell_accuracy: None,
                 warnings: Vec::new(),
             })
+        }
+    }
+
+    struct BlockingEngine {
+        inner: FixtureEngine,
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+    impl ImportEngine for BlockingEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            self.inner.descriptor()
+        }
+        fn supports(&self, input: &ImportInput) -> bool {
+            self.inner.supports(input)
+        }
+        fn execute(
+            &self,
+            request: &EngineRequest,
+            cancellation: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            let (lock, signal) = &*self.entered;
+            *lock.lock().unwrap() = true;
+            signal.notify_all();
+            let (lock, signal) = &*self.release;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = signal.wait(released).unwrap();
+            }
+            self.inner.execute(request, cancellation)
+        }
+    }
+
+    struct FailingEngine {
+        root: PathBuf,
+        sabotage_task_store: bool,
+    }
+    impl ImportEngine for FailingEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "failing".into(),
+                engine_version: "1".into(),
+                route: "fixture".into(),
+            }
+        }
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            _: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            if self.sabotage_task_store {
+                let tasks = self.root.join(".app/tasks");
+                std::fs::remove_dir_all(&tasks).unwrap();
+                std::fs::write(&tasks, b"blocked").unwrap();
+            }
+            Err(BackendError::new(
+                "ENGINE_SECRET",
+                "Bearer private-token C:/Users/Aletta/a.pdf",
+                true,
+                false,
+            ))
         }
     }
 
@@ -710,6 +835,321 @@ mod tests {
         assert_eq!(
             fixture.tasks.get_task(&task.id).unwrap().status,
             TaskStatus::Failed
+        );
+    }
+
+    #[test]
+    fn restart_reconciles_in_flight_items_and_allows_retry() {
+        for status in [
+            ImportItemStatus::Inspecting,
+            ImportItemStatus::Extracting,
+            ImportItemStatus::Validating,
+        ] {
+            let fixture = OrchestratorFixture::new(&format!("recovery-{status:?}"));
+            let (session, item, task) = fixture.seed_one_item();
+            fixture
+                .tasks
+                .transition_status(&task.id, TaskStatus::Running)
+                .unwrap();
+            let mut persisted = fixture
+                .service
+                .load_session(&fixture.context, &fixture.files, &session.session_id)
+                .unwrap();
+            persisted.items[0].status = status;
+            persisted.items[0].task_id = Some(task.id.clone());
+            fixture
+                .service
+                .sessions
+                .save(&fixture.context, &fixture.files, &persisted)
+                .unwrap();
+            let recovered_tasks = TaskService::default();
+            recovered_tasks.recover_tasks(&fixture.root).unwrap();
+            assert_eq!(
+                recovered_tasks.get_task(&task.id).unwrap().status,
+                TaskStatus::Failed
+            );
+            let restarted = ImportV2Service::default();
+            let reconciled = restarted
+                .recover_session(
+                    &fixture.context,
+                    &fixture.files,
+                    &recovered_tasks,
+                    &session.session_id,
+                )
+                .unwrap();
+            assert_eq!(reconciled.items[0].status, ImportItemStatus::Failed);
+            assert_eq!(
+                reconciled.items[0].issue.as_ref().unwrap().code,
+                "TASK_RECOVERY"
+            );
+            restarted
+                .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+                .unwrap();
+            let retry = recovered_tasks
+                .create_project_task(
+                    TaskType::Import,
+                    fixture.context.project_id.clone(),
+                    fixture.root.clone(),
+                    "Retry".into(),
+                    true,
+                )
+                .unwrap();
+            assert_eq!(
+                restarted
+                    .run_item(
+                        &fixture.context,
+                        &fixture.files,
+                        &recovered_tasks,
+                        &session.session_id,
+                        &item.item_id,
+                        &retry.id
+                    )
+                    .unwrap()
+                    .status,
+                ImportItemStatus::PreviewReady
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_run_cannot_overwrite_claim_or_start_second_task() {
+        let (context, root) = test_context("concurrent-claim");
+        let files = Arc::new(FileStore::default());
+        let tasks = Arc::new(TaskService::default());
+        let service = Arc::new(ImportV2Service::default());
+        let session = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = service
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![test_file_input("a.pdf")],
+            )
+            .unwrap();
+        let item_id = session.items[0].item_id.clone();
+        let first = tasks
+            .create_project_task(
+                TaskType::Import,
+                context.project_id.clone(),
+                root.clone(),
+                "First".into(),
+                true,
+            )
+            .unwrap();
+        let second = tasks
+            .create_project_task(
+                TaskType::Import,
+                context.project_id.clone(),
+                root.clone(),
+                "Second".into(),
+                true,
+            )
+            .unwrap();
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        service
+            .register_engine(Arc::new(BlockingEngine {
+                inner: FixtureEngine::success(root.clone()),
+                entered: entered.clone(),
+                release: release.clone(),
+            }))
+            .unwrap();
+        let worker = {
+            let service = service.clone();
+            let tasks = tasks.clone();
+            let files = files.clone();
+            let context = context.clone();
+            let session_id = session.session_id.clone();
+            let item_id = item_id.clone();
+            let task_id = first.id.clone();
+            std::thread::spawn(move || {
+                service.run_item(&context, &files, &tasks, &session_id, &item_id, &task_id)
+            })
+        };
+        let (lock, signal) = &*entered;
+        let mut seen = lock.lock().unwrap();
+        while !*seen {
+            seen = signal.wait(seen).unwrap();
+        }
+        drop(seen);
+        let error = service
+            .run_item(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &item_id,
+                &second.id,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_STATE_INVALID);
+        assert_eq!(
+            tasks.get_task(&second.id).unwrap().status,
+            TaskStatus::Queued
+        );
+        assert_eq!(
+            service
+                .load_session(&context, &files, &session.session_id)
+                .unwrap()
+                .items[0]
+                .task_id
+                .as_deref(),
+            Some(first.id.as_str())
+        );
+        let (lock, signal) = &*release;
+        *lock.lock().unwrap() = true;
+        signal.notify_all();
+        worker.join().unwrap().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_incompatible_tasks_before_binding() {
+        let fixture = OrchestratorFixture::new("task-validation");
+        let (session, item, _) = fixture.seed_one_item();
+        let wrong_type = fixture
+            .tasks
+            .create_project_task(
+                TaskType::Export,
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                "Wrong".into(),
+                true,
+            )
+            .unwrap();
+        let wrong_project = fixture
+            .tasks
+            .create_project_task(
+                TaskType::Import,
+                "other-project".into(),
+                fixture.root.clone(),
+                "Wrong project".into(),
+                true,
+            )
+            .unwrap();
+        let running = fixture
+            .tasks
+            .create_project_task(
+                TaskType::Import,
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                "Running".into(),
+                true,
+            )
+            .unwrap();
+        fixture
+            .tasks
+            .transition_status(&running.id, TaskStatus::Running)
+            .unwrap();
+        for task_id in [&wrong_type.id, &wrong_project.id, &running.id] {
+            assert_eq!(
+                fixture
+                    .service
+                    .run_item(
+                        &fixture.context,
+                        &fixture.files,
+                        &fixture.tasks,
+                        &session.session_id,
+                        &item.item_id,
+                        task_id
+                    )
+                    .unwrap_err()
+                    .code,
+                IMPORT_V2_STATE_INVALID
+            );
+            assert!(fixture.reopen().items[0].task_id.is_none());
+        }
+    }
+
+    #[test]
+    fn inspecting_is_persisted_before_task_running() {
+        let fixture = OrchestratorFixture::new("ordering");
+        let (session, item, task) = fixture.seed_one_item();
+        let task_store = fixture.root.join(".app/tasks");
+        std::fs::remove_dir_all(&task_store).unwrap();
+        std::fs::write(&task_store, b"blocked").unwrap();
+        assert_eq!(
+            fixture
+                .service
+                .run_item(
+                    &fixture.context,
+                    &fixture.files,
+                    &fixture.tasks,
+                    &session.session_id,
+                    &item.item_id,
+                    &task.id
+                )
+                .unwrap_err()
+                .code,
+            IMPORT_V2_STATE_INVALID
+        );
+        assert_eq!(
+            fixture.reopen().items[0].status,
+            ImportItemStatus::Inspecting
+        );
+    }
+
+    #[test]
+    fn finish_failed_propagates_task_persistence_errors() {
+        let fixture = OrchestratorFixture::new("failure-persistence");
+        fixture
+            .service
+            .register_engine(Arc::new(FailingEngine {
+                root: fixture.root.clone(),
+                sabotage_task_store: true,
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let error = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_STATE_INVALID);
+    }
+
+    #[test]
+    fn finish_failed_persists_redacted_error_log_and_terminal_task() {
+        let fixture = OrchestratorFixture::new("failure-durable");
+        fixture
+            .service
+            .register_engine(Arc::new(FailingEngine {
+                root: fixture.root.clone(),
+                sabotage_task_store: false,
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        assert_eq!(
+            fixture
+                .service
+                .run_item(
+                    &fixture.context,
+                    &fixture.files,
+                    &fixture.tasks,
+                    &session.session_id,
+                    &item.item_id,
+                    &task.id
+                )
+                .unwrap_err()
+                .code,
+            "ENGINE_SECRET"
+        );
+        let restarted = TaskService::default();
+        restarted.recover_tasks(&fixture.root).unwrap();
+        let recovered = restarted.get_task(&task.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert_eq!(recovered.error.unwrap().message, "Import engine failed.");
+        assert_eq!(
+            restarted.get_logs(&task.id).unwrap()[0].message,
+            "Import engine failed."
         );
     }
 }
