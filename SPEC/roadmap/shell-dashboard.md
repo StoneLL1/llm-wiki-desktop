@@ -5,7 +5,7 @@
 
 ## 0. 现状摘要
 
-应用外壳的三层栅格骨架（顶栏 48px + 主区 + 状态栏 28px）已经在 `src/components/app/AppShell.tsx` 落地，`LeftSidebar` / `TopBar` / `RightContextPanel` / `BottomStatusBar` / `TaskLogDrawer` / `ConfirmationDialog` / `CompileConflictDialog` / `Toaster` 全部到位。`AppShell` 当前只负责布局、pane 行为、快捷键与全局壳层接线，不再拥有 feature workflow command；`WorkspaceController` 组合项目级 workflows，`WorkspaceRouter` 负责 view-level lazy dispatch，并以 `Suspense` + `ViewErrorBoundary` 隔离加载与渲染失败。token 系统（`src/styles.css`）与设计稿 `app.css` 一一对应，Tauri 托盘菜单和系统通知通道也在 `src-tauri/src/lib.rs:13-80` 实现。整体完成度大约 **55%**：核心栅格和交互行为跑通，但这一板块还停留在"功能能跑"的占位阶段，缺少设计稿定义的关键信息密度与启动体验。
+应用外壳的三层栅格骨架（顶栏 48px + 主区 + 状态栏 28px）已经在 `src/components/app/AppShell.tsx` 落地，`LeftSidebar` / `TopBar` / `RightContextPanel` / `BottomStatusBar` / `TaskLogDrawer` / `ConfirmationDialog` / `CompileConflictDialog` / `Toaster` 全部到位。`AppShell` 当前只负责布局、pane 行为、快捷键与全局壳层接线，不再拥有 feature workflow command；`WorkspaceController` 组合项目级 workflows，`WorkspaceRouter` 负责 view-level lazy dispatch，并以 `Suspense` + `ViewErrorBoundary` 隔离加载与渲染失败。token 系统（`src/styles.css`）与设计稿 `app.css` 一一对应，Tauri 托盘菜单、启动时本地化、关闭拦截和系统通知通道也在 `src-tauri/src/lib.rs:20-108` 实现。整体完成度大约 **55%**：核心栅格和交互行为跑通，但这一板块还停留在"功能能跑"的占位阶段，缺少设计稿定义的关键信息密度与启动体验。
 
 三个最突出的缺口：
 1. **Dashboard 退化为纯状态卡片**（`src/features/dashboard/DashboardView.tsx`）——只有 6 个数字指标和三段静态文案，缺设计稿要求的项目健康行、统计摘要六宫格、主题分布柱、最近活动时间线、快速操作四象限、图谱预览（`dashboard.html:142-395`）。
@@ -48,7 +48,7 @@
 | 任务日志抽屉 `.drawer` | 460px 右抽屉、左 180px 任务列表 + 右日志面板、取消按钮、进度条、终端样式日志（`app.css:1418-1439`） | 420px、180px 任务列表 + 日志、取消按钮、进度条；宽度比设计稿窄 40px | 🟡部分实现 | P2 | src/components/app/TaskLogDrawer.tsx:137-272 |
 | Toast `.toast` | 右下、280-380px、深色背景、三态（ok/err/info，`app.css:1441-1467`） | 右下、max-360、白底带描边、info/warning/error 三态；**配色与设计稿相反：设计稿 toast 是深底白字，当前是浅底深字** | 🟡部分实现 | P2 | src/components/app/Toaster.tsx |
 | 任务活动按钮 `.topbar__actions` 铃 | 含未读数量 badge（`dashboard.html:82`） | Bell 图标 + 红点（无数字） | 🟡部分实现 | P2 | src/components/app/TaskActivityButton.tsx |
-| 托盘 + 系统通知 | 关闭主窗口默认最小化到托盘并继续；完成后系统通知（`SPEC.md` §CLAUDE.md 长任务硬边界、PRD-AGENT-005） | Tauri 托盘菜单 Show/Hide/Quit + 左键点击恢复 + 通知 plugin 注册 + `src/services/notifications.ts` 已发送完成/失败/需确认通知；**close 拦截已接线**：`lib.rs:84-100` 在 `setup()` 挂 `window.on_window_event`，`CloseRequested` 时读 `SettingsService::read_close_behavior()`，`MinimizeToTray` → `api.prevent_close()` + `window.hide()` | ✅已完成 | — | src-tauri/src/lib.rs:84-100, src/services/notifications.ts |
+| 托盘 + 系统通知 | 关闭主窗口默认最小化到托盘并继续；完成后系统通知（`SPEC.md` §CLAUDE.md 长任务硬边界、PRD-AGENT-005） | Tauri 启动时读取 Settings language，通过 `tray_labels` 为 English/简体中文/繁体中文构建 Show/Hide/Quit 与 tooltip；左键点击恢复、通知 plugin、完成/失败/需确认通知和 CloseRequested 的 `prevent_close()` + `hide()` 均已接线。运行中切换语言后需重启才能重建菜单（P2） | ✅已完成 | — | `src-tauri/src/lib.rs:32-58,93-108`、`src-tauri/src/utils/i18n.rs:34-41`、`src/services/notifications.ts` |
 | Skip link `.skip-link` | 键盘可达性：跳至主内容（`app.css:2123-2137`） | **未实现** | ❌缺失 | P2 | src/components/app/AppShell.tsx |
 | 响应式折叠 | 1180px 下右面板变 fixed 抽屉、820px 下侧栏折叠为 56px（`app.css:2069-2121`） | 1180px 下右面板以 fixed drawer + backdrop 呈现并默认关闭；pane 尺寸和折叠偏好写入 `localStorage`。820px 下会隐藏侧栏文字，但 CSS 未强制把已持久化宽度收敛为 56px | 🟡部分实现 | P2 | `src/components/app/AppShell.tsx`、`src/styles.css`、`src/stores/navigationStore.ts` |
 
@@ -67,7 +67,7 @@
 - [ ] **新建项目对话框 `.dialog--wide`**：现状内联表单 → 目标（`launch.html:421-480`，PRD-GIT-001 初始化 Git 复选框） → `src/features/project/ProjectStartView.tsx` → 验收标准：640px 对话框，项目名/保存位置（带"选择…"按钮）/模板分段控件/Git 初始化复选框。
 - [ ] **右侧项目信息面板补全**：现状 4 段 → 目标（`dashboard.html:407-468`） → `src/components/app/RightContextPanel.tsx:122-197` → 验收标准：补 Git 分支/HEAD、上次编译时间、待确认计数、磁盘占用 5 段；执行路径从单行 routeLabel 改为每个 agent 一行 dotstatus。
 - [ ] **状态栏补全**：现状 4 项 → 目标（`dashboard.html:473-489`） → `src/components/app/BottomStatusBar.tsx` → 验收标准：补 claude 版本、Git 分支 + HEAD、索引同步时间、Git 干净状态、当前语言。
-- [x] **关闭主窗口最小化到托盘**：✅ 已实现（`lib.rs:84-100` `on_window_event` 拦截 `CloseRequested`，按 `read_close_behavior()` 决定 hide/quit）。验收通过。
+- [x] **关闭主窗口最小化到托盘 + 启动时本地化**：✅ 已实现（`lib.rs:32-58,93-108` 读取 Settings language 构建本地化菜单/tooltip，并在 `CloseRequested` 时按 `read_close_behavior()` 决定 hide/quit）。运行中切换语言后需重启刷新托盘文案，属于 P2 热更新限制。
 - [ ] **侧栏 Agent 底部状态脚**：现状显示 routeLabel 文案 → 目标（`dashboard.html:122-128`） → `src/components/app/LeftSidebar.tsx:99-106` → 验收标准：显示"claude · 1.0.23"+ 右箭头按钮跳 Agent 视图；未配置时显示灰点 + "未配置"。
 - [ ] **侧栏 Lint warn 徽标**：现状无 → 目标（`dashboard.html:108`） → `src/components/app/LeftSidebar.tsx` → 验收标准：Lint 导航项右侧显示橙色数字徽标，数量来自 lint store issueCount。
 - [x] **响应式右面板与 pane 持久化** @ 2026-07-10：`src/styles.css` 已实现 1180px fixed 右抽屉/backdrop；`AppShell` 响应右面板状态，`navigationStore` 持久化 pane 尺寸和侧栏折叠偏好。820px 下强制收窄为设计稿 56px 仍是 P2 落差。
@@ -126,7 +126,7 @@
 - ✅ 确认对话框覆盖风险操作（删除/覆盖/合并冲突）。
 - ✅ 语言切换、Agent 检测、BYOK 状态都有对应 IPC。
 - ✅ AppShell 已移除 `min-w-[1120px]` 硬限制，并具备响应式右抽屉与持久化 pane 行为；820px 下侧栏仍需强制收窄为 56px。
-- ⚠️ 关闭拦截已按 `MinimizeToTray` 执行 `prevent_close()` + `hide()`；剩余托盘菜单 i18n 与 BYOK 长任务进度等跨切面体验缺口见 [cross-cutting.md](cross-cutting.md)。
+- ✅ 关闭拦截已按 `MinimizeToTray` 执行 `prevent_close()` + `hide()`，托盘菜单/tooltip 已按启动时 Settings language 本地化；免重启语言热更新是 P2，BYOK 长任务进度等真实缺口见 [cross-cutting.md](cross-cutting.md)。
 
 **遗留风险**
 

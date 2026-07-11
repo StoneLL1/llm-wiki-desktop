@@ -13,7 +13,7 @@
 1. **i18n 对 Agent/LLM 生成内容的语言偏好未落地**（CLAUDE.md 硬约束明确要求 "Agent 生成内容按用户语言偏好输出"，但 chat/compile/export/lint 的 prompt 全是英文，且未把 `settings.language` 传入后端）。这是 P0 红线。
 2. **Import checkpoint 时序不满足预操作语义**：`confirm_import_preview` 的两次写盘都发生在 `create_import_checkpoint` 之前；checkpoint 失败无法阻止已经发生的导入变更。详细 P0 以 [import.md](import.md) 为准。
 
-另外有几处 P1/P2 收尾项：托盘菜单 i18n 缺失、URL 安全策略与 SSRF 防护已落地但日志不显式遮蔽密钥的回归测试缺失，以及 `set_default_agent` 后未持久化到 `.app/agent-config.json`（待核对）。`WorkspaceController` 挂载的 `useAiCapabilities` 已在每次 project key 变化时无条件检测 Agent/Provider；启动页也会复用最近项目检测，但没有任何 recent project 时仍无法构造后端要求的 project context。
+另外有几处 P1/P2 收尾项：托盘菜单已按启动时的 Settings language 本地化，但应用运行中切换语言后需重启才能重建菜单（P2）；URL 安全策略与 SSRF 防护已落地但日志不显式遮蔽密钥的回归测试缺失；`set_default_agent` 后未持久化到 `.app/agent-config.json`（待核对）。`WorkspaceController` 挂载的 `useAiCapabilities` 已在每次 project key 变化时无条件检测 Agent/Provider；启动页也会复用最近项目检测，但没有任何 recent project 时仍无法构造后端要求的 project context。
 
 ## 1. 跨切面特性清单
 
@@ -22,7 +22,7 @@
 | 1. Git 检查点机制 | CLAUDE.md 必读硬边界；PRD-GIT-001/002/003/004 | `GitService` 完整落地，compile/lint/chat 在受保护写入前创建 checkpoint；Import 虽接入 checkpoint，但 `confirm_import_preview` 先写导入产物和冲突 JSON 再创建 checkpoint | 🟡部分实现 | P0 | `src-tauri/src/services/git_service.rs:60-150`、`src-tauri/src/commands/import_commands.rs:597-625`、[import.md](import.md) |
 | 2. API Key 凭据管理 | CLAUDE.md 必读硬边界；PRD-SET-002 | 走 `keyring` crate；前端只显"已配置"；密钥不入项目文件 | ✅已完成 | — | `src-tauri/src/services/secret_service.rs:14-92`、`src-tauri/src/commands/llm_commands.rs`、`src/components/settings/SettingsView.tsx` |
 | 3. Agent 默认优先 / BYOK 兜底 | CLAUDE.md 必读硬边界；PRD-WIKI-001/002、PRD-AGENT-001 | 路由策略 `Auto` 已落地：Agent installed → Agent，否则 BYOK；Agent CLI 检测走 `where`/`which`+`%APPDATA%\npm` fallback；只检测不安装 | ✅已完成 | — | `src-tauri/src/commands/compile_commands.rs:160-257`、`src-tauri/src/services/agent_service.rs:73-131,554-607` |
-| 4. 长任务可取消 / 可后台 / 可报告进度 / 托盘 | CLAUDE.md 必读硬边界；PRD-AGENT-003/004/005、§11.1 | `TaskService` 后台任务+事件总线+进度+取消；托盘"最小化到托盘"已接入 `CloseBehavior`；OS 通知 | 🟡部分实现 | P1 | `src-tauri/src/lib.rs:31-100`、`src/stores/taskStore.ts:121-128`、`src/hooks/useTaskEvents.ts:43-98`、`src/services/notifications.ts` |
+| 4. 长任务可取消 / 可后台 / 可报告进度 / 托盘 | CLAUDE.md 必读硬边界；PRD-AGENT-003/004/005、§11.1 | `TaskService` 后台任务+事件总线+进度+取消；托盘"最小化到托盘"已接入 `CloseBehavior`；启动时按 Settings language 本地化菜单/tooltip；OS 通知 | 🟡部分实现 | P1 | `src-tauri/src/lib.rs:31-108`、`src-tauri/src/utils/i18n.rs:34-41`、`src/stores/taskStore.ts:121-128`、`src/hooks/useTaskEvents.ts:43-98`、`src/services/notifications.ts` |
 | 5. 路径安全 / Unicode-CJK / 跨平台 | CLAUDE.md 必读硬边界；PRD §11.4 | `ProjectContext` 全链路路径校验 + 符号链接拒绝 + canonicalize 跨盘符防护 + CJK 测试 | ✅已完成 | — | `src-tauri/src/models/paths.rs:19-103`、`src-tauri/src/app_state.rs:41-95`、`src-tauri/src/utils/url_utils.rs:11-57` |
 | 6. PendingAction 高风险确认流 | CLAUDE.md 必读硬边界；PRD-LINT-004、PRD-GIT-004 | 后端 `ConfirmationRegistry` 统一登记 + scoped 执行；`ProjectConfirmationController` 从 `PendingAction.checkpointHash` 派生 checkpoint 显示，并编排 `ConfirmationDialog` + `CompileConflictDialog` | 🟡部分实现 | P1 | `src/components/app/ProjectConfirmationController.tsx`、`src/components/app/ConfirmationDialog.tsx`、`src-tauri/src/commands/compile_commands.rs:385-628` |
 | 7. i18n（zh-CN / en） | CLAUDE.md 必读硬边界（UI + Agent 输出）；PRD-SET-003 | UI 全量双语；Agent/LLM 生成内容未按用户语言偏好输出 | 🟡部分实现 | P0 | `src/i18n/index.ts:19-34`、`src/i18n/locales/en.json`、`src-tauri/src/services/chat_service/retrieval.rs` (`ChatService::build_retrieval_context`)、`src-tauri/src/services/compile_service.rs:207-211`、`src-tauri/src/services/export_service.rs:31-150`、`src-tauri/src/services/lint_service/deep.rs` (`LintService::build_deep_lint_prompt`) |
@@ -79,15 +79,15 @@
 - 现状：
   - `TaskService` 有 `create_project_task`、`update_progress`、`append_log`、`is_cancelled`、`cancel_task`、`transition_status`（含 `WaitingForConfirmation`）。
   - `run_task_streaming`（AgentService）50ms 轮询 `is_cancelled`，取消时 `child.kill()` 并返回 `AGENT_CANCELLED`；BYOK compile 在 `tokio::select!` 里响应取消。
-  - `lib.rs:31-100` 构建托盘 Show/Hide/Quit 菜单，`on_window_event(CloseRequested)` 读 `SettingsService::read_close_behavior`，`MinimizeToTray` 时 `prevent_close + hide`。
+  - `lib.rs:32-48` 读取 `SettingsService::read_language`，调用 `utils::i18n::tray_labels` 构建本地化菜单与 tooltip；`tray_labels` 覆盖 English、Simplified Chinese、Traditional Chinese。`on_window_event(CloseRequested)` 读 `SettingsService::read_close_behavior`，`MinimizeToTray` 时 `prevent_close + hide`。
   - OS 通知：完成/失败/待确认三种事件，`notifyTaskEvent` 异步触发；`onAction` 把窗口 `show + setFocus` 并打开 task drawer。
 - 落差：
-  1. 托盘菜单 label 硬编码英文（"Show"/"Hide"/"Quit"），tooltip `"LLM Wiki Desktop"`，与 i18n 硬约束冲突。托盘在 Rust 侧构建，需要把 `settings.language` 读到后端并本地化（或把菜单 label 抽到 i18n 资源 + 后端按语言挑选）。
-  2. 进度报告对 BYOK 路径较粗：`generate_manifest` 在 BYOK 下只在 prompt 前 append 一条 "Calling {:?}" 日志，模型生成期间用户看不到进度（单次 `llm_service.complete` 是阻塞的，进度条会"卡住"）。建议改为异步流式（stream）或至少每秒 append "Generating..."。
-  3. Import preview 的等待已从 `AppShell` 下沉到 `useImportWorkflow`，并统一调用 event-first 的 `waitForTaskTerminal`；该 helper 仍以 1s `get_task` 轮询作为漏事件/监听失败时的兜底。需要保留兜底语义时，不应把它误记成 AppShell feature workflow。
-- 涉及文件：`src-tauri/src/lib.rs:35-82`、`src-tauri/src/commands/compile_commands.rs:226-253`、`src/features/import/useImportWorkflow.ts`、`src/lib/waitForTaskTerminal.ts`。
+  1. 进度报告对 BYOK 路径较粗：`generate_manifest` 在 BYOK 下只在 prompt 前 append 一条 "Calling {:?}" 日志，模型生成期间用户看不到进度（单次 `llm_service.complete` 是阻塞的，进度条会"卡住"）。建议改为异步流式（stream）或至少每秒 append "Generating..."。
+  2. Import preview 的等待已从 `AppShell` 下沉到 `useImportWorkflow`，并统一调用 event-first 的 `waitForTaskTerminal`；该 helper 仍以 1s `get_task` 轮询作为漏事件/监听失败时的兜底。需要保留兜底语义时，不应把它误记成 AppShell feature workflow。
+  3. **P2**：托盘菜单在启动时构建一次；运行中切换 language 不会就地重建菜单，需重启应用后生效。
+- 涉及文件：`src-tauri/src/lib.rs:32-108`、`src-tauri/src/utils/i18n.rs:34-41`、`src-tauri/src/commands/compile_commands.rs:226-253`、`src/features/import/useImportWorkflow.ts`、`src/lib/waitForTaskTerminal.ts`。
 - 验收标准：
-  1. 托盘菜单随 `settings.language` 切换中英文，tooltip 同步。
+  1. ✅ 启动应用时，托盘菜单与 tooltip 按持久化的 `settings.language` 显示 English / 简体中文 / 繁体中文；运行中切换语言后的菜单热更新属于 P2，当前需重启。
   2. BYOK compile 在模型生成期间每 ≤2s append 一条 progress 日志，或切到流式 API。
   3. 评估 `waitForTaskTerminal` 的 event-first + 1s polling fallback 是否需要进一步统一；不得删除防漏事件兜底而不补等价可靠性保障。
 
@@ -124,15 +124,14 @@
 - 现状：
   - UI 侧 `i18n/index.ts` 用 `react-i18next`，`en.json` 和 `zh-CN.json` 的 key 完全对齐（shell、nav、views、settings、lint、chat、graph、exports、import、task、notification、confirmation 全覆盖），`localStorage` 持久化偏好，fallback `en`。
   - **Agent/LLM 生成内容未按用户语言偏好输出**：`ChatService::assemble_prompt`、`CompileService::compile_prompt`、`ExportService::build_export_prompt`、`LintService::build_deep_lint_prompt`、`compile_commands::provider_prompt` 五个 prompt 构造点全部是英文 system instruction，且没有读取 `settings.language`。
-  - 托盘菜单（见 2.4）硬编码英文。
+  - 托盘菜单启动时本地化已完成：`SettingsService::read_language` → `tray_labels`，覆盖 English、Simplified Chinese、Traditional Chinese；运行中切换语言需重启后刷新菜单（P2）。
 - 目标（CLAUDE.md 原文："i18n：Agent 生成内容按用户语言偏好输出"）：
   1. 后端在构造 prompt 时读 `SettingsService::read_settings().language`，在 system instruction 末尾追加 "Respond in {{language}}" 或等价指令；生成式任务（chat 回答、wiki 编译页面文本、导出 HTML 正文、深度 lint 建议）按语言偏好输出。
   2. 确定性输出（JSON schema、frontmatter 字段名、路径、lint issueType 枚举）保持英文，避免破坏解析。
-  3. 托盘菜单 + tooltip i18n。
 - 涉及文件：`src-tauri/src/services/chat_service/retrieval.rs` (`ChatService::build_retrieval_context`)、`src-tauri/src/services/compile_service.rs:207-211`、`src-tauri/src/services/export_service.rs:31-150`、`src-tauri/src/services/lint_service/deep.rs` (`LintService::build_deep_lint_prompt`)、`src-tauri/src/commands/compile_commands.rs:295-317`、`src-tauri/src/services/settings_service.rs`、`src-tauri/src/lib.rs:35-48`。
 - 验收标准：
   1. 切换语言到 zh-CN 后，chat 回答、编译生成的 `wiki/*.md` 正文、HTML 导出正文、深度 lint 的 `suggestion` 字段为中文（确定性字段如 path/issueType 仍英文）。
-  2. 托盘菜单在 zh-CN 下显示"显示/隐藏/退出"。
+  2. ✅ 以 zh-CN 启动时，托盘菜单显示"显示/隐藏/退出"且 tooltip 本地化；zh-TW 与英文也有对应启动时文案。
   3. 回归测试：对每个 prompt 构造函数加一条断言，输出包含 "Respond in zh-CN" 或等价标记。
 
 ### 2.8 本地优先 / 无数据库（✅已完成）
@@ -163,7 +162,7 @@
 ### P0（红线，MVP 前必须关闭）
 
 1. **2.1 Import checkpoint 预操作语义**：把 checkpoint 创建移到任何 confirm-import mutation 之前；checkpoint 失败不得产生项目文件变更。详细实现与验收以 [import.md](import.md) 为准。
-2. **2.7 i18n 生成内容语言偏好**：五个 prompt 构造点接入 `SettingsService::language`；托盘菜单 i18n。违反 CLAUDE.md 硬约束。
+2. **2.7 i18n 生成内容语言偏好**：五个 prompt 构造点接入 `SettingsService::language`。托盘启动时本地化已完成，不属于此 P0。
 
 ### P1（MVP 期内补齐）
 
@@ -175,3 +174,4 @@
 5. **2.2 prompt 泄露密钥的快照测试**。
 6. **2.5 Windows UNC 路径**的 `ensure_no_detectable_escape` 测试。
 7. **2.10 无 Provider 也能搜索**的回归测试。
+8. **2.4 托盘菜单语言热更新**：如需免重启切换，重建现有 tray menu；当前启动时本地化已满足，故为 P2。
