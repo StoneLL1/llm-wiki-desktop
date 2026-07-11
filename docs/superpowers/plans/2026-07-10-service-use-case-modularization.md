@@ -1,5 +1,9 @@
 # Service Use-Case Modularization Implementation Plan
 
+> Status: completed on 2026-07-10 and integrated into master.
+> Current architecture documentation: [backend structure](../../../SPEC/BACKEND_STRUCTURE.md), [tech stack](../../../SPEC/TECH_STACK.md), and [roadmap migration note](../../../SPEC/roadmap/README.md).
+> The task body below remains the historical implementation plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在不改变 Tauri IPC、DTO、持久化格式和安全边界的前提下，把 `ImportService`、`LintService`、`ChatService`、`SearchService` 的单文件实现拆成按 use-case 组织、可独立审查和测试的 Rust 子模块。

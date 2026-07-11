@@ -1,16 +1,16 @@
 # Lint 板块落差与实施计划
 
 > 对照源：UI-Frontend-design/lint.html + assets/app.css + SPEC/PRD.md（§8.7、§9.8、Phase 4）
-> 当前实现：src/features/lint/、src/stores/lintStore.ts、src-tauri/src/services/lint_service.rs、src-tauri/src/commands/lint_commands.rs
+> 当前实现：src/features/lint/、src/stores/lintStore.ts、src-tauri/src/services/lint_service/、src-tauri/src/commands/lint_commands.rs
 
 ## 0. 现状摘要
 
 Lint 板块已具备完整的**双层骨架**且大多落在设计稿与 PRD 要求之内：
 
-- **后端确定性规则真实跑通**（非 mock）：`run_local_lint` 在 `lint_service.rs:36-255` 内扫描 wiki，检出 8 类问题——死链、孤立页、缺 frontmatter、空页面、重复文件名、路径大小写、缺失资源、index.md 漂移；`lint_service.rs:932-1142` 有 8 个 Rust 集成测试覆盖每条规则。
+- **后端确定性规则真实跑通**（非 mock）：`LintService::run_local_lint` 在 `src-tauri/src/services/lint_service/rules.rs` 内扫描 wiki，检出 8 类问题——死链、孤立页、缺 frontmatter、空页面、重复文件名、路径大小写、缺失资源、index.md 漂移；同模块测试覆盖每条规则。
 - **Agent 深度 Lint 已接入**：`start_deep_lint`（`lint_commands.rs:39-74`）走 `wiki-lint` Skill（Agent CLI 优先、BYOK 兜底），支持取消，解析 ```json``` 结构化输出到 `.app/lint-reports/<task_id>.json`。
-- **修复闭环打通**：safe 修复（缺 frontmatter）直接落盘；high-risk（死链、index 漂移）返回 `PendingAction` → 前端内联确认 → 二次调用 `apply_lint_fix` 带 `confirm_high_risk + expectedHash` 才写盘。所有写操作前先 `create_scoped_checkpoint`（`lint_service.rs:603-629`），用 `OverwriteIfHashMatches` 乐观锁防护，并清理 graph-cache、追加 `wiki/log.md`。
-- **路径安全硬边界**：`lint_service.rs:410-418` 拒绝任何不以 `wiki/` 开头或含 `..` 的 fix 路径。
+- **修复闭环打通**：safe 修复（缺 frontmatter）直接落盘；high-risk（死链、index 漂移）返回 `PendingAction` → 前端内联确认 → 二次调用 `apply_lint_fix` 带 `confirm_high_risk + expectedHash` 才写盘。所有写操作前先 `create_scoped_checkpoint`（`src-tauri/src/services/lint_service/fixes.rs`），用 `OverwriteIfHashMatches` 乐观锁防护，并清理 graph-cache、追加 `wiki/log.md`。
+- **路径安全硬边界**：`LintService::apply_fix` 在 `src-tauri/src/services/lint_service/fixes.rs` 拒绝任何不以 `wiki/` 开头或含 `..` 的 fix 路径。
 
 **核心缺口集中在 UI 层**：当前 `LintView` 仅是功能化的“列表 + 详情 + 修复按钮”，设计稿定义的摘要卡、模式分段（全部 / 本地 / Agent 深度）、批量修复、修复方案 radio、安全检查 checkbox、diff 预览、已通过区域等均未呈现。另外后端从不发出 `severity: error` 级别问题（全部为 warning/info），导致设计稿“错误 2”摘要卡无数据支撑。
 
@@ -32,7 +32,7 @@ Lint 板块已具备完整的**双层骨架**且大多落在设计稿与 PRD 要
 | Agent 建议卡片 | 独立 section，灰底框展示模型自然语言建议 | 仅当 `issue.suggestedAction` 存在时单行渲染 | 🟡部分实现 | P2 | `src/features/lint/LintIssueDetails.tsx:112-114` |
 | **修复方案多选 radio**（合并 / 保留加 cross-ref / 忽略）| `check-row` 带 radio + 影响摘要 + 风险 badge | **完全缺失**，只有单一 Apply 入口 | ❌缺失 | P1 | `src/features/lint/LintIssueDetails.tsx:166-178` |
 | 安全检查 checkbox（检查点/修复后提交/重编译）| 3 个 checkbox，前两个默认勾选 | **完全缺失**；检查点行为固定在后端，用户不可选 | ❌缺失 | P1 | `src/features/lint/LintIssueDetails.tsx` |
-| “忽略本次” / lint-ignore 机制 | radio 项：写入 lint-ignore，后续不再报告 | **前后端均无** ignore 持久化 | ❌缺失 | P1 | `src-tauri/src/services/lint_service.rs`、`src/features/lint/LintIssueDetails.tsx` |
+| “忽略本次” / lint-ignore 机制 | radio 项：写入 lint-ignore，后续不再报告 | **前后端均无** ignore 持久化 | ❌缺失 | P1 | `src-tauri/src/services/lint_service/ignores.rs`、`src/features/lint/LintIssueDetails.tsx` |
 | 高风险内联确认 + diff 预览 | 大 confirm 面板带 before/after | 已实现 before/after 双列，带 pageHash 乐观锁 | ✅已完成 | — | `src/features/lint/LintIssueDetails.tsx:123-166`、`lintStore.ts:181-217` |
 | 取消 / 应用修复 双按钮 | 底部 `btn--block` 两个 | 已有 | ✅已完成 | — | `src/features/lint/LintIssueDetails.tsx:149-165` |
 | 状态栏“待确认数 / 上次检查时间 / Git 检查点 hash” | footer 四条状态项 | 无（状态栏在 AppShell，但未显示 lint 专用状态）| ❌缺失 | P2 | `src/components/app/AppShell.tsx` |
@@ -40,10 +40,10 @@ Lint 板块已具备完整的**双层骨架**且大多落在设计稿与 PRD 要
 
 ## 2. 功能落差（PRD 对照）
 
-- [ ] **PRD-LINT-001 / 错误（error）级别**：设计稿摘要卡期望“错误 2（死链·必修）”，但 `lint_service.rs` 内所有 issue 均以 `LintSeverity::Warning` 或 `Info` 发出（`lint_service.rs:71/93/110/132/154/186/218/278`），**从不产生 error**。现状 → 死链目前是 warning。目标 → 将死链、index.md 漂移等“必修”问题升级为 `error`（或引入规则配置允许用户分级）。涉及 `src-tauri/src/services/lint_service.rs`。验收：摘要卡“错误”计数与设计稿语义一致。
-- [ ] **PRD-LINT-003 / 批量自动修复**：`lint.html` 工具栏有 `自动修复 (3)` 按钮，当前实现仅支持逐条 `apply_lint_fix`，无批量入口、无“一次 Git 检查点 → 逐条应用 → 一次提交”编排。现状 → 每条 fix 各自一次 checkpoint。目标 → 新增 `apply_lint_fixes`（批量）后端命令：一次性 scoped checkpoint，逐条按 fixability 分流，safe 立即写、high-risk 收集 PendingAction 统一确认。涉及 `src-tauri/src/commands/lint_commands.rs`、`lint_service.rs`、`src/stores/lintStore.ts`、`LintView.tsx`。验收：一键按钮触发，结束后单次提交、单次回滚可用。
+- [ ] **PRD-LINT-001 / 错误（error）级别**：设计稿摘要卡期望“错误 2（死链·必修）”，但 `LintService::run_local_lint` 在 `src-tauri/src/services/lint_service/rules.rs` 内只发出 `LintSeverity::Warning` 或 `Info`，**从不产生 error**。现状 → 死链目前是 warning。目标 → 将死链、index.md 漂移等“必修”问题升级为 `error`（或引入规则配置允许用户分级）。涉及 `src-tauri/src/services/lint_service/rules.rs`。验收：摘要卡“错误”计数与设计稿语义一致。
+- [ ] **PRD-LINT-003 / 批量自动修复**：`lint.html` 工具栏有 `自动修复 (3)` 按钮，当前实现仅支持逐条 `apply_lint_fix`，无批量入口、无“一次 Git 检查点 → 逐条应用 → 一次提交”编排。现状 → 每条 fix 各自一次 checkpoint。目标 → 新增 `apply_lint_fixes`（批量）后端命令：一次性 scoped checkpoint，逐条按 fixability 分流，safe 立即写、high-risk 收集 PendingAction 统一确认。涉及 `src-tauri/src/commands/lint_commands.rs`、`src-tauri/src/services/lint_service/fixes.rs`、`src/stores/lintStore.ts`、`LintView.tsx`。验收：一键按钮触发，结束后单次提交、单次回滚可用。
 - [ ] **PRD-LINT-002 + Agent 建议 UI**：Agent deep-lint 已能解析 6 类 issue，但 `LintIssueDetails` 没有“Agent 建议卡片”独立区——`suggestedAction` 仅作普通 Row。现状 → 建议混在元数据中。目标 → 单独 section，灰底框，保留模型自然语言原文。涉及 `src/features/lint/LintIssueDetails.tsx`。验收：Agent issue 渲染独立建议块。
-- [ ] **修复方案多选 + lint-ignore**：设计稿详情面板允许“合并 / 加 cross-ref / 忽略本次”三选一。现状 → 后端 `apply_fix` 仅针对 `MissingFrontmatter / DeadLink / IndexDrift` 三类有确定性路径，其余一律 `LINT_FIX_NOT_AUTO`；无 ignore 持久化。目标 → (1) 前端把多种修复策略作为 `fixOptions[]` 列在 issue 上（由后端在 `LintIssue` 增加 `available_fixes` 字段返回）；(2) `.app/lint-ignore.json` 记录被忽略 issue 的稳定 key，`run_local_lint` 跳过。涉及 `src-tauri/src/models/lint.rs`、`lint_service.rs`、`src/types/lint.ts`、`LintIssueDetails.tsx`。验收：用户可选策略；被忽略的 issue 不再出现于下次扫描。
+- [ ] **修复方案多选 + lint-ignore**：设计稿详情面板允许“合并 / 加 cross-ref / 忽略本次”三选一。现状 → 后端 `apply_fix` 仅针对 `MissingFrontmatter / DeadLink / IndexDrift` 三类有确定性路径，其余一律 `LINT_FIX_NOT_AUTO`；无 ignore 持久化。目标 → (1) 前端把多种修复策略作为 `fixOptions[]` 列在 issue 上（由后端在 `LintIssue` 增加 `available_fixes` 字段返回）；(2) `.app/lint-ignore.json` 记录被忽略 issue 的稳定 key，`run_local_lint` 跳过。涉及 `src-tauri/src/models/lint.rs`、`src-tauri/src/services/lint_service/{fixes,ignores,rules}.rs`、`src/types/lint.ts`、`LintIssueDetails.tsx`。验收：用户可选策略；被忽略的 issue 不再出现于下次扫描。
 - [ ] **模式分段筛选（全部/本地/Agent 深度）**：设计稿顶栏 seg 控件按 source 过滤并各自计数。现状 → 始终合并展示。目标 → 增加 `mode: "all" | "local" | "agent"` store 字段，`LintView` 顶栏 seg 控件，列表按 mode 过滤。涉及 `src/stores/lintStore.ts`、`LintView.tsx`、`LintIssueList.tsx`。验收：切换可正确过滤且计数准确。
 - [ ] **安全检查可配置**：设计稿允许用户勾选“修复前检查点 / 修复后立即提交 / 完成后重编译”。现状 → 检查点行为在后端硬编码，提交行为隐含。目标 → UI 暴露偏好（持久化到 `.app/settings.json`），后端读 settings 决定是否额外触发 wiki compile。涉及 `src-tauri/src/services/settings_service.rs`、`lint_commands.rs`。验收：偏好切换生效，未勾检查点时直接报错拦截。
 
