@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::io::Read;
+use std::path::{Component, Path};
 
 use sha2::{Digest, Sha256};
 
@@ -536,17 +537,66 @@ fn verified_artifact(
     relative: &str,
     expected_hash: &str,
 ) -> Result<Vec<u8>, BackendError> {
-    let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let bytes = std::fs::read(&path)
-        .map_err(|_| commit_error(IMPORT_V2_COMMIT_FAILED, "Preview artifact is missing."))?;
+    if relative.trim().is_empty()
+        || relative.contains('\\')
+        || relative.contains(':')
+        || Path::new(relative)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(staging_artifact_error());
+    }
+    let canonical_root = root.canonicalize().map_err(|_| staging_artifact_error())?;
+    let mut candidate = root.to_path_buf();
+    for component in Path::new(relative).components() {
+        candidate.push(component.as_os_str());
+        let metadata =
+            std::fs::symlink_metadata(&candidate).map_err(|_| staging_artifact_error())?;
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return Err(staging_artifact_error());
+        }
+    }
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|_| staging_artifact_error())?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(staging_artifact_error());
+    }
+    let mut file = std::fs::File::open(&canonical).map_err(|_| staging_artifact_error())?;
+    let before = file.metadata().map_err(|_| staging_artifact_error())?;
+    if !before.is_file() || is_reparse_point(&before) {
+        return Err(staging_artifact_error());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| staging_artifact_error())?;
+    let after = file.metadata().map_err(|_| staging_artifact_error())?;
+    if !after.is_file() || before.len() != after.len() || after.len() != bytes.len() as u64 {
+        return Err(staging_artifact_error());
+    }
     let hash = format!("{:x}", Sha256::digest(&bytes));
     if hash != expected_hash {
-        return Err(commit_error(
-            IMPORT_V2_COMMIT_FAILED,
-            "Preview artifact changed after validation.",
-        ));
+        return Err(staging_artifact_error());
     }
     Ok(bytes)
+}
+
+fn staging_artifact_error() -> BackendError {
+    commit_error(
+        IMPORT_V2_COMMIT_FAILED,
+        "A staged import artifact is unsafe, missing, or changed.",
+    )
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn json_bytes(value: &impl serde::Serialize) -> Result<Vec<u8>, BackendError> {
@@ -1250,5 +1300,72 @@ mod tests {
             std::fs::read(fixture.root.join(".app/source-index-v2.json")).unwrap(),
             before_index
         );
+    }
+
+    #[test]
+    fn commit_rejects_persisted_preview_path_traversal() {
+        let mut fixture = CommitFixture::two_ready_items();
+        fixture.second_item_id = None;
+        let mut session = fixture
+            .service
+            .load_session(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        std::fs::write(fixture.root.join("outside.bin"), b"first.pdf").unwrap();
+        session.items[0]
+            .preview
+            .as_mut()
+            .unwrap()
+            .source_snapshot
+            .relative_path = "../../../../../../outside.bin".into();
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &session)
+            .unwrap();
+        let result = fixture.commit_all();
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(
+            result.items[0].error_code.as_deref(),
+            Some(crate::errors::IMPORT_V2_COMMIT_FAILED)
+        );
+        assert!(!fixture.root.join("raw/sources").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_rejects_symlinked_staging_source() {
+        use std::os::unix::fs::symlink;
+        let mut fixture = CommitFixture::two_ready_items();
+        fixture.second_item_id = None;
+        let source = fixture.root.join(format!(
+            ".app/import-sessions/{}/items/{}/staging/source.bin",
+            fixture.session_id, fixture.first_item_id
+        ));
+        let outside = fixture.root.join("outside.bin");
+        std::fs::write(&outside, b"first.pdf").unwrap();
+        std::fs::remove_file(&source).unwrap();
+        symlink(&outside, &source).unwrap();
+        assert_eq!(fixture.commit_all().failed_count, 1);
+        assert!(!fixture.root.join("raw/sources").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn commit_rejects_windows_reparse_staging_source_when_supported() {
+        use std::os::windows::fs::symlink_file;
+        let mut fixture = CommitFixture::two_ready_items();
+        fixture.second_item_id = None;
+        let source = fixture.root.join(format!(
+            ".app/import-sessions/{}/items/{}/staging/source.bin",
+            fixture.session_id, fixture.first_item_id
+        ));
+        let outside = fixture.root.join("outside.bin");
+        std::fs::write(&outside, b"first.pdf").unwrap();
+        std::fs::remove_file(&source).unwrap();
+        if symlink_file(&outside, &source).is_err() {
+            return;
+        }
+        assert_eq!(fixture.commit_all().failed_count, 1);
+        assert!(!fixture.root.join("raw/sources").exists());
     }
 }
