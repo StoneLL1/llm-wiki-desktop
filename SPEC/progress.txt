@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] SPEC and application-flow alignment — Updated the canonical current-state docs for AppShell/WorkspaceController/WorkspaceRouter orchestration, project-key/epoch workflow guards, global task/confirmation flows, and AppState-backed Import/Search/Lint/Chat stable service facades while keeping ChatConvenienceService and WikiIndex independent — Key decision: record implemented workflow and facade facts without changing product scope, local Markdown/JSON storage, Git checkpoint/confirmation, search, BYOK/Agent, or other safety contracts.
+
 [2026-07-11] Integration dual-review cancel guard — Prevented a delayed old-project task-cancellation failure from toasting into the newly active project, backed by a deferred RED→GREEN hook regression from both independent reviewer findings — Key decision: task records remain globally trackable, but cancellation error UI commits only when the initiating projectId + rootPath is still active.
 
 [2026-07-11] Integration preflight stale-toast fix — Guarded the source-action follow-up compile error path so a rejection settling after project switch cannot toast into the newly active project, with a deferred RED→GREEN controller regression — Key decision: every post-await UI effect, including error reporting, must revalidate both projectId and rootPath; old-project task registry updates remain allowed.
