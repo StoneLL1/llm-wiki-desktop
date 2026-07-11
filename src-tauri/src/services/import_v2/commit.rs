@@ -89,8 +89,14 @@ impl ImportV2Service {
             failed_count: 0,
             items: Vec::new(),
         };
-        file_store.write_json_atomic(context, &history_path, &batch)?;
+        let mut initial_history = FileTransaction::new_for_project(&context.root);
+        initial_history.write_new(
+            &context.resolve_project_path(&history_path)?,
+            &json_bytes(&batch)?,
+        )?;
+        initial_history.commit()?;
         for (position, decision) in request.decisions.iter().enumerate() {
+            let history_hash_before = file_store.file_hash(context, &history_path)?;
             if is_cancelled() {
                 for unprocessed in &request.decisions[position..] {
                     batch.items.push(ImportItemCommitResult {
@@ -103,7 +109,7 @@ impl ImportV2Service {
                     });
                 }
                 batch.failed_count = batch.items.len() as u32 - batch.committed_count;
-                file_store.write_json_atomic(context, &history_path, &batch)?;
+                persist_history_checked(context, &history_path, &batch, &history_hash_before)?;
                 return Err(commit_error(
                     crate::errors::IMPORT_V2_CANCELLED,
                     "Import commit was cancelled.",
@@ -133,7 +139,7 @@ impl ImportV2Service {
             batch.failed_count = batch.items.len() as u32 - batch.committed_count;
             if !batch.items.last().is_some_and(|item| item.committed) {
                 run_before_failed_history_write_hook(&context.resolve_project_path(&history_path)?);
-                file_store.write_json_atomic(context, &history_path, &batch)?;
+                persist_history_checked(context, &history_path, &batch, &history_hash_before)?;
             }
         }
         Ok(batch)
@@ -344,6 +350,16 @@ impl ImportV2Service {
         history.committed_count =
             history.items.iter().filter(|entry| entry.committed).count() as u32;
         history.failed_count = history.items.len() as u32 - history.committed_count;
+        let history_expected_hash = files.file_hash(context, history_path)?;
+        let session_expected_hashes: std::collections::HashMap<_, _> = self
+            .sessions
+            .serialized_writes(&session)?
+            .into_iter()
+            .map(|(path, _)| {
+                let hash = files.file_hash(context, &path)?;
+                Ok((path, hash))
+            })
+            .collect::<Result<_, BackendError>>()?;
         let mut transaction = FileTransaction::new_for_project(&context.root);
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
@@ -389,25 +405,28 @@ impl ImportV2Service {
             } else {
                 transaction.write_new(&index_path, &json_bytes(&plan.next_index)?)?;
             }
-            transaction.write(
+            transaction.write_if_hash_matches(
                 &context.resolve_project_path(history_path)?,
                 &json_bytes(&history)?,
+                &history_expected_hash,
             )?;
             session.items[item_position].status = ImportItemStatus::Committing;
             session.items[item_position].status = ImportItemStatus::Completed;
             session.status = derive_session_status(&session.items);
             session.updated_at = chrono::Utc::now().to_rfc3339();
-            let session_root =
-                context.resolve_project_path(&format!(".app/import-sessions/{session_id}"))?;
-            transaction.track(&session_root.join("session.json"))?;
-            for item in &session.items {
-                transaction.track(
-                    &session_root
-                        .join("items")
-                        .join(format!("{}.json", item.item_id)),
+            for (relative, bytes) in self.sessions.serialized_writes(&session)? {
+                transaction.write_if_hash_matches(
+                    &context.resolve_project_path(&relative)?,
+                    &bytes,
+                    session_expected_hashes.get(&relative).ok_or_else(|| {
+                        commit_error(
+                            IMPORT_V2_COMMIT_FAILED,
+                            "Import session changed during commit.",
+                        )
+                    })?,
                 )?;
             }
-            self.sessions.save(context, files, &session)
+            Ok(())
         })();
         if let Err(error) = write_result {
             return Err(transaction.rollback_after(error));
@@ -610,6 +629,21 @@ fn json_bytes(value: &impl serde::Serialize) -> Result<Vec<u8>, BackendError> {
 
 fn commit_error(code: &str, message: &str) -> BackendError {
     BackendError::new(code, message, true, true)
+}
+
+fn persist_history_checked(
+    context: &ProjectContext,
+    relative: &str,
+    batch: &ImportBatchResult,
+    expected_hash: &str,
+) -> Result<(), BackendError> {
+    let mut transaction = FileTransaction::new_for_project(&context.root);
+    transaction.write_if_hash_matches(
+        &context.resolve_project_path(relative)?,
+        &json_bytes(batch)?,
+        expected_hash,
+    )?;
+    transaction.commit()
 }
 
 fn plan_asset_placeholder() -> &'static str {
@@ -1367,5 +1401,66 @@ mod tests {
         }
         assert_eq!(fixture.commit_all().failed_count, 1);
         assert!(!fixture.root.join("raw/sources").exists());
+    }
+
+    #[test]
+    fn concurrent_session_edit_is_preserved_and_commit_rolls_back() {
+        let mut fixture = CommitFixture::two_ready_items();
+        fixture.second_item_id = None;
+        set_before_checked_displace_hook(|path| {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            if normalized.contains("/import-sessions/") && normalized.ends_with("/session.json") {
+                std::fs::write(path, b"external session edit").unwrap();
+                true
+            } else {
+                false
+            }
+        });
+        let result = fixture.commit_all();
+        assert_eq!(result.failed_count, 1);
+        let session_path = fixture.root.join(format!(
+            ".app/import-sessions/{}/session.json",
+            fixture.session_id
+        ));
+        assert_eq!(
+            std::fs::read(session_path).unwrap(),
+            b"external session edit"
+        );
+        assert!(!fixture.root.join("raw/sources").exists());
+    }
+
+    #[test]
+    fn concurrent_history_edit_is_preserved() {
+        let mut fixture = CommitFixture::two_ready_items();
+        fixture.second_item_id = None;
+        set_before_checked_displace_hook(|path| {
+            if path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .contains("/.app/import-history/")
+            {
+                std::fs::write(path, b"external history edit").unwrap();
+                true
+            } else {
+                false
+            }
+        });
+        let request = fixture.request(vec![CommitItemDecision {
+            item_id: fixture.first_item_id.clone(),
+            conflict_action: None,
+            expected_wiki_hash: None,
+        }]);
+        let error = fixture
+            .service
+            .commit_items(&fixture.context, &fixture.files, &fixture.git, &request)
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
+        let history = std::fs::read_dir(fixture.root.join(".app/import-history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(history).unwrap(), b"external history edit");
     }
 }

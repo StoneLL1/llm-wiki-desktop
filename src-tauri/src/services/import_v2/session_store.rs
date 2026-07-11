@@ -70,6 +70,29 @@ fn session_root(session_id: &str) -> String {
 }
 
 impl SessionStore {
+    pub(super) fn serialized_writes(
+        &self,
+        session: &ImportSession,
+    ) -> Result<Vec<(String, Vec<u8>)>, BackendError> {
+        validate_id(&session.session_id)?;
+        let root = session_root(&session.session_id);
+        let mut writes = Vec::with_capacity(session.items.len() + 1);
+        for item in &session.items {
+            validate_id(&item.item_id)?;
+            writes.push((
+                format!("{root}/items/{}.json", item.item_id),
+                serde_json::to_vec_pretty(item)
+                    .map_err(|_| invalid_session("Import session item could not be serialized."))?,
+            ));
+        }
+        writes.push((
+            format!("{root}/session.json"),
+            serde_json::to_vec_pretty(&SessionRecord::from(session))
+                .map_err(|_| invalid_session("Import session summary could not be serialized."))?,
+        ));
+        Ok(writes)
+    }
+
     pub fn create(
         &self,
         context: &ProjectContext,
