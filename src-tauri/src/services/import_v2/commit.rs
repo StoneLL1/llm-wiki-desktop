@@ -181,6 +181,7 @@ impl ImportV2Service {
                 verified_artifact(&staging, &asset.relative_path, &asset.sha256)?,
             ));
         }
+        let index_existed = files.exists(context, ".app/source-index-v2.json");
         let index = SourceRegistry::read_index(context, files)?;
         let locator = item.input.normalized_locator.as_deref().ok_or_else(|| {
             commit_error(
@@ -296,14 +297,14 @@ impl ImportV2Service {
         let mut transaction = FileTransaction::new();
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
-                transaction.write(&context.resolve_project_path(&plan.raw_path)?, &source)?;
-                transaction.write(
+                transaction.write_new(&context.resolve_project_path(&plan.raw_path)?, &source)?;
+                transaction.write_new(
                     &context.resolve_project_path(&plan.baseline_path)?,
                     &markdown,
                 )?;
                 for (relative, bytes) in assets {
                     let target = format!("{}/{}", plan.asset_root_path, relative);
-                    transaction.write(&context.resolve_project_path(&target)?, &bytes)?;
+                    transaction.write_new(&context.resolve_project_path(&target)?, &bytes)?;
                 }
             }
             if !wiki_exists || overwrite_wiki {
@@ -315,17 +316,21 @@ impl ImportV2Service {
                         decision.expected_wiki_hash.as_deref().unwrap(),
                     )?;
                 } else {
-                    transaction.write(&wiki, &markdown)?;
+                    transaction.write_new(&wiki, &markdown)?;
                 }
             }
-            transaction.write(
-                &context.resolve_project_path(&plan.manifest_path)?,
-                &json_bytes(&plan.next_manifest)?,
-            )?;
-            transaction.write(
-                &context.resolve_project_path(".app/source-index-v2.json")?,
-                &json_bytes(&plan.next_index)?,
-            )?;
+            let manifest_path = context.resolve_project_path(&plan.manifest_path)?;
+            if existing_manifest.is_some() {
+                transaction.write(&manifest_path, &json_bytes(&plan.next_manifest)?)?;
+            } else {
+                transaction.write_new(&manifest_path, &json_bytes(&plan.next_manifest)?)?;
+            }
+            let index_path = context.resolve_project_path(".app/source-index-v2.json")?;
+            if index_existed {
+                transaction.write(&index_path, &json_bytes(&plan.next_index)?)?;
+            } else {
+                transaction.write_new(&index_path, &json_bytes(&plan.next_index)?)?;
+            }
             transaction.write(
                 &context.resolve_project_path(history_path)?,
                 &json_bytes(&history)?,
@@ -415,6 +420,7 @@ mod tests {
 
     use super::super::ImportV2Service;
     use super::{asset_collision_key, set_before_failed_history_write_hook};
+    use crate::services::import_v2::transaction::set_before_new_install_hook;
 
     struct FixtureEngine {
         root: PathBuf,
@@ -805,5 +811,47 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, "FILE_WRITE_FAILED");
+    }
+
+    #[test]
+    fn concurrent_new_destinations_are_never_clobbered() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        for target_kind in ["raw", "baseline", "asset", "wiki", "index"] {
+            let mut fixture = CommitFixture::two_ready_items();
+            fixture.second_item_id = None;
+            let captured = Rc::new(RefCell::new(None::<PathBuf>));
+            let output = captured.clone();
+            set_before_new_install_hook(move |path| {
+                let normalized = path.to_string_lossy().replace('\\', "/");
+                let matches = match target_kind {
+                    "raw" => {
+                        normalized.contains("/raw/sources/") && normalized.contains("/original.")
+                    }
+                    "baseline" => normalized.ends_with("/baseline.md"),
+                    "asset" => normalized.ends_with("/assets/asset.png"),
+                    "wiki" => normalized.contains("/wiki/") && normalized.ends_with(".md"),
+                    "index" => normalized.ends_with("/.app/source-index-v2.json"),
+                    _ => false,
+                };
+                if matches {
+                    std::fs::write(path, b"external concurrent file").unwrap();
+                    *output.borrow_mut() = Some(path.to_path_buf());
+                }
+                matches
+            });
+            let result = fixture.commit_all();
+            assert_eq!(result.failed_count, 1, "{target_kind}");
+            let path = captured
+                .borrow()
+                .clone()
+                .expect("race hook must match destination");
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                b"external concurrent file",
+                "{target_kind}"
+            );
+        }
     }
 }
