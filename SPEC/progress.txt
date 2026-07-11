@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] Architecture documentation alignment — Aligned living SPEC, flow, technical, backend, frontend, and roadmap documentation with the AppShell workflow controllers and Rust service use-case modules while preserving product contracts and historical evidence — Key decision: current code is the implementation source of truth; DESIGN.md and historical audits remain unchanged.
+
 [2026-07-11] SPEC and application-flow alignment — Updated the canonical current-state docs for AppShell/WorkspaceController/WorkspaceRouter orchestration, project-key/epoch workflow guards, global task/confirmation flows, and AppState-backed Import/Search/Lint/Chat stable service facades while keeping ChatConvenienceService and WikiIndex independent — Key decision: record implemented workflow and facade facts without changing product scope, local Markdown/JSON storage, Git checkpoint/confirmation, search, BYOK/Agent, or other safety contracts.
 
 [2026-07-11] Integration dual-review cancel guard — Prevented a delayed old-project task-cancellation failure from toasting into the newly active project, backed by a deferred RED→GREEN hook regression from both independent reviewer findings — Key decision: task records remain globally trackable, but cancellation error UI commits only when the initiating projectId + rootPath is still active.

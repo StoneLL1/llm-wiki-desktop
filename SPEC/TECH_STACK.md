@@ -116,6 +116,7 @@ IPC 层负责把前端意图转成后端服务调用。
 - Project commands：应用摘要、创建 / 打开 / 预览普通文件夹、扫描、最近项目列表与记忆。
 - Import commands：文件 / 文本 / URL 预览、URL 抓取与校验、来源目录、删除 / 替换请求、确认导入和提取文本预览。
 - Wiki commands：扫描、读取、保存、创建、重命名、删除请求和书签切换。
+- Search commands：`search_wiki` 提供本地 Wiki 关键词 / 过滤搜索，不调用模型。
 - Git commands：状态、仓库初始化、检查点和 Markdown diff；当前未注册通用提交或恢复 command。
 - Agent commands：检测 CLI、读取 Agent 配置和设置默认 Agent；任务取消与日志归 `Task commands`，当前 Agent command 不直接启动任务。
 - LLM commands：Provider 列表 / 保存、密钥保存 / 删除 / 状态、Ollama 可达性和 Provider 测试；当前未注册通用 BYOK 执行 command。
