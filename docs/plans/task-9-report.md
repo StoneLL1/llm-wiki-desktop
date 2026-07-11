@@ -1,5 +1,12 @@
 # Task 9 final Review B recovery closeout
 
+## 2026-07-12 recovery-of-recovery durability
+
+- Each journal entry can now carry a backward-compatible durable recovery record containing the canonical and unique guard project-relative paths, expected installed identity/hash, rollback action, and Planned/Quarantined/Restored phase.
+- Recovery persists and syncs the guard plan through the retained journal parent before quarantining. Restart reconciliation discovers either canonical or guard state, verifies the guard through the retained target parent, preserves external canonical replacements, and clears the phase only after the guard is consumed or removed.
+- New-file delete and checked-overwrite restore recovery are idempotent across process death immediately after quarantine, after the no-clobber action, before guard removal, and after removal before phase clear. Every case reconciles twice without an orphan; conflicted overwrite recovery retains and reports the durable guard.
+- Focused transaction tests pass (`30/30`), both real commit persistence-boundary matrices pass, clean Rust library and Import V2 integration suites pass (`569/569` and `3/3`), and the unified `npm run check` passes (`455/455` frontend plus all Rust/integration stages).
+
 ## 2026-07-12 recovery child-name quarantine
 
 - Restart rollback now renames the current canonical child to a unique recovery guard through the retained parent namespace before any destructive decision. The quarantined object is opened relative to that same parent and must match both the journal's persisted installed identity and desired hash.
