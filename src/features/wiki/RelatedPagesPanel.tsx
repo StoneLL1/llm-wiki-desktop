@@ -73,7 +73,7 @@ export function RelatedPagesPanel({
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto p-3 text-[12px]">
+    <div className="app-pane-scrollbar flex h-full flex-col gap-4 overflow-y-auto p-3 text-[12px]">
       <section>
         <h4 className="mb-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
           {t("wiki.related.metadata")}

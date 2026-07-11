@@ -128,79 +128,81 @@ export function LeftSidebar() {
       role="navigation"
       className="app-sidebar"
     >
-      <div className="py-3">
-        <div className="app-sidebar__section-label">
-          {t("shell.mainViews")}
+      <div className="app-sidebar__scroll-region app-pane-scrollbar">
+        <div className="py-3">
+          <div className="app-sidebar__section-label">
+            {t("shell.mainViews")}
+          </div>
+          <div className="flex flex-col gap-[1px] px-2">{renderNavGroup(mainViews)}</div>
         </div>
-        <div className="flex flex-col gap-[1px] px-2">{renderNavGroup(mainViews)}</div>
-      </div>
 
-      <div className="py-3">
-        <div className="app-sidebar__section-label">
-          {t("shell.workflow")}
+        <div className="py-3">
+          <div className="app-sidebar__section-label">
+            {t("shell.workflow")}
+          </div>
+          <div className="flex flex-col gap-[1px] px-2">{renderNavGroup(workflowViews)}</div>
         </div>
-        <div className="flex flex-col gap-[1px] px-2">{renderNavGroup(workflowViews)}</div>
-      </div>
 
-      <div className="app-sidebar__favorites py-3">
-        <div className="app-sidebar__section-label flex items-center justify-between">
-          <span>{t("shell.favorites")}</span>
-          <Star aria-hidden="true" className="shrink-0" size={11} />
+        <div className="app-sidebar__favorites py-3">
+          <div className="app-sidebar__section-label flex items-center justify-between">
+            <span>{t("shell.favorites")}</span>
+            <Star aria-hidden="true" className="shrink-0" size={11} />
+          </div>
+          <div className="flex flex-col gap-[1px] px-2">
+            {favorites.length === 0 ? (
+              <p className="m-0 px-2 text-[11.5px] leading-5 text-[var(--text-muted)]">
+                {t("shell.favorites.empty")}
+              </p>
+            ) : (
+              favorites.map((item) => {
+                const Icon = item.kind === "wiki_page" ? FileText : FileOutput;
+                return (
+                  <button
+                    key={item.id}
+                    aria-label={t(item.kind === "wiki_page" ? "shell.favorite.openWiki" : "shell.favorite.openExport", { title: item.title })}
+                    onClick={() => openFavorite(item)}
+                    className="flex h-[26px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+                    title={item.missing ? t("shell.favorite.missingExport") : item.path}
+                    type="button"
+                  >
+                    <Icon aria-hidden="true" className="shrink-0 text-[var(--accent)]" size={14} />
+                    <span className="truncate">{item.title}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>
-        <div className="flex flex-col gap-[1px] px-2">
-          {favorites.length === 0 ? (
-            <p className="m-0 px-2 text-[11.5px] leading-5 text-[var(--text-muted)]">
-              {t("shell.favorites.empty")}
-            </p>
-          ) : (
-            favorites.map((item) => {
-              const Icon = item.kind === "wiki_page" ? FileText : FileOutput;
-              return (
+
+        <div className="app-sidebar__recent py-3">
+          <div className="app-sidebar__section-label flex items-center justify-between">
+            <span>{t("shell.recentPages")}</span>
+          </div>
+          <div className="flex flex-col gap-[1px] px-2">
+            {recentPages.length === 0 ? (
+              <p className="m-0 px-2 text-[11.5px] leading-5 text-[var(--text-muted)]">
+                {t("shell.recentPages.empty")}
+              </p>
+            ) : (
+              recentPages.map((page, index) => (
                 <button
-                  key={item.id}
-                  aria-label={t(item.kind === "wiki_page" ? "shell.favorite.openWiki" : "shell.favorite.openExport", { title: item.title })}
-                  onClick={() => openFavorite(item)}
+                  key={page.path}
+                  aria-label={page.title}
+                  onClick={() => openRecentPage(page.path)}
                   className="flex h-[26px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
-                  title={item.missing ? t("shell.favorite.missingExport") : item.path}
+                  title={page.path}
                   type="button"
                 >
-                  <Icon aria-hidden="true" className="shrink-0 text-[var(--accent)]" size={14} />
-                  <span className="truncate">{item.title}</span>
+                  <FileText aria-hidden="true" className={`shrink-0 ${index === 0 ? "text-[var(--accent)]" : "text-[var(--text-secondary)]"}`} size={14} />
+                  <span className="truncate">{page.title}</span>
                 </button>
-              );
-            })
-          )}
+              ))
+            )}
+          </div>
         </div>
       </div>
 
-      <div className="app-sidebar__recent min-h-0 flex-1 overflow-y-auto py-3">
-        <div className="app-sidebar__section-label flex items-center justify-between">
-          <span>{t("shell.recentPages")}</span>
-        </div>
-        <div className="flex flex-col gap-[1px] px-2">
-          {recentPages.length === 0 ? (
-            <p className="m-0 px-2 text-[11.5px] leading-5 text-[var(--text-muted)]">
-              {t("shell.recentPages.empty")}
-            </p>
-          ) : (
-            recentPages.map((page, index) => (
-              <button
-                key={page.path}
-                aria-label={page.title}
-                onClick={() => openRecentPage(page.path)}
-                className="flex h-[26px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
-                title={page.path}
-                type="button"
-              >
-                <FileText aria-hidden="true" className={`shrink-0 ${index === 0 ? "text-[var(--accent)]" : "text-[var(--text-secondary)]"}`} size={14} />
-                <span className="truncate">{page.title}</span>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
+      <div className="flex shrink-0 items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
         <span className="flex min-w-0 flex-1 items-center gap-2">
           <span className={`inline-block h-[7px] w-[7px] shrink-0 rounded-full ${agentDot}`} aria-hidden="true" />
           <span className="app-sidebar__agent-name truncate font-mono text-[var(--text-secondary)]">{agentLabel}</span>

@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] Sidebar scroll and appearance stability — Unified the upper left sidebar scroll region, refined left/right panel scrollbars, and removed settings save-status reflow — Key decision: the Agent footer remains fixed while save feedback is absolutely positioned outside normal layout flow.
+
 [2026-07-11] LLM Wiki Desktop context skill evolution — Updated the project skill with current AppShell/workflow ownership, project-switch async commit guards, stable Rust facade contracts, context authority rules, exact code routing, and the unified `npm run check` gate — Key decision: the skill is an anti-drift map, not a duplicate architecture spec; focused checks accelerate iteration but never replace the full check.
 
 [2026-07-11] Architecture documentation alignment — Aligned living SPEC, flow, technical, backend, frontend, and roadmap documentation with the AppShell workflow controllers and Rust service use-case modules while preserving product contracts and historical evidence — Key decision: current code is the implementation source of truth; DESIGN.md and historical audits remain unchanged.

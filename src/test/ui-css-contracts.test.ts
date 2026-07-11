@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest";
 
 const stylesPath = join(process.cwd(), "src", "styles.css");
 const styles = readFileSync(stylesPath, "utf8");
+const rightPanelSourcePaths = [
+  join(process.cwd(), "src", "components", "app", "RightContextPanel.tsx"),
+  join(process.cwd(), "src", "features", "agent", "AgentRightPanel.tsx"),
+  join(process.cwd(), "src", "features", "chat", "PageChatPanel.tsx"),
+  join(process.cwd(), "src", "features", "import", "ImportRightPanel.tsx"),
+  join(process.cwd(), "src", "features", "wiki", "RelatedPagesPanel.tsx"),
+];
 
 /** Re-read styles.css so a test observes the current file contents even when
  *  other tests in the same run mutated the cached module-level `styles`. */
@@ -45,6 +52,28 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".resize-handle");
     expect(styles).toMatch(/\.resize-handle:focus-visible::before/s);
     expect(styles).toContain("body.is-resizing-pane");
+  });
+
+  it("uses one compact scrollbar treatment for the left sidebar and right panel bodies", () => {
+    const css = readStyles();
+    expect(css).toMatch(/\.app-sidebar__scroll-region\s*\{[^}]*overflow-y:\s*auto/s);
+    expect(css).toMatch(/\.app-sidebar__recent\s*\{[^}]*flex:\s*none/s);
+    expect(css).toMatch(/@supports not selector\(::-webkit-scrollbar\)\s*\{[\s\S]*\.app-pane-scrollbar\s*\{[^}]*scrollbar-width:\s*thin/s);
+    expect(css).toMatch(/\.app-pane-scrollbar::-webkit-scrollbar\s*\{[^}]*width:\s*4px/s);
+    expect(css).toMatch(/\.app-pane-scrollbar::-webkit-scrollbar-thumb\s*\{[^}]*color-mix/s);
+    expect(css).toMatch(/\.app-pane-scrollbar:hover::-webkit-scrollbar-thumb/s);
+
+    rightPanelSourcePaths.forEach((sourcePath) => {
+      const source = readFileSync(sourcePath, "utf8");
+      expect(source).toMatch(/className="[^"]*app-pane-scrollbar[^"]*overflow-y-auto[^"]*"/);
+    });
+  });
+
+  it("keeps transient settings status feedback out of document flow", () => {
+    const css = readStyles();
+    expect(css).toMatch(/\.settings-view__content-inner\s*\{[^}]*position:\s*relative/s);
+    expect(css).toMatch(/\.settings-view__content-inner\s*\{[^}]*padding-top:\s*calc/s);
+    expect(css).toMatch(/\.settings-view__status\s*\{[^}]*position:\s*absolute/s);
   });
 
   it("wires shell grid columns to persisted pane width variables", () => {
