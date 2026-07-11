@@ -25,11 +25,26 @@ use crate::services::{FileStore, GitService};
 thread_local! {
     static BEFORE_FAILED_HISTORY_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
+    static BEFORE_ARTIFACT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
 }
+
+#[cfg(test)]
+fn run_before_artifact_open_hook(path: &Path) {
+    BEFORE_ARTIFACT_OPEN_HOOK.with(|slot| if let Some(hook) = slot.borrow_mut().take() { hook(path) });
+}
+
+#[cfg(not(test))]
+fn run_before_artifact_open_hook(_path: &Path) {}
 
 #[cfg(test)]
 fn set_before_failed_history_write_hook(hook: impl FnOnce(&Path) + 'static) {
     BEFORE_FAILED_HISTORY_WRITE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn set_before_artifact_open_hook(hook: impl FnOnce(&Path) + 'static) {
+    BEFORE_ARTIFACT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 fn run_before_failed_history_write_hook(path: &Path) {
@@ -581,6 +596,13 @@ fn verified_artifact(
         return Err(staging_artifact_error());
     }
     let mut file = std::fs::File::open(&canonical).map_err(|_| staging_artifact_error())?;
+    // Bind validation to this opened object. Later namespace replacement cannot
+    // redirect reads through this handle, and its kernel-resolved final path must
+    // still be the validated canonical artifact.
+    if !opened_file_matches_path(&file, &canonical) {
+        return Err(staging_artifact_error());
+    }
+    run_before_artifact_open_hook(&canonical);
     let before = file.metadata().map_err(|_| staging_artifact_error())?;
     if !before.is_file() || is_reparse_point(&before) {
         return Err(staging_artifact_error());
@@ -597,6 +619,35 @@ fn verified_artifact(
         return Err(staging_artifact_error());
     }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    std::fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).is_ok_and(|path| path == canonical)
+}
+
+#[cfg(windows)]
+fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFinalPathNameByHandleW(handle: *mut std::ffi::c_void, path: *mut u16, size: u32, flags: u32) -> u32;
+    }
+    let mut buffer = vec![0u16; 32768];
+    // SAFETY: the file owns a live handle and buffer is writable for its full declared size.
+    let length = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle().cast(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
+    if length == 0 || length as usize >= buffer.len() { return false; }
+    let resolved = String::from_utf16_lossy(&buffer[..length as usize]);
+    let resolved = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
+    let canonical_text = canonical.to_string_lossy();
+    let canonical_text = canonical_text.strip_prefix(r"\\?\").unwrap_or(&canonical_text);
+    resolved.replace('/', "\\").eq_ignore_ascii_case(&canonical_text.replace('/', "\\"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn opened_file_matches_path(_file: &std::fs::File, _canonical: &Path) -> bool {
+    false
 }
 
 fn staging_artifact_error() -> BackendError {
@@ -657,6 +708,7 @@ fn asset_collision_key(path: &str) -> String {
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
+    use sha2::{Digest, Sha256};
 
     use crate::errors::IMPORT_V2_COMMIT_CONFLICT;
     use crate::models::import_v2::{
@@ -674,7 +726,7 @@ mod tests {
     use crate::tasks::TaskService;
 
     use super::super::ImportV2Service;
-    use super::{asset_collision_key, set_before_failed_history_write_hook};
+    use super::{asset_collision_key, set_before_artifact_open_hook, set_before_failed_history_write_hook, verified_artifact};
     use crate::services::import_v2::transaction::set_before_checked_displace_hook;
     use crate::services::import_v2::transaction::set_before_new_install_hook;
 
@@ -1461,5 +1513,22 @@ mod tests {
             .unwrap()
             .path();
         assert_eq!(std::fs::read(history).unwrap(), b"external history edit");
+    }
+
+    #[test]
+    fn staged_artifact_replacement_after_open_cannot_redirect_bound_handle() {
+        let root = std::env::temp_dir().join(format!("import-v2-artifact-{}", uuid::Uuid::new_v4()));
+        let path = root.join("staging/item.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"expected").unwrap();
+        set_before_artifact_open_hook(|path| {
+            let replacement = path.with_extension("replacement");
+            std::fs::write(&replacement, b"attacker").unwrap();
+            std::fs::remove_file(path).unwrap();
+            std::fs::rename(replacement, path).unwrap();
+        });
+        assert_eq!(verified_artifact(&root, "staging/item.md", &format!("{:x}", Sha256::digest(b"expected"))).unwrap(), b"expected");
+        assert_eq!(std::fs::read(&path).unwrap(), b"attacker");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
