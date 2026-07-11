@@ -4,7 +4,7 @@
 
 本文面向后续开发 Agent / Claude Code，用来确定 LLM Wiki Desktop 的 Tauri / Rust 后端架构、目录结构、模块职责、IPC 边界、任务模型、错误模型和安全规则。
 
-本文不是对现有源码的解释。当前仓库仍以产品文档和样本 Wiki 为主，尚未初始化完整 Tauri 应用源码。后续实现后端时，应先阅读：
+本文是对当前已实现后端源码的权威结构说明。后续调整后端时，应同时核对：
 
 - `PRD.md`
 - `SPEC.md`
@@ -28,9 +28,9 @@
 - Agent CLI 默认优先，但 BYOK API 必须支撑核心流程。
 - Git 检查点是数据安全边界，不是可选增强。
 
-## 3. 推荐目录结构
+## 3. 当前目录结构
 
-后端源码放在 Tauri 标准目录下：
+后端源码位于 Tauri 标准目录。以下 command、model、service 和 task 布局与当前 `src-tauri/src/` 一致：
 
 ```text
 src-tauri/
@@ -41,93 +41,158 @@ src-tauri/
     ├── lib.rs
     ├── app_state.rs
     ├── commands/
+    │   ├── agent_commands.rs
+    │   ├── chat_commands.rs
+    │   ├── compile_commands.rs
+    │   ├── export_commands.rs
+    │   ├── file_commands.rs
+    │   ├── git_commands.rs
+    │   ├── graph_commands.rs
+    │   ├── import_commands.rs
+    │   ├── lint_commands.rs
+    │   ├── llm_commands.rs
     │   ├── mod.rs
     │   ├── project_commands.rs
-    │   ├── file_commands.rs
-    │   ├── import_commands.rs
-    │   ├── wiki_commands.rs
-    │   ├── git_commands.rs
-    │   ├── agent_commands.rs
-    │   ├── llm_commands.rs
     │   ├── search_commands.rs
-    │   ├── graph_commands.rs
-    │   ├── lint_commands.rs
-    │   ├── export_commands.rs
     │   ├── settings_commands.rs
-    │   └── task_commands.rs
+    │   ├── task_commands.rs
+    │   └── wiki_commands.rs
+    ├── models/
+    │   ├── agent.rs
+    │   ├── bookmark.rs
+    │   ├── chat.rs
+    │   ├── compile.rs
+    │   ├── confirmation.rs
+    │   ├── export.rs
+    │   ├── git.rs
+    │   ├── graph.rs
+    │   ├── import.rs
+    │   ├── lint.rs
+    │   ├── llm.rs
+    │   ├── mod.rs
+    │   ├── paths.rs
+    │   ├── project.rs
+    │   ├── search.rs
+    │   ├── settings.rs
+    │   ├── task.rs
+    │   └── wiki.rs
     ├── services/
+    │   ├── agent_service.rs
+    │   ├── bookmark_service.rs
+    │   ├── chat_convenience_service.rs
+    │   ├── chat_service/
+    │   │   ├── citations.rs
+    │   │   ├── mod.rs
+    │   │   ├── retrieval.rs
+    │   │   ├── saved_answers.rs
+    │   │   ├── sessions.rs
+    │   │   └── test_support.rs
+    │   ├── compile_instructions.rs
+    │   ├── compile_service.rs
+    │   ├── export_service.rs
+    │   ├── extraction_service.rs
+    │   ├── file_store.rs
+    │   ├── git_service.rs
+    │   ├── graph_service.rs
+    │   ├── import_service/
+    │   │   ├── artifacts.rs
+    │   │   ├── classification.rs
+    │   │   ├── confirmation.rs
+    │   │   ├── mod.rs
+    │   │   ├── preview.rs
+    │   │   ├── promotion.rs
+    │   │   ├── source_actions.rs
+    │   │   ├── source_catalog.rs
+    │   │   └── test_support.rs
+    │   ├── lint_service/
+    │   │   ├── deep.rs
+    │   │   ├── fixes.rs
+    │   │   ├── ignores.rs
+    │   │   ├── mod.rs
+    │   │   ├── reports.rs
+    │   │   ├── rules.rs
+    │   │   └── test_support.rs
+    │   ├── llm_service.rs
     │   ├── mod.rs
     │   ├── project_service.rs
-    │   ├── file_store.rs
-    │   ├── import_service.rs
-    │   ├── extraction_service.rs
-    │   ├── git_service.rs
-    │   ├── agent_service.rs
-    │   ├── llm_service.rs
-    │   ├── search_service.rs
-    │   ├── graph_service.rs
-    │   ├── lint_service.rs
-    │   ├── export_service.rs
+    │   ├── search_service/
+    │   │   ├── catalog.rs
+    │   │   ├── excerpts.rs
+    │   │   ├── mod.rs
+    │   │   ├── pages.rs
+    │   │   ├── query.rs
+    │   │   └── test_support.rs
+    │   ├── secret_service.rs
     │   ├── settings_service.rs
-    │   └── secret_service.rs
+    │   └── wiki_index.rs
     ├── tasks/
+    │   ├── byok_progress.rs
+    │   ├── cancellation.rs
     │   ├── mod.rs
-    │   ├── task_service.rs
-    │   ├── task_model.rs
     │   ├── task_events.rs
-    │   └── cancellation.rs
-    ├── models/
-    │   ├── mod.rs
-    │   ├── project.rs
-    │   ├── paths.rs
-    │   ├── import.rs
-    │   ├── wiki.rs
-    │   ├── git.rs
-    │   ├── agent.rs
-    │   ├── llm.rs
-    │   ├── graph.rs
-    │   ├── lint.rs
-    │   ├── export.rs
-    │   ├── settings.rs
-    │   └── confirmation.rs
+    │   ├── task_model.rs
+    │   └── task_service.rs
     ├── errors/
     │   ├── mod.rs
     │   ├── backend_error.rs
     │   └── error_codes.rs
     └── utils/
+        ├── i18n.rs
+        ├── markdown_utils.rs
         ├── mod.rs
         ├── path_utils.rs
-        ├── json_utils.rs
-        ├── markdown_utils.rs
-        ├── process_utils.rs
-        └── time_utils.rs
+        ├── time_utils.rs
+        └── url_utils.rs
 ```
 
-实现可以根据 Rust 模块习惯调整文件名，但必须保持同等清晰的职责边界。
+四个稳定 facade 目录的完整文件集合也可写为：
+
+```text
+services/import_service/{artifacts,classification,confirmation,preview,promotion,source_actions,source_catalog,test_support}.rs
+services/search_service/{catalog,excerpts,pages,query,test_support}.rs
+services/lint_service/{deep,fixes,ignores,reports,rules,test_support}.rs
+services/chat_service/{citations,retrieval,saved_answers,sessions,test_support}.rs
+```
+
+各目录另有定义 facade 与模块边界的 `mod.rs`。
+
+物理文件可以继续按用例拆分，但 facade、DTO 和持久化兼容性不能因为文件移动而改变。
 
 ## 4. 后端分层总览
 
 ```text
-React UI
-  -> Tauri IPC Commands
-      -> AppState
-          -> Services
-              -> File system / Git / Agent CLI / LLM API / OS secrets
-          -> TaskService
-          -> Event emitter
+React shell / feature workflows
+  -> typed Tauri invoke
+      -> thin command modules
+          -> AppState + ProjectRegistry
+              -> stable service facades
+              -> TaskService
+              -> ConfirmationRegistry
+                  -> local files / Git / Agent CLI / LLM API / OS credentials
 ```
 
 各层职责：
 
 - `commands/`：接收前端请求、参数校验、调用 service、返回 DTO。
 - `app_state.rs`：持有共享服务实例和当前应用级状态。
-- `services/`：业务能力实现。
+- `services/`：稳定 facade 和聚焦用例实现；`services/mod.rs` 是 crate-facing re-export boundary。
 - `tasks/`：后台任务生命周期、进度、日志、取消和事件。
 - `models/`：领域模型、DTO、持久化 JSON 结构。
 - `errors/`：统一错误类型和错误码。
 - `utils/`：无状态工具函数。
 
 不要在 command 函数里实现导入、Git、Agent、Lint、导出等核心逻辑。
+
+当前 facade 依赖规则：
+
+- commands 和 `AppState` 依赖 facade 类型，绝不依赖私有 use-case 子模块。
+- `services/mod.rs` 是面向 crate 的统一 re-export boundary；跨层调用从这里取得稳定类型。
+- `ImportService`、`SearchService`、`LintService`、`ChatService` 的多个聚焦 `impl Service` block 分布在用例子模块中，共同实现同一个稳定 facade。
+- 子模块使用满足协作所需的最窄可见性；默认 `mod` 私有，兄弟模块共享 helper 才使用 `pub(super)`，计划级共享常量才使用 `pub(crate)`。
+- `src-tauri/tests/service_facade_contracts.rs` 保护 facade 的构造方式和选定公开契约。
+- `ChatConvenienceService` 与 `WikiIndex` 保持独立：前者承载 Chat 便捷写入的意图与变更审计，后者承载项目级只读内存索引；二者不并入四个 facade。
+- command 注册继续在 `lib.rs` 中通过 `tauri::generate_handler!` 显式维护。
+- 物理文件移动不改变 command DTO、公开 facade 或 `.app/*.json` 等持久化兼容性。
 
 ## 5. Tauri IPC 规则
 
@@ -151,6 +216,8 @@ Command 层不做：
 - 图谱构建。
 - Lint 修复。
 - HTML 生成。
+
+GUI command 模块由 `commands/mod.rs` 明确导出，并在 `lib.rs` 的 `tauri::generate_handler!` 中逐项注册。仅增加 Rust 函数而遗漏显式注册，不构成可调用 IPC 接口。
 
 ### 5.2 结构化输入输出
 
@@ -198,18 +265,20 @@ pub struct OpenProjectResponse {
 
 ## 6. AppState 与依赖管理
 
-`AppState` 持有后端服务和共享运行态。
-
-建议结构：
+`AppState` 持有稳定 service facade、全局任务 / 确认运行态以及多项目可信根注册表。当前结构为：
 
 ```rust
 pub struct AppState {
+    pub project_registry: ProjectRegistry,
     pub project_service: ProjectService,
     pub file_store: FileStore,
     pub import_service: ImportService,
     pub extraction_service: ExtractionService,
     pub git_service: GitService,
     pub agent_service: AgentService,
+    pub bookmark_service: BookmarkService,
+    pub chat_convenience_service: ChatConvenienceService,
+    pub chat_service: ChatService,
     pub llm_service: LlmService,
     pub search_service: SearchService,
     pub graph_service: GraphService,
@@ -218,10 +287,11 @@ pub struct AppState {
     pub settings_service: SettingsService,
     pub secret_service: SecretService,
     pub task_service: TaskService,
+    pub confirmation_registry: ConfirmationRegistry,
 }
 ```
 
-实现可以用 `Arc`、`Mutex`、`RwLock` 或内部 channel 管理并发，但要避免全局可变状态失控。
+`ProjectRegistry` 把已打开项目的 `project_id` 映射到 canonical root；command 使用 `AppState::resolve_project_context` 校验调用方断言的 id / root 组合。需要并发共享的实现细节可以使用 `Arc`、`Mutex`、`RwLock` 或内部 channel，但不能让 command 绕过 facade 直接获取私有模块状态。
 
 规则：
 
@@ -229,6 +299,7 @@ pub struct AppState {
 - 共享状态尽量集中在 `AppState`。
 - 当前项目上下文通过 `ProjectContext` 传递。
 - 不要让 service 随意从全局变量读取当前项目。
+- `AppState` 字段类型来自 `crate::services` 和 `crate::tasks` 的稳定 re-export，不引用四个 facade 目录内的私有模块。
 
 ## 7. ProjectContext 路径安全边界
 
@@ -373,7 +444,7 @@ pub struct PendingAction {
 - 自动修复。
 - HTML / 卡片 / 报告导出。
 
-建议任务模型：
+当前公开任务 DTO 定义在 `models/task.rs`，任务运行态、取消令牌和状态迁移定义在 `tasks/task_model.rs`；`TaskService` 通过 `tasks/mod.rs` re-export。公开 DTO 结构为：
 
 ```rust
 pub struct BackendTask {
@@ -479,6 +550,19 @@ pub struct BackendTask {
 - 所有 JSON 写入应尽量原子化，避免写一半损坏状态文件。
 
 ## 13. ImportService
+
+`ImportService` 是 `services/import_service/mod.rs` 中的稳定 unit-struct facade；commands 和 `AppState` 不引用其私有子模块。当前用例分布为：
+
+- `artifacts.rs`：产物路径校验、hash 校验和失败清理 helper。
+- `classification.rs`：文件类型分类、归档目录和确定性重命名；只有 `classify_file` 经 facade 与 `services/mod.rs` 公开 re-export。
+- `preview.rs`：来源收集、hash 和文件 / 文本 / URL 导入预览。
+- `confirmation.rs`：确认预览与归档执行。
+- `promotion.rs`：将可浏览副本提升到 Wiki source 页面并重映射提取路径。
+- `source_actions.rs`：原始来源删除 / 替换的确认请求。
+- `source_catalog.rs`：已导入来源目录读取。
+- `test_support.rs`：仅在 `cfg(test)` 下编译的共享测试 helper。
+
+`confirmation.rs`、`preview.rs`、`promotion.rs`、`source_actions.rs`、`source_catalog.rs` 分别提供聚焦的 `impl super::ImportService` block；内部 helper 使用 `pub(super)` 或更窄可见性。
 
 职责：
 
@@ -635,7 +719,19 @@ Provider：
 - 不把密钥写入 `.app/settings.json`。
 - 普通搜索不能自动调用 LLM。
 
-## 18. SearchService
+## 18. SearchService 与 ChatService
+
+### 18.1 SearchService
+
+`SearchService` 是 `services/search_service/mod.rs` 中的稳定 facade，当前子模块为：
+
+- `catalog.rs`：扫描 Wiki、构建目录树和页面元数据目录。
+- `pages.rs`：Wiki 页面读取、创建、保存、重命名和删除请求。
+- `query.rs`：本地关键词、标签、类型和来源过滤查询。
+- `excerpts.rs`：受限检索片段和正文摘要。
+- `test_support.rs`：仅在 `cfg(test)` 下编译的目录、索引和 CJK fixture helper。
+
+这些文件通过多个 `impl SearchService` block 实现同一个 facade。`SearchService` 组合 `FileStore` 和独立 `WikiIndex`；`WikiIndex` 负责项目级只读内存索引及外部 Markdown 变更失效，不成为 Search facade 的私有子模块。
 
 职责：
 
@@ -657,6 +753,25 @@ Provider：
 
 - SearchService 不直接调用 LLM。
 - 语义问答由 Chat 流程调用 LlmService 或 AgentService。
+- `WikiIndex` 保持独立，不能与 `SearchService` 的 query / page 用例物理合并后向 commands 暴露。
+
+### 18.2 ChatService
+
+`ChatService` 是 `services/chat_service/mod.rs` 中的稳定 facade，当前子模块为：
+
+- `sessions.rs`：会话创建、列表、加载、重命名、删除和消息持久化。
+- `retrieval.rs`：本地检索上下文、预算和诊断组装。
+- `citations.rs`：模型引用解析和来源校验。
+- `saved_answers.rs`：将回答保存为 Markdown Wiki 页面。
+- `test_support.rs`：仅在 `cfg(test)` 下编译的会话与检索 fixture helper。
+
+这些文件通过多个 `impl ChatService` block 实现同一个 facade；`RetrievalContext` 等选定类型从 `services/mod.rs` re-export 以维持 command / contract test 调用面。
+
+边界：
+
+- `ChatService` 负责会话、检索、引用和保存答案，不负责 Chat 便捷写入的授权、意图分类或 Git 变更审计。
+- `ChatConvenienceService` 保持独立 service，由 `AppState` 单独持有，不并入 `ChatService`。
+- Chat 的模型 / Agent 路由通过现有 command、`LlmService`、`AgentService` 和 `TaskService` 编排；物理拆分不得改变 Chat DTO 或 `.app/chats/*.json` 持久化兼容性。
 
 ## 19. GraphService
 
@@ -684,6 +799,17 @@ Provider：
 - 不实现复杂关系类型和证据系统。
 
 ## 20. LintService
+
+`LintService` 是 `services/lint_service/mod.rs` 中的稳定 facade，当前子模块为：
+
+- `rules.rs`：确定性本地规则与规则 helper。
+- `ignores.rs`：ignore 读取、写入和匹配。
+- `reports.rs`：Lint 报告、历史和持久化读取。
+- `deep.rs`：深度 Lint 编排与结果解析。
+- `fixes.rs`：single / batch fix、确认和 Git checkpoint 编排。
+- `test_support.rs`：仅在 `cfg(test)` 下编译的临时项目与 fixture helper。
+
+这些文件通过多个 `impl LintService` block 实现同一个 facade。`LINT_REPORTS_DIR` 只保持计划级 `pub(crate)`，兄弟模块共享 helper 使用 `pub(super)`，其余实现保持私有；commands 和 `AppState` 只依赖 `LintService`。
 
 职责：
 
@@ -969,30 +1095,14 @@ Agent 和 LLM 应提供可替换 adapter：
 - 导入解析部分失败。
 - 图谱缓存损坏。
 
-## 29. MVP 后端实现顺序
+## 29. 当前后端演进规则
 
-建议顺序：
-
-1. 初始化 Tauri v2 / Rust 后端目录。
-2. 建立 `BackendError`、DTO 和 command 返回规范。
-3. 建立 `AppState` 和 service skeleton。
-4. 实现 `ProjectContext` 与路径安全工具。
-5. 实现 `FileStore` 基础读写。
-6. 实现 `ProjectService` 创建 / 打开 / 扫描。
-7. 实现 `GitService` 初始化和检查点。
-8. 实现 `TaskService` 和事件推送。
-9. 实现 `ImportService` 归档和冲突记录。
-10. 实现 `ExtractionService` 接口和基础文本格式解析。
-11. 实现 Wiki 页面读取 / 保存 commands。
-12. 实现 `AgentService` 检测和任务输出。
-13. 实现 `LlmService` provider 测试和基础请求。
-14. 实现 `SearchService` 本地搜索。
-15. 实现 `GraphService` 扫描和缓存。
-16. 实现 `LintService` 本地快速规则。
-17. 实现 `ExportService` Skill 调用骨架。
-18. 实现 `SecretService` 平台密钥存储。
-19. 补齐后台通知、取消和恢复。
-20. 增加跨平台和 CJK 路径测试。
+1. 新增 Tauri 能力时先扩展稳定 model / DTO，再实现 service facade 用例，最后在薄 command 与 `lib.rs` 注册表接线。
+2. 单文件 facade 变大时，可以按聚焦用例拆分目录和多个 `impl Service` block；不得改变 command / `AppState` 依赖面。
+3. `services/mod.rs` 只 re-export 跨 crate 真正需要的 facade 和选定契约，不为测试方便扩大私有 helper 可见性。
+4. facade 拆分或文件移动后，更新 `service_facade_contracts.rs` 或同级契约测试，验证构造方式和选定公开方法仍可用。
+5. DTO 序列化、错误码、事件类型和 `.app/*.json` 持久化结构必须保持兼容；仅移动物理文件不构成协议变更授权。
+6. `ChatConvenienceService` 与 `WikiIndex` 继续作为独立边界；除非有单独设计批准，不并入四个聚焦 facade。
 
 ## 30. 后续开发 Agent 禁止事项
 

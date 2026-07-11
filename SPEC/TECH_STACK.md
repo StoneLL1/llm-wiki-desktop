@@ -2,7 +2,7 @@
 
 ## 1. 文档目的
 
-本文面向后续开发 Agent / Claude Code，用来说明 LLM Wiki Desktop 已确定的技术栈、推荐架构分层、模块职责和实现边界。
+本文面向后续开发 Agent / Claude Code，用来说明 LLM Wiki Desktop 已确定的技术栈、当前已实现架构分层、模块职责和实现边界。
 
 本文会区分“已确定决策”和“实现建议”。实现建议用于降低后续开发跑偏风险，但如果实际工程约束要求调整，必须保证不违反 `PRD.md`、`SPEC.md` 和本文列出的硬边界。
 
@@ -38,25 +38,23 @@
 | LLM API | OpenAI / Anthropic / Google / Ollama / Custom |
 | 发布目标 | Windows `.msi`、macOS `.dmg`、Linux `.deb` / `.AppImage` |
 
-## 4. 推荐架构分层
+## 4. 当前已实现架构分层
 
 ```text
-React UI
-  -> Frontend State / View Models
-  -> Tauri IPC Commands
-  -> Rust Backend Services
-      -> Project / File Store
-      -> Importer
-      -> Git Manager
-      -> Agent Runner
-      -> BYOK LLM Client
-      -> Search / Graph Builder
-      -> Export / Skill Runner
-      -> Settings / Security
-  -> Local Project Folder
+React shell/layout
+  -> WorkspaceController + feature workflows
+  -> typed Tauri invoke
+  -> thin command modules
+  -> AppState + ProjectRegistry
+  -> stable service facades / TaskService / ConfirmationRegistry
+  -> local files / Git / Agent / LLM / OS credential store
 ```
 
-实现时要保持 UI、IPC、服务层和文件写入边界清晰。不要让 React 组件直接承担大量文件系统、Git、Agent 进程管理逻辑。
+当前前端工作台调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter`。`AppShell` 持有桌面 shell、右侧上下文面板，以及全局 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`；`WorkspaceController` 组合 `useAiCapabilities`、`useTaskLauncher`、`useImportWorkflow`、`useProviderWorkflow`、`useAgentWorkflow` 五条领域 workflow；`WorkspaceRouter` 只分发活动视图。
+
+Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Agent 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。这是当前实现事实，不是对 React Router 的推荐。
+
+跨层仍保持硬边界：React 不直接执行文件系统、Git、Agent 进程或系统凭据操作；typed Tauri invoke 进入显式注册的薄 command，再由 `AppState` 中的稳定 facade、`TaskService` 和 `ConfirmationRegistry` 编排本地能力。
 
 ## 5. React UI 层
 
@@ -89,31 +87,31 @@ React UI 不应直接实现：
 
 这些能力应通过 Tauri IPC 调用后端服务。
 
-### 5.3 视图命名
+### 5.3 视图分发与故障隔离
 
-文档只规定稳定视图职责，不规定具体 URL 路由。实现可以采用 React Router，也可以采用内部 view state。
+当前实现使用 `navigationStore` 的内部 view state，不把工作台视图绑定到浏览器 URL。`WorkspaceRouter` 负责稳定视图名到 feature view 的映射；lazy chunk 等待状态由 `Suspense` 处理，渲染或加载失败由 `ViewErrorBoundary` 隔离并提供重试。除非产品路由需求改变，不应在 feature view 内另建一套竞争路由状态。
 
 ## 6. 前端状态管理
 
-Zustand 用于管理前端应用状态。
-
-建议拆分 store：
+Zustand 用于管理前端应用状态。当前已拆分的主要 store 包括：
 
 - `projectStore`：当前项目、最近项目、项目扫描状态。
 - `navigationStore`：当前视图、选中文章、右侧面板状态。
-- `taskStore`：后台任务、进度、日志摘要。
-- `agentStore`：Agent 检测状态、默认 Agent、执行路径。
+- `taskStore`：全局后台任务、进度、日志、抽屉和选中任务；后端任务事件统一 upsert 到这里。
+- `importStore`：导入预览、来源目录和确认状态。
 - `settingsStore`：语言、主题、启动行为等 UI 设置。
 - `chatStore`：当前会话、消息流、引用来源。
 - `graphStore`：图谱节点、边、布局状态、筛选模式。
+- `lintStore`、`exportStore`：对应领域的结果、历史和交互状态。
+- `toastStore`：全局瞬时通知。
 
-实现建议：store 保存 UI 状态和轻量元数据；项目文件内容以按需读取为主，避免一次性把大型 Wiki 全量塞入前端内存。
+当前跨项目异步边界使用由 `projectId + rootPath` 组成的 project key，并在需要时叠加 request epoch。workflow 在提交视图状态、打开任务抽屉、切换视图或发送 toast 前核对 key / epoch，旧项目结果不得写回新项目 UI。项目文件内容仍以按需读取为主，不把大型 Wiki 全量塞入前端 store。
 
 ## 7. Tauri IPC Commands
 
 IPC 层负责把前端意图转成后端服务调用。
 
-建议按领域拆分命令：
+当前 command 已按领域拆分：
 
 - Project commands：创建、打开、扫描、最近项目。
 - Import commands：选择文件、复制资料、解析预览。
@@ -121,18 +119,22 @@ IPC 层负责把前端意图转成后端服务调用。
 - Git commands：初始化、检查点、提交、diff、恢复。
 - Agent commands：检测 CLI、启动任务、取消任务、读取日志。
 - LLM commands：测试 provider、执行 BYOK 请求。
+- Chat commands：会话、检索问答、引用、保存答案和便捷写入确认。
+- Compile commands：启动编译、确认动作和处理冲突。
+- File commands：受项目上下文约束的 Markdown / JSON 读写与确认继续执行。
 - Graph commands：构建、读取缓存、刷新布局。
 - Lint commands：运行本地检查、触发深度检查、应用修复。
 - Export commands：生成 HTML、读取预览、打开导出目录。
 - Settings commands：读取、保存、密钥管理、更新检查。
+- Task commands：创建、查询、取消、日志、清理和活动项目绑定。
 
-IPC 输入输出必须使用结构化数据，不要用临时拼接字符串承载复杂状态。
+IPC 输入输出使用结构化 DTO，不用临时拼接字符串承载复杂状态。所有 GUI command 在 `src-tauri/src/lib.rs` 的 `tauri::generate_handler!` 中显式注册；新增或删除 command 时必须同步该注册表。
 
 ## 8. Rust 后端服务层
 
 Rust 后端是本地能力核心，负责文件系统、Git、Agent 进程、密钥存储和跨平台能力。
 
-推荐服务模块：
+当前 `AppState` 持有的主要 service / registry：
 
 - `ProjectService`
 - `FileStore`
@@ -140,6 +142,9 @@ Rust 后端是本地能力核心，负责文件系统、Git、Agent 进程、密
 - `ExtractionService`
 - `GitService`
 - `AgentService`
+- `BookmarkService`
+- `ChatConvenienceService`
+- `ChatService`
 - `LlmService`
 - `SearchService`
 - `GraphService`
@@ -148,8 +153,10 @@ Rust 后端是本地能力核心，负责文件系统、Git、Agent 进程、密
 - `SettingsService`
 - `SecretService`
 - `TaskService`
+- `ProjectRegistry`
+- `ConfirmationRegistry`
 
-模块间通过清晰数据结构通信，不要让一个服务吞掉所有职责。
+commands 和 `AppState` 只依赖稳定 facade 类型；聚焦用例可以拆到 facade 子模块，但不把私有子模块暴露为跨 crate 依赖。模块间通过清晰数据结构通信，不让一个服务吞掉所有职责。
 
 ## 9. ProjectService
 
@@ -486,56 +493,25 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 - 块引用面板。
 - 图谱拖线编辑。
 
-## 25. 依赖安装基线
+## 25. 依赖管理边界
 
-根据 `SPEC.md`，初始化项目时的依赖基线如下：
+仓库已经初始化；前端依赖以根目录 `package.json` 和锁文件为事实来源，Rust / Tauri 依赖以 `src-tauri/Cargo.toml` 和锁文件为事实来源。本文只固定技术方向和跨层边界，不再保存一次性脚手架或安装命令。
 
-```bash
-npm create tauri-app@latest llm-wiki-desktop -- --template react-ts
-cd llm-wiki-desktop
+新增或替换依赖属于实现决策，必须说明它解决的当前问题，并验证 Tauri v2、React 19、Tailwind CSS v4、Windows / macOS / Linux 打包和 CJK 路径兼容性。尚未验证的 PDF / Office 解析库，以及替换现有系统凭据或跨平台进程实现的方案，只能标记为推荐，不能写成当前事实。
 
-npm install @tauri-apps/api @tauri-apps/plugin-shell
-npm install react-router-dom zustand react-i18next i18next
-npm install tailwindcss @tailwindcss/vite
-npx shadcn@latest init
-npm install lucide-react
+## 26. 当前架构演进规则
 
-npm install sigma graphology graphology-layout-forceatlas2 graphology-communities-louvain
-
-npm install remark-gfm remark-math rehype-katex rehype-highlight
-
-npm install @milkdown/core @milkdown/react @milkdown/plugin-math
-```
-
-如果后续实现发现 Tauri v2、Tailwind v4 或 React 19 的安装命令已有变化，应以官方当前命令为准，但不能改变本文确定的技术方向，除非用户明确批准。
-
-## 26. 推荐实现顺序
-
-1. Tauri v2 + React + TypeScript 项目骨架。
-2. shadcn/ui、Tailwind、Lucide、基础布局。
-3. 项目创建、打开、扫描。
-4. FileStore 和路径规范化。
-5. GitService 初始化和检查点。
-6. ImportService 基础归档。
-7. ExtractionService 解析预览接口。
-8. Wiki 文件树和 Markdown 阅读。
-9. Milkdown 编辑和保存。
-10. AgentService 检测和任务日志。
-11. BYOK LlmService 基础请求。
-12. Wiki 编译任务骨架。
-13. SearchService。
-14. GraphService 和 sigma.js 展示。
-15. Chat 问答和引用来源。
-16. LintService 本地规则。
-17. Agent 深度 Lint。
-18. ExportService 和 `skills/html-*`。
-19. TaskService、托盘和通知。
-20. i18n、主题、更新检查和多平台打包。
+1. 前端新增跨视图流程时，优先进入 `WorkspaceController` 组合的领域 workflow；`WorkspaceRouter` 只做视图分发。
+2. 新增 feature view 默认评估 lazy load，并使用现有 `Suspense` / `ViewErrorBoundary` 边界。
+3. 新增异步 workflow 必须接入 project key / epoch 防护；长任务结果必须进入全局 `taskStore`。
+4. 新增 Tauri 能力先定义 typed DTO 和薄 command，再通过 `AppState` 的稳定 facade 进入聚焦用例。
+5. 高风险操作继续复用全局确认控制器和后端 `ConfirmationRegistry` / Git checkpoint，不在 feature view 保存可绕过重校验的继续执行参数。
+6. Provider 非密钥配置与密钥流必须分离：配置可写项目设置，密钥只通过 typed invoke 交给 `SecretService` 和 OS credential store；前端只接收 `hasSecret` 与掩码等状态，不回读完整密钥。
 
 ## 27. 后续开发 Agent 注意事项
 
 - 先读 `PRD.md`、`SPEC.md`、`APP_flow.md`、`TECH_STACK.md`。
-- 当前仓库还不是完整应用源码仓库，先确认是否已经初始化 Tauri 项目。
+- 当前仓库包含已初始化的 React 19 + Tauri v2 应用源码；修改架构文档前先核对 `src/`、`src-tauri/src/` 和现有契约测试。
 - 不要在没有用户确认时大规模重写产品决策。
 - 不要把样本 `wiki/wiki/` 当成应用源码。
 - 样本 `wiki/wiki/` 是验证真实规模、Obsidian 兼容性和图谱性能的重要数据。
