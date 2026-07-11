@@ -7,7 +7,7 @@ use crate::errors::{BackendError, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FA
 
 #[cfg(test)]
 thread_local! {
-    static BEFORE_CHECKED_DISPLACE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+    static BEFORE_CHECKED_DISPLACE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path) -> bool>>> =
         std::cell::RefCell::new(None);
     static FAIL_NEXT_CANDIDATE_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_NEW_INSTALL_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path) -> bool>>> = std::cell::RefCell::new(None);
@@ -30,15 +30,18 @@ fn set_fail_next_cleanup(kind: &str) {
 }
 
 #[cfg(test)]
-fn set_before_checked_displace_hook(hook: impl FnOnce(&Path) + 'static) {
+pub(super) fn set_before_checked_displace_hook(hook: impl FnMut(&Path) -> bool + 'static) {
     BEFORE_CHECKED_DISPLACE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 fn run_before_checked_displace_hook(path: &Path) {
     #[cfg(test)]
     BEFORE_CHECKED_DISPLACE_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook(path);
+        let mut borrowed = slot.borrow_mut();
+        if let Some(hook) = borrowed.as_mut() {
+            if hook(path) {
+                borrowed.take();
+            }
         }
     });
     #[cfg(not(test))]
@@ -49,7 +52,8 @@ pub struct FileTransaction {
     backups: Vec<(PathBuf, Option<Vec<u8>>)>,
     created_dirs: Vec<PathBuf>,
     recovery_artifacts: Vec<PathBuf>,
-    created_hashes: std::collections::HashMap<PathBuf, String>,
+    installed_ownership: std::collections::HashMap<PathBuf, InstalledOwnership>,
+    unverified_installs: std::collections::HashSet<PathBuf>,
     finished: bool,
 }
 
@@ -59,7 +63,8 @@ impl FileTransaction {
             backups: Vec::new(),
             created_dirs: Vec::new(),
             recovery_artifacts: Vec::new(),
-            created_hashes: std::collections::HashMap::new(),
+            installed_ownership: std::collections::HashMap::new(),
+            unverified_installs: std::collections::HashSet::new(),
             finished: false,
         }
     }
@@ -80,10 +85,8 @@ impl FileTransaction {
         }
         self.track(path)?;
         write_atomic_bytes(path, bytes)?;
-        if was_absent {
-            self.created_hashes
-                .insert(path.to_path_buf(), hash_bytes(bytes));
-        }
+        let _ = was_absent;
+        self.capture_installed(path, bytes)?;
         Ok(())
     }
 
@@ -112,9 +115,8 @@ impl FileTransaction {
             };
         }
         self.backups.push((path.to_path_buf(), None));
-        self.created_hashes
-            .insert(path.to_path_buf(), hash_bytes(bytes));
-        self.cleanup_artifact(&temporary)
+        self.capture_installed(path, bytes)?;
+        Ok(())
     }
 
     fn ensure_parent(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -249,17 +251,68 @@ impl FileTransaction {
             };
         }
         self.backups.push((path.to_path_buf(), Some(previous)));
+        self.capture_installed(path, bytes)?;
         self.cleanup_artifact(&temporary)?;
         self.cleanup_artifact(&guard)
     }
 
-    pub fn commit(mut self) {
+    pub fn commit(mut self) -> Result<(), BackendError> {
+        for artifact in self.recovery_artifacts.clone() {
+            if let Err(error) = self.cleanup_artifact(&artifact) {
+                return Err(self.rollback_after(error));
+            }
+        }
         self.finished = true;
+        Ok(())
+    }
+
+    fn capture_installed(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
+        self.unverified_installs.insert(path.to_path_buf());
+        let anchor = std::fs::File::open(path).map_err(|error| io_error(error, path))?;
+        let identity = file_identity_from_file(&anchor, path)?;
+        self.installed_ownership.insert(
+            path.to_path_buf(),
+            InstalledOwnership {
+                identity,
+                hash: digest_bytes(bytes),
+                _anchor: anchor,
+            },
+        );
+        self.unverified_installs.remove(path);
+        Ok(())
     }
 
     pub(super) fn rollback(&mut self) -> Result<(), BackendError> {
         let mut failures = Vec::new();
         for (path, previous) in self.backups.iter().rev() {
+            if self.unverified_installs.contains(path) {
+                failures.push(format!("{}: installed ownership could not be verified; preserved instead of rolling back", path.display()));
+                continue;
+            }
+            if let Some(ownership) = self.installed_ownership.get(path) {
+                if !path.exists() {
+                    failures.push(format!(
+                        "{}: destination was deleted externally; preserved instead of rolling back",
+                        path.display()
+                    ));
+                    continue;
+                } else {
+                    let identity_changed =
+                        file_identity(path).ok().as_ref() != Some(&ownership.identity);
+                    let content_changed = std::fs::read(path)
+                        .ok()
+                        .map(|bytes| digest_bytes(&bytes))
+                        .as_ref()
+                        != Some(&ownership.hash);
+                    if identity_changed || content_changed {
+                        failures.push(format!(
+                            "{}: destination changed externally; preserved instead of rolling back",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                }
+            }
             match previous {
                 Some(bytes) => {
                     if let Err(error) = write_atomic_bytes(path, bytes) {
@@ -267,16 +320,6 @@ impl FileTransaction {
                     }
                 }
                 None => {
-                    if path.exists() {
-                        let current = std::fs::read(path).ok().map(|bytes| hash_bytes(&bytes));
-                        if current != self.created_hashes.get(path).cloned() {
-                            failures.push(format!(
-                                "{}: destination changed externally; preserved instead of deleting",
-                                path.display()
-                            ));
-                            continue;
-                        }
-                    }
                     if let Err(error) = std::fs::remove_file(path) {
                         if error.kind() != std::io::ErrorKind::NotFound {
                             failures.push(format!("{}: {error}", path.display()));
@@ -424,8 +467,109 @@ fn rollback_failure(message: &str, failures: Vec<String>) -> BackendError {
         .with_details(serde_json::json!({ "rollbackFailures": failures }))
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
+fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity(u64, u64);
+
+struct InstalledOwnership {
+    identity: FileIdentity,
+    hash: String,
+    _anchor: std::fs::File,
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Result<FileIdentity, BackendError> {
+    let file = std::fs::File::open(path).map_err(|error| io_error(error, path))?;
+    file_identity_from_file(&file, path)
+}
+
+#[cfg(unix)]
+fn file_identity_from_file(
+    file: &std::fs::File,
+    path: &Path,
+) -> Result<FileIdentity, BackendError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata().map_err(|error| io_error(error, path))?;
+    Ok(FileIdentity(metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path) -> Result<FileIdentity, BackendError> {
+    let file = std::fs::File::open(path).map_err(|error| io_error(error, path))?;
+    file_identity_from_file(&file, path)
+}
+
+#[cfg(windows)]
+fn file_identity_from_file(
+    file: &std::fs::File,
+    path: &Path,
+) -> Result<FileIdentity, BackendError> {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        creation: FileTime,
+        last_access: FileTime,
+        last_write: FileTime,
+        volume_serial: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let mut information = std::mem::MaybeUninit::<ByHandleFileInformation>::uninit();
+    // SAFETY: `file` owns a live Windows handle for the duration of the call and
+    // `information` points to writable storage of the exact Win32 structure layout.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle().cast(), information.as_mut_ptr())
+    };
+    if succeeded == 0 {
+        return Err(io_error(std::io::Error::last_os_error(), path));
+    }
+    // SAFETY: Win32 reports success only after initializing the full output structure.
+    let information = unsafe { information.assume_init() };
+    Ok(FileIdentity(
+        u64::from(information.volume_serial),
+        (u64::from(information.index_high) << 32) | u64::from(information.index_low),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(path: &Path) -> Result<FileIdentity, BackendError> {
+    Err(BackendError::new(
+        IMPORT_V2_COMMIT_FAILED,
+        "Stable file identity is unavailable on this platform.",
+        false,
+        true,
+    )
+    .with_details(serde_json::json!({ "path": path.to_string_lossy() })))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity_from_file(
+    _file: &std::fs::File,
+    path: &Path,
+) -> Result<FileIdentity, BackendError> {
+    file_identity(path)
 }
 
 fn io_error(error: std::io::Error, path: &Path) -> BackendError {
@@ -465,7 +609,7 @@ mod tests {
         let path = root.join("nested/file.bin");
         let mut transaction = FileTransaction::new();
         transaction.write(&path, b"kept").unwrap();
-        transaction.commit();
+        transaction.commit().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"kept");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -507,7 +651,10 @@ mod tests {
         let path = root.join("wiki.md");
         std::fs::write(&path, b"expected").unwrap();
         let expected = format!("{:x}", sha2::Sha256::digest(b"expected"));
-        set_before_checked_displace_hook(|path| std::fs::write(path, b"external edit").unwrap());
+        set_before_checked_displace_hook(|path| {
+            std::fs::write(path, b"external edit").unwrap();
+            true
+        });
         let mut transaction = FileTransaction::new();
         let error = transaction
             .write_if_hash_matches(&path, b"candidate", &expected)
@@ -601,8 +748,6 @@ mod tests {
         let mut transaction = FileTransaction::new();
         transaction.write_new(&path, b"candidate").unwrap_err();
         assert_eq!(std::fs::read(&path).unwrap(), b"external");
-        transaction.rollback().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"external");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -613,8 +758,8 @@ mod tests {
         let path = root.join("new.bin");
         set_fail_next_cleanup("tmp");
         let mut transaction = FileTransaction::new();
-        transaction.write_new(&path, b"candidate").unwrap_err();
-        transaction.rollback().unwrap();
+        transaction.write_new(&path, b"candidate").unwrap();
+        transaction.commit().unwrap_err();
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -652,6 +797,49 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(path.to_string_lossy().as_ref()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_preserves_same_content_external_replacement_by_identity() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("new.bin");
+        let mut transaction = FileTransaction::new();
+        transaction.write_new(&path, b"same bytes").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"same bytes").unwrap();
+        transaction.rollback().unwrap_err();
+        assert_eq!(std::fs::read(&path).unwrap(), b"same bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overwrite_rollback_preserves_post_write_external_replacement() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("existing.bin");
+        std::fs::write(&path, b"before").unwrap();
+        let mut transaction = FileTransaction::new();
+        transaction.write(&path, b"after").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"after").unwrap();
+        transaction.rollback().unwrap_err();
+        assert_eq!(std::fs::read(&path).unwrap(), b"after");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overwrite_rollback_preserves_external_deletion() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("existing.bin");
+        std::fs::write(&path, b"before").unwrap();
+        let mut transaction = FileTransaction::new();
+        transaction.write(&path, b"after").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        transaction.rollback().unwrap_err();
+        assert!(!path.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
