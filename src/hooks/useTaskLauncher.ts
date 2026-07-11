@@ -116,16 +116,18 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
 
   const cancel = useCallback(
     async (taskId: string) => {
+      const requestKey = projectKey;
       try {
         await cancelTaskRequest(taskId);
       } catch (error) {
+        if (latestProjectKey.current !== requestKey) return;
         pushToast(
           "error",
           t("task.cancelError", { message: errorMessage(error) }),
         );
       }
     },
-    [pushToast, t],
+    [projectKey, pushToast, t],
   );
 
   return { startCompile, startDeepLint, startExport, cancel };
