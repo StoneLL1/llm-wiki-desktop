@@ -18,7 +18,27 @@ thread_local! {
         std::cell::RefCell::new(None);
     static BEFORE_RECOVERY_FINAL_MUTATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
+    static RECOVERY_PROCESS_DEATH_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&str) -> bool>>> =
+        std::cell::RefCell::new(None);
     static SIMULATED_PROCESS_ABORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn set_recovery_process_death_hook(hook: impl FnMut(&str) -> bool + 'static) {
+    RECOVERY_PROCESS_DEATH_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn recovery_fault_boundary(phase: &str) {
+    #[cfg(test)]
+    RECOVERY_PROCESS_DEATH_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_mut().is_some_and(|hook| hook(phase)) {
+            slot.take();
+            panic!("simulated recovery process death at {phase}");
+        }
+    });
+    #[cfg(not(test))]
+    let _ = phase;
 }
 
 #[cfg(test)]
@@ -107,6 +127,31 @@ struct JournalEntry {
     desired_hash: String,
     #[serde(default)]
     installed_identity: Option<FileIdentity>,
+    #[serde(default)]
+    recovery: Option<RecoveryRecord>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+enum RecoveryAction {
+    DeleteInstalled,
+    RestorePrevious,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+enum RecoveryPhase {
+    Planned,
+    Quarantined,
+    Restored,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct RecoveryRecord {
+    canonical_relative_path: String,
+    guard_relative_path: String,
+    expected_hash: String,
+    expected_identity: FileIdentity,
+    action: RecoveryAction,
+    phase: RecoveryPhase,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -210,16 +255,16 @@ impl FileTransaction {
             {
                 return Err(staging_safe_io_error());
             }
-            let journal: Journal =
+            let mut journal: Journal =
                 serde_json::from_slice(&read_regular_nofollow(&journal_binding, &path)?)
                     .map_err(|_| staging_safe_io_error())?;
-            let intents: Box<dyn Iterator<Item = &JournalEntry>> =
-                if journal.state == JournalState::Committed {
-                    Box::new(journal.entries.iter())
-                } else {
-                    Box::new(journal.entries.iter().rev())
-                };
-            for intent in intents {
+            let indices: Vec<usize> = if journal.state == JournalState::Committed {
+                (0..journal.entries.len()).collect()
+            } else {
+                (0..journal.entries.len()).rev().collect()
+            };
+            for index in indices {
+                let intent = &journal.entries[index];
                 let target = safe_journal_target(root, &intent.relative_path)?;
                 let parent_binding = bind_recovery_parent(root, &target)?;
                 let current = match std::fs::read(&target) {
@@ -237,26 +282,33 @@ impl FileTransaction {
                     continue;
                 }
                 let previous_hash = intent.previous.as_deref().map(digest_bytes);
-                if current_hash != previous_hash {
+                if intent.recovery.is_some() || current_hash != previous_hash {
+                    if intent.recovery.is_some() {
+                        resume_recovery_entry(
+                            root,
+                            &journal_binding,
+                            &path,
+                            &mut journal,
+                            index,
+                            &parent_binding,
+                            &target,
+                        )?;
+                        continue;
+                    }
                     if current_hash.as_deref() != Some(&intent.desired_hash)
                         || !journal_identity_matches(&target, intent)?
                     {
                         return Err(conflict_error());
                     }
-                    match &intent.previous {
-                        Some(bytes) => {
-                            recover_owned_target(
-                                root,
-                                &parent_binding,
-                                &target,
-                                intent,
-                                Some(bytes),
-                            )?;
-                        }
-                        None => {
-                            recover_owned_target(root, &parent_binding, &target, intent, None)?;
-                        }
-                    }
+                    plan_and_recover_entry(
+                        root,
+                        &journal_binding,
+                        &path,
+                        &mut journal,
+                        index,
+                        &parent_binding,
+                        &target,
+                    )?;
                 }
             }
             for relative in &journal.recovery_artifacts {
@@ -316,6 +368,7 @@ impl FileTransaction {
             // native identity. Persist it before the namespace mutation so a
             // crash immediately after install is still recoverable.
             installed_identity: Some(candidate_identity),
+            recovery: None,
         });
         let journal_path = self
             .journal_path
@@ -867,6 +920,21 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
     result
 }
 
+fn write_bound_atomic_bytes(
+    binding: &RecoveryParentBinding,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), BackendError> {
+    let temporary = write_synced_temp(&binding.parent, path, bytes)?;
+    let result = bound_replace_existing(binding, &temporary, path)
+        .map_err(|error| io_error(error, path))
+        .and_then(|()| sync_parent(&binding.parent));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn write_synced_temp(parent: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, BackendError> {
     let file_name = path
         .file_name()
@@ -1093,26 +1161,130 @@ fn bound_remove_file(binding: &RecoveryParentBinding, path: &Path) -> Result<(),
     std::fs::remove_file(path)
 }
 
-fn recover_owned_target(
-    root: &Path,
+fn persist_recovery_journal(
     binding: &RecoveryParentBinding,
     path: &Path,
-    entry: &JournalEntry,
-    previous: Option<&[u8]>,
+    journal: &Journal,
 ) -> Result<(), BackendError> {
+    let bytes = serde_json::to_vec(journal).map_err(|_| staging_safe_io_error())?;
+    write_bound_atomic_bytes(binding, path, &bytes)
+}
+
+fn plan_and_recover_entry(
+    root: &Path,
+    journal_binding: &RecoveryParentBinding,
+    journal_path: &Path,
+    journal: &mut Journal,
+    index: usize,
+    binding: &RecoveryParentBinding,
+    path: &Path,
+) -> Result<(), BackendError> {
+    let entry = &journal.entries[index];
     let expected_identity = entry.installed_identity.ok_or_else(conflict_error)?;
     let guard = binding.parent.join(format!(
         ".import-v2-recovery-guard-{}",
         uuid::Uuid::new_v4()
     ));
-    run_before_recovery_mutation_hook(path);
-    bound_quarantine(binding, path, &guard).map_err(|error| io_error(error, path))?;
-    sync_parent(&binding.parent)?;
+    let guard_relative = guard
+        .strip_prefix(root)
+        .map_err(|_| staging_safe_io_error())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    journal.entries[index].recovery = Some(RecoveryRecord {
+        canonical_relative_path: journal.entries[index].relative_path.clone(),
+        guard_relative_path: guard_relative,
+        expected_hash: journal.entries[index].desired_hash.clone(),
+        expected_identity,
+        action: if journal.entries[index].previous.is_some() {
+            RecoveryAction::RestorePrevious
+        } else {
+            RecoveryAction::DeleteInstalled
+        },
+        phase: RecoveryPhase::Planned,
+    });
+    // The guard name and ownership proof must reach stable storage before the
+    // canonical child can leave its name.
+    persist_recovery_journal(journal_binding, journal_path, journal)?;
+    resume_recovery_entry(
+        root,
+        journal_binding,
+        journal_path,
+        journal,
+        index,
+        binding,
+        path,
+    )
+}
 
-    let verified = bound_file_identity(binding, &guard).ok() == Some(expected_identity)
+fn resume_recovery_entry(
+    root: &Path,
+    journal_binding: &RecoveryParentBinding,
+    journal_path: &Path,
+    journal: &mut Journal,
+    index: usize,
+    binding: &RecoveryParentBinding,
+    path: &Path,
+) -> Result<(), BackendError> {
+    let record = journal.entries[index]
+        .recovery
+        .clone()
+        .ok_or_else(staging_safe_io_error)?;
+    let expected_action = if journal.entries[index].previous.is_some() {
+        RecoveryAction::RestorePrevious
+    } else {
+        RecoveryAction::DeleteInstalled
+    };
+    if record.canonical_relative_path != journal.entries[index].relative_path
+        || record.expected_hash != journal.entries[index].desired_hash
+        || Some(record.expected_identity) != journal.entries[index].installed_identity
+        || record.action != expected_action
+    {
+        return Err(staging_safe_io_error());
+    }
+    let guard = safe_journal_target(root, &record.guard_relative_path)?;
+    if guard.parent() != path.parent()
+        || !guard.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with(".import-v2-recovery-guard-")
+        })
+    {
+        return Err(staging_safe_io_error());
+    }
+    let previous = journal.entries[index].previous.clone();
+    let previous_hash = previous.as_deref().map(digest_bytes);
+    let guard_exists = bound_file_identity(binding, &guard).is_ok();
+
+    if !guard_exists {
+        let canonical = read_regular_nofollow(binding, path).ok();
+        let canonical_hash = canonical.as_deref().map(digest_bytes);
+        let canonical_is_installed = bound_file_identity(binding, path).ok()
+            == Some(record.expected_identity)
+            && canonical_hash.as_deref() == Some(&record.expected_hash);
+        if record.phase == RecoveryPhase::Planned && canonical_is_installed {
+            run_before_recovery_mutation_hook(path);
+            bound_quarantine(binding, path, &guard).map_err(|error| io_error(error, path))?;
+            sync_parent(&binding.parent)?;
+            recovery_fault_boundary("after_quarantine");
+            journal.entries[index].recovery.as_mut().unwrap().phase = RecoveryPhase::Quarantined;
+            persist_recovery_journal(journal_binding, journal_path, journal)?;
+        } else {
+            let complete = match record.action {
+                RecoveryAction::DeleteInstalled => true,
+                RecoveryAction::RestorePrevious => canonical_hash == previous_hash,
+            };
+            if complete {
+                journal.entries[index].recovery = None;
+                persist_recovery_journal(journal_binding, journal_path, journal)?;
+                return Ok(());
+            }
+            return Err(conflict_error());
+        }
+    }
+
+    let verified = bound_file_identity(binding, &guard).ok() == Some(record.expected_identity)
         && read_regular_nofollow(binding, &guard)
             .ok()
-            .is_some_and(|bytes| digest_bytes(&bytes) == entry.desired_hash);
+            .is_some_and(|bytes| digest_bytes(&bytes) == record.expected_hash);
     if !verified {
         let restore = bound_restore_guard_if_absent(binding, &guard, path);
         let guard_relative = guard
@@ -1135,27 +1307,41 @@ fn recover_owned_target(
         ));
     }
 
-    run_before_recovery_final_mutation_hook(path);
-    if let Some(bytes) = previous {
-        let temporary = write_synced_temp(&binding.parent, path, bytes)?;
-        if let Err(error) = install_candidate(binding, &temporary, path) {
+    if record.action == RecoveryAction::RestorePrevious {
+        let canonical_hash = read_regular_nofollow(binding, path)
+            .ok()
+            .as_deref()
+            .map(digest_bytes);
+        if canonical_hash != previous_hash {
+            run_before_recovery_final_mutation_hook(path);
+            let temporary = write_synced_temp(&binding.parent, path, previous.as_deref().unwrap())?;
+            if let Err(error) = install_candidate(binding, &temporary, path) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(rollback_failure(
+                    "Recovery preserved an external child replacement.",
+                    vec![format!(
+                        "{}: verified installed recovery guard was retained; canonical destination was not overwritten ({error})",
+                        record.guard_relative_path
+                    )],
+                ));
+            }
             let _ = std::fs::remove_file(&temporary);
-            let guard_relative = guard
-                .strip_prefix(root)
-                .unwrap_or(&guard)
-                .to_string_lossy()
-                .replace('\\', "/");
-            return Err(rollback_failure(
-                "Recovery preserved an external child replacement.",
-                vec![format!(
-                    "{}: previous bytes remain in the verified recovery guard; canonical destination was not overwritten ({error})",
-                    guard_relative
-                )],
-            ));
+            recovery_fault_boundary("after_restore");
         }
+        journal.entries[index].recovery.as_mut().unwrap().phase = RecoveryPhase::Restored;
+        persist_recovery_journal(journal_binding, journal_path, journal)?;
+    } else {
+        // New-file rollback's no-clobber action is intentionally leaving the
+        // canonical name absent (or preserving a replacement that won it).
+        run_before_recovery_final_mutation_hook(path);
+        recovery_fault_boundary("after_restore");
     }
+    recovery_fault_boundary("before_guard_remove");
     bound_remove_file(binding, &guard).map_err(|error| io_error(error, &guard))?;
-    sync_parent(&binding.parent)
+    sync_parent(&binding.parent)?;
+    recovery_fault_boundary("after_guard_remove");
+    journal.entries[index].recovery = None;
+    persist_recovery_journal(journal_binding, journal_path, journal)
 }
 
 #[cfg(unix)]
@@ -1683,9 +1869,10 @@ mod tests {
         digest_bytes, set_before_checked_displace_hook, set_before_new_install_hook,
         set_before_recovery_final_mutation_hook, set_before_recovery_mutation_hook,
         set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
-        FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
+        set_recovery_process_death_hook, FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
     };
     use sha2::Digest;
+    use std::path::Path;
 
     #[test]
     fn dropped_transaction_restores_overwrites_and_removes_created_tree() {
@@ -2145,6 +2332,136 @@ mod tests {
             assert_eq!(std::fs::read(&guards[0]).unwrap(), b"after");
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn restart_recovery_is_idempotent_at_every_new_file_recovery_boundary() {
+        for boundary in [
+            "after_quarantine",
+            "after_restore",
+            "before_guard_remove",
+            "after_guard_remove",
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "import-v2-recovery-death-new-{boundary}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let target = root.join("wiki/new.md");
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction.write_new(&target, b"installed").unwrap();
+            transaction.simulate_process_crash();
+            set_recovery_process_death_hook(move |phase| phase == boundary);
+            assert!(
+                std::panic::catch_unwind(|| FileTransaction::reconcile_project(&root)).is_err()
+            );
+            FileTransaction::reconcile_project(&root).unwrap();
+            FileTransaction::reconcile_project(&root).unwrap();
+            assert!(!target.exists());
+            assert_no_recovery_residue(&root, target.parent().unwrap());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn restart_recovery_is_idempotent_at_every_overwrite_recovery_boundary() {
+        for boundary in [
+            "after_quarantine",
+            "after_restore",
+            "before_guard_remove",
+            "after_guard_remove",
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "import-v2-recovery-death-overwrite-{boundary}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let target = root.join("wiki/existing.md");
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(&target, b"before").unwrap();
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction
+                .write_if_hash_matches(&target, b"after", &digest_bytes(b"before"))
+                .unwrap();
+            transaction.simulate_process_crash();
+            set_recovery_process_death_hook(move |phase| phase == boundary);
+            assert!(
+                std::panic::catch_unwind(|| FileTransaction::reconcile_project(&root)).is_err()
+            );
+            FileTransaction::reconcile_project(&root).unwrap();
+            FileTransaction::reconcile_project(&root).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"before");
+            assert_no_recovery_residue(&root, target.parent().unwrap());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn assert_no_recovery_residue(root: &Path, target_parent: &Path) {
+        assert!(std::fs::read_dir(target_parent).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("recovery-guard")));
+        assert_eq!(
+            std::fs::read_dir(root.join(".app/import-v2-journal"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn journals_without_recovery_phase_remain_backward_compatible() {
+        let journal: super::Journal = serde_json::from_value(serde_json::json!({
+            "state": "InProgress",
+            "entries": [{
+                "relative_path": "wiki/old.md",
+                "previous": null,
+                "desired_hash": digest_bytes(b"old"),
+                "installed_identity": null
+            }]
+        }))
+        .unwrap();
+        assert!(journal.entries[0].recovery.is_none());
+        assert!(journal.recovery_artifacts.is_empty());
+    }
+
+    #[test]
+    fn resumed_overwrite_recovery_preserves_external_canonical_and_reports_durable_guard() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-recovery-drift-overwrite-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = root.join("wiki/existing.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"before").unwrap();
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction
+            .write_if_hash_matches(&target, b"after", &digest_bytes(b"before"))
+            .unwrap();
+        transaction.simulate_process_crash();
+        set_recovery_process_death_hook(|phase| phase == "after_quarantine");
+        assert!(std::panic::catch_unwind(|| FileTransaction::reconcile_project(&root)).is_err());
+        std::fs::write(&target, b"external").unwrap();
+
+        let first = FileTransaction::reconcile_project(&root).unwrap_err();
+        let second = FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(std::fs::read(&target).unwrap(), b"external");
+        let first_details = first.details.unwrap().to_string();
+        let second_details = second.details.unwrap().to_string();
+        assert!(first_details.contains("wiki/.import-v2-recovery-guard-"));
+        assert_eq!(first_details, second_details);
+        let guard = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("recovery-guard")
+            })
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(guard).unwrap(), b"after");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
