@@ -20,6 +20,28 @@ use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::import_v2::ImportV2Service;
 use crate::services::{FileStore, GitService};
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_FAILED_HISTORY_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_before_failed_history_write_hook(hook: impl FnOnce(&Path) + 'static) {
+    BEFORE_FAILED_HISTORY_WRITE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_before_failed_history_write_hook(path: &Path) {
+    #[cfg(test)]
+    BEFORE_FAILED_HISTORY_WRITE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = path;
+}
+
 impl ImportV2Service {
     pub fn commit_items(
         &self,
@@ -76,7 +98,8 @@ impl ImportV2Service {
             batch.committed_count = batch.items.iter().filter(|item| item.committed).count() as u32;
             batch.failed_count = batch.items.len() as u32 - batch.committed_count;
             if !batch.items.last().is_some_and(|item| item.committed) {
-                let _ = file_store.write_json_atomic(context, &history_path, &batch);
+                run_before_failed_history_write_hook(&context.resolve_project_path(&history_path)?);
+                file_store.write_json_atomic(context, &history_path, &batch)?;
             }
         }
         Ok(batch)
@@ -271,56 +294,61 @@ impl ImportV2Service {
             history.items.iter().filter(|entry| entry.committed).count() as u32;
         history.failed_count = history.items.len() as u32 - history.committed_count;
         let mut transaction = FileTransaction::new();
-        if !duplicate {
-            transaction.write(&context.resolve_project_path(&plan.raw_path)?, &source)?;
-            transaction.write(
-                &context.resolve_project_path(&plan.baseline_path)?,
-                &markdown,
-            )?;
-            for (relative, bytes) in assets {
-                let target = format!("{}/{}", plan.asset_root_path, relative);
-                transaction.write(&context.resolve_project_path(&target)?, &bytes)?;
-            }
-        }
-        if !wiki_exists || overwrite_wiki {
-            let wiki = context.resolve_project_path(&plan.wiki_path)?;
-            if overwrite_wiki {
-                transaction.write_if_hash_matches(
-                    &wiki,
+        let write_result = (|| -> Result<(), BackendError> {
+            if !duplicate {
+                transaction.write(&context.resolve_project_path(&plan.raw_path)?, &source)?;
+                transaction.write(
+                    &context.resolve_project_path(&plan.baseline_path)?,
                     &markdown,
-                    decision.expected_wiki_hash.as_deref().unwrap(),
                 )?;
-            } else {
-                transaction.write(&wiki, &markdown)?;
+                for (relative, bytes) in assets {
+                    let target = format!("{}/{}", plan.asset_root_path, relative);
+                    transaction.write(&context.resolve_project_path(&target)?, &bytes)?;
+                }
             }
-        }
-        transaction.write(
-            &context.resolve_project_path(&plan.manifest_path)?,
-            &json_bytes(&plan.next_manifest)?,
-        )?;
-        transaction.write(
-            &context.resolve_project_path(".app/source-index-v2.json")?,
-            &json_bytes(&plan.next_index)?,
-        )?;
-        transaction.write(
-            &context.resolve_project_path(history_path)?,
-            &json_bytes(&history)?,
-        )?;
-        session.items[item_position].status = ImportItemStatus::Committing;
-        session.items[item_position].status = ImportItemStatus::Completed;
-        session.status = derive_session_status(&session.items);
-        session.updated_at = chrono::Utc::now().to_rfc3339();
-        let session_root =
-            context.resolve_project_path(&format!(".app/import-sessions/{session_id}"))?;
-        transaction.track(&session_root.join("session.json"))?;
-        for item in &session.items {
-            transaction.track(
-                &session_root
-                    .join("items")
-                    .join(format!("{}.json", item.item_id)),
+            if !wiki_exists || overwrite_wiki {
+                let wiki = context.resolve_project_path(&plan.wiki_path)?;
+                if overwrite_wiki {
+                    transaction.write_if_hash_matches(
+                        &wiki,
+                        &markdown,
+                        decision.expected_wiki_hash.as_deref().unwrap(),
+                    )?;
+                } else {
+                    transaction.write(&wiki, &markdown)?;
+                }
+            }
+            transaction.write(
+                &context.resolve_project_path(&plan.manifest_path)?,
+                &json_bytes(&plan.next_manifest)?,
             )?;
+            transaction.write(
+                &context.resolve_project_path(".app/source-index-v2.json")?,
+                &json_bytes(&plan.next_index)?,
+            )?;
+            transaction.write(
+                &context.resolve_project_path(history_path)?,
+                &json_bytes(&history)?,
+            )?;
+            session.items[item_position].status = ImportItemStatus::Committing;
+            session.items[item_position].status = ImportItemStatus::Completed;
+            session.status = derive_session_status(&session.items);
+            session.updated_at = chrono::Utc::now().to_rfc3339();
+            let session_root =
+                context.resolve_project_path(&format!(".app/import-sessions/{session_id}"))?;
+            transaction.track(&session_root.join("session.json"))?;
+            for item in &session.items {
+                transaction.track(
+                    &session_root
+                        .join("items")
+                        .join(format!("{}.json", item.item_id)),
+                )?;
+            }
+            self.sessions.save(context, files, &session)
+        })();
+        if let Err(error) = write_result {
+            return Err(transaction.rollback_after(error));
         }
-        self.sessions.save(context, files, &session)?;
         transaction.commit();
         Ok(result)
     }
@@ -386,7 +414,7 @@ mod tests {
     use crate::tasks::TaskService;
 
     use super::super::ImportV2Service;
-    use super::asset_collision_key;
+    use super::{asset_collision_key, set_before_failed_history_write_hook};
 
     struct FixtureEngine {
         root: PathBuf,
@@ -746,5 +774,36 @@ mod tests {
             asset_collision_key("assets/Ä.png"),
             asset_collision_key("assets/ä.png")
         );
+    }
+
+    #[test]
+    fn failed_item_history_write_failure_is_propagated() {
+        let fixture = CommitFixture::two_ready_items();
+        fixture.break_second_asset_after_preview();
+        set_before_failed_history_write_hook(|path| {
+            std::fs::remove_file(path).unwrap();
+            std::fs::create_dir(path).unwrap();
+        });
+        let decisions = [
+            fixture.first_item_id.clone(),
+            fixture.second_item_id.clone().unwrap(),
+        ]
+        .into_iter()
+        .map(|item_id| CommitItemDecision {
+            item_id,
+            conflict_action: None,
+            expected_wiki_hash: None,
+        })
+        .collect();
+        let error = fixture
+            .service
+            .commit_items(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &fixture.request(decisions),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "FILE_WRITE_FAILED");
     }
 }
