@@ -349,6 +349,7 @@ async fn run_export(
             TaskResult {
                 summary: format!("Export written to {output_path}"),
                 affected_paths: vec![output_path, ".app/exports.json".into()],
+                reference: None,
                 pending_action: None,
             },
         )

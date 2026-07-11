@@ -822,6 +822,7 @@ mod tests {
         let result = TaskResult {
             summary: "Compiled 10 pages".to_string(),
             affected_paths: vec!["wiki/index.md".to_string(), "wiki/overview.md".to_string()],
+            reference: None,
             pending_action: None,
         };
 
@@ -920,6 +921,7 @@ mod tests {
                     TaskResult {
                         summary: "Done".to_string(),
                         affected_paths: vec![],
+                        reference: None,
                         pending_action: None,
                     },
                 )
