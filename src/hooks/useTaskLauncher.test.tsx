@@ -68,6 +68,27 @@ describe("useTaskLauncher", () => {
     expect(useTaskStore.getState()).toMatchObject({ drawerOpen: false, selectedTaskId: null });
   });
 
+  it("does not toast a cancel failure after the project changed", async () => {
+    let rejectCancel!: (reason: Error) => void;
+    invokeMock.mockReturnValue(
+      new Promise((_, reject) => { rejectCancel = reject; }),
+    );
+    const projectB = { ...project, projectId: "p2", rootPath: "/wiki/p2" };
+    const { result, rerender } = renderHook(
+      ({ current }) => useTaskLauncher(current),
+      { initialProps: { current: project } },
+    );
+
+    const pending = result.current.cancel("task-1");
+    rerender({ current: projectB });
+    await act(async () => {
+      rejectCancel(new Error("old project cancel failed"));
+      await pending;
+    });
+
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
   it("starts compile tasks and tracks them in the shared drawer", async () => {
     invokeMock.mockResolvedValue(task);
     const { result } = renderHook(() => useTaskLauncher(project));
