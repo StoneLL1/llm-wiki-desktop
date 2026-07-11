@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -24,7 +24,8 @@ impl QualityGate {
         let markdown = read_artifact(staging_root, &result.markdown_path, ArtifactKind::Markdown)?;
         let markdown_content =
             String::from_utf8(markdown.bytes.clone()).map_err(|_| quality_error())?;
-        validate_markdown_content(&markdown_content)?;
+        let rendered_markdown = strip_code_contexts(&markdown_content);
+        validate_markdown_content(&markdown_content, &rendered_markdown)?;
 
         let source_snapshot = read_artifact(
             staging_root,
@@ -47,7 +48,7 @@ impl QualityGate {
         }
 
         let mut warnings = result.warnings.clone();
-        let local_images = image_destinations(&markdown_content);
+        let local_images = image_destinations_from_rendered(&rendered_markdown);
         for destination in local_images {
             if is_remote(&destination) {
                 push_warning(&mut warnings, "REMOTE_IMAGE");
@@ -150,19 +151,103 @@ fn normalize_relative(value: &str) -> Result<String, BackendError> {
     Ok(normalized)
 }
 
-fn validate_markdown_content(markdown: &str) -> Result<(), BackendError> {
-    let lowercase = markdown.to_ascii_lowercase();
+fn validate_markdown_content(markdown: &str, rendered: &str) -> Result<(), BackendError> {
+    let lowercase = decode_html_entities(rendered).to_ascii_lowercase();
+    let compact: String = lowercase
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && !character.is_ascii_control())
+        .collect();
     if markdown.trim().is_empty()
         || lowercase.contains("<script")
-        || lowercase.contains("javascript:")
-        || lowercase.contains("data:text/html")
+        || lowercase.contains("<iframe")
+        || contains_unsafe_html_attribute(&lowercase)
+        || compact.contains("javascript:")
+        || compact.contains("vbscript:")
+        || compact.contains("data:text/html")
     {
         return Err(quality_error());
     }
     Ok(())
 }
 
-fn image_destinations(markdown: &str) -> Vec<String> {
+fn image_destinations_from_rendered(rendered: &str) -> Vec<String> {
+    let references = reference_definitions(&rendered);
+    let mut destinations = inline_image_destinations(&rendered);
+    destinations.extend(reference_image_destinations(&rendered, &references));
+    destinations.extend(html_image_destinations(&rendered));
+    destinations
+}
+
+fn strip_code_contexts(markdown: &str) -> String {
+    let mut rendered = String::with_capacity(markdown.len());
+    let mut fence: Option<char> = None;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if let Some(active) = fence {
+            if marker == Some(active) {
+                fence = None;
+            }
+            rendered.extend(std::iter::repeat_n(' ', line.len()));
+            continue;
+        }
+        if let Some(marker) = marker {
+            fence = Some(marker);
+            rendered.extend(std::iter::repeat_n(' ', line.len()));
+            continue;
+        }
+        rendered.push_str(&strip_inline_code_and_escaped_images(line));
+    }
+    rendered
+}
+
+fn strip_inline_code_and_escaped_images(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut output = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'!') {
+            let end = line[index + 2..]
+                .find(')')
+                .map(|offset| index + 2 + offset + 1)
+                .unwrap_or(index + 2);
+            output[index..end].fill(b' ');
+            index = end;
+            continue;
+        }
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let delimiter_start = index;
+        while bytes.get(index) == Some(&b'`') {
+            index += 1;
+        }
+        let delimiter_len = index - delimiter_start;
+        let mut closing = index;
+        let end = loop {
+            let Some(offset) = line[closing..].find(&"`".repeat(delimiter_len)) else {
+                break bytes.len();
+            };
+            closing += offset;
+            if bytes.get(closing + delimiter_len) != Some(&b'`') {
+                break closing + delimiter_len;
+            }
+            closing += delimiter_len;
+        };
+        output[delimiter_start..end].fill(b' ');
+        index = end;
+    }
+    String::from_utf8(output).expect("input line was valid UTF-8")
+}
+
+fn inline_image_destinations(markdown: &str) -> Vec<String> {
     let mut destinations = Vec::new();
     let mut rest = markdown;
     while let Some(image_start) = rest.find("![") {
@@ -185,6 +270,256 @@ fn image_destinations(markdown: &str) -> Vec<String> {
         rest = &rest[destination_end + 1..];
     }
     destinations
+}
+
+fn reference_definitions(markdown: &str) -> HashMap<String, String> {
+    let mut definitions = HashMap::new();
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        let Some(label_end) = trimmed.strip_prefix('[').and_then(|value| value.find(']')) else {
+            continue;
+        };
+        let after_label = &trimmed[label_end + 2..];
+        let Some(raw) = after_label.strip_prefix(':') else {
+            continue;
+        };
+        if let Some(destination) = destination_token(raw.trim_start()) {
+            definitions.insert(
+                trimmed[1..label_end + 1].trim().to_ascii_lowercase(),
+                destination,
+            );
+        }
+    }
+    definitions
+}
+
+fn reference_image_destinations(
+    markdown: &str,
+    definitions: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut destinations = Vec::new();
+    let mut rest = markdown;
+    while let Some(start) = rest.find("![") {
+        rest = &rest[start + 2..];
+        let Some(alt_end) = rest.find(']') else {
+            break;
+        };
+        let alt = rest[..alt_end].trim();
+        let after_alt = &rest[alt_end + 1..];
+        if let Some(reference) = after_alt.strip_prefix('[') {
+            if let Some(reference_end) = reference.find(']') {
+                let label = reference[..reference_end].trim();
+                let key = if label.is_empty() { alt } else { label }.to_ascii_lowercase();
+                if let Some(destination) = definitions.get(&key) {
+                    destinations.push(destination.clone());
+                }
+                rest = &reference[reference_end + 1..];
+                continue;
+            }
+        }
+        rest = after_alt;
+    }
+    destinations
+}
+
+fn html_image_destinations(markdown: &str) -> Vec<String> {
+    let lowercase = markdown.to_ascii_lowercase();
+    let mut destinations = Vec::new();
+    let mut offset = 0;
+    while let Some(relative_start) = lowercase[offset..].find("<img") {
+        let start = offset + relative_start;
+        let Some(relative_end) = lowercase[start..].find('>') else {
+            break;
+        };
+        let end = start + relative_end + 1;
+        if let Some(src) = html_attribute(&markdown[start..end], "src") {
+            destinations.push(decode_html_entities(&src));
+        }
+        offset = end;
+    }
+    destinations
+}
+
+fn html_attribute(tag: &str, wanted: &str) -> Option<String> {
+    let bytes = tag.as_bytes();
+    let mut index = 0;
+    if bytes.get(index) == Some(&b'<') {
+        index += 1;
+    }
+    while bytes
+        .get(index)
+        .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'>')
+    {
+        index += 1;
+    }
+    while index < bytes.len() {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>'))
+        {
+            index += 1;
+        }
+        let name_start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            index += 1;
+        }
+        if name_start == index {
+            index += 1;
+            continue;
+        }
+        let name = &tag[name_start..index];
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'=') {
+            continue;
+        }
+        index += 1;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+        let quote = bytes
+            .get(index)
+            .copied()
+            .filter(|byte| matches!(byte, b'\'' | b'"'));
+        if quote.is_some() {
+            index += 1;
+        }
+        let value_start = index;
+        while let Some(byte) = bytes.get(index) {
+            if quote.map_or(byte.is_ascii_whitespace() || *byte == b'>', |quote| {
+                *byte == quote
+            }) {
+                break;
+            }
+            index += 1;
+        }
+        if name.eq_ignore_ascii_case(wanted) {
+            return Some(tag[value_start..index].to_string());
+        }
+        if quote.is_some() {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn destination_token(raw: &str) -> Option<String> {
+    if let Some(bracketed) = raw.strip_prefix('<') {
+        return bracketed.find('>').map(|end| bracketed[..end].to_string());
+    }
+    raw.split_ascii_whitespace().next().map(str::to_string)
+}
+
+fn contains_unsafe_html_attribute(markdown: &str) -> bool {
+    let mut rest = markdown;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('>') else { break };
+        let tag = &rest[..end];
+        if html_attribute(tag, "srcdoc").is_some() || contains_event_handler(tag) {
+            return true;
+        }
+        rest = &rest[end + 1..];
+    }
+    false
+}
+
+fn contains_event_handler(tag: &str) -> bool {
+    let bytes = tag.as_bytes();
+    let mut index = 0;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        index += 1;
+    }
+    while index < bytes.len() {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+        let start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            index += 1;
+        }
+        let name = &tag[start..index];
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+        if name.len() > 2
+            && name.to_ascii_lowercase().starts_with("on")
+            && bytes.get(index) == Some(&b'=')
+        {
+            return true;
+        }
+        if start == index {
+            index += 1;
+        }
+        while bytes
+            .get(index)
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+    }
+    false
+}
+
+fn decode_html_entities(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('&') {
+        decoded.push_str(&rest[..start]);
+        let entity = &rest[start + 1..];
+        let Some(end) = entity.find(';') else {
+            decoded.push_str(&rest[start..]);
+            return decoded;
+        };
+        let name = &entity[..end];
+        let replacement = name
+            .strip_prefix("#x")
+            .or_else(|| name.strip_prefix("#X"))
+            .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+            .or_else(|| {
+                name.strip_prefix('#')
+                    .and_then(|digits| digits.parse().ok())
+            })
+            .and_then(char::from_u32)
+            .or_else(|| match name.to_ascii_lowercase().as_str() {
+                "colon" => Some(':'),
+                "tab" => Some('\t'),
+                "newline" => Some('\n'),
+                _ => None,
+            });
+        if let Some(character) = replacement {
+            decoded.push(character);
+        } else {
+            decoded.push('&');
+            decoded.push_str(name);
+            decoded.push(';');
+        }
+        rest = &entity[end + 1..];
+    }
+    decoded.push_str(rest);
+    decoded
 }
 
 fn is_remote(destination: &str) -> bool {
@@ -416,5 +751,103 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning == "ENGINE_OCR_PARTIAL"));
+    }
+
+    #[test]
+    fn quality_gate_validates_local_and_warns_remote_reference_images() {
+        let mut local = quality_fixture("![图][asset]\n\n[asset]: assets/图.png");
+        std::fs::create_dir_all(local.root.join("assets")).unwrap();
+        std::fs::write(local.root.join("assets/图.png"), b"image").unwrap();
+        local.result.asset_paths = vec!["assets/图.png".into()];
+        assert_eq!(
+            QualityGate::default()
+                .evaluate(&local.root, &local.result)
+                .unwrap()
+                .quality
+                .level,
+            QualityLevel::Pass
+        );
+
+        let remote = quality_fixture("![remote][asset]\n\n[asset]: https://example.com/image.png");
+        let preview = QualityGate::default()
+            .evaluate(&remote.root, &remote.result)
+            .unwrap();
+        assert!(preview
+            .quality
+            .warnings
+            .iter()
+            .any(|warning| warning == "REMOTE_IMAGE"));
+    }
+
+    #[test]
+    fn quality_gate_validates_local_and_warns_remote_html_images() {
+        assert_eq!(
+            html_image_destinations(r#"<IMG SRC='https://example.com/image.png'>"#),
+            vec!["https://example.com/image.png"]
+        );
+        let mut local = quality_fixture(r#"<img alt="图" src="assets/图.png">"#);
+        std::fs::create_dir_all(local.root.join("assets")).unwrap();
+        std::fs::write(local.root.join("assets/图.png"), b"image").unwrap();
+        local.result.asset_paths = vec!["assets/图.png".into()];
+        assert_eq!(
+            QualityGate::default()
+                .evaluate(&local.root, &local.result)
+                .unwrap()
+                .quality
+                .level,
+            QualityLevel::Pass
+        );
+
+        let remote = quality_fixture(r#"<IMG SRC='https://example.com/image.png'>"#);
+        let preview = QualityGate::default()
+            .evaluate(&remote.root, &remote.result)
+            .unwrap();
+        assert!(preview
+            .quality
+            .warnings
+            .iter()
+            .any(|warning| warning == "REMOTE_IMAGE"));
+    }
+
+    #[test]
+    fn quality_gate_rejects_active_html_and_obfuscated_unsafe_schemes() {
+        assert!(contains_unsafe_html_attribute(
+            r#"<div srcdoc="<p>unsafe</p>"></div>"#
+        ));
+        for markdown in [
+            r#"<img src="safe.png" onerror="alert(1)">"#,
+            r#"<div onclick = "alert(1)">unsafe</div>"#,
+            r#"<iframe src="https://example.com"></iframe>"#,
+            r#"<div srcdoc="<p>unsafe</p>"></div>"#,
+            r#"[x](java&#x73;cript:alert(1))"#,
+            r#"<img src="java&#115;cript:alert(1)">"#,
+        ] {
+            let fixture = quality_fixture(markdown);
+            assert_eq!(
+                QualityGate::default()
+                    .evaluate(&fixture.root, &fixture.result)
+                    .unwrap_err()
+                    .code,
+                IMPORT_V2_QUALITY_FAILED,
+                "unsafe content should fail: {markdown}"
+            );
+        }
+    }
+
+    #[test]
+    fn quality_gate_ignores_images_in_code_or_escaped_markdown() {
+        for markdown in [
+            "```markdown\n![not rendered](assets/missing.png)\n```",
+            "Text `![not rendered](assets/missing.png)` text",
+            r#"\![not rendered](assets/missing.png)"#,
+            "```html\n<script>alert(1)</script>\n```",
+            r#"\![not rendered](javascript:alert(1))"#,
+        ] {
+            let fixture = quality_fixture(markdown);
+            let preview = QualityGate::default()
+                .evaluate(&fixture.root, &fixture.result)
+                .unwrap();
+            assert_eq!(preview.quality.level, QualityLevel::Pass);
+        }
     }
 }
