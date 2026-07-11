@@ -116,7 +116,7 @@ impl FileTransaction {
                 &std::fs::read(&path).map_err(|error| io_error(error, &path))?,
             ).map_err(|_| staging_safe_io_error())?;
             for intent in journal.entries.iter().rev() {
-                let target = root.join(&intent.relative_path);
+                let target = safe_journal_target(root, &intent.relative_path)?;
                 let current = std::fs::read(&target).ok();
                 let current_hash = current.as_deref().map(digest_bytes);
                 let previous_hash = intent.previous.as_deref().map(digest_bytes);
@@ -569,6 +569,27 @@ fn conflict_error() -> BackendError {
         true,
         true,
     )
+}
+
+fn safe_journal_target(root: &Path, relative: &str) -> Result<PathBuf, BackendError> {
+    if relative.is_empty()
+        || relative.contains('\\')
+        || relative.contains(':')
+        || Path::new(relative).components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(BackendError::new("PATH_INVALID", "Recovery target is invalid.", false, true));
+    }
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| io_error(error, root))?;
+    let target = root.join(relative);
+    let existing_anchor = target.ancestors().find(|candidate| candidate.exists()).ok_or_else(|| {
+        BackendError::new("PATH_INVALID", "Recovery target is invalid.", false, true)
+    })?;
+    let canonical_anchor = std::fs::canonicalize(existing_anchor)
+        .map_err(|error| io_error(error, existing_anchor))?;
+    if !canonical_anchor.starts_with(&canonical_root) {
+        return Err(BackendError::new("PATH_INVALID", "Recovery target is invalid.", false, true));
+    }
+    Ok(target)
 }
 
 fn staging_safe_io_error() -> BackendError {
