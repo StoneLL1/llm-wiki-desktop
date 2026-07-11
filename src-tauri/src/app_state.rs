@@ -5,6 +5,7 @@ use std::sync::RwLock;
 use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
 use crate::models::confirmation::ConfirmationRegistry;
 use crate::models::paths::ProjectContext;
+use crate::services::import_v2::ImportV2Service;
 use crate::services::{
     AgentService, BookmarkService, ChatConvenienceService, ChatService, ExportService,
     ExtractionService, FileStore, GitService, GraphService, ImportService, LintService, LlmService,
@@ -18,6 +19,7 @@ pub struct AppState {
     pub project_service: ProjectService,
     pub file_store: FileStore,
     pub import_service: ImportService,
+    pub import_v2_service: ImportV2Service,
     pub extraction_service: ExtractionService,
     pub git_service: GitService,
     pub agent_service: AgentService,

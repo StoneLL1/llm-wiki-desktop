@@ -50,6 +50,17 @@ impl ImportV2Service {
         git_service: &GitService,
         request: &CommitImportSessionRequest,
     ) -> Result<ImportBatchResult, BackendError> {
+        self.commit_items_cancellable(context, file_store, git_service, request, || false)
+    }
+
+    pub fn commit_items_cancellable(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        git_service: &GitService,
+        request: &CommitImportSessionRequest,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<ImportBatchResult, BackendError> {
         if request.project_id != context.project_id
             || Path::new(&request.project_root_path) != context.root
         {
@@ -75,6 +86,9 @@ impl ImportV2Service {
         };
         file_store.write_json_atomic(context, &history_path, &batch)?;
         for decision in &request.decisions {
+            if is_cancelled() {
+                break;
+            }
             let provisional = match self.commit_one(
                 context,
                 file_store,
