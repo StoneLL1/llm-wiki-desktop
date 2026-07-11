@@ -6,12 +6,12 @@
 
 ## 0. 现状摘要
 
-跨切面硬约束整体落地度高。最核心的 **Git 检查点 + 高风险确认** 闭环已打通：`GitService` 能初始化仓库、生成 scoped/全量 checkpoint、输出 Markdown diff；`CompileService`、`LintService`、`ChatService.save_answer_to_wiki` 在写文件前都先创建 checkpoint；`PendingAction + ConfirmationRegistry + ConfirmationDialog` 把删除、替换、覆盖、冲突、智能体自动修复统一收口到前端对话框；`ProjectContext` + `app_state::ProjectRegistry` 实现了项目 id+根路径双校验、路径穿越/绝对路径/符号链接拒绝、Unicode-CJK 兼容（测试覆盖中文资料库路径）。托盘最小化、任务事件流、OS 通知、任务可取消也已落地。
+跨切面硬约束整体落地度高。`GitService` 能初始化仓库、生成 scoped/全量 checkpoint、输出 Markdown diff；`CompileService`、`LintService`、`ChatService.save_answer_to_wiki` 在写文件前创建 checkpoint，但 **Import 仍是 P0 例外**：`confirm_import_preview` 先确认归档并写 `.app/import-conflicts.json`，之后才创建 checkpoint，因此跨切面的“危险写操作前检查点”边界仅部分完成。`PendingAction + ConfirmationRegistry + ConfirmationDialog` 把删除、替换、覆盖、冲突、智能体自动修复统一收口到前端对话框；`ProjectContext` + `app_state::ProjectRegistry` 实现了项目 id+根路径双校验、路径穿越/绝对路径/符号链接拒绝、Unicode-CJK 兼容（测试覆盖中文资料库路径）。托盘最小化、任务事件流、OS 通知、任务可取消也已落地。
 
-主要的落差集中在两处：
+主要的 P0 落差集中在两处：
 
 1. **i18n 对 Agent/LLM 生成内容的语言偏好未落地**（CLAUDE.md 硬约束明确要求 "Agent 生成内容按用户语言偏好输出"，但 chat/compile/export/lint 的 prompt 全是英文，且未把 `settings.language` 传入后端）。这是 P0 红线。
-2. **ConfirmationDialog 里 `riskLevel === "destructive"` 时确认按钮却用 `variant="primary"`**，样式和语义相反（destructive 应该用 danger 样式已经做了，但 button variant 与样式冲突可能让用户优先级倒置）。属于 P1。
+2. **Import checkpoint 时序不满足预操作语义**：`confirm_import_preview` 的两次写盘都发生在 `create_import_checkpoint` 之前；checkpoint 失败无法阻止已经发生的导入变更。详细 P0 以 [import.md](import.md) 为准。
 
 另外有几处 P1/P2 收尾项：托盘菜单 i18n 缺失、URL 安全策略与 SSRF 防护已落地但日志不显式遮蔽密钥的回归测试缺失，以及 `set_default_agent` 后未持久化到 `.app/agent-config.json`（待核对）。`WorkspaceController` 挂载的 `useAiCapabilities` 已在每次 project key 变化时无条件检测 Agent/Provider；启动页也会复用最近项目检测，但没有任何 recent project 时仍无法构造后端要求的 project context。
 
@@ -19,11 +19,11 @@
 
 | 特性 | 硬约束/PRD 要求 | 当前实现 | 状态 | 优先级 | 涉及文件 |
 |---|---|---|---|---|---|
-| 1. Git 检查点机制 | CLAUDE.md 必读硬边界；PRD-GIT-001/002/003/004 | `GitService` 完整落地，compile/lint/chat/import 流程均接入 checkpoint | ✅已完成 | — | `src-tauri/src/services/git_service.rs:60-150`、`src-tauri/src/services/compile_service.rs:259-400`、`src-tauri/src/services/lint_service/fixes.rs`、`src-tauri/src/services/chat_service/saved_answers.rs` |
+| 1. Git 检查点机制 | CLAUDE.md 必读硬边界；PRD-GIT-001/002/003/004 | `GitService` 完整落地，compile/lint/chat 在受保护写入前创建 checkpoint；Import 虽接入 checkpoint，但 `confirm_import_preview` 先写导入产物和冲突 JSON 再创建 checkpoint | 🟡部分实现 | P0 | `src-tauri/src/services/git_service.rs:60-150`、`src-tauri/src/commands/import_commands.rs:597-625`、[import.md](import.md) |
 | 2. API Key 凭据管理 | CLAUDE.md 必读硬边界；PRD-SET-002 | 走 `keyring` crate；前端只显"已配置"；密钥不入项目文件 | ✅已完成 | — | `src-tauri/src/services/secret_service.rs:14-92`、`src-tauri/src/commands/llm_commands.rs`、`src/components/settings/SettingsView.tsx` |
 | 3. Agent 默认优先 / BYOK 兜底 | CLAUDE.md 必读硬边界；PRD-WIKI-001/002、PRD-AGENT-001 | 路由策略 `Auto` 已落地：Agent installed → Agent，否则 BYOK；Agent CLI 检测走 `where`/`which`+`%APPDATA%\npm` fallback；只检测不安装 | ✅已完成 | — | `src-tauri/src/commands/compile_commands.rs:160-257`、`src-tauri/src/services/agent_service.rs:73-131,554-607` |
 | 4. 长任务可取消 / 可后台 / 可报告进度 / 托盘 | CLAUDE.md 必读硬边界；PRD-AGENT-003/004/005、§11.1 | `TaskService` 后台任务+事件总线+进度+取消；托盘"最小化到托盘"已接入 `CloseBehavior`；OS 通知 | 🟡部分实现 | P1 | `src-tauri/src/lib.rs:31-100`、`src/stores/taskStore.ts:121-128`、`src/hooks/useTaskEvents.ts:43-98`、`src/services/notifications.ts` |
-| 5. 路径安全 / Unicode-CJK / 跨平台 | CLAUDE.md 必读硬边界；PRD §11.4 | `ProjectContext` 全链路路径校验 + 符号链接拒绝 + canonicalize 跨盘符防护 + CJK 测试 | ✅已完成 | — | `src-tauri/src/models/paths.rs:19-103`、`src-tauri/src/app_state.rs:41-95`、`src-tauri/src/services/url_utils.rs:11-57` |
+| 5. 路径安全 / Unicode-CJK / 跨平台 | CLAUDE.md 必读硬边界；PRD §11.4 | `ProjectContext` 全链路路径校验 + 符号链接拒绝 + canonicalize 跨盘符防护 + CJK 测试 | ✅已完成 | — | `src-tauri/src/models/paths.rs:19-103`、`src-tauri/src/app_state.rs:41-95`、`src-tauri/src/utils/url_utils.rs:11-57` |
 | 6. PendingAction 高风险确认流 | CLAUDE.md 必读硬边界；PRD-LINT-004、PRD-GIT-004 | 后端 `ConfirmationRegistry` 统一登记 + scoped 执行；`ProjectConfirmationController` 从 `PendingAction.checkpointHash` 派生 checkpoint 显示，并编排 `ConfirmationDialog` + `CompileConflictDialog` | 🟡部分实现 | P1 | `src/components/app/ProjectConfirmationController.tsx`、`src/components/app/ConfirmationDialog.tsx`、`src-tauri/src/commands/compile_commands.rs:385-628` |
 | 7. i18n（zh-CN / en） | CLAUDE.md 必读硬边界（UI + Agent 输出）；PRD-SET-003 | UI 全量双语；Agent/LLM 生成内容未按用户语言偏好输出 | 🟡部分实现 | P0 | `src/i18n/index.ts:19-34`、`src/i18n/locales/en.json`、`src-tauri/src/services/chat_service/retrieval.rs` (`ChatService::build_retrieval_context`)、`src-tauri/src/services/compile_service.rs:207-211`、`src-tauri/src/services/export_service.rs:31-150`、`src-tauri/src/services/lint_service/deep.rs` (`LintService::build_deep_lint_prompt`) |
 | 8. 本地优先 / 无数据库 | CLAUDE.md 必读硬边界；PRD §11.5 | 无任何数据库依赖；状态 = Markdown + JSON；`FileStore` 原子写 `.app/` | ✅已完成 | — | `src-tauri/src/services/file_store.rs`、`src-tauri/Cargo.toml` |
@@ -32,7 +32,7 @@
 
 ## 2. 逐条落差与验收
 
-### 2.1 Git 检查点机制（✅已完成）
+### 2.1 Git 检查点机制（🟡部分实现，P0）
 
 - 现状：
   - `GitService::initialize_repository` / `create_checkpoint` / `create_scoped_checkpoint` / `diff_markdown` 完整实现，`core.quotepath=false` + 强制 `user.name/email` 保证 CJK 路径可提交、提交者一致。
@@ -40,18 +40,20 @@
   - `LintService::apply_fix` 对 `Missing frontmatter` 这种安全修复也走 `create_scoped_checkpoint`（`checkpoint_path`），对 `DeadLink`/`IndexDrift` 高风险修复在确认后才 checkpoint；写盘前用 `OverwriteIfHashMatches` 做乐观锁。
   - `ChatService::save_answer_to_wiki` 新建页面直接写、覆盖前必须 `allow_overwrite + expected_hash` 且先 scoped checkpoint。
   - `request_delete_source` / `request_replace_source` 返回 `PendingAction(risk_level=Destructive)`，`affected_paths` 包含源文件 + 关联 extracted 工件。
-- 目标：保持现状；**回归测试需要显式覆盖"checkpoint 失败时写盘被阻止"**（目前 `compile_service` 的回滚测试覆盖间接路径，lint/chat 有 scoped checkpoint 失败映射成 `GIT_CHECKPOINT_FAILED` 的代码但缺专门测试）。
+  - **Import 例外**：`confirm_import_preview` 在 `ImportService::confirm_import` 与 `.app/import-conflicts.json` 写盘后才调用 `create_import_checkpoint`（`src-tauri/src/commands/import_commands.rs:603-618`），不满足预操作检查点硬边界。
+- 目标：先修复 Import P0，使 checkpoint 创建发生在任何 confirm-import mutation 之前；同时补显式覆盖“checkpoint 失败时写盘被阻止”的回归测试（详细设计以 [import.md](import.md) 为准）。
 - 涉及文件：见清单表。
 - 验收标准：
-  1. 新增测试：模拟 `git commit` 失败（如 `.git` 目录只读）时，`apply_fix` / `save_answer_to_wiki` / `apply_confirmed_manifest` 不产生任何文件变更。
-  2. 新增测试：`delete_source` 确认执行后，checkpoint commit message 出现在 `git log` 且 `affected_paths` 全部在 commit 里。
+  1. `confirm_import_preview` 必须在 `ImportService::confirm_import`、conflict JSON 或其他确认导入写盘之前成功创建 checkpoint；模拟 checkpoint 失败时项目内容不变。
+  2. 新增测试：模拟 `git commit` 失败（如 `.git` 目录只读）时，`apply_fix` / `save_answer_to_wiki` / `apply_confirmed_manifest` 不产生任何文件变更。
+  3. 新增测试：`delete_source` 确认执行后，checkpoint commit message 出现在 `git log` 且 `affected_paths` 全部在 commit 里。
 
 ### 2.2 API Key 凭据管理（✅已完成）
 
 - 现状：
   - `SecretService` 默认走 `keyring::Entry`（Windows Credential Manager / macOS Keychain / Linux Secret Service）；测试模式下 `SecretService::memory()` 使用进程内 `HashMap`，避免在 CI 里污染宿主凭据库。
-  - `provider_secret_status` 只返布尔；`mask()` 返回 `••••` + 末 4 字。
-  - 前端 `SettingsView` 通过 `provider_secret_status` / `provider.configured` 表达"已配置/未配置"，`store_provider_secret` 直接调 `secret_service.set`，不落 `.app/`。
+  - `provider_secret_status` 只返布尔；`mask()` 返回 `••••` + 末 4 字；`list_llm_providers` 返回 `has_secret` / `secret_mask` 与非敏感配置，不返回原始密钥。
+  - 前端 Settings 通过 Provider status 的 `hasSecret` / `secretMask` 表达"已配置/未配置"，`store_provider_secret` 直接调 `secret_service.set`，不落 `.app/`。
   - `provider_prompt` / `build_deep_lint_prompt` / `build_retrieval_context` / `build_export_prompt` 里都注释"No secret or API key is ever placed in the prompt"，实际实现也确实不拼 key。
 - 目标：保持现状。
 - 涉及文件：见清单表。
@@ -104,17 +106,18 @@
 ### 2.6 PendingAction 高风险确认流（🟡部分实现，P1）
 
 - 现状：
-  - 后端 `ConfirmationRegistry::register_with_execution` 把 `PendingAction` 和 `ConfirmationExecution`（`DeleteSource` / `ReplaceSource` / `CompileMerge` / `InitializeFolder` / …）一起存；`confirm(action_id, status)` 取出执行；`ConfirmationDialog` 支持 9 种 `action_type`（`initialize_folder` / `delete_file` / `overwrite_file` / `batch_rewrite` / `replace_source` / `delete_source` / `merge_conflict` / `agent_auto_fix` / `run_skill`）。
+  - 前后端 `PendingActionType` DTO 共有 10 个值；`ConfirmationDialog` 的穷尽映射覆盖全部 10 个，包括 `install_agent`。
+  - `ConfirmationExecution` 是 registry continuation 的内部执行计划，恰好只有 7 个变体：`InitializeFolder`、`CompileMerge`、`LintFix`、`ChatOverwrite`、`DeleteSource`、`DeleteWikiPage`、`ReplaceSource`。它与面向 UI/IPC 的 `PendingActionType` 不是一一同名或同数量的概念。
+  - 后端 `ConfirmationRegistry::register_with_execution` 把 `PendingAction` 与可选 executable continuation 一起存，`confirm(action_id, status)` 取出执行。
   - `ProjectConfirmationController` 把项目级 PendingAction（import delete/replace）与 compile 冲突 PendingAction 合并到 `displayedPendingAction`，分别走 `confirmPendingAction`（项目 store）和 `confirm_compile_action`（后端命令）；`AppShell` 只挂载 controller。
 - 已完成：`PendingAction.checkpointHash` 已透传；`ProjectConfirmationController` 使用 `displayedPendingAction.checkpointHash != null` 派生 `checkpointExists`，compile merge 与尚未创建 checkpoint 的动作能显示不同状态。
-- 剩余落差（P1/P2）：
-  1. `ConfirmationDialog` 的 destructive 确认按钮视觉使用 danger class，但组件仍是通用 `btn` 语义；需继续核对危险操作的 a11y label 与样式语义。
-  2. `ConfirmationExecution::InitializeFolder` / `OverwriteFile` / `DeleteFile` / `BatchRewrite` / `RunSkill` 在模型中定义，但 commands 并未全部产出；`AgentAutoFix` 当前主要由 lint 使用。应按真实生产者收敛或补齐，而不是把未接线路径当已完成能力。
+- 已完成：破坏性操作确认按钮使用 `Button variant="danger"`；非破坏性确认使用 secondary，不再存在 primary/danger 冲突。
+- 剩余落差（P1/P2）：`PendingActionType::BatchRewrite` / `InstallAgent` / `RunSkill` 当前没有生产者。若未来接入，应分别决定是否需要 executable continuation；不能据此虚构同名 `ConfirmationExecution` 变体。
 - 涉及文件：`src/components/app/ConfirmationDialog.tsx`、`src/components/app/ProjectConfirmationController.tsx`、`src-tauri/src/models/confirmation.rs`、`src-tauri/src/commands/compile_commands.rs:128-145`。
 - 验收标准：
   1. ✅ `PendingAction.checkpoint_hash` 与前端 `checkpointHash` 已接通，controller 按是否存在 hash 派生显示。
   2. 补 e2e：compile 冲突发生时对话框显示"Checkpoint: available"；dead_link 修复首次对话框显示"Checkpoint: not created yet"，确认后二次写盘创建 checkpoint。
-  3. `ConfirmationDialog` 破坏性按钮 a11y label 与样式语义对齐。
+  3. 为新生产的 action type 补 controller/registry 端到端测试；只有实际需要延迟执行时才新增或复用 `ConfirmationExecution` continuation。
 
 ### 2.7 i18n（zh-CN / en）（🟡部分实现，P0）
 
@@ -159,17 +162,16 @@
 
 ### P0（红线，MVP 前必须关闭）
 
-1. **2.7 i18n 生成内容语言偏好**：五个 prompt 构造点接入 `SettingsService::language`；托盘菜单 i18n。违反 CLAUDE.md 硬约束。
+1. **2.1 Import checkpoint 预操作语义**：把 checkpoint 创建移到任何 confirm-import mutation 之前；checkpoint 失败不得产生项目文件变更。详细实现与验收以 [import.md](import.md) 为准。
+2. **2.7 i18n 生成内容语言偏好**：五个 prompt 构造点接入 `SettingsService::language`；托盘菜单 i18n。违反 CLAUDE.md 硬约束。
 
 ### P1（MVP 期内补齐）
 
-2. **2.4 BYOK compile 流式进度**：把 `LlmService::complete` 改成 stream，或至少每 2s append "Generating..." 日志。
-3. **2.4 任务状态同步机制统一**：Import 已改为 `useImportWorkflow` + `waitForTaskTerminal`；继续评估 event-first 与可靠 polling fallback 的统一边界。
-4. **2.6 ConfirmationDialog destructive 按钮语义**：a11y 与 danger 样式语义对齐。
+3. **2.4 BYOK compile 流式进度**：把 `LlmService::complete` 改成 stream，或至少每 2s append "Generating..." 日志。
+4. **2.4 任务状态同步机制统一**：Import 已改为 `useImportWorkflow` + `waitForTaskTerminal`；继续评估 event-first 与可靠 polling fallback 的统一边界。
 
 ### P2（打磨）
 
-5. **2.1 checkpoint 失败阻止写盘**的专门回归测试。
-6. **2.2 prompt 泄露密钥的快照测试**。
-7. **2.5 Windows UNC 路径**的 `ensure_no_detectable_escape` 测试。
-8. **2.10 无 Provider 也能搜索**的回归测试。
+5. **2.2 prompt 泄露密钥的快照测试**。
+6. **2.5 Windows UNC 路径**的 `ensure_no_detectable_escape` 测试。
+7. **2.10 无 Provider 也能搜索**的回归测试。

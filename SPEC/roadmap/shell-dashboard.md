@@ -111,13 +111,12 @@
 
 1. **[P0] Dashboard 四象限重构**（依赖：无） → 重写 `src/features/dashboard/DashboardView.tsx`，落地健康行 + 统计六宫格 + 最近活动时间线 + 快速操作四象限。时间线和分布柱需先约定后端返回结构（`wiki/log.md` 解析 + `.app/tasks/` 聚合）。
 2. **[P0] 启动页重写为设计稿三栏布局**（依赖：PRD-PROJ-001/002/003/004 全部） → 重写 `src/features/project/ProjectStartView.tsx`，引入 `projgrid`/`projcard`/`quickaction`/`agentmini`/`templateside`，新建项目走 `.dialog--wide` 弹窗。
-3. **[P0] 关闭主窗口最小化到托盘**（依赖：settingsStore 关闭行为选项） → `src-tauri/src/lib.rs` `run()` 中加 `.on_window_event` 拦截 `WindowEvent::CloseRequested`，根据 setting 转 hide；前端 `AppShell` 卸载时不杀任务。
-4. **[P1] 右侧项目信息面板 + 状态栏补全**（依赖：GitService 暴露 branch/HEAD/disk usage IPC、IndexService 上次编译时间） → `src/components/app/RightContextPanel.tsx` 补 5 段、`BottomStatusBar.tsx` 补 5 项。
-5. **[P1] 顶栏项目切换下拉 + 返回总览**（依赖：recentProjects store） → `src/components/app/TopBar.tsx` 项目按钮改为弹出 menu，新增 corner 按钮。
-6. **[P1] 左侧栏 Lint warn 徽标 + Agent 底部脚**（依赖：lintStore issueCount、agent version） → `src/components/app/LeftSidebar.tsx`。
-7. **[P1] 启动页搜索/筛选 + 模板侧栏 + Agent 检测**（依赖：步骤 2 已落地骨架） → 启动页第二迭代。
-8. **[P2] 视觉打磨**：Toast 配色对齐、Drawer 宽度 460、Tooltip 用 `data-tip`、prefers-reduced-motion、Skip link、820px 下侧栏强制收窄为 56px；响应式右抽屉、pane 持久化与 `min-width: 0` 已完成。
-9. **[P2] section 标签 letter-spacing 改 0.08em**（依赖：无） → 全局 find/replace `tracking-[0.06em]` → `tracking-[0.08em]` 在 section 标签上下文。
+3. **[P1] 右侧项目信息面板 + 状态栏补全**（依赖：GitService 暴露 branch/HEAD/disk usage IPC、IndexService 上次编译时间） → `src/components/app/RightContextPanel.tsx` 补 5 段、`BottomStatusBar.tsx` 补 5 项。关闭窗口拦截已由 `src-tauri/src/lib.rs:93-108` 完成，不再列入实施步骤。
+4. **[P1] 顶栏项目切换下拉 + 返回总览**（依赖：recentProjects store） → `src/components/app/TopBar.tsx` 项目按钮改为弹出 menu，新增 corner 按钮。
+5. **[P1] 左侧栏 Lint warn 徽标 + Agent 底部脚**（依赖：lintStore issueCount、agent version） → `src/components/app/LeftSidebar.tsx`。
+6. **[P1] 启动页搜索/筛选 + 模板侧栏 + Agent 检测**（依赖：步骤 2 已落地骨架） → 启动页第二迭代。
+7. **[P2] 视觉打磨**：Toast 配色对齐、Drawer 宽度 460、Tooltip 用 `data-tip`、prefers-reduced-motion、Skip link、820px 下侧栏强制收窄为 56px；响应式右抽屉、pane 持久化与 `min-width: 0` 已完成。
+8. **[P2] section 标签 letter-spacing 改 0.08em**（依赖：无） → 全局 find/replace `tracking-[0.06em]` → `tracking-[0.08em]` 在 section 标签上下文。
 
 ---
 
@@ -127,7 +126,7 @@
 - ✅ 确认对话框覆盖风险操作（删除/覆盖/合并冲突）。
 - ✅ 语言切换、Agent 检测、BYOK 状态都有对应 IPC。
 - ✅ AppShell 已移除 `min-w-[1120px]` 硬限制，并具备响应式右抽屉与持久化 pane 行为；820px 下侧栏仍需强制收窄为 56px。
-- ⚠️ "关闭窗口继续后台任务"未完整闭环（托盘 + 通知已实现，但 close 拦截未实现）。
+- ⚠️ 关闭拦截已按 `MinimizeToTray` 执行 `prevent_close()` + `hide()`；剩余托盘菜单 i18n 与 BYOK 长任务进度等跨切面体验缺口见 [cross-cutting.md](cross-cutting.md)。
 
 **遗留风险**
 
