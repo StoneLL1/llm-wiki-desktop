@@ -180,18 +180,14 @@ fn image_destinations_from_rendered(rendered: &str) -> Vec<String> {
 
 fn strip_code_contexts(markdown: &str) -> String {
     let mut rendered = String::with_capacity(markdown.len());
-    let mut fence: Option<char> = None;
+    let mut fence: Option<(char, usize)> = None;
     for line in markdown.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        let marker = if trimmed.starts_with("```") {
-            Some('`')
-        } else if trimmed.starts_with("~~~") {
-            Some('~')
-        } else {
-            None
-        };
-        if let Some(active) = fence {
-            if marker == Some(active) {
+        let marker = fence_marker(trimmed);
+        if let Some((active_char, active_len)) = fence {
+            if marker
+                .is_some_and(|(character, length)| character == active_char && length >= active_len)
+            {
                 fence = None;
             }
             rendered.extend(std::iter::repeat_n(' ', line.len()));
@@ -207,18 +203,23 @@ fn strip_code_contexts(markdown: &str) -> String {
     rendered
 }
 
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let character = line
+        .chars()
+        .next()
+        .filter(|value| matches!(value, '`' | '~'))?;
+    let length = line.chars().take_while(|value| *value == character).count();
+    (length >= 3).then_some((character, length))
+}
+
 fn strip_inline_code_and_escaped_images(line: &str) -> String {
     let bytes = line.as_bytes();
     let mut output = bytes.to_vec();
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'!') {
-            let end = line[index + 2..]
-                .find(')')
-                .map(|offset| index + 2 + offset + 1)
-                .unwrap_or(index + 2);
-            output[index..end].fill(b' ');
-            index = end;
+            output[index + 1] = b' ';
+            index += 2;
             continue;
         }
         if bytes[index] != b'`' {
@@ -231,18 +232,27 @@ fn strip_inline_code_and_escaped_images(line: &str) -> String {
         }
         let delimiter_len = index - delimiter_start;
         let mut closing = index;
-        let end = loop {
-            let Some(offset) = line[closing..].find(&"`".repeat(delimiter_len)) else {
-                break bytes.len();
-            };
-            closing += offset;
-            if bytes.get(closing + delimiter_len) != Some(&b'`') {
-                break closing + delimiter_len;
+        let mut end = None;
+        while closing < bytes.len() {
+            if bytes[closing] != b'`' {
+                closing += 1;
+                continue;
             }
-            closing += delimiter_len;
-        };
-        output[delimiter_start..end].fill(b' ');
-        index = end;
+            let run_start = closing;
+            while bytes.get(closing) == Some(&b'`') {
+                closing += 1;
+            }
+            if closing - run_start == delimiter_len {
+                end = Some(closing);
+                break;
+            }
+        }
+        if let Some(end) = end {
+            output[delimiter_start..end].fill(b' ');
+            index = end;
+        } else {
+            index = delimiter_start + delimiter_len;
+        }
     }
     String::from_utf8(output).expect("input line was valid UTF-8")
 }
@@ -841,7 +851,6 @@ mod tests {
             "Text `![not rendered](assets/missing.png)` text",
             r#"\![not rendered](assets/missing.png)"#,
             "```html\n<script>alert(1)</script>\n```",
-            r#"\![not rendered](javascript:alert(1))"#,
         ] {
             let fixture = quality_fixture(markdown);
             let preview = QualityGate::default()
@@ -849,5 +858,50 @@ mod tests {
                 .unwrap();
             assert_eq!(preview.quality.level, QualityLevel::Pass);
         }
+    }
+
+    #[test]
+    fn unmatched_inline_backtick_keeps_rendered_resources_and_html_visible() {
+        for markdown in [
+            "` unmatched ![rendered](assets/missing.png)",
+            "` unmatched <script>alert(1)</script>",
+        ] {
+            let fixture = quality_fixture(markdown);
+            assert_eq!(
+                QualityGate::default()
+                    .evaluate(&fixture.root, &fixture.result)
+                    .unwrap_err()
+                    .code,
+                IMPORT_V2_QUALITY_FAILED
+            );
+        }
+    }
+
+    #[test]
+    fn escaped_bang_without_image_syntax_does_not_hide_unsafe_html() {
+        for markdown in [
+            r#"\! ordinary <script>alert(1)</script>)"#,
+            r#"\![not an image](javascript:alert(1))"#,
+        ] {
+            let fixture = quality_fixture(markdown);
+            assert_eq!(
+                QualityGate::default()
+                    .evaluate(&fixture.root, &fixture.result)
+                    .unwrap_err()
+                    .code,
+                IMPORT_V2_QUALITY_FAILED
+            );
+        }
+    }
+
+    #[test]
+    fn shorter_fence_does_not_close_a_longer_fence() {
+        let fixture = quality_fixture(
+            "````markdown\ncode\n```\n![not rendered](assets/missing.png)\n````\n# visible",
+        );
+        let preview = QualityGate::default()
+            .evaluate(&fixture.root, &fixture.result)
+            .unwrap();
+        assert_eq!(preview.quality.level, QualityLevel::Pass);
     }
 }
