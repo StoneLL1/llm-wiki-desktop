@@ -1016,7 +1016,6 @@ fn bound_remove_file(binding: &RecoveryParentBinding, path: &Path) -> Result<(),
     unsafe extern "C" {
         fn unlinkat(dirfd: i32, pathname: *const std::ffi::c_char, flags: i32) -> i32;
     }
-    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
     let name = std::ffi::CString::new(path.file_name().unwrap().as_bytes())?;
     // SAFETY: dirfd is a retained open directory and name is a live NUL-terminated
     // single component. flags=0 removes only a non-directory entry.
@@ -1044,7 +1043,6 @@ fn bound_hard_link(
             flags: i32,
         ) -> i32;
     }
-    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
     let old = std::ffi::CString::new(existing.file_name().unwrap().as_bytes())?;
     let new = std::ffi::CString::new(new_path.file_name().unwrap().as_bytes())?;
     // SAFETY: both are single components relative to the same retained parent.
@@ -1087,7 +1085,6 @@ fn bound_restore_bytes(
 ) -> Result<(), BackendError> {
     let temporary = write_synced_temp(&binding.parent, path, bytes)?;
     run_before_recovery_mutation_hook(path);
-    revalidate_recovery_parent(binding)?;
     bound_replace_existing(binding, &temporary, path).map_err(|error| io_error(error, path))?;
     sync_parent(&binding.parent)
 }
