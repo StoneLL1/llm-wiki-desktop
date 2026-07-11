@@ -16,6 +16,8 @@ thread_local! {
     static FAIL_NEXT_IDENTITY_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_RECOVERY_MUTATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
+    static BEFORE_RECOVERY_FINAL_MUTATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
     static SIMULATED_PROCESS_ABORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -35,6 +37,22 @@ fn set_before_recovery_mutation_hook(hook: impl FnOnce(&Path) + 'static) {
 fn run_before_recovery_mutation_hook(path: &Path) {
     #[cfg(test)]
     BEFORE_RECOVERY_MUTATION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+#[cfg(test)]
+fn set_before_recovery_final_mutation_hook(hook: impl FnOnce(&Path) + 'static) {
+    BEFORE_RECOVERY_FINAL_MUTATION_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_before_recovery_final_mutation_hook(path: &Path) {
+    #[cfg(test)]
+    BEFORE_RECOVERY_FINAL_MUTATION_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
             hook(path);
         }
@@ -227,19 +245,16 @@ impl FileTransaction {
                     }
                     match &intent.previous {
                         Some(bytes) => {
-                            bound_restore_bytes(&parent_binding, &target, bytes)?;
+                            recover_owned_target(
+                                root,
+                                &parent_binding,
+                                &target,
+                                intent,
+                                Some(bytes),
+                            )?;
                         }
                         None => {
-                            run_before_recovery_mutation_hook(&target);
-                            match bound_remove_file(&parent_binding, &target) {
-                                Ok(()) => {
-                                    if let Some(parent) = target.parent() {
-                                        sync_parent(parent)?;
-                                    }
-                                }
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(error) => return Err(io_error(error, &target)),
-                            }
+                            recover_owned_target(root, &parent_binding, &target, intent, None)?;
                         }
                     }
                 }
@@ -1078,14 +1093,68 @@ fn bound_remove_file(binding: &RecoveryParentBinding, path: &Path) -> Result<(),
     std::fs::remove_file(path)
 }
 
-fn bound_restore_bytes(
+fn recover_owned_target(
+    root: &Path,
     binding: &RecoveryParentBinding,
     path: &Path,
-    bytes: &[u8],
+    entry: &JournalEntry,
+    previous: Option<&[u8]>,
 ) -> Result<(), BackendError> {
-    let temporary = write_synced_temp(&binding.parent, path, bytes)?;
+    let expected_identity = entry.installed_identity.ok_or_else(conflict_error)?;
+    let guard = binding.parent.join(format!(
+        ".import-v2-recovery-guard-{}",
+        uuid::Uuid::new_v4()
+    ));
     run_before_recovery_mutation_hook(path);
-    bound_replace_existing(binding, &temporary, path).map_err(|error| io_error(error, path))?;
+    bound_quarantine(binding, path, &guard).map_err(|error| io_error(error, path))?;
+    sync_parent(&binding.parent)?;
+
+    let verified = bound_file_identity(binding, &guard).ok() == Some(expected_identity)
+        && read_regular_nofollow(binding, &guard)
+            .ok()
+            .is_some_and(|bytes| digest_bytes(&bytes) == entry.desired_hash);
+    if !verified {
+        let restore = bound_restore_guard_if_absent(binding, &guard, path);
+        let guard_relative = guard
+            .strip_prefix(root)
+            .unwrap_or(&guard)
+            .to_string_lossy()
+            .replace('\\', "/");
+        return Err(rollback_failure(
+            "Recovery could not verify the quarantined installed file.",
+            vec![match restore {
+                Ok(()) => format!(
+                    "{}: unverified child was restored without replacing another file",
+                    guard_relative
+                ),
+                Err(error) => format!(
+                    "{}: unverified child was preserved; canonical-name restore failed: {}",
+                    guard_relative, error
+                ),
+            }],
+        ));
+    }
+
+    run_before_recovery_final_mutation_hook(path);
+    if let Some(bytes) = previous {
+        let temporary = write_synced_temp(&binding.parent, path, bytes)?;
+        if let Err(error) = install_candidate(binding, &temporary, path) {
+            let _ = std::fs::remove_file(&temporary);
+            let guard_relative = guard
+                .strip_prefix(root)
+                .unwrap_or(&guard)
+                .to_string_lossy()
+                .replace('\\', "/");
+            return Err(rollback_failure(
+                "Recovery preserved an external child replacement.",
+                vec![format!(
+                    "{}: previous bytes remain in the verified recovery guard; canonical destination was not overwritten ({error})",
+                    guard_relative
+                )],
+            ));
+        }
+    }
+    bound_remove_file(binding, &guard).map_err(|error| io_error(error, &guard))?;
     sync_parent(&binding.parent)
 }
 
@@ -1122,6 +1191,68 @@ fn bound_replace_existing(
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+#[cfg(unix)]
+fn bound_quarantine(
+    binding: &RecoveryParentBinding,
+    path: &Path,
+    guard: &Path,
+) -> Result<(), std::io::Error> {
+    bound_rename(binding, path, guard)
+}
+
+#[cfg(unix)]
+fn bound_rename(
+    binding: &RecoveryParentBinding,
+    from: &Path,
+    to: &Path,
+) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn renameat(
+            olddirfd: i32,
+            oldpath: *const std::ffi::c_char,
+            newdirfd: i32,
+            newpath: *const std::ffi::c_char,
+        ) -> i32;
+    }
+    let old = std::ffi::CString::new(from.file_name().unwrap().as_bytes())?;
+    let new = std::ffi::CString::new(to.file_name().unwrap().as_bytes())?;
+    // SAFETY: both are single-component names under the retained parent fd.
+    if unsafe {
+        renameat(
+            binding._anchor.as_raw_fd(),
+            old.as_ptr(),
+            binding._anchor.as_raw_fd(),
+            new.as_ptr(),
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn bound_quarantine(
+    binding: &RecoveryParentBinding,
+    path: &Path,
+    guard: &Path,
+) -> Result<(), std::io::Error> {
+    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
+    std::fs::rename(path, guard)
+}
+
+fn bound_restore_guard_if_absent(
+    binding: &RecoveryParentBinding,
+    guard: &Path,
+    path: &Path,
+) -> Result<(), std::io::Error> {
+    bound_hard_link(binding, guard, path)?;
+    bound_remove_file(binding, guard)
 }
 
 #[cfg(not(unix))]
@@ -1177,6 +1308,50 @@ fn read_regular_nofollow(
     file.read_to_end(&mut bytes)
         .map_err(|error| io_error(error, path))?;
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn bound_file_identity(
+    binding: &RecoveryParentBinding,
+    path: &Path,
+) -> Result<FileIdentity, BackendError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn openat(dirfd: i32, pathname: *const std::ffi::c_char, flags: i32, mode: u32) -> i32;
+    }
+    const O_RDONLY: i32 = 0;
+    #[cfg(target_os = "linux")]
+    const O_NOFOLLOW: i32 = 0x20000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_NOFOLLOW: i32 = 0x100;
+    let name = std::ffi::CString::new(path.file_name().unwrap().as_bytes())
+        .map_err(|_| staging_safe_io_error())?;
+    // SAFETY: the retained parent fd and single-component NUL-terminated name
+    // remain valid for the call; ownership of a successful fd transfers once.
+    let fd = unsafe {
+        openat(
+            binding._anchor.as_raw_fd(),
+            name.as_ptr(),
+            O_RDONLY | O_NOFOLLOW,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(io_error(std::io::Error::last_os_error(), path));
+    }
+    // SAFETY: openat returned this new owned descriptor.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file_identity_from_file(&file, path)
+}
+
+#[cfg(not(unix))]
+fn bound_file_identity(
+    binding: &RecoveryParentBinding,
+    path: &Path,
+) -> Result<FileIdentity, BackendError> {
+    revalidate_recovery_parent(binding)?;
+    file_identity(path)
 }
 
 #[cfg(windows)]
@@ -1506,8 +1681,9 @@ fn io_error(error: std::io::Error, path: &Path) -> BackendError {
 mod tests {
     use super::{
         digest_bytes, set_before_checked_displace_hook, set_before_new_install_hook,
-        set_before_recovery_mutation_hook, set_fail_next_candidate_install, set_fail_next_cleanup,
-        set_fail_next_identity_query, FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
+        set_before_recovery_final_mutation_hook, set_before_recovery_mutation_hook,
+        set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
+        FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
     };
     use sha2::Digest;
 
@@ -1884,6 +2060,91 @@ mod tests {
         assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
         assert_eq!(std::fs::read(&target).unwrap(), b"external");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_new_file_quarantine_never_unlinks_a_last_moment_child_replacement() {
+        for replacement in [b"installed".as_slice(), b"external-different".as_slice()] {
+            let root = std::env::temp_dir().join(format!(
+                "import-v2-recovery-child-new-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let target = root.join("wiki/new.md");
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction.write_new(&target, b"installed").unwrap();
+            transaction.simulate_process_crash();
+
+            let hook_target = target.clone();
+            let replacement = replacement.to_vec();
+            let hook_replacement = replacement.clone();
+            set_before_recovery_final_mutation_hook(move |_| {
+                std::fs::write(&hook_target, hook_replacement).unwrap();
+            });
+
+            FileTransaction::reconcile_project(&root).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), replacement);
+            assert!(std::fs::read_dir(target.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("recovery-guard")));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_overwrite_quarantine_preserves_last_moment_child_and_previous_guard() {
+        for replacement in [b"after".as_slice(), b"external-different".as_slice()] {
+            let root = std::env::temp_dir().join(format!(
+                "import-v2-recovery-child-overwrite-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let target = root.join("wiki/existing.md");
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(&target, b"before").unwrap();
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction
+                .write_if_hash_matches(&target, b"after", &digest_bytes(b"before"))
+                .unwrap();
+            transaction.simulate_process_crash();
+
+            let hook_target = target.clone();
+            let replacement = replacement.to_vec();
+            let hook_replacement = replacement.clone();
+            set_before_recovery_final_mutation_hook(move |_| {
+                std::fs::write(&hook_target, hook_replacement).unwrap();
+            });
+
+            let error = FileTransaction::reconcile_project(&root).unwrap_err();
+            assert_eq!(std::fs::read(&target).unwrap(), replacement);
+            let details = error.details.unwrap();
+            let failures = details["rollbackFailures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(failures.iter().any(|failure| {
+                failure.contains("wiki/.import-v2-recovery-guard-")
+                    && failure.contains("canonical destination was not overwritten")
+            }));
+            let guards = std::fs::read_dir(target.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains("recovery-guard")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(guards.len(), 1);
+            assert_eq!(std::fs::read(&guards[0]).unwrap(), b"after");
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
