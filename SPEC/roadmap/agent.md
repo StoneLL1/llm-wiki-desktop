@@ -8,7 +8,7 @@
 后端骨架真实落地，前端为薄壳 MVP：
 
 - **后端（真实可用）**：`AgentService` 通过 `SystemProcessRunner::run_task_streaming` 真正 spawn 子进程（`Command::new` + `--print --output-format stream-json` 等），并把 stdout/stderr 逐行回投到 TaskService 日志，支持 `is_cancelled` → `child.kill()`。编译流 `start_wiki_compile`/`run_compile`/`generate_manifest` 已完整跑通 Agent/BYOK 双路：创建 Git 检查点 → snapshot 哈希 → 创建候选 workspace → 调 Agent/BYOK → 冲突时回灌 `PendingAction(CompileMerge)` → `confirm_compile_action`/`resolve_compile_conflict` 落盘 + 二次检查点 + graph-cache 失效 + search 重扫。deep-lint (`start_deep_lint`) 同样真实 spawn。
-- **前端（薄壳占位）**：`AgentView` 仅渲染三块 panel（检测列表 + 一个"编译 Wiki"按钮 + providerCount 数字 + 任务列表跳转入口），右面板配置、Skill 系统视图、核心操作四宫格、实时日志 terminal、任务行内进度条、"运行 Agent"对话框、BYOK 卡片化展示**全部缺失**。日志/取消走 `TaskLogDrawer`（独立抽屉），编译冲突走 `CompileConflictDialog`（独立弹窗），这两条线已能跑通。
+- **前端（workflow 已抽离）**：`RunAgentDialog` 已提供 Skill、执行路径、Git 检查点和后台运行选项；`useAgentWorkflow` 按 `wiki-ingest` / `wiki-lint` / `wiki-query` / `html-*` 路由到 compile、deep lint、Chat 或 Exports，`WorkspaceController` 负责对话框接线。实时日志 terminal 等其余视觉落差见下表。日志/取消走 `TaskLogDrawer`（独立抽屉），编译冲突走 `CompileConflictDialog`（独立弹窗），这两条线已能跑通。
 
 整体完成度约 **40%**：安全/正确性硬骨架已具备，UI 信息密度与交互形态与设计稿差距大。
 
@@ -22,7 +22,7 @@
 | 核心操作四宫格（ingest-grid） | 4 张 ingest-card：Ingest/Lint/Query/HTML，每张带 icon+标题+描述+`claude → skill →` CTA | 仅一个"编译 Wiki"按钮 | ❌缺失 | P1 | `src/features/agent/AgentView.tsx:57-64` |
 | 任务列表（task-row） | 行内显示：状态图标+标题+`claude · wiki-lint · started 14:31 · PID 8421`+进度条+查看日志/取消按钮；完成/失败有徽章和 diff 摘要（+4/-1） | AgentView 内只是简单两列按钮跳抽屉，真正的任务展示在 `TaskLogDrawer` 抽屉中（列表+日志+取消+进度条） | 🟡部分实现 | P1 | `src/features/agent/AgentView.tsx:71-81`，抽屉实现 `src/components/app/TaskLogDrawer.tsx:137-272` |
 | 实时输出 terminal | 360px 高度的 `terminal` 区，时间戳+level 标签彩色高亮、cursor 闪烁、复制/清空/全屏 overlay、底部状态栏（PID·时长·KB·关闭窗口继续提示） | TaskLogDrawer 内有日志滚动区，但无时间戳 level 染色（只按 level 整行着色）、无 terminal 类名、无复制/清空/全屏、无底部 PID/KB/后台提示 | 🟡部分实现 | P1 | `src/components/app/TaskLogDrawer.tsx:38-54,196-266` |
-| 运行 Agent 对话框（dlg-run） | Skill 下拉 + 执行路径分段（claude/codex/BYOK）+ Git 检查点 checkbox + 后台运行 toggle + "运行"按钮 | **完全缺失**，"编译 Wiki" 按钮直接触发 `startCompile()` 无对话框 | ❌缺失 | P0 | `src/components/app/AppShell.tsx:591-600` |
+| 运行 Agent 对话框（dlg-run） | Skill 下拉 + 执行路径分段（claude/codex/BYOK）+ Git 检查点 checkbox + 后台运行 toggle + "运行"按钮 | `RunAgentDialog` 已实现完整控件；`useAgentWorkflow` 负责 Skill 路由，`WorkspaceController` 负责生命周期与接线 | ✅已完成 | — | `src/features/agent/RunAgentDialog.tsx`、`src/features/agent/useAgentWorkflow.ts`、`src/components/app/WorkspaceController.tsx` |
 | 右面板 "Agent 配置" | 5 个 section：默认 Agent 元信息、Skill 系统 checklist（含缺模板警告）、上下文窗口滑杆、安全边界 4 checkbox、快捷操作 4 按钮 | **完全缺失** | ❌缺失 | P1 | 无（`AgentView` 未渲染右面板） |
 | PendingAction 确认流（编译冲突） | 设计稿未画具体形态，由 CLAUDE.md 硬约束派生 | `CompileConflictDialog` 已实现双栏 diff + 手动合并 + 保留/使用生成/取消，调 `resolve_compile_conflict` | ✅已完成 | — | `src/components/app/CompileConflictDialog.tsx:20-111` |
 | Git 检查点（PRD 硬约束） | 危险操作前自动检查点 | `run_compile` 创建 `HighRiskOperation` 检查点，`finish_compile` 创建 `FinalResult` 检查点，`ensure_checkpoint_head` 防 HEAD 漂移，失败时 `unstage_paths`+`restore_outputs` 回滚 | ✅已完成 | — | `src-tauri/src/commands/compile_commands.rs:106-110,147-153,484,634-654` |
@@ -32,7 +32,7 @@
 
 ## 2. 功能落差（PRD 对照）
 
-- [ ] **"运行 Agent"对话框（Skill 编排入口）**：现状为 AgentView 只有"编译 Wiki"单一入口，直接 `startCompile()` → 涉及 `src/features/agent/AgentView.tsx`、`src/components/app/AppShell.tsx:591-600` → 目标：dialog 含 Skill 选择（wiki-ingest/wiki-lint/wiki-query/html-*）、执行路径分段（Agent/BYOK，默认 Agent 优先）、Git 检查点 checkbox（默认开）、后台运行 toggle → 验收：能从 Agent 面板触发任意已实现 Skill；选择 BYOK 路径时后端走 `CompileRoute::Byok`；对话框关闭后再触发需走新 dialog 实例。
+- [x] **"运行 Agent"对话框（Skill 编排入口）** @ 2026-07-10：`RunAgentDialog` 含 wiki-ingest/wiki-lint/wiki-query/html-* Skill、Agent/BYOK 执行路径、Git 检查点与后台运行选项；`useAgentWorkflow` 路由到现有任务入口或目标视图，对话框实例由 `WorkspaceController` 按项目隔离。
 - [ ] **核心操作四宫格**：现状仅 Ingest 按钮 → 目标：Ingest/Lint/Query/HTML 四张卡，Ingest 高亮 `is-primary`，其余跳转对应视图（lint.html/chat.html/exports.html 对应 `activeView` 切换） → 涉及 `src/features/agent/AgentView.tsx:57-64` → 验收：点击 Lint 卡切换到 LintView；HTML 卡切换到 ExportsView；主卡触发运行对话框。
 - [ ] **BYOK 卡片化展示**：现状 `providerCount` 数字 → 目标：4 张 sumcard 显示 Anthropic/OpenAI/Google/Ollama 的已配置/未配置/本地状态 + 模型 hint + 掩码 key（如 `sk-ant-···8f3a`）→ 涉及 `src/features/agent/AgentView.tsx:65-69`、需要扩展 props 把 `providers: LlmProviderConfig[]` 传入而非只传 count；密钥掩码需后端补 `list_secret_status` 之类的命令（当前 SecretService 只 `get`） → 验收：卡片区分状态，未配置卡显示"前往 Settings → LLM Providers"。
 - [ ] **AgentView 任务行内进度**：现状 AgentView 任务区只显示标题+taskType+status 文字，进度条和取消按钮要去抽屉 → 目标：任务行直接嵌 `ProgressBar` + 行内"取消"按钮 + "查看日志"按钮一键开抽屉 → 涉及 `src/features/agent/AgentView.tsx:71-81` → 验收：running 任务在 AgentView 内可见百分比；行内取消调 `cancelTaskRequest`。
@@ -52,7 +52,7 @@
 
 ## 4. 交互 / 可访问性落差
 
-- **键盘导航**：运行 Agent 对话框（未实现）需支持 Esc 关闭、Tab 焦点环、Enter 触发主操作。当前 `CompileConflictDialog` 已有 `role="dialog" aria-modal`，但 `AgentView` 的任务行用 `<button>` 包裹整行，屏幕阅读器会把整行当一个按钮，子元素语义丢失。
+- **键盘导航**：运行 Agent 对话框已通过 `useModalDialog` 支持 Esc 与焦点约束，并使用 `role="dialog" aria-modal`。当前 `CompileConflictDialog` 已有 `role="dialog" aria-modal`，但 `AgentView` 的任务行用 `<button>` 包裹整行，屏幕阅读器会把整行当一个按钮，子元素语义丢失。
 - **aria 标签缺失**：AgentView 的"重新检测"按钮无 `aria-label`，仅图标+文本；CLI 状态 dot 无 `aria-label`/`title`；进度条无 `role="progressbar"` + `aria-valuenow/min/max`（`TaskLogDrawer.tsx:56-77` 的 ProgressBar 缺这些属性）。
 - **颜色对比/状态可读性**：当前 CLI 行 state 文字用 `uppercase tracking 11px muted` 表达，色盲用户无法区分 installed/missing/failed；设计稿用图标颜色 + dot 双重编码，当前只有图标颜色。
 - **对话框焦点陷阱**：`CompileConflictDialog` 打开时未实现焦点陷阱（focus trap），Tab 可能逃逸到背景。`TaskLogDrawer` 同理。
@@ -61,7 +61,7 @@
 
 ## 5. 建议实施顺序
 
-1. **P0 — 运行 Agent 对话框**（Skill 编排入口）：先把多 Skill 触发路径打通，否则右面板/四宫格都是死链接。新增 `src/features/agent/RunAgentDialog.tsx`，扩展 `CompileRequest` 到通用 `RunAgentRequest`（复用 route/agent/provider 三参），后端复用 `start_wiki_compile`/`start_deep_lint`/chat/export 命令。
+1. **✅ 已完成 — 运行 Agent 对话框与 Skill 路由**：`RunAgentDialog` + `useAgentWorkflow` + `WorkspaceController` 已打通现有 compile/deep-lint/chat/export 入口，未改变后端 command/DTO 契约。
 2. **P1 — 核心操作四宫格 + CLI 行视觉对齐**：一起做，因为都依赖补 `.cli-row`/`.ingest-card` CSS 到 `src/styles.css`。四宫格直接接到已实现视图切换。
 3. **P1 — BYOK 卡片化**：需先与后端商定 `list_secret_status` 命令（只返掩码 + configured bool，不返完整 key，符合 CLAUDE.md 硬约束）。
 4. **P1 — AgentView 任务行内进度/取消**：复用 `TaskLogDrawer` 的 `ProgressBar` 和 `cancelTaskRequest`，改动量小，体验提升大。

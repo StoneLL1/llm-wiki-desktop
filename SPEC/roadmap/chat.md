@@ -1,7 +1,7 @@
 # Chat 板块落差与实施计划
 
 > 对照源：UI-Frontend-design/chat.html + assets/app.css + SPEC/PRD.md（§8.6 / §9.6 / Phase 3）
-> 当前实现：src/features/chat/、src/stores/chatStore.ts、src/types/{chat,llm}.ts、src-tauri/src/services/chat_service.rs、src-tauri/src/commands/chat_commands.rs
+> 当前实现：src/features/chat/、src/stores/chatStore.ts、src/types/{chat,llm}.ts、src-tauri/src/services/chat_service/、src-tauri/src/commands/chat_commands.rs
 
 ## 0. 现状摘要
 
@@ -41,7 +41,7 @@ PRD P0/P1 的 5 条中：CHAT-001~004 已达标，CHAT-005 由"全局搜索不�
 | 右面板 "操作"（保存/复制 MD/生成卡片/标记问题） | 4 按钮 | 仅 "保存到 wiki/queries"（且按钮在 ChatView 而非右面板） | ❌缺失 | P1 | src/features/chat/ChatView.tsx:132-140 |
 | 状态栏 Chat 行（.app/chats/xx.json · N 条 · tokens） | 多 segment | 无 Chat 状态栏行 | ❌缺失 | P2 | src/components/app/StatusStrip.tsx（待查） |
 | Agent vs BYOK 路由 | auto/agent/byok 三态 | 后端 resolve_route 完整；前端无选择器，固定 auto | 🟡部分实现 | P1 | src-tauri/src/commands/chat_commands.rs:272-315、ChatView.tsx:13 |
-| 会话标题自动生成 | 新会话应自动命名 | 后端 create_session 默认 "New chat"，前端无"按首条问题改名" | 🟡部分实现 | P2 | src-tauri/src/services/chat_service.rs:38-42 |
+| 会话标题自动生成 | 新会话应自动命名 | 后端 `ChatService::create_session` 默认 "New chat"，前端无"按首条问题改名" | 🟡部分实现 | P2 | `src-tauri/src/services/chat_service/sessions.rs` |
 
 ## 2. 功能落差（PRD 对照）
 

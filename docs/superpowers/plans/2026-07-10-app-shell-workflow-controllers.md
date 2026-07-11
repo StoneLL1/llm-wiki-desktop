@@ -1,5 +1,9 @@
 # AppShell Workflow Controllers Implementation Plan
 
+> Status: completed on 2026-07-10 and integrated into master.
+> Current architecture documentation: [APP flow](../../../SPEC/APP_flow.md), [frontend guidelines](../../../SPEC/FRONTEND_GUIDELINES.md), and [shell roadmap](../../../SPEC/roadmap/shell-dashboard.md).
+> The task body below remains the historical implementation plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 `AppShell.tsx` 中的 Import、Provider、Agent、task 和 confirmation 业务编排下沉到 feature hooks/controllers，使 AppShell 只负责 Codex-like 桌面布局、pane 行为和全局壳层接线。

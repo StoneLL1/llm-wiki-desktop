@@ -3,6 +3,8 @@
 > 本目录是一份**落差审计 + 实施计划**，对照源是 `UI-Frontend-design/` 设计稿与 `SPEC/PRD.md` 功能清单，审计时点是 2026-06-21，分支 `task1-backend-contracts`。
 > 目的：让**别的对话**能照着这里的每个板块文件，逐块认领、修复或补齐功能，无需重新调研。
 
+> **2026-07-11 架构迁移说明：**本目录是持续更新的路线图。旧的 `src-tauri/src/services/{import,search,lint,chat}_service.rs` 单文件证据现分别对应 `import_service/`、`search_service/`、`lint_service/`、`chat_service/` 目录模块；四个 service facade、Tauri command、DTO 与持久化契约保持不变，`chat_convenience_service.rs` 与 `wiki_index.rs` 仍是独立边界。前端 `AppShell` 只负责布局、pane 与全局壳层接线，项目级编排由 `WorkspaceController` 组合 `useImportWorkflow` / `useAgentWorkflow` / `useProviderWorkflow` 等 hook，视图 lazy dispatch 由 `WorkspaceRouter` 负责。`docs/audits/` 下的 dated audits 保留为当时的历史证据，不按当前路径回写。
+
 ---
 
 ## 如何使用本路线图（给后续对话）
@@ -28,8 +30,8 @@
 | Shell + Dashboard + 启动页 | ~55% | 2 | [shell-dashboard.md](shell-dashboard.md) | **Dashboard 退化为状态表**（缺健康行/统计/时间线/快速操作）、**启动页未对齐三栏布局**、**关闭窗口最小化到托盘的 close 拦截断链** |
 | Wiki | ~50% | 4 | [wiki.md](wiki.md) | **frontmatter 卡片化**、**Milkdown 工具条**、**新建/重命名/删除 + Git 检查点**、**冲突 Diff 对话框**；HTML 预览第三态完全缺失 |
 | Exports | ~45% | 1 | [exports.md](exports.md) | **新建导出对话框**、已生成列表表格化/失败重试、模板选择端到端参数传递 |
-| Agent | ~40% | 1 | [agent.md](agent.md) | **"运行 Agent"对话框**、核心操作四宫格、BYOK 卡片化、右面板 Agent 配置区、CLI 行/任务行样式族 |
-| Import | 后端~75% / 前端~35% | 2 | [import.md](import.md) | **前端 UI 与设计稿错位重构**、**PDF/Office 解析适配器**、**"打开文件夹为项目"对话框 + 导入后自动编译** |
+| Agent | ~40% | 0 | [agent.md](agent.md) | 核心操作四宫格、BYOK 卡片化、右面板 Agent 配置区、CLI 行/任务行样式族 |
+| Import | 后端~75% / 前端~35% | 2 | [import.md](import.md) | **前端 UI 与设计稿错位重构**、**PDF/Office 解析适配器**、**"打开文件夹为项目"对话框** |
 
 > 完成度是子代理基于"真功能 vs 空壳 vs 缺失"的粗估，仅供排期参考，不是精确指标。
 
@@ -51,20 +53,18 @@
    阅读视图 frontmatter 是裸 `<pre>` YAML；编辑器真接入 Milkdown 但无格式工具条（加粗/斜体/标题/链接/代码/引用/撤销重做）。
 6. **Wiki：编译冲突 Markdown Diff 对话框** `[wiki]`
    外部修改冲突仅 banner + reload，缺三路 diff（baseline / 外部 / agent）+ 三选项确认。后端 `FILE_HASH_MISMATCH` 需返回 baseline 文本。
-7. **Agent："运行 Agent"对话框 + 核心操作四宫格** `[agent]`
-   AgentView 只有一个"编译 Wiki"按钮直触发，无 Skill 选择 / 执行路径 / Git 检查点 / 后台 toggle；设计稿核心三块（操作四宫格、BYOK 卡片、右面板 Agent 配置区）全缺。
-8. **Lint：批量自动修复编排 + severity 分级** `[lint]`
+7. **Lint：批量自动修复编排 + severity 分级** `[lint]`
    设计稿顶栏"自动修复 (N)"主 CTA 无实现，只能逐条 Apply（每条各做一次 Git 检查点）；后端从不发 `error` 级（死链目前是 warning），severity 分级形同虚设；缺 lint-ignore 持久化。
-9. **Import：前端 UI 与设计稿错位重构** `[import]`
+8. **Import：前端 UI 与设计稿错位重构** `[import]`
    当前是"Tab + 单行输入 + 左右双栏"，设计稿是"卡片网格 + 文件表 + 右面板 + 底部确认条"。
-10. **Import：PDF/Office 解析适配器缺失（PRD-IMP-001）** `[import]`
+9. **Import：PDF/Office 解析适配器缺失（PRD-IMP-001）** `[import]`
     `ExtractionService` 直接返回 `Unsupported`，无法产出文本/页数/字数/图片。
-11. **Shell：关闭主窗口最小化到托盘的 close 拦截未接线** `[shell-dashboard]`
+10. **Shell：关闭主窗口最小化到托盘的 close 拦截未接线** `[shell-dashboard]`
     托盘和通知已就绪，闭环断在 `src-tauri/src/lib.rs` 未 `on_window_event`（cross-cutting 2.4 记录该处已有读 `close_behavior` 逻辑——需复核是否真未接线，两份报告措辞需对齐）。
-12. **Settings：PRD-SET-005 更新检查是 mock** `[settings]`
+11. **Settings：PRD-SET-005 更新检查是 mock** `[settings]`
     `window.confirm` 假弹窗，不真正查更新源。
 
-> 第 11 项存在两份报告措辞分歧（shell-dashboard 说"断链"，cross-cutting 2.4 说"已接入 `on_window_event` 读 `CloseBehavior`"）。**认领人需先读 `src-tauri/src/lib.rs:31-100` 核实真实状态**，再决定是修代码还是修文档。
+> 第 10 项存在两份报告措辞分歧（shell-dashboard 说"断链"，cross-cutting 2.4 说"已接入 `on_window_event` 读 `CloseBehavior`"）。**认领人需先读 `src-tauri/src/lib.rs:31-100` 核实真实状态**，再决定是修代码还是修文档。
 
 ---
 
