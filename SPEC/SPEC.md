@@ -559,15 +559,20 @@ npm install remark-gfm remark-math rehype-katex rehype-highlight
 npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 ```
 
-## 16. 当前实现对齐记录（2026-07-10）
+## 16. 当前实现对齐记录（2026-07-11）
 
 本节只记录已经落地或已经被测试固定的实现约束，不改变上文的核心产品方向；涉及产品范围、数据模型或安全边界的扩大仍需单独确认。
 
-### 16.1 已初始化工程结构
+### 16.1 当前工程与编排结构
 
 - 当前仓库已是 Tauri v2 + React 19 + TypeScript + Vite 应用骨架，而不再只是文档与样本 Wiki。
 - 前端代码按 `components/app`、`components/ui`、`features/*`、`stores/*`、`types/*`、`hooks/*`、`services/*` 分层；领域视图已覆盖 Dashboard、Wiki、Chat、Graph、Agent、Import、Lint、Exports、Settings。
-- 后端代码已按 `commands/`、`services/`、`models/`、`errors/`、`tasks/`、`utils/` 拆分。Tauri command 继续保持薄层，业务逻辑集中在 service 层，数据通过 typed DTO 和 JSON/Markdown 文件传递。
+- 当前前端工作台的已实现调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter -> lazy feature views`。`AppShell` 持有桌面 shell 和全局覆盖层，`WorkspaceController` 组合项目级 workflow，`WorkspaceRouter` 只负责活动视图分发；除 Dashboard 外的 feature view 按需 lazy load。
+- 当前全局控制器是 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`，统一挂载在 `AppShell`，不由单个 feature view 重复持有。
+- 当前跨视图 workflow 是 `useAiCapabilities`、`useTaskLauncher`、`useImportWorkflow`、`useProviderWorkflow`、`useAgentWorkflow`；它们集中处理 AI 能力发现、任务启动、导入、Provider 配置和 Agent 编排，并以项目 key / epoch 阻止异步结果提交到错误项目。
+- 后端代码已按 `commands/`、`services/`、`models/`、`errors/`、`tasks/`、`utils/` 拆分。当前已实现调用链是 `commands -> AppState -> stable service facades -> focused use-case modules`；Tauri command 继续保持薄层，业务逻辑通过 `AppState` 中的稳定 service facade 进入聚焦模块，数据通过 typed DTO 和 JSON/Markdown 文件传递。
+- `ImportService`、`SearchService`、`LintService`、`ChatService` 是当前稳定 facade。它们保留 command / `AppState` 调用面，并把具体用例拆入各自子模块。
+- `ChatConvenienceService` 与 `WikiIndex` 是独立边界，不并入 `ChatService`、`SearchService` 或其他 facade；前者负责 Chat 便捷写入的意图与变更审计，后者负责项目级只读内存索引。
 - LintService 已将确定性 rules、ignore persistence、report/history persistence、deep analysis/parser 与 single/batch fixes 拆入独立模块，同时保持 `LintService::default()` facade、`LINT_REPORTS_DIR` 的计划级 `pub(crate)` 可见性、rules helpers 的最窄模块可见性、SearchService 只读目录依赖、Git checkpoint/PendingAction 安全边界以及既有 Lint command/DTO 契约不变。
 - 当前实现和测试仍遵循无数据库约束；项目内容继续以 Markdown、JSON 和本地文件为事实来源。
 
