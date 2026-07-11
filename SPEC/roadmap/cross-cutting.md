@@ -8,13 +8,12 @@
 
 跨切面硬约束整体落地度高。最核心的 **Git 检查点 + 高风险确认** 闭环已打通：`GitService` 能初始化仓库、生成 scoped/全量 checkpoint、输出 Markdown diff；`CompileService`、`LintService`、`ChatService.save_answer_to_wiki` 在写文件前都先创建 checkpoint；`PendingAction + ConfirmationRegistry + ConfirmationDialog` 把删除、替换、覆盖、冲突、智能体自动修复统一收口到前端对话框；`ProjectContext` + `app_state::ProjectRegistry` 实现了项目 id+根路径双校验、路径穿越/绝对路径/符号链接拒绝、Unicode-CJK 兼容（测试覆盖中文资料库路径）。托盘最小化、任务事件流、OS 通知、任务可取消也已落地。
 
-主要的落差集中在三处：
+主要的落差集中在两处：
 
 1. **i18n 对 Agent/LLM 生成内容的语言偏好未落地**（CLAUDE.md 硬约束明确要求 "Agent 生成内容按用户语言偏好输出"，但 chat/compile/export/lint 的 prompt 全是英文，且未把 `settings.language` 传入后端）。这是 P0 红线。
-2. **LintService 高风险修复的确认流有隐患**：`ConfirmationDialog` 组件硬编码 `checkpointExists={false}`，即便后端已经按操作语义先创建了 checkpoint，UI 仍始终显示 "Checkpoint: not created yet"，在 dead_link / index_drift / chat overwrite 这类"先 checkpoint 再写"的路径上误导用户。是 P0 体验红线。
-3. **ConfirmationDialog 里 `riskLevel === "destructive"` 时确认按钮却用 `variant="primary"`**，样式和语义相反（destructive 应该用 danger 样式已经做了，但 button variant 与样式冲突可能让用户优先级倒置）。属于 P1。
+2. **ConfirmationDialog 里 `riskLevel === "destructive"` 时确认按钮却用 `variant="primary"`**，样式和语义相反（destructive 应该用 danger 样式已经做了，但 button variant 与样式冲突可能让用户优先级倒置）。属于 P1。
 
-另外有几处 P1/P2 收尾项：托盘菜单 i18n 缺失、URL 安全策略与 SSRF 防护已落地但日志不显式遮蔽密钥的回归测试缺失、`WorkspaceController` 目前只在 Agent/Settings 激活时通过 `useAiCapabilities` 做 Agent 检测（MVP 验收要求的"显示可用 Agent、版本和状态"在 Dashboard 首屏会空），以及 `set_default_agent` 后未持久化到 `.app/agent-config.json`（待核对）。`AppShell` 已不再拥有 feature workflow command。
+另外有几处 P1/P2 收尾项：托盘菜单 i18n 缺失、URL 安全策略与 SSRF 防护已落地但日志不显式遮蔽密钥的回归测试缺失，以及 `set_default_agent` 后未持久化到 `.app/agent-config.json`（待核对）。`WorkspaceController` 挂载的 `useAiCapabilities` 已在每次 project key 变化时无条件检测 Agent/Provider；启动页也会复用最近项目检测，但没有任何 recent project 时仍无法构造后端要求的 project context。
 
 ## 1. 跨切面特性清单
 
@@ -25,7 +24,7 @@
 | 3. Agent 默认优先 / BYOK 兜底 | CLAUDE.md 必读硬边界；PRD-WIKI-001/002、PRD-AGENT-001 | 路由策略 `Auto` 已落地：Agent installed → Agent，否则 BYOK；Agent CLI 检测走 `where`/`which`+`%APPDATA%\npm` fallback；只检测不安装 | ✅已完成 | — | `src-tauri/src/commands/compile_commands.rs:160-257`、`src-tauri/src/services/agent_service.rs:73-131,554-607` |
 | 4. 长任务可取消 / 可后台 / 可报告进度 / 托盘 | CLAUDE.md 必读硬边界；PRD-AGENT-003/004/005、§11.1 | `TaskService` 后台任务+事件总线+进度+取消；托盘"最小化到托盘"已接入 `CloseBehavior`；OS 通知 | 🟡部分实现 | P1 | `src-tauri/src/lib.rs:31-100`、`src/stores/taskStore.ts:121-128`、`src/hooks/useTaskEvents.ts:43-98`、`src/services/notifications.ts` |
 | 5. 路径安全 / Unicode-CJK / 跨平台 | CLAUDE.md 必读硬边界；PRD §11.4 | `ProjectContext` 全链路路径校验 + 符号链接拒绝 + canonicalize 跨盘符防护 + CJK 测试 | ✅已完成 | — | `src-tauri/src/models/paths.rs:19-103`、`src-tauri/src/app_state.rs:41-95`、`src-tauri/src/services/url_utils.rs:11-57` |
-| 6. PendingAction 高风险确认流 | CLAUDE.md 必读硬边界；PRD-LINT-004、PRD-GIT-004 | 后端 `ConfirmationRegistry` 统一登记 + scoped 执行；前端 `ProjectConfirmationController` 编排 `ConfirmationDialog` + `CompileConflictDialog` | 🟡部分实现 | P0 | `src/components/app/ProjectConfirmationController.tsx`、`src/components/app/ConfirmationDialog.tsx`、`src-tauri/src/commands/compile_commands.rs:385-628` |
+| 6. PendingAction 高风险确认流 | CLAUDE.md 必读硬边界；PRD-LINT-004、PRD-GIT-004 | 后端 `ConfirmationRegistry` 统一登记 + scoped 执行；`ProjectConfirmationController` 从 `PendingAction.checkpointHash` 派生 checkpoint 显示，并编排 `ConfirmationDialog` + `CompileConflictDialog` | 🟡部分实现 | P1 | `src/components/app/ProjectConfirmationController.tsx`、`src/components/app/ConfirmationDialog.tsx`、`src-tauri/src/commands/compile_commands.rs:385-628` |
 | 7. i18n（zh-CN / en） | CLAUDE.md 必读硬边界（UI + Agent 输出）；PRD-SET-003 | UI 全量双语；Agent/LLM 生成内容未按用户语言偏好输出 | 🟡部分实现 | P0 | `src/i18n/index.ts:19-34`、`src/i18n/locales/en.json`、`src-tauri/src/services/chat_service/retrieval.rs` (`ChatService::build_retrieval_context`)、`src-tauri/src/services/compile_service.rs:207-211`、`src-tauri/src/services/export_service.rs:31-150`、`src-tauri/src/services/lint_service/deep.rs` (`LintService::build_deep_lint_prompt`) |
 | 8. 本地优先 / 无数据库 | CLAUDE.md 必读硬边界；PRD §11.5 | 无任何数据库依赖；状态 = Markdown + JSON；`FileStore` 原子写 `.app/` | ✅已完成 | — | `src-tauri/src/services/file_store.rs`、`src-tauri/Cargo.toml` |
 | 9. 通知 / Toast 系统 | PRD-AGENT-003/005、§11.2 | OS 通知（完成/失败/待确认）+ 前端 Toaster | ✅已完成 | — | `src/services/notifications.ts`、`src/components/app/Toaster.tsx`、`src/stores/toastStore.ts` |
@@ -67,10 +66,10 @@
   - `find_executable` 做了 `where`/`which` → `%APPDATA%\npm\{cmd,bat,exe}` 的 fallback，且 Windows 下优先 `.cmd/.bat/.exe` 避开无扩展名 bash shim（注释解释了 CreateProcess 无法执行该 shim）。
   - "不静默安装"：`install_guidance` 只是字符串数据，`AgentService` 没有任何 `Command::new("npm install ...")`。
   - BYOK 路径：`LlmService::complete` 在 BYOK 时用 `secret_service.get(provider.provider)` 拿密钥，Provider 未配置 secret 直接错 `LLM_SECRET_MISSING`。
-- 目标：保持现状；**建议补充**：在 Dashboard 首屏异步 `detect_agents`，避免用户打开应用看到"Agent not found"误以为没装。
+- 目标：项目工作区保持现状；`useAiCapabilities` 已在 project key 变化时无条件异步 `detect_agents` / `list_llm_providers`。仅启动页在没有任何 recent project 时缺少可用于后端命令的 project context。
 - 涉及文件：见清单表。
 - 验收标准：
-  1. 在 `WorkspaceController` / `useAiCapabilities` 的项目级 capability workflow 中，于 `currentProject.projectId` 变化时触发一次 `detect_agents`，把结果写入共享 capability 状态。
+  1. ✅ `WorkspaceController` / `useAiCapabilities` 已在 `projectId + rootPath` 变化时触发 `detect_agents` 与 provider refresh，并把 resolved route 写入共享 project 状态。
   2. 回归测试：`Auto` + Agent installed + BYOK configured → 路由是 Agent；`Auto` + Agent missing + BYOK configured → 路由是 BYOK；`Auto` + 两者都缺 → 错 `LLM_PROVIDER_MISSING` 或 `AGENT_UNAVAILABLE`。
 
 ### 2.4 长任务可取消 / 可后台 / 可报告进度 / 托盘最小化（🟡部分实现，P1）
@@ -102,20 +101,20 @@
 - 验收标准：
   1. 已有测试覆盖路径穿越、CJK、符号链接、跨盘符；建议补一项 `ensure_no_detectable_escape` 对 Windows UNC 路径（`\\?\C:\...`）的行为测试。
 
-### 2.6 PendingAction 高风险确认流（🟡部分实现，P0）
+### 2.6 PendingAction 高风险确认流（🟡部分实现，P1）
 
 - 现状：
   - 后端 `ConfirmationRegistry::register_with_execution` 把 `PendingAction` 和 `ConfirmationExecution`（`DeleteSource` / `ReplaceSource` / `CompileMerge` / `InitializeFolder` / …）一起存；`confirm(action_id, status)` 取出执行；`ConfirmationDialog` 支持 9 种 `action_type`（`initialize_folder` / `delete_file` / `overwrite_file` / `batch_rewrite` / `replace_source` / `delete_source` / `merge_conflict` / `agent_auto_fix` / `run_skill`）。
   - `ProjectConfirmationController` 把项目级 PendingAction（import delete/replace）与 compile 冲突 PendingAction 合并到 `displayedPendingAction`，分别走 `confirmPendingAction`（项目 store）和 `confirm_compile_action`（后端命令）；`AppShell` 只挂载 controller。
-- 落差（P0）：
-  1. **`ConfirmationDialog` 硬编码 `checkpointExists={false}`**（`AppShell.tsx:152`）。对于 LintService 高风险修复（`dead_link` / `index_drift`）和 chat 覆盖保存，后端是在用户**确认后**才创建 checkpoint（`confirm_high_risk=true` 触发 `checkpoint_path`），所以这里显示"Checkpoint: not created yet"在语义上正确；但对于 `MergeConflict`（compile），checkpoint 在生成 manifest **之前**就已创建，`ConfirmationExecution::CompileMerge.checkpoint_hash` 存了 commit hash，前端却仍显示"not created yet"。这是误导。**应该把 `checkpoint_hash` 透传到 `PendingAction`，前端按是否存在 hash 决定文案。**
-  2. `ConfirmationDialog.tsx:158-162`：`isDestructive` 时 button `variant="primary"` + className 用 danger 背景。shadcn `primary` 在语义上对应"主行动"，destructive 应该走独立 `variant="danger"` 或保持 `secondary` + danger class。目前视觉正确但 a11y/语义混乱。
-  3. `ConfirmationExecution::InitializeFolder` / `OverwriteFile` / `DeleteFile` / `BatchRewrite` / `RunSkill` 在 `confirmation_models` 里定义了，但 `commands/` 里除了 compile/import 之外没有任何命令产出这些 action。LintService 返回的 `dead_link_pending_action` 用 `AgentAutoFix`，没问题；但 `agent_commands` 里没有"Agent 自动修复"路径产出 `AgentAutoFix`，这条 action_type 目前实际上是 lint 专用。
+- 已完成：`PendingAction.checkpointHash` 已透传；`ProjectConfirmationController` 使用 `displayedPendingAction.checkpointHash != null` 派生 `checkpointExists`，compile merge 与尚未创建 checkpoint 的动作能显示不同状态。
+- 剩余落差（P1/P2）：
+  1. `ConfirmationDialog` 的 destructive 确认按钮视觉使用 danger class，但组件仍是通用 `btn` 语义；需继续核对危险操作的 a11y label 与样式语义。
+  2. `ConfirmationExecution::InitializeFolder` / `OverwriteFile` / `DeleteFile` / `BatchRewrite` / `RunSkill` 在模型中定义，但 commands 并未全部产出；`AgentAutoFix` 当前主要由 lint 使用。应按真实生产者收敛或补齐，而不是把未接线路径当已完成能力。
 - 涉及文件：`src/components/app/ConfirmationDialog.tsx`、`src/components/app/ProjectConfirmationController.tsx`、`src-tauri/src/models/confirmation.rs`、`src-tauri/src/commands/compile_commands.rs:128-145`。
 - 验收标准：
-  1. `PendingAction` 增加 `checkpoint_hash: Option<String>` 字段；compile 冲突登记时填入；前端 `checkpointExists = action.checkpointHash !== null`。
-  2. 新增 e2e：compile 冲突发生时对话框显示"Checkpoint: available"；dead_link 修复首次对话框显示"Checkpoint: not created yet"，确认后二次写盘创建 checkpoint。
-  3. `ConfirmationDialog` 破坏性按钮 a11y label 或 variant 与样式对齐。
+  1. ✅ `PendingAction.checkpoint_hash` 与前端 `checkpointHash` 已接通，controller 按是否存在 hash 派生显示。
+  2. 补 e2e：compile 冲突发生时对话框显示"Checkpoint: available"；dead_link 修复首次对话框显示"Checkpoint: not created yet"，确认后二次写盘创建 checkpoint。
+  3. `ConfirmationDialog` 破坏性按钮 a11y label 与样式语义对齐。
 
 ### 2.7 i18n（zh-CN / en）（🟡部分实现，P0）
 
@@ -161,18 +160,16 @@
 ### P0（红线，MVP 前必须关闭）
 
 1. **2.7 i18n 生成内容语言偏好**：五个 prompt 构造点接入 `SettingsService::language`；托盘菜单 i18n。违反 CLAUDE.md 硬约束。
-2. **2.6 ConfirmationDialog checkpoint 显示**：`PendingAction` 增字段，compile 冲突透传 `checkpoint_hash`，前端按 hash 显示状态。高风险确认流的诚实性红线。
-3. **2.4 Dashboard 首屏 Agent 检测**：在 `WorkspaceController` / `useAiCapabilities` 的 capability workflow 中随项目切换触发一次 `detect_agents`，避免"打开应用看到 Agent 未检测"的错误首屏。
 
 ### P1（MVP 期内补齐）
 
-4. **2.4 BYOK compile 流式进度**：把 `LlmService::complete` 改成 stream，或至少每 2s append "Generating..." 日志。
-5. **2.4 任务状态同步机制统一**：Import 已改为 `useImportWorkflow` + `waitForTaskTerminal`；继续评估 event-first 与可靠 polling fallback 的统一边界。
-6. **2.6 ConfirmationDialog destructive 按钮 variant**：a11y 语义对齐。
+2. **2.4 BYOK compile 流式进度**：把 `LlmService::complete` 改成 stream，或至少每 2s append "Generating..." 日志。
+3. **2.4 任务状态同步机制统一**：Import 已改为 `useImportWorkflow` + `waitForTaskTerminal`；继续评估 event-first 与可靠 polling fallback 的统一边界。
+4. **2.6 ConfirmationDialog destructive 按钮语义**：a11y 与 danger 样式语义对齐。
 
 ### P2（打磨）
 
-7. **2.1 checkpoint 失败阻止写盘**的专门回归测试。
-8. **2.2 prompt 泄露密钥的快照测试**。
-9. **2.5 Windows UNC 路径**的 `ensure_no_detectable_escape` 测试。
-10. **2.10 无 Provider 也能搜索**的回归测试。
+5. **2.1 checkpoint 失败阻止写盘**的专门回归测试。
+6. **2.2 prompt 泄露密钥的快照测试**。
+7. **2.5 Windows UNC 路径**的 `ensure_no_detectable_escape` 测试。
+8. **2.10 无 Provider 也能搜索**的回归测试。
