@@ -75,6 +75,10 @@ impl ImportV2Service {
                 "Import commit lock is unavailable.",
             )
         })?;
+        let session = self
+            .sessions
+            .load(context, file_store, &request.session_id)?;
+        validate_complete_decision_set(&session, &request.decisions)?;
         let batch_id = uuid::Uuid::new_v4().to_string();
         let history_path = format!(".app/import-history/{batch_id}.json");
         let mut batch = ImportBatchResult {
@@ -387,6 +391,71 @@ impl ImportV2Service {
         transaction.commit()?;
         Ok(result)
     }
+}
+
+fn validate_complete_decision_set(
+    session: &crate::models::import_v2::ImportSession,
+    decisions: &[CommitItemDecision],
+) -> Result<(), BackendError> {
+    let mut item_ids = std::collections::HashSet::with_capacity(decisions.len());
+    for decision in decisions {
+        if !item_ids.insert(decision.item_id.as_str()) {
+            return Err(commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import commit decisions must be unique.",
+            ));
+        }
+        let item = session
+            .items
+            .iter()
+            .find(|item| item.item_id == decision.item_id)
+            .ok_or_else(|| {
+                commit_error(
+                    IMPORT_V2_STATE_INVALID,
+                    "Import item was not found for commit.",
+                )
+            })?;
+        if !item.selected
+            || !matches!(
+                item.status,
+                ImportItemStatus::PreviewReady | ImportItemStatus::NeedsMerge
+            )
+            || item.preview.is_none()
+        {
+            return Err(commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import item is not ready for commit.",
+            ));
+        }
+        if item
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.quality.level == QualityLevel::Fail)
+        {
+            return Err(commit_error(
+                IMPORT_V2_QUALITY_FAILED,
+                "Failed quality previews cannot be committed.",
+            ));
+        }
+        if item.status == ImportItemStatus::NeedsMerge && decision.conflict_action.is_none() {
+            return Err(commit_error(
+                IMPORT_V2_COMMIT_CONFLICT,
+                "Merge conflicts require an explicit conflict action.",
+            ));
+        }
+        if decision.conflict_action == Some(CommitConflictAction::ApplyMergedCandidate)
+            && decision
+                .expected_wiki_hash
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err(commit_error(
+                IMPORT_V2_COMMIT_CONFLICT,
+                "Expected Wiki hash is required.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verified_artifact(
@@ -723,6 +792,54 @@ mod tests {
             1,
             "failed item must not leave a raw source directory"
         );
+    }
+
+    #[test]
+    fn invalid_later_decision_cannot_commit_an_earlier_item_or_create_history() {
+        let fixture = CommitFixture::two_ready_items();
+        let history_dir = fixture.root.join(".app/import-history");
+        let request = fixture.request(vec![
+            CommitItemDecision {
+                item_id: fixture.first_item_id.clone(),
+                conflict_action: None,
+                expected_wiki_hash: None,
+            },
+            CommitItemDecision {
+                item_id: "missing-item".into(),
+                conflict_action: None,
+                expected_wiki_hash: None,
+            },
+        ]);
+
+        let error = fixture
+            .service
+            .commit_items(&fixture.context, &fixture.files, &fixture.git, &request)
+            .unwrap_err();
+
+        assert_eq!(error.code, crate::errors::IMPORT_V2_STATE_INVALID);
+        assert!(!history_dir.exists());
+        assert!(!fixture.root.join("raw/sources").exists());
+        assert!(!fixture.root.join("wiki").exists());
+    }
+
+    #[test]
+    fn duplicate_decisions_are_rejected_before_history_or_item_mutation() {
+        let fixture = CommitFixture::two_ready_items();
+        let decision = CommitItemDecision {
+            item_id: fixture.first_item_id.clone(),
+            conflict_action: None,
+            expected_wiki_hash: None,
+        };
+        let request = fixture.request(vec![decision.clone(), decision]);
+
+        let error = fixture
+            .service
+            .commit_items(&fixture.context, &fixture.files, &fixture.git, &request)
+            .unwrap_err();
+
+        assert_eq!(error.code, crate::errors::IMPORT_V2_STATE_INVALID);
+        assert!(!fixture.root.join(".app/import-history").exists());
+        assert!(!fixture.root.join("raw/sources").exists());
     }
 
     #[test]
