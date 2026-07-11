@@ -3,6 +3,7 @@ import { create } from "zustand";
 
 import type { ConfirmedAction } from "../types/backend";
 import type {
+  AgentRoute,
   OpenProjectResponse,
   ProjectSummary,
   ProjectTemplate,
@@ -25,6 +26,7 @@ interface ProjectState {
   initialized: boolean;
   error: string | null;
   setCurrentProject: (project: ProjectSummary) => void;
+  setAgentRoute: (projectId: string, rootPath: string, agentRoute: AgentRoute) => void;
   clearCurrentProject: () => void;
   setRecentProjects: (projects: RecentProject[]) => void;
   setPendingAction: (action: OpenProjectResponse["pendingAction"]) => void;
@@ -90,6 +92,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     set({ currentProject });
   },
+  setAgentRoute: (projectId, rootPath, agentRoute) =>
+    set((state) => {
+      if (
+        state.currentProject.projectId !== projectId ||
+        state.currentProject.rootPath !== rootPath
+      ) {
+        return state;
+      }
+      return {
+        currentProject: { ...state.currentProject, agentRoute },
+      };
+    }),
   clearCurrentProject: () => {
     selectionEpoch += 1;
     invalidateProjectScope();
@@ -141,27 +155,52 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!action) {
       return undefined;
     }
+    const requestEpoch = selectionEpoch;
+    const requestProject = get().currentProject;
     if (!hasTauri()) {
-      set({ pendingAction: undefined });
+      if (
+        requestEpoch === selectionEpoch &&
+        get().pendingAction?.id === action.id
+      ) {
+        set({ pendingAction: undefined });
+      }
       return { action, status: "confirmed", checkpointExists: false, projectSummary: null };
     }
     const confirmed = await invoke<ConfirmedAction>("confirm_pending_action", {
       request: { actionId: action.id, status: "confirmed" },
     });
-    set({
-      currentProject: confirmed.projectSummary ?? get().currentProject,
-      pendingAction: undefined,
-    });
+    const state = get();
+    if (
+      requestEpoch === selectionEpoch &&
+      state.currentProject.projectId === requestProject.projectId &&
+      state.currentProject.rootPath === requestProject.rootPath &&
+      state.pendingAction?.id === action.id
+    ) {
+      set({
+        currentProject: confirmed.projectSummary ?? state.currentProject,
+        pendingAction: undefined,
+      });
+    }
     return confirmed;
   },
   cancelPendingAction: async () => {
     const action = get().pendingAction;
+    const requestEpoch = selectionEpoch;
+    const requestProject = get().currentProject;
     if (action && hasTauri()) {
       await invoke<ConfirmedAction>("confirm_pending_action", {
         request: { actionId: action.id, status: "cancelled" },
       });
     }
-    set({ pendingAction: undefined });
+    const state = get();
+    if (
+      requestEpoch === selectionEpoch &&
+      state.currentProject.projectId === requestProject.projectId &&
+      state.currentProject.rootPath === requestProject.rootPath &&
+      state.pendingAction?.id === action?.id
+    ) {
+      set({ pendingAction: undefined });
+    }
   },
   bootstrap: async () => {
     if (get().initialized || get().initializing) return;

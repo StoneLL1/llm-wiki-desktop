@@ -6,6 +6,12 @@ Symptom — Chat history 按 newest-first 选取后再反转为 chronological or
 
 Symptom — Import 错误提示测试在 `App.test.tsx` 单文件中通过，却在全套 Vitest 中反复抓到 lazy `Loading…` status 或等不到业务错误。 — Root cause — 测试用通用 `findByRole("status")` 与懒加载 status 竞争，同时 `mockRejectedValueOnce` 把失败绑定到“下一次任意 invoke”，全套并发/后台调用可能先消费该 rejection。 — How to avoid — 先等待懒加载后的业务输入，按具体 command（如 `preview_import`）配置 mock，并等待具体错误文本，不用通用 status 角色或全局 next-call 时序表达业务断言。
 
+[2026-07-10] 现象 — projectId + rootPath guard 能阻止跨项目覆盖，但同一项目连续触发 capability/Import preview 时，较旧请求仍可能晚到并覆盖较新结果。— 根因 — project key 只标识作用域，不标识该作用域内的请求代次。— 规避做法 — 对可并发且“latest wins”的请求同时捕获单调 request epoch；提交结果、清 loading/error、打开 drawer 或 toast 前同时校验 project key 与 epoch。
+
+[2026-07-10] 现象 — `WorkspaceRouter` lazy-reject 测试单文件运行通过，但完整 Vitest 套件中偶发渲染先前成功的 AgentView mock，导致找不到 `role="alert"`。— 根因 — 同一测试模块先用 `vi.doMock` 加载成功 lazy module，再以 `resetModules + doMock` 改成 reject；React.lazy 与 Vite worker 的模块 Promise 缓存使第二次定义依赖测试顺序，定向运行掩盖了不稳定性。— 规避做法 — lazy import reject 场景放到独立测试文件，顶层固定一个会 throw/reject 的模块 mock；不要在同一模块内重复定义已被 React.lazy 缓存的 chunk。必须用完整 `npm run test` 验证模块隔离测试。
+
+[2026-07-10] 现象 — 新增 hook/controller 的 Vitest 全绿，但 `npm run build` 在测试文件报 `Mock<Procedure | Constructable>` 不能赋给具体 async callback，或字面量 props 不能从 dashboard 切到 import。— 根因 — `let mock: ReturnType<typeof vi.fn>` 会丢掉可调用签名并保留“函数或构造器”宽联合；`renderHook` 的 initialProps 又会把字符串推断成单一字面量。Vitest 运行时转译不暴露这些问题，`tsc -b` 才会失败。— 规避做法 — 跨赋值/传入 typed store 的 mock 使用 `ReturnType<typeof vi.fn<(args) => Promise<Result>>>` 或 typed async wrapper；会 rerender 的 props 显式标注 union（如 `AppView`）；完成新增测试后必须跑 build，不能以 Vitest 绿色代替类型构建。
+
 [2026-07-10] 现象 — 用字符串 `StartsWith(repoPath)` 判断仓库外备份目录时，名称带有仓库目录前缀的 sibling path 被误判为仓库内路径。— 根因 — 路径边界缺少目录分隔符，`llm-wiki-desktop-runtime-backup-*` 也会匹配 `llm-wiki-desktop` 前缀。— 规避做法 — 先规范化路径，再用 `repoPath.TrimEnd('\\') + '\\'` 作为目录边界前缀，或使用 `Path.GetRelativePath` 验证目标不以 `..` 开头。
 
 [2026-07-09] Symptom — PowerShell displayed UTF-8 locale strings as mojibake, making valid `en.json` / `zh-CN.json` lines look corrupted and causing patch context guesses to fail. — Root cause — `Get-Content` used the shell's default decoding in this environment instead of UTF-8. — How to avoid — Read locale/docs files with `Get-Content -Encoding UTF8` before patching or copying exact context; treat mojibake output as a terminal decoding issue until UTF-8 read proves otherwise.

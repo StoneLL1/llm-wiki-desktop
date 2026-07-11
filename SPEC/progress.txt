@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-11] Integration preflight stale-toast fix — Guarded the source-action follow-up compile error path so a rejection settling after project switch cannot toast into the newly active project, with a deferred RED→GREEN controller regression — Key decision: every post-await UI effect, including error reporting, must revalidate both projectId and rootPath; old-project task registry updates remain allowed.
+
 [2026-07-11] Final service modularization review fixes — Restored the planned Lint report-directory visibility, narrowed Chat retrieval-only candidates, and centralized Import artifact validation/removal helpers without changing facade APIs or write safety ordering — Key decision: keep `LINT_REPORTS_DIR` at the exact planned `pub(crate)` scope, keep rules helpers private to the Lint module tree, and route Import confirmation/promotion/source actions one-way through a private artifacts module.
 
 [2026-07-11] Import 2.0 architecture design — Consolidated the approved file/folder, exact-URL, capability-pack, OCR/ASR, legacy Office conversion, balanced Agent, versioned-source, security, migration, and hard acceptance decisions into a formal design spec — Key decision: implement five independently validated packages, then replace the legacy importer once after complete regression; UI visual implementation remains deferred for a separate design.
@@ -23,6 +25,26 @@
 [2026-07-10] Search catalog and page use-case modularization — Split the SearchService catalog/read and page mutation use cases into focused directory modules while preserving the public facade and existing characterization coverage — Key decision: keep one shared WikiIndex and live bookmark overlay; preserve optimistic hash/checkpoint/reference rollback contracts.
 
 [2026-07-10] Import service modularization — Split read-only preview, confirmation/rollback, and source delete/replace use cases from the ImportService facade into focused modules with their existing regression tests — Key decision: keep the public facade and command/DTO contracts unchanged while preserving confirm preflight-before-write/rollback/staging cleanup and source-action revalidation/checkpoint/mutation/commit-or-restore safety order.
+
+[2026-07-10] Workflow controller review hardening — Added post-await project/epoch guards for confirmation, task drawer, Agent, Provider, capability probes, and Import previews; isolated Settings lazy failures and removed duplicate secret refreshes — Key decision: old-project tasks remain in the unified task registry, but stale requests cannot change the active project, open current UI, navigate, toast, replace staging, or start follow-on compile work.
+
+[2026-07-10] AppShell reduced to layout wiring — Replaced the 768-line mixed shell/workflow component with a 154-line layout shell that retains pane sizing, responsive panel collapse, global shortcuts, frame components, confirmation controller, task drawer, and toaster — Key decision: AppShell imports no Tauri invoke, feature DTO/store, Readability, terminal waiter, lazy view, or business command; WorkspaceController owns workspace composition.
+
+[2026-07-10] Workspace router and controller — Added a static-Dashboard/lazy-feature router with colocated Suspense + ViewErrorBoundary and a composition controller that wires capability, task, Import, Provider, and Agent workflows into existing views/dialogs — Key decision: routing performs no IPC and controller composition stays feature-separated rather than becoming a monolithic workspace hook.
+
+[2026-07-10] Project confirmation controller — Moved source delete/replace confirmation, post-confirm compile launch, waiting compile actions, and merge-conflict task updates into a global controller — Key decision: AppShell will render one controller only; confirmation semantics and checkpoint display stay in the existing dialogs while all returned tasks remain in taskStore.
+
+[2026-07-10] Agent workflow extraction — Added a focused Agent hook for dialog presets, installed-default derivation, default Agent persistence, and explicit wiki-ingest/lint/query/single-page export/project-report routing — Key decision: task-producing skills call only the typed shared launcher; single-page exports navigate to their picker and never invent a source path.
+
+[2026-07-10] Provider workflow extraction — Added a focused provider hook for config save, OS-credential secret save/delete, provider tests, and shared capability refresh — Key decision: secret material is an ephemeral IPC argument only; it is never returned from the workflow or written to React/Zustand state, logs, snapshots, or toast messages.
+
+[2026-07-10] Import workflow extraction — Added a focused import hook covering project-scoped source lists, tracked file preview tasks, clipboard/URL previews with on-demand Readability, guarded source actions, and confirm → Wiki scan → optional compile sequencing — Key decision: every awaited UI-state commit checks projectId + rootPath; old project tasks remain globally trackable but cannot mutate the new project's Import staging.
+
+[2026-07-10] Typed task launcher workflow — Centralized compile, deep-lint, export, tracking, shared drawer selection, and cancellation error handling in useTaskLauncher — Key decision: expose only typed task methods, never an arbitrary command launcher, so all new long tasks continue through the existing taskStore and TaskLogDrawer.
+
+[2026-07-10] Guarded AI capability workflow — Added atomic project-scoped agentRoute updates and a shared capability probe hook with initial/visibility refresh, Agent-first routing, BYOK fallback, and stale-project result rejection — Key decision: compare projectId + rootPath both in the hook ref guard and the store action so delayed project A probes cannot mutate project B.
+
+[2026-07-10] AppShell workflow boundary baseline — Added a static architecture contract that fails while Tauri/import/task/provider orchestration remains in AppShell and reverified the existing eight shell interaction regressions before extraction — Key decision: preserve current DOM, Settings modal, focus, panel, checkpoint, and dashboard capability behavior while moving workflows behind controllers.
 
 [2026-07-10] Runtime cleanup — After explicit confirmation, restored tracked `.app` files to HEAD and moved untracked runtime state out to `D:\Users\Aletta\Desktop\Works\llm-wiki-desktop-runtime-backup-2026-07-10` — Key decision: retain all runtime bytes in the external backup while keeping the shared baseline free of task/settings/graph-cache state.
 
