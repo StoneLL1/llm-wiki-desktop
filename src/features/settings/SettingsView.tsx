@@ -249,11 +249,9 @@ export function SettingsView({
               onSaveProvider={(config) => onSaveProvider({ ...config, contextWindow: settings.contextWindow })}
               onSaveSecret={async (provider, secret) => {
                 await onSaveSecret(provider, secret);
-                await onRefreshCapabilities();
               }}
               onDeleteSecret={async (provider) => {
                 await onDeleteSecret(provider);
-                await onRefreshCapabilities();
               }}
               onTestProvider={(config) => onTestProvider({ ...config, contextWindow: settings.contextWindow })}
             />
@@ -266,7 +264,6 @@ export function SettingsView({
               onDeleteSecret={(provider) => {
                 void (async () => {
                   await onDeleteSecret(provider);
-                  await onRefreshCapabilities();
                 })();
               }}
               onRevokeChatConvenience={() => {
