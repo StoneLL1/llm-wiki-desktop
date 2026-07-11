@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 
 use crate::errors::{BackendError, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED};
 
@@ -54,6 +55,18 @@ fn run_before_checked_displace_hook(path: &Path) {
     let _ = path;
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct JournalEntry {
+    relative_path: String,
+    previous: Option<Vec<u8>>,
+    desired_hash: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Journal {
+    entries: Vec<JournalEntry>,
+}
+
 pub struct FileTransaction {
     backups: Vec<(PathBuf, Option<Vec<u8>>)>,
     created_dirs: Vec<PathBuf>,
@@ -62,6 +75,8 @@ pub struct FileTransaction {
     unverified_installs: std::collections::HashSet<PathBuf>,
     guard_by_destination: std::collections::HashMap<PathBuf, PathBuf>,
     project_root: Option<PathBuf>,
+    journal_path: Option<PathBuf>,
+    journal_entries: Vec<JournalEntry>,
     finished: bool,
 }
 
@@ -75,6 +90,8 @@ impl FileTransaction {
             unverified_installs: std::collections::HashSet::new(),
             guard_by_destination: std::collections::HashMap::new(),
             project_root: None,
+            journal_path: None,
+            journal_entries: Vec::new(),
             finished: false,
         }
     }
@@ -83,6 +100,69 @@ impl FileTransaction {
         let mut transaction = Self::new();
         transaction.project_root = Some(root.to_path_buf());
         transaction
+    }
+
+    pub fn reconcile_project(root: &Path) -> Result<(), BackendError> {
+        let directory = root.join(".app/import-v2-journal");
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_error(error, &directory)),
+        };
+        for entry in entries {
+            let path = entry.map_err(|error| io_error(error, &directory))?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+            let journal: Journal = serde_json::from_slice(
+                &std::fs::read(&path).map_err(|error| io_error(error, &path))?,
+            ).map_err(|_| staging_safe_io_error())?;
+            for intent in journal.entries.iter().rev() {
+                let target = root.join(&intent.relative_path);
+                let current = std::fs::read(&target).ok();
+                let current_hash = current.as_deref().map(digest_bytes);
+                let previous_hash = intent.previous.as_deref().map(digest_bytes);
+                if current_hash == previous_hash { continue; }
+                if current_hash.as_deref() != Some(&intent.desired_hash) {
+                    return Err(conflict_error());
+                }
+                match &intent.previous {
+                    Some(bytes) => write_atomic_bytes(&target, bytes)?,
+                    None => match std::fs::remove_file(&target) {
+                        Ok(()) => if let Some(parent) = target.parent() { sync_parent(parent)?; },
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(error) => return Err(io_error(error, &target)),
+                    },
+                }
+            }
+            std::fs::remove_file(&path).map_err(|error| io_error(error, &path))?;
+            sync_parent(&directory)?;
+        }
+        Ok(())
+    }
+
+    fn record_intent(&mut self, path: &Path, previous: Option<Vec<u8>>, bytes: &[u8]) -> Result<(), BackendError> {
+        let Some(root) = self.project_root.as_deref() else { return Ok(()); };
+        let relative = path.strip_prefix(root).map_err(|_| BackendError::new(
+            "PATH_INVALID", "Commit target is outside the project.", false, true,
+        ))?.to_string_lossy().replace('\\', "/");
+        self.journal_entries.push(JournalEntry { relative_path: relative, previous, desired_hash: digest_bytes(bytes) });
+        let journal_path = self.journal_path.get_or_insert_with(|| root.join(format!(
+            ".app/import-v2-journal/{}.json", uuid::Uuid::new_v4()
+        ))).clone();
+        if let Some(parent) = journal_path.parent() { std::fs::create_dir_all(parent).map_err(|error| io_error(error, parent))?; }
+        let bytes = serde_json::to_vec(&Journal { entries: self.journal_entries.clone() })
+            .map_err(|_| staging_safe_io_error())?;
+        write_atomic_bytes(&journal_path, &bytes)
+    }
+
+    fn finish_journal(&mut self) -> Result<(), BackendError> {
+        if let Some(path) = self.journal_path.take() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => if let Some(parent) = path.parent() { sync_parent(parent)?; },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(io_error(error, &path)),
+            }
+        }
+        Ok(())
     }
 
     pub fn write(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
@@ -110,6 +190,7 @@ impl FileTransaction {
         self.ensure_parent(path)?;
         let parent = path.parent().unwrap();
         let temporary = write_synced_temp(parent, path, bytes)?;
+        self.record_intent(path, None, bytes)?;
         self.recovery_artifacts.push(temporary.clone());
         #[cfg(test)]
         BEFORE_NEW_INSTALL_HOOK.with(|slot| {
@@ -132,7 +213,7 @@ impl FileTransaction {
         }
         self.backups.push((path.to_path_buf(), None));
         self.capture_installed(path, bytes)?;
-        Ok(())
+        self.cleanup_artifact(&temporary)
     }
 
     fn ensure_parent(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -236,6 +317,7 @@ impl FileTransaction {
             let _ = self.cleanup_artifact(&guard);
             return Err(conflict_error());
         }
+        self.record_intent(path, Some(previous_before.clone()), bytes)?;
         if let Err(error) = replace_existing(&temporary, path) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);
@@ -263,6 +345,7 @@ impl FileTransaction {
                 return Err(self.rollback_after(error));
             }
         }
+        self.finish_journal()?;
         self.finished = true;
         Ok(())
     }
@@ -362,6 +445,11 @@ impl FileTransaction {
             }
         }
         self.finished = true;
+        if failures.is_empty() {
+            if let Err(_error) = self.finish_journal() {
+                failures.push(".app/import-v2-journal: cleanup failed".to_string());
+            }
+        }
         if failures.is_empty() {
             Ok(())
         } else {
@@ -659,7 +747,7 @@ mod tests {
     use super::{
         set_before_checked_displace_hook, set_before_new_install_hook,
         set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
-        FileTransaction,
+        digest_bytes, FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
     };
     use sha2::Digest;
 
@@ -955,5 +1043,42 @@ mod tests {
         let details = error.details.unwrap();
         assert!(details.to_string().contains("wiki/notes/.wiki-guard-"));
         std::fs::remove_dir_all(outer).unwrap();
+    }
+
+    #[test]
+    fn durable_journal_reconciles_formal_and_session_writes_after_abandonment() {
+        let root = std::env::temp_dir().join(format!("import-v2-journal-{}", uuid::Uuid::new_v4()));
+        let formal = root.join("wiki/new.md");
+        let session = root.join(".app/import-sessions/s1/session.json");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(&session, b"before").unwrap();
+        let expected = digest_bytes(b"before");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&formal, b"formal").unwrap();
+        transaction.write_if_hash_matches(&session, b"after", &expected).unwrap();
+        std::mem::forget(transaction);
+
+        assert_eq!(std::fs::read(&formal).unwrap(), b"formal");
+        assert_eq!(std::fs::read(&session).unwrap(), b"after");
+        FileTransaction::reconcile_project(&root).unwrap();
+        assert!(!formal.exists());
+        assert_eq!(std::fs::read(&session).unwrap(), b"before");
+        assert_eq!(std::fs::read_dir(root.join(".app/import-v2-journal")).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_journal_preserves_external_drift_during_reconciliation() {
+        let root = std::env::temp_dir().join(format!("import-v2-journal-{}", uuid::Uuid::new_v4()));
+        let target = root.join("wiki/new.md");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&target, b"committed").unwrap();
+        std::mem::forget(transaction);
+        std::fs::write(&target, b"external").unwrap();
+
+        let error = FileTransaction::reconcile_project(&root).unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

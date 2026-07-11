@@ -76,6 +76,7 @@ impl ImportV2Service {
                 "Import commit lock is unavailable.",
             )
         })?;
+        FileTransaction::reconcile_project(&context.root)?;
         let session = self
             .sessions
             .load(context, file_store, &request.session_id)?;
