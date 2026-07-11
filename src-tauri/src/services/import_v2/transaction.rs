@@ -389,8 +389,6 @@ impl FileTransaction {
         })
         .map_err(|_| staging_safe_io_error())?;
         write_atomic_bytes(&journal_path, &bytes)?;
-        #[cfg(test)]
-        commit_fault_boundary("intent", Some(&relative));
         Ok(())
     }
 
@@ -475,6 +473,10 @@ impl FileTransaction {
         self.record_intent(path, None, bytes, candidate_identity)?;
         self.recovery_artifacts.push(temporary.clone());
         self.record_recovery_artifact(&temporary)?;
+        #[cfg(test)]
+        if let Some(entry) = self.journal_entries.last() {
+            commit_fault_boundary("intent", Some(entry.relative_path.as_str()));
+        }
         let parent_binding = self.bind_mutation_parent(path)?;
         #[cfg(test)]
         BEFORE_NEW_INSTALL_HOOK.with(|slot| {
@@ -637,6 +639,10 @@ impl FileTransaction {
         )?;
         self.record_recovery_artifact(&temporary)?;
         self.record_recovery_artifact(&guard)?;
+        #[cfg(test)]
+        if let Some(entry) = self.journal_entries.last() {
+            commit_fault_boundary("intent", Some(entry.relative_path.as_str()));
+        }
         if let Err(error) = bound_replace_existing(&parent_binding, &temporary, path) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);

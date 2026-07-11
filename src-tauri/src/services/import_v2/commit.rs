@@ -51,6 +51,26 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    static COMMIT_DURABLE_TARGETS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(Vec<(String, String)>)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_commit_durable_targets_hook(hook: impl FnOnce(Vec<(String, String)>) + 'static) {
+    COMMIT_DURABLE_TARGETS_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_commit_durable_targets_hook(targets: Vec<(String, String)>) {
+    COMMIT_DURABLE_TARGETS_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(targets);
+        }
+    });
+}
+
+#[cfg(test)]
 fn classify_commit_target(relative: &str) -> CommitPersistenceTarget {
     if relative.contains("/assets/") {
         CommitPersistenceTarget::Asset(relative.rsplit('/').next().unwrap_or(relative).into())
@@ -459,6 +479,43 @@ impl ImportV2Service {
             .into_iter()
             .map(|(path, bytes)| (path, format!("{:x}", Sha256::digest(&bytes))))
             .collect();
+        #[cfg(test)]
+        {
+            let mut targets = vec![
+                ("raw snapshot".into(), plan.raw_path.clone()),
+                ("baseline".into(), plan.baseline_path.clone()),
+            ];
+            targets.extend(preview.assets.iter().map(|asset| {
+                let relative = asset
+                    .relative_path
+                    .strip_prefix("assets/")
+                    .unwrap_or(&asset.relative_path);
+                (
+                    format!("asset {relative}"),
+                    format!("{}/{relative}", plan.asset_root_path),
+                )
+            }));
+            targets.extend([
+                ("Wiki".into(), plan.wiki_path.clone()),
+                ("source manifest".into(), plan.manifest_path.clone()),
+                ("source index".into(), ".app/source-index-v2.json".into()),
+                ("batch history".into(), history_path.to_string()),
+            ]);
+            targets.extend(session.items.iter().map(|session_item| {
+                (
+                    format!("session item {}", session_item.item_id),
+                    format!(
+                        ".app/import-sessions/{session_id}/items/{}.json",
+                        session_item.item_id
+                    ),
+                )
+            }));
+            targets.push((
+                "session summary".into(),
+                format!(".app/import-sessions/{session_id}/session.json"),
+            ));
+            run_commit_durable_targets_hook(targets);
+        }
         let mut transaction = FileTransaction::new_for_project(&context.root);
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
@@ -863,8 +920,8 @@ mod tests {
     use super::super::ImportV2Service;
     use super::{
         asset_collision_key, set_before_artifact_open_hook, set_before_failed_history_write_hook,
-        set_commit_persistence_hook, verified_artifact, CommitPersistenceBoundary,
-        CommitPersistenceTarget,
+        set_commit_durable_targets_hook, set_commit_persistence_hook, verified_artifact,
+        CommitPersistenceBoundary, CommitPersistenceTarget,
     };
     use crate::services::import_v2::transaction::set_before_checked_displace_hook;
     use crate::services::import_v2::transaction::set_before_new_install_hook;
@@ -1680,10 +1737,54 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn observed_item_commit_boundaries(fixture: &CommitFixture) -> Vec<CommitPersistenceBoundary> {
+    fn persistence_target_for(label: &str, path: &str) -> CommitPersistenceTarget {
+        if label == "raw snapshot" {
+            CommitPersistenceTarget::RawSnapshot
+        } else if label == "baseline" {
+            CommitPersistenceTarget::Baseline
+        } else if let Some(name) = label.strip_prefix("asset ") {
+            CommitPersistenceTarget::Asset(name.to_string())
+        } else if label == "Wiki" {
+            CommitPersistenceTarget::Wiki
+        } else if label == "source manifest" {
+            CommitPersistenceTarget::Manifest
+        } else if label == "source index" {
+            CommitPersistenceTarget::Index
+        } else if label == "batch history" {
+            CommitPersistenceTarget::History
+        } else if label.starts_with("session item ") {
+            CommitPersistenceTarget::SessionItem
+        } else if label == "session summary" {
+            CommitPersistenceTarget::SessionSummary
+        } else {
+            panic!("unclassified expected durable target {label}: {path}");
+        }
+    }
+
+    fn expected_item_commit_boundaries(
+        targets: &[(String, String)],
+    ) -> Vec<CommitPersistenceBoundary> {
+        let mut expected = Vec::with_capacity(targets.len() * 2 + 2);
+        for (label, path) in targets {
+            let target = persistence_target_for(label, path);
+            expected.push(CommitPersistenceBoundary::JournalIntent(target.clone()));
+            expected.push(CommitPersistenceBoundary::TargetInstalled(target));
+        }
+        expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
+        expected.push(CommitPersistenceBoundary::JournalDeleted);
+        expected
+    }
+
+    fn observed_item_commit_contract(
+        fixture: &CommitFixture,
+        overwrite: bool,
+    ) -> (Vec<(String, String)>, Vec<CommitPersistenceBoundary>) {
         use std::cell::{Cell, RefCell};
         use std::rc::Rc;
         let observed = Rc::new(RefCell::new(Vec::new()));
+        let targets = Rc::new(RefCell::new(None));
+        let captured_targets = targets.clone();
+        set_commit_durable_targets_hook(move |value| *captured_targets.borrow_mut() = Some(value));
         let armed = Rc::new(Cell::new(false));
         let captured = observed.clone();
         let hook_armed = armed.clone();
@@ -1699,9 +1800,63 @@ mod tests {
             }
             false
         });
-        fixture.commit_with(None, None);
+        if overwrite {
+            let manifest = fixture.manifest();
+            let hash = fixture
+                .files
+                .file_hash(&fixture.context, &manifest.wiki_path)
+                .unwrap();
+            fixture.commit_with(
+                Some(CommitConflictAction::ApplyMergedCandidate),
+                Some(&hash),
+            );
+        } else {
+            fixture.commit_with(None, None);
+        }
         set_commit_persistence_hook(|_| false);
-        Rc::try_unwrap(observed).unwrap().into_inner()
+        let targets = Rc::try_unwrap(targets).unwrap().into_inner().unwrap();
+        let observed = Rc::try_unwrap(observed).unwrap().into_inner();
+        assert_eq!(
+            observed,
+            expected_item_commit_boundaries(&targets),
+            "every expected persistence hook must fire in durable target order"
+        );
+        (targets, observed)
+    }
+
+    fn read_optional(path: &std::path::Path) -> Option<Vec<u8>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("failed to read {}: {error}", path.display()),
+        }
+    }
+
+    fn assert_no_transaction_orphans(root: &std::path::Path) {
+        fn visit(root: &std::path::Path, path: &std::path::Path) {
+            if !path.exists() {
+                return;
+            }
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    visit(root, &path);
+                    continue;
+                }
+                let relative = path.strip_prefix(root).unwrap().to_string_lossy();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(
+                    !relative.contains(".app\\import-v2-journal")
+                        && !relative.contains(".app/import-v2-journal")
+                        && !name.contains(".tmp")
+                        && !name.contains(".wiki-guard-")
+                        && !name.contains(".recovery-"),
+                    "transaction orphan remained after recovery: {relative}"
+                );
+            }
+        }
+        visit(root, root);
     }
 
     fn abort_at_item_boundary(
@@ -1721,6 +1876,20 @@ mod tests {
             let path = fixture.root.join(&manifest.wiki_path);
             let original = std::fs::read(&path).unwrap();
             (path, original, b"# updated.pdf".to_vec())
+        });
+        use std::cell::RefCell;
+        let durable = Rc::new(RefCell::new(None));
+        let captured_durable = durable.clone();
+        let root = fixture.root.clone();
+        set_commit_durable_targets_hook(move |targets| {
+            let snapshots: Vec<(String, String, Option<Vec<u8>>)> = targets
+                .into_iter()
+                .map(|(label, relative)| {
+                    let old = read_optional(&root.join(&relative));
+                    (label, relative, old)
+                })
+                .collect();
+            *captured_durable.borrow_mut() = Some(snapshots);
         });
         set_commit_persistence_hook(move |boundary| {
             if matches!(
@@ -1757,6 +1926,12 @@ mod tests {
         );
         set_commit_persistence_hook(|_| false);
 
+        let durable = Rc::try_unwrap(durable).unwrap().into_inner().unwrap();
+        let crashed: Vec<_> = durable
+            .iter()
+            .map(|(_, relative, _)| read_optional(&fixture.root.join(relative)))
+            .collect();
+
         let drift = fixture.root.join("wiki/external-drift.md");
         std::fs::create_dir_all(drift.parent().unwrap()).unwrap();
         std::fs::write(&drift, b"external drift before recovery").unwrap();
@@ -1773,6 +1948,15 @@ mod tests {
             session.items[0].status == ImportItemStatus::Completed,
             forward
         );
+        for ((label, relative, old), new) in durable.iter().zip(&crashed) {
+            let expected = if forward { new } else { old };
+            assert_eq!(
+                &read_optional(&fixture.root.join(relative)),
+                expected,
+                "{label} must recover to exact {} bytes at {target:?}: {relative}",
+                if forward { "new" } else { "old-or-absent" }
+            );
+        }
         if let Some((wiki, original, candidate)) = checked_wiki {
             assert_eq!(
                 std::fs::read(wiki).unwrap(),
@@ -1784,27 +1968,15 @@ mod tests {
             std::fs::read(drift).unwrap(),
             b"external drift before recovery"
         );
-        let journals = fixture.root.join(".app/import-v2-journal");
-        assert!(
-            !journals.exists() || std::fs::read_dir(journals).unwrap().next().is_none(),
-            "normal preflight must finish reconciliation"
-        );
+        assert_no_transaction_orphans(&fixture.root);
     }
 
     #[test]
     fn real_new_import_commit_recovers_at_every_persistence_boundary() {
         let mut discovery = CommitFixture::two_ready_items();
         discovery.second_item_id = None;
-        let boundaries = observed_item_commit_boundaries(&discovery);
-        assert!(
-            boundaries.contains(&CommitPersistenceBoundary::TargetInstalled(
-                CommitPersistenceTarget::Asset("asset.png".into())
-            ))
-        );
-        assert!(boundaries.iter().any(|boundary| matches!(
-            boundary,
-            CommitPersistenceBoundary::TargetInstalled(CommitPersistenceTarget::SessionItem)
-        )));
+        let (targets, boundaries) = observed_item_commit_contract(&discovery, false);
+        assert_eq!(boundaries, expected_item_commit_boundaries(&targets));
         let mut occurrences = std::collections::HashMap::new();
         for boundary in boundaries {
             let occurrence = occurrences
@@ -1820,40 +1992,8 @@ mod tests {
     #[test]
     fn real_checked_wiki_overwrite_recovers_at_every_persistence_boundary() {
         let discovery = CommitFixture::updated_source();
-        let manifest = discovery.manifest();
-        let hash = discovery
-            .files
-            .file_hash(&discovery.context, &manifest.wiki_path)
-            .unwrap();
-        use std::cell::{Cell, RefCell};
-        use std::rc::Rc;
-        let observed = Rc::new(RefCell::new(Vec::new()));
-        let armed = Rc::new(Cell::new(false));
-        let captured = observed.clone();
-        let hook_armed = armed.clone();
-        set_commit_persistence_hook(move |boundary| {
-            if matches!(
-                boundary,
-                CommitPersistenceBoundary::JournalIntent(CommitPersistenceTarget::RawSnapshot)
-            ) {
-                hook_armed.set(true);
-            }
-            if hook_armed.get() {
-                captured.borrow_mut().push(boundary.clone());
-            }
-            false
-        });
-        discovery.commit_with(
-            Some(CommitConflictAction::ApplyMergedCandidate),
-            Some(&hash),
-        );
-        set_commit_persistence_hook(|_| false);
-        let boundaries = Rc::try_unwrap(observed).unwrap().into_inner();
-        assert!(
-            boundaries.contains(&CommitPersistenceBoundary::TargetInstalled(
-                CommitPersistenceTarget::Wiki
-            ))
-        );
+        let (targets, boundaries) = observed_item_commit_contract(&discovery, true);
+        assert_eq!(boundaries, expected_item_commit_boundaries(&targets));
         let mut occurrences = std::collections::HashMap::new();
         for boundary in boundaries {
             let occurrence = occurrences
