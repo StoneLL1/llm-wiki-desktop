@@ -358,7 +358,7 @@ impl SourceRegistry {
             .insert(input.content_hash.clone(), pointer.clone());
         next_index.by_locator.insert(locator, pointer);
 
-        Ok(SourceCommitPlan {
+        let plan = SourceCommitPlan {
             source_id: source_id.clone(),
             version_id,
             raw_path,
@@ -367,7 +367,9 @@ impl SourceRegistry {
             manifest_path: format!(".app/sources/{source_id}.json"),
             next_manifest,
             next_index,
-        })
+        };
+        validate_commit_plan(&plan)?;
+        Ok(plan)
     }
 }
 
@@ -390,7 +392,7 @@ fn validate_index(index: &SourceIndex) -> Result<(), BackendError> {
 }
 
 fn invalid_pointer(pointer: &SourcePointer) -> bool {
-    pointer.source_id.trim().is_empty() || pointer.version_id.trim().is_empty()
+    !is_safe_id(&pointer.source_id) || !is_safe_id(&pointer.version_id)
 }
 
 fn invalid_index() -> BackendError {
@@ -415,26 +417,85 @@ fn validate_manifest(manifest: &SourceManifest) -> Result<(), BackendError> {
         .count();
     let mut version_ids = std::collections::BTreeSet::new();
     let invalid_version = manifest.versions.iter().any(|version| {
-        !version_ids.insert(&version.version_id)
-            || !version
-                .raw_path
-                .starts_with(&format!("raw/sources/{}/", manifest.source_id))
-            || !version
-                .baseline_path
-                .starts_with(&format!(".app/source-artifacts/{}/", manifest.source_id))
+        !is_safe_id(&version.version_id)
+            || !version_ids.insert(&version.version_id)
+            || !valid_raw_path(&version.raw_path, &manifest.source_id, &version.version_id)
+            || version.baseline_path
+                != format!(
+                    ".app/source-artifacts/{}/{}/baseline.md",
+                    manifest.source_id, version.version_id
+                )
             || paths.resolve_project_path(&version.raw_path).is_err()
             || paths.resolve_project_path(&version.baseline_path).is_err()
     });
     if manifest.schema_version != IMPORT_V2_SCHEMA_VERSION
-        || manifest.source_id.trim().is_empty()
+        || !is_safe_id(&manifest.source_id)
         || current_count != 1
         || invalid_version
-        || !manifest.wiki_path.starts_with("wiki/sources/")
+        || !valid_wiki_path(&manifest.wiki_path)
         || paths.resolve_project_path(&manifest.wiki_path).is_err()
     {
         return Err(invalid_index());
     }
     Ok(())
+}
+
+fn validate_commit_plan(plan: &SourceCommitPlan) -> Result<(), BackendError> {
+    let paths = ProjectContext::new("source-plan-validation", std::path::PathBuf::from("."));
+    let manifest_path = format!(".app/sources/{}.json", plan.source_id);
+    if !is_safe_id(&plan.source_id)
+        || !is_safe_id(&plan.version_id)
+        || !valid_raw_path(&plan.raw_path, &plan.source_id, &plan.version_id)
+        || plan.baseline_path
+            != format!(
+                ".app/source-artifacts/{}/{}/baseline.md",
+                plan.source_id, plan.version_id
+            )
+        || !valid_wiki_path(&plan.wiki_path)
+        || plan.manifest_path != manifest_path
+        || [
+            &plan.raw_path,
+            &plan.baseline_path,
+            &plan.wiki_path,
+            &plan.manifest_path,
+        ]
+        .iter()
+        .any(|path| paths.resolve_project_path(path).is_err())
+    {
+        return Err(invalid_index());
+    }
+    Ok(())
+}
+
+fn is_safe_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn valid_raw_path(path: &str, source_id: &str, version_id: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.len() == 5
+        && parts[0] == "raw"
+        && parts[1] == "sources"
+        && parts[2] == source_id
+        && parts[3] == version_id
+        && parts[4].starts_with("original.")
+        && safe_extension(parts[4].trim_start_matches("original."))
+            == parts[4].trim_start_matches("original.")
+}
+
+fn valid_wiki_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.len() == 4
+        && parts[0] == "wiki"
+        && parts[1] == "sources"
+        && matches!(parts[2], "files" | "web" | "video")
+        && parts[3].ends_with(".md")
+        && parts[3].len() > 3
+        && !parts[3].contains(['\\', ':'])
 }
 
 fn safe_extension(extension: &str) -> String {
@@ -792,6 +853,84 @@ mod tests {
                 &SourceIndex::default_v2(),
                 Some(&existing),
                 &fixture_input("file:/a.docx", "hash-b", "a.docx"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_SOURCE_INDEX_INVALID);
+    }
+
+    #[test]
+    fn source_id_must_be_one_safe_component_for_every_planned_target() {
+        let pointer = SourcePointer {
+            source_id: "nested/source".into(),
+            version_id: "version-1".into(),
+        };
+        let index = SourceIndex {
+            schema_version: 2,
+            by_content_hash: BTreeMap::from([("hash-a".into(), pointer.clone())]),
+            by_locator: BTreeMap::from([("file:/a.docx".into(), pointer)]),
+        };
+        let existing = SourceManifest {
+            schema_version: 2,
+            source_id: "nested/source".into(),
+            origins: vec!["file:/a.docx".into()],
+            versions: vec![SourceVersion {
+                version_id: "version-1".into(),
+                content_hash: "hash-a".into(),
+                raw_path: "raw/sources/nested/source/version-1/original.docx".into(),
+                baseline_path: ".app/source-artifacts/nested/source/version-1/baseline.md".into(),
+                created_at: "2026-07-11T00:00:00Z".into(),
+                route: "fixture".into(),
+                engine_id: "fixture".into(),
+                engine_version: "1.0.0".into(),
+                quality: pass_quality(),
+            }],
+            current_version_id: "version-1".into(),
+            wiki_path: "wiki/sources/files/a.md".into(),
+        };
+        let error = SourceRegistry
+            .build_commit_plan(
+                &index,
+                Some(&existing),
+                &fixture_input("file:/a.docx", "hash-a", "a.docx"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_SOURCE_INDEX_INVALID);
+    }
+
+    #[test]
+    fn version_id_and_artifact_paths_must_describe_the_same_version_directory() {
+        let pointer = SourcePointer {
+            source_id: "source-1".into(),
+            version_id: "../escape".into(),
+        };
+        let index = SourceIndex {
+            schema_version: 2,
+            by_content_hash: BTreeMap::from([("hash-a".into(), pointer.clone())]),
+            by_locator: BTreeMap::from([("file:/a.docx".into(), pointer)]),
+        };
+        let existing = SourceManifest {
+            schema_version: 2,
+            source_id: "source-1".into(),
+            origins: vec!["file:/a.docx".into()],
+            versions: vec![SourceVersion {
+                version_id: "../escape".into(),
+                content_hash: "hash-a".into(),
+                raw_path: "raw/sources/source-1/safe-version/original.docx".into(),
+                baseline_path: ".app/source-artifacts/source-1/safe-version/baseline.md".into(),
+                created_at: "2026-07-11T00:00:00Z".into(),
+                route: "fixture".into(),
+                engine_id: "fixture".into(),
+                engine_version: "1.0.0".into(),
+                quality: pass_quality(),
+            }],
+            current_version_id: "../escape".into(),
+            wiki_path: "wiki/sources/files/a.md".into(),
+        };
+        let error = SourceRegistry
+            .build_commit_plan(
+                &index,
+                Some(&existing),
+                &fixture_input("file:/a.docx", "hash-a", "a.docx"),
             )
             .unwrap_err();
         assert_eq!(error.code, IMPORT_V2_SOURCE_INDEX_INVALID);
