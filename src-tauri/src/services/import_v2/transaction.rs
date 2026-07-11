@@ -255,7 +255,9 @@ impl FileTransaction {
         }
         self.backups.push((path.to_path_buf(), None));
         self.capture_installed(path, bytes)?;
-        self.cleanup_artifact(&temporary)
+        // Keep the linked staging name tracked until commit so cleanup failure is
+        // a transaction failure and rollback can retry it deterministically.
+        Ok(())
     }
 
     fn ensure_parent(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -418,12 +420,22 @@ impl FileTransaction {
 
     pub(super) fn rollback(&mut self) -> Result<(), BackendError> {
         let mut failures = Vec::new();
+        let mut ownership_valid = std::collections::HashMap::new();
+        for (path, ownership) in &self.installed_ownership {
+            let valid = path.exists()
+                && file_identity(path).ok().as_ref() == Some(&ownership.identity)
+                && std::fs::read(path).ok().map(|bytes| digest_bytes(&bytes)).as_ref() == Some(&ownership.hash);
+            ownership_valid.insert(path.clone(), valid);
+        }
+        // Windows std File anchors intentionally deny replacement/deletion. They
+        // have served their identity purpose; close them before rollback mutation.
+        self.installed_ownership.clear();
         for (path, previous) in self.backups.iter().rev() {
             if self.unverified_installs.contains(path) {
                 failures.push(format!("{}: installed ownership could not be verified; preserved instead of rolling back", self.actionable_path(path)));
                 continue;
             }
-            if let Some(ownership) = self.installed_ownership.get(path) {
+            if let Some(valid) = ownership_valid.get(path) {
                 if !path.exists() {
                     failures.push(format!(
                         "{}: destination was deleted externally; preserved instead of rolling back",
@@ -431,14 +443,7 @@ impl FileTransaction {
                     ));
                     continue;
                 } else {
-                    let identity_changed =
-                        file_identity(path).ok().as_ref() != Some(&ownership.identity);
-                    let content_changed = std::fs::read(path)
-                        .ok()
-                        .map(|bytes| digest_bytes(&bytes))
-                        .as_ref()
-                        != Some(&ownership.hash);
-                    if identity_changed || content_changed {
+                    if !valid {
                         failures.push(format!(
                             "{}: destination changed externally; preserved instead of rolling back",
                             self.actionable_path(path)
@@ -646,11 +651,19 @@ fn staging_safe_io_error() -> BackendError {
 
 #[cfg(unix)]
 fn replace_existing(temporary: &Path, path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    if FAIL_NEXT_CANDIDATE_INSTALL.with(|flag| flag.replace(false)) {
+        return Err(std::io::Error::other("injected candidate install failure"));
+    }
     std::fs::rename(temporary, path)
 }
 
 #[cfg(windows)]
 fn replace_existing(temporary: &Path, path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    if FAIL_NEXT_CANDIDATE_INSTALL.with(|flag| flag.replace(false)) {
+        return Err(std::io::Error::other("injected candidate install failure"));
+    }
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -1047,7 +1060,7 @@ mod tests {
         assert!(error.details.unwrap()["rollbackFailures"][0]
             .as_str()
             .unwrap()
-            .contains(path.to_string_lossy().as_ref()));
+            .contains(&path.to_string_lossy().replace('\\', "/")));
         std::fs::remove_dir_all(root).unwrap();
     }
 
