@@ -1,5 +1,12 @@
 # Task 9 final Review B recovery closeout
 
+## 2026-07-12 recovery child-name quarantine
+
+- Restart rollback now renames the current canonical child to a unique recovery guard through the retained parent namespace before any destructive decision. The quarantined object is opened relative to that same parent and must match both the journal's persisted installed identity and desired hash.
+- New-file rollback deletes only the verified transaction-owned guard. Checked-overwrite rollback installs previous bytes with create-if-absent semantics; if an external child wins the canonical name, recovery preserves it, retains the verified guard, and reports the guard by project-relative path.
+- Added a hook at the final unlink/install primitive and regressions for new and overwritten targets with same-byte and different-byte child replacements. The external child remains canonical in every case; conflicted overwrite recovery remains actionable without overwriting either object.
+- Focused transaction tests (`26/26`), both real persistence-boundary crash matrices, clean full Rust (`565/565` plus integration suites), and unified `npm run check` (`455/455` frontend tests) pass.
+
 ## 2026-07-12 recovery parent binding
 
 - Recovery now binds the project root and every existing target-parent component to stable native identities, rejects symlink/reparse components, and revalidates the complete chain immediately before journal-driven writes and deletes.
