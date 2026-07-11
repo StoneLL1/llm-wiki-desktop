@@ -182,6 +182,9 @@ impl ImportV2Service {
             ));
         }
         let index_existed = files.exists(context, ".app/source-index-v2.json");
+        let index_hash = index_existed
+            .then(|| files.file_hash(context, ".app/source-index-v2.json"))
+            .transpose()?;
         let index = SourceRegistry::read_index(context, files)?;
         let locator = item.input.normalized_locator.as_deref().ok_or_else(|| {
             commit_error(
@@ -194,10 +197,15 @@ impl ImportV2Service {
             .by_locator
             .get(locator)
             .or_else(|| index.by_content_hash.get(&preview.source_snapshot.sha256));
-        let existing_manifest: Option<SourceManifest> = pointer
-            .map(|pointer| {
-                files.read_json(context, &format!(".app/sources/{}.json", pointer.source_id))
-            })
+        let existing_manifest_path =
+            pointer.map(|pointer| format!(".app/sources/{}.json", pointer.source_id));
+        let existing_manifest_hash = existing_manifest_path
+            .as_deref()
+            .map(|path| files.file_hash(context, path))
+            .transpose()?;
+        let existing_manifest: Option<SourceManifest> = existing_manifest_path
+            .as_deref()
+            .map(|path| files.read_json(context, path))
             .transpose()?;
         let attempt = item.attempts.last();
         let extension = Path::new(&item.input.display_name)
@@ -321,13 +329,21 @@ impl ImportV2Service {
             }
             let manifest_path = context.resolve_project_path(&plan.manifest_path)?;
             if existing_manifest.is_some() {
-                transaction.write(&manifest_path, &json_bytes(&plan.next_manifest)?)?;
+                transaction.write_if_hash_matches(
+                    &manifest_path,
+                    &json_bytes(&plan.next_manifest)?,
+                    existing_manifest_hash.as_deref().unwrap(),
+                )?;
             } else {
                 transaction.write_new(&manifest_path, &json_bytes(&plan.next_manifest)?)?;
             }
             let index_path = context.resolve_project_path(".app/source-index-v2.json")?;
             if index_existed {
-                transaction.write(&index_path, &json_bytes(&plan.next_index)?)?;
+                transaction.write_if_hash_matches(
+                    &index_path,
+                    &json_bytes(&plan.next_index)?,
+                    index_hash.as_deref().unwrap(),
+                )?;
             } else {
                 transaction.write_new(&index_path, &json_bytes(&plan.next_index)?)?;
             }
@@ -354,7 +370,7 @@ impl ImportV2Service {
         if let Err(error) = write_result {
             return Err(transaction.rollback_after(error));
         }
-        transaction.commit();
+        transaction.commit()?;
         Ok(result)
     }
 }
@@ -420,6 +436,7 @@ mod tests {
 
     use super::super::ImportV2Service;
     use super::{asset_collision_key, set_before_failed_history_write_hook};
+    use crate::services::import_v2::transaction::set_before_checked_displace_hook;
     use crate::services::import_v2::transaction::set_before_new_install_hook;
 
     struct FixtureEngine {
@@ -853,5 +870,65 @@ mod tests {
                 "{target_kind}"
             );
         }
+    }
+
+    #[test]
+    fn concurrent_existing_index_update_blocks_without_manifest_inconsistency() {
+        let fixture = CommitFixture::updated_source();
+        let manifest = fixture.manifest();
+        let manifest_path = fixture
+            .root
+            .join(format!(".app/sources/{}.json", manifest.source_id));
+        let before_manifest = std::fs::read(&manifest_path).unwrap();
+        let index_path = fixture.root.join(".app/source-index-v2.json");
+        set_before_checked_displace_hook(|path| {
+            if path.ends_with("source-index-v2.json") {
+                std::fs::write(path, b"external index update").unwrap();
+                true
+            } else {
+                false
+            }
+        });
+        let result = fixture.commit_with(Some(CommitConflictAction::KeepWiki), None);
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(
+            result.items[0].error_code.as_deref(),
+            Some(IMPORT_V2_COMMIT_CONFLICT)
+        );
+        assert_eq!(
+            std::fs::read(&index_path).unwrap(),
+            b"external index update"
+        );
+        assert_eq!(std::fs::read(manifest_path).unwrap(), before_manifest);
+    }
+
+    #[test]
+    fn concurrent_existing_manifest_update_blocks_before_index_commit() {
+        let fixture = CommitFixture::updated_source();
+        let manifest = fixture.manifest();
+        let manifest_path = fixture
+            .root
+            .join(format!(".app/sources/{}.json", manifest.source_id));
+        let before_index = std::fs::read(fixture.root.join(".app/source-index-v2.json")).unwrap();
+        set_before_checked_displace_hook(|path| {
+            if path.to_string_lossy().contains("/.app/sources/")
+                || path.to_string_lossy().contains("\\.app\\sources\\")
+            {
+                std::fs::write(path, b"external manifest update").unwrap();
+                true
+            } else {
+                false
+            }
+        });
+        let result = fixture.commit_with(Some(CommitConflictAction::KeepWiki), None);
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(
+            std::fs::read(manifest_path).unwrap(),
+            b"external manifest update"
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(".app/source-index-v2.json")).unwrap(),
+            before_index
+        );
     }
 }
