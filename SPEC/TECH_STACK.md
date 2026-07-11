@@ -113,20 +113,20 @@ IPC 层负责把前端意图转成后端服务调用。
 
 当前 command 已按领域拆分：
 
-- Project commands：创建、打开、扫描、最近项目。
-- Import commands：选择文件、复制资料、解析预览。
-- Wiki commands：读取页面、保存页面、刷新索引。
-- Git commands：初始化、检查点、提交、diff、恢复。
-- Agent commands：检测 CLI、启动任务、取消任务、读取日志。
-- LLM commands：测试 provider、执行 BYOK 请求。
-- Chat commands：会话、检索问答、引用、保存答案和便捷写入确认。
-- Compile commands：启动编译、确认动作和处理冲突。
-- File commands：受项目上下文约束的 Markdown / JSON 读写与确认继续执行。
-- Graph commands：构建、读取缓存、刷新布局。
-- Lint commands：运行本地检查、触发深度检查、应用修复。
-- Export commands：生成 HTML、读取预览、打开导出目录。
-- Settings commands：读取、保存、密钥管理、更新检查。
-- Task commands：创建、查询、取消、日志、清理和活动项目绑定。
+- Project commands：应用摘要、创建 / 打开 / 预览普通文件夹、扫描、最近项目列表与记忆。
+- Import commands：文件 / 文本 / URL 预览、URL 抓取与校验、来源目录、删除 / 替换请求、确认导入和提取文本预览。
+- Wiki commands：扫描、读取、保存、创建、重命名、删除请求和书签切换。
+- Git commands：状态、仓库初始化、检查点和 Markdown diff；当前未注册通用提交或恢复 command。
+- Agent commands：检测 CLI、读取 Agent 配置和设置默认 Agent；任务取消与日志归 `Task commands`，当前 Agent command 不直接启动任务。
+- LLM commands：Provider 列表 / 保存、密钥保存 / 删除 / 状态、Ollama 可达性和 Provider 测试；当前未注册通用 BYOK 执行 command。
+- Chat commands：会话创建 / 列表 / 加载 / 重命名 / 删除、发送消息、保存回答和便捷写入的确认 / 回滚。
+- Compile commands：启动编译、确认动作、读取冲突详情和解决冲突。
+- File commands：受项目上下文约束的 Markdown / JSON 读写、文件 hash 和 pending action 确认。
+- Graph commands：获取 / 构建图谱，以及保存前端计算的布局。
+- Lint commands：本地 / 深度检查、报告与历史、single / batch fix 和 ignore 管理。
+- Export commands：启动 / 重新生成、列表、书签、预览，以及在浏览器或文件夹中打开导出。
+- Settings commands：读取 / 保存设置、Provider 密钥状态和 Chat 便捷写入授权；当前没有更新检查 command。
+- Task commands：创建、列表、详情、取消、日志、清理完成项和活动项目绑定。
 
 IPC 输入输出使用结构化 DTO，不用临时拼接字符串承载复杂状态。所有 GUI command 在 `src-tauri/src/lib.rs` 的 `tauri::generate_handler!` 中显式注册；新增或删除 command 时必须同步该注册表。
 
@@ -328,23 +328,20 @@ API Key 不得写入项目文件，必须交给 `SecretService`。
 
 ## 17. GraphService
 
-负责知识图谱：
+后端图谱路径负责扫描、解析、拓扑构建、缓存和数据提供：
 
-- 扫描 `wiki/` 页面。
-- 解析 frontmatter。
-- 解析 `[[wikilinks]]`。
-- 推断页面类型。
-- 构建节点和边。
-- 运行 ForceAtlas2 布局。
-- 运行 Louvain 社区检测。
-- 写入 `.app/graph-cache.json`。
+- command 通过 `SearchService` 扫描 `wiki/` 页面并解析 frontmatter、`[[wikilinks]]` 和页面元数据。
+- `GraphService` 从扫描结果构建节点与边，按 content hash 解析 / 重建 `.app/graph-cache.json`，并向前端提供图谱数据。
+- `GraphService` 保存前端回传且与 content hash 匹配的布局和社区结果；陈旧布局不会附着到新版本 Wiki。
+- ForceAtlas2 布局和 Louvain 社区检测在前端运行，不在 Rust `GraphService` 中计算。
 
 图谱技术：
 
 - sigma.js 负责前端渲染。
-- graphology 负责图结构。
-- ForceAtlas2 负责布局。
-- Louvain 用于社区检测。
+- graphology 负责前端图结构。
+- graphology ForceAtlas2 负责前端布局。
+- graphology Louvain 负责前端社区检测。
+- Rust 后端负责拓扑、缓存、失效判断和布局持久化。
 
 首版边统一表示“相关”。不要提前实现复杂关系类型和证据系统。
 

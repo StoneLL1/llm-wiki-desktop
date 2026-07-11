@@ -299,7 +299,7 @@ pub struct AppState {
 - 共享状态尽量集中在 `AppState`。
 - 当前项目上下文通过 `ProjectContext` 传递。
 - 不要让 service 随意从全局变量读取当前项目。
-- `AppState` 字段类型来自 `crate::services` 和 `crate::tasks` 的稳定 re-export，不引用四个 facade 目录内的私有模块。
+- `AppState` 的 service 字段类型来自 `crate::services` 的稳定 re-export，`TaskService` 来自 `crate::tasks` 的 re-export；`ConfirmationRegistry` 和 `ProjectContext` 从 `crate::models` 导入，`ProjectRegistry` 在 `app_state.rs` 本地定义。上述依赖均不引用四个 facade 目录内的私有模块。
 
 ## 7. ProjectContext 路径安全边界
 
