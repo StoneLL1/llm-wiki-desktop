@@ -279,6 +279,7 @@ mod tests {
                 display_name: "a.pdf".into(),
                 locator: "fixture/in/a.pdf".into(),
                 normalized_locator: None,
+                source_identity: None,
             }],
         };
         let value = serde_json::to_value(request).unwrap();

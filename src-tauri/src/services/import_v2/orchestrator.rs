@@ -259,11 +259,8 @@ impl ImportV2Service {
         for ((_, quality_floor), engine) in engines {
             let descriptor = engine.descriptor();
             if is_capability_route(&descriptor.route) && request.input.source_identity.is_some() {
-                request.input = materialize_capability_input(
-                    context,
-                    &staging_root,
-                    &request.input,
-                )?;
+                request.input =
+                    materialize_capability_input(context, &staging_root, &request.input)?;
             }
             let started_at = chrono::Utc::now().to_rfc3339();
             let candidate = match engine.execute(&request, &token) {
@@ -678,8 +675,8 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
         "pdf" => vec![
             "pdf.text",
             "pdf.layout",
-            "ocr.basic",
             "ocr.cjk-accurate",
+            "ocr.basic",
             "agent.pdf",
         ],
         "srt" | "vtt" | "lrc" | "ass" | "ssa" => vec!["media.subtitle"],
@@ -745,12 +742,16 @@ fn candidate_meets_floor(
     match extension.as_str() {
         "xls" | "xlsx" => {
             result.sheet_count_exact == Some(1.0)
-                && result.non_empty_cell_coverage.is_some_and(|value| value >= 0.95)
+                && result
+                    .non_empty_cell_coverage
+                    .is_some_and(|value| value >= 0.95)
                 && result.formula_value_pairs == Some(1.0)
         }
         "ppt" | "pptx" => {
             result.slide_count_exact == Some(1.0)
-                && result.meaningful_image_coverage.is_some_and(|value| value >= 0.95)
+                && result
+                    .meaningful_image_coverage
+                    .is_some_and(|value| value >= 0.95)
         }
         _ => true,
     }
@@ -771,15 +772,26 @@ fn materialize_capability_input(
     })?;
     let source = Path::new(&input.locator);
     let bytes = crate::services::import_v2::native_file_engine::safe_read_source(source, identity)?;
-    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or("bin");
-    let relative = format!("{staging_root}/authorized/source.{extension}");
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bin");
+    let authorized_relative = format!("{staging_root}/authorized");
+    let authorized_root = context.resolve_project_path(&authorized_relative)?;
+    reset_authorized_directory(&context.root, &authorized_root)?;
+    let relative = format!("{authorized_relative}/source.{extension}");
     let destination = context.resolve_project_path(&relative)?;
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|error| {
             BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
         })?;
-    }
-    std::fs::write(&destination, bytes).map_err(|error| {
+    std::io::Write::write_all(&mut output, &bytes).map_err(|error| {
+        BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
+    })?;
+    output.sync_all().map_err(|error| {
         BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
     })?;
     let mut authorized = input.clone();
@@ -787,6 +799,68 @@ fn materialize_capability_input(
     authorized.normalized_locator = Some(relative.replace('\\', "/"));
     authorized.source_identity = None;
     Ok(authorized)
+}
+
+fn reset_authorized_directory(
+    project_root: &Path,
+    authorized_root: &Path,
+) -> Result<(), BackendError> {
+    let parent = authorized_root.parent().ok_or_else(|| {
+        BackendError::new(
+            "IMPORT_FILE_STAGE_FAILED",
+            "The staging path is invalid.",
+            false,
+            false,
+        )
+    })?;
+    let relative_parent = parent.strip_prefix(project_root).map_err(|_| {
+        BackendError::new(
+            "IMPORT_FILE_STAGE_FAILED",
+            "The staging path escaped the project.",
+            false,
+            false,
+        )
+    })?;
+    let mut current = project_root.to_path_buf();
+    for component in relative_parent.components() {
+        current.push(component.as_os_str());
+        if let Ok(metadata) = std::fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() || staging_reparse(&metadata) {
+                return Err(BackendError::new(
+                    "IMPORT_FILE_STAGE_FAILED",
+                    "The staging path contains a link or reparse point.",
+                    false,
+                    true,
+                ));
+            }
+        }
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(authorized_root) {
+        if metadata.file_type().is_symlink() || staging_reparse(&metadata) || !metadata.is_dir() {
+            return Err(BackendError::new(
+                "IMPORT_FILE_STAGE_FAILED",
+                "The authorized staging directory is not a regular directory.",
+                false,
+                true,
+            ));
+        }
+        std::fs::remove_dir_all(authorized_root).map_err(|error| {
+            BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
+        })?;
+    }
+    std::fs::create_dir_all(authorized_root).map_err(|error| {
+        BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
+    })
+}
+
+#[cfg(windows)]
+fn staging_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+#[cfg(not(windows))]
+fn staging_reparse(_: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn route_resolution_input(route: &str, input: &ImportInput) -> ImportInput {
@@ -948,6 +1022,21 @@ mod tests {
     use crate::tasks::TaskService;
 
     use super::*;
+
+    #[test]
+    fn authorized_staging_rejects_a_residual_non_directory() {
+        let root = std::env::temp_dir().join(format!("authorized-stage-{}", uuid::Uuid::new_v4()));
+        let authorized = root.join(".app/import-staging/session/item/authorized");
+        std::fs::create_dir_all(authorized.parent().unwrap()).unwrap();
+        std::fs::write(&authorized, b"must not be followed or overwritten").unwrap();
+        let error = reset_authorized_directory(&root, &authorized).unwrap_err();
+        assert_eq!(error.code, "IMPORT_FILE_STAGE_FAILED");
+        assert_eq!(
+            std::fs::read(&authorized).unwrap(),
+            b"must not be followed or overwritten"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
 
     struct FixtureEngine {
         project_root: PathBuf,
@@ -1156,11 +1245,19 @@ mod tests {
             meaningful_image_coverage: None,
             warnings: vec![],
         };
-        assert!(!candidate_meets_floor(&input, &result, QualityFloor::ModernOffice));
+        assert!(!candidate_meets_floor(
+            &input,
+            &result,
+            QualityFloor::ModernOffice
+        ));
         result.sheet_count_exact = Some(1.0);
         result.non_empty_cell_coverage = Some(0.95);
         result.formula_value_pairs = Some(1.0);
-        assert!(candidate_meets_floor(&input, &result, QualityFloor::ModernOffice));
+        assert!(candidate_meets_floor(
+            &input,
+            &result,
+            QualityFloor::ModernOffice
+        ));
     }
     impl ImportEngine for FailingEngine {
         fn descriptor(&self) -> EngineDescriptor {

@@ -1,8 +1,8 @@
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use sha2::{Digest, Sha256};
 
 use crate::errors::{BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_UNAVAILABLE};
 use crate::models::import_v2::{ImportInput, ImportInputKind};
@@ -68,8 +68,8 @@ impl ImportEngine for PackProcessEngine {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
-        validate_entrypoint_unchanged(&self.pack)?;
-        let mut command = Command::new(&self.pack.entrypoint);
+        let private_entrypoint = prepare_verified_entrypoint(&self.pack)?;
+        let mut command = Command::new(private_entrypoint.as_os_str());
         command
             .current_dir(&self.pack.root)
             .stdin(Stdio::piped())
@@ -88,7 +88,7 @@ impl ImportEngine for PackProcessEngine {
         let child = command
             .spawn()
             .map_err(|_| engine_error("The capability process could not be started."))?;
-        let mut child = ProcessGuard(child, None, None);
+        let mut child = ProcessGuard(child, None, None, Some(private_entrypoint));
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: request.request_id.clone(),
@@ -166,24 +166,55 @@ impl ImportEngine for PackProcessEngine {
     }
 }
 
-fn validate_entrypoint_unchanged(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
+fn prepare_verified_entrypoint(
+    pack: &ResolvedCapabilityPack,
+) -> Result<tempfile::TempPath, BackendError> {
     let metadata = std::fs::symlink_metadata(&pack.entrypoint)
         .map_err(|_| engine_error("The capability entrypoint is unavailable."))?;
     if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_file() {
-        return Err(engine_error("The capability entrypoint changed after verification."));
+        return Err(engine_error(
+            "The capability entrypoint changed after verification.",
+        ));
     }
     let canonical = std::fs::canonicalize(&pack.entrypoint)
         .map_err(|_| engine_error("The capability entrypoint cannot be resolved."))?;
     if !canonical.starts_with(&pack.root) {
-        return Err(engine_error("The capability entrypoint escaped its verified install root."));
+        return Err(engine_error(
+            "The capability entrypoint escaped its verified install root.",
+        ));
     }
     let bytes = std::fs::read(&canonical)
         .map_err(|_| engine_error("The capability entrypoint cannot be verified."))?;
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual = format!("{:x}", Sha256::digest(&bytes));
     if actual != pack.entrypoint_sha256 {
-        return Err(engine_error("The capability entrypoint changed after verification."));
+        return Err(engine_error(
+            "The capability entrypoint changed after verification.",
+        ));
     }
-    Ok(())
+    let suffix = pack
+        .entrypoint
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let mut private = tempfile::Builder::new()
+        .prefix("llm-wiki-capability-")
+        .suffix(&suffix)
+        .tempfile()
+        .map_err(|_| engine_error("A private capability entrypoint could not be created."))?;
+    private
+        .write_all(&bytes)
+        .and_then(|_| private.flush())
+        .map_err(|_| engine_error("The private capability entrypoint could not be written."))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        private
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| engine_error("The private capability entrypoint could not be secured."))?;
+    }
+    Ok(private.into_temp_path())
 }
 
 #[cfg(windows)]
@@ -192,20 +223,30 @@ fn is_reparse(metadata: &std::fs::Metadata) -> bool {
     metadata.file_attributes() & 0x400 != 0
 }
 #[cfg(not(windows))]
-fn is_reparse(_: &std::fs::Metadata) -> bool { false }
+fn is_reparse(_: &std::fs::Metadata) -> bool {
+    false
+}
 
 fn read_response(reader: impl Read) -> Result<JsonRpcResponse<EngineResult>, ()> {
     let mut reader = BufReader::new(reader);
     for _ in 0..MAX_STDOUT_LINES {
         let mut bytes = Vec::new();
-        match reader.by_ref().take((MAX_STDOUT_LINE_BYTES + 1) as u64).read_until(b'\n', &mut bytes) {
+        match reader
+            .by_ref()
+            .take((MAX_STDOUT_LINE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut bytes)
+        {
             Ok(0) => break,
-            Ok(_) if bytes.len() > MAX_STDOUT_LINE_BYTES || !bytes.ends_with(b"\n") => return Err(()),
+            Ok(_) if bytes.len() > MAX_STDOUT_LINE_BYTES || !bytes.ends_with(b"\n") => {
+                return Err(())
+            }
             Err(_) => return Err(()),
             _ => {}
         }
         if let Ok(line) = std::str::from_utf8(&bytes) {
-            if let Ok(response) = serde_json::from_str::<JsonRpcResponse<EngineResult>>(line.trim_end()) {
+            if let Ok(response) =
+                serde_json::from_str::<JsonRpcResponse<EngineResult>>(line.trim_end())
+            {
                 return Ok(response);
             }
         }
@@ -217,6 +258,7 @@ struct ProcessGuard(
     Child,
     Option<std::thread::JoinHandle<()>>,
     Option<std::thread::JoinHandle<()>>,
+    Option<tempfile::TempPath>,
 );
 
 impl ProcessGuard {
@@ -232,6 +274,7 @@ impl ProcessGuard {
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
+        let _private_entrypoint = &self.3;
         // Always terminate the recorded process group/tree. The direct child may
         // have exited while a grandchild still owns inherited stdio handles.
         terminate_tree(&mut self.0);
@@ -257,9 +300,6 @@ fn terminate_tree(child: &mut Child) {
             .stderr(Stdio::null())
             .status();
         for _ in 0..10 {
-            if child.try_wait().ok().flatten().is_some() {
-                return;
-            }
             std::thread::sleep(Duration::from_millis(10));
         }
         let _ = Command::new("kill")
@@ -320,11 +360,13 @@ mod tests {
             entrypoint_sha256: format!("{:x}", Sha256::digest(b"verified")),
         };
         std::fs::write(&entrypoint, b"replaced").unwrap();
-        assert!(validate_entrypoint_unchanged(&pack).is_err());
+        assert!(prepare_verified_entrypoint(&pack).is_err());
         std::fs::remove_dir_all(root).ok();
     }
 
-    struct SlowReader { bytes: Cursor<Vec<u8>> }
+    struct SlowReader {
+        bytes: Cursor<Vec<u8>>,
+    }
     impl Read for SlowReader {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
             std::thread::yield_now();
@@ -336,7 +378,10 @@ mod tests {
     #[test]
     fn accepts_a_valid_response_arriving_in_slow_chunks() {
         let json = b"{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n".to_vec();
-        let response = read_response(SlowReader { bytes: Cursor::new(json) }).unwrap();
+        let response = read_response(SlowReader {
+            bytes: Cursor::new(json),
+        })
+        .unwrap();
         assert_eq!(response.id, "r");
     }
 
@@ -345,13 +390,15 @@ mod tests {
         #[cfg(windows)]
         let child = Command::new(r"C:\Windows\System32\cmd.exe")
             .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         #[cfg(unix)]
         let child = Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
         let joined = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal = joined.clone();
-        let reader = std::thread::spawn(move || signal.store(true, std::sync::atomic::Ordering::SeqCst));
-        drop(ProcessGuard(child, Some(reader), None));
+        let reader =
+            std::thread::spawn(move || signal.store(true, std::sync::atomic::Ordering::SeqCst));
+        drop(ProcessGuard(child, Some(reader), None, None));
         assert!(joined.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
