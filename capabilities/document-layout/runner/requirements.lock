@@ -1,0 +1,3 @@
+# Release builders resolve and hash a Docling 2.48.0 wheelhouse.
+# Runtime installation is forbidden; absence is reported as waiting_capability.
+docling==2.48.0

@@ -8,6 +8,7 @@ pub mod native_file_engine;
 mod orchestrator;
 pub mod pack_engine;
 pub mod pack_protocol;
+pub mod pdf_router;
 pub mod quality_gate;
 mod session_store;
 pub mod source_registry;
