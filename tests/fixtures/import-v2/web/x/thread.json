@@ -1,0 +1,1 @@
+{"targetAuthor":"alice","posts":[{"id":"1","author":"alice","date":"2026-07-12","text":"目标贴","relationship":"target","media":["https://pbs.twimg.com/a.jpg?token=secret"]},{"id":"2","author":"alice","date":"2026-07-12","text":"同作者线程","relationship":"thread","media":[]},{"id":"3","author":"bob","date":"2026-07-12","text":"无关回复","relationship":"reply","media":[]}]}
