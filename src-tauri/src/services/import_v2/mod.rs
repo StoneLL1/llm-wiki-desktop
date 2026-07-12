@@ -2,6 +2,7 @@ pub mod capability_pack;
 mod commit;
 pub mod engine;
 pub mod file_discovery;
+pub mod file_router;
 pub mod markdown_normalizer;
 pub mod native_file_engine;
 mod orchestrator;
