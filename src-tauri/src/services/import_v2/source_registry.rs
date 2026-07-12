@@ -586,6 +586,11 @@ mod tests {
             level: QualityLevel::Pass,
             metrics: Vec::new(),
             warnings: Vec::new(),
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
         }
     }
 

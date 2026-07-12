@@ -6,6 +6,7 @@ pub mod file_router;
 pub mod markdown_normalizer;
 pub mod native_file_engine;
 pub mod ocr_router;
+pub mod office_postprocess;
 mod orchestrator;
 pub mod pack_engine;
 pub mod pack_protocol;
