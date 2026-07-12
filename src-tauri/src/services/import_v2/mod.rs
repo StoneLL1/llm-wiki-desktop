@@ -4,6 +4,7 @@ pub mod engine;
 pub mod file_discovery;
 pub mod file_router;
 pub mod markdown_normalizer;
+pub mod media_router;
 pub mod native_file_engine;
 pub mod ocr_router;
 pub mod office_postprocess;

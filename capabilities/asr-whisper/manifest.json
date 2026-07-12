@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "packId": "asr-whisper",
+  "version": "1.8.3",
+  "protocolVersion": "2",
+  "targetTriples": [],
+  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "licenseExpression": "MIT",
+  "entrypoint": "runner/asr-whisper-pack",
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "payloadStatus": "release_ci_required",
+  "engine": {"name": "whisper.cpp", "version": "1.8.3", "license": "MIT"},
+  "models": [
+    {"id": "base", "version": "ggml-base", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "download": {"resumable": true, "signatureRequired": true, "runtimeInstallAllowed": false}},
+    {"id": "small", "version": "ggml-small", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "download": {"resumable": true, "signatureRequired": true, "runtimeInstallAllowed": false}},
+    {"id": "medium", "version": "ggml-medium", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "download": {"resumable": true, "signatureRequired": true, "runtimeInstallAllowed": false}}
+  ],
+  "streaming": {"chunkBytes": 1048576, "maxInFlightChunks": 2, "backpressure": true},
+  "execution": {"process": "independent", "shell": false, "protocol": "json-rpc-2.0-stdio", "stagingOnly": true},
+  "distributionNote": "The engine and models are separate signed release artifacts. Model download is an application-managed resumable verified transfer; this pack never installs software or downloads during engine execution."
+}
