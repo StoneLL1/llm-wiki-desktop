@@ -31,7 +31,7 @@ tauri = { version = "2", features = ["tray-icon"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-notification = { version = "2", optional = true }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 pdf-extract = "0.10"
