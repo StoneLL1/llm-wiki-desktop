@@ -55,8 +55,7 @@ impl ImportEngine for NativeFileEngine {
         let root = PathBuf::from(&request.project_root);
         let source = resolve_source(&root, &request.input.locator)?;
         let staging = resolve_inside(&root, &request.staging_root)?;
-        let bytes =
-            std::fs::read(&source).map_err(|_| invalid("The source file could not be read."))?;
+        let bytes = safe_read_source(&source)?;
         let text = decode_utf8(&bytes)?;
         let format = extension(&request.input.locator).unwrap_or_default();
         let (markdown, warnings) = match format.as_str() {
@@ -144,6 +143,66 @@ fn resolve_source(root: &Path, locator: &str) -> Result<PathBuf, BackendError> {
         return Err(invalid("The native engine source path is invalid."));
     }
     Ok(root.join(candidate))
+}
+fn safe_read_source(path: &Path) -> Result<Vec<u8>, BackendError> {
+    let link = std::fs::symlink_metadata(path)
+        .map_err(|_| invalid("The source file could not be inspected."))?;
+    if link.file_type().is_symlink() || is_reparse_point(&link) || !link.is_file() {
+        return Err(BackendError::new(
+            "IMPORT_FILE_SOURCE_CHANGED",
+            "The selected source changed and must be scanned again.",
+            true,
+            true,
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| invalid("The source file could not be resolved."))?;
+    if canonical
+        != path
+            .canonicalize()
+            .map_err(|_| invalid("The source file could not be resolved."))?
+    {
+        return Err(BackendError::new(
+            "IMPORT_FILE_SOURCE_CHANGED",
+            "The selected source changed and must be scanned again.",
+            true,
+            true,
+        ));
+    }
+    let file = std::fs::File::open(&canonical)
+        .map_err(|_| invalid("The source file could not be read."))?;
+    let before = file
+        .metadata()
+        .map_err(|_| invalid("The source file could not be inspected."))?;
+    if before.len() > 64 * 1024 * 1024 {
+        return Err(invalid("The source file exceeds the ingestion size limit."));
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    use std::io::Read;
+    file.take(before.len() + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid("The source file could not be read."))?;
+    let after = std::fs::metadata(&canonical)
+        .map_err(|_| invalid("The source file changed while it was being read."))?;
+    if bytes.len() as u64 != before.len() || before.len() != after.len() {
+        return Err(BackendError::new(
+            "IMPORT_FILE_SOURCE_CHANGED",
+            "The selected source changed and must be scanned again.",
+            true,
+            true,
+        ));
+    }
+    Ok(bytes)
+}
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+#[cfg(not(windows))]
+fn is_reparse_point(_: &std::fs::Metadata) -> bool {
+    false
 }
 fn extension(locator: &str) -> Option<String> {
     Path::new(locator)
