@@ -143,6 +143,20 @@ impl AttemptRecord {
 
 pub struct FileRoutePlanner;
 impl FileRoutePlanner {
+    pub fn deterministic_routes(
+        format: FileFormat,
+        capabilities: CapabilitySnapshot,
+    ) -> Vec<&'static str> {
+        let planned = Self::plan(format, capabilities);
+        if !planned.is_empty() {
+            return planned.into_iter().map(|attempt| attempt.route).collect();
+        }
+        match format {
+            FileFormat::Markdown => vec!["native.markdown"],
+            FileFormat::Pdf => vec!["pack.pdf", "pack.ocr"],
+            _ => vec!["native.file"],
+        }
+    }
     pub fn plan(format: FileFormat, capabilities: CapabilitySnapshot) -> Vec<RouteAttempt> {
         let legacy_target = match format {
             FileFormat::Doc => Some("office.modern.docx"),

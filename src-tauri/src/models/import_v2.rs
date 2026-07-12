@@ -176,6 +176,49 @@ pub struct ImportIssue {
     pub stage: ImportStage,
     pub retryable: bool,
     pub user_action_required: bool,
+    #[serde(default)]
+    pub recovery_actions: Vec<ImportRecoveryAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportRecoveryAction {
+    InstallCapability,
+    Retry,
+    SwitchParser,
+    EnableOcr,
+    InvokeAgent,
+    Skip,
+    ViewLog,
+}
+
+impl ImportIssue {
+    pub fn for_file_code(code: &str, stage: ImportStage) -> Self {
+        use ImportRecoveryAction::*;
+        let (retryable, user_action_required, mut recovery_actions) = match code {
+            "IMPORT_FILE_CAPABILITY_MISSING" => (true, true, vec![InstallCapability, Retry]),
+            "IMPORT_FILE_PASSWORD_REQUIRED" => (true, true, vec![Retry]),
+            "IMPORT_FILE_CORRUPT" => (false, true, vec![SwitchParser, InvokeAgent]),
+            "IMPORT_FILE_RESOURCE_LIMIT" => (true, true, vec![Retry]),
+            "IMPORT_FILE_CONVERSION_FAILED" | "IMPORT_FILE_PARSE_FAILED" => {
+                (true, true, vec![Retry, SwitchParser, InvokeAgent])
+            }
+            "IMPORT_FILE_QUALITY_FAILED" => {
+                (true, true, vec![EnableOcr, SwitchParser, InvokeAgent])
+            }
+            "IMPORT_FILE_CANCELLED" => (true, false, vec![Retry]),
+            _ => (true, false, vec![Retry, InvokeAgent]),
+        };
+        recovery_actions.extend([Skip, ViewLog]);
+        Self {
+            code: code.into(),
+            message: "File import could not be completed.".into(),
+            stage,
+            retryable,
+            user_action_required,
+            recovery_actions,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
