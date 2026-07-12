@@ -934,7 +934,7 @@ mod tests {
             EngineDescriptor {
                 engine_id: "commit-fixture".into(),
                 engine_version: "1".into(),
-                route: "fixture".into(),
+                route: "pdf.text".into(),
             }
         }
         fn supports(&self, _: &ImportInput) -> bool {

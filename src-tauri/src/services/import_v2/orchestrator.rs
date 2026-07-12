@@ -113,6 +113,10 @@ impl ImportV2Service {
                         stage: ImportStage::Extract,
                         retryable: true,
                         user_action_required: false,
+                        recovery_actions: vec![
+                            crate::models::import_v2::ImportRecoveryAction::Retry,
+                            crate::models::import_v2::ImportRecoveryAction::ViewLog,
+                        ],
                     });
                 }
             }
@@ -190,23 +194,31 @@ impl ImportV2Service {
             .find(|item| item.item_id == item_id)
             .ok_or_else(item_not_found)?
             .input;
-        let engine = match self.engines.resolve(&input) {
-            Ok(engine) => engine,
-            Err(error) => {
-                self.mutate_item(context, files, session_id, item_id, |item| {
-                    transition_item(item, ImportItemStatus::WaitingCapability)?;
-                    item.issue = Some(issue_from_engine_error(&error, ImportStage::Route));
-                    Ok(())
-                })?;
-                task_call(tasks.append_log(
-                    task_id,
-                    LogLevel::Warn,
-                    "No available import engine supports this input.".into(),
-                ))?;
-                task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
-                return Err(error);
-            }
-        };
+        let planned_routes = explicit_routes(&input);
+        let engines = planned_routes
+            .iter()
+            .filter_map(|route| self.engines.resolve_route(route, &input).ok())
+            .collect::<Vec<_>>();
+        if engines.is_empty() {
+            let error = BackendError::new(
+                crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE,
+                "No planned import route is installed.",
+                true,
+                true,
+            );
+            self.mutate_item(context, files, session_id, item_id, |item| {
+                transition_item(item, ImportItemStatus::WaitingCapability)?;
+                item.issue = Some(issue_from_engine_error(&error, ImportStage::Route));
+                Ok(())
+            })?;
+            task_call(tasks.append_log(
+                task_id,
+                LogLevel::Warn,
+                "No available import engine supports this input.".into(),
+            ))?;
+            task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+            return Err(error);
+        }
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Extracting)
         })?;
@@ -226,28 +238,77 @@ impl ImportV2Service {
         let token = tasks
             .get_cancellation_token(task_id)
             .ok_or_else(|| task_error("Task cancellation state is unavailable."))?;
-        let result = match engine.execute(&request, &token) {
-            Ok(result) if !token.is_cancelled() => result,
-            Ok(_) => {
-                return self.finish_cancelled(context, files, tasks, session_id, item_id, task_id)
-            }
-            Err(_) if token.is_cancelled() => {
-                return self.finish_cancelled(context, files, tasks, session_id, item_id, task_id)
-            }
-            Err(error) => {
-                return self.finish_failed(
+        let mut selected = None;
+        let mut last_error = None;
+        for engine in engines {
+            let descriptor = engine.descriptor();
+            let started_at = chrono::Utc::now().to_rfc3339();
+            let candidate = match engine.execute(&request, &token) {
+                Ok(result) if !token.is_cancelled() => result,
+                Ok(_) => {
+                    return self
+                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                }
+                Err(_) if token.is_cancelled() => {
+                    return self
+                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                }
+                Err(error) => {
+                    self.record_attempt(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        &descriptor,
+                        started_at,
+                        crate::models::import_v2::AttemptOutcome::Failed,
+                        Vec::new(),
+                    )?;
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            if let Err(error) = validate_engine_result(&staging_root, &candidate) {
+                self.record_attempt(
                     context,
                     files,
-                    tasks,
                     session_id,
                     item_id,
-                    task_id,
-                    error,
-                    ImportStage::Extract,
-                )
+                    &descriptor,
+                    started_at,
+                    crate::models::import_v2::AttemptOutcome::Failed,
+                    candidate.warnings.clone(),
+                )?;
+                last_error = Some(error);
+                continue;
             }
-        };
-        if let Err(error) = validate_engine_result(&staging_root, &result) {
+            // Attempt-level precheck selects a candidate; the formal QualityGate still runs once.
+            if candidate
+                .text_coverage
+                .is_some_and(|coverage| coverage < 0.50)
+            {
+                self.record_attempt(
+                    context,
+                    files,
+                    session_id,
+                    item_id,
+                    &descriptor,
+                    started_at,
+                    crate::models::import_v2::AttemptOutcome::Failed,
+                    candidate.warnings.clone(),
+                )?;
+                last_error = Some(BackendError::new(
+                    crate::errors::IMPORT_V2_QUALITY_FAILED,
+                    "Candidate failed the route precheck.",
+                    true,
+                    true,
+                ));
+                continue;
+            }
+            selected = Some((descriptor, started_at, candidate));
+            break;
+        }
+        let Some((descriptor, started_at, result)) = selected else {
             return self.finish_failed(
                 context,
                 files,
@@ -255,10 +316,17 @@ impl ImportV2Service {
                 session_id,
                 item_id,
                 task_id,
-                error,
+                last_error.unwrap_or_else(|| {
+                    BackendError::new(
+                        crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE,
+                        "No planned route produced a candidate.",
+                        true,
+                        true,
+                    )
+                }),
                 ImportStage::Extract,
             );
-        }
+        };
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Validating)
         })?;
@@ -285,6 +353,16 @@ impl ImportV2Service {
             transition_item(item, ImportItemStatus::PreviewReady)?;
             item.preview = Some(preview);
             item.issue = None;
+            item.attempts.push(crate::models::import_v2::AttemptRecord {
+                route: descriptor.route.clone(),
+                engine_id: descriptor.engine_id.clone(),
+                engine_version: descriptor.engine_version.clone(),
+                stage: ImportStage::Validate,
+                started_at,
+                completed_at: Some(chrono::Utc::now().to_rfc3339()),
+                outcome: crate::models::import_v2::AttemptOutcome::Succeeded,
+                warnings: result.warnings.clone(),
+            });
             Ok(())
         })?;
         task_call(tasks.update_progress(task_id, 4, Some(4), Some("Preview ready".into())))?;
@@ -302,6 +380,32 @@ impl ImportV2Service {
         ))?;
         task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
         Ok(item)
+    }
+
+    fn record_attempt(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+        started_at: String,
+        outcome: crate::models::import_v2::AttemptOutcome,
+        warnings: Vec<String>,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            item.attempts.push(crate::models::import_v2::AttemptRecord {
+                route: descriptor.route.clone(),
+                engine_id: descriptor.engine_id.clone(),
+                engine_version: descriptor.engine_version.clone(),
+                stage: ImportStage::Extract,
+                started_at,
+                completed_at: Some(chrono::Utc::now().to_rfc3339()),
+                outcome,
+                warnings,
+            });
+            Ok(())
+        })
     }
 
     fn claim_item_for_run(
@@ -440,6 +544,40 @@ impl ImportV2Service {
     }
 }
 
+fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
+    let extension = Path::new(&input.locator)
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "md" | "markdown" | "txt" | "csv" | "html" | "htm" => vec!["file.native"],
+        "docx" => vec![
+            "office.modern.docx",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
+        "xlsx" => vec![
+            "office.modern.xlsx",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
+        "pptx" => vec![
+            "office.modern.pptx",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
+        "doc" | "xls" | "ppt" => vec!["pack.office-legacy", "pack.office-oxide", "agent.office"],
+        "pdf" => vec!["pdf.text", "pdf.layout", "ocr.document", "agent.pdf"],
+        "srt" | "vtt" | "lrc" | "ass" | "ssa" => vec!["media.subtitle"],
+        "mp3" | "wav" | "m4a" | "mp4" | "mov" | "mkv" => vec!["media.asr"],
+        _ => Vec::new(),
+    }
+}
+
 fn persist_derived(
     store: &SessionStore,
     context: &ProjectContext,
@@ -502,12 +640,22 @@ fn transition_item(item: &mut ImportItem, next: ImportItemStatus) -> Result<(), 
     Ok(())
 }
 fn issue_from_engine_error(error: &BackendError, stage: ImportStage) -> ImportIssue {
-    ImportIssue {
-        code: error.code.clone(),
-        message: "Import engine failed.".into(),
-        stage,
-        retryable: error.recoverable,
-        user_action_required: error.user_action_required,
+    let code = stable_file_error_code(&error.code);
+    ImportIssue::for_file_code(code, stage)
+}
+
+fn stable_file_error_code(code: &str) -> &'static str {
+    match code {
+        crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE
+        | crate::errors::IMPORT_V2_CAPABILITY_UNAVAILABLE => "IMPORT_FILE_CAPABILITY_MISSING",
+        crate::errors::IMPORT_V2_CANCELLED => "IMPORT_FILE_CANCELLED",
+        crate::errors::IMPORT_V2_QUALITY_FAILED => "IMPORT_FILE_QUALITY_FAILED",
+        crate::errors::IMPORT_V2_ENGINE_OUTPUT_INVALID => "IMPORT_FILE_PARSE_FAILED",
+        _ if code.contains("PASSWORD") => "IMPORT_FILE_PASSWORD_REQUIRED",
+        _ if code.contains("CORRUPT") => "IMPORT_FILE_CORRUPT",
+        _ if code.contains("RESOURCE") || code.contains("LIMIT") => "IMPORT_FILE_RESOURCE_LIMIT",
+        _ if code.contains("CONVERSION") => "IMPORT_FILE_CONVERSION_FAILED",
+        _ => "IMPORT_FILE_PARSE_FAILED",
     }
 }
 pub(super) fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus {
@@ -580,7 +728,7 @@ mod tests {
             EngineDescriptor {
                 engine_id: "fixture".into(),
                 engine_version: "1.0.0".into(),
-                route: "fixture".into(),
+                route: "pdf.text".into(),
             }
         }
         fn supports(&self, _input: &ImportInput) -> bool {
@@ -650,12 +798,107 @@ mod tests {
         root: PathBuf,
         sabotage_task_store: bool,
     }
+
+    struct RouteFixtureEngine {
+        root: PathBuf,
+        id: &'static str,
+        route: &'static str,
+        coverage: f64,
+    }
+    impl ImportEngine for RouteFixtureEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: self.id.into(),
+                engine_version: "1".into(),
+                route: self.route.into(),
+            }
+        }
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            request: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            let staging = self.root.join(
+                request
+                    .staging_root
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            );
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::write(staging.join("source.bin"), b"source").unwrap();
+            std::fs::write(staging.join("candidate.md"), b"# Candidate\n\nBody").unwrap();
+            Ok(EngineResult {
+                source_snapshot_path: "source.bin".into(),
+                markdown_path: "candidate.md".into(),
+                asset_paths: vec![],
+                metadata_path: None,
+                title: self.id.into(),
+                text_coverage: Some(self.coverage),
+                table_cell_accuracy: None,
+                sheet_count_exact: None,
+                slide_count_exact: None,
+                non_empty_cell_coverage: None,
+                formula_value_pairs: None,
+                meaningful_image_coverage: None,
+                warnings: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn quality_rejected_route_falls_back_and_persists_attempt_order() {
+        let fixture = OrchestratorFixture::new("route-fallback");
+        fixture
+            .service
+            .register_engine(Arc::new(RouteFixtureEngine {
+                root: fixture.root.clone(),
+                id: "low",
+                route: "pdf.text",
+                coverage: 0.1,
+            }))
+            .unwrap();
+        fixture
+            .service
+            .register_engine(Arc::new(RouteFixtureEngine {
+                root: fixture.root.clone(),
+                id: "good",
+                route: "pdf.layout",
+                coverage: 1.0,
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let result = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        assert_eq!(result.attempts.len(), 2);
+        assert_eq!(result.attempts[0].engine_id, "low");
+        assert_eq!(
+            result.attempts[0].outcome,
+            crate::models::import_v2::AttemptOutcome::Failed
+        );
+        assert_eq!(result.attempts[1].engine_id, "good");
+        assert_eq!(
+            result.attempts[1].outcome,
+            crate::models::import_v2::AttemptOutcome::Succeeded
+        );
+        assert!(result.preview.is_some());
+    }
     impl ImportEngine for FailingEngine {
         fn descriptor(&self) -> EngineDescriptor {
             EngineDescriptor {
                 engine_id: "failing".into(),
                 engine_version: "1".into(),
-                route: "fixture".into(),
+                route: "pdf.text".into(),
             }
         }
         fn supports(&self, _: &ImportInput) -> bool {
@@ -842,7 +1085,7 @@ mod tests {
         let error = BackendError::new("ENGINE_FAILED", "Authorization: Bearer secret", true, false)
             .with_details(serde_json::json!({ "path": "C:/Users/Aletta/private.pdf" }));
         let issue = issue_from_engine_error(&error, ImportStage::Extract);
-        assert_eq!(issue.message, "Import engine failed.");
+        assert_eq!(issue.message, "File import could not be completed.");
         let value = serde_json::to_string(&issue).unwrap();
         assert!(!value.contains("secret"));
         assert!(!value.contains("Aletta"));

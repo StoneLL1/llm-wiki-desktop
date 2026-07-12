@@ -62,7 +62,7 @@ impl ImportEngine for FixtureEngine {
         EngineDescriptor {
             engine_id: "fixture-core".into(),
             engine_version: "1.0.0".into(),
-            route: "fixture".into(),
+            route: "office.modern.docx".into(),
         }
     }
     fn supports(&self, _: &ImportInput) -> bool {
@@ -115,6 +115,49 @@ impl ImportEngine for FixtureEngine {
     }
 }
 
+struct FixtureRouteEngine {
+    inner: Arc<FixtureEngine>,
+    engine_id: &'static str,
+    route: &'static str,
+}
+
+impl ImportEngine for FixtureRouteEngine {
+    fn descriptor(&self) -> EngineDescriptor {
+        EngineDescriptor {
+            engine_id: self.engine_id.into(),
+            engine_version: "1.0.0".into(),
+            route: self.route.into(),
+        }
+    }
+
+    fn supports(&self, input: &ImportInput) -> bool {
+        self.inner.supports(input)
+    }
+
+    fn execute(
+        &self,
+        request: &EngineRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
+        self.inner.execute(request, cancellation)
+    }
+}
+
+fn register_fixture_routes(service: &ImportV2Service, engine: &Arc<FixtureEngine>) {
+    for (engine_id, route) in [
+        ("fixture-core-docx", "office.modern.docx"),
+        ("fixture-core-pdf", "pdf.text"),
+    ] {
+        service
+            .register_engine(Arc::new(FixtureRouteEngine {
+                inner: engine.clone(),
+                engine_id,
+                route,
+            }))
+            .unwrap();
+    }
+}
+
 fn result(markdown: &str, title: &str) -> EngineResult {
     EngineResult {
         source_snapshot_path: "source.bin".into(),
@@ -156,7 +199,7 @@ impl CoreIntegrationFixture {
         let context = ProjectContext::new("project-core-资料", root.clone());
         let engine = Arc::new(FixtureEngine::new(root.clone()));
         let service = ImportV2Service::default();
-        service.register_engine(engine.clone()).unwrap();
+        register_fixture_routes(&service, &engine);
         Self {
             root,
             context,
@@ -211,7 +254,7 @@ impl CoreIntegrationFixture {
     }
     fn reopen_service(&self) -> ImportV2Service {
         let service = ImportV2Service::default();
-        service.register_engine(self.engine.clone()).unwrap();
+        register_fixture_routes(&service, &self.engine);
         service
     }
     fn commit_selected(

@@ -112,6 +112,31 @@ impl EngineRegistry {
                 )
             })
     }
+
+    /// Resolve an explicitly planned route; registration order is never routing policy.
+    pub fn resolve_route(
+        &self,
+        route: &str,
+        input: &ImportInput,
+    ) -> Result<Arc<dyn ImportEngine>, BackendError> {
+        self.engines
+            .read()
+            .map_err(|_| registry_error())?
+            .iter()
+            .find(|engine| {
+                let descriptor = engine.descriptor();
+                descriptor.route == route && engine.supports(input)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::new(
+                    IMPORT_V2_ENGINE_UNAVAILABLE,
+                    "The planned import route is not installed.",
+                    true,
+                    true,
+                )
+            })
+    }
 }
 
 pub fn validate_engine_result(
