@@ -2074,6 +2074,8 @@ dependencies = [
  "pdf-extract",
  "quick-xml 0.36.2",
  "reqwest",
+ "ring",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
