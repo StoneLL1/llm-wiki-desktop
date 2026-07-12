@@ -26,6 +26,7 @@ fn request(root: &TempDir, name: &str) -> EngineRequest {
         },
         project_root: root.path().to_string_lossy().into_owned(),
         staging_root: "staging".into(),
+        chained_input: None,
     }
 }
 

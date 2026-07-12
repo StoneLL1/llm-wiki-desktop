@@ -1055,6 +1055,30 @@ mod tests {
     }
 
     #[test]
+    fn queued_task_recovers_as_retryable_interrupted_work() {
+        let root = std::env::temp_dir().join(format!("task-recover-queued-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (service, _) = make_service();
+        service.set_project_root(Some(root.clone())).unwrap();
+        let queued = service.create_task(
+            TaskType::Import,
+            Some("p".into()),
+            "Queued import".into(),
+            true,
+        );
+        service.persist_task(&queued.id, &root).unwrap();
+
+        let (restarted, _) = make_service();
+        restarted.recover_tasks(&root).unwrap();
+        let recovered = restarted.get_task(&queued.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        let error = recovered.error.unwrap();
+        assert_eq!(error.code, "TASK_RECOVERY");
+        assert!(error.recoverable);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn test_project_task_root_is_bound_explicitly_not_from_ambient_active_project() {
         let project_a = std::env::temp_dir().join(format!("task-root-a-{}", Uuid::new_v4()));
         let project_b = std::env::temp_dir().join(format!("task-root-b-{}", Uuid::new_v4()));

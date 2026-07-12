@@ -27,3 +27,9 @@ export interface CapabilityRequirement {
   capabilityId: string; minimumVersion?: string; protocolVersion: string;
   targetTriple: string; acceptedLicenseExpressions: string[];
 }
+export interface AddImportPathsV2Request {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  sourcePaths: string[];
+}
