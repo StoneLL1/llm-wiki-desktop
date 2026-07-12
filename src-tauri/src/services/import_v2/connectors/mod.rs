@@ -1,6 +1,7 @@
 pub mod wechat;
 pub mod zhihu;
 pub mod bilibili;
+pub mod xiaohongshu;
 use serde::Serialize;
 #[derive(Debug,Clone,Serialize)]#[serde(rename_all="camelCase")]pub struct ConnectorDocument{pub title:String,pub author:Option<String>,pub published_at:Option<String>,pub body_html:String,pub public_url:String,#[serde(skip)]pub image_requests:Vec<ImageRequest>}
 #[derive(Debug,Clone)]pub struct ImageRequest{pub request_url:String,pub public_url:String}
