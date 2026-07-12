@@ -207,6 +207,12 @@ pub enum ImportRecoveryAction {
     InvokeAgent,
     Skip,
     ViewLog,
+    RetryRoute,
+    SwitchRoute,
+    BeginLogin,
+    AuthorizePrivateTarget,
+    InstallBrowserCapability,
+    InstallMediaCapability,
 }
 
 impl ImportIssue {

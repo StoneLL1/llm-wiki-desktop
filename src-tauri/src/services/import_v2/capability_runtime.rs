@@ -92,6 +92,11 @@ struct PackSpec {
     licenses: &'static [&'static str],
 }
 const PACK_SPECS: &[PackSpec] = &[
+    PackSpec { id: "browser-runtime-lite", route: "web.generic.readability", extensions: &[], licenses: &["Apache-2.0 AND MIT"] },
+    PackSpec { id: "browser-runtime", route: "web.generic.browser", extensions: &[], licenses: &["Apache-2.0"] },
+    PackSpec { id: "browser-runtime", route: "web.wechat.article", extensions: &[], licenses: &["Apache-2.0"] },
+    PackSpec { id: "browser-runtime", route: "web.zhihu.content", extensions: &[], licenses: &["Apache-2.0"] },
+    PackSpec { id: "browser-runtime", route: "web.bilibili.video", extensions: &[], licenses: &["Apache-2.0"] },
     PackSpec {
         id: "document-standard",
         route: "pack.markitdown",

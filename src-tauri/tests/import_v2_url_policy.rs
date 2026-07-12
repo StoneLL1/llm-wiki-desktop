@@ -20,3 +20,9 @@ fn connection_must_match_fresh_dns_set_and_redirect_is_reparsed() {
     assert!(policy.validate_resolved_target(&target,&[IpAddr::V4(Ipv4Addr::new(93,184,216,35))],connected,None,"i").is_err());
     assert!(policy.validate_redirect(&target,"file:///etc/passwd").is_err());
 }
+
+#[test]
+fn public_query_is_allowlist_based_not_a_secret_denylist() {
+    let target=UrlPolicy.normalize_for_session("https://example.com/a?id=7&api_key=a&client_secret=b&sessionid=c&X-Amz-Credential=d&code=e&Expires=9").unwrap();
+    assert_eq!(target.public.public_url,"https://example.com/a?id=7");
+}

@@ -646,6 +646,12 @@ impl ImportV2Service {
 }
 
 fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
+    if input.kind == crate::models::import_v2::ImportInputKind::Url {
+        let host = url::Url::parse(input.normalized_locator.as_deref().unwrap_or(&input.locator)).ok().and_then(|url| url.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
+        if host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com") || host == "x.com" || host.ends_with(".x.com") || host == "twitter.com" || host.ends_with(".twitter.com") { return Vec::new(); }
+        let platform = if host == "mp.weixin.qq.com" { Some("web.wechat.article") } else if host == "zhihu.com" || host.ends_with(".zhihu.com") { Some("web.zhihu.content") } else if host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv" { Some("web.bilibili.video") } else { None };
+        let mut routes = platform.into_iter().collect::<Vec<_>>(); routes.extend(["web.generic.readability", "web.generic.browser"]); return routes;
+    }
     let extension = Path::new(&input.locator)
         .extension()
         .and_then(|v| v.to_str())

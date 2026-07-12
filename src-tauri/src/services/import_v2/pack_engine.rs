@@ -32,7 +32,7 @@ impl PackProcessEngine {
         timeout: Duration,
     ) -> Self {
         let descriptor = EngineDescriptor {
-            engine_id: format!("pack.{}", pack.manifest.pack_id),
+            engine_id: format!("pack.{}.{route}", pack.manifest.pack_id),
             engine_version: pack.manifest.version.clone(),
             route,
         };
@@ -51,13 +51,13 @@ impl ImportEngine for PackProcessEngine {
     }
 
     fn supports(&self, input: &ImportInput) -> bool {
-        input.kind == ImportInputKind::File
+        (input.kind == ImportInputKind::Url && self.supported_extensions.is_empty()) || (input.kind == ImportInputKind::File
             && self.supported_extensions.iter().any(|extension| {
                 input
                     .locator
                     .to_ascii_lowercase()
                     .ends_with(&format!(".{extension}"))
-            })
+            }))
     }
 
     fn execute(
