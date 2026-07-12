@@ -1,6 +1,7 @@
 pub mod capability_pack;
 mod commit;
 pub mod engine;
+pub mod file_discovery;
 mod orchestrator;
 pub mod pack_engine;
 pub mod pack_protocol;
