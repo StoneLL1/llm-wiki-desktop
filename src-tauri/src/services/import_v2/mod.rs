@@ -22,6 +22,7 @@ pub mod web_fetch;
 pub mod domain_limiter;
 pub mod generic_web_engine;
 pub mod domain_router;
+pub mod connector_session;
 
 #[cfg(test)]
 mod test_support;

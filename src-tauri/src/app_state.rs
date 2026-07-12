@@ -7,6 +7,7 @@ use crate::models::confirmation::ConfirmationRegistry;
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::capability_runtime::ImportCapabilityRuntime;
 use crate::services::import_v2::ImportV2Service;
+use crate::services::import_v2::connector_session::ConnectorSessionService;
 use crate::services::{
     AgentService, BookmarkService, ChatConvenienceService, ChatService, ExportService,
     ExtractionService, FileStore, GitService, GraphService, ImportService, LintService, LlmService,
@@ -22,6 +23,7 @@ pub struct AppState {
     pub import_service: ImportService,
     pub import_v2_service: ImportV2Service,
     pub import_capability_runtime: ImportCapabilityRuntime,
+    pub connector_session_service: ConnectorSessionService,
     pub extraction_service: ExtractionService,
     pub git_service: GitService,
     pub agent_service: AgentService,
