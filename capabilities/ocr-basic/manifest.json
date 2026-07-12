@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "packId": "ocr-basic",
+  "version": "5.4.1",
+  "protocolVersion": "2",
+  "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
+  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "licenseExpression": "Apache-2.0 AND BSD-2-Clause",
+  "entrypoint": "runner/ocr-basic-pack",
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "payloadStatus": "release_ci_required",
+  "engine": { "name": "Tesseract", "version": "5.4.1", "license": "Apache-2.0" },
+  "models": [
+    { "language": "eng", "file": "models/eng.traineddata", "version": "tessdata_best-4.1.0", "sha256": "release-ci-must-substitute" },
+    { "language": "chi_sim", "file": "models/chi_sim.traineddata", "version": "tessdata_best-4.1.0", "sha256": "release-ci-must-substitute" },
+    { "language": "chi_tra", "file": "models/chi_tra.traineddata", "version": "tessdata_best-4.1.0", "sha256": "release-ci-must-substitute", "optional": true }
+  ],
+  "distributionNote": "Release CI must pin platform binaries, traineddata bytes, hashes, sizes, notices, and SBOM. This source manifest is intentionally not installable."
+}

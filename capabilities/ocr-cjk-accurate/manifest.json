@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "packId": "ocr-cjk-accurate",
+  "version": "3.0.0",
+  "protocolVersion": "2",
+  "targetTriples": [],
+  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "licenseExpression": "Apache-2.0",
+  "entrypoint": "runner/ocr-cjk-accurate-pack",
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "payloadStatus": "waiting_for_ci_qualification",
+  "engine": { "name": "PaddleOCR", "version": "3.0.0", "license": "Apache-2.0" },
+  "models": [],
+  "distributionNote": "No target triple is advertised until its CPU runtime and exact model set pass reproducible CI, security, accuracy, size, and license gates. Never use cloud OCR as fallback."
+}
