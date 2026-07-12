@@ -11,6 +11,7 @@ use crate::services::import_v2::engine::EngineResult;
 
 pub const MIN_TEXT_COVERAGE: f64 = 0.98;
 pub const MIN_TABLE_CELL_ACCURACY: f64 = 0.95;
+const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct QualityGate;
@@ -134,14 +135,35 @@ fn read_artifact(
     let normalized = normalize_relative(relative_path)?;
     let root = staging_root.canonicalize().map_err(|_| quality_error())?;
     let path = root.join(Path::new(&normalized));
+    let mut component = root.clone();
+    for part in Path::new(&normalized).components() {
+        component.push(part.as_os_str());
+        let metadata = std::fs::symlink_metadata(&component).map_err(|_| quality_error())?;
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return Err(quality_error());
+        }
+    }
     let canonical = path.canonicalize().map_err(|_| quality_error())?;
     if !canonical.starts_with(&root) || !canonical.is_file() {
         return Err(quality_error());
     }
     let before = std::fs::metadata(&canonical).map_err(|_| quality_error())?;
-    let bytes = std::fs::read(&canonical).map_err(|_| quality_error())?;
+    if before.len() > MAX_ARTIFACT_BYTES {
+        return Err(quality_error());
+    }
+    let file = std::fs::File::open(&canonical).map_err(|_| quality_error())?;
+    let opened = file.metadata().map_err(|_| quality_error())?;
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    use std::io::Read;
+    file.take(MAX_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| quality_error())?;
     let after = std::fs::metadata(&canonical).map_err(|_| quality_error())?;
-    if before.len() != bytes.len() as u64 || before.len() != after.len() {
+    if bytes.len() as u64 > MAX_ARTIFACT_BYTES
+        || before.len() != opened.len()
+        || before.len() != bytes.len() as u64
+        || before.len() != after.len()
+    {
         return Err(quality_error());
     }
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
@@ -154,6 +176,16 @@ fn read_artifact(
         },
         bytes,
     })
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+#[cfg(not(windows))]
+fn is_reparse_point(_: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn normalize_relative(value: &str) -> Result<String, BackendError> {
