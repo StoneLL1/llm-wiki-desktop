@@ -18,6 +18,8 @@ mod session_store;
 pub mod source_registry;
 mod transaction;
 pub mod url_policy;
+pub mod web_fetch;
+pub mod domain_limiter;
 
 #[cfg(test)]
 mod test_support;

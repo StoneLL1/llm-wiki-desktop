@@ -1,0 +1,3 @@
+use llm_wiki_desktop_lib::services::import_v2::{domain_limiter::DomainLimiter,web_fetch::WebFetchPolicy};
+#[test] fn fetch_policy_is_bounded(){let p=WebFetchPolicy::default();assert_eq!(p.max_attempts_per_route,2);assert!(p.max_redirects<=8&&p.max_response_bytes<=16*1024*1024);}
+#[tokio::test] async fn sensitive_domains_are_single_concurrency(){let l=DomainLimiter::default();let first=l.acquire("mp.weixin.qq.com",true).await.unwrap();let blocked=tokio::time::timeout(std::time::Duration::from_millis(10),l.acquire("mp.weixin.qq.com",true)).await;assert!(blocked.is_err());drop(first);assert!(l.acquire("mp.weixin.qq.com",true).await.is_ok());}
