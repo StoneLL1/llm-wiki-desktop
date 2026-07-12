@@ -5,9 +5,15 @@ use tauri::{AppHandle, Manager, State};
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::import_v2::ImportSession;
-use crate::models::import_v2_file::FileScanPolicy;
+use crate::models::import_v2_file::{FileScanPolicy, FileScanResult};
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
+use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::file_discovery::{new_import_inputs, FileDiscoveryService};
+
+#[tauri::command]
+pub fn get_import_capability_statuses(state: State<'_, AppState>) -> Vec<CapabilityRuntimeStatus> {
+    state.import_capability_runtime.statuses()
+}
 use crate::tasks::task_model::LogLevel;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -17,6 +23,15 @@ pub struct AddImportPathsV2Request {
     pub project_root_path: String,
     pub session_id: String,
     pub source_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetImportScanResultV2Request {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub task_id: String,
 }
 
 /// Starts durable discovery work and returns immediately. The existing
@@ -62,14 +77,16 @@ pub fn start_add_import_paths_v2(
                 .iter()
                 .map(PathBuf::from)
                 .collect::<Vec<_>>();
+            let mut discovered = 0_u64;
             let scan = FileDiscoveryService::default().scan(
                 &context,
                 &roots,
                 FileScanPolicy::default(),
                 |batch| {
+                    discovered += batch.len() as u64;
                     let _ = state.task_service.update_progress(
                         &task_id,
-                        batch.len() as u64,
+                        discovered,
                         None,
                         Some("Discovering files".into()),
                     );
@@ -79,6 +96,13 @@ pub fn start_add_import_paths_v2(
             if state.task_service.is_cancelled(&task_id) {
                 return Ok(());
             }
+            let scan_path = format!(
+                ".app/import-sessions/{}/scans/{}.json",
+                request.session_id, task_id
+            );
+            state
+                .file_store
+                .write_json_atomic(&context, &scan_path, &scan)?;
             let skipped = scan.skipped.len();
             let inputs = new_import_inputs(&session, scan.files);
             let added = inputs.len();
@@ -104,7 +128,7 @@ pub fn start_add_import_paths_v2(
                     &task_id,
                     TaskResult {
                         summary: format!("Added {added} files; skipped {skipped}."),
-                        affected_paths: Vec::new(),
+                        affected_paths: vec![scan_path],
                         reference: None,
                         pending_action: None,
                     },
@@ -124,6 +148,19 @@ pub fn start_add_import_paths_v2(
         }
     });
     Ok(task)
+}
+
+#[tauri::command]
+pub fn get_import_scan_result_v2(
+    state: State<'_, AppState>,
+    request: GetImportScanResultV2Request,
+) -> Result<FileScanResult, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let path = format!(
+        ".app/import-sessions/{}/scans/{}.json",
+        request.session_id, request.task_id
+    );
+    state.file_store.read_json(&context, &path)
 }
 
 fn task_error(message: String) -> BackendError {

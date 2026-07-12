@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-12] Import V2 dual-review runtime and security hardening — Connected signed app-local capability loading, background cancellable discovery, planner-owned typed fallbacks and chained legacy conversion, added source identity revalidation, handle-bound quality reads, bounded pack framing, reader cleanup, and process-tree termination — Key decision: the embedded development trust store remains empty and every placeholder pack stays fail-closed; only release-signed, hash-verified, qualified app-local payloads can register executable routes.
+
 [2026-07-12] Import V2 ingestion race closure — Persisted canonical/size/hash/magic source identity from discovery into session inputs, revalidated it before native extraction, hardened Quality Gate same-file reads, and bounded/joined capability stdout handling — Key decision: legacy sessions deserialize without identity, but newly discovered native inputs fail closed on any source replacement; Windows process-tree cancellation remains the absolute taskkill fallback.
 
 [2026-07-12] Import V2 File Ingestion release gates — Added executable all-format route/manifest/performance contracts and a fail-closed QA evidence matrix covering golden, security, recovery, package, license, and platform requirements — Key decision: local source-level gates pass, but absent signed pack payloads, actual size/RSS data, frozen binary Golden Corpus, real process-tree tests, and macOS/Linux/reference-device evidence remain explicit one-time-cutover release blockers.

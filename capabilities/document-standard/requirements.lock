@@ -3,4 +3,3 @@
 # The distributable pack MUST NOT be published until verify-import-pack.ps1
 # validates the generated wheelhouse lock, archive digest, SBOM and licenses.
 markitdown[docx,xlsx,pptx]==0.1.0
-

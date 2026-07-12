@@ -66,6 +66,7 @@ pub struct RouteAttempt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualityFloor {
     ModernOffice,
+    DeterministicDocument,
     ComparisonFallback,
     AgentCandidate,
 }
@@ -92,6 +93,15 @@ impl QualityFloor {
                 require_images: true,
                 require_notes_or_footnotes: true,
                 require_formula_and_display_value: true,
+            },
+            Self::DeterministicDocument => QualityRequirements {
+                minimum_text_coverage: 0.98,
+                require_exact_unit_count: false,
+                require_ordered_structure: true,
+                require_tables: false,
+                require_images: false,
+                require_notes_or_footnotes: false,
+                require_formula_and_display_value: false,
             },
             Self::ComparisonFallback | Self::AgentCandidate => QualityRequirements {
                 minimum_text_coverage: 0.0,

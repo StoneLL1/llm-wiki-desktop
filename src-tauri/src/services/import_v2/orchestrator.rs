@@ -134,6 +134,10 @@ impl ImportV2Service {
         self.engines.register(engine)
     }
 
+    pub fn registered_engine_routes(&self) -> Result<Vec<String>, BackendError> {
+        self.engines.registered_routes()
+    }
+
     pub fn register_capability_pack(
         &self,
         pack: ResolvedCapabilityPack,
@@ -435,7 +439,13 @@ impl ImportV2Service {
         let Some(format) = format else {
             return Ok(explicit_routes(input)
                 .into_iter()
-                .map(|route| (route, QualityFloor::ComparisonFallback))
+                .map(|route| {
+                    let floor = match route {
+                        "pdf.text" | "pdf.layout" => QualityFloor::DeterministicDocument,
+                        _ => QualityFloor::ComparisonFallback,
+                    };
+                    (route, floor)
+                })
                 .collect());
         };
         let routes = self.engines.registered_routes()?;
@@ -967,7 +977,7 @@ mod tests {
                 &task.id,
             )
             .unwrap();
-        assert_eq!(result.attempts.len(), 2);
+        assert_eq!(result.attempts.len(), 2, "attempts: {:?}", result.attempts);
         assert_eq!(result.attempts[0].engine_id, "low");
         assert_eq!(
             result.attempts[0].outcome,

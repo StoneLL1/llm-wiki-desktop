@@ -1,8 +1,8 @@
 # Import V2 File Ingestion Release-Gate Evidence
 
-Date: 2026-07-12  
-Baseline: `3bd282c6a86a5baa2d16660d1387b617e88a35a7`  
-Evidence candidate: `codex/import-v2-file-ingestion`  
+Date: 2026-07-12
+Baseline: `3bd282c6a86a5baa2d16660d1387b617e88a35a7`
+Evidence candidate: `codex/import-v2-file-ingestion`
 Overall status: **UNVERIFIED — RELEASE BLOCKER**
 
 This report distinguishes executable source-level contract evidence from evidence that requires
