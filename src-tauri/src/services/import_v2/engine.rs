@@ -25,6 +25,8 @@ pub struct EngineRequest {
     pub task_id: String,
     pub operation: EngineOperation,
     pub input: ImportInput,
+    #[serde(default)]
+    pub project_root: String,
     pub staging_root: String,
 }
 
@@ -34,6 +36,8 @@ pub struct EngineResult {
     pub source_snapshot_path: String,
     pub markdown_path: String,
     pub asset_paths: Vec<String>,
+    #[serde(default)]
+    pub metadata_path: Option<String>,
     pub title: String,
     pub text_coverage: Option<f64>,
     pub table_cell_accuracy: Option<f64>,
@@ -108,6 +112,9 @@ pub fn validate_engine_result(
     validate_staging_relative_path(staging_root, &result.markdown_path)?;
     for asset_path in &result.asset_paths {
         validate_staging_relative_path(staging_root, asset_path)?;
+    }
+    if let Some(metadata_path) = &result.metadata_path {
+        validate_staging_relative_path(staging_root, metadata_path)?;
     }
     Ok(())
 }
@@ -207,6 +214,7 @@ mod tests {
             source_snapshot_path: "source.bin".into(),
             markdown_path: "candidate.md".into(),
             asset_paths: vec!["assets/image.png".into()],
+            metadata_path: None,
             title: "Fixture".into(),
             text_coverage: Some(1.0),
             table_cell_accuracy: None,

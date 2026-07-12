@@ -46,6 +46,10 @@ impl QualityGate {
                 read_artifact(staging_root, asset_path, classify_asset(asset_path))?.artifact,
             );
         }
+        if let Some(metadata_path) = &result.metadata_path {
+            assets
+                .push(read_artifact(staging_root, metadata_path, ArtifactKind::Metadata)?.artifact);
+        }
 
         let mut warnings = result.warnings.clone();
         let local_images = image_destinations_from_rendered(&rendered_markdown);
@@ -638,6 +642,7 @@ mod tests {
                 source_snapshot_path: "source.bin".into(),
                 markdown_path: "candidate.md".into(),
                 asset_paths: Vec::new(),
+                metadata_path: None,
                 title: "Fixture".into(),
                 text_coverage: Some(text),
                 table_cell_accuracy: Some(table),
