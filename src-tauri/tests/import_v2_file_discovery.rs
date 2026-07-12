@@ -32,6 +32,11 @@ fn scans_breadth_first_and_reports_limits_without_placeholder_files() {
         )
         .unwrap();
     assert_eq!(result.files.iter().map(|f| f.display_name.as_str()).collect::<Vec<_>>(), vec!["首页.md", "说明.md"]);
+    let first = &result.files[0];
+    assert_eq!(first.source_identity.size_bytes, first.size_bytes);
+    assert_eq!(first.source_identity.sha256.len(), 64);
+    assert_eq!(first.source_identity.magic.len(), 64);
+    assert!(std::path::Path::new(&first.source_identity.canonical_path).is_absolute());
     assert!(result.skipped.iter().any(|s| s.reason == FileSkipReason::UnsupportedFormat));
     assert!(result.skipped.iter().any(|s| s.reason == FileSkipReason::HiddenOrSystem));
     assert!(result.skipped.iter().any(|s| s.reason == FileSkipReason::ProjectInternal));
@@ -98,8 +103,8 @@ fn requires_real_ooxml_structure_and_sniffs_magic() {
 #[test]
 fn repeated_append_drops_existing_and_in_batch_duplicates() {
     let mut session = ImportSession::new("s", "p", ImportResourceMode::Balanced);
-    session.items.push(ImportItem::queued("i", ImportInput { kind: ImportInputKind::File, display_name: "a.md".into(), locator: "C:/Input/A.md".into(), normalized_locator: Some("c:/input/a.md".into()) }));
-    let file = llm_wiki_desktop_lib::models::import_v2_file::DiscoveredFile { source_path: "C:/Input/A.md".into(), relative_path: "A.md".into(), display_name: "A.md".into(), format: llm_wiki_desktop_lib::models::import_v2_file::FileFormat::Markdown, size_bytes: 1, identity: llm_wiki_desktop_lib::models::import_v2_file::FileIdentity { extension: "md".into(), magic: "utf-8".into(), mime: "text/markdown".into() } };
+    session.items.push(ImportItem::queued("i", ImportInput { kind: ImportInputKind::File, display_name: "a.md".into(), locator: "C:/Input/A.md".into(), normalized_locator: Some("c:/input/a.md".into()), source_identity: None }));
+    let file = llm_wiki_desktop_lib::models::import_v2_file::DiscoveredFile { source_path: "C:/Input/A.md".into(), relative_path: "A.md".into(), display_name: "A.md".into(), format: llm_wiki_desktop_lib::models::import_v2_file::FileFormat::Markdown, size_bytes: 1, identity: llm_wiki_desktop_lib::models::import_v2_file::FileIdentity { extension: "md".into(), magic: "utf-8".into(), mime: "text/markdown".into() }, source_identity: llm_wiki_desktop_lib::models::import_v2::SourceIdentity { canonical_path: "C:/Input/A.md".into(), size_bytes: 1, modified_nanos: None, file_id: None, sha256: "00".repeat(32), magic: "11".repeat(32) } };
     assert!(new_import_inputs(&session, [file.clone(), file]).is_empty());
 }
 

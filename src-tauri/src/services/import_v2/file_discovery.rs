@@ -1,10 +1,11 @@
 use crate::errors::BackendError;
-use crate::models::import_v2::{ImportInput, ImportInputKind, ImportSession};
+use crate::models::import_v2::{ImportInput, ImportInputKind, ImportSession, SourceIdentity};
 use crate::models::import_v2_file::{
     DiscoveredFile, FileFormat, FileIdentity, FileScanPolicy, FileScanResult, FileSkipReason,
     SkippedFile,
 };
 use crate::models::paths::ProjectContext;
+use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::Read;
@@ -258,6 +259,7 @@ impl FileDiscoveryService {
                 format,
                 size_bytes: metadata.len(),
                 identity,
+                source_identity: source_identity(&canonical, &metadata)?,
             };
             result.files.push(file.clone());
             on_batch(std::slice::from_ref(&file));
@@ -325,9 +327,49 @@ pub fn new_import_inputs(
                 display_name: file.display_name,
                 locator: file.source_path,
                 normalized_locator: Some(normalized),
+                source_identity: Some(file.source_identity),
             })
         })
         .collect()
+}
+
+fn source_identity(path: &Path, metadata: &fs::Metadata) -> Result<SourceIdentity, BackendError> {
+    let bytes = fs::read(path).map_err(io_error)?;
+    let modified_nanos = metadata.modified().ok().and_then(|value| {
+        value
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_nanos())
+    });
+    Ok(SourceIdentity {
+        canonical_path: path.to_string_lossy().into_owned(),
+        size_bytes: metadata.len(),
+        modified_nanos,
+        file_id: file_id(metadata),
+        sha256: format!("{:x}", Sha256::digest(&bytes)),
+        magic: magic_fingerprint(&bytes),
+    })
+}
+
+fn magic_fingerprint(bytes: &[u8]) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(&bytes[..bytes.len().min(PREFIX_BYTES as usize)])
+    )
+}
+
+#[cfg(unix)]
+fn file_id(metadata: &fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    Some(format!("{}:{}", metadata.dev(), metadata.ino()))
+}
+#[cfg(windows)]
+fn file_id(_: &fs::Metadata) -> Option<String> {
+    None
+}
+#[cfg(not(any(unix, windows)))]
+fn file_id(_: &fs::Metadata) -> Option<String> {
+    None
 }
 
 fn normalize_locator(path: &Path) -> String {

@@ -9,6 +9,26 @@ use crate::models::import_v2::{
 };
 use crate::services::import_v2::engine::EngineResult;
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_ARTIFACT_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_before_artifact_open(hook: impl FnOnce(&Path) + 'static) {
+    BEFORE_ARTIFACT_OPEN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_before_artifact_open(path: &Path) {
+    BEFORE_ARTIFACT_OPEN.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+}
+
 pub const MIN_TEXT_COVERAGE: f64 = 0.98;
 pub const MIN_TABLE_CELL_ACCURACY: f64 = 0.95;
 const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
@@ -151,8 +171,13 @@ fn read_artifact(
     if before.len() > MAX_ARTIFACT_BYTES {
         return Err(quality_error());
     }
+    #[cfg(test)]
+    run_before_artifact_open(&canonical);
     let file = std::fs::File::open(&canonical).map_err(|_| quality_error())?;
     let opened = file.metadata().map_err(|_| quality_error())?;
+    if !same_file(&before, &opened) {
+        return Err(quality_error());
+    }
     let mut bytes = Vec::with_capacity(opened.len() as usize);
     use std::io::Read;
     file.take(MAX_ARTIFACT_BYTES + 1)
@@ -163,6 +188,7 @@ fn read_artifact(
         || before.len() != opened.len()
         || before.len() != bytes.len() as u64
         || before.len() != after.len()
+        || !same_file(&opened, &after)
     {
         return Err(quality_error());
     }
@@ -176,6 +202,25 @@ fn read_artifact(
         },
         bytes,
     })
+}
+
+#[cfg(unix)]
+fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    left.creation_time() == right.creation_time()
+        && left.last_write_time() == right.last_write_time()
+        && left.file_size() == right.file_size()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
 #[cfg(windows)]
@@ -998,5 +1043,30 @@ mod tests {
             .evaluate(&fixture.root, &fixture.result)
             .unwrap();
         assert_eq!(preview.quality.level, QualityLevel::Pass);
+    }
+
+    #[test]
+    fn rejects_same_length_artifact_swap_between_validation_and_open() {
+        let fixture = quality_fixture("# trusted\n");
+        let replacement = fixture.root.join("replacement.md");
+        std::fs::write(&replacement, b"# hostile\n").unwrap();
+        assert_eq!(
+            std::fs::metadata(fixture.root.join("candidate.md"))
+                .unwrap()
+                .len(),
+            std::fs::metadata(&replacement).unwrap().len()
+        );
+        set_before_artifact_open(move |validated| {
+            std::fs::remove_file(validated).unwrap();
+            std::fs::rename(&replacement, validated).unwrap();
+        });
+
+        assert_eq!(
+            QualityGate::default()
+                .evaluate(&fixture.root, &fixture.result)
+                .unwrap_err()
+                .code,
+            IMPORT_V2_QUALITY_FAILED
+        );
     }
 }

@@ -48,6 +48,7 @@ pub struct DiscoveredFile {
     pub format: FileFormat,
     pub size_bytes: u64,
     pub identity: FileIdentity,
+    pub source_identity: crate::models::import_v2::SourceIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

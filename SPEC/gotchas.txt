@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Same-length source or staging replacement passed length-only race checks — Path canonicalization and byte count do not establish that the opened handle is the object validated at discovery — Persist SHA-256/magic/canonical identity for sources, compare opened-vs-path file identity around staging reads, and keep deterministic validate/open swap hooks in tests.
+
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
 Symptom — Chat history 按 newest-first 选取后再反转为 chronological order 时，较旧消息若恰好被字符预算截断，会与下一条较新消息的 `User:` / `Assistant:` 标签粘成一行。— Root cause — 每条原始 line 自带尾随换行，但 `take_chars` 截断时会把该换行裁掉；最终直接 `push_str` selected chunks，没有额外分隔符。— How to avoid — truncated chunk 必须在原预算内保留分隔：用最后一个已预算字符替换为 `\n`，不要额外追加导致超预算；测试要让 newest 完整、older partial，并同时断言 chronological order、角色前换行和总 history chars 不超 budget。

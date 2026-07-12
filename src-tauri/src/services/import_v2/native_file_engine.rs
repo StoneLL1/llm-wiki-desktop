@@ -8,6 +8,7 @@ use crate::services::import_v2::markdown_normalizer::{
 };
 use crate::tasks::task_model::CancellationToken;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Default)]
@@ -55,7 +56,12 @@ impl ImportEngine for NativeFileEngine {
         let root = PathBuf::from(&request.project_root);
         let source = resolve_source(&root, &request.input.locator)?;
         let staging = resolve_inside(&root, &request.staging_root)?;
-        let bytes = safe_read_source(&source)?;
+        let identity = request
+            .input
+            .source_identity
+            .as_ref()
+            .ok_or_else(source_changed)?;
+        let bytes = safe_read_source(&source, identity)?;
         let text = decode_utf8(&bytes)?;
         let format = extension(&request.input.locator).unwrap_or_default();
         let (markdown, warnings) = match format.as_str() {
@@ -144,7 +150,10 @@ fn resolve_source(root: &Path, locator: &str) -> Result<PathBuf, BackendError> {
     }
     Ok(root.join(candidate))
 }
-fn safe_read_source(path: &Path) -> Result<Vec<u8>, BackendError> {
+fn safe_read_source(
+    path: &Path,
+    identity: &crate::models::import_v2::SourceIdentity,
+) -> Result<Vec<u8>, BackendError> {
     let link = std::fs::symlink_metadata(path)
         .map_err(|_| invalid("The source file could not be inspected."))?;
     if link.file_type().is_symlink() || is_reparse_point(&link) || !link.is_file() {
@@ -158,6 +167,9 @@ fn safe_read_source(path: &Path) -> Result<Vec<u8>, BackendError> {
     let canonical = path
         .canonicalize()
         .map_err(|_| invalid("The source file could not be resolved."))?;
+    if canonical.to_string_lossy() != identity.canonical_path {
+        return Err(source_changed());
+    }
     if canonical
         != path
             .canonicalize()
@@ -175,6 +187,9 @@ fn safe_read_source(path: &Path) -> Result<Vec<u8>, BackendError> {
     let before = file
         .metadata()
         .map_err(|_| invalid("The source file could not be inspected."))?;
+    if before.len() != identity.size_bytes {
+        return Err(source_changed());
+    }
     if before.len() > 64 * 1024 * 1024 {
         return Err(invalid("The source file exceeds the ingestion size limit."));
     }
@@ -193,7 +208,22 @@ fn safe_read_source(path: &Path) -> Result<Vec<u8>, BackendError> {
             true,
         ));
     }
+    let prefix = &bytes[..bytes.len().min(8192)];
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let magic = format!("{:x}", Sha256::digest(prefix));
+    if hash != identity.sha256 || magic != identity.magic {
+        return Err(source_changed());
+    }
     Ok(bytes)
+}
+
+fn source_changed() -> BackendError {
+    BackendError::new(
+        "IMPORT_FILE_SOURCE_CHANGED",
+        "The selected source changed and must be scanned again.",
+        true,
+        true,
+    )
 }
 #[cfg(windows)]
 fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
