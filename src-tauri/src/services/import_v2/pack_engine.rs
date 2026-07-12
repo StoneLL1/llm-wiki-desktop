@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use sha2::{Digest, Sha256};
 
 use crate::errors::{BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_UNAVAILABLE};
 use crate::models::import_v2::{ImportInput, ImportInputKind};
@@ -67,6 +68,7 @@ impl ImportEngine for PackProcessEngine {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
+        validate_entrypoint_unchanged(&self.pack)?;
         let mut command = Command::new(&self.pack.entrypoint);
         command
             .current_dir(&self.pack.root)
@@ -164,6 +166,34 @@ impl ImportEngine for PackProcessEngine {
     }
 }
 
+fn validate_entrypoint_unchanged(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
+    let metadata = std::fs::symlink_metadata(&pack.entrypoint)
+        .map_err(|_| engine_error("The capability entrypoint is unavailable."))?;
+    if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_file() {
+        return Err(engine_error("The capability entrypoint changed after verification."));
+    }
+    let canonical = std::fs::canonicalize(&pack.entrypoint)
+        .map_err(|_| engine_error("The capability entrypoint cannot be resolved."))?;
+    if !canonical.starts_with(&pack.root) {
+        return Err(engine_error("The capability entrypoint escaped its verified install root."));
+    }
+    let bytes = std::fs::read(&canonical)
+        .map_err(|_| engine_error("The capability entrypoint cannot be verified."))?;
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if actual != pack.entrypoint_sha256 {
+        return Err(engine_error("The capability entrypoint changed after verification."));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+#[cfg(not(windows))]
+fn is_reparse(_: &std::fs::Metadata) -> bool { false }
+
 fn read_response(reader: impl Read) -> Result<JsonRpcResponse<EngineResult>, ()> {
     let mut reader = BufReader::new(reader);
     for _ in 0..MAX_STDOUT_LINES {
@@ -202,9 +232,9 @@ impl ProcessGuard {
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            terminate_tree(&mut self.0);
-        }
+        // Always terminate the recorded process group/tree. The direct child may
+        // have exited while a grandchild still owns inherited stdio handles.
+        terminate_tree(&mut self.0);
         self.join_readers();
     }
 }
@@ -256,11 +286,42 @@ fn engine_error(message: &str) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::import_v2::capability_pack::CapabilityPackManifest;
     use std::io::{Cursor, Read};
 
     #[test]
     fn rejects_stdout_without_newline_beyond_eight_mib() {
         assert!(read_response(Cursor::new(vec![b'x'; MAX_STDOUT_LINE_BYTES + 1])).is_err());
+    }
+
+    #[test]
+    fn rejects_entrypoint_replaced_after_registration() {
+        let root = std::env::temp_dir().join(format!("pack-swap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let entrypoint = root.join("runner.bin");
+        std::fs::write(&entrypoint, b"verified").unwrap();
+        let pack = ResolvedCapabilityPack {
+            manifest: CapabilityPackManifest {
+                schema_version: 1,
+                pack_id: "fixture".into(),
+                version: "1".into(),
+                protocol_version: "2".into(),
+                target_triples: vec![],
+                archive_sha256: String::new(),
+                license_expression: "MIT".into(),
+                entrypoint: "runner.bin".into(),
+                compressed_bytes: 0,
+                installed_bytes: 0,
+                signing_key_id: "fixture".into(),
+                signature: String::new(),
+            },
+            root: root.canonicalize().unwrap(),
+            entrypoint: entrypoint.canonicalize().unwrap(),
+            entrypoint_sha256: format!("{:x}", Sha256::digest(b"verified")),
+        };
+        std::fs::write(&entrypoint, b"replaced").unwrap();
+        assert!(validate_entrypoint_unchanged(&pack).is_err());
+        std::fs::remove_dir_all(root).ok();
     }
 
     struct SlowReader { bytes: Cursor<Vec<u8>> }

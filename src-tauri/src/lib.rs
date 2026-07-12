@@ -163,7 +163,6 @@ pub fn run() {
             commands::import_v2_commands::set_import_item_selection_v2,
             commands::import_v2_commands::start_import_items_v2,
             commands::import_v2_commands::confirm_import_session_v2,
-            commands::import_v2_file_commands::add_import_paths_v2,
             commands::import_v2_file_commands::start_add_import_paths_v2,
             commands::import_v2_file_commands::get_import_capability_statuses,
             commands::import_v2_file_commands::get_import_scan_result_v2,

@@ -189,6 +189,13 @@ impl FileRoutePlanner {
                     required_pack: None,
                     quality_floor: QualityFloor::ModernOffice,
                 });
+                if capabilities.document_standard {
+                    routes.push(RouteAttempt {
+                        route: "pack.markitdown",
+                        required_pack: Some("document-standard"),
+                        quality_floor: QualityFloor::ComparisonFallback,
+                    });
+                }
             }
             if capabilities.office_oxide_installed && capabilities.office_oxide_qualified {
                 routes.push(RouteAttempt {

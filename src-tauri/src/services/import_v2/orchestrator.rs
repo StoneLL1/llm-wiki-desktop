@@ -258,6 +258,13 @@ impl ImportV2Service {
         let mut request = request;
         for ((_, quality_floor), engine) in engines {
             let descriptor = engine.descriptor();
+            if is_capability_route(&descriptor.route) && request.input.source_identity.is_some() {
+                request.input = materialize_capability_input(
+                    context,
+                    &staging_root,
+                    &request.input,
+                )?;
+            }
             let started_at = chrono::Utc::now().to_rfc3339();
             let candidate = match engine.execute(&request, &token) {
                 Ok(result) if !token.is_cancelled() => result,
@@ -280,8 +287,27 @@ impl ImportV2Service {
                         crate::models::import_v2::AttemptOutcome::Failed,
                         Vec::new(),
                     )?;
+                    if is_non_fallback_error(&error) {
+                        return self.finish_failed(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
+                        );
+                    }
+                    let route_record = FileRoutePlanner::record(
+                        descriptor.route.clone(),
+                        RouteOutcome::Failed(classify_route_failure(&error)),
+                    );
                     last_error = Some(error);
-                    continue;
+                    if route_record.allows_fallback() {
+                        continue;
+                    }
+                    break;
                 }
             };
             if let Err(error) = validate_engine_result(&staging_root, &candidate) {
@@ -300,10 +326,7 @@ impl ImportV2Service {
             }
             // Attempt-level precheck selects a candidate; the formal QualityGate still runs once.
             let required_coverage = quality_floor.requirements().minimum_text_coverage as f64;
-            if candidate
-                .text_coverage
-                .is_some_and(|coverage| coverage < required_coverage)
-            {
+            if !candidate_meets_floor(&request.input, &candidate, *quality_floor) {
                 self.record_attempt(
                     context,
                     files,
@@ -652,18 +675,136 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
             "agent.office",
         ],
         "doc" | "xls" | "ppt" => vec!["pack.office-legacy", "pack.office-oxide", "agent.office"],
-        "pdf" => vec!["pdf.text", "pdf.layout", "ocr.document", "agent.pdf"],
+        "pdf" => vec![
+            "pdf.text",
+            "pdf.layout",
+            "ocr.basic",
+            "ocr.cjk-accurate",
+            "agent.pdf",
+        ],
         "srt" | "vtt" | "lrc" | "ass" | "ssa" => vec!["media.subtitle"],
         "mp3" | "wav" | "m4a" | "mp4" | "mov" | "mkv" => vec!["media.asr"],
         _ => Vec::new(),
     }
 }
 
+fn is_capability_route(route: &str) -> bool {
+    route.starts_with("pack.")
+        || route.starts_with("pdf.")
+        || route.starts_with("ocr.")
+        || route.starts_with("media.")
+}
+
+fn is_non_fallback_error(error: &BackendError) -> bool {
+    error.code == crate::errors::IMPORT_V2_CANCELLED
+        || error.code.contains("PASSWORD")
+        || error.code.contains("LOGIN")
+}
+
+fn classify_route_failure(
+    error: &BackendError,
+) -> crate::services::import_v2::file_router::RouteFailure {
+    use crate::services::import_v2::file_router::RouteFailure;
+    if error.code.contains("CAPABILITY") || error.code.contains("UNAVAILABLE") {
+        RouteFailure::CapabilityUnavailable
+    } else if error.code.contains("CORRUPT") || error.code.contains("PARSE") {
+        RouteFailure::CorruptInput
+    } else if error.code.contains("RESOURCE") || error.code.contains("LIMIT") {
+        RouteFailure::ResourceLimit
+    } else if error.code.contains("UNSUPPORTED") {
+        RouteFailure::UnsupportedFeature {
+            feature: error.code.clone(),
+        }
+    } else {
+        RouteFailure::EngineFailure {
+            code: error.code.clone(),
+        }
+    }
+}
+
+fn candidate_meets_floor(
+    input: &ImportInput,
+    result: &crate::services::import_v2::engine::EngineResult,
+    floor: QualityFloor,
+) -> bool {
+    let requirements = floor.requirements();
+    if result
+        .text_coverage
+        .is_some_and(|coverage| coverage < requirements.minimum_text_coverage as f64)
+    {
+        return false;
+    }
+    if floor != QualityFloor::ModernOffice {
+        return true;
+    }
+    let extension = Path::new(&input.locator)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "xls" | "xlsx" => {
+            result.sheet_count_exact == Some(1.0)
+                && result.non_empty_cell_coverage.is_some_and(|value| value >= 0.95)
+                && result.formula_value_pairs == Some(1.0)
+        }
+        "ppt" | "pptx" => {
+            result.slide_count_exact == Some(1.0)
+                && result.meaningful_image_coverage.is_some_and(|value| value >= 0.95)
+        }
+        _ => true,
+    }
+}
+
+fn materialize_capability_input(
+    context: &ProjectContext,
+    staging_root: &str,
+    input: &ImportInput,
+) -> Result<ImportInput, BackendError> {
+    let identity = input.source_identity.as_ref().ok_or_else(|| {
+        BackendError::new(
+            "IMPORT_FILE_SOURCE_CHANGED",
+            "The selected source must be scanned again before capability execution.",
+            true,
+            true,
+        )
+    })?;
+    let source = Path::new(&input.locator);
+    let bytes = crate::services::import_v2::native_file_engine::safe_read_source(source, identity)?;
+    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or("bin");
+    let relative = format!("{staging_root}/authorized/source.{extension}");
+    let destination = context.resolve_project_path(&relative)?;
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
+        })?;
+    }
+    std::fs::write(&destination, bytes).map_err(|error| {
+        BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
+    })?;
+    let mut authorized = input.clone();
+    authorized.locator = destination.to_string_lossy().into_owned();
+    authorized.normalized_locator = Some(relative.replace('\\', "/"));
+    authorized.source_identity = None;
+    Ok(authorized)
+}
+
 fn route_resolution_input(route: &str, input: &ImportInput) -> ImportInput {
+    let original_extension = Path::new(&input.locator)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let extension = match route {
         "office.modern.docx" => Some("docx"),
         "office.modern.xlsx" => Some("xlsx"),
         "office.modern.pptx" => Some("pptx"),
+        "pack.markitdown" => match original_extension.as_str() {
+            "doc" => Some("docx"),
+            "xls" => Some("xlsx"),
+            "ppt" => Some("pptx"),
+            _ => None,
+        },
         _ => None,
     };
     let Some(extension) = extension else {
@@ -989,6 +1130,37 @@ mod tests {
             crate::models::import_v2::AttemptOutcome::Succeeded
         );
         assert!(result.preview.is_some());
+    }
+
+    #[test]
+    fn modern_workbook_floor_requires_exact_structure_metrics() {
+        let input = ImportInput {
+            kind: crate::models::import_v2::ImportInputKind::File,
+            display_name: "book.xlsx".into(),
+            locator: "book.xlsx".into(),
+            normalized_locator: None,
+            source_identity: None,
+        };
+        let mut result = EngineResult {
+            source_snapshot_path: "source.bin".into(),
+            markdown_path: "candidate.md".into(),
+            asset_paths: vec![],
+            metadata_path: None,
+            title: "book".into(),
+            text_coverage: Some(1.0),
+            table_cell_accuracy: Some(1.0),
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            warnings: vec![],
+        };
+        assert!(!candidate_meets_floor(&input, &result, QualityFloor::ModernOffice));
+        result.sheet_count_exact = Some(1.0);
+        result.non_empty_cell_coverage = Some(0.95);
+        result.formula_value_pairs = Some(1.0);
+        assert!(candidate_meets_floor(&input, &result, QualityFloor::ModernOffice));
     }
     impl ImportEngine for FailingEngine {
         fn descriptor(&self) -> EngineDescriptor {
