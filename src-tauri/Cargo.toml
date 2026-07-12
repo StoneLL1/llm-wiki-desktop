@@ -37,3 +37,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 pdf-extract = "0.10"
 quick-xml = "0.36"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
