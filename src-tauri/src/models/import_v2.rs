@@ -126,6 +126,16 @@ pub struct QualityReport {
     pub level: QualityLevel,
     pub metrics: Vec<QualityMetric>,
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_count_exact: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_count_exact: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_empty_cell_coverage: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_value_pairs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meaningful_image_coverage: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

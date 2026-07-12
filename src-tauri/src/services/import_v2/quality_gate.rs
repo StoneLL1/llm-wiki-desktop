@@ -79,6 +79,23 @@ impl QualityGate {
             result.table_cell_accuracy,
             MIN_TABLE_CELL_ACCURACY,
         );
+        for (code, actual, minimum) in [
+            ("SHEET_COUNT_EXACT", result.sheet_count_exact, 1.0),
+            ("SLIDE_COUNT_EXACT", result.slide_count_exact, 1.0),
+            (
+                "NON_EMPTY_CELL_COVERAGE",
+                result.non_empty_cell_coverage,
+                0.95,
+            ),
+            ("FORMULA_VALUE_PAIRS", result.formula_value_pairs, 1.0),
+            (
+                "MEANINGFUL_IMAGE_COVERAGE",
+                result.meaningful_image_coverage,
+                0.95,
+            ),
+        ] {
+            push_metric(&mut metrics, &mut warnings, code, actual, minimum);
+        }
         let level = if warnings.is_empty() {
             QualityLevel::Pass
         } else {
@@ -93,6 +110,11 @@ impl QualityGate {
                 level,
                 metrics,
                 warnings,
+                sheet_count_exact: result.sheet_count_exact,
+                slide_count_exact: result.slide_count_exact,
+                non_empty_cell_coverage: result.non_empty_cell_coverage,
+                formula_value_pairs: result.formula_value_pairs,
+                meaningful_image_coverage: result.meaningful_image_coverage,
             },
             title: result.title.clone(),
         })
@@ -646,6 +668,11 @@ mod tests {
                 title: "Fixture".into(),
                 text_coverage: Some(text),
                 table_cell_accuracy: Some(table),
+                sheet_count_exact: None,
+                slide_count_exact: None,
+                non_empty_cell_coverage: None,
+                formula_value_pairs: None,
+                meaningful_image_coverage: None,
                 warnings: Vec::new(),
             },
         }

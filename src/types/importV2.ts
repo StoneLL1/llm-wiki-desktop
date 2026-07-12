@@ -11,7 +11,7 @@ export type ImportSessionStatus = "draft" | "processing" | "waiting_for_confirma
 
 export interface ImportInput { kind: ImportInputKind; displayName: string; locator: string; normalizedLocator: string | null; }
 export interface QualityMetric { code: string; actual: number; minimum: number; passed: boolean; }
-export interface QualityReport { level: QualityLevel; metrics: QualityMetric[]; warnings: string[]; }
+export interface QualityReport { level: QualityLevel; metrics: QualityMetric[]; warnings: string[]; sheetCountExact?: number; slideCountExact?: number; nonEmptyCellCoverage?: number; formulaValuePairs?: number; meaningfulImageCoverage?: number; }
 export interface ImportArtifact { kind: ArtifactKind; relativePath: string; sha256: string; sizeBytes: number; }
 export interface AttemptRecord { route: string; engineId: string; engineVersion: string; stage: ImportStage; startedAt: string; completedAt: string | null; outcome: AttemptOutcome; warnings: string[]; }
 export interface ImportIssue { code: string; message: string; stage: ImportStage; retryable: boolean; userActionRequired: boolean; }

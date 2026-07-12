@@ -124,6 +124,11 @@ fn result(markdown: &str, title: &str) -> EngineResult {
         title: title.into(),
         text_coverage: Some(1.0),
         table_cell_accuracy: None,
+        sheet_count_exact: None,
+        slide_count_exact: None,
+        non_empty_cell_coverage: None,
+        formula_value_pairs: None,
+        meaningful_image_coverage: None,
         warnings: vec![],
     }
 }

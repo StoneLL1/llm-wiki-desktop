@@ -41,6 +41,16 @@ pub struct EngineResult {
     pub title: String,
     pub text_coverage: Option<f64>,
     pub table_cell_accuracy: Option<f64>,
+    #[serde(default)]
+    pub sheet_count_exact: Option<f64>,
+    #[serde(default)]
+    pub slide_count_exact: Option<f64>,
+    #[serde(default)]
+    pub non_empty_cell_coverage: Option<f64>,
+    #[serde(default)]
+    pub formula_value_pairs: Option<f64>,
+    #[serde(default)]
+    pub meaningful_image_coverage: Option<f64>,
     pub warnings: Vec<String>,
 }
 
@@ -218,6 +228,11 @@ mod tests {
             title: "Fixture".into(),
             text_coverage: Some(1.0),
             table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
             warnings: Vec::new(),
         }
     }
