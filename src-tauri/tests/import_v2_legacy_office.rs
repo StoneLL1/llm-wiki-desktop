@@ -82,3 +82,14 @@ fn manifest_and_runner_freeze_isolation_and_cache_contracts() {
     assert!(!runner.contains("pip install"));
     assert!(!runner.contains("os.system"));
 }
+
+#[test]
+fn modern_document_runner_consumes_only_a_staging_contained_chained_artifact() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let runner =
+        fs::read_to_string(root.join("capabilities/document-standard/runner/markitdown_pack.py"))
+            .unwrap();
+    assert!(runner.contains("chainedInput"));
+    assert!(runner.contains("contained(staging, source) if chained"));
+    assert!(!runner.contains("pip install"));
+}

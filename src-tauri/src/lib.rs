@@ -158,6 +158,7 @@ pub fn run() {
             commands::import_v2_commands::start_import_items_v2,
             commands::import_v2_commands::confirm_import_session_v2,
             commands::import_v2_file_commands::add_import_paths_v2,
+            commands::import_v2_file_commands::start_add_import_paths_v2,
             commands::task_commands::create_task,
             commands::task_commands::list_tasks,
             commands::task_commands::get_task,

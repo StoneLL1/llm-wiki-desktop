@@ -8,11 +8,15 @@ use crate::models::import_v2::{
     ImportInput, ImportIssue, ImportItem, ImportItemStatus, ImportResourceMode, ImportSession,
     ImportSessionStatus, ImportStage,
 };
+use crate::models::import_v2_file::FileFormat;
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineOperation, EngineRegistry, EngineRequest, ImportEngine,
+};
+use crate::services::import_v2::file_router::{
+    AttemptOutcome as RouteOutcome, CapabilitySnapshot, FileRoutePlanner, QualityFloor,
 };
 use crate::services::import_v2::native_file_engine::NativeFileEngine;
 use crate::services::import_v2::pack_engine::PackProcessEngine;
@@ -194,10 +198,16 @@ impl ImportV2Service {
             .find(|item| item.item_id == item_id)
             .ok_or_else(item_not_found)?
             .input;
-        let planned_routes = explicit_routes(&input);
+        let planned_routes = self.planned_routes(&input)?;
         let engines = planned_routes
             .iter()
-            .filter_map(|route| self.engines.resolve_route(route, &input).ok())
+            .filter_map(|attempt| {
+                let route_input = route_resolution_input(attempt.0, &input);
+                self.engines
+                    .resolve_route(attempt.0, &route_input)
+                    .ok()
+                    .map(|engine| (attempt, engine))
+            })
             .collect::<Vec<_>>();
         if engines.is_empty() {
             let error = BackendError::new(
@@ -234,13 +244,15 @@ impl ImportV2Service {
             input,
             project_root: context.root.to_string_lossy().into_owned(),
             staging_root: staging_root.clone(),
+            chained_input: None,
         };
         let token = tasks
             .get_cancellation_token(task_id)
             .ok_or_else(|| task_error("Task cancellation state is unavailable."))?;
         let mut selected = None;
         let mut last_error = None;
-        for engine in engines {
+        let mut request = request;
+        for ((_, quality_floor), engine) in engines {
             let descriptor = engine.descriptor();
             let started_at = chrono::Utc::now().to_rfc3339();
             let candidate = match engine.execute(&request, &token) {
@@ -275,7 +287,7 @@ impl ImportV2Service {
                     session_id,
                     item_id,
                     &descriptor,
-                    started_at,
+                    started_at.clone(),
                     crate::models::import_v2::AttemptOutcome::Failed,
                     candidate.warnings.clone(),
                 )?;
@@ -283,9 +295,10 @@ impl ImportV2Service {
                 continue;
             }
             // Attempt-level precheck selects a candidate; the formal QualityGate still runs once.
+            let required_coverage = quality_floor.requirements().minimum_text_coverage as f64;
             if candidate
                 .text_coverage
-                .is_some_and(|coverage| coverage < 0.50)
+                .is_some_and(|coverage| coverage < required_coverage)
             {
                 self.record_attempt(
                     context,
@@ -293,7 +306,7 @@ impl ImportV2Service {
                     session_id,
                     item_id,
                     &descriptor,
-                    started_at,
+                    started_at.clone(),
                     crate::models::import_v2::AttemptOutcome::Failed,
                     candidate.warnings.clone(),
                 )?;
@@ -303,7 +316,26 @@ impl ImportV2Service {
                     true,
                     true,
                 ));
-                continue;
+                let record = FileRoutePlanner::record(
+                    descriptor.route.clone(),
+                    RouteOutcome::QualityRejected {
+                        actual: candidate.text_coverage.unwrap_or_default() as f32,
+                        required: required_coverage as f32,
+                    },
+                );
+                if record.allows_fallback() {
+                    continue;
+                }
+            }
+            if descriptor.route == "pack.office-legacy" {
+                if let Some(converted) = candidate
+                    .asset_paths
+                    .iter()
+                    .find(|path| path.starts_with("converted/"))
+                {
+                    request.chained_input = Some(converted.clone());
+                    continue;
+                }
             }
             selected = Some((descriptor, started_at, candidate));
             break;
@@ -380,6 +412,45 @@ impl ImportV2Service {
         ))?;
         task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
         Ok(item)
+    }
+
+    fn planned_routes(
+        &self,
+        input: &ImportInput,
+    ) -> Result<Vec<(&'static str, QualityFloor)>, BackendError> {
+        let extension = Path::new(&input.locator)
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let format = match extension.as_str() {
+            "doc" => Some(FileFormat::Doc),
+            "docx" => Some(FileFormat::Docx),
+            "xls" => Some(FileFormat::Xls),
+            "xlsx" => Some(FileFormat::Xlsx),
+            "ppt" => Some(FileFormat::Ppt),
+            "pptx" => Some(FileFormat::Pptx),
+            _ => None,
+        };
+        let Some(format) = format else {
+            return Ok(explicit_routes(input)
+                .into_iter()
+                .map(|route| (route, QualityFloor::ComparisonFallback))
+                .collect());
+        };
+        let routes = self.engines.registered_routes()?;
+        let has = |route: &str| routes.iter().any(|registered| registered == route);
+        let capabilities = CapabilitySnapshot {
+            document_standard: has("pack.markitdown"),
+            office_legacy: has("pack.office-legacy"),
+            office_oxide_installed: has("pack.office-oxide"),
+            office_oxide_qualified: has("pack.office-oxide"),
+            agent_available: has("agent.office"),
+        };
+        Ok(FileRoutePlanner::plan(format, capabilities)
+            .into_iter()
+            .map(|attempt| (attempt.route, attempt.quality_floor))
+            .collect())
     }
 
     fn record_attempt(
@@ -576,6 +647,22 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
         "mp3" | "wav" | "m4a" | "mp4" | "mov" | "mkv" => vec!["media.asr"],
         _ => Vec::new(),
     }
+}
+
+fn route_resolution_input(route: &str, input: &ImportInput) -> ImportInput {
+    let extension = match route {
+        "office.modern.docx" => Some("docx"),
+        "office.modern.xlsx" => Some("xlsx"),
+        "office.modern.pptx" => Some("pptx"),
+        _ => None,
+    };
+    let Some(extension) = extension else {
+        return input.clone();
+    };
+    let mut routed = input.clone();
+    routed.locator = format!("converted.{extension}");
+    routed.display_name = routed.locator.clone();
+    routed
 }
 
 fn persist_derived(

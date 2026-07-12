@@ -34,10 +34,14 @@ def handle(request):
     staging = Path(params.get("stagingRoot", ""))
     if not staging.is_absolute():
         staging = project / staging
-    source = Path(params.get("input", {}).get("locator", ""))
+    chained = params.get("chainedInput")
+    source = Path(chained) if chained else Path(params.get("input", {}).get("locator", ""))
+    if chained and not source.is_absolute():
+        source = staging / source
     if not source.is_absolute():
         source = project / source
-    if not source.is_file() or not contained(project, staging):
+    allowed_source = contained(staging, source) if chained else contained(project, source)
+    if not source.is_file() or not contained(project, staging) or not allowed_source:
         return fail(request_id, -32602, "unauthorized source or staging path")
     try:
         from markitdown import MarkItDown

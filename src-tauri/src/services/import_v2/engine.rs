@@ -28,6 +28,10 @@ pub struct EngineRequest {
     #[serde(default)]
     pub project_root: String,
     pub staging_root: String,
+    /// Staging-relative artifact produced by a preceding route (for example
+    /// the validated OOXML emitted by the legacy Office converter).
+    #[serde(default)]
+    pub chained_input: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,6 +82,15 @@ pub struct EngineRegistry {
 }
 
 impl EngineRegistry {
+    pub fn registered_routes(&self) -> Result<Vec<String>, BackendError> {
+        Ok(self
+            .engines
+            .read()
+            .map_err(|_| registry_error())?
+            .iter()
+            .map(|engine| engine.descriptor().route)
+            .collect())
+    }
     pub fn register(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
         let descriptor = engine.descriptor();
         let mut engines = self.engines.write().map_err(|_| registry_error())?;
@@ -331,5 +344,28 @@ mod tests {
                 "path should be rejected: {invalid_path:?}"
             );
         }
+    }
+
+    #[test]
+    fn chained_input_is_an_explicit_protocol_field() {
+        let value = serde_json::to_value(EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "r".into(),
+            session_id: "s".into(),
+            item_id: "i".into(),
+            task_id: "t".into(),
+            operation: EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::File,
+                display_name: "legacy.doc".into(),
+                locator: "legacy.doc".into(),
+                normalized_locator: None,
+            },
+            project_root: "root".into(),
+            staging_root: "staging".into(),
+            chained_input: Some("converted/legacy.docx".into()),
+        })
+        .unwrap();
+        assert_eq!(value["chainedInput"], "converted/legacy.docx");
     }
 }
