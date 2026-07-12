@@ -14,6 +14,7 @@ use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineOperation, EngineRegistry, EngineRequest, ImportEngine,
 };
+use crate::services::import_v2::native_file_engine::NativeFileEngine;
 use crate::services::import_v2::pack_engine::PackProcessEngine;
 use crate::services::import_v2::quality_gate::QualityGate;
 use crate::services::import_v2::transaction::FileTransaction;
@@ -31,9 +32,13 @@ pub struct ImportV2Service {
 
 impl Default for ImportV2Service {
     fn default() -> Self {
+        let engines = EngineRegistry::default();
+        engines
+            .register(Arc::new(NativeFileEngine::default()))
+            .expect("the built-in native file engine identifier is unique");
         Self {
             sessions: SessionStore::default(),
-            engines: EngineRegistry::default(),
+            engines,
             quality: QualityGate::default(),
             mutation_lock: Mutex::new(()),
         }
@@ -215,6 +220,7 @@ impl ImportV2Service {
             task_id: task_id.into(),
             operation: EngineOperation::Extract,
             input,
+            project_root: context.root.to_string_lossy().into_owned(),
             staging_root: staging_root.clone(),
         };
         let token = tasks
@@ -597,6 +603,7 @@ mod tests {
                 source_snapshot_path: "source.bin".into(),
                 markdown_path: "candidate.md".into(),
                 asset_paths: Vec::new(),
+                metadata_path: None,
                 title: "Fixture".into(),
                 text_coverage: Some(1.0),
                 table_cell_accuracy: None,

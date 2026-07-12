@@ -966,6 +966,7 @@ mod tests {
                 source_snapshot_path: "source.bin".into(),
                 markdown_path: "candidate.md".into(),
                 asset_paths: vec!["assets/asset.png".into()],
+                metadata_path: None,
                 title: request.input.display_name.clone(),
                 text_coverage: Some(1.0),
                 table_cell_accuracy: None,

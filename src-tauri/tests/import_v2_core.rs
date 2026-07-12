@@ -120,6 +120,7 @@ fn result(markdown: &str, title: &str) -> EngineResult {
         source_snapshot_path: "source.bin".into(),
         markdown_path: markdown.into(),
         asset_paths: vec![],
+        metadata_path: None,
         title: title.into(),
         text_coverage: Some(1.0),
         table_cell_accuracy: None,

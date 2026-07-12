@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-12] Import V2 Native File Engine — Added deterministic UTF-8 Markdown/text and RFC CSV normalization plus conservative local HTML sanitization, byte-exact source staging, safe relative-image copies, typed loss warnings, metadata provenance, cancellation cleanup, and default Import Core registration — Key decision: keep the public eight-format FileFormat contract stable while routing lightweight identity extensions internally through builtin.native-file and keeping formal writes behind Import Core.
+
 [2026-07-12] Import V2 File Discovery — Added deterministic bounded breadth-first folder and multi-file discovery, portable path collision handling, extension/magic/MIME and bounded OOXML validation, repeated-append deduplication, and a thin registered Tauri command — Key decision: discovery only creates Import Core inputs; skipped paths never become placeholder items and formal writes remain owned by Import Core.
 
 [2026-07-12] Import V2 Capability Packs — Added signed/hash-pinned/versioned platform and license selection, health rollback, traversal-safe immutable entrypoints, and a no-shell JSON-RPC process engine with cancellation, timeout, process-tree cleanup, and staging-only artifact validation — Key decision: formal raw/wiki/index writes remain exclusively behind Import Core; pack manifests and processes can only return item-staging artifacts.
