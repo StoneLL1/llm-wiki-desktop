@@ -68,8 +68,8 @@ impl ImportEngine for PackProcessEngine {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
-        let private_entrypoint = prepare_verified_entrypoint(&self.pack)?;
-        let mut command = Command::new(private_entrypoint.as_os_str());
+        validate_entrypoint_unchanged(&self.pack)?;
+        let mut command = Command::new(&self.pack.entrypoint);
         command
             .current_dir(&self.pack.root)
             .stdin(Stdio::piped())
@@ -88,7 +88,7 @@ impl ImportEngine for PackProcessEngine {
         let child = command
             .spawn()
             .map_err(|_| engine_error("The capability process could not be started."))?;
-        let mut child = ProcessGuard(child, None, None, Some(private_entrypoint));
+        let mut child = ProcessGuard(child, None, None);
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: request.request_id.clone(),
@@ -166,9 +166,7 @@ impl ImportEngine for PackProcessEngine {
     }
 }
 
-fn prepare_verified_entrypoint(
-    pack: &ResolvedCapabilityPack,
-) -> Result<tempfile::TempPath, BackendError> {
+fn validate_entrypoint_unchanged(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
     let metadata = std::fs::symlink_metadata(&pack.entrypoint)
         .map_err(|_| engine_error("The capability entrypoint is unavailable."))?;
     if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_file() {
@@ -185,36 +183,13 @@ fn prepare_verified_entrypoint(
     }
     let bytes = std::fs::read(&canonical)
         .map_err(|_| engine_error("The capability entrypoint cannot be verified."))?;
-    let actual = format!("{:x}", Sha256::digest(&bytes));
+    let actual = format!("{:x}", Sha256::digest(bytes));
     if actual != pack.entrypoint_sha256 {
         return Err(engine_error(
             "The capability entrypoint changed after verification.",
         ));
     }
-    let suffix = pack
-        .entrypoint
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| format!(".{value}"))
-        .unwrap_or_default();
-    let mut private = tempfile::Builder::new()
-        .prefix("llm-wiki-capability-")
-        .suffix(&suffix)
-        .tempfile()
-        .map_err(|_| engine_error("A private capability entrypoint could not be created."))?;
-    private
-        .write_all(&bytes)
-        .and_then(|_| private.flush())
-        .map_err(|_| engine_error("The private capability entrypoint could not be written."))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        private
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| engine_error("The private capability entrypoint could not be secured."))?;
-    }
-    Ok(private.into_temp_path())
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -258,7 +233,6 @@ struct ProcessGuard(
     Child,
     Option<std::thread::JoinHandle<()>>,
     Option<std::thread::JoinHandle<()>>,
-    Option<tempfile::TempPath>,
 );
 
 impl ProcessGuard {
@@ -274,7 +248,6 @@ impl ProcessGuard {
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        let _private_entrypoint = &self.3;
         // Always terminate the recorded process group/tree. The direct child may
         // have exited while a grandchild still owns inherited stdio handles.
         terminate_tree(&mut self.0);
@@ -360,7 +333,7 @@ mod tests {
             entrypoint_sha256: format!("{:x}", Sha256::digest(b"verified")),
         };
         std::fs::write(&entrypoint, b"replaced").unwrap();
-        assert!(prepare_verified_entrypoint(&pack).is_err());
+        assert!(validate_entrypoint_unchanged(&pack).is_err());
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -398,7 +371,7 @@ mod tests {
         let signal = joined.clone();
         let reader =
             std::thread::spawn(move || signal.store(true, std::sync::atomic::Ordering::SeqCst));
-        drop(ProcessGuard(child, Some(reader), None, None));
+        drop(ProcessGuard(child, Some(reader), None));
         assert!(joined.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

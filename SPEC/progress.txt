@@ -1,6 +1,6 @@
 # 进度记录 (progress.txt)
 
-[2026-07-12] Import V2 final execution-boundary closure — Rebuilt authorized staging without links/reparse points, launched only a private copy of hash-verified pack entrypoints, killed Unix process groups even after parent exit, and made accurate CJK OCR reachable before basic OCR — Key decision: verified payload bytes, not a mutable installed path, are the executable authority.
+[2026-07-12] Import V2 final execution-boundary hardening — Rebuilt authorized staging without static links/reparse points, revalidated hash-verified pack entrypoints immediately before spawn, killed Unix process groups even after parent exit, and made accurate CJK OCR independently addressable — Key decision: preserve signed pack-relative runtime layout; immutable install-root enforcement and handle-bound cross-platform spawn remain release-hardening gates.
 
 [2026-07-12] Import V2 dual-review runtime and security hardening — Connected signed app-local capability loading, background cancellable discovery, planner-owned typed fallbacks and chained legacy conversion, added source identity revalidation, handle-bound quality reads, bounded pack framing, reader cleanup, and process-tree termination — Key decision: the embedded development trust store remains empty and every placeholder pack stays fail-closed; only release-signed, hash-verified, qualified app-local payloads can register executable routes.
 
