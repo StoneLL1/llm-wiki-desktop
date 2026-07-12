@@ -18,6 +18,7 @@ pub(super) fn test_context(suffix: &str) -> (ProjectContext, PathBuf) {
 
 pub(super) fn test_file_input(name: &str) -> ImportInput {
     ImportInput {
+        source_identity: None,
         kind: ImportInputKind::File,
         display_name: name.to_string(),
         locator: format!("D:/fixtures/{name}"),

@@ -1009,6 +1009,7 @@ mod tests {
                 .create_session(&context, &files, ImportResourceMode::Balanced)
                 .unwrap();
             let inputs = ["first.pdf", "second.pdf"].map(|name| ImportInput {
+                source_identity: None,
                 kind: ImportInputKind::File,
                 display_name: name.into(),
                 locator: format!("D:/{name}"),
@@ -1067,6 +1068,7 @@ mod tests {
                 )
                 .unwrap();
             let input = ImportInput {
+                source_identity: None,
                 kind: ImportInputKind::File,
                 display_name: "updated.pdf".into(),
                 locator: "D:/first.pdf".into(),
@@ -1403,6 +1405,7 @@ mod tests {
             )
             .unwrap();
         let input = ImportInput {
+            source_identity: None,
             kind: ImportInputKind::File,
             display_name: "first.pdf".into(),
             locator: "D:/alias/first.pdf".into(),

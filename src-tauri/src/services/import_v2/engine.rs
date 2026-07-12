@@ -285,6 +285,7 @@ mod tests {
             .register(Arc::new(FixtureEngine::new("fixture", true)))
             .unwrap();
         let input = ImportInput {
+            source_identity: None,
             kind: ImportInputKind::File,
             display_name: "a.pdf".into(),
             locator: "D:/a.pdf".into(),
@@ -356,6 +357,7 @@ mod tests {
             task_id: "t".into(),
             operation: EngineOperation::Extract,
             input: ImportInput {
+                source_identity: None,
                 kind: ImportInputKind::File,
                 display_name: "legacy.doc".into(),
                 locator: "legacy.doc".into(),

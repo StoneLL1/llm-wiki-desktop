@@ -384,6 +384,7 @@ impl Drop for CoreIntegrationFixture {
 
 fn input(name: &str, locator: &str) -> ImportInput {
     ImportInput {
+        source_identity: None,
         kind: ImportInputKind::File,
         display_name: name.into(),
         locator: locator.into(),

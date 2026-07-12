@@ -109,6 +109,23 @@ pub struct ImportInput {
     pub display_name: String,
     pub locator: String,
     pub normalized_locator: Option<String>,
+    /// Immutable discovery-time fingerprint. Older sessions deserialize without it,
+    /// but file ingestion requires it before reading user-controlled content.
+    #[serde(default)]
+    pub source_identity: Option<SourceIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceIdentity {
+    pub canonical_path: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub modified_nanos: Option<u128>,
+    #[serde(default)]
+    pub file_id: Option<String>,
+    pub sha256: String,
+    pub magic: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

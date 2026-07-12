@@ -9,8 +9,20 @@ use llm_wiki_desktop_lib::services::import_v2::native_file_engine::NativeFileEng
 use llm_wiki_desktop_lib::services::import_v2::quality_gate::QualityGate;
 use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
 use tempfile::TempDir;
+use sha2::{Digest, Sha256};
 
 fn request(root: &TempDir, name: &str) -> EngineRequest {
+    let path = root.path().join(name);
+    let source_identity = fs::read(&path).ok().map(|bytes| {
+        llm_wiki_desktop_lib::models::import_v2::SourceIdentity {
+            canonical_path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
+            size_bytes: bytes.len() as u64,
+            modified_nanos: None,
+            file_id: None,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            magic: format!("{:x}", Sha256::digest(&bytes[..bytes.len().min(8192)])),
+        }
+    });
     EngineRequest {
         protocol_version: "2.0".into(),
         request_id: "request-1".into(),
@@ -23,6 +35,7 @@ fn request(root: &TempDir, name: &str) -> EngineRequest {
             display_name: name.into(),
             locator: name.into(),
             normalized_locator: None,
+            source_identity,
         },
         project_root: root.path().to_string_lossy().into_owned(),
         staging_root: "staging".into(),
@@ -144,5 +157,18 @@ fn invalid_utf8_and_pre_cancel_leave_no_staging_artifacts() {
         .execute(&request(&root, "cancel.md"), &token)
         .unwrap_err();
     assert_eq!(error.code, IMPORT_V2_CANCELLED);
+    assert!(!root.path().join("staging").exists());
+}
+
+#[test]
+fn rejects_same_length_source_swap_after_discovery() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("swap.md"), b"# trusted\n").unwrap();
+    let request = request(&root, "swap.md");
+    fs::write(root.path().join("swap.md"), b"# hostile\n").unwrap();
+    let error = NativeFileEngine::default()
+        .execute(&request, &CancellationToken::new())
+        .unwrap_err();
+    assert_eq!(error.code, "IMPORT_FILE_SOURCE_CHANGED");
     assert!(!root.path().join("staging").exists());
 }

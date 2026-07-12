@@ -121,35 +121,7 @@ impl ImportEngine for PackProcessEngine {
         child.2 = Some(stderr_reader);
         let (sender, receiver) = mpsc::channel::<Result<JsonRpcResponse<EngineResult>, ()>>();
         let stdout_reader = std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            for _ in 0..MAX_STDOUT_LINES {
-                let mut bytes = Vec::new();
-                match reader
-                    .by_ref()
-                    .take((MAX_STDOUT_LINE_BYTES + 1) as u64)
-                    .read_until(b'\n', &mut bytes)
-                {
-                    Ok(0) => break,
-                    Ok(_) if bytes.len() > MAX_STDOUT_LINE_BYTES || !bytes.ends_with(b"\n") => {
-                        let _ = sender.send(Err(()));
-                        return;
-                    }
-                    Err(_) => {
-                        let _ = sender.send(Err(()));
-                        return;
-                    }
-                    _ => {}
-                }
-                if let Ok(line) = std::str::from_utf8(&bytes) {
-                    if let Ok(response) =
-                        serde_json::from_str::<JsonRpcResponse<EngineResult>>(line.trim_end())
-                    {
-                        let _ = sender.send(Ok(response));
-                        return;
-                    }
-                }
-            }
-            let _ = sender.send(Err(()));
+            let _ = sender.send(read_response(stdout));
         });
         child.1 = Some(stdout_reader);
         let started = Instant::now();
@@ -190,6 +162,25 @@ impl ImportEngine for PackProcessEngine {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn read_response(reader: impl Read) -> Result<JsonRpcResponse<EngineResult>, ()> {
+    let mut reader = BufReader::new(reader);
+    for _ in 0..MAX_STDOUT_LINES {
+        let mut bytes = Vec::new();
+        match reader.by_ref().take((MAX_STDOUT_LINE_BYTES + 1) as u64).read_until(b'\n', &mut bytes) {
+            Ok(0) => break,
+            Ok(_) if bytes.len() > MAX_STDOUT_LINE_BYTES || !bytes.ends_with(b"\n") => return Err(()),
+            Err(_) => return Err(()),
+            _ => {}
+        }
+        if let Ok(line) = std::str::from_utf8(&bytes) {
+            if let Ok(response) = serde_json::from_str::<JsonRpcResponse<EngineResult>>(line.trim_end()) {
+                return Ok(response);
+            }
+        }
+    }
+    Err(())
 }
 
 struct ProcessGuard(
@@ -260,4 +251,46 @@ fn cancelled() -> BackendError {
 }
 fn engine_error(message: &str) -> BackendError {
     BackendError::new(IMPORT_V2_ENGINE_UNAVAILABLE, message, true, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Read};
+
+    #[test]
+    fn rejects_stdout_without_newline_beyond_eight_mib() {
+        assert!(read_response(Cursor::new(vec![b'x'; MAX_STDOUT_LINE_BYTES + 1])).is_err());
+    }
+
+    struct SlowReader { bytes: Cursor<Vec<u8>> }
+    impl Read for SlowReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::yield_now();
+            let count = out.len().min(3);
+            self.bytes.read(&mut out[..count])
+        }
+    }
+
+    #[test]
+    fn accepts_a_valid_response_arriving_in_slow_chunks() {
+        let json = b"{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n".to_vec();
+        let response = read_response(SlowReader { bytes: Cursor::new(json) }).unwrap();
+        assert_eq!(response.id, "r");
+    }
+
+    #[test]
+    fn process_guard_joins_reader_after_termination() {
+        #[cfg(windows)]
+        let child = Command::new(r"C:\Windows\System32\cmd.exe")
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .spawn().unwrap();
+        #[cfg(unix)]
+        let child = Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+        let joined = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = joined.clone();
+        let reader = std::thread::spawn(move || signal.store(true, std::sync::atomic::Ordering::SeqCst));
+        drop(ProcessGuard(child, Some(reader), None));
+        assert!(joined.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }

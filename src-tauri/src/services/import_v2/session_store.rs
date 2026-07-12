@@ -338,6 +338,7 @@ mod tests {
                 &files,
                 &session.session_id,
                 vec![crate::models::import_v2::ImportInput {
+                    source_identity: None,
                     kind: crate::models::import_v2::ImportInputKind::Url,
                     display_name: "公开页面".into(),
                     locator: format!("https://user:{secret}@例子.测试/文档?lang=zh&token={secret}&signature={secret}#access_token={secret}"),
