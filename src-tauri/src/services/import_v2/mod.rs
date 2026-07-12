@@ -17,6 +17,7 @@ pub mod quality_gate;
 mod session_store;
 pub mod source_registry;
 mod transaction;
+pub mod url_policy;
 
 #[cfg(test)]
 mod test_support;
