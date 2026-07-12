@@ -39,6 +39,7 @@ pub struct ResolvedCapabilityPack {
     pub manifest: CapabilityPackManifest,
     pub root: PathBuf,
     pub entrypoint: PathBuf,
+    pub entrypoint_sha256: String,
 }
 
 pub struct CapabilityPackManager {
@@ -191,10 +192,18 @@ impl CapabilityPackManager {
                 "The capability archive hash does not match its signed manifest.",
             ));
         }
+        let entrypoint_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                fs::read(&entrypoint)
+                    .map_err(|_| invalid("The capability entrypoint cannot be read."))?
+            )
+        );
         Ok(ResolvedCapabilityPack {
             manifest,
             root: canonical_root,
             entrypoint,
+            entrypoint_sha256,
         })
     }
 }

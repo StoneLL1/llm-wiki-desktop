@@ -150,7 +150,7 @@ fn resolve_source(root: &Path, locator: &str) -> Result<PathBuf, BackendError> {
     }
     Ok(root.join(candidate))
 }
-fn safe_read_source(
+pub(crate) fn safe_read_source(
     path: &Path,
     identity: &crate::models::import_v2::SourceIdentity,
 ) -> Result<Vec<u8>, BackendError> {

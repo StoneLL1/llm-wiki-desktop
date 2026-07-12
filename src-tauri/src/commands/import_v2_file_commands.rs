@@ -141,10 +141,18 @@ pub fn start_add_import_paths_v2(
             Ok(())
         };
         if let Err(error) = run() {
-            let _ = state.task_service.set_error(&task_id, error);
-            let _ = state
-                .task_service
-                .transition_status(&task_id, TaskStatus::Failed);
+            if error.code == "IMPORT_FILE_SCAN_CANCELLED"
+                || state.task_service.is_cancelled(&task_id)
+            {
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, TaskStatus::Cancelled);
+            } else {
+                let _ = state.task_service.set_error(&task_id, error);
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, TaskStatus::Failed);
+            }
         }
     });
     Ok(task)

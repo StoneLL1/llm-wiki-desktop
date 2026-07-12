@@ -118,13 +118,13 @@ const PACK_SPECS: &[PackSpec] = &[
     },
     PackSpec {
         id: "ocr-basic",
-        route: "ocr.document",
+        route: "ocr.basic",
         extensions: &["pdf"],
         licenses: &["Apache-2.0 AND BSD-2-Clause"],
     },
     PackSpec {
         id: "ocr-cjk-accurate",
-        route: "ocr.document",
+        route: "ocr.cjk-accurate",
         extensions: &["pdf"],
         licenses: &["Apache-2.0"],
     },
