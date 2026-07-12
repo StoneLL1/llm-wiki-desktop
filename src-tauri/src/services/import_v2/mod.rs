@@ -20,6 +20,7 @@ mod transaction;
 pub mod url_policy;
 pub mod web_fetch;
 pub mod domain_limiter;
+pub mod generic_web_engine;
 
 #[cfg(test)]
 mod test_support;

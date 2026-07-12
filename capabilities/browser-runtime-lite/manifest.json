@@ -1,0 +1,1 @@
+{"schemaVersion":1,"packId":"browser-runtime-lite","version":"0.1.0","protocolVersion":"2","targetTriples":[],"archiveSha256":"0000000000000000000000000000000000000000000000000000000000000000","licenseExpression":"Apache-2.0 AND MIT","entrypoint":"runner/index.mjs","compressedBytes":0,"installedBytes":0,"signingKeyId":"release-build-placeholder","signature":""}
