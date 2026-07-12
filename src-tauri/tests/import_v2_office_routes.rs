@@ -7,6 +7,7 @@ use llm_wiki_desktop_lib::services::import_v2::file_router::{
 fn modern_office_routes_are_explicit_and_deterministic() {
     let capabilities = CapabilitySnapshot {
         document_standard: true,
+        office_legacy: false,
         office_oxide_installed: true,
         office_oxide_qualified: true,
         agent_available: true,
