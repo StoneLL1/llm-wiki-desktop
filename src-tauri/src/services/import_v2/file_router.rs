@@ -5,6 +5,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapabilitySnapshot {
     pub document_standard: bool,
+    pub office_legacy: bool,
     pub office_oxide_installed: bool,
     /// True only after an independently produced qualification record passes
     /// the critical corpus and security gates on every supported platform.
@@ -47,6 +48,7 @@ impl CapabilitySnapshot {
                 });
         Self {
             document_standard,
+            office_legacy: false,
             office_oxide_installed,
             office_oxide_qualified,
             agent_available,
@@ -142,6 +144,44 @@ impl AttemptRecord {
 pub struct FileRoutePlanner;
 impl FileRoutePlanner {
     pub fn plan(format: FileFormat, capabilities: CapabilitySnapshot) -> Vec<RouteAttempt> {
+        let legacy_target = match format {
+            FileFormat::Doc => Some("office.modern.docx"),
+            FileFormat::Xls => Some("office.modern.xlsx"),
+            FileFormat::Ppt => Some("office.modern.pptx"),
+            _ => None,
+        };
+        if let Some(modern) = legacy_target {
+            let mut routes = Vec::new();
+            if capabilities.office_legacy {
+                routes.push(RouteAttempt {
+                    route: "pack.office-legacy",
+                    required_pack: Some("office-legacy"),
+                    quality_floor: QualityFloor::ModernOffice,
+                });
+                // This route consumes only the validated OOXML cache artifact emitted by
+                // office-legacy; it never changes the legacy source snapshot identity.
+                routes.push(RouteAttempt {
+                    route: modern,
+                    required_pack: None,
+                    quality_floor: QualityFloor::ModernOffice,
+                });
+            }
+            if capabilities.office_oxide_installed && capabilities.office_oxide_qualified {
+                routes.push(RouteAttempt {
+                    route: "pack.office-oxide",
+                    required_pack: Some("office-oxide"),
+                    quality_floor: QualityFloor::ModernOffice,
+                });
+            }
+            if capabilities.agent_available {
+                routes.push(RouteAttempt {
+                    route: "agent.office",
+                    required_pack: None,
+                    quality_floor: QualityFloor::AgentCandidate,
+                });
+            }
+            return routes;
+        }
         let primary = match format {
             FileFormat::Docx => Some("office.modern.docx"),
             FileFormat::Xlsx => Some("office.modern.xlsx"),
