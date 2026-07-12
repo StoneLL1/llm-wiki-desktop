@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "packId": "document-standard",
+  "version": "0.1.0",
+  "protocolVersion": "2",
+  "targetTriples": [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu"
+  ],
+  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "licenseExpression": "MIT",
+  "entrypoint": "runner/markitdown-pack",
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "5a25b0756f682e5b874b1c75b41b7a43b2f84d398e9cab92825199b3f9cf54eeb3e211f45f0de445da9d58359ca00d4bd3360f8b0017ce0556688d53b0d43b09"
+}

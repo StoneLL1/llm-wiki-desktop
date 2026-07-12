@@ -10,9 +10,11 @@ use crate::models::import_v2::{
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
+use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineOperation, EngineRegistry, EngineRequest, ImportEngine,
 };
+use crate::services::import_v2::pack_engine::PackProcessEngine;
 use crate::services::import_v2::quality_gate::QualityGate;
 use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::import_v2::SessionStore;
@@ -117,6 +119,21 @@ impl ImportV2Service {
     }
     pub fn register_engine(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
         self.engines.register(engine)
+    }
+
+    pub fn register_capability_pack(
+        &self,
+        pack: ResolvedCapabilityPack,
+        route: String,
+        supported_extensions: Vec<String>,
+        timeout: std::time::Duration,
+    ) -> Result<(), BackendError> {
+        self.register_engine(Arc::new(PackProcessEngine::new(
+            pack,
+            route,
+            supported_extensions,
+            timeout,
+        )))
     }
     pub fn set_item_selected(
         &self,

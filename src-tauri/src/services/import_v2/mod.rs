@@ -1,6 +1,8 @@
+pub mod capability_pack;
 mod commit;
 pub mod engine;
 mod orchestrator;
+pub mod pack_engine;
 pub mod pack_protocol;
 pub mod quality_gate;
 mod session_store;

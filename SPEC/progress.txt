@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-12] Import V2 Capability Packs — Added signed/hash-pinned/versioned platform and license selection, health rollback, traversal-safe immutable entrypoints, and a no-shell JSON-RPC process engine with cancellation, timeout, process-tree cleanup, and staging-only artifact validation — Key decision: formal raw/wiki/index writes remain exclusively behind Import Core; pack manifests and processes can only return item-staging artifacts.
+
 [2026-07-12] Import V2 File Contracts — Frozen Rust/TypeScript file formats, discovery skip reasons, scan policy/results, capability requirements, and Golden Corpus assertion schema with RED→GREEN contract coverage — Key decision: preserve the eight approved release formats and keep capability/runtime details additive behind Import Core.
 
 [2026-07-11] Import 2.0 Core — Added versioned DTOs, resumable sessions, engine protocol, quality gating, immutable source registry, atomic per-item commits, task integration, and V2 IPC without changing the legacy importer — Key decision: keep real file/web/Agent engines behind the stable ImportEngine boundary and defer command cutover until full regression.
