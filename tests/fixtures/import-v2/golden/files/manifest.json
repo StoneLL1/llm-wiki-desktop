@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "samples": [
+    {
+      "path": "sample.md",
+      "format": "markdown",
+      "expectedHeadings": ["Sample"],
+      "orderedTextSentinels": ["Sample content"],
+      "tableCellSentinels": [],
+      "imageCount": 0,
+      "pageSheetSlideCount": 1,
+      "minimumNormalizedCoverage": 0.98,
+      "expectedWarningCodes": []
+    }
+  ]
+}
