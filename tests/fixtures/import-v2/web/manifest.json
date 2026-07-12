@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "fixtures": [
+    {"id":"generic-article","publicUrl":"https://example.com/article","route":"generic_http","status":200,"bodyFixture":"generic/article.html","expected":{"title":"Example article","bodySentinels":["Frozen body"],"imageCount":0,"contentKind":"article"}},
+    {"id":"wechat-challenge","publicUrl":"https://mp.weixin.qq.com/s/example","route":"wechat","status":200,"bodyFixture":"wechat/challenge.html","expected":{"error":"challenge_detected","browserTransition":true}},
+    {"id":"zhihu-article","publicUrl":"https://zhuanlan.zhihu.com/p/1","route":"zhihu","status":200,"bodyFixture":"zhihu/article.html","expected":{"title":"Zhihu fixture","contentKind":"article"}},
+    {"id":"bilibili-video","publicUrl":"https://www.bilibili.com/video/BV1fixture","route":"bilibili","status":200,"bodyFixture":"bilibili/video.html","expected":{"title":"Bilibili fixture","contentKind":"video"}}
+  ]
+}
