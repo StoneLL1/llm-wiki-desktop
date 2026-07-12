@@ -1,4 +1,5 @@
 pub mod capability_pack;
+pub mod capability_runtime;
 mod commit;
 pub mod engine;
 pub mod file_discovery;

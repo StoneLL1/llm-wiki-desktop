@@ -28,6 +28,12 @@ pub fn run() {
             state
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
+            if let Ok(app_data) = app.path().app_local_data_dir() {
+                state.import_capability_runtime.load_installed(
+                    &app_data.join("installed-capabilities"),
+                    &state.import_v2_service,
+                );
+            }
 
             // Build tray menu: Show / Hide / Quit. Labels + tooltip are
             // localized to the user's UI language preference (CLAUDE.md: i18n
@@ -159,6 +165,8 @@ pub fn run() {
             commands::import_v2_commands::confirm_import_session_v2,
             commands::import_v2_file_commands::add_import_paths_v2,
             commands::import_v2_file_commands::start_add_import_paths_v2,
+            commands::import_v2_file_commands::get_import_capability_statuses,
+            commands::import_v2_file_commands::get_import_scan_result_v2,
             commands::task_commands::create_task,
             commands::task_commands::list_tasks,
             commands::task_commands::get_task,

@@ -470,7 +470,7 @@ fn import_v2_core_rejects_escape_and_redacts_secrets() {
             &fixture.context,
             &fixture.files,
             &session.session_id,
-            vec![input("escape.md", r"C:\safe\escape.md")],
+            vec![input("escape.docx", r"C:\safe\escape.docx")],
         )
         .unwrap();
     fixture.engine.escape_next.store(true, Ordering::SeqCst);
@@ -496,7 +496,7 @@ fn import_v2_core_rejects_escape_and_redacts_secrets() {
             &fixture.context,
             &fixture.files,
             &session.session_id,
-            vec![input("secret.md", r"C:\safe\secret.md")],
+            vec![input("secret.docx", r"C:\safe\secret.docx")],
         )
         .unwrap();
     fixture.engine.secret_next.store(true, Ordering::SeqCst);
