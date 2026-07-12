@@ -43,3 +43,7 @@ pub struct AddImportUrlV2Request {
     pub session_id: String,
     pub url: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebImportErrorCode { UrlRejected, PrivateTargetBlocked, RedirectRejected, TlsFailed, ResponseTooLarge, ChallengeDetected, LoginRequired, CaptchaRequired, StructureChanged, SubtitleUnavailable, ConnectorRateLimited }

@@ -7,9 +7,9 @@ use url::Url;
 use crate::errors::BackendError;
 use crate::models::import_v2_web::NormalizedWebUrl;
 
-const SECRET_KEYS: &[&str] = &["token", "access_token", "auth", "authorization", "signature", "sig", "xsec_token", "xsec_source", "utm_source", "utm_medium", "utm_campaign", "spm", "fbclid", "gclid"];
+const PUBLIC_QUERY_KEYS: &[&str] = &["id", "p", "page", "article", "aid", "bvid", "mid"];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionWebTarget { pub request_url: Url, pub public: NormalizedWebUrl }
 
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ impl UrlPolicy {
         let pairs = request_url.query_pairs().map(|(k,v)| (k.into_owned(),v.into_owned())).collect::<Vec<_>>();
         public.set_query(None);
         for (key, value) in pairs {
-            if !is_secret_key(&key) { public.query_pairs_mut().append_pair(&key, &value); }
+            if is_public_key(&key) { public.query_pairs_mut().append_pair(&key, &value); }
         }
         Ok(SessionWebTarget { request_url, public: NormalizedWebUrl { public_url: public.to_string(), host, scheme: public.scheme().into() } })
     }
@@ -52,7 +52,7 @@ impl UrlPolicy {
     pub fn public_persistence_url<'a>(&self, target: &'a SessionWebTarget) -> &'a str { &target.public.public_url }
 }
 
-fn is_secret_key(key: &str) -> bool { let k=key.to_ascii_lowercase(); SECRET_KEYS.iter().any(|s| k == *s || k.starts_with("utm_") || k.contains("signature")) }
+fn is_public_key(key: &str) -> bool { let k=key.to_ascii_lowercase(); PUBLIC_QUERY_KEYS.contains(&k.as_str()) }
 fn grant_allows(grant: Option<&PrivateTargetGrant>, target: &SessionWebTarget, ip: IpAddr, item_id: &str) -> bool {
     grant.is_some_and(|g| g.item_id == item_id && g.scheme == target.public.scheme && g.host == target.public.host && g.port == target.request_url.port_or_known_default().unwrap_or(0) && g.expires_at > Utc::now() && g.resolved_ips.contains(&ip))
 }
