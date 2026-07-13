@@ -182,6 +182,20 @@ pub struct FileTransaction {
     finished: bool,
 }
 
+pub(super) fn read_project_file_nofollow(
+    root: &Path,
+    path: &Path,
+) -> Result<Vec<u8>, BackendError> {
+    let binding = bind_recovery_parent(root, path)?;
+    let bytes = read_regular_nofollow(&binding, path)?;
+    revalidate_recovery_parent(&binding)?;
+    Ok(bytes)
+}
+
+pub(super) fn is_project_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    transaction_is_reparse_point(metadata)
+}
+
 impl FileTransaction {
     #[cfg(test)]
     fn simulate_process_crash(mut self) {
