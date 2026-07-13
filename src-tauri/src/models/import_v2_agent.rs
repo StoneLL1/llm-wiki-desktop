@@ -73,6 +73,22 @@ pub struct AgentInvocationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct GetImportAgentPolicyRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetImportAgentPolicyRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub policy: AgentAssistancePolicy,
+    pub local_agent_kind: Option<AgentKind>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SendScopeFile {
     pub relative_path: String,
     pub sha256: String,

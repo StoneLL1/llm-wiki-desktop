@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentKind;
+use crate::models::import_v2_agent::AgentAssistancePolicy;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::project::ProjectTemplate;
 
@@ -318,6 +319,8 @@ pub struct Settings {
     #[serde(default)]
     pub agent_default: Option<AgentKind>,
     #[serde(default)]
+    pub import_agent_policy: AgentAssistancePolicy,
+    #[serde(default)]
     pub llm_providers: Vec<LlmProviderConfig>,
     #[serde(default)]
     pub template: ProjectTemplate,
@@ -359,6 +362,7 @@ impl Default for Settings {
             manual_edit_protection: default_manual_edit_protection(),
             raw_sources_immutable: default_raw_sources_immutable(),
             agent_default: None,
+            import_agent_policy: AgentAssistancePolicy::default(),
             llm_providers: Vec::new(),
             template: ProjectTemplate::General,
         }
@@ -472,6 +476,8 @@ pub struct ProjectSettingsFile {
     #[serde(default)]
     pub agent_default: Option<AgentKind>,
     #[serde(default)]
+    pub import_agent_policy: AgentAssistancePolicy,
+    #[serde(default)]
     pub llm_providers: Vec<LlmProviderConfig>,
     #[serde(default)]
     pub template: ProjectTemplate,
@@ -515,6 +521,7 @@ impl Settings {
         self.manual_edit_protection = project.manual_edit_protection;
         self.raw_sources_immutable = project.raw_sources_immutable;
         self.agent_default = project.agent_default;
+        self.import_agent_policy = project.import_agent_policy;
         self.llm_providers = project.llm_providers;
         self.template = project.template;
     }
@@ -560,6 +567,7 @@ impl Settings {
             manual_edit_protection: self.manual_edit_protection,
             raw_sources_immutable: self.raw_sources_immutable,
             agent_default: self.agent_default,
+            import_agent_policy: self.import_agent_policy.clone(),
             llm_providers: self.llm_providers.clone(),
             template: self.template,
         }
