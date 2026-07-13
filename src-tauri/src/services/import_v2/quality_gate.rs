@@ -261,11 +261,16 @@ fn read_artifact(
     if before.len() > MAX_ARTIFACT_BYTES {
         return Err(quality_error());
     }
+    let validated_handle = same_file::Handle::from_path(&canonical).map_err(|_| quality_error())?;
     #[cfg(test)]
     run_before_artifact_open(&canonical);
     let file = std::fs::File::open(&canonical).map_err(|_| quality_error())?;
     let opened = file.metadata().map_err(|_| quality_error())?;
-    if !same_file(&before, &opened) {
+    let opened_handle = same_file::Handle::from_file(
+        file.try_clone().map_err(|_| quality_error())?,
+    )
+    .map_err(|_| quality_error())?;
+    if validated_handle != opened_handle || !same_file(&before, &opened) {
         return Err(quality_error());
     }
     let mut bytes = Vec::with_capacity(opened.len() as usize);
@@ -274,11 +279,13 @@ fn read_artifact(
         .read_to_end(&mut bytes)
         .map_err(|_| quality_error())?;
     let after = std::fs::metadata(&canonical).map_err(|_| quality_error())?;
+    let current_handle = same_file::Handle::from_path(&canonical).map_err(|_| quality_error())?;
     if bytes.len() as u64 > MAX_ARTIFACT_BYTES
         || before.len() != opened.len()
         || before.len() != bytes.len() as u64
         || before.len() != after.len()
         || !same_file(&opened, &after)
+        || opened_handle != current_handle
     {
         return Err(quality_error());
     }

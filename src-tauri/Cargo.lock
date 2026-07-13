@@ -2077,6 +2077,7 @@ dependencies = [
  "quick-xml 0.36.2",
  "reqwest",
  "ring",
+ "same-file",
  "semver",
  "serde",
  "serde_json",
