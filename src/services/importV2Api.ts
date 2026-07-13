@@ -90,7 +90,8 @@ const commandNames: ImportV2CommandNames = {
   getActivation: "get_import_backend_activation",
 };
 
-const request = <T>(name: string, value: T) => invoke<T>(name, { request: value });
+const request = <Response, Payload = unknown>(name: string, value: Payload) =>
+  invoke<Response>(name, { request: value });
 
 export const importV2Api: ImportV2Api = {
   commandNames,

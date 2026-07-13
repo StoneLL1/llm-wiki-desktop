@@ -245,7 +245,7 @@ fn read_staging_markdown(
     })?;
     let total_bytes = metadata.len();
     let truncated = total_bytes > IMPORT_V2_PREVIEW_MAX_BYTES;
-    let mut file = fs::File::open(&path).map_err(|_| {
+    let file = fs::File::open(&path).map_err(|_| {
         presentation_error(
             "IMPORT_V2_PREVIEW_READ_FAILED",
             "Markdown preview could not be read.",

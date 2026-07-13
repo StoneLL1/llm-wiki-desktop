@@ -129,7 +129,7 @@ export interface MigrationProjectRequest {
   projectRootPath: string;
 }
 
-export interface ScanImportV2MigrationRequest extends MigrationProjectRequest {}
+export type ScanImportV2MigrationRequest = MigrationProjectRequest;
 export interface PlanImportV2MigrationRequest extends MigrationProjectRequest {
   inventory: LegacyInventory;
 }
