@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Markdown preview links/images can become an implicit network/file fetch if rendered with default URL/image behavior — Keep links limited to safe external schemes and replace all image nodes with an omission marker; load content only through the identity-bound backend callback.
+
 The old App import tests hard-code V1 commands while the old ImportView remains during the staged cutover — keeping them active would assert removed behavior, but leaving skips past final integration would hide regressions — Keep the temporary six skips scoped to Task 5 and rewrite/replace them when Task 10 installs the V2 ImportView.
 
 Windows same-size artifact swaps can preserve coarse metadata timestamps — metadata-only identity checks may accept a replacement — Reuse same-file handle identity before/after artifact reads and keep the replacement regression test in the validation/open window.

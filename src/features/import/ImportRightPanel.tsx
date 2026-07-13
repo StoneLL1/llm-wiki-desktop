@@ -1,215 +1,130 @@
+import { Eye, FileCode2, Globe2, Link2, Package, ShieldAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import {
-  CheckCircle,
-  File as FileIcon,
-  FileSpreadsheet,
-  FileText,
-  Image as ImageIcon,
-  Link,
-  Presentation,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import type { ImportFileEntry, SourceFileType } from "../../types/import";
-import { FILE_TYPE_LABELS } from "../../types/import";
-import { useImportStore } from "../../stores/importStore";
-import { RightPanelHeader } from "../../components/app/RightPanelHeader";
+import type { ReactNode } from "react";
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+import { RightPanelHeader } from "../../components/app/RightPanelHeader";
+import { compactPath } from "../../lib/pathDisplay";
+import type { ImportItem } from "../../types/importV2";
+import { presentImportItem } from "./importStatusPresentation";
+import { ImportAttemptTimeline } from "./ImportAttemptTimeline";
+import { ImportItemStatus } from "./ImportItemStatus";
+import { ImportQualitySummary } from "./ImportQualitySummary";
+
+export interface ImportRightPanelProps {
+  selectedItem?: ImportItem | null;
+  onPreviewMarkdown?: (itemId: string) => void;
 }
 
-function fileTypeIcon(type: SourceFileType): { Icon: LucideIcon; color: string } {
-  switch (type) {
-    case "pdf":
-    case "document":
-      return { Icon: FileText, color: "var(--danger)" };
-    case "presentation":
-      return { Icon: Presentation, color: "var(--warning)" };
-    case "spreadsheet":
-    case "csv":
-      return { Icon: FileSpreadsheet, color: "var(--accent)" };
-    case "markdown":
-    case "text":
-      return { Icon: FileText, color: "var(--text-secondary)" };
-    case "image":
-      return { Icon: ImageIcon, color: "var(--text-secondary)" };
-    case "html":
-    case "url":
-      return { Icon: Link, color: "var(--accent)" };
-    default:
-      return { Icon: FileIcon, color: "var(--text-muted)" };
+function urlHost(locator: string): string {
+  try {
+    return new URL(locator).host || locator;
+  } catch {
+    return locator;
   }
 }
 
-const ARCHIVE_RULES: { type: string; target: string }[] = [
-  { type: "PDF", target: "raw/sources/pdfs/" },
-  { type: "DOCX", target: "raw/sources/docs/" },
-  { type: "PPTX", target: "raw/sources/slides/" },
-  { type: "XLSX/CSV", target: "raw/sources/sheets/" },
-  { type: "MD/TXT", target: "raw/sources/markdown/" },
-  { type: "图片", target: "raw/assets/" },
-  { type: "URL", target: "raw/sources/links/" },
-];
+function routeFor(item: ImportItem): string {
+  if (item.input.kind !== "url") return item.attempts.at(-1)?.route ?? "local_file";
+  const host = urlHost(item.input.normalizedLocator ?? item.input.locator).toLowerCase();
+  if (host.includes("bilibili")) return "bilibili";
+  if (host.includes("wechat") || host.includes("weixin")) return "wechat";
+  if (host.includes("zhihu")) return "zhihu";
+  return "generic_http";
+}
 
-export function ImportRightPanel() {
+function InspectorHeading({ children }: { children: ReactNode }) {
+  return <h3 className="import-v2-inspector-heading">{children}</h3>;
+}
+
+export function ImportRightPanel({ selectedItem = null, onPreviewMarkdown = () => undefined }: ImportRightPanelProps) {
   const { t } = useTranslation();
-  const preview = useImportStore((state) => state.preview);
-  const selectedSourcePath = useImportStore((state) => state.selectedSourcePath);
-
-  const file: ImportFileEntry | null = selectedSourcePath
-    ? preview?.files.find((entry) => entry.sourcePath === selectedSourcePath) ?? null
-    : null;
-
   return (
-    <aside
-      id="right-context-panel"
-      aria-label={t("import.rightpanel.title")}
-      className="right-panel"
-    >
-      <RightPanelHeader title={t("import.rightpanel.title")} />
+    <aside id="right-context-panel" aria-label={t("importV2.inspector.title")} className="right-panel">
+      <RightPanelHeader title={t("importV2.inspector.title")} />
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {!file ? (
-          <p className="px-4 py-3 text-[12px] text-[var(--text-muted)]">{t("import.rightpanel.noSelection")}</p>
+        {!selectedItem ? (
+          <p className="px-4 py-3 text-[12px] text-[var(--text-muted)]">{t("importV2.inspector.empty")}</p>
         ) : (
-          <SelectedFileSection file={file} />
+          <SelectedSource item={selectedItem} onPreviewMarkdown={onPreviewMarkdown} />
         )}
-        <ArchiveRulesSection />
-        <ConflictsSection />
       </div>
     </aside>
   );
 }
 
-function SelectedFileSection({ file }: { file: ImportFileEntry }) {
+function SelectedSource({ item, onPreviewMarkdown = () => undefined }: ImportRightPanelProps & { item: ImportItem }) {
   const { t } = useTranslation();
-  const { Icon, color } = fileTypeIcon(file.fileType);
-  const meta = file.metadata;
-  const sizePage = [
-    formatBytes(file.sizeBytes),
-    file.pageCount != null ? t("import.table.pagesValue", { n: file.pageCount }) : null,
-    file.wordCount != null ? t("import.table.wordsValue", { n: file.wordCount.toLocaleString() }) : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const presentation = presentImportItem(item);
+  const route = routeFor(item);
+  const preview = item.preview;
+  const sourceIcon = item.input.kind === "url" ? Globe2 : FileCode2;
+  const SourceIcon = sourceIcon;
+  const latestAttempt = item.attempts.at(-1);
 
   return (
-    <div className="border-b border-[var(--border-subtle)] px-4 py-3">
-      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
-        {t("import.rightpanel.selectedFile")}
-      </h4>
-      <div className="mb-3 flex items-center gap-2">
-        <Icon size={16} style={{ color }} />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-semibold text-[var(--text-primary)]">{file.originalName}</div>
-          <div className="font-mono text-[11px] text-[var(--text-muted)]">{sizePage || "—"}</div>
-        </div>
-      </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px]">
-        <dt className="text-[var(--text-muted)]">{t("import.table.col.type")}</dt>
-        <dd className="m-0 text-[var(--text-primary)]">{FILE_TYPE_LABELS[file.fileType]}</dd>
-        {file.pageCount != null && (
-          <>
-            <dt className="text-[var(--text-muted)]">{t("import.metaPages")}</dt>
-            <dd className="m-0 text-[var(--text-primary)]">{file.pageCount}</dd>
-          </>
-        )}
-        {file.wordCount != null && (
-          <>
-            <dt className="text-[var(--text-muted)]">{t("import.metaWords")}</dt>
-            <dd className="m-0 text-[var(--text-primary)]">{file.wordCount.toLocaleString()}</dd>
-          </>
-        )}
-        {meta?.language && (
-          <>
-            <dt className="text-[var(--text-muted)]">{t("import.meta.language")}</dt>
-            <dd className="m-0 text-[var(--text-primary)]">{meta.language}</dd>
-          </>
-        )}
-        {meta?.created && (
-          <>
-            <dt className="text-[var(--text-muted)]">{t("import.meta.created")}</dt>
-            <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{meta.created.slice(0, 10)}</dd>
-          </>
-        )}
-        {meta?.modified && (
-          <>
-            <dt className="text-[var(--text-muted)]">{t("import.meta.modified")}</dt>
-            <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{meta.modified.slice(0, 10)}</dd>
-          </>
-        )}
-        {file.extractedAssets.length > 0 && (
-          <>
-            <dt className="text-[var(--text-muted)]">{t("import.meta.assets")}</dt>
-            <dd className="m-0 text-[var(--text-primary)]">{file.extractedAssets.length}</dd>
-          </>
-        )}
-      </dl>
-
-      {file.extractionStatus === "unsupported" && (
-        <p className="mt-3 rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[11.5px] text-[var(--warning-text)]">
-          {t("import.unsupported.note")}
-        </p>
-      )}
-
-      {file.textPreview && (
-        <div className="mt-3">
-          <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
-            {t("import.rightpanel.textPreview")}
-          </h4>
-          <pre className="m-0 max-h-[240px] overflow-auto whitespace-pre-wrap rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--background)] p-3 font-mono text-[11.5px] leading-[1.65] text-[var(--text-secondary)]">
-            {file.textPreview}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ArchiveRulesSection() {
-  const { t } = useTranslation();
-  return (
-    <div className="border-b border-[var(--border-subtle)] px-4 py-3">
-      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
-        {t("import.rightpanel.archiveRules")}
-      </h4>
-      <div className="flex flex-col gap-1 font-mono text-[11.5px] text-[var(--text-secondary)]">
-        {ARCHIVE_RULES.map((rule) => (
-          <div key={rule.type}>
-            {rule.type} → {rule.target}
+    <>
+      <section className="border-b border-[var(--border-subtle)] px-4 py-3" aria-labelledby="import-source-title">
+        <div className="mb-2 flex items-start gap-2">
+          <SourceIcon size={16} className="mt-0.5 shrink-0 text-[var(--accent)]" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <h3 id="import-source-title" className="truncate text-[13px] font-semibold text-[var(--text-primary)]" title={item.input.displayName}>
+              {item.input.displayName}
+            </h3>
+            <div className="truncate font-mono text-[11px] text-[var(--text-muted)]" title={item.input.locator}>
+              {item.input.kind === "url" ? urlHost(item.input.normalizedLocator ?? item.input.locator) : compactPath(item.input.locator)}
+            </div>
           </div>
-        ))}
-      </div>
-      <p className="mt-2 text-[11px] text-[var(--text-muted)]">{t("import.rightpanel.rule.original")}</p>
-    </div>
+        </div>
+        <div className="mb-3"><ImportItemStatus item={item} presentation={presentation} /></div>
+        <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11.5px]">
+          <dt className="text-[var(--text-muted)]">{t("importV2.inspector.kind")}</dt>
+          <dd className="m-0 text-[var(--text-primary)]">{item.input.kind === "url" ? route : t("importV2.inspector.localSource")}</dd>
+          <dt className="text-[var(--text-muted)]">{t("importV2.inspector.route")}</dt>
+          <dd className="m-0 font-mono text-[var(--text-primary)]">{route}</dd>
+          {latestAttempt ? (
+            <>
+              <dt className="text-[var(--text-muted)]">{t("importV2.inspector.engine")}</dt>
+              <dd className="m-0 font-mono text-[var(--text-primary)]">{latestAttempt.engineId} {latestAttempt.engineVersion}</dd>
+            </>
+          ) : null}
+        </dl>
+        {item.issue ? (
+          <div role="alert" className="mt-3 flex gap-2 rounded-[var(--radius-md)] border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[11.5px] text-[var(--danger-text)]">
+            <ShieldAlert size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
+            <div><strong>{item.issue.code}</strong><div>{item.issue.message}</div></div>
+          </div>
+        ) : null}
+        {preview && presentation.actions.includes("preview_markdown") ? (
+          <button type="button" className="mt-3 inline-flex items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--border)] px-2.5 py-1.5 text-[11.5px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]" onClick={() => onPreviewMarkdown(item.itemId)}>
+            <Eye size={14} aria-hidden="true" />
+            {t("importV2.inspector.previewMarkdown")}
+          </button>
+        ) : null}
+      </section>
+
+      <section className="border-b border-[var(--border-subtle)] px-4 py-3" aria-labelledby="import-provenance-title">
+        <InspectorHeading><span id="import-provenance-title">{t("importV2.inspector.provenance")}</span></InspectorHeading>
+        {preview ? (
+          <dl className="m-0 space-y-1.5 text-[11.5px]">
+            <ArtifactRow label={t("importV2.inspector.output")} path={preview.markdown.relativePath} sha256={preview.markdown.sha256} sizeBytes={preview.markdown.sizeBytes} icon={Package} />
+            <ArtifactRow label={t("importV2.inspector.sourceSnapshot")} path={preview.sourceSnapshot.relativePath} sha256={preview.sourceSnapshot.sha256} sizeBytes={preview.sourceSnapshot.sizeBytes} icon={Link2} />
+            <div className="flex items-center justify-between gap-3 text-[var(--text-secondary)]"><dt>{t("importV2.inspector.assets")}</dt><dd className="m-0">{t("importV2.inspector.assetCount", { count: preview.assets.length })}</dd></div>
+          </dl>
+        ) : <p className="m-0 text-[12px] text-[var(--text-muted)]">{t("importV2.inspector.provenanceUnavailable")}</p>}
+      </section>
+
+      <ImportQualitySummary quality={preview?.quality ?? null} />
+      <ImportAttemptTimeline attempts={item.attempts} />
+    </>
   );
 }
 
-function ConflictsSection() {
-  const { t } = useTranslation();
-  const preview = useImportStore((state) => state.preview);
-  const conflicts = preview?.conflicts ?? [];
+function ArtifactRow({ label, path, sha256, sizeBytes, icon: Icon }: { label: string; path: string; sha256: string; sizeBytes: number; icon: typeof Package }) {
   return (
-    <div className="px-4 py-3">
-      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
-        {t("import.rightpanel.conflicts")}
-      </h4>
-      {conflicts.length === 0 ? (
-        <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-3 py-2 text-[11.5px]" style={{ color: "var(--accent-hover)" }}>
-          <CheckCircle size={14} />
-          {t("import.rightpanel.conflicts.empty")}
-        </div>
-      ) : (
-        <ul className="m-0 flex flex-col gap-2 p-0 text-[11.5px] text-[var(--text-secondary)]" style={{ listStyle: "none" }}>
-          {conflicts.map((conflict, idx) => (
-            <li key={`${conflict.newHash}-${conflict.resolvedPath}-${idx}`} className="rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--background)] px-3 py-2">
-              <div className="font-medium text-[var(--text-primary)]">{conflict.originalName}</div>
-              <div className="font-mono text-[10.5px] text-[var(--text-muted)]">→ {conflict.resolvedPath}</div>
-            </li>
-          ))}
-        </ul>
-      )}
+    <div className="min-w-0">
+      <div className="flex items-center gap-1.5 text-[var(--text-muted)]"><Icon size={12} aria-hidden="true" /><span>{label}</span><span className="ml-auto font-mono text-[10.5px]">{sizeBytes} B</span></div>
+      <div className="truncate font-mono text-[10.5px] text-[var(--text-primary)]" title={path}>{path}</div>
+      <div className="truncate font-mono text-[10px] text-[var(--text-muted)]" title={sha256}>sha256:{sha256}</div>
     </div>
   );
 }

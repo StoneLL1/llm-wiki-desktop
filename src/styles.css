@@ -3180,4 +3180,32 @@ select:focus-visible {
 }
 .lint-passed__badges { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* Import V2 right inspector: compact, token-backed section labels and reading preview. */
+.import-v2-inspector-heading {
+  margin: 0 0 var(--sp-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.import-v2-markdown-preview {
+  font-size: 14px;
+  line-height: 1.7;
+}
+.import-v2-markdown-preview :where(h1, h2, h3) {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.import-v2-markdown-preview :where(code, pre) {
+  font-family: var(--font-mono);
+}
+.import-v2-markdown-preview pre {
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  padding: var(--sp-3);
+}
+
 
