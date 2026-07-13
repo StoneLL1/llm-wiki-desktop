@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Visible account/avatar DOM was treated as login proof — Public article pages and logged-out headers can render those same elements — Require a known platform authentication cookie scoped to the target domain; DOM absence/presence alone never changes connector auth state.
+
 Validating a browser subresource hostname with Node DNS did not pin Chromium's later connection — Chromium performed an independent lookup after the public-answer check, leaving an allowed CDN host open to DNS rebinding — Permit only the initial host, map it to one address from an all-public DNS set before launch, and localize cross-host assets through the Rust pinned fetcher.
 
 Signing only a capability entrypoint or archive did not authenticate mutable installed siblings — JavaScript policies, dependencies, and helper binary digests can live outside the entrypoint while still controlling execution — Sign a sorted per-file path/size/SHA-256 inventory, reject missing/unexpected/symlink files, and reverify the whole runtime immediately before every spawn.

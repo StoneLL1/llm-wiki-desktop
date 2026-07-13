@@ -88,7 +88,12 @@ impl ImportEngine for PackProcessEngine {
         } else {
             request.clone()
         };
-        let authenticated_profile = self.web_targets.authenticated_profile(&request.item_id)?;
+        let authenticated_profile = if self.descriptor.route == "web.generic.browser" {
+            self.web_targets.take_authenticated_profile(&request.item_id)?
+        } else {
+            None
+        };
+        let _profile_cleanup = authenticated_profile.clone().map(EphemeralProfileGuard);
         validate_entrypoint_unchanged(&self.pack)?;
         let runtime_temp = std::path::Path::new(&request.project_root)
             .join(&request.staging_root)
@@ -236,6 +241,13 @@ impl ImportEngine for PackProcessEngine {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+struct EphemeralProfileGuard(std::path::PathBuf);
+impl Drop for EphemeralProfileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

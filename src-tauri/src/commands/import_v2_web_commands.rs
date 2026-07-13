@@ -166,6 +166,7 @@ pub fn complete_import_login_v2(
     }
     let profile = state.connector_session_service.authenticated_profile(&request.connector_session_id)?;
     state.import_v2_service.bind_authenticated_profile(&request.item_id, profile)?;
+    state.import_v2_service.release_item_after_login(&context, &state.file_store, &request.import_session_id, &request.item_id)?;
     Ok(reference)
 }
 #[tauri::command]

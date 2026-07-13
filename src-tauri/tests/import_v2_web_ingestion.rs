@@ -149,5 +149,17 @@ fn login_required_pauses_item_and_task_with_typed_recovery_without_secret_logs()
     .unwrap();
     let logs = serde_json::to_string(&tasks.get_logs(&task.id).unwrap()).unwrap();
     assert!(!persisted.contains("secret-cookie") && !logs.contains("secret-cookie"));
+    let released = service
+        .release_item_after_login(&context, &files, &session.session_id, &item.item_id)
+        .unwrap();
+    assert_eq!(released.status, ImportItemStatus::Failed);
+    assert!(released.task_id.is_none());
+    let retry = tasks
+        .create_project_task(TaskType::Import, "p".into(), root.clone(), "retry".into(), true)
+        .unwrap();
+    let retried = service
+        .run_item(&context, &files, &tasks, &session.session_id, &item.item_id, &retry.id)
+        .unwrap();
+    assert_eq!(retried.status, ImportItemStatus::WaitingLogin);
     std::fs::remove_dir_all(root).ok();
 }

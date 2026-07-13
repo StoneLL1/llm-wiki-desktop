@@ -82,6 +82,23 @@ impl ImportV2Service {
     pub fn bind_authenticated_profile(&self, item_id: &str, profile: std::path::PathBuf) -> Result<(), BackendError> {
         self.web_targets.bind_authenticated_profile(item_id, profile)
     }
+    pub fn release_item_after_login(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.status != ImportItemStatus::WaitingLogin {
+                return Err(BackendError::new(crate::errors::IMPORT_V2_STATE_INVALID, "Only a waiting-login item can be released.", false, true));
+            }
+            transition_item(item, ImportItemStatus::Failed)?;
+            item.task_id = None;
+            item.issue = None;
+            Ok(())
+        })
+    }
     pub fn create_session(
         &self,
         context: &ProjectContext,
