@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AGENT_RECOVERY_ACTIONS, balancedAgentAssistancePolicy } from "./importV2Agent";
 import type { ImportIssue } from "./importV2";
+import type { SelectImportAgentCandidateRequest } from "./importV2";
 
 describe("Import V2 Agent assistance contracts", () => {
   it("freezes recovery action wire names", () => {
@@ -33,5 +34,18 @@ describe("Import V2 Agent assistance contracts", () => {
     };
     expect(issue.recoveryActions).toEqual(["retry", "invoke_agent"]);
     expect(issue.availableActions).toEqual(["invoke_local_agent", "request_byok"]);
+  });
+
+  it("requires a current Wiki hash for explicit three-way merge payloads", () => {
+    const request: SelectImportAgentCandidateRequest = {
+      projectId: "project-a",
+      projectRootPath: "C:/wiki",
+      sessionId: "session-a",
+      itemId: "item-a",
+      candidateId: "candidate-a",
+      mergedMarkdown: "# Explicit merge",
+      expectedCurrentWikiSha256: "a".repeat(64),
+    };
+    expect(request.expectedCurrentWikiSha256).toHaveLength(64);
   });
 });

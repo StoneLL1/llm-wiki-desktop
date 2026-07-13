@@ -86,6 +86,48 @@ export interface AgentCandidateDiff {
   needsThreeWayMerge: boolean;
 }
 
+export interface AgentCandidateView {
+  projectId: string;
+  sessionId: string;
+  itemId: string;
+  candidate: AgentCandidate;
+  diff: AgentCandidateDiff;
+}
+
+export interface AgentCandidateActionResult {
+  projectId: string;
+  sessionId: string;
+  itemId: string;
+  candidateId: string;
+  item: import("./importV2").ImportItem;
+}
+
+export interface AcceptImportAgentCandidateRequest {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  itemId: string;
+  taskId: string;
+}
+
+export interface SelectImportAgentCandidateRequest {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  itemId: string;
+  candidateId: string;
+  mergedMarkdown: string | null;
+  expectedCurrentWikiSha256: string | null;
+}
+
+export interface DiscardImportAgentCandidateRequest {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  itemId: string;
+  candidateId: string;
+}
+
 export interface AgentAuditRecord {
   auditId: string;
   taskId: string;
