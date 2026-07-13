@@ -91,6 +91,7 @@ fn markdown_import_is_promoted_verbatim_to_wiki_sources() {
         files: vec![entry],
         conflicts: Vec::new(),
         summary: empty_summary(1),
+        v2_session_id: None,
     };
 
     ImportService
@@ -138,6 +139,7 @@ fn extracted_text_import_is_promoted_and_transient_staging_removed() {
         files: vec![entry],
         conflicts: Vec::new(),
         summary: empty_summary(1),
+        v2_session_id: None,
     };
 
     ImportService
@@ -185,6 +187,7 @@ fn cjk_original_name_is_preserved_in_promoted_filename() {
         files: vec![entry],
         conflicts: Vec::new(),
         summary: empty_summary(1),
+        v2_session_id: None,
     };
 
     ImportService
@@ -229,6 +232,7 @@ fn colliding_clean_names_get_numeric_suffix() {
         files: vec![md_entry, pdf_entry],
         conflicts: Vec::new(),
         summary: empty_summary(2),
+        v2_session_id: None,
     };
 
     ImportService
@@ -337,6 +341,7 @@ fn markdown_starting_with_horizontal_rule_is_not_misread_as_frontmatter() {
         files: vec![entry],
         conflicts: Vec::new(),
         summary: empty_summary(1),
+        v2_session_id: None,
     };
 
     ImportService

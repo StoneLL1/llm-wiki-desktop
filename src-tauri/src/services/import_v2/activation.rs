@@ -188,6 +188,10 @@ impl ImportV2ActivationService {
         }
         Ok(())
     }
+
+    pub fn is_active(context: &ProjectContext) -> Result<bool, BackendError> {
+        Ok(Self::default().read(context)?.is_some())
+    }
 }
 
 fn io_error(error: std::io::Error) -> BackendError {

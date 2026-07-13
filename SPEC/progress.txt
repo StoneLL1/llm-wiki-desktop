@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 cutover routing fix — Activation-aware legacy import facade now creates and executes V2 sessions, projects previews read-only, carries the V2 session through confirmation, and stages clipboard text inside the V2 session workspace — Key decision: preserve the existing import UI contract while post-activation import writes remain V2-only.
+
 [2026-07-13] Import V2 Agent Assistance release gate — Final unified check passed from the beginning after all review fixes (71 frontend files / 461 tests, lint, build, console scan, GUI Rust check, 597 Rust unit tests plus integration suites); product/integration review A and attacker review B both passed with no remaining findings — Key decision: packaged parent-crash process semantics remain an explicit operational qualification item, not an overstated repository certification.
 
 [2026-07-13] Import V2 Agent workspace crash lease — Added a pre-copy atomic lease bound to process instance, optional task, expiry and exact workspace UUID; restart recovery preserves active/succeeded tasks, removes abandoned preview or terminal task roots, and safely cleans partial atomic temporaries — Key decision: recovery never deletes an item-wide Agent directory and cannot be poisoned by a truncated lease temp.

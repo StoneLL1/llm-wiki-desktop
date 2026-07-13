@@ -189,6 +189,7 @@ impl super::ImportService {
             files: entries,
             conflicts,
             summary,
+            v2_session_id: None,
         })
     }
     fn scan_existing(
@@ -711,6 +712,7 @@ mod tests {
                 failed_files: 0,
                 conflicts_count: 0,
             },
+            v2_session_id: None,
         };
 
         let json = serde_json::to_string(&preview).unwrap();

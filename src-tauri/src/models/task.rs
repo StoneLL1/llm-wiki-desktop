@@ -72,6 +72,7 @@ pub struct TaskResult {
 )]
 pub enum TaskResultReference {
     ImportPreview { session_id: String, item_id: String },
+    ImportV2SessionPreview { session_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -49,6 +49,9 @@ export type TaskResultReference = {
   type: "import_preview";
   sessionId: string;
   itemId: string;
+} | {
+  type: "import_v2_session_preview";
+  sessionId: string;
 };
 
 export interface BackendError {
