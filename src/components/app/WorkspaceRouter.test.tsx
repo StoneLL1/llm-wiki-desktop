@@ -53,6 +53,12 @@ const importWorkflow: ImportWorkflow = {
   acceptAgentCandidate: vi.fn(),
   selectAgentCandidate: vi.fn(),
   discardAgentCandidate: vi.fn(),
+  beginLogin: vi.fn(),
+  completeLogin: vi.fn(),
+  revokeLogin: vi.fn(),
+  authorizePrivateTarget: vi.fn(),
+  getCapabilityRequirement: vi.fn(),
+  installCapability: vi.fn(),
 };
 const agentWorkflow: AgentWorkflow = {
   agents: [],

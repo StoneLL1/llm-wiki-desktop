@@ -26,6 +26,12 @@ const api = vi.hoisted(() => ({
   acceptAgentCandidate: vi.fn(),
   selectAgentCandidate: vi.fn(),
   discardAgentCandidate: vi.fn(),
+  beginLogin: vi.fn(),
+  completeLogin: vi.fn(),
+  revokeLogin: vi.fn(),
+  authorizePrivateTarget: vi.fn(),
+  getCapabilityRequirement: vi.fn(),
+  installCapability: vi.fn(),
 }));
 
 vi.mock("../../services/importV2Api", () => ({ importV2Api: api }));
@@ -163,6 +169,22 @@ beforeEach(() => {
     candidateId: "candidate-1",
     item: item(itemId, "failed"),
   }));
+  api.beginLogin.mockResolvedValue({ sessionId: "connector-1", platform: "wechat", profileRef: "opaque-profile", state: "waiting_login" });
+  api.completeLogin.mockResolvedValue({ sessionId: "connector-1", platform: "wechat", profileRef: "opaque-profile", state: "authenticated" });
+  api.revokeLogin.mockResolvedValue(undefined);
+  api.authorizePrivateTarget.mockResolvedValue("grant-opaque");
+  api.getCapabilityRequirement.mockResolvedValue({
+    requirement: { capabilityId: "browser-runtime", minimumVersion: "1.0.0", protocolVersion: "2", targetTriple: "x86_64-pc-windows-msvc", acceptedLicenseExpressions: ["Apache-2.0"] },
+    route: "web.generic.browser",
+    available: false,
+    installable: false,
+    compressedBytes: null,
+    installedBytes: null,
+    modelBytes: null,
+    license: "Apache-2.0",
+    fallback: "Use the signed release pack.",
+  });
+  api.installCapability.mockResolvedValue(task("capability-task", projectA.projectId, "queued"));
 });
 
 describe("useImportWorkflow", () => {
@@ -312,5 +334,27 @@ describe("useImportWorkflow", () => {
     expect(api.selectAgentCandidate).toHaveBeenCalledWith(expect.objectContaining({ candidateId: "candidate-1" }));
     expect(api.discardAgentCandidate).toHaveBeenCalledWith(expect.objectContaining({ candidateId: "candidate-1" }));
     expect(useTaskStore.getState().tasks.map((entry) => entry.id)).toEqual(expect.arrayContaining(["agent-task", "byok-task"]));
+  });
+
+  it("routes login, private-target, and capability gates through the current session identity", async () => {
+    const gated = item("gated-url", "waiting_login");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [gated]));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    await act(async () => result.current.beginLogin("gated-url", "wechat"));
+    await act(async () => result.current.completeLogin("gated-url", "connector-1"));
+    await act(async () => result.current.revokeLogin("connector-1"));
+    await act(async () => result.current.authorizePrivateTarget("gated-url", "https://private.example.com/article"));
+    await act(async () => result.current.getCapabilityRequirement("gated-url"));
+    await act(async () => result.current.installCapability("gated-url", "browser-runtime"));
+
+    expect(api.beginLogin).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-project-a", itemId: "gated-url", platform: "wechat" }));
+    expect(api.completeLogin).toHaveBeenCalledWith(expect.objectContaining({ importSessionId: "session-project-a", connectorSessionId: "connector-1" }));
+    expect(api.revokeLogin).toHaveBeenCalledWith({ sessionId: "connector-1" });
+    expect(api.authorizePrivateTarget).toHaveBeenCalledWith(expect.objectContaining({ url: "https://private.example.com/article" }));
+    expect(api.getCapabilityRequirement).toHaveBeenCalledWith(expect.objectContaining({ itemId: "gated-url" }));
+    expect(api.installCapability).toHaveBeenCalledWith(expect.objectContaining({ capabilityId: "browser-runtime", acknowledgeInstall: true }));
+    expect(useTaskStore.getState().tasks).toContainEqual(expect.objectContaining({ id: "capability-task" }));
   });
 });

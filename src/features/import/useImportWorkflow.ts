@@ -18,7 +18,11 @@ import type {
   AgentCandidateView,
   AgentSendScope,
 } from "../../types/importV2Agent";
-import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
+import type {
+  ConnectorSessionRef,
+  ImportCapabilityRequirement,
+  ImportFrontendReadiness,
+} from "../../types/importV2Presentation";
 import type { ProjectSummary } from "../../types/project";
 import type { BackendEvent, BackendTask } from "../../types/task";
 import { selectQueueCounts, selectSessionProgress, selectVisibleItems, type ImportQueueCounts, type ImportSessionProgress } from "./importViewModel";
@@ -68,6 +72,12 @@ export interface ImportWorkflow {
     expectedCurrentWikiSha256: string | null;
   }) => Promise<AgentCandidateActionResult | null>;
   discardAgentCandidate: (itemId: string, candidateId: string) => Promise<AgentCandidateActionResult | null>;
+  beginLogin: (itemId: string, platform: string) => Promise<ConnectorSessionRef | null>;
+  completeLogin: (itemId: string, connectorSessionId: string) => Promise<ConnectorSessionRef | null>;
+  revokeLogin: (connectorSessionId: string) => Promise<boolean>;
+  authorizePrivateTarget: (itemId: string, url: string) => Promise<string | null>;
+  getCapabilityRequirement: (itemId: string) => Promise<ImportCapabilityRequirement | null>;
+  installCapability: (itemId: string, capabilityId: string) => Promise<BackendTask | null>;
 
   // Compatibility fields are retained only until ImportView is replaced in Task 10.
   importedSources: ImportedSource[];
@@ -493,6 +503,85 @@ export function useImportWorkflow(
     }
   }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
 
+  const beginLogin = useCallback(async (itemId: string, platform: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const result = await importV2Api.beginLogin({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, platform });
+      return isScopeCurrent(projectKey, epoch) ? result : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
+  const completeLogin = useCallback(async (itemId: string, connectorSessionId: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const result = await importV2Api.completeLogin({ projectId, projectRootPath: rootPath, importSessionId: current.session.sessionId, itemId, connectorSessionId });
+      return isScopeCurrent(projectKey, epoch) ? result : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
+  const revokeLogin = useCallback(async (connectorSessionId: string) => {
+    if (latestProjectKey.current !== projectKey) return false;
+    try {
+      await importV2Api.revokeLogin({ sessionId: connectorSessionId });
+      return latestProjectKey.current === projectKey;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [projectKey, pushToast, t]);
+
+  const authorizePrivateTarget = useCallback(async (itemId: string, url: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const grant = await importV2Api.authorizePrivateTarget({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, url });
+      return isScopeCurrent(projectKey, epoch) ? grant : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
+  const getCapabilityRequirement = useCallback(async (itemId: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const result = await importV2Api.getCapabilityRequirement({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId });
+      return isScopeCurrent(projectKey, epoch) ? result : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
+  const installCapability = useCallback(async (itemId: string, capabilityId: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const task = await importV2Api.installCapability({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, capabilityId, acknowledgeInstall: true });
+      if (!isScopeCurrent(projectKey, epoch)) return null;
+      selectedTaskUpsert(task);
+      openTaskDrawer(task.id);
+      return task;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+
   return {
     session,
     readiness,
@@ -521,6 +610,12 @@ export function useImportWorkflow(
     acceptAgentCandidate,
     selectAgentCandidate,
     discardAgentCandidate,
+    beginLogin,
+    completeLogin,
+    revokeLogin,
+    authorizePrivateTarget,
+    getCapabilityRequirement,
+    installCapability,
     importedSources,
     isConfirming,
     requestPreview,
