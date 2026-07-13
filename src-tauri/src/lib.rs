@@ -169,6 +169,8 @@ pub fn run() {
             commands::import_v2_agent_commands::get_import_agent_policy_v2,
             commands::import_v2_agent_commands::set_import_agent_policy_v2,
             commands::import_v2_agent_commands::start_import_agent_assistance_v2,
+            commands::import_v2_agent_commands::preview_import_byok_scope_v2,
+            commands::import_v2_agent_commands::approve_import_byok_assistance_v2,
             commands::import_v2_file_commands::start_add_import_paths_v2,
             commands::import_v2_file_commands::get_import_capability_statuses,
             commands::import_v2_file_commands::get_import_scan_result_v2,

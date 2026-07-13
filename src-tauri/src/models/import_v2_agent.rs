@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     agent::AgentKind,
     import_v2::{ImportArtifact, QualityReport},
+    llm::LlmProviderKind,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,11 +106,43 @@ pub struct AgentSendScope {
     pub item_id: String,
     pub provider: String,
     pub model: String,
+    pub destination: String,
+    #[serde(default)]
+    pub public_metadata: Vec<String>,
     pub files: Vec<SendScopeFile>,
     pub estimated_input_tokens: u64,
     pub estimated_cost_micros: Option<u64>,
+    #[serde(default)]
+    pub requires_duplicate_charge_acknowledgement: bool,
     pub scope_sha256: String,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewImportByokScopeRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub trigger: AgentAssistanceTrigger,
+    pub provider: LlmProviderKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveImportByokAssistanceRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub trigger: AgentAssistanceTrigger,
+    pub provider: LlmProviderKind,
+    pub model: String,
+    pub approval_id: String,
+    pub scope_sha256: String,
+    #[serde(default)]
+    pub acknowledge_possible_duplicate_charge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

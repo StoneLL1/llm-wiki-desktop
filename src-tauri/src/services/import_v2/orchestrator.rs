@@ -168,7 +168,10 @@ impl ImportV2Service {
             let agent_attempts = item
                 .attempts
                 .iter()
-                .filter(|attempt| attempt.route.starts_with("agent_assistance/"))
+                .filter(|attempt| {
+                    attempt.route.starts_with("agent_assistance/")
+                        || attempt.route.starts_with("byok_assistance/")
+                })
                 .collect::<Vec<_>>();
             if agent_attempts.len() >= usize::from(max_attempts) {
                 return Err(task_error(
@@ -225,6 +228,53 @@ impl ImportV2Service {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_byok_assistance(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        trigger: AgentAssistanceTrigger,
+        provider: crate::models::llm::LlmProviderKind,
+        max_attempts: u8,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            let attempts = item
+                .attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.route.starts_with("agent_assistance/")
+                        || attempt.route.starts_with("byok_assistance/")
+                })
+                .collect::<Vec<_>>();
+            if attempts.len() >= usize::from(max_attempts)
+                || attempts.iter().any(|attempt| attempt.completed_at.is_none())
+            {
+                return Err(task_error("The Agent assistance attempt budget is exhausted or active."));
+            }
+            if !matches!(item.status, ImportItemStatus::Failed | ImportItemStatus::PreviewReady) {
+                return Err(task_error("BYOK assistance requires a failed item or preview."));
+            }
+            item.task_id = Some(task_id.to_string());
+            item.attempts.push(AttemptRecord {
+                route: format!("byok_assistance/{task_id}"),
+                engine_id: serde_json::to_value(provider)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "byok".into()),
+                engine_version: "configured-provider".into(),
+                stage: ImportStage::Extract,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                completed_at: None,
+                outcome: AttemptOutcome::Failed,
+                warnings: vec![format!("trigger={trigger:?}")],
+            });
+            Ok(())
+        })
+    }
+
     pub fn finish_agent_assistance_attempt(
         &self,
         context: &ProjectContext,
@@ -236,12 +286,13 @@ impl ImportV2Service {
         warnings: Vec<String>,
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
-            let route = format!("agent_assistance/{task_id}");
+            let local_route = format!("agent_assistance/{task_id}");
+            let byok_route = format!("byok_assistance/{task_id}");
             let attempt = item
                 .attempts
                 .iter_mut()
                 .rev()
-                .find(|attempt| attempt.route == route)
+                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
                 .ok_or_else(|| task_error("Agent assistance attempt was not found."))?;
             attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
             attempt.outcome = outcome;
@@ -261,15 +312,34 @@ impl ImportV2Service {
         let mut session = self.sessions.load(context, files, session_id)?;
         for item in &mut session.items {
             for attempt in &mut item.attempts {
+                let is_byok = attempt.route.starts_with("byok_assistance/");
                 let Some(task_id) = attempt
                     .route
                     .strip_prefix("agent_assistance/")
+                    .or_else(|| attempt.route.strip_prefix("byok_assistance/"))
                     .filter(|_| attempt.completed_at.is_none())
                     .map(str::to_owned)
                 else {
                     continue;
                 };
                 let task_status = tasks.get_task(&task_id).map(|task| task.status);
+                let charge_unknown = if is_byok {
+                    let audit_path = format!(
+                        ".app/import-sessions/{session_id}/items/{}/agent-audit/{task_id}.json",
+                        item.item_id
+                    );
+                    files
+                        .read_json::<crate::models::import_v2_agent::AgentAuditRecord>(
+                            context,
+                            &audit_path,
+                        )
+                        .ok()
+                        .is_some_and(|audit| {
+                            matches!(audit.outcome.as_str(), "send_started" | "outcome_unknown")
+                        })
+                } else {
+                    false
+                };
                 attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
                 match task_status {
                     Some(TaskStatus::Succeeded) => {
@@ -284,9 +354,13 @@ impl ImportV2Service {
                     }
                     _ => {
                         attempt.outcome = AttemptOutcome::Failed;
-                        attempt.warnings = vec![
-                            "Interrupted Agent assistance was closed during recovery.".into(),
-                        ];
+                        attempt.warnings = if charge_unknown {
+                            vec!["BYOK_CHARGE_STATUS_UNKNOWN".into()]
+                        } else {
+                            vec![
+                                "Interrupted Agent assistance was closed during recovery.".into(),
+                            ]
+                        };
                     }
                 }
             }
