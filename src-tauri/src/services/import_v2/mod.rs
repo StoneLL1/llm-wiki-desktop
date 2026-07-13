@@ -15,6 +15,7 @@ pub mod file_router;
 pub mod generic_web_engine;
 pub mod markdown_normalizer;
 pub mod media_router;
+pub mod migration;
 pub mod native_file_engine;
 pub mod ocr_router;
 pub mod office_postprocess;
