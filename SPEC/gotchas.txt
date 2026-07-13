@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Legacy import confirmation has no V2 conflict-action control — Mapping `NeedsMerge` to `CreateNew` would silently choose a destination and violate fail-closed correlation — Leave the Core decision unset and surface the conflict until a V2 confirmation surface supplies an explicit action.
+
 Parent preview cancellation could race a separate result write — The facade set a task result and then transitioned status, while cancellation could land between those operations — Use the existing TaskService atomic completion boundary and link parent/child cancellation tokens; never manually promote a cancelled parent to success.
 
 Activation-only backend guards left the existing import UI unable to commit after cutover — The old facade still created V1 previews and confirmation did not carry the V2 session identity — Route preview/text preview through V2 when activation is recorded, project V2 sessions into the old preview DTO, and include the session id in confirmation while keeping the old path guarded and read-only after cutover.

@@ -13,8 +13,8 @@ use crate::models::confirmation::{
 };
 use crate::models::import::{ConfirmedImport, ImportPreview, ImportRequest};
 use crate::models::import_v2::{
-    CommitConflictAction, CommitImportSessionRequest, CommitItemDecision, ImportInput,
-    ImportInputKind, ImportResourceMode,
+    CommitImportSessionRequest, CommitItemDecision, ImportInput, ImportInputKind,
+    ImportResourceMode,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -720,9 +720,9 @@ fn confirm_import_v2(
         })
         .map(|item| CommitItemDecision {
             item_id: item.item_id.clone(),
-            conflict_action: (item.status
-                == crate::models::import_v2::ImportItemStatus::NeedsMerge)
-                .then_some(CommitConflictAction::CreateNew),
+            // The compatibility UI has no explicit V2 conflict action. Keep
+            // conflicts unresolved rather than guessing CreateNew/KeepWiki.
+            conflict_action: None,
             expected_wiki_hash: None,
         })
         .collect();
