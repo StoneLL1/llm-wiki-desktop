@@ -1,0 +1,97 @@
+use crate::{
+    errors::BackendError,
+    services::{
+        import_v2::url_policy::{SessionWebTarget, UrlPolicy},
+        SecretService,
+    },
+};
+use serde::{Deserialize, Serialize};
+
+const PREFIX: &str = "import-web-target:";
+
+#[derive(Clone)]
+pub struct WebTargetStore {
+    secrets: SecretService,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredTarget {
+    request_url: String,
+    expires_at: String,
+}
+
+impl Default for WebTargetStore {
+    fn default() -> Self {
+        Self {
+            secrets: SecretService::default(),
+        }
+    }
+}
+impl WebTargetStore {
+    pub fn new(secrets: SecretService) -> Self {
+        Self { secrets }
+    }
+    pub fn store(&self, target: &SessionWebTarget) -> Result<String, BackendError> {
+        let reference = format!("{PREFIX}{}", uuid::Uuid::new_v4());
+        let payload = StoredTarget {
+            request_url: target.request_url.to_string(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339(),
+        };
+        self.secrets.set_account(
+            &reference,
+            &serde_json::to_string(&payload).map_err(|_| store_error())?,
+        )?;
+        Ok(reference)
+    }
+    pub fn resolve(
+        &self,
+        locator: &str,
+        expected_public: Option<&str>,
+    ) -> Result<SessionWebTarget, BackendError> {
+        let target = if locator.starts_with(PREFIX) {
+            let value = self.secrets.get_account(locator)?.ok_or_else(missing)?;
+            let stored: StoredTarget = serde_json::from_str(&value).map_err(|_| missing())?;
+            let expires = chrono::DateTime::parse_from_rfc3339(&stored.expires_at)
+                .map_err(|_| missing())?
+                .with_timezone(&chrono::Utc);
+            if expires <= chrono::Utc::now() {
+                self.secrets.delete_account(locator)?;
+                return Err(missing());
+            }
+            UrlPolicy.normalize_for_session(&stored.request_url)?
+        } else {
+            UrlPolicy.normalize_for_session(locator)?
+        };
+        if expected_public.is_some_and(|expected| expected != target.public.public_url) {
+            return Err(BackendError::new(
+                "IMPORT_V2_URL_REFERENCE_MISMATCH",
+                "Secure URL reference does not match its public locator.",
+                false,
+                true,
+            ));
+        }
+        Ok(target)
+    }
+    pub fn delete(&self, reference: &str) -> Result<(), BackendError> {
+        if reference.starts_with(PREFIX) {
+            self.secrets.delete_account(reference)?;
+        }
+        Ok(())
+    }
+}
+fn missing() -> BackendError {
+    BackendError::new(
+        "IMPORT_V2_URL_REFERENCE_EXPIRED",
+        "The secure URL reference is missing or expired.",
+        true,
+        true,
+    )
+}
+fn store_error() -> BackendError {
+    BackendError::new(
+        "IMPORT_V2_URL_REFERENCE_FAILED",
+        "The secure URL reference could not be stored.",
+        true,
+        true,
+    )
+}

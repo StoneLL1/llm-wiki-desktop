@@ -1,16 +1,20 @@
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::errors::{BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_UNAVAILABLE};
 use crate::models::import_v2::{ImportInput, ImportInputKind};
 use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
+use crate::services::import_v2::domain_limiter::DomainLimiter;
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
 };
 use crate::services::import_v2::pack_protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::services::import_v2::url_policy::UrlPolicy;
+use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
+use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
 
 const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -22,6 +26,8 @@ pub struct PackProcessEngine {
     descriptor: EngineDescriptor,
     timeout: Duration,
     supported_extensions: Vec<String>,
+    domain_limiter: Arc<DomainLimiter>,
+    web_targets: Arc<WebTargetStore>,
 }
 
 impl PackProcessEngine {
@@ -30,6 +36,7 @@ impl PackProcessEngine {
         route: String,
         supported_extensions: Vec<String>,
         timeout: Duration,
+        web_targets: Arc<WebTargetStore>,
     ) -> Self {
         let descriptor = EngineDescriptor {
             engine_id: format!("pack.{}.{route}", pack.manifest.pack_id),
@@ -41,6 +48,8 @@ impl PackProcessEngine {
             descriptor,
             timeout,
             supported_extensions,
+            domain_limiter: Arc::new(DomainLimiter::default()),
+            web_targets,
         }
     }
 }
@@ -51,13 +60,14 @@ impl ImportEngine for PackProcessEngine {
     }
 
     fn supports(&self, input: &ImportInput) -> bool {
-        (input.kind == ImportInputKind::Url && self.supported_extensions.is_empty()) || (input.kind == ImportInputKind::File
-            && self.supported_extensions.iter().any(|extension| {
-                input
-                    .locator
-                    .to_ascii_lowercase()
-                    .ends_with(&format!(".{extension}"))
-            }))
+        (input.kind == ImportInputKind::Url && self.supported_extensions.is_empty())
+            || (input.kind == ImportInputKind::File
+                && self.supported_extensions.iter().any(|extension| {
+                    input
+                        .locator
+                        .to_ascii_lowercase()
+                        .ends_with(&format!(".{extension}"))
+                }))
     }
 
     fn execute(
@@ -68,27 +78,67 @@ impl ImportEngine for PackProcessEngine {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
+        let request = if request.input.kind == ImportInputKind::Url {
+            prepare_web_request(
+                request,
+                cancellation,
+                self.domain_limiter.clone(),
+                self.web_targets.clone(),
+            )?
+        } else {
+            request.clone()
+        };
         validate_entrypoint_unchanged(&self.pack)?;
         let mut command = Command::new(&self.pack.entrypoint);
         command
             .current_dir(&self.pack.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .env_clear();
+        for key in [
+            "SystemRoot",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+            "HOME",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
         }
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|_| engine_error("The capability process could not be started."))?;
-        let mut child = ProcessGuard(child, None, None);
+        let platform_job = match attach_platform_job(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                terminate_tree(&mut child);
+                return Err(error);
+            }
+        };
+        let mut child = ProcessGuard(child, None, None, platform_job);
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: request.request_id.clone(),
@@ -121,7 +171,7 @@ impl ImportEngine for PackProcessEngine {
             let _ = stderr.take(MAX_STDERR_BYTES + 1).read_to_end(&mut sink);
         });
         child.2 = Some(stderr_reader);
-        let (sender, receiver) = mpsc::channel::<Result<JsonRpcResponse<EngineResult>, ()>>();
+        let (sender, receiver) = mpsc::channel::<Result<PackResponse, ()>>();
         let stdout_reader = std::thread::spawn(move || {
             let _ = sender.send(read_response(stdout));
         });
@@ -142,13 +192,35 @@ impl ImportEngine for PackProcessEngine {
                         "The capability process output exceeded protocol limits or was invalid.",
                     )
                 })?;
-                response.validate(&request.request_id)?;
-                let result = response
+                response.rpc.validate(&request.request_id)?;
+                if let Some(error) = response.rpc.error.as_ref() {
+                    let stable = error
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("code"))
+                        .and_then(|code| code.as_str())
+                        .filter(|code| code.starts_with("IMPORT_WEB_"))
+                        .unwrap_or(crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE);
+                    return Err(BackendError::new(
+                        stable.to_string(),
+                        "The web capability reported a typed failure.",
+                        true,
+                        stable.contains("LOGIN") || stable.contains("CHALLENGE"),
+                    ));
+                }
+                let mut result = response
+                    .rpc
                     .result
                     .ok_or_else(|| engine_error("The capability process reported an error."))?;
+                localize_remote_assets(
+                    &request,
+                    &mut result,
+                    response.remote_assets,
+                    cancellation,
+                    self.domain_limiter.clone(),
+                )?;
                 validate_engine_result(&request.staging_root, &result)?;
                 terminate_tree(&mut child.0);
-                child.join_readers();
                 return Ok(result);
             }
             if child
@@ -166,7 +238,90 @@ impl ImportEngine for PackProcessEngine {
     }
 }
 
-fn validate_entrypoint_unchanged(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
+fn prepare_web_request(
+    request: &EngineRequest,
+    cancellation: &CancellationToken,
+    limiter: Arc<DomainLimiter>,
+    targets: Arc<WebTargetStore>,
+) -> Result<EngineRequest, BackendError> {
+    let target = targets.resolve(
+        &request.input.locator,
+        request.input.normalized_locator.as_deref(),
+    )?;
+    let sensitive = matches!(target.public.host.as_str(), "mp.weixin.qq.com")
+        || target.public.host.ends_with(".xiaohongshu.com")
+        || matches!(target.public.host.as_str(), "x.com" | "twitter.com");
+    let token = cancellation.clone();
+    let item_id = request.item_id.clone();
+    let fetched = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|_| engine_error("The web runtime could not be started."))?;
+        runtime.block_on(async move {
+            let _permit = limiter
+                .acquire(&target.public.host, sensitive)
+                .await
+                .map_err(|_| engine_error("The domain limiter is unavailable."))?;
+            let policy = WebFetchPolicy::default();
+            fetch_with_safe_retries(target, &policy, &item_id, &token).await
+        })
+    })
+    .join()
+    .map_err(|_| engine_error("The web fetch worker failed."))??;
+    let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
+    std::fs::create_dir_all(&root)
+        .map_err(|_| engine_error("The web staging directory could not be created."))?;
+    std::fs::write(root.join("fetched.html"), &fetched.bytes)
+        .map_err(|_| engine_error("The fetched web response could not be staged."))?;
+    let mut prepared = request.clone();
+    prepared.input.locator = fetched.final_public_url.clone();
+    prepared.input.normalized_locator = Some(fetched.final_public_url);
+    prepared.chained_input = Some("fetched.html".into());
+    Ok(prepared)
+}
+
+async fn fetch_with_safe_retries(
+    target: crate::services::import_v2::url_policy::SessionWebTarget,
+    policy: &WebFetchPolicy,
+    item_id: &str,
+    token: &CancellationToken,
+) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
+    let mut last = None;
+    for _ in 0..policy.max_attempts_per_route.max(1) {
+        if token.is_cancelled() {
+            return Err(cancelled());
+        }
+        match WebFetchService
+            .fetch(
+                target.clone(),
+                &UrlPolicy,
+                policy,
+                None,
+                item_id,
+                |_| {},
+                || token.is_cancelled(),
+            )
+            .await
+        {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "IMPORT_V2_CONNECTOR_RATE_LIMITED"
+                        | "IMPORT_V2_DNS_FAILED"
+                        | "IMPORT_V2_FETCH_FAILED"
+                ) =>
+            {
+                last = Some(error)
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| engine_error("The web route exhausted its retry budget.")))
+}
+
+pub(super) fn validate_entrypoint_unchanged(
+    pack: &ResolvedCapabilityPack,
+) -> Result<(), BackendError> {
     let metadata = std::fs::symlink_metadata(&pack.entrypoint)
         .map_err(|_| engine_error("The capability entrypoint is unavailable."))?;
     if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_file() {
@@ -202,8 +357,21 @@ fn is_reparse(_: &std::fs::Metadata) -> bool {
     false
 }
 
-fn read_response(reader: impl Read) -> Result<JsonRpcResponse<EngineResult>, ()> {
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAssetRequest {
+    placeholder: String,
+    url: String,
+    kind: String,
+}
+struct PackResponse {
+    rpc: JsonRpcResponse<EngineResult>,
+    remote_assets: Vec<RemoteAssetRequest>,
+}
+
+fn read_response(reader: impl Read) -> Result<PackResponse, ()> {
     let mut reader = BufReader::new(reader);
+    let mut remote_assets = Vec::new();
     for _ in 0..MAX_STDOUT_LINES {
         let mut bytes = Vec::new();
         match reader
@@ -219,30 +387,180 @@ fn read_response(reader: impl Read) -> Result<JsonRpcResponse<EngineResult>, ()>
             _ => {}
         }
         if let Ok(line) = std::str::from_utf8(&bytes) {
-            if let Ok(response) =
-                serde_json::from_str::<JsonRpcResponse<EngineResult>>(line.trim_end())
-            {
-                return Ok(response);
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim_end()) else {
+                continue;
+            };
+            if value.get("method").and_then(|v| v.as_str()) == Some("import.remoteAsset") {
+                if remote_assets.len() >= 32 {
+                    return Err(());
+                }
+                let request: RemoteAssetRequest =
+                    serde_json::from_value(value.get("params").cloned().ok_or(())?)
+                        .map_err(|_| ())?;
+                if request.url.len() > 8192
+                    || request.placeholder.is_empty()
+                    || !request
+                        .placeholder
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    || !matches!(request.kind.as_str(), "image" | "subtitle")
+                {
+                    return Err(());
+                }
+                remote_assets.push(request);
+                continue;
+            }
+            if let Ok(rpc) = serde_json::from_value::<JsonRpcResponse<EngineResult>>(value) {
+                return Ok(PackResponse { rpc, remote_assets });
             }
         }
     }
     Err(())
 }
 
+fn localize_remote_assets(
+    request: &EngineRequest,
+    result: &mut EngineResult,
+    assets: Vec<RemoteAssetRequest>,
+    cancellation: &CancellationToken,
+    limiter: Arc<DomainLimiter>,
+) -> Result<(), BackendError> {
+    if assets.is_empty() {
+        return Ok(());
+    }
+    let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
+    let markdown_path = root.join(&result.markdown_path);
+    let source_path = root.join(&result.source_snapshot_path);
+    let mut markdown = std::fs::read_to_string(&markdown_path)
+        .map_err(|_| engine_error("The web candidate could not be reopened."))?;
+    let mut source = std::fs::read_to_string(&source_path)
+        .map_err(|_| engine_error("The sanitized web snapshot could not be reopened."))?;
+    for (index, asset) in assets.into_iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
+        let target = UrlPolicy.normalize_for_session(&asset.url)?;
+        let token = cancellation.clone();
+        let item_id = request.item_id.clone();
+        let content = if asset.kind == "image" {
+            WebFetchContent::Image
+        } else {
+            WebFetchContent::Subtitle
+        };
+        let mut policy = WebFetchPolicy::default();
+        policy.content = content;
+        policy.max_response_bytes = if content == WebFetchContent::Image {
+            8 * 1024 * 1024
+        } else {
+            4 * 1024 * 1024
+        };
+        let limiter = limiter.clone();
+        let fetched = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|_| engine_error("The asset runtime could not be started."))?;
+            runtime.block_on(async move {
+                let _permit = limiter
+                    .acquire(&target.public.host, false)
+                    .await
+                    .map_err(|_| engine_error("The domain limiter is unavailable."))?;
+                fetch_with_safe_retries(target, &policy, &item_id, &token).await
+            })
+        })
+        .join()
+        .map_err(|_| engine_error("The asset fetch worker failed."))??;
+        let extension = safe_asset_extension(&fetched.content_type, content)?;
+        let directory = if content == WebFetchContent::Image {
+            "assets"
+        } else {
+            "subtitles"
+        };
+        let relative = format!("{directory}/web-{index}.{extension}");
+        let destination = root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|_| engine_error("The asset directory could not be created."))?;
+        }
+        let transcript = (content == WebFetchContent::Subtitle)
+            .then(|| render_subtitle_markdown(&fetched.bytes, &extension))
+            .flatten();
+        std::fs::write(&destination, fetched.bytes)
+            .map_err(|_| engine_error("A localized web asset could not be written."))?;
+        let marker = format!("asset://{}", asset.placeholder);
+        markdown = markdown.replace(&marker, &relative);
+        if let Some(transcript) = transcript {
+            markdown.push_str("\n\n## Transcript\n\n");
+            markdown.push_str(&transcript);
+        }
+        source = source.replace(&marker, &relative);
+        result.asset_paths.push(relative);
+    }
+    std::fs::write(markdown_path, markdown)
+        .map_err(|_| engine_error("The localized candidate could not be written."))?;
+    std::fs::write(source_path, source)
+        .map_err(|_| engine_error("The localized snapshot could not be written."))?;
+    Ok(())
+}
+
+fn render_subtitle_markdown(bytes: &[u8], extension: &str) -> Option<String> {
+    if extension != "vtt" && extension != "srt" {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut output = String::new();
+    let mut timestamp = None;
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line == "WEBVTT" || line.chars().all(|value| value.is_ascii_digit()) {
+            continue;
+        }
+        if line.contains("-->") {
+            timestamp = line.split("-->").next().map(str::trim);
+            continue;
+        }
+        if line.starts_with("NOTE") || line.starts_with("STYLE") || line.starts_with("REGION") {
+            continue;
+        }
+        let clean = line.replace('<', "&lt;").replace('>', "&gt;");
+        if let Some(start) = timestamp.take() {
+            output.push_str(&format!("- [{start}] {clean}\n"));
+        } else if !output.ends_with(&format!("{clean}\n")) {
+            output.push_str(&format!("  {clean}\n"));
+        }
+        if output.len() > 4 * 1024 * 1024 {
+            break;
+        }
+    }
+    (!output.trim().is_empty()).then_some(output)
+}
+
+fn safe_asset_extension(
+    content_type: &str,
+    kind: WebFetchContent,
+) -> Result<&'static str, BackendError> {
+    let mime = content_type.split(';').next().unwrap_or("").trim();
+    match (kind, mime) {
+        (WebFetchContent::Image, "image/jpeg") => Ok("jpg"),
+        (WebFetchContent::Image, "image/png") => Ok("png"),
+        (WebFetchContent::Image, "image/gif") => Ok("gif"),
+        (WebFetchContent::Image, "image/webp") => Ok("webp"),
+        (WebFetchContent::Subtitle, "text/vtt") => Ok("vtt"),
+        (WebFetchContent::Subtitle, "application/x-subrip")
+        | (WebFetchContent::Subtitle, "text/plain") => Ok("srt"),
+        (WebFetchContent::Subtitle, "application/json") => Ok("json"),
+        _ => Err(engine_error("The remote asset MIME type is not allowed.")),
+    }
+}
+
 struct ProcessGuard(
     Child,
     Option<std::thread::JoinHandle<()>>,
     Option<std::thread::JoinHandle<()>>,
+    Option<PlatformJob>,
 );
 
 impl ProcessGuard {
-    fn join_readers(&mut self) {
-        if let Some(reader) = self.1.take() {
-            let _ = reader.join();
-        }
-        if let Some(reader) = self.2.take() {
-            let _ = reader.join();
-        }
+    fn detach_readers(&mut self) {
+        self.1.take();
+        self.2.take();
     }
 }
 
@@ -251,11 +569,12 @@ impl Drop for ProcessGuard {
         // Always terminate the recorded process group/tree. The direct child may
         // have exited while a grandchild still owns inherited stdio handles.
         terminate_tree(&mut self.0);
-        self.join_readers();
+        self.3.take();
+        self.detach_readers();
     }
 }
 
-fn terminate_tree(child: &mut Child) {
+pub(super) fn terminate_tree(child: &mut Child) {
     #[cfg(windows)]
     {
         let _ = Command::new(r"C:\Windows\System32\taskkill.exe")
@@ -284,6 +603,55 @@ fn terminate_tree(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[cfg(windows)]
+pub(super) struct PlatformJob(windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+unsafe impl Send for PlatformJob {}
+#[cfg(windows)]
+impl Drop for PlatformJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+#[cfg(windows)]
+pub(super) fn attach_platform_job(child: &Child) -> Result<Option<PlatformJob>, BackendError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::*;
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(engine_error(
+                "A kill-on-close Job Object could not be created.",
+            ));
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as _,
+            std::mem::size_of_val(&info) as u32,
+        ) == 0
+            || AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0
+        {
+            windows_sys::Win32::Foundation::CloseHandle(job);
+            return Err(engine_error(
+                "The capability process could not be assigned to its Job Object.",
+            ));
+        }
+        Ok(Some(PlatformJob(job)))
+    }
+}
+#[cfg(not(windows))]
+pub(super) struct PlatformJob;
+#[cfg(not(windows))]
+pub(super) fn attach_platform_job(_: &Child) -> Result<Option<PlatformJob>, BackendError> {
+    Ok(None)
+}
 fn cancelled() -> BackendError {
     BackendError::new(
         IMPORT_V2_CANCELLED,
@@ -305,6 +673,17 @@ mod tests {
     #[test]
     fn rejects_stdout_without_newline_beyond_eight_mib() {
         assert!(read_response(Cursor::new(vec![b'x'; MAX_STDOUT_LINE_BYTES + 1])).is_err());
+    }
+
+    #[test]
+    fn renders_localized_vtt_as_timestamped_markdown_without_html() {
+        let markdown = render_subtitle_markdown(
+            b"WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello <script>\n",
+            "vtt",
+        )
+        .unwrap();
+        assert!(markdown.contains("[00:00:01.000] Hello &lt;script&gt;"));
+        assert!(!markdown.contains("<script>"));
     }
 
     #[test]
@@ -355,7 +734,15 @@ mod tests {
             bytes: Cursor::new(json),
         })
         .unwrap();
-        assert_eq!(response.id, "r");
+        assert_eq!(response.rpc.id, "r");
+    }
+
+    #[test]
+    fn captures_bounded_remote_assets_only_from_typed_notifications() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"import.remoteAsset\",\"params\":{\"placeholder\":\"webasset-0\",\"url\":\"https://cdn.example/image.jpg?signature=secret\",\"kind\":\"image\"}}\n{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n";
+        let response = read_response(Cursor::new(input)).unwrap();
+        assert_eq!(response.remote_assets.len(), 1);
+        assert_eq!(response.remote_assets[0].placeholder, "webasset-0");
     }
 
     #[test]
@@ -371,7 +758,14 @@ mod tests {
         let signal = joined.clone();
         let reader =
             std::thread::spawn(move || signal.store(true, std::sync::atomic::Ordering::SeqCst));
-        drop(ProcessGuard(child, Some(reader), None));
+        let job = attach_platform_job(&child).unwrap();
+        drop(ProcessGuard(child, Some(reader), None, job));
+        for _ in 0..100 {
+            if joined.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
         assert!(joined.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

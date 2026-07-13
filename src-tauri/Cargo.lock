@@ -2071,6 +2071,7 @@ dependencies = [
  "csv",
  "futures-util",
  "keyring",
+ "libc",
  "lopdf",
  "pdf-extract",
  "quick-xml 0.36.2",
@@ -2090,6 +2091,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

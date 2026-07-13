@@ -1,3 +1,98 @@
-use serde::{Deserialize,Serialize};use super::ConnectorFailure;use crate::services::import_v2::{media_router::{MediaInput,MediaKind,MediaRoutePlan,MediaRouter,SubtitleCandidate,SubtitleKind},url_policy::UrlPolicy};
-#[derive(Clone,Serialize,Deserialize)]#[serde(rename_all="camelCase")]pub struct BilibiliDocument{pub title:String,pub author:String,pub published_at:Option<String>,pub description:String,pub cover_public_url:Option<String>,pub public_url:String,pub chapters:Vec<String>,#[serde(skip)]pub subtitle_requests:Vec<String>}
-pub fn extract_json(json:&str,url:&str,whisper_available:bool)->Result<(BilibiliDocument,MediaRoutePlan),ConnectorFailure>{let v:serde_json::Value=serde_json::from_str(json).map_err(|_|ConnectorFailure::StructureChanged)?;if v["code"].as_i64()==Some(-404){return Err(ConnectorFailure::Removed)}if v["loginRequired"].as_bool()==Some(true){return Err(ConnectorFailure::LoginRequired)}let d=&v["data"];let title=d["title"].as_str().filter(|s|!s.is_empty()).ok_or(ConnectorFailure::StructureChanged)?;let target=UrlPolicy.normalize_for_session(url).map_err(|_|ConnectorFailure::StructureChanged)?;let subtitles=d["subtitles"].as_array().into_iter().flatten().filter_map(|s|{let u=s["url"].as_str()?;let t=UrlPolicy.normalize_for_session(u).ok()?;let kind=if s["automatic"].as_bool()==Some(true){SubtitleKind::Automatic}else{SubtitleKind::HumanPlatform};Some((SubtitleCandidate::new(kind,t.public.public_url),t.request_url.to_string()))}).collect::<Vec<_>>();let plan=MediaRouter.plan(&MediaInput{kind:MediaKind::Video,subtitles:subtitles.iter().map(|x|x.0.clone()).collect(),cover_path:None},whisper_available);let doc=BilibiliDocument{title:title.into(),author:d["owner"]["name"].as_str().unwrap_or("Unknown").into(),published_at:d["publishedAt"].as_str().map(str::to_string),description:d["description"].as_str().unwrap_or("").into(),cover_public_url:d["cover"].as_str().and_then(|u|UrlPolicy.normalize_for_session(u).ok()).map(|t|t.public.public_url),public_url:target.public.public_url,chapters:d["chapters"].as_array().into_iter().flatten().filter_map(|x|x.as_str().map(str::to_string)).collect(),subtitle_requests:subtitles.into_iter().map(|x|x.1).collect()};Ok((doc,plan))}
+use serde::{Deserialize, Serialize};
+
+use super::ConnectorFailure;
+use crate::services::import_v2::{
+    media_router::{
+        MediaInput, MediaKind, MediaRoutePlan, MediaRouter, SubtitleCandidate, SubtitleKind,
+    },
+    url_policy::UrlPolicy,
+};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LocalAsrPolicy {
+    pub capability_available: bool,
+    pub user_authorized: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BilibiliDocument {
+    pub title: String,
+    pub author: String,
+    pub published_at: Option<String>,
+    pub description: String,
+    pub cover_public_url: Option<String>,
+    pub public_url: String,
+    pub chapters: Vec<String>,
+    #[serde(skip)]
+    pub subtitle_requests: Vec<String>,
+}
+
+pub fn extract_json(
+    json: &str,
+    url: &str,
+    asr: LocalAsrPolicy,
+) -> Result<(BilibiliDocument, MediaRoutePlan), ConnectorFailure> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| ConnectorFailure::StructureChanged)?;
+    if value["code"].as_i64() == Some(-404) {
+        return Err(ConnectorFailure::Removed);
+    }
+    if value["loginRequired"].as_bool() == Some(true) {
+        return Err(ConnectorFailure::LoginRequired);
+    }
+    let data = &value["data"];
+    let title = data["title"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(ConnectorFailure::StructureChanged)?;
+    let target = UrlPolicy
+        .normalize_for_session(url)
+        .map_err(|_| ConnectorFailure::StructureChanged)?;
+    let subtitles = data["subtitles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|subtitle| {
+            let url = subtitle["url"].as_str()?;
+            let target = UrlPolicy.normalize_for_session(url).ok()?;
+            let kind = if subtitle["automatic"].as_bool() == Some(true) {
+                SubtitleKind::Automatic
+            } else {
+                SubtitleKind::HumanPlatform
+            };
+            Some((
+                SubtitleCandidate::new(kind, target.public.public_url),
+                target.request_url.to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let plan = MediaRouter.plan_authorized(
+        &MediaInput {
+            kind: MediaKind::Video,
+            subtitles: subtitles.iter().map(|item| item.0.clone()).collect(),
+            cover_path: None,
+        },
+        asr.capability_available,
+        asr.user_authorized,
+    );
+    let document = BilibiliDocument {
+        title: title.into(),
+        author: data["owner"]["name"].as_str().unwrap_or("Unknown").into(),
+        published_at: data["publishedAt"].as_str().map(str::to_string),
+        description: data["description"].as_str().unwrap_or("").into(),
+        cover_public_url: data["cover"]
+            .as_str()
+            .and_then(|url| UrlPolicy.normalize_for_session(url).ok())
+            .map(|target| target.public.public_url),
+        public_url: target.public.public_url,
+        chapters: data["chapters"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect(),
+        subtitle_requests: subtitles.into_iter().map(|item| item.1).collect(),
+    };
+    Ok((document, plan))
+}

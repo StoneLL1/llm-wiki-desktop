@@ -1,5 +1,9 @@
 # 踩坑清单 (gotchas.txt)
 
+Node smoke scripts named `*.test.mjs` are collected by Vitest even when they use `node:test` or top-level assertions — Vitest reports “No test suite found” after the standalone assertions pass — Name manual scripts `*.smoke.mjs` and keep Node test-runner files outside the Vitest `*.test.*` pattern.
+
+Bilibili “ASR available” was mistaken for “ASR authorized” — Capability presence alone does not grant permission to download or process temporary media, and a metadata-only success suppresses all fallbacks — Model availability and per-item user authorization separately, fail closed when subtitles are absent, and never claim ASR completion without the signed media runtime and cleanup chain.
+
 Copying only a verified capability entrypoint broke its runtime layout — Pack launchers may import sibling modules or load adjacent DLLs/resources, while a path-level hash check still has a narrow check-to-spawn race — Preserve the signed pack directory layout; release packaging must enforce an immutable install root and platform handle-bound execution, and process groups/trees must still be terminated unconditionally.
 
 Capability pack fallback rejected ordinary project-external imports or bypassed scan identity — Passing the original locator to a pack either violates its project/staging sandbox or reopens a scan-to-execute TOCTOU window — Revalidate the persisted source identity in Core, copy exact bytes to the item staging `authorized/` area, and expose only that snapshot plus staging-contained chained artifacts to every pack.

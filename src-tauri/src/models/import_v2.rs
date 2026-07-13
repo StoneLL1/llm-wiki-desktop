@@ -62,7 +62,7 @@ impl ImportItemStatus {
                 )
                 | (WaitingCapability, Extracting | Cancelled | Failed)
                 | (WaitingLogin, Extracting | Cancelled | Failed)
-                | (Extracting, Validating | Failed | Cancelled)
+                | (Extracting, WaitingLogin | Validating | Failed | Cancelled)
                 | (Validating, PreviewReady | Failed | Cancelled)
                 | (PreviewReady, NeedsMerge | Committing | Skipped | Cancelled)
                 | (NeedsMerge, PreviewReady | Committing | Skipped | Cancelled)
@@ -216,6 +216,33 @@ pub enum ImportRecoveryAction {
 }
 
 impl ImportIssue {
+    pub fn for_web_code(code: &str, stage: ImportStage) -> Self {
+        use ImportRecoveryAction::*;
+        let (retryable, user_action_required, mut recovery_actions) = match code {
+            "IMPORT_WEB_LOGIN_REQUIRED"
+            | "IMPORT_WEB_CHALLENGE_DETECTED"
+            | "IMPORT_WEB_CAPTCHA_REQUIRED" => (false, true, vec![BeginLogin]),
+            "IMPORT_V2_URL_REJECTED" | "IMPORT_V2_REDIRECT_REJECTED" => (false, true, vec![Skip]),
+            "IMPORT_V2_PRIVATE_TARGET_BLOCKED" => (false, true, vec![AuthorizePrivateTarget]),
+            "IMPORT_V2_RESPONSE_TOO_LARGE" => (false, true, vec![SwitchRoute]),
+            "IMPORT_V2_CONNECTOR_RATE_LIMITED" => (true, false, vec![RetryRoute, SwitchRoute]),
+            "IMPORT_WEB_STRUCTURE_CHANGED" => (true, true, vec![SwitchRoute, InvokeAgent]),
+            "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => {
+                (true, true, vec![InstallMediaCapability, InvokeAgent])
+            }
+            "IMPORT_V2_ENGINE_UNAVAILABLE" => (true, true, vec![InstallBrowserCapability]),
+            _ => (true, false, vec![RetryRoute, SwitchRoute]),
+        };
+        recovery_actions.extend([Skip, ViewLog]);
+        Self {
+            code: code.into(),
+            message: "Web import could not be completed.".into(),
+            stage,
+            retryable,
+            user_action_required,
+            recovery_actions,
+        }
+    }
     pub fn for_file_code(code: &str, stage: ImportStage) -> Self {
         use ImportRecoveryAction::*;
         let (retryable, user_action_required, mut recovery_actions) = match code {

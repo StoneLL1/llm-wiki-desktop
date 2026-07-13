@@ -1,9 +1,14 @@
 pub mod capability_pack;
 pub mod capability_runtime;
 mod commit;
+pub mod connector_session;
+pub mod connectors;
+pub mod domain_limiter;
+pub mod domain_router;
 pub mod engine;
 pub mod file_discovery;
 pub mod file_router;
+pub mod generic_web_engine;
 pub mod markdown_normalizer;
 pub mod media_router;
 pub mod native_file_engine;
@@ -19,11 +24,7 @@ pub mod source_registry;
 mod transaction;
 pub mod url_policy;
 pub mod web_fetch;
-pub mod domain_limiter;
-pub mod generic_web_engine;
-pub mod domain_router;
-pub mod connector_session;
-pub mod connectors;
+pub mod web_target_store;
 
 #[cfg(test)]
 mod test_support;
