@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Windows same-size artifact swaps can preserve coarse metadata timestamps — metadata-only identity checks may accept a replacement — Reuse same-file handle identity before/after artifact reads and keep the replacement regression test in the validation/open window.
+
 The frontend capability install affordance cannot be backed by a download task yet — the current runtime exposes only signed installed-pack resolution — Keep the adapter installable=false and surface the release/fallback path instead of fabricating a task or silently downloading.
 
 Legacy import confirmation has no V2 conflict-action control — Mapping `NeedsMerge` to `CreateNew` would silently choose a destination and violate fail-closed correlation — Leave the Core decision unset and surface the conflict until a V2 confirmation surface supplies an explicit action.

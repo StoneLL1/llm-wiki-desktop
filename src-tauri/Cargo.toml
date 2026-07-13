@@ -27,6 +27,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 sha2 = "0.10"
 ring = "0.17"
 semver = "1"
+same-file = "1.0"
 tauri = { version = "2", features = ["tray-icon"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-notification = { version = "2", optional = true }
