@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -50,6 +51,51 @@ impl Default for ImportV2Service {
 }
 
 impl ImportV2Service {
+    pub fn find_unfinished_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+    ) -> Result<Option<String>, BackendError> {
+        let root = context.app_dir.join("import-sessions");
+        let metadata = match fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(BackendError::new("IMPORT_V2_SESSION_SCAN_FAILED", error.to_string(), true, true)),
+        };
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
+        {
+            return Err(BackendError::new("IMPORT_V2_SESSION_SCAN_FAILED", "Import session directory is not safe.", false, true));
+        }
+        let mut ids = fs::read_dir(root)
+            .map_err(|error| BackendError::new("IMPORT_V2_SESSION_SCAN_FAILED", error.to_string(), true, true))?
+            .flatten()
+            .filter_map(|entry| {
+                let metadata = fs::symlink_metadata(entry.path()).ok()?;
+                if metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && !crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
+                {
+                    let id = entry.file_name().to_string_lossy().into_owned();
+                    (id.len() <= 64 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')).then_some(id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        for id in ids {
+            let session = self.load_session(context, files, &id)?;
+            if !matches!(session.status, ImportSessionStatus::Completed | ImportSessionStatus::Cancelled)
+                && !session.items.is_empty()
+            {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn with_secret_service(secrets: SecretService) -> Self {
         let engines = EngineRegistry::default();
         engines

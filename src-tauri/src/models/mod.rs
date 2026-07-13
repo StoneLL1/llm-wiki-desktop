@@ -12,6 +12,7 @@ pub mod import_v2_migration;
 pub mod import_backend_activation;
 pub mod import_v2_agent;
 pub mod import_v2_file;
+pub mod import_v2_presentation;
 pub mod import_v2_web;
 pub mod lint;
 pub mod llm;
