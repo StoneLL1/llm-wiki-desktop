@@ -1255,5 +1255,8 @@
   "importV2.action.compare_candidate": "比较候选",
   "importV2.action.discard_candidate": "丢弃候选",
   "importV2.action.resolve_merge": "解决合并",
-  "importV2.action.open_result": "打开结果"
+  "importV2.action.open_result": "打开结果",
+  "importV2.workflow.error": "导入流程错误：{{message}}",
+  "importV2.workflow.clipboardUnavailable": "剪贴板导入尚未纳入 V2 来源契约。",
+  "importV2.workflow.legacyActionUnavailable": "V2 切换后旧来源修改已禁用。"
 }
