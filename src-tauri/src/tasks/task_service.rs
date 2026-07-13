@@ -391,6 +391,50 @@ impl TaskService {
         Ok(task)
     }
 
+    /// Atomically installs a result and completes a running task. This is used
+    /// at cancellation-sensitive boundaries where `set_result` followed by a
+    /// separate status transition would allow a Cancelled task to retain a
+    /// successful result.
+    pub fn complete_running_with_result(
+        &self,
+        id: &str,
+        result: TaskResult,
+    ) -> Result<BackendTask, String> {
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {}", id))?;
+        if entry.task.status != TaskStatus::Running || entry.cancellation.is_cancelled() {
+            return Err(format!("Task is no longer running: {id}"));
+        }
+        let previous = entry.task.clone();
+        let now = Utc::now().to_rfc3339();
+        entry.task.result = Some(result);
+        entry.task.status = TaskStatus::Succeeded;
+        entry.task.updated_at = now.clone();
+        entry.task.completed_at = Some(now);
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task(id) {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.task = previous;
+            }
+            drop(tasks);
+            let _ = self.persist_current_task(id);
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskCompleted,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
     pub fn set_error(
         &self,
         id: &str,
@@ -623,6 +667,49 @@ mod tests {
     use crate::tasks::task_events::CapturedEvent;
     use crate::tasks::task_model::LogLevel;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn cancellation_and_atomic_completion_never_leave_a_cancelled_result() {
+        for _ in 0..64 {
+            let service = Arc::new(TaskService::default());
+            let task = service.create_task(TaskType::Import, None, "race".into(), true);
+            service
+                .transition_status(&task.id, TaskStatus::Running)
+                .unwrap();
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let cancel_service = Arc::clone(&service);
+            let cancel_id = task.id.clone();
+            let cancel_barrier = Arc::clone(&barrier);
+            let cancel = std::thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_service.cancel_task(&cancel_id)
+            });
+            let complete_service = Arc::clone(&service);
+            let complete_id = task.id.clone();
+            let complete_barrier = Arc::clone(&barrier);
+            let complete = std::thread::spawn(move || {
+                complete_barrier.wait();
+                complete_service.complete_running_with_result(
+                    &complete_id,
+                    TaskResult {
+                        summary: "candidate".into(),
+                        affected_paths: Vec::new(),
+                        reference: None,
+                        pending_action: None,
+                    },
+                )
+            });
+            barrier.wait();
+            let _ = cancel.join().unwrap();
+            let _ = complete.join().unwrap();
+            let final_task = service.get_task(&task.id).unwrap();
+            match final_task.status {
+                TaskStatus::Succeeded => assert!(final_task.result.is_some()),
+                TaskStatus::Cancelled => assert!(final_task.result.is_none()),
+                status => panic!("unexpected race terminal state: {status:?}"),
+            }
+        }
+    }
 
     fn make_service() -> (TaskService, Arc<Mutex<Vec<CapturedEvent>>>) {
         let (event_bus, events) = EventBus::new_test_capture();

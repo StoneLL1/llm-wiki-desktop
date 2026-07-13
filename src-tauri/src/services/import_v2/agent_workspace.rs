@@ -54,9 +54,6 @@ impl AgentWorkspaceBuilder {
         trigger: AgentAssistanceTrigger,
     ) -> Result<AgentWorkspace, BackendError> {
         validate_identity(context, session, item)?;
-        let preview = item.preview.as_ref().ok_or_else(|| {
-            workspace_error("Agent assistance requires a deterministic preview or source snapshot.")
-        })?;
         let workspace_id = uuid::Uuid::new_v4().to_string();
         let relative_root = format!(
             ".app/import-sessions/{}/items/{}/staging/agent/{workspace_id}",
@@ -70,32 +67,54 @@ impl AgentWorkspaceBuilder {
         for dir in [&source_dir, &deterministic_dir, &logs_dir, &output_dir] {
             fs::create_dir_all(dir).map_err(workspace_io_error)?;
         }
+        if let Err(error) = reject_links_between(&context.root, &root) {
+            make_tree_writable(&root);
+            let _ = fs::remove_dir_all(&root);
+            return Err(error);
+        }
 
         let result = (|| {
-            let source_name = stable_copy_name("source", &preview.source_snapshot.relative_path);
-            let source_copy = source_dir.join(&source_name);
-            copy_verified_item_artifact(
-                context,
-                session,
-                item,
-                &preview.source_snapshot,
-                &source_copy,
-            )?;
-
-            let deterministic_copy = deterministic_dir.join("candidate.md");
-            copy_verified_item_artifact(
-                context,
-                session,
-                item,
-                &preview.markdown,
-                &deterministic_copy,
-            )?;
-            for (index, asset) in preview.assets.iter().enumerate() {
-                let asset_dir = deterministic_dir.join("assets");
-                fs::create_dir_all(&asset_dir).map_err(workspace_io_error)?;
-                let name = stable_copy_name(&format!("asset-{index}"), &asset.relative_path);
-                copy_verified_item_artifact(context, session, item, asset, &asset_dir.join(name))?;
-            }
+            let (source_name, mut input_hashes) = if let Some(preview) = &item.preview {
+                let source_name =
+                    stable_copy_name("source", &preview.source_snapshot.relative_path);
+                copy_verified_item_artifact(
+                    context,
+                    session,
+                    item,
+                    &preview.source_snapshot,
+                    &source_dir.join(&source_name),
+                )?;
+                let deterministic_copy = deterministic_dir.join("candidate.md");
+                copy_verified_item_artifact(
+                    context,
+                    session,
+                    item,
+                    &preview.markdown,
+                    &deterministic_copy,
+                )?;
+                for (index, asset) in preview.assets.iter().enumerate() {
+                    let asset_dir = deterministic_dir.join("assets");
+                    fs::create_dir_all(&asset_dir).map_err(workspace_io_error)?;
+                    let name = stable_copy_name(&format!("asset-{index}"), &asset.relative_path);
+                    copy_verified_item_artifact(
+                        context,
+                        session,
+                        item,
+                        asset,
+                        &asset_dir.join(name),
+                    )?;
+                }
+                (
+                    source_name,
+                    vec![
+                        preview.source_snapshot.sha256.clone(),
+                        preview.markdown.sha256.clone(),
+                    ],
+                )
+            } else {
+                copy_hard_failure_source(context, session, item, &source_dir)?
+            };
+            input_hashes.sort();
 
             let task = AgentTaskBundle {
                 schema_version: WORKSPACE_SCHEMA_VERSION,
@@ -103,10 +122,7 @@ impl AgentWorkspaceBuilder {
                 item_id: item.item_id.clone(),
                 trigger,
                 public_source: public_source(item),
-                input_hashes: vec![
-                    preview.source_snapshot.sha256.clone(),
-                    preview.markdown.sha256.clone(),
-                ],
+                input_hashes,
                 allowed_tools: vec![
                     AgentToolGrant::InspectSource,
                     AgentToolGrant::RunDeterministicRoute,
@@ -154,6 +170,21 @@ impl AgentWorkspaceBuilder {
         hashes.sort();
         Ok(hashes)
     }
+
+    pub fn validate_output_target(workspace: &AgentWorkspace) -> Result<(), BackendError> {
+        reject_links_between(&workspace.root, &workspace.output_dir)?;
+        let root = workspace.root.canonicalize().map_err(workspace_io_error)?;
+        let output = workspace
+            .output_dir
+            .canonicalize()
+            .map_err(workspace_io_error)?;
+        if !output.starts_with(&root) || output == root {
+            return Err(workspace_error(
+                "Agent output directory escaped the isolated workspace.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn validate_identity(
@@ -174,6 +205,71 @@ fn validate_identity(
         ));
     }
     Ok(())
+}
+
+fn copy_hard_failure_source(
+    context: &ProjectContext,
+    session: &ImportSession,
+    item: &ImportItem,
+    destination_dir: &Path,
+) -> Result<(String, Vec<String>), BackendError> {
+    let staging = context.resolve_project_path(&format!(
+        ".app/import-sessions/{}/items/{}/staging",
+        session.session_id, item.item_id
+    ))?;
+    let mut candidates = vec![staging.join("source.bin")];
+    let authorized = staging.join("authorized");
+    if authorized.is_dir() {
+        for entry in fs::read_dir(&authorized).map_err(workspace_io_error)? {
+            let path = entry.map_err(workspace_io_error)?.path();
+            if path.is_file() {
+                candidates.push(path);
+            }
+        }
+    }
+    let staged = candidates.into_iter().find(|path| path.is_file());
+    let source = if let Some(path) = staged {
+        reject_links_between(&context.root, &path)?;
+        path
+    } else if let Some(identity) = &item.input.source_identity {
+        let asserted = PathBuf::from(&identity.canonical_path);
+        let canonical = asserted.canonicalize().map_err(workspace_io_error)?;
+        if canonical != asserted
+            || fs::symlink_metadata(&canonical)
+                .map_err(workspace_io_error)?
+                .file_type()
+                .is_symlink()
+        {
+            return Err(workspace_error(
+                "The authorized source changed before Agent assistance.",
+            ));
+        }
+        canonical
+    } else {
+        return Err(workspace_error(
+            "No sanitized source snapshot is available for this hard failure.",
+        ));
+    };
+    let metadata = fs::metadata(&source).map_err(workspace_io_error)?;
+    if !metadata.is_file() || metadata.len() > 128 * 1024 * 1024 {
+        return Err(workspace_error(
+            "The hard-failure source is not an allowed regular file.",
+        ));
+    }
+    let bytes = fs::read(&source).map_err(workspace_io_error)?;
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    if let Some(identity) = &item.input.source_identity {
+        if source == PathBuf::from(&identity.canonical_path)
+            && (identity.size_bytes != bytes.len() as u64 || identity.sha256 != hash)
+        {
+            return Err(workspace_error(
+                "The authorized source changed before Agent assistance.",
+            ));
+        }
+    }
+    let source_name = stable_copy_name("source", &source.to_string_lossy());
+    fs::write(destination_dir.join(&source_name), bytes).map_err(workspace_io_error)?;
+    Ok((source_name, vec![hash]))
 }
 
 fn copy_verified_item_artifact(
@@ -293,7 +389,13 @@ fn set_readonly(path: &Path, readonly: bool) -> Result<(), BackendError> {
 }
 
 fn make_tree_writable(root: &Path) {
-    if let Ok(metadata) = fs::metadata(root) {
+    let Ok(metadata) = fs::symlink_metadata(root) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || is_windows_reparse(&metadata) {
+        return;
+    }
+    {
         let mut permissions = metadata.permissions();
         permissions.set_readonly(false);
         let _ = fs::set_permissions(root, permissions);

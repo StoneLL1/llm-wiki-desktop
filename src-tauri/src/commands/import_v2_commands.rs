@@ -7,7 +7,9 @@ use crate::errors::BackendError;
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportInput, ImportResourceMode, ImportSession,
 };
+use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
+use crate::services::import_v2::agent_assistance::AgentAssistanceService;
 
 macro_rules! request {
     ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
@@ -158,6 +160,37 @@ pub fn start_import_items_v2(
                 });
             if let Err(error) = result {
                 fail_task_unless_cancelled(&state, &task_id, error);
+                if let Ok(context) = state.resolve_project_context(&project_id, &root) {
+                    let settings = state.settings_service.read_settings(&context);
+                    if let Ok(settings) = settings {
+                        if let Some(agent_kind) = settings.agent_default {
+                            let assistance = AgentAssistanceService::new(
+                                &state.import_v2_service,
+                                &state.file_store,
+                                &state.settings_service,
+                                &state.agent_service,
+                                &state.task_service,
+                                AgentAssistanceService::bundled_skill_path(),
+                            );
+                            if let Ok(agent_task) = assistance.start_local(
+                                &context,
+                                &session_id,
+                                &item_id,
+                                AgentAssistanceTrigger::DeterministicHardFailure,
+                                agent_kind,
+                            ) {
+                                let _ = assistance.run_local(
+                                    &context,
+                                    &session_id,
+                                    &item_id,
+                                    &agent_task.id,
+                                    AgentAssistanceTrigger::DeterministicHardFailure,
+                                    agent_kind,
+                                );
+                            }
+                        }
+                    }
+                }
             }
         });
         tasks.push(task);
