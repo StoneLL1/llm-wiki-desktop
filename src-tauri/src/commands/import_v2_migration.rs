@@ -183,10 +183,18 @@ fn spawn_migration_task(
                 let _ = state.task_service.transition_status(&task_id, TaskStatus::Cancelled);
             }
             Ok(result) => {
+                let checkpoint_summary = result
+                    .checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.commit_hash.as_deref())
+                    .map(|hash| format!("Git checkpoint {hash}"))
+                    .unwrap_or_else(|| "No Git checkpoint; rollback is release-based".into());
                 let _ = state.task_service.set_result(
                     &task_id,
                     TaskResult {
-                        summary: "Import V2 migration metadata applied.".into(),
+                        summary: format!(
+                            "Import V2 migration metadata applied ({checkpoint_summary})."
+                        ),
                         affected_paths: vec![
                             ".app/source-index-v2.json".into(),
                             ".app/import-v2-migration/report.json".into(),
@@ -196,7 +204,6 @@ fn spawn_migration_task(
                     },
                 );
                 let _ = state.task_service.transition_status(&task_id, TaskStatus::Succeeded);
-                let _ = result;
             }
             Err(error) => {
                 let _ = state.task_service.set_error(&task_id, error);

@@ -138,11 +138,15 @@ pub fn confirm_pending_action(
         }) = stored.execution.as_ref()
         {
             if let Ok(context) = state.resolve_project_context(project_id, root_path) {
-                state.import_service.cleanup_replacement_artifacts(
-                    &context,
-                    old_artifacts,
-                    new_artifacts,
-                );
+                if let Ok(_guard) = state.import_v2_service.acquire_migration_lock() {
+                    if ImportV2ActivationService::legacy_mutation_guard(&context).is_ok() {
+                        state.import_service.cleanup_replacement_artifacts(
+                            &context,
+                            old_artifacts,
+                            new_artifacts,
+                        );
+                    }
+                }
             }
         }
         return Ok(ConfirmedAction {
@@ -262,6 +266,7 @@ fn execute_source_delete(
     artifacts: &[String],
 ) -> Result<ConfirmedAction, BackendError> {
     let context = state.resolve_project_context(project_id, root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let checkpoint_exists = state.import_service.apply_source_delete(
         &context,
@@ -323,6 +328,7 @@ fn execute_source_replace(
     new_artifacts: &[String],
 ) -> Result<ConfirmedAction, BackendError> {
     let context = state.resolve_project_context(project_id, root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let replacement = PathBuf::from(replacement_path);
     let result = state.import_service.apply_source_replace(

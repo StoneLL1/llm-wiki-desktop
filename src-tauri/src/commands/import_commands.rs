@@ -133,6 +133,7 @@ pub fn request_delete_source(
     request: SourceActionRequest,
 ) -> Result<PendingAction, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(&context)?;
     state
         .import_service
@@ -190,6 +191,7 @@ pub fn request_replace_source(
     request: ReplaceSourceRequest,
 ) -> Result<PendingAction, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let target = state
         .import_service
@@ -334,6 +336,7 @@ fn run_import_preview(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(context)?;
     state
         .task_service
@@ -453,6 +456,7 @@ pub fn preview_text_import(
     request: PreviewTextImportRequest,
 ) -> Result<ImportPreview, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let extension = match request.kind {
         StagedImportKind::Clipboard => "md",
@@ -606,6 +610,7 @@ pub fn confirm_import_preview(
     request: ConfirmImportRequest,
 ) -> Result<ConfirmedImport, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(&context)?;
 
     state
@@ -640,6 +645,7 @@ pub fn extract_text_preview(
     request: ExtractTextRequest,
 ) -> Result<crate::models::import::ExtractResult, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
     ImportV2ActivationService::legacy_mutation_guard(&context)?;
 
     let output_dir = context.raw_dir.join("extracted");
