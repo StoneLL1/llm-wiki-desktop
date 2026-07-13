@@ -25,6 +25,7 @@ fn candidate(id: &str, decision: MigrationDecision) -> MigrationCandidate {
 fn dry_run_report_is_inspectable_and_lists_immutable_boundaries() {
     let plan = MigrationPlan {
         plan_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+        v2_index_fingerprint: "v2-index-test".into(),
         inventory_fingerprint: "inventory-fingerprint".into(),
         candidates: vec![
             candidate(
@@ -65,6 +66,7 @@ fn dry_run_report_is_inspectable_and_lists_immutable_boundaries() {
     };
     let inventory = LegacyInventory {
         schema_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+        project_identity: "project-test".into(),
         fingerprint: "inventory-fingerprint".into(),
         records: plan.candidates.iter().map(|candidate| candidate.record.clone()).collect(),
         warnings: vec![llm_wiki_desktop_lib::models::import_v2_migration::MigrationWarning {

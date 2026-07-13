@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::errors::{BackendError, PATH_ABSOLUTE_NOT_ALLOWED, PATH_INVALID, PATH_TRAVERSAL};
 
@@ -47,6 +48,7 @@ pub struct MigrationWarning {
 #[serde(rename_all = "camelCase")]
 pub struct LegacyInventory {
     pub schema_version: u32,
+    pub project_identity: String,
     pub fingerprint: String,
     pub records: Vec<LegacyRecord>,
     pub warnings: Vec<MigrationWarning>,
@@ -116,6 +118,7 @@ pub struct MigrationSummary {
 #[serde(rename_all = "camelCase")]
 pub struct MigrationPlan {
     pub plan_version: u32,
+    pub v2_index_fingerprint: String,
     pub inventory_fingerprint: String,
     pub candidates: Vec<MigrationCandidate>,
     pub summary: MigrationSummary,
@@ -149,6 +152,8 @@ pub struct MigrationApplyResult {
     pub plan_fingerprint: String,
     pub applied_candidate_ids: Vec<String>,
     pub report_relative_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<crate::models::git::GitCheckpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +161,7 @@ pub struct MigrationApplyResult {
 pub struct MigrationReport {
     pub report_version: u32,
     pub plan_version: u32,
+    pub plan_fingerprint: String,
     pub inventory_fingerprint: String,
     pub status: MigrationStatus,
     pub summary: MigrationSummary,
@@ -239,6 +245,14 @@ impl MigrationPlan {
                 true,
             ));
         }
+        if self.v2_index_fingerprint.trim().is_empty() {
+            return Err(BackendError::new(
+                PATH_INVALID,
+                "V2 index fingerprint cannot be empty.",
+                false,
+                true,
+            ));
+        }
         let mut ids = BTreeSet::new();
         for candidate in &self.candidates {
             if !ids.insert(candidate.candidate_id.clone()) {
@@ -252,6 +266,13 @@ impl MigrationPlan {
             candidate.validate()?;
         }
         Ok(())
+    }
+
+    pub fn fingerprint(&self) -> String {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        let mut digest = Sha256::new();
+        digest.update(bytes);
+        digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
@@ -300,6 +321,7 @@ impl MigrationReport {
         Ok(Self {
             report_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
             plan_version: plan.plan_version,
+            plan_fingerprint: plan.fingerprint(),
             inventory_fingerprint: plan.inventory_fingerprint.clone(),
             status: MigrationStatus::DryRunReady,
             summary: plan.summary.clone(),
