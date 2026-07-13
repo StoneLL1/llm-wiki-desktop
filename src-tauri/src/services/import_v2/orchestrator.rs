@@ -5,9 +5,10 @@ use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_STATE_INVALID,
 };
 use crate::models::import_v2::{
-    ImportInput, ImportIssue, ImportItem, ImportItemStatus, ImportResourceMode, ImportSession,
-    ImportSessionStatus, ImportStage,
+    AttemptOutcome, AttemptRecord, ImportInput, ImportIssue, ImportItem, ImportItemStatus,
+    ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
 };
+use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_file::FileFormat;
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -151,6 +152,103 @@ impl ImportV2Service {
         self.preflight_locked(context)?;
         self.sessions.load(context, files, session_id)
     }
+
+    pub fn begin_agent_assistance(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        trigger: AgentAssistanceTrigger,
+        agent_kind: crate::models::agent::AgentKind,
+        max_attempts: u8,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            let agent_attempts = item
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.route.starts_with("agent_assistance/"))
+                .collect::<Vec<_>>();
+            if agent_attempts.len() >= usize::from(max_attempts) {
+                return Err(task_error(
+                    "The Agent assistance attempt budget is exhausted for this item.",
+                ));
+            }
+            if agent_attempts
+                .iter()
+                .any(|attempt| attempt.completed_at.is_none())
+            {
+                return Err(task_error(
+                    "Another Agent assistance task is already active for this item.",
+                ));
+            }
+            match trigger {
+                AgentAssistanceTrigger::DeterministicHardFailure
+                    if item.status != ImportItemStatus::Failed =>
+                {
+                    return Err(task_error(
+                        "Automatic Agent assistance requires a deterministic hard failure.",
+                    ));
+                }
+                AgentAssistanceTrigger::QualityOptimization
+                    if item.status != ImportItemStatus::PreviewReady =>
+                {
+                    return Err(task_error(
+                        "Quality optimization requires a deterministic preview.",
+                    ));
+                }
+                AgentAssistanceTrigger::Manual
+                    if !matches!(
+                        item.status,
+                        ImportItemStatus::Failed | ImportItemStatus::PreviewReady
+                    ) =>
+                {
+                    return Err(task_error(
+                        "Manual Agent assistance requires a failed item or preview.",
+                    ));
+                }
+                _ => {}
+            }
+            item.task_id = Some(task_id.to_string());
+            item.attempts.push(AttemptRecord {
+                route: format!("agent_assistance/{task_id}"),
+                engine_id: format!("{:?}", agent_kind).to_ascii_lowercase(),
+                engine_version: "detected-local-cli".into(),
+                stage: ImportStage::Extract,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                completed_at: None,
+                outcome: AttemptOutcome::Failed,
+                warnings: Vec::new(),
+            });
+            Ok(())
+        })
+    }
+
+    pub fn finish_agent_assistance_attempt(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        outcome: AttemptOutcome,
+        warnings: Vec<String>,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            let route = format!("agent_assistance/{task_id}");
+            let attempt = item
+                .attempts
+                .iter_mut()
+                .rev()
+                .find(|attempt| attempt.route == route)
+                .ok_or_else(|| task_error("Agent assistance attempt was not found."))?;
+            attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
+            attempt.outcome = outcome;
+            attempt.warnings = warnings;
+            Ok(())
+        })
+    }
     pub fn recover_session(
         &self,
         context: &ProjectContext,
@@ -162,6 +260,36 @@ impl ImportV2Service {
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         for item in &mut session.items {
+            for attempt in &mut item.attempts {
+                let Some(task_id) = attempt
+                    .route
+                    .strip_prefix("agent_assistance/")
+                    .filter(|_| attempt.completed_at.is_none())
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let task_status = tasks.get_task(&task_id).map(|task| task.status);
+                attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                match task_status {
+                    Some(TaskStatus::Succeeded) => {
+                        attempt.outcome = AttemptOutcome::Succeeded;
+                        attempt.warnings.clear();
+                    }
+                    Some(TaskStatus::Cancelled) => {
+                        attempt.outcome = AttemptOutcome::Cancelled;
+                        attempt.warnings = vec![
+                            "Agent assistance was cancelled before recovery completed.".into(),
+                        ];
+                    }
+                    _ => {
+                        attempt.outcome = AttemptOutcome::Failed;
+                        attempt.warnings = vec![
+                            "Interrupted Agent assistance was closed during recovery.".into(),
+                        ];
+                    }
+                }
+            }
             if matches!(
                 item.status,
                 ImportItemStatus::Inspecting
@@ -854,7 +982,14 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Failed)?;
-            item.issue = Some(issue_from_engine_error(&error, stage));
+            let mut issue = issue_from_engine_error(&error, stage);
+            if is_agent_eligible_failure(&error.code, &issue) {
+                issue.available_actions = vec![
+                    crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent,
+                    crate::models::import_v2_agent::AgentRecoveryAction::RequestByok,
+                ];
+            }
+            item.issue = Some(issue);
             Ok(())
         })?;
         task_call(tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into()))?;
@@ -915,6 +1050,37 @@ impl ImportV2Service {
     fn preflight_locked(&self, context: &ProjectContext) -> Result<(), BackendError> {
         FileTransaction::reconcile_project(&context.root)
     }
+}
+
+fn is_agent_eligible_failure(original_code: &str, issue: &ImportIssue) -> bool {
+    let original_is_eligible = matches!(
+        original_code,
+        crate::errors::IMPORT_V2_ENGINE_OUTPUT_INVALID
+            | crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE
+            | crate::errors::IMPORT_V2_CAPABILITY_UNAVAILABLE
+            | crate::errors::IMPORT_V2_QUALITY_FAILED
+            | "IMPORT_WEB_STRUCTURE_CHANGED"
+            | "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
+            | "IMPORT_ASR_TIMEOUT"
+            | "IMPORT_ASR_ENGINE_FAILED"
+            | "IMPORT_ASR_OUTPUT_INVALID"
+    ) || original_code.contains("PARSE")
+        || original_code.contains("CORRUPT")
+        || original_code.contains("CONVERSION");
+    original_is_eligible
+        && matches!(
+            issue.code.as_str(),
+            "IMPORT_FILE_PARSE_FAILED"
+                | "IMPORT_FILE_CORRUPT"
+                | "IMPORT_FILE_CONVERSION_FAILED"
+                | "IMPORT_FILE_QUALITY_FAILED"
+                | "IMPORT_FILE_CAPABILITY_MISSING"
+                | "IMPORT_WEB_STRUCTURE_CHANGED"
+                | "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
+                | "IMPORT_ASR_TIMEOUT"
+                | "IMPORT_ASR_ENGINE_FAILED"
+                | "IMPORT_ASR_OUTPUT_INVALID"
+        )
 }
 
 fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
@@ -1366,6 +1532,31 @@ mod tests {
     use crate::tasks::TaskService;
 
     use super::*;
+
+    #[test]
+    fn agent_eligibility_uses_stable_issue_codes_and_excludes_access_failures() {
+        let invalid = BackendError::new(
+            crate::errors::IMPORT_V2_ENGINE_OUTPUT_INVALID,
+            "invalid",
+            true,
+            false,
+        );
+        let stable = issue_from_engine_error(&invalid, ImportStage::Extract);
+        assert_eq!(stable.code, "IMPORT_FILE_PARSE_FAILED");
+        assert!(is_agent_eligible_failure(&invalid.code, &stable));
+        assert!(!is_agent_eligible_failure(
+            "IMPORT_WEB_LOGIN_REQUIRED",
+            &ImportIssue::for_web_code("IMPORT_WEB_LOGIN_REQUIRED", ImportStage::Extract),
+        ));
+        assert!(!is_agent_eligible_failure(
+            "IMPORT_FILE_PASSWORD_REQUIRED",
+            &ImportIssue::for_file_code("IMPORT_FILE_PASSWORD_REQUIRED", ImportStage::Extract),
+        ));
+        assert!(!is_agent_eligible_failure(
+            "PATH_OUTSIDE_PROJECT",
+            &ImportIssue::for_file_code("IMPORT_FILE_PARSE_FAILED", ImportStage::Extract),
+        ));
+    }
 
     #[test]
     fn authorized_staging_rejects_a_residual_non_directory() {

@@ -1,4 +1,5 @@
 pub mod capability_pack;
+pub mod agent_assistance;
 pub mod agent_workspace;
 pub mod agent_tools;
 pub mod capability_runtime;

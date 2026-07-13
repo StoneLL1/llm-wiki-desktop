@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 local Agent invocation — Added policy-gated automatic hard-failure and explicit manual starts, isolated stdin-only Claude/Codex profiles, durable AgentRun task binding, redacted output capture, process-tree cancellation, hard-failure source recovery, and fail-closed unsupported CLI profiles — Key decision: low-quality optimization stays manual-only, unavailable agents are never installed, and successful output remains staging-only for later candidate validation.
+
 [2026-07-13] Import V2 structured Agent tool broker — Added a typed, grant-checked, item-bound tool protocol with route/model limits, cancellation checks, output containment, and a redacted per-workspace ledger — Key decision: shell, Git, installers, arbitrary network, credential access, and arbitrary file writes are unrepresentable in the protocol.
 
 [2026-07-13] Import V2 Agent Assistance isolated workspace — Added item-bound sanitized workspaces, immutable verified copies, untrusted-source labeling, output-only contract, reparse containment checks, terminal hash preservation, and the wiki-ingest-assist Skill — Key decision: task.json contains only public source identity, hashes, grants, and relative material references; live project paths and credentials never enter the Agent bundle.
