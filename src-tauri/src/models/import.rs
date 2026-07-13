@@ -14,6 +14,8 @@ pub struct ImportPreview {
     pub files: Vec<ImportFileEntry>,
     pub conflicts: Vec<ImportConflict>,
     pub summary: ImportSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v2_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

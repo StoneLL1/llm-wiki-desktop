@@ -600,6 +600,7 @@ mod import_checkpoint_tests {
                 failed_files: 0,
                 conflicts_count: 0,
             },
+            v2_session_id: None,
         };
 
         let hash = state.create_import_checkpoint(&context, &preview).unwrap();

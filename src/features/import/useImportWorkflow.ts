@@ -226,6 +226,7 @@ export function useImportWorkflow(
             content,
             title,
             author,
+            sourceLocator: kind === "url" ? value : null,
           },
         });
         if (isPreviewCurrent(requestKey, epoch)) setPreview(nextPreview);
@@ -301,6 +302,9 @@ export function useImportWorkflow(
               projectRootPath: rootPath,
               preview: stagedPreview,
               createCheckpoint: options.createCheckpoint,
+              ...(stagedPreview.v2SessionId
+                ? { v2SessionId: stagedPreview.v2SessionId }
+                : {}),
             },
           });
           if (!isCurrent(requestKey)) return;

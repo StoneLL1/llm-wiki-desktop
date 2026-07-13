@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Activation-only backend guards left the existing import UI unable to commit after cutover — The old facade still created V1 previews and confirmation did not carry the V2 session identity — Route preview/text preview through V2 when activation is recorded, project V2 sessions into the old preview DTO, and include the session id in confirmation while keeping the old path guarded and read-only after cutover.
+
 An atomic lease temp could block every later recovery after a crash — Directory scans treated partial `.tmp` files as formal JSON records — Scope-clean atomic-writer errors, safely remove internal regular `.tmp` files during recovery, reject unknown names, and test both truncated and complete pre-rename temporaries.
 
 BYOK Candidate validation rejected every normal HTTP(S) destination — A slash-delimited audit route was parsed with an exact segment count even though the destination itself contains slashes — Persist provider and destination as structured audit fields, reconstruct the route for exact comparison, and keep a real BYOK run-to-candidate success test.

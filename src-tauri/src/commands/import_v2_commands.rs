@@ -30,6 +30,13 @@ request!(GetImportSessionV2Request {
     session_id: String
 });
 request!(AddImportItemsV2Request { project_id: String, project_root_path: String, session_id: String, inputs: Vec<ImportInput> });
+request!(AddImportTextV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    source_name: String,
+    content: String
+});
 request!(SetImportItemSelectionV2Request {
     project_id: String,
     project_root_path: String,
@@ -79,6 +86,21 @@ pub fn add_import_items_v2(
         &state.file_store,
         &request.session_id,
         request.inputs,
+    )
+}
+
+#[tauri::command]
+pub fn add_import_text_v2(
+    state: State<'_, AppState>,
+    request: AddImportTextV2Request,
+) -> Result<ImportSession, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.add_text_input(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.source_name,
+        &request.content,
     )
 }
 #[tauri::command]

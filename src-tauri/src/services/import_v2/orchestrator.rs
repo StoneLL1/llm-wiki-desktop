@@ -1,12 +1,14 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use sha2::{Digest, Sha256};
 use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_STATE_INVALID,
 };
 use crate::models::import_v2::{
-    AttemptOutcome, AttemptRecord, ImportInput, ImportIssue, ImportItem, ImportItemStatus,
-    ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
+    AttemptOutcome, AttemptRecord, ImportInput, ImportInputKind, ImportIssue, ImportItem,
+    ImportItemStatus, ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
+    SourceIdentity,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_agent::AgentCandidate;
@@ -31,6 +33,7 @@ use crate::services::FileStore;
 use crate::services::SecretService;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
+use unicode_normalization::UnicodeNormalization;
 
 pub struct ImportV2Service {
     pub(super) sessions: SessionStore,
@@ -142,6 +145,82 @@ impl ImportV2Service {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
         self.sessions.add_inputs(context, files, session_id, inputs)
+    }
+
+    /// Stage user-provided text inside the V2 session workspace and register
+    /// it as a normal immutable file input. This keeps clipboard imports out
+    /// of `raw/` and gives the native engine the same identity/CAS checks as a
+    /// discovered file.
+    pub fn add_text_input(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        display_name: &str,
+        content: &str,
+    ) -> Result<ImportSession, BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let name = if display_name.trim().is_empty() {
+            "text-import.md"
+        } else {
+            display_name.trim()
+        };
+        let extension = Path::new(name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("md");
+        let relative = format!(
+            ".app/import-sessions/{session_id}/inputs/{}.{}",
+            uuid::Uuid::new_v4(),
+            extension
+        );
+        let path = context.resolve_project_path(&relative)?;
+        let canonical_path = path.canonicalize().map_err(|error| {
+            BackendError::new("IMPORT_V2_TEXT_STAGE_FAILED", error.to_string(), true, false)
+        })?;
+        let bytes = content.as_bytes();
+        let mut transaction = FileTransaction::new_for_project(&context.root);
+        transaction.write_new(&path, bytes)?;
+        transaction.commit()?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            BackendError::new("IMPORT_V2_TEXT_STAGE_FAILED", error.to_string(), true, false)
+        })?;
+        let modified_nanos = metadata.modified().ok().and_then(|value| {
+            value
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_nanos())
+        });
+        let digest = Sha256::digest(bytes);
+        let magic = Sha256::digest(&bytes[..bytes.len().min(8192)]);
+        self.sessions.add_inputs(
+            context,
+            files,
+            session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::File,
+                display_name: name.to_string(),
+                locator: relative.clone(),
+                normalized_locator: Some(
+                    canonical_path
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .nfc()
+                        .collect::<String>()
+                        .to_lowercase(),
+                ),
+                source_identity: Some(SourceIdentity {
+                    canonical_path: canonical_path.to_string_lossy().into_owned(),
+                    size_bytes: metadata.len(),
+                    modified_nanos,
+                    file_id: None,
+                    sha256: format!("{digest:x}"),
+                    magic: format!("{magic:x}"),
+                }),
+            }],
+        )
     }
     pub fn load_session(
         &self,

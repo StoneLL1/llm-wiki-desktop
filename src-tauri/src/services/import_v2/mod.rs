@@ -1,6 +1,7 @@
 pub mod capability_pack;
 pub mod agent_assistance;
 pub mod activation;
+pub mod legacy_route;
 pub mod agent_candidate;
 pub mod agent_workspace;
 pub mod agent_tools;
