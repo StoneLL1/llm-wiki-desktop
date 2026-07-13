@@ -6,3 +6,5 @@ export type WebRecoveryAction = "retry_route" | "switch_route" | "begin_login" |
 export interface NormalizedWebUrl { publicUrl: string; host: string; scheme: "http" | "https"; }
 export interface WebMetadata { title: string; author: string | null; publishedAt: string | null; publicUrl: string; fetchedAt: string; images: string[]; }
 export interface AddImportUrlV2Request { projectId: string; projectRootPath: string; sessionId: string; url: string; }
+export interface CompleteImportLoginV2Request { projectId: string; projectRootPath: string; importSessionId: string; itemId: string; connectorSessionId: string; }
+export interface AuthorizePrivateTargetV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; url: string; }

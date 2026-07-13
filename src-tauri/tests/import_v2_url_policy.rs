@@ -26,3 +26,12 @@ fn public_query_is_allowlist_based_not_a_secret_denylist() {
     let target=UrlPolicy.normalize_for_session("https://example.com/a?id=7&api_key=a&client_secret=b&sessionid=c&X-Amz-Credential=d&code=e&Expires=9").unwrap();
     assert_eq!(target.public.public_url,"https://example.com/a?id=7");
 }
+
+#[test]
+fn wechat_public_identity_keeps_account_mid_and_index_but_not_signature() {
+    let target = UrlPolicy.normalize_for_session("https://mp.weixin.qq.com/s?__biz=MzA1&mid=123&idx=2&sn=secret-signature").unwrap();
+    assert!(target.public.public_url.contains("__biz=MzA1"));
+    assert!(target.public.public_url.contains("mid=123"));
+    assert!(target.public.public_url.contains("idx=2"));
+    assert!(!target.public.public_url.contains("sn=") && !target.public.public_url.contains("secret-signature"));
+}

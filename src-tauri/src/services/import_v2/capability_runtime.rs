@@ -270,6 +270,7 @@ mod tests {
             installed_bytes: 16,
             signing_key_id: "release-test".into(),
             signature: String::new(),
+            files: vec![],
         };
         manifest.signature = key
             .sign(&manifest.signing_payload().unwrap())

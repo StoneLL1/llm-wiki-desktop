@@ -81,6 +81,7 @@ try {
   let raw;
   try { raw = JSON.parse(stdout); } catch { throw new Error("IMPORT_WEB_STRUCTURE_CHANGED"); }
   const { safe, markdown, remoteAssets } = parseYtDlpMetadata(raw, requestedUrl);
+  if (remoteAssets.length === 0) throw new Error("IMPORT_WEB_SUBTITLE_UNAVAILABLE");
   for (const asset of remoteAssets) {
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: asset })}\n`);
   }
@@ -89,7 +90,7 @@ try {
     fs.writeFile(path.join(stagingRoot, "source.json"), JSON.stringify(safe), { encoding: "utf8", flag: "wx" }),
     fs.writeFile(path.join(stagingRoot, "metadata.json"), JSON.stringify(safe), { encoding: "utf8", flag: "wx" }),
   ]);
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.json", markdownPath: "candidate.md", assetPaths: [], metadataPath: "metadata.json", title: safe.title, textCoverage: safe.description ? 0.3 : 0.1, warnings: remoteAssets.length ? [] : ["subtitle_unavailable"] }, error: null })}\n`);
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.json", markdownPath: "candidate.md", assetPaths: [], metadataPath: "metadata.json", title: safe.title, textCoverage: safe.description ? 0.3 : 0.1, warnings: [] }, error: null })}\n`);
 } catch (error) {
   const code = typeof error?.message === "string" && /^IMPORT_WEB_[A-Z_]+$/.test(error.message)
     ? error.message : "IMPORT_WEB_ENGINE_FAILED";

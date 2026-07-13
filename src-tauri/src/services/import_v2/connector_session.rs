@@ -40,6 +40,20 @@ pub struct ConnectorSessionService {
     sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     grants: Mutex<HashMap<String, PrivateTargetGrant>>,
 }
+impl Drop for ConnectorSessionService {
+    fn drop(&mut self) {
+        let entries = self.sessions.lock().map(|mut sessions| sessions.drain().map(|(_, entry)| entry).collect::<Vec<_>>()).unwrap_or_default();
+        for entry in entries {
+            if let Some(child) = entry.child {
+                if let Ok(mut child) = child.lock() {
+                    terminate_tree(&mut child.child);
+                    child._job.take();
+                }
+            }
+            let _ = std::fs::remove_dir_all(entry.path);
+        }
+    }
+}
 impl ConnectorSessionService {
     pub fn create(
         &self,
@@ -94,27 +108,21 @@ impl ConnectorSessionService {
             .map(|entry| entry.path.clone())
             .ok_or_else(|| e("Connector session was not found."))?;
         let mut command = Command::new(&pack.entrypoint);
+        let runtime_temp = profile.join("runtime-temp");
+        std::fs::create_dir_all(&runtime_temp)
+            .map_err(|_| e("Connector runtime temp could not be created."))?;
         command
             .current_dir(&pack.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env_clear();
-        for key in [
-            "SystemRoot",
-            "WINDIR",
-            "TEMP",
-            "TMP",
-            "HOME",
-            "USERPROFILE",
-            "LOCALAPPDATA",
-            "APPDATA",
-            "PATH",
-        ] {
+        for key in ["SystemRoot", "WINDIR"] {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
         }
+        command.env("TEMP", &runtime_temp).env("TMP", &runtime_temp);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -207,6 +215,14 @@ impl ConnectorSessionService {
             return Err(e("The browser has not proven an authenticated session."));
         }
         Ok(entry.reference.clone())
+    }
+    pub fn authenticated_profile(&self, id: &str) -> Result<PathBuf, BackendError> {
+        let sessions = self.sessions.lock().map_err(|_| e("Connector sessions are unavailable."))?;
+        let entry = sessions.get(id).ok_or_else(|| e("Connector session was not found."))?;
+        if entry.reference.state != "authenticated" || !entry.path.is_dir() {
+            return Err(e("The browser has not proven an authenticated session."));
+        }
+        Ok(entry.path.clone())
     }
     pub fn revoke(&self, id: &str) -> Result<(), BackendError> {
         if let Some(entry) = self

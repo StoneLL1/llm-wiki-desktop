@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
@@ -26,6 +26,16 @@ pub struct CapabilityPackManifest {
     pub installed_bytes: u64,
     pub signing_key_id: String,
     pub signature: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<CapabilityPackFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityPackFile {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,13 +209,162 @@ impl CapabilityPackManager {
                     .map_err(|_| invalid("The capability entrypoint cannot be read."))?
             )
         );
-        Ok(ResolvedCapabilityPack {
+        let pack = ResolvedCapabilityPack {
             manifest,
             root: canonical_root,
             entrypoint,
             entrypoint_sha256,
-        })
+        };
+        verify_runtime_integrity(&pack)?;
+        Ok(pack)
     }
+}
+
+/// Revalidates every installed runtime file immediately before a capability is launched.
+/// Resolution verifies the signature; this function closes the mutation window between
+/// resolution and process creation without needing the signing key again.
+pub fn verify_runtime_integrity(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
+    let canonical_root = fs::canonicalize(&pack.root)
+        .map_err(|_| invalid("The capability install directory cannot be resolved."))?;
+    if canonical_root != pack.root {
+        return Err(invalid(
+            "The capability install directory changed after resolution.",
+        ));
+    }
+    let actual_files = collect_runtime_files(&canonical_root)?;
+    if pack.manifest.files.is_empty() {
+        let entrypoint_relative = pack.entrypoint.strip_prefix(&canonical_root).map_err(|_| {
+            invalid("The capability entrypoint escapes its immutable install directory.")
+        })?;
+        let expected = portable_relative_path(entrypoint_relative)?;
+        if actual_files.len() != 1 || actual_files[0].0 != expected {
+            return Err(invalid(
+                "Capability packs with runtime siblings require a signed file inventory.",
+            ));
+        }
+        let actual = hash_file(&pack.entrypoint)?;
+        if !actual.eq_ignore_ascii_case(&pack.entrypoint_sha256) {
+            return Err(invalid(
+                "The capability entrypoint changed after resolution.",
+            ));
+        }
+        return Ok(());
+    }
+
+    validate_inventory_shape(&pack.manifest.files)?;
+    if actual_files.len() != pack.manifest.files.len() {
+        return Err(invalid(
+            "The capability runtime contains an unexpected or missing file.",
+        ));
+    }
+    let actual_paths: HashSet<&str> = actual_files.iter().map(|(path, _)| path.as_str()).collect();
+    for expected in &pack.manifest.files {
+        if !actual_paths.contains(expected.path.as_str()) {
+            return Err(invalid(
+                "The capability runtime contains an unexpected or missing file.",
+            ));
+        }
+        let file = canonical_root.join(Path::new(&expected.path));
+        let metadata = fs::metadata(&file)
+            .map_err(|_| invalid("A capability runtime file cannot be read."))?;
+        if metadata.len() != expected.bytes
+            || !hash_file(&file)?.eq_ignore_ascii_case(&expected.sha256)
+        {
+            return Err(invalid(
+                "A capability runtime file does not match its signed inventory.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_inventory_shape(files: &[CapabilityPackFile]) -> Result<(), BackendError> {
+    let mut previous: Option<&str> = None;
+    for file in files {
+        let relative = Path::new(&file.path);
+        if file.path.contains('\\')
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+            || file.path == "manifest.json"
+            || file.path == "pack.archive"
+            || file.sha256.len() != 64
+            || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(invalid("The signed capability file inventory is invalid."));
+        }
+        if previous.is_some_and(|prior| prior >= file.path.as_str()) {
+            return Err(invalid(
+                "The signed capability file inventory is not deterministic.",
+            ));
+        }
+        previous = Some(&file.path);
+    }
+    Ok(())
+}
+
+fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendError> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        output: &mut Vec<(String, PathBuf)>,
+    ) -> Result<(), BackendError> {
+        let entries = fs::read_dir(directory)
+            .map_err(|_| invalid("The capability runtime directory cannot be read."))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|_| invalid("The capability runtime directory cannot be read."))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|_| invalid("A capability runtime file cannot be inspected."))?;
+            if metadata.file_type().is_symlink() {
+                return Err(invalid(
+                    "Capability runtime symbolic links are not allowed.",
+                ));
+            }
+            if metadata.is_dir() {
+                visit(root, &path, output)?;
+            } else if metadata.is_file() {
+                let relative = path.strip_prefix(root).map_err(|_| {
+                    invalid("A capability runtime file escapes its install directory.")
+                })?;
+                let portable = portable_relative_path(relative)?;
+                if portable != "manifest.json" && portable != "pack.archive" {
+                    output.push((portable, path));
+                }
+            } else {
+                return Err(invalid("Capability runtime special files are not allowed."));
+            }
+        }
+        Ok(())
+    }
+    let mut output = Vec::new();
+    visit(root, root, &mut output)?;
+    output.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(output)
+}
+
+fn portable_relative_path(path: &Path) -> Result<String, BackendError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let Component::Normal(part) = component else {
+            return Err(invalid("A capability runtime path is invalid."));
+        };
+        parts.push(
+            part.to_str()
+                .ok_or_else(|| invalid("A capability runtime path is not valid UTF-8."))?,
+        );
+    }
+    if parts.is_empty() {
+        return Err(invalid("A capability runtime path is empty."));
+    }
+    Ok(parts.join("/"))
+}
+
+fn hash_file(path: &Path) -> Result<String, BackendError> {
+    let bytes = fs::read(path).map_err(|_| invalid("A capability runtime file cannot be read."))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 impl CapabilityPackManifest {

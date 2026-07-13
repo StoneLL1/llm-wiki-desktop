@@ -28,7 +28,19 @@ pub struct RevokeRequest {
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompleteLoginRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub import_session_id: String,
+    pub item_id: String,
+    pub connector_session_id: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthorizePrivateTargetRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
     pub item_id: String,
     pub url: String,
 }
@@ -92,6 +104,14 @@ pub fn begin_import_login_v2(
         &item.input.locator,
         item.input.normalized_locator.as_deref(),
     )?;
+    if !platform_matches_host(&request.platform, &target.public.host) {
+        return Err(BackendError::new(
+            "IMPORT_V2_BROWSER_SESSION_FAILED",
+            "The connector platform does not match the import target.",
+            false,
+            true,
+        ));
+    }
     let pack = state
         .import_capability_runtime
         .browser_pack()
@@ -130,11 +150,42 @@ pub fn revoke_import_login_v2(
     state.connector_session_service.revoke(&request.session_id)
 }
 #[tauri::command]
+pub fn complete_import_login_v2(
+    state: State<'_, AppState>,
+    request: CompleteLoginRequest,
+) -> Result<ConnectorSessionRef, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session = state.import_v2_service.load_session(&context, &state.file_store, &request.import_session_id)?;
+    let item = session.items.iter().find(|item| item.item_id == request.item_id).ok_or_else(|| {
+        BackendError::new("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.", false, true)
+    })?;
+    let target = state.import_v2_service.resolve_web_target(&item.input.locator, item.input.normalized_locator.as_deref())?;
+    let reference = state.connector_session_service.resume(&request.connector_session_id)?;
+    if !platform_matches_host(&reference.platform, &target.public.host) {
+        return Err(BackendError::new("IMPORT_V2_BROWSER_SESSION_FAILED", "The authenticated connector does not match this item.", false, true));
+    }
+    let profile = state.connector_session_service.authenticated_profile(&request.connector_session_id)?;
+    state.import_v2_service.bind_authenticated_profile(&request.item_id, profile)?;
+    Ok(reference)
+}
+#[tauri::command]
 pub async fn authorize_import_private_target_v2(
     state: State<'_, AppState>,
     request: AuthorizePrivateTargetRequest,
 ) -> Result<String, BackendError> {
-    let target = UrlPolicy.normalize_for_session(&request.url)?;
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session = state.import_v2_service.load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session.items.iter().find(|item| item.item_id == request.item_id).ok_or_else(|| {
+        BackendError::new("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.", false, true)
+    })?;
+    if item.input.kind != ImportInputKind::Url {
+        return Err(BackendError::new("IMPORT_V2_URL_REJECTED", "Private authorization is available only for URL imports.", false, true));
+    }
+    let target = state.import_v2_service.resolve_web_target(&item.input.locator, item.input.normalized_locator.as_deref())?;
+    let confirmed = UrlPolicy.normalize_for_session(&request.url)?;
+    if confirmed.public != target.public {
+        return Err(BackendError::new("IMPORT_V2_URL_REFERENCE_MISMATCH", "The confirmed private target does not match this import item.", false, true));
+    }
     let port = target.request_url.port_or_known_default().ok_or_else(|| {
         BackendError::new(
             "IMPORT_V2_URL_REJECTED",
@@ -158,5 +209,16 @@ pub async fn authorize_import_private_target_v2(
         resolved_ips: ips,
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
     };
-    state.connector_session_service.authorize_private(grant)
+    state.import_v2_service.authorize_private_target(grant)
+}
+
+fn platform_matches_host(platform: &str, host: &str) -> bool {
+    match platform {
+        "wechat" => host == "mp.weixin.qq.com",
+        "zhihu" => host == "zhihu.com" || host.ends_with(".zhihu.com"),
+        "bilibili" => host == "b23.tv" || host == "bilibili.com" || host.ends_with(".bilibili.com"),
+        "xiaohongshu" => host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com"),
+        "x" => host == "x.com" || host.ends_with(".x.com") || host == "twitter.com" || host.ends_with(".twitter.com"),
+        _ => false,
+    }
 }

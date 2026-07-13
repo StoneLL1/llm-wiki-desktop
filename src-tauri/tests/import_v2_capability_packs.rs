@@ -7,7 +7,8 @@ use llm_wiki_desktop_lib::errors::{
 };
 use llm_wiki_desktop_lib::models::import_v2_file::CapabilityRequirement;
 use llm_wiki_desktop_lib::services::import_v2::capability_pack::{
-    CapabilityPackManager, CapabilityPackManifest, PackHealth,
+    verify_runtime_integrity, CapabilityPackFile, CapabilityPackManager, CapabilityPackManifest,
+    PackHealth,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
@@ -64,6 +65,11 @@ impl Fixture {
             installed_bytes: 14,
             signing_key_id: "release-2026".into(),
             signature: String::new(),
+            files: vec![CapabilityPackFile {
+                path: "runner.exe".into(),
+                sha256: format!("{:x}", Sha256::digest(b"immutable pack")),
+                bytes: 14,
+            }],
         };
         manifest.signature = hex(self.key.sign(&manifest.signing_payload().unwrap()).as_ref());
         fs::write(
@@ -73,6 +79,19 @@ impl Fixture {
         .unwrap();
         root
     }
+}
+
+fn resign(fixture: &Fixture, path: &Path, change: impl FnOnce(&mut CapabilityPackManifest)) {
+    let manifest_path = path.join("manifest.json");
+    let mut manifest: CapabilityPackManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    change(&mut manifest);
+    manifest.signature.clear();
+    manifest.signature = hex(fixture
+        .key
+        .sign(&manifest.signing_payload().unwrap())
+        .as_ref());
+    fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -170,4 +189,111 @@ fn rolls_back_to_last_healthy_side_by_side_version() {
         manager.resolve(&fixture.requirement()).unwrap_err().code,
         IMPORT_V2_CAPABILITY_UNAVAILABLE
     );
+}
+
+#[test]
+fn signed_inventory_covers_runtime_siblings_and_is_reverified_before_launch() {
+    let fixture = Fixture::new("inventory");
+    let root = fixture.install("1.0.0");
+    fs::create_dir(root.join("lib")).unwrap();
+    fs::write(root.join("lib/helper.js"), b"helper").unwrap();
+    resign(&fixture, &root, |manifest| {
+        manifest.files.push(CapabilityPackFile {
+            path: "lib/helper.js".into(),
+            sha256: format!("{:x}", Sha256::digest(b"helper")),
+            bytes: 6,
+        });
+        manifest
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+    });
+    let pack = fixture.manager().resolve(&fixture.requirement()).unwrap();
+    verify_runtime_integrity(&pack).unwrap();
+    fs::write(root.join("lib/helper.js"), b"evil!!").unwrap();
+    assert_eq!(
+        verify_runtime_integrity(&pack).unwrap_err().code,
+        IMPORT_V2_CAPABILITY_INVALID
+    );
+}
+
+#[test]
+fn rejects_missing_inventory_unexpected_files_and_inventory_traversal() {
+    let fixture = Fixture::new("missing-inventory");
+    let root = fixture.install("1.0.0");
+    fs::write(root.join("helper.dll"), b"sibling").unwrap();
+    resign(&fixture, &root, |manifest| manifest.files.clear());
+    assert_eq!(
+        fixture
+            .manager()
+            .resolve(&fixture.requirement())
+            .unwrap_err()
+            .code,
+        IMPORT_V2_CAPABILITY_INVALID
+    );
+
+    let fixture = Fixture::new("unexpected-file");
+    let root = fixture.install("1.0.0");
+    fs::write(root.join("unexpected.dll"), b"surprise").unwrap();
+    assert_eq!(
+        fixture
+            .manager()
+            .resolve(&fixture.requirement())
+            .unwrap_err()
+            .code,
+        IMPORT_V2_CAPABILITY_INVALID
+    );
+
+    let fixture = Fixture::new("inventory-traversal");
+    let root = fixture.install("1.0.0");
+    resign(&fixture, &root, |manifest| {
+        manifest.files[0].path = "../runner.exe".into()
+    });
+    assert_eq!(
+        fixture
+            .manager()
+            .resolve(&fixture.requirement())
+            .unwrap_err()
+            .code,
+        IMPORT_V2_CAPABILITY_INVALID
+    );
+}
+
+#[test]
+fn rejects_nondeterministic_inventory_and_runtime_symlinks() {
+    let fixture = Fixture::new("inventory-order");
+    let root = fixture.install("1.0.0");
+    fs::write(root.join("a.dll"), b"a").unwrap();
+    resign(&fixture, &root, |manifest| {
+        manifest.files.push(CapabilityPackFile {
+            path: "a.dll".into(),
+            sha256: format!("{:x}", Sha256::digest(b"a")),
+            bytes: 1,
+        });
+    });
+    assert_eq!(
+        fixture
+            .manager()
+            .resolve(&fixture.requirement())
+            .unwrap_err()
+            .code,
+        IMPORT_V2_CAPABILITY_INVALID
+    );
+
+    let fixture = Fixture::new("symlink");
+    let root = fixture.install("1.0.0");
+    let link = root.join("linked-runner.exe");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(root.join("runner.exe"), &link).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(root.join("runner.exe"), &link).is_ok();
+    if linked {
+        assert_eq!(
+            fixture
+                .manager()
+                .resolve(&fixture.requirement())
+                .unwrap_err()
+                .code,
+            IMPORT_V2_CAPABILITY_INVALID
+        );
+    }
 }

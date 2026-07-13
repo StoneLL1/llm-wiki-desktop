@@ -47,6 +47,7 @@ pub struct RedirectLedgerEntry {
 pub struct WebFetchArtifact {
     pub bytes: Vec<u8>,
     pub final_public_url: String,
+    pub final_session_target: SessionWebTarget,
     pub content_type: String,
     pub sanitized_headers: BTreeMap<String, String>,
     pub redirects: Vec<RedirectLedgerEntry>,
@@ -224,7 +225,8 @@ impl WebFetchService {
             }
             return Ok(WebFetchArtifact {
                 bytes,
-                final_public_url: target.public.public_url,
+                final_public_url: target.public.public_url.clone(),
+                final_session_target: target,
                 content_type,
                 sanitized_headers: headers,
                 redirects,

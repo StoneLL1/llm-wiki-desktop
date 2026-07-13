@@ -34,6 +34,9 @@ pub fn run() {
                     &state.import_v2_service,
                 );
             }
+            if let Ok(app_data) = app.path().app_data_dir() {
+                let _ = state.connector_session_service.recover_orphans(&app_data.join("connector-profiles"));
+            }
 
             // Build tray menu: Show / Hide / Quit. Labels + tooltip are
             // localized to the user's UI language preference (CLAUDE.md: i18n
@@ -168,6 +171,7 @@ pub fn run() {
             commands::import_v2_file_commands::get_import_scan_result_v2,
             commands::import_v2_web_commands::add_import_url_v2,
             commands::import_v2_web_commands::begin_import_login_v2,
+            commands::import_v2_web_commands::complete_import_login_v2,
             commands::import_v2_web_commands::revoke_import_login_v2,
             commands::import_v2_web_commands::authorize_import_private_target_v2,
             commands::task_commands::create_task,

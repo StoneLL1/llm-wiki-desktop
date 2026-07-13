@@ -1,5 +1,5 @@
 use llm_wiki_desktop_lib::services::{
-    import_v2::{url_policy::UrlPolicy, web_target_store::WebTargetStore},
+    import_v2::{url_policy::{PrivateTargetGrant, UrlPolicy}, web_target_store::WebTargetStore},
     SecretService,
 };
 
@@ -25,6 +25,22 @@ fn exact_signed_target_lives_only_behind_an_opaque_secret_reference() {
     assert!(store
         .resolve(&reference, Some(&target.public.public_url))
         .is_err());
+}
+
+#[test]
+fn private_grant_is_scoped_to_one_item_and_consumed_once() {
+    let store = WebTargetStore::new(SecretService::memory());
+    store.authorize_private(PrivateTargetGrant {
+        item_id: "item-a".into(),
+        scheme: "http".into(),
+        host: "intranet.example".into(),
+        port: 80,
+        resolved_ips: vec!["10.0.0.8".parse().unwrap()],
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+    }).unwrap();
+    assert!(store.take_private("item-b").unwrap().is_none());
+    assert!(store.take_private("item-a").unwrap().is_some());
+    assert!(store.take_private("item-a").unwrap().is_none());
 }
 
 #[test]
