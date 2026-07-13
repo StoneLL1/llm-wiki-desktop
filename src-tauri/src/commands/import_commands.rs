@@ -11,6 +11,7 @@ use crate::models::confirmation::{
 use crate::models::import::{ConfirmedImport, ImportPreview, ImportRequest};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
+use crate::services::import_v2::activation::ImportV2ActivationService;
 use crate::tasks::task_model::LogLevel;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,6 +133,7 @@ pub fn request_delete_source(
     request: SourceActionRequest,
 ) -> Result<PendingAction, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     state
         .import_service
         .validate_imported_source_path(&context, &request.target_path)?;
@@ -188,6 +190,7 @@ pub fn request_replace_source(
     request: ReplaceSourceRequest,
 ) -> Result<PendingAction, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let target = state
         .import_service
         .validate_imported_source_path(&context, &request.target_path)?;
@@ -290,6 +293,7 @@ pub fn preview_import(
     request: ImportPreviewRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let task = state
         .task_service
         .create_project_task(
@@ -330,6 +334,7 @@ fn run_import_preview(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
+    ImportV2ActivationService::legacy_mutation_guard(context)?;
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
@@ -448,6 +453,7 @@ pub fn preview_text_import(
     request: PreviewTextImportRequest,
 ) -> Result<ImportPreview, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let extension = match request.kind {
         StagedImportKind::Clipboard => "md",
         StagedImportKind::Url => "url",
@@ -600,6 +606,7 @@ pub fn confirm_import_preview(
     request: ConfirmImportRequest,
 ) -> Result<ConfirmedImport, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
 
     state
         .import_service
@@ -633,6 +640,7 @@ pub fn extract_text_preview(
     request: ExtractTextRequest,
 ) -> Result<crate::models::import::ExtractResult, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
 
     let output_dir = context.raw_dir.join("extracted");
     let path = PathBuf::from(&request.source_path);

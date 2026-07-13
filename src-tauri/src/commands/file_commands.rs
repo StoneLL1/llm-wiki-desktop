@@ -6,6 +6,7 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus, ConfirmedAction};
+use crate::services::import_v2::activation::ImportV2ActivationService;
 use crate::services::WriteMode;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -261,6 +262,7 @@ fn execute_source_delete(
     artifacts: &[String],
 ) -> Result<ConfirmedAction, BackendError> {
     let context = state.resolve_project_context(project_id, root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let checkpoint_exists = state.import_service.apply_source_delete(
         &context,
         &state.file_store,
@@ -321,6 +323,7 @@ fn execute_source_replace(
     new_artifacts: &[String],
 ) -> Result<ConfirmedAction, BackendError> {
     let context = state.resolve_project_context(project_id, root_path)?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let replacement = PathBuf::from(replacement_path);
     let result = state.import_service.apply_source_replace(
         &context,

@@ -1,16 +1,19 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const REQUIRED_IMPORT_V2_CONTRACT: &str = "import-v2-core-v2";
 const REQUIRED_PACKAGES: [&str; 4] = ["core", "file", "web", "agent"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PackageGateEvidence {
     pub package: String,
     pub contract_version: String,
     pub release_gate_passed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ExternalToolLicenseEvidence {
     pub name: String,
     pub license: String,
@@ -21,7 +24,8 @@ pub struct ExternalToolLicenseEvidence {
     pub fallback: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct MigrationReadinessEvidence {
     pub core_recovery_passed: bool,
     pub package_gates: Vec<PackageGateEvidence>,
