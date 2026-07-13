@@ -10,7 +10,9 @@ use crate::errors::BackendError;
 use crate::models::import_v2::{
     ArtifactKind, ImportArtifact, ImportItem, ImportPreviewArtifact,
 };
-use crate::models::import_v2_agent::{AgentCandidate, AgentCandidateDiff, AgentCandidateManifest};
+use crate::models::import_v2_agent::{
+    AgentAuditRecord, AgentCandidate, AgentCandidateDiff, AgentCandidateManifest,
+};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::agent_workspace::AgentTaskBundle;
@@ -258,10 +260,27 @@ impl<'a> AgentCandidateService<'a> {
             .as_ref()
             .is_some_and(|current| current != &baseline_markdown);
         let unified_diff = GitService::diff_candidate_files(context, &baseline_path, &agent_path)?;
+        let audit_path = format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
+        );
+        let mut audit: AgentAuditRecord = self.files.read_json(context, &audit_path).map_err(|_| {
+            candidate_error("Agent candidate provenance audit is missing or invalid.")
+        })?;
+        validate_candidate_audit(&audit, &bundle, &manifest, session_id, item_id, task_id)?;
+        if audit.outcome == "output_staged" {
+            audit.outcome = "succeeded".into();
+            self.files.write_json_atomic(context, &audit_path, &audit)?;
+        }
         let mut candidate = AgentCandidate {
             candidate_id: candidate_id.clone(),
             task_id: task_id.into(),
+            audit_id: audit.audit_id,
             trigger: bundle.trigger,
+            agent_kind: audit.agent_kind,
+            agent_version: audit.agent_version,
+            prompt_template_version: audit.prompt_template_version,
+            approved_cost_micros: audit.approved_cost_micros,
+            tool_calls: audit.tool_calls,
             markdown: preview.markdown,
             assets: preview.assets,
             quality: preview.quality,
@@ -433,7 +452,7 @@ impl<'a> AgentCandidateService<'a> {
             quality: selected_quality,
             title: format!("AI-assisted: {}", item.input.display_name),
         };
-        self.imports.select_agent_candidate(
+        let selected = self.imports.select_agent_candidate(
             context,
             self.files,
             session_id,
@@ -441,7 +460,9 @@ impl<'a> AgentCandidateService<'a> {
             &stored.candidate.task_id,
             preview,
             stored.diff.needs_three_way_merge,
-        )
+        )?;
+        self.cleanup_task_workspace(context, session_id, item_id, &stored.candidate.task_id)?;
+        Ok(selected)
     }
 
     pub fn discard_candidate(
@@ -464,6 +485,7 @@ impl<'a> AgentCandidateService<'a> {
         let root = context.resolve_project_path(&root_relative)?;
         reject_links_between(&context.root, &root)?;
         fs::remove_dir_all(&root).map_err(io_error)?;
+        self.cleanup_task_workspace(context, session_id, item_id, &stored.candidate.task_id)?;
         Ok(item)
     }
 
@@ -473,6 +495,18 @@ impl<'a> AgentCandidateService<'a> {
         session_id: &str,
     ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
         let session = self.imports.load_session(context, self.files, session_id)?;
+        for item in &session.items {
+            super::agent_workspace::AgentWorkspaceBuilder::cleanup_abandoned_leases(
+                context,
+                session_id,
+                &item.item_id,
+                |task_id| {
+                    self.tasks.get_task(task_id).is_some_and(|task| {
+                        !matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled)
+                    })
+                },
+            )?;
+        }
         let completed = session
             .items
             .iter()
@@ -527,7 +561,32 @@ impl<'a> AgentCandidateService<'a> {
                 }
             }
         }
-        self.imports.load_session(context, self.files, session_id)
+        let latest = self.imports.load_session(context, self.files, session_id)?;
+        for item in &latest.items {
+            let has_agent_attempt = item.attempts.iter().any(|attempt| {
+                attempt.route.starts_with("agent_assistance/")
+                    || attempt.route.starts_with("byok_assistance/")
+            });
+            let registered_candidate = matches!(
+                item.status,
+                crate::models::import_v2::ImportItemStatus::PreviewReady
+                    | crate::models::import_v2::ImportItemStatus::NeedsMerge
+            ) && item.preview.as_ref().is_some_and(|preview| {
+                preview.markdown.relative_path.starts_with("agent-candidates/")
+            });
+            let terminal_without_candidate = has_agent_attempt
+                && matches!(
+                    item.status,
+                    crate::models::import_v2::ImportItemStatus::Failed
+                        | crate::models::import_v2::ImportItemStatus::Cancelled
+                );
+            if registered_candidate || terminal_without_candidate {
+                if let Some(task_id) = item.task_id.as_deref() {
+                    self.cleanup_task_workspace(context, session_id, &item.item_id, task_id)?;
+                }
+            }
+        }
+        Ok(latest)
     }
 
     fn load_stored(
@@ -547,6 +606,85 @@ impl<'a> AgentCandidateService<'a> {
         } else {
             Ok(())
         }
+    }
+
+    fn cleanup_task_workspace(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<(), BackendError> {
+        let audit_path = format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
+        );
+        if !self.files.exists(context, &audit_path) {
+            return Ok(());
+        }
+        let audit: AgentAuditRecord = self.files.read_json(context, &audit_path)?;
+        if audit.task_id != task_id || audit.session_id != session_id || audit.item_id != item_id {
+            return Err(candidate_error("Recorded Agent workspace belongs to another task."));
+        }
+        super::agent_workspace::AgentWorkspaceBuilder::cleanup_recorded_workspace(
+            context,
+            session_id,
+            item_id,
+            &audit.workspace_relative_path,
+        )
+    }
+}
+
+fn validate_candidate_audit(
+    audit: &AgentAuditRecord,
+    bundle: &AgentTaskBundle,
+    manifest: &AgentCandidateManifest,
+    session_id: &str,
+    item_id: &str,
+    task_id: &str,
+) -> Result<(), BackendError> {
+    let exact_output = audit.output_hashes == vec![manifest.markdown_sha256.clone()];
+    let common = audit.task_id == task_id
+        && audit.session_id == session_id
+        && audit.item_id == item_id
+        && audit.trigger == bundle.trigger
+        && matches!(audit.outcome.as_str(), "output_staged" | "succeeded")
+        && audit.completed_at.is_some()
+        && !audit.agent_version.trim().is_empty()
+        && audit.tool_calls.is_empty()
+        && exact_output;
+    let route_valid = if let Some(command) = audit.route.strip_prefix("local/") {
+        audit.agent_kind.is_some_and(|kind| kind.command() == command)
+            && audit.prompt_template_version == "wiki-ingest-assist/local-v1"
+            && audit.approved_cost_micros.is_none()
+            && audit.approved_scope_sha256.is_none()
+            && audit.byok_provider.is_none()
+            && audit.byok_destination.is_none()
+            && audit.input_hashes == bundle.input_hashes
+            && audit.granted_tools == bundle.allowed_tools
+    } else if audit.route.starts_with("byok/") {
+        audit.byok_provider.as_ref().is_some_and(|provider| !provider.trim().is_empty())
+            && audit.byok_destination.as_ref().is_some_and(|destination| !destination.trim().is_empty())
+            && audit.route
+                == format!(
+                    "byok/{}/{}/{}",
+                    audit.byok_provider.as_deref().unwrap_or_default(),
+                    audit.agent_version,
+                    audit.byok_destination.as_deref().unwrap_or_default()
+                )
+            && audit.agent_kind.is_none()
+            && audit.prompt_template_version == "wiki-ingest-assist/byok-v1"
+            && audit.approved_scope_sha256.as_ref().is_some_and(|value| !value.is_empty())
+            && audit.approved_cost_micros.is_some()
+            && audit.granted_tools.is_empty()
+    } else {
+        false
+    };
+    if common && route_valid {
+        Ok(())
+    } else {
+        Err(candidate_error(
+            "Agent candidate provenance does not match the completed task.",
+        ))
     }
 }
 
@@ -938,6 +1076,8 @@ fn io_error(error: std::io::Error) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::agent::AgentKind;
+    use crate::models::import_v2_agent::AgentToolGrant;
     use crate::models::import_v2::{
         ArtifactKind, ImportArtifact, ImportInput, ImportInputKind, ImportItem,
         ImportPreviewArtifact, QualityLevel, QualityReport,
@@ -953,6 +1093,65 @@ mod tests {
             tools_used: vec!["tool-free-local-agent".into()],
             uncertainties: vec!["Formatting may differ.".into()],
             warnings: vec!["Review the Diff.".into()],
+        }
+    }
+
+    fn audit(bundle: &AgentTaskBundle) -> AgentAuditRecord {
+        AgentAuditRecord {
+            audit_id: "audit-a".into(),
+            task_id: "task-a".into(),
+            session_id: "session-a".into(),
+            item_id: "item-a".into(),
+            trigger: bundle.trigger,
+            route: "local/claude".into(),
+            agent_kind: Some(AgentKind::Claude),
+            agent_version: "1.0".into(),
+            prompt_template_version: "wiki-ingest-assist/local-v1".into(),
+            approved_cost_micros: None,
+            tool_calls: Vec::new(),
+            approved_scope_sha256: None,
+            byok_provider: None,
+            byok_destination: None,
+            workspace_relative_path: ".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a".into(),
+            granted_tools: bundle.allowed_tools.clone(),
+            input_hashes: bundle.input_hashes.clone(),
+            output_hashes: vec![manifest().markdown_sha256],
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            outcome: "succeeded".into(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn provenance_fails_closed_for_unknown_routes_and_tampering() {
+        let bundle = AgentTaskBundle {
+            schema_version: 1,
+            session_id: "session-a".into(),
+            item_id: "item-a".into(),
+            trigger: crate::models::import_v2_agent::AgentAssistanceTrigger::Manual,
+            public_source: "Example".into(),
+            input_hashes: vec!["b".repeat(64)],
+            allowed_tools: vec![AgentToolGrant::ValidateCandidate],
+            required_outputs: Vec::new(),
+            untrusted_source_material: Vec::new(),
+        };
+        let manifest = manifest();
+        let valid = audit(&bundle);
+        assert!(validate_candidate_audit(
+            &valid, &bundle, &manifest, "session-a", "item-a", "task-a"
+        )
+        .is_ok());
+        for tampered in [
+            AgentAuditRecord { route: "plugin/arbitrary".into(), ..valid.clone() },
+            AgentAuditRecord { prompt_template_version: "unknown".into(), ..valid.clone() },
+            AgentAuditRecord { completed_at: None, ..valid.clone() },
+            AgentAuditRecord { output_hashes: vec![manifest.markdown_sha256.clone(), "c".repeat(64)], ..valid.clone() },
+        ] {
+            assert!(validate_candidate_audit(
+                &tampered, &bundle, &manifest, "session-a", "item-a", "task-a"
+            )
+            .is_err());
         }
     }
 

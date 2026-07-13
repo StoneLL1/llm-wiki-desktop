@@ -11,12 +11,16 @@ use llm_wiki_desktop_lib::{
             ImportInput, ImportInputKind, ImportItem, ImportItemStatus, ImportResourceMode,
             ImportSession,
         },
-        import_v2_agent::{AgentAssistanceTrigger, AgentRecoveryAction},
+        import_v2_agent::{AgentAssistanceTrigger, AgentAuditRecord, AgentRecoveryAction},
         llm::{LlmProviderConfig, LlmProviderKind},
         paths::ProjectContext,
     },
     services::{
-        import_v2::{agent_assistance::AgentAssistanceService, ImportV2Service, SessionStore},
+        import_v2::{
+            agent_assistance::AgentAssistanceService,
+            agent_candidate::AgentCandidateService,
+            ImportV2Service, SessionStore,
+        },
         AgentService, FileStore, LlmService, SecretService, SettingsService,
     },
     tasks::TaskService,
@@ -218,6 +222,63 @@ fn byok_scope_is_exact_expiring_and_one_shot() {
     assert!(request.contains("send exactly this"));
     assert!(!request.contains("source-secret-value"));
     assert!(!tree_contains(root.path(), "sk-must-never-persist"));
+    let audit: AgentAuditRecord = files
+        .read_json(
+            &context,
+            &format!(
+                ".app/import-sessions/session-a/items/item-a/agent-audit/{}.json",
+                task.id
+            ),
+        )
+        .unwrap();
+    assert_eq!(audit.task_id, task.id);
+    assert_eq!(audit.agent_kind, None);
+    assert_eq!(audit.agent_version, "gpt-test");
+    assert_eq!(audit.prompt_template_version, "wiki-ingest-assist/byok-v1");
+    assert_eq!(audit.approved_cost_micros, scope.estimated_cost_micros);
+    assert_eq!(audit.byok_provider.as_deref(), Some("open_ai"));
+    assert_eq!(audit.byok_destination.as_deref(), Some(scope.destination.as_str()));
+    assert_eq!(audit.outcome, "succeeded");
+    assert_eq!(audit.output_hashes.len(), 1);
+
+    let candidate = AgentCandidateService::new(&imports, &files, &tasks)
+        .accept_staged_output(&context, "session-a", "item-a", &task.id)
+        .unwrap();
+    assert_eq!(candidate.audit_id, audit.audit_id);
+
+    let affected = tasks.get_task(&task.id).unwrap().result.unwrap().affected_paths[0].clone();
+    std::fs::write(root.path().join(affected).join("candidate.md"), "tampered after response")
+        .unwrap();
+    assert!(AgentCandidateService::new(&imports, &files, &tasks)
+        .accept_staged_output(&context, "session-a", "item-a", &task.id)
+        .is_err());
+    let retry = service
+        .preview_byok_scope(
+            &context,
+            "session-a",
+            "item-a",
+            AgentAssistanceTrigger::Manual,
+            LlmProviderKind::OpenAi,
+        )
+        .unwrap();
+    assert!(retry.requires_duplicate_charge_acknowledgement);
+    assert_eq!(
+        service
+            .start_byok(
+                &context,
+                "session-a",
+                "item-a",
+                AgentAssistanceTrigger::Manual,
+                LlmProviderKind::OpenAi,
+                &retry.model,
+                &retry.approval_id,
+                &retry.scope_sha256,
+                false,
+            )
+            .unwrap_err()
+            .code,
+        "IMPORT_BYOK_DUPLICATE_CHARGE_ACK_REQUIRED"
+    );
 }
 
 #[test]

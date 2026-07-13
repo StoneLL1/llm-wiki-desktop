@@ -1,10 +1,12 @@
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use chrono::{Duration, Utc};
 
 use crate::{
     errors::BackendError,
@@ -40,6 +42,18 @@ pub struct AgentWorkspace {
     pub deterministic_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub output_dir: PathBuf,
+    pub lease_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentWorkspaceLease {
+    session_id: String,
+    item_id: String,
+    workspace_id: String,
+    task_id: Option<String>,
+    process_instance_id: String,
+    expires_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +67,31 @@ impl AgentWorkspaceBuilder {
         item: &ImportItem,
         trigger: AgentAssistanceTrigger,
     ) -> Result<AgentWorkspace, BackendError> {
+        self.build_with_owner(context, session, item, trigger, None)
+    }
+
+    pub fn build_for_task(
+        &self,
+        context: &ProjectContext,
+        session: &ImportSession,
+        item: &ImportItem,
+        trigger: AgentAssistanceTrigger,
+        task_id: &str,
+    ) -> Result<AgentWorkspace, BackendError> {
+        if !is_safe_component(task_id) {
+            return Err(workspace_error("Agent workspace task identity is invalid."));
+        }
+        self.build_with_owner(context, session, item, trigger, Some(task_id))
+    }
+
+    fn build_with_owner(
+        &self,
+        context: &ProjectContext,
+        session: &ImportSession,
+        item: &ImportItem,
+        trigger: AgentAssistanceTrigger,
+        task_id: Option<&str>,
+    ) -> Result<AgentWorkspace, BackendError> {
         validate_identity(context, session, item)?;
         let workspace_id = uuid::Uuid::new_v4().to_string();
         let relative_root = format!(
@@ -60,16 +99,43 @@ impl AgentWorkspaceBuilder {
             session.session_id, item.item_id
         );
         let root = context.resolve_project_path(&relative_root)?;
+        let lease_relative = format!(
+            ".app/import-sessions/{}/items/{}/staging/agent-leases/{workspace_id}.json",
+            session.session_id, item.item_id
+        );
+        let lease_path = context.resolve_project_path(&lease_relative)?;
+        let lease_parent = lease_path
+            .parent()
+            .ok_or_else(|| workspace_error("Agent workspace lease path is invalid."))?;
+        fs::create_dir_all(lease_parent).map_err(workspace_io_error)?;
+        reject_links_between(&context.root, lease_parent)?;
+        write_json_atomic_path(
+            &lease_path,
+            &AgentWorkspaceLease {
+                session_id: session.session_id.clone(),
+                item_id: item.item_id.clone(),
+                workspace_id: workspace_id.clone(),
+                task_id: task_id.map(str::to_owned),
+                process_instance_id: process_instance_id().clone(),
+                expires_at: Utc::now() + Duration::minutes(10),
+            },
+        )?;
         let source_dir = root.join("source");
         let deterministic_dir = root.join("deterministic");
         let logs_dir = root.join("logs");
         let output_dir = root.join("output");
         for dir in [&source_dir, &deterministic_dir, &logs_dir, &output_dir] {
-            fs::create_dir_all(dir).map_err(workspace_io_error)?;
+            if let Err(error) = fs::create_dir_all(dir).map_err(workspace_io_error) {
+                make_tree_writable(&root);
+                let _ = fs::remove_dir_all(&root);
+                let _ = fs::remove_file(&lease_path);
+                return Err(error);
+            }
         }
         if let Err(error) = reject_links_between(&context.root, &root) {
             make_tree_writable(&root);
             let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_file(&lease_path);
             return Err(error);
         }
 
@@ -149,12 +215,14 @@ impl AgentWorkspaceBuilder {
                 deterministic_dir,
                 logs_dir,
                 output_dir,
+                lease_path: lease_path.clone(),
             })
         })();
 
         if result.is_err() {
             make_tree_writable(&root);
             let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_file(&lease_path);
         }
         result
     }
@@ -166,6 +234,9 @@ impl AgentWorkspaceBuilder {
         }
         make_tree_writable(&workspace.root);
         fs::remove_dir_all(&workspace.root).map_err(workspace_io_error)?;
+        if workspace.lease_path.exists() {
+            fs::remove_file(&workspace.lease_path).map_err(workspace_io_error)?;
+        }
         hashes.sort();
         Ok(hashes)
     }
@@ -184,6 +255,221 @@ impl AgentWorkspaceBuilder {
         }
         Ok(())
     }
+
+    pub fn cleanup_recorded_workspace(
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        workspace_relative_path: &str,
+    ) -> Result<(), BackendError> {
+        if !is_safe_component(session_id) || !is_safe_component(item_id) {
+            return Err(workspace_error("Agent workspace identity is invalid."));
+        }
+        let expected_prefix = format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/staging/agent/"
+        );
+        let normalized = workspace_relative_path.replace('\\', "/");
+        let workspace_id = normalized.strip_prefix(&expected_prefix).ok_or_else(|| {
+            workspace_error("Recorded Agent workspace is outside the current import item.")
+        })?;
+        if !is_safe_component(workspace_id) || workspace_id.contains('/') {
+            return Err(workspace_error("Recorded Agent workspace identity is invalid."));
+        }
+        let root = context.resolve_project_path(&normalized)?;
+        if root.exists() {
+            reject_links_between(&context.root, &root)?;
+            let metadata = fs::symlink_metadata(&root).map_err(workspace_io_error)?;
+            if !metadata.is_dir() {
+                return Err(workspace_error("Agent workspace storage is not a directory."));
+            }
+            make_tree_writable(&root);
+            fs::remove_dir_all(root).map_err(workspace_io_error)?;
+        }
+        let lease = context.resolve_project_path(&format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-leases/{workspace_id}.json"
+        ))?;
+        if lease.exists() {
+            reject_links_between(&context.root, &lease)?;
+            fs::remove_file(lease).map_err(workspace_io_error)?;
+        }
+        Ok(())
+    }
+
+    pub fn cleanup_abandoned_leases(
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        preserve_task: impl Fn(&str) -> bool,
+    ) -> Result<(), BackendError> {
+        if !is_safe_component(session_id) || !is_safe_component(item_id) {
+            return Err(workspace_error("Agent workspace identity is invalid."));
+        }
+        let leases = context.resolve_project_path(&format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-leases"
+        ))?;
+        if !leases.exists() {
+            return Ok(());
+        }
+        validate_isolated_directory(&context.root, &leases)?;
+        for entry in fs::read_dir(&leases).map_err(workspace_io_error)? {
+            let path = entry.map_err(workspace_io_error)?.path();
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| workspace_error("Agent workspace lease filename is invalid."))?;
+            if name.starts_with('.') && name.ends_with(".tmp") {
+                reject_links_between(&context.root, &path)?;
+                let metadata = fs::symlink_metadata(&path).map_err(workspace_io_error)?;
+                if !metadata.is_file()
+                    || metadata.file_type().is_symlink()
+                    || is_windows_reparse(&metadata)
+                {
+                    return Err(workspace_error("Agent workspace lease temporary is invalid."));
+                }
+                fs::remove_file(path).map_err(workspace_io_error)?;
+                continue;
+            }
+            if !name.ends_with(".json") {
+                return Err(workspace_error("Agent workspace lease filename is invalid."));
+            }
+            let bytes = read_isolated_regular_file(&context.root, &path, 64 * 1024)?;
+            let lease: AgentWorkspaceLease = serde_json::from_slice(&bytes)
+                .map_err(|_| workspace_error("Agent workspace lease is invalid."))?;
+            if lease.session_id != session_id
+                || lease.item_id != item_id
+                || !is_safe_component(&lease.workspace_id)
+            {
+                return Err(workspace_error("Agent workspace lease identity is invalid."));
+            }
+            let preserve = match lease.task_id.as_deref() {
+                Some(task_id) => preserve_task(task_id),
+                None => lease.process_instance_id == *process_instance_id()
+                    && lease.expires_at > Utc::now(),
+            };
+            if !preserve {
+                let relative = format!(
+                    ".app/import-sessions/{session_id}/items/{item_id}/staging/agent/{}",
+                    lease.workspace_id
+                );
+                Self::cleanup_recorded_workspace(context, session_id, item_id, &relative)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn process_instance_id() -> &'static String {
+    static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
+pub(crate) fn validate_isolated_directory(root: &Path, directory: &Path) -> Result<(), BackendError> {
+    reject_links_between(root, directory)?;
+    let canonical_root = root.canonicalize().map_err(workspace_io_error)?;
+    let canonical = directory.canonicalize().map_err(workspace_io_error)?;
+    if !canonical.starts_with(&canonical_root)
+        || !fs::symlink_metadata(directory).map_err(workspace_io_error)?.is_dir()
+    {
+        return Err(workspace_error("Agent input directory escaped its isolated workspace."));
+    }
+    Ok(())
+}
+
+pub(crate) fn read_isolated_regular_file(
+    root: &Path,
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, BackendError> {
+    reject_links_between(root, path)?;
+    let canonical_root = root.canonicalize().map_err(workspace_io_error)?;
+    let before = path.canonicalize().map_err(workspace_io_error)?;
+    if !before.starts_with(&canonical_root) {
+        return Err(workspace_error("Agent input escaped its isolated workspace."));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let mut file = options.open(path).map_err(workspace_io_error)?;
+    let opened = file.metadata().map_err(workspace_io_error)?;
+    let path_metadata = fs::symlink_metadata(path).map_err(workspace_io_error)?;
+    if !opened.is_file()
+        || path_metadata.file_type().is_symlink()
+        || is_windows_reparse(&path_metadata)
+        || !same_path_metadata(&opened, &path_metadata)
+    {
+        return Err(workspace_error("Agent input changed while it was being opened."));
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take((max_bytes.saturating_add(1)) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(workspace_io_error)?;
+    if bytes.len() > max_bytes {
+        return Err(workspace_error("Agent input exceeds the isolated read limit."));
+    }
+    let after = path.canonicalize().map_err(workspace_io_error)?;
+    let after_metadata = fs::symlink_metadata(path).map_err(workspace_io_error)?;
+    let verification = options.open(path).map_err(workspace_io_error)?;
+    if before != after
+        || !after.starts_with(&canonical_root)
+        || after_metadata.file_type().is_symlink()
+        || is_windows_reparse(&after_metadata)
+        || !same_path_metadata(&opened, &after_metadata)
+        || !same_open_file(&file, &verification)
+    {
+        return Err(workspace_error("Agent input changed while it was being read."));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn same_path_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_path_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    left.file_attributes() == right.file_attributes()
+        && left.file_size() == right.file_size()
+        && left.last_write_time() == right.last_write_time()
+}
+
+#[cfg(unix)]
+fn same_open_file(left: &fs::File, right: &fs::File) -> bool {
+    match (left.metadata(), right.metadata()) {
+        (Ok(left), Ok(right)) => same_path_metadata(&left, &right),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn same_open_file(left: &fs::File, right: &fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+    };
+    fn identity(file: &fs::File) -> Option<(u32, u32, u32)> {
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            GetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                &mut information,
+            )
+        } != 0;
+        ok.then_some((
+            information.dwVolumeSerialNumber,
+            information.nFileIndexHigh,
+            information.nFileIndexLow,
+        ))
+    }
+    identity(left).is_some_and(|left| Some(left) == identity(right))
 }
 
 fn validate_identity(
@@ -218,49 +504,47 @@ fn copy_hard_failure_source(
     ))?;
     let mut candidates = vec![staging.join("source.bin")];
     let authorized = staging.join("authorized");
-    if authorized.is_dir() {
+    if authorized.exists() {
+        validate_isolated_directory(&context.root, &authorized)?;
         for entry in fs::read_dir(&authorized).map_err(workspace_io_error)? {
             let path = entry.map_err(workspace_io_error)?.path();
-            if path.is_file() {
+            if fs::symlink_metadata(&path)
+                .map_err(workspace_io_error)?
+                .is_file()
+            {
                 candidates.push(path);
             }
         }
     }
-    let staged = candidates.into_iter().find(|path| path.is_file());
-    let source = if let Some(path) = staged {
-        reject_links_between(&context.root, &path)?;
-        path
+    let staged = candidates.into_iter().find(|path| {
+        fs::symlink_metadata(path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+    });
+    let (source, bytes) = if let Some(path) = staged {
+        let bytes = read_isolated_regular_file(&context.root, &path, 128 * 1024 * 1024)?;
+        (path, bytes)
     } else if let Some(identity) = &item.input.source_identity {
         let asserted = PathBuf::from(&identity.canonical_path);
+        let parent = asserted.parent().ok_or_else(|| {
+            workspace_error("The authorized source has no isolated parent directory.")
+        })?;
+        let bytes = read_isolated_regular_file(parent, &asserted, 128 * 1024 * 1024)?;
         let canonical = asserted.canonicalize().map_err(workspace_io_error)?;
-        if canonical != asserted
-            || fs::symlink_metadata(&canonical)
-                .map_err(workspace_io_error)?
-                .file_type()
-                .is_symlink()
-        {
+        if canonical != asserted {
             return Err(workspace_error(
                 "The authorized source changed before Agent assistance.",
             ));
         }
-        canonical
+        (canonical, bytes)
     } else {
         return Err(workspace_error(
             "No sanitized source snapshot is available for this hard failure.",
         ));
     };
-    let metadata = fs::metadata(&source).map_err(workspace_io_error)?;
-    if !metadata.is_file() || metadata.len() > 128 * 1024 * 1024 {
-        return Err(workspace_error(
-            "The hard-failure source is not an allowed regular file.",
-        ));
-    }
-    let bytes = fs::read(&source).map_err(workspace_io_error)?;
     let hash = format!("{:x}", Sha256::digest(&bytes));
     if let Some(identity) = &item.input.source_identity {
-        if source == PathBuf::from(&identity.canonical_path)
-            && (identity.size_bytes != bytes.len() as u64 || identity.sha256 != hash)
-        {
+        if identity.size_bytes != bytes.len() as u64 || identity.sha256 != hash {
             return Err(workspace_error(
                 "The authorized source changed before Agent assistance.",
             ));
@@ -291,8 +575,7 @@ fn copy_verified_item_artifact(
     let source = context.resolve_project_path(&normalized).map_err(|_| {
         workspace_error("Artifact path is not contained by the current project item.")
     })?;
-    reject_links_between(&context.root, &source)?;
-    let bytes = fs::read(&source).map_err(workspace_io_error)?;
+    let bytes = read_isolated_regular_file(&context.root, &source, 128 * 1024 * 1024)?;
     if bytes.len() as u64 != artifact.size_bytes
         || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256
     {
@@ -365,6 +648,32 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), BackendError> {
         )
     })?;
     fs::write(path, bytes).map_err(workspace_io_error)
+}
+
+fn write_json_atomic_path(path: &Path, value: &impl Serialize) -> Result<(), BackendError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| workspace_error("Agent workspace lease path is invalid."))?;
+    fs::create_dir_all(parent).map_err(workspace_io_error)?;
+    let temporary = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|_| workspace_error("Agent workspace lease is invalid."))?;
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(workspace_io_error)?;
+        use std::io::Write;
+        file.write_all(&bytes).map_err(workspace_io_error)?;
+        file.sync_all().map_err(workspace_io_error)?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(workspace_io_error)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn set_tree_readonly(root: &Path) -> Result<(), BackendError> {
@@ -441,4 +750,37 @@ fn workspace_io_error(error: std::io::Error) -> BackendError {
         true,
         false,
     )
+}
+
+#[cfg(test)]
+mod sealed_read_tests {
+    use super::*;
+
+    #[test]
+    fn isolated_read_accepts_regular_file_and_rejects_linked_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("safe.txt"), "safe").unwrap();
+        fs::write(outside.path().join("secret.txt"), "outside-secret").unwrap();
+        assert_eq!(
+            read_isolated_regular_file(root.path(), &root.path().join("safe.txt"), 32).unwrap(),
+            b"safe"
+        );
+
+        let link = root.path().join("linked");
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(outside.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "junction setup failed");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        assert!(read_isolated_regular_file(root.path(), &link.join("secret.txt"), 32).is_err());
+    }
 }

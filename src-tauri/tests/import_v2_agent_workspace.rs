@@ -110,6 +110,26 @@ fn workspace_contains_only_sanitized_current_item_copies() {
         .unwrap()
         .permissions()
         .readonly());
+    let lease_bytes = std::fs::read(&workspace.lease_path).unwrap();
+    let lease_parent = workspace.lease_path.parent().unwrap();
+    let partial = lease_parent.join(".partial.tmp");
+    let completed = lease_parent.join(".completed.tmp");
+    std::fs::write(&partial, b"{\"partial\":").unwrap();
+    std::fs::write(&completed, &lease_bytes).unwrap();
+    let mut lease: serde_json::Value = serde_json::from_slice(&lease_bytes).unwrap();
+    lease["processInstanceId"] = "previous-process".into();
+    std::fs::write(&workspace.lease_path, serde_json::to_vec_pretty(&lease).unwrap()).unwrap();
+    AgentWorkspaceBuilder::cleanup_abandoned_leases(
+        &context,
+        "session-a",
+        "item-a",
+        |_| true,
+    )
+    .unwrap();
+    assert!(!workspace.root.exists());
+    assert!(!workspace.lease_path.exists());
+    assert!(!partial.exists());
+    assert!(!completed.exists());
 }
 
 #[test]
@@ -227,4 +247,5 @@ fn terminal_cleanup_preserves_output_hashes_but_removes_workspace() {
     let hashes = AgentWorkspaceBuilder::cleanup_terminal(&workspace).unwrap();
     assert_eq!(hashes, vec![format!("{:x}", Sha256::digest(b"# improved"))]);
     assert!(!workspace.root.exists());
+    assert!(!workspace.lease_path.exists());
 }

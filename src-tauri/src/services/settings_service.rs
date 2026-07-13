@@ -117,6 +117,14 @@ impl SettingsService {
                 true,
             ));
         }
+        if policy.auto_local_on_quality_warning {
+            return Err(BackendError::new(
+                "IMPORT_AGENT_POLICY_INVALID",
+                "Low-quality optimization is manual-only and cannot be enabled as automation.",
+                false,
+                true,
+            ));
+        }
         let mut settings = self.read_settings(context)?;
         settings.import_agent_policy = policy.clone();
         settings.agent_default = local_agent_kind;
