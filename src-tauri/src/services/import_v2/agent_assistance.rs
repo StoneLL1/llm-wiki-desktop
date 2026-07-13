@@ -13,12 +13,12 @@ use crate::{
         agent::AgentKind,
         import_v2::{AttemptOutcome, ImportItemStatus},
         import_v2_agent::{
-            AgentAssistancePolicy, AgentAssistanceTrigger, AgentAuditRecord, AgentRecoveryAction,
-            AgentSendScope, SendScopeFile,
+            AgentAssistancePolicy, AgentAssistanceTrigger, AgentAuditRecord,
+            AgentCandidateManifest, AgentRecoveryAction, AgentSendScope, SendScopeFile,
         },
         llm::LlmProviderKind,
         paths::ProjectContext,
-        task::{BackendTask, TaskResult, TaskStatus, TaskType},
+        task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType},
     },
     services::{AgentService, FileStore, LlmService, SecretService, SettingsService},
     tasks::TaskService,
@@ -499,6 +499,11 @@ impl<'a> AgentAssistanceService<'a> {
             use std::io::Write;
             file.write_all(output.as_bytes()).map_err(|_| assistance_error("IMPORT_AGENT_OUTPUT_INVALID", "BYOK output could not be staged."))?;
             file.sync_all().map_err(|_| assistance_error("IMPORT_AGENT_OUTPUT_INVALID", "BYOK output could not be staged."))?;
+            write_candidate_manifest(
+                &workspace.output_dir,
+                "byok-model",
+                &format!("{:x}", Sha256::digest(output.as_bytes())),
+            )?;
             workspace.root.strip_prefix(&context.root).map(|path| path.to_string_lossy().replace('\\', "/")).map_err(|_| assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent workspace escaped the project."))
         })();
         let relative_workspace = match staged {
@@ -513,7 +518,10 @@ impl<'a> AgentAssistanceService<'a> {
         if let Err(error) = self.tasks.complete_running_with_result(task_id, TaskResult {
             summary: "BYOK output is staged for candidate validation.".into(),
             affected_paths: vec![format!("{relative_workspace}/output")],
-            reference: None,
+            reference: Some(TaskResultReference::ImportPreview {
+                session_id: session_id.into(),
+                item_id: item_id.into(),
+            }),
             pending_action: None,
         }) {
             let error = assistance_error("IMPORT_AGENT_TASK_FAILED", &error);
@@ -815,6 +823,16 @@ impl<'a> AgentAssistanceService<'a> {
                     "Agent output could not be staged for candidate validation.",
                 ));
             }
+            if let Err(error) =
+                write_candidate_manifest(
+                    &workspace.output_dir,
+                    "tool-free-local-agent",
+                    &format!("{:x}", Sha256::digest(output.as_bytes())),
+                )
+            {
+                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
+                return Err(error);
+            }
             let relative_workspace = workspace
                 .root
                 .strip_prefix(&context.root)
@@ -831,7 +849,10 @@ impl<'a> AgentAssistanceService<'a> {
                 TaskResult {
                     summary: "Agent output is staged for candidate validation.".into(),
                     affected_paths: vec![format!("{relative_workspace}/output")],
-                    reference: None,
+                    reference: Some(TaskResultReference::ImportPreview {
+                        session_id: session_id.into(),
+                        item_id: item_id.into(),
+                    }),
                     pending_action: None,
                 },
             ) {
@@ -1138,6 +1159,50 @@ fn canonical_send_text(bytes: &[u8]) -> Result<(String, Vec<String>), BackendErr
         assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Canonical BYOK text could not be encoded.")
     })?;
     Ok((encoded, redactions))
+}
+
+fn write_candidate_manifest(
+    output_dir: &Path,
+    route: &str,
+    markdown_sha256: &str,
+) -> Result<(), BackendError> {
+    let manifest = AgentCandidateManifest {
+        markdown_path: "candidate.md".into(),
+        asset_paths: Vec::new(),
+        markdown_sha256: markdown_sha256.into(),
+        asset_sha256: std::collections::BTreeMap::new(),
+        processing_summary: "AI-assisted Markdown candidate staged for validation.".into(),
+        tools_used: vec![route.into()],
+        uncertainties: vec![
+            "The generated structure may differ from the deterministic extraction.".into(),
+        ],
+        warnings: vec!["Review the candidate Diff before selection.".into()],
+    };
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| {
+        assistance_error(
+            "IMPORT_AGENT_OUTPUT_INVALID",
+            "Agent manifest could not be encoded.",
+        )
+    })?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_dir.join("manifest.json"))
+        .map_err(|_| {
+            assistance_error(
+                "IMPORT_AGENT_OUTPUT_INVALID",
+                "Agent manifest could not be staged.",
+            )
+        })?;
+    use std::io::Write;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| {
+            assistance_error(
+                "IMPORT_AGENT_OUTPUT_INVALID",
+                "Agent manifest could not be staged.",
+            )
+        })
 }
 
 fn validate_agent_output(output: &str) -> Result<(), BackendError> {

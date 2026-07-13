@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 Agent candidate validation — Added exact-hash strict manifests, single-read immutable candidate sealing, deterministic input revalidation, hardened text/image asset checks, Source Registry baseline/current/agent Git Diff, idempotent recovery, and Core PreviewReady/NeedsMerge registration — Key decision: unmeasured Agent fidelity stays an explicit warning and neither deterministic staging nor raw/wiki is ever overwritten.
+
 [2026-07-13] Import V2 BYOK assistance — Added exact one-shot send-scope approval bound to project/item/provider/model/destination, canonical secret-redacted payload hashing, context/cost disclosure, cancellable shared LLM streaming, staging-only output, durable send-phase audit, and duplicate-charge acknowledgement after ambiguous recovery — Key decision: cloud assistance is never automatic and a send-started call is recovered as charge-unknown rather than silently retried.
 
 [2026-07-13] Import V2 local Agent invocation — Added policy-gated automatic hard-failure and explicit manual starts, isolated stdin-only Claude/Codex profiles, durable AgentRun task binding, redacted output capture, process-tree cancellation, hard-failure source recovery, and fail-closed unsupported CLI profiles — Key decision: low-quality optimization stays manual-only, unavailable agents are never installed, and successful output remains staging-only for later candidate validation.

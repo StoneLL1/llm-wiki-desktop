@@ -9,6 +9,7 @@ use crate::models::import_v2::{
     ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
+use crate::models::import_v2_agent::AgentCandidate;
 use crate::models::import_v2_file::FileFormat;
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -297,6 +298,29 @@ impl ImportV2Service {
             attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
             attempt.outcome = outcome;
             attempt.warnings = warnings;
+            Ok(())
+        })
+    }
+
+    pub fn register_agent_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        candidate: AgentCandidate,
+        needs_three_way_merge: bool,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.task_id.as_deref() != Some(task_id) || candidate.task_id != task_id {
+                return Err(task_error("Agent candidate is not bound to this import item task."));
+            }
+            item.status = if needs_three_way_merge {
+                ImportItemStatus::NeedsMerge
+            } else {
+                ImportItemStatus::PreviewReady
+            };
             Ok(())
         })
     }

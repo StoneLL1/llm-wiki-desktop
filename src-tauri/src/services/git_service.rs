@@ -12,6 +12,57 @@ use crate::models::git::{
 use crate::models::paths::ProjectContext;
 
 impl GitService {
+    /// Render a candidate comparison with Git's existing diff renderer without
+    /// staging or mutating either file.
+    pub fn diff_candidate_files(
+        context: &ProjectContext,
+        baseline: &std::path::Path,
+        candidate: &std::path::Path,
+    ) -> Result<String, BackendError> {
+        let root = context.root.canonicalize().map_err(|error| {
+            BackendError::new("GIT_DIFF_FAILED", error.to_string(), true, false)
+        })?;
+        let mut relative = Vec::new();
+        for path in [baseline, candidate] {
+            let canonical = path.canonicalize().map_err(|error| {
+                BackendError::new("GIT_DIFF_FAILED", error.to_string(), true, false)
+            })?;
+            if !canonical.starts_with(&root) || !canonical.is_file() {
+                return Err(BackendError::new(
+                    "GIT_DIFF_FAILED",
+                    "Candidate diff inputs must be regular files inside the project.",
+                    false,
+                    true,
+                ));
+            }
+            relative.push(
+                canonical
+                    .strip_prefix(&root)
+                    .expect("candidate containment was checked")
+                    .to_path_buf(),
+            );
+        }
+        let output = Command::new("git")
+            .current_dir(&context.root)
+            .args(["diff", "--no-index", "--no-ext-diff", "--"])
+            .arg(&relative[0])
+            .arg(&relative[1])
+            .output()
+            .map_err(|error| {
+                BackendError::new("GIT_DIFF_FAILED", error.to_string(), true, false)
+            })?;
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            return Err(BackendError::new(
+                "GIT_DIFF_FAILED",
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                true,
+                false,
+            ));
+        }
+        let body = String::from_utf8_lossy(&output.stdout);
+        Ok(format!("```diff\n{}\n```", body.trim_end()))
+    }
+
     pub fn initialize_repository(
         &self,
         context: &ProjectContext,

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::{
     agent::AgentKind,
@@ -143,6 +144,20 @@ pub struct ApproveImportByokAssistanceRequest {
     pub scope_sha256: String,
     #[serde(default)]
     pub acknowledge_possible_duplicate_charge: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCandidateManifest {
+    pub markdown_path: String,
+    pub asset_paths: Vec<String>,
+    pub markdown_sha256: String,
+    #[serde(default)]
+    pub asset_sha256: BTreeMap<String, String>,
+    pub processing_summary: String,
+    pub tools_used: Vec<String>,
+    pub uncertainties: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
