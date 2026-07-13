@@ -591,7 +591,7 @@ fn preview_import_v2(
             }
             state
                 .task_service
-                .set_result(
+                .complete_running_with_result(
                     &task_id,
                     TaskResult {
                         summary: "Import V2 preview ready.".into(),
@@ -605,10 +605,6 @@ fn preview_import_v2(
                         pending_action: None,
                     },
                 )
-                .map_err(task_error)?;
-            state
-                .task_service
-                .transition_status(&task_id, TaskStatus::Succeeded)
                 .map_err(task_error)?;
             Ok(())
         })();
