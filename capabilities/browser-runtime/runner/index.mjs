@@ -7,7 +7,7 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
-import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformTargetHost, loginSentinels, resolvePinnedAddress } from "./policy.mjs";
+import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformTargetHost, resolvePinnedAddress } from "./policy.mjs";
 
 const line = await new Promise((resolve) => { let data = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (chunk) => { data += chunk; }); process.stdin.on("end", () => resolve(data.trim())); });
 const rpc = JSON.parse(line);
@@ -53,11 +53,7 @@ if (rpc.method === "browser.login") {
     while (Date.now() < deadline) {
       if (page.isClosed()) break;
       const cookies = await context.cookies([sourceUrl]);
-      const visible = [];
-      for (const selector of loginSentinels(platform)) {
-        if (await page.locator(selector).first().isVisible().catch(() => false)) visible.push(selector);
-      }
-      if (hasPlatformAuthentication(platform, target.hostname, cookies, visible)) { authenticated = true; break; }
+      if (hasPlatformAuthentication(platform, target.hostname, cookies)) { authenticated = true; break; }
       await page.waitForTimeout(1000);
     }
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { authenticated }, error: null })}\n`);

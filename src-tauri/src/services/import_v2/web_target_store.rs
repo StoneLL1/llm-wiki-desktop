@@ -100,8 +100,8 @@ impl WebTargetStore {
         self.authenticated_profiles.lock().map_err(|_| store_error())?.insert(item_id.to_string(), profile);
         Ok(())
     }
-    pub fn authenticated_profile(&self, item_id: &str) -> Result<Option<PathBuf>, BackendError> {
-        Ok(self.authenticated_profiles.lock().map_err(|_| store_error())?.get(item_id).filter(|path| path.is_dir()).cloned())
+    pub fn take_authenticated_profile(&self, item_id: &str) -> Result<Option<PathBuf>, BackendError> {
+        Ok(self.authenticated_profiles.lock().map_err(|_| store_error())?.remove(item_id).filter(|path| path.is_dir()))
     }
 }
 fn missing() -> BackendError {

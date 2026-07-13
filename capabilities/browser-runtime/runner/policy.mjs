@@ -9,14 +9,6 @@ const LOGIN_COOKIE_NAMES = Object.freeze({
   x: new Set(["auth_token"]),
 });
 
-const LOGIN_SENTINELS = Object.freeze({
-  wechat: ["#js_profile_qrcode", ".account_nickname"],
-  zhihu: [".AppHeader-profile", "[data-za-detail-view-element_name='Avatar']"],
-  bilibili: [".header-avatar-wrap", ".bili-avatar"],
-  xiaohongshu: [".user.side-bar-component", "[data-v-user-avatar]"],
-  x: ["[data-testid='SideNav_AccountSwitcher_Button']"],
-});
-
 const PLATFORM_HOSTS = Object.freeze({
   wechat: ["mp.weixin.qq.com"],
   zhihu: ["zhihu.com"],
@@ -52,17 +44,12 @@ export function isPlatformTargetHost(platform, targetHost) {
   return (PLATFORM_HOSTS[platform] || []).some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
 }
 
-export function loginSentinels(platform) {
-  return [...(LOGIN_SENTINELS[platform] || [])];
-}
-
-export function hasPlatformAuthentication(platform, targetHost, cookies, visibleSentinels = []) {
+export function hasPlatformAuthentication(platform, targetHost, cookies) {
   const allowedNames = LOGIN_COOKIE_NAMES[platform];
   if (!allowedNames) return false;
   const cookieProof = cookies.some((cookie) => {
     const domain = String(cookie.domain || "").replace(/^\./, "").toLowerCase();
     return allowedNames.has(cookie.name) && (domain === targetHost || targetHost.endsWith(`.${domain}`));
   });
-  const allowedSentinels = new Set(LOGIN_SENTINELS[platform] || []);
-  return cookieProof || visibleSentinels.some((selector) => allowedSentinels.has(selector));
+  return cookieProof;
 }

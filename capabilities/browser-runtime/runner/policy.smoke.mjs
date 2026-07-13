@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { hasPlatformAuthentication, isBlockedAddress, isPinnedTargetHost, isPlatformTargetHost, loginSentinels, resolvePinnedAddress } from "./policy.mjs";
+import { hasPlatformAuthentication, isBlockedAddress, isPinnedTargetHost, isPlatformTargetHost, resolvePinnedAddress } from "./policy.mjs";
 
 for (const address of ["127.0.0.1", "10.0.0.1", "169.254.169.254", "192.168.1.1", "224.0.0.1", "::1", "fc00::1", "fe80::1"]) {
   assert.equal(isBlockedAddress(address), true, address);
@@ -22,6 +22,4 @@ await assert.rejects(() => resolvePinnedAddress("example.com", async () => [{ ad
 assert.equal(hasPlatformAuthentication("bilibili", "www.bilibili.com", [{ name: "SESSDATA", domain: ".bilibili.com" }]), true);
 assert.equal(hasPlatformAuthentication("bilibili", "www.bilibili.com", [{ name: "SESSDATA", domain: ".evil.test" }]), false);
 assert.equal(hasPlatformAuthentication("bilibili", "www.bilibili.com", [], []), false);
-const [xSentinel] = loginSentinels("x");
-assert.equal(hasPlatformAuthentication("x", "x.com", [], [xSentinel]), true);
-assert.equal(hasPlatformAuthentication("x", "x.com", [], ["body"]), false);
+assert.equal(hasPlatformAuthentication("x", "x.com", [], ["public-page-selector"]), false);
