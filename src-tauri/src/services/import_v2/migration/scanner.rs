@@ -103,9 +103,16 @@ impl LegacyScanner for DefaultLegacyScanner {
             (left.code.as_str(), left.relative_path.as_deref().unwrap_or_default())
                 .cmp(&(right.code.as_str(), right.relative_path.as_deref().unwrap_or_default()))
         });
-        let fingerprint = fingerprint(&state.records, &state.files, &state.warnings);
+        let project_identity = project_identity(project_root, &root_metadata);
+        let fingerprint = fingerprint(
+            &project_identity,
+            &state.records,
+            &state.files,
+            &state.warnings,
+        );
         Ok(LegacyInventory {
             schema_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+            project_identity,
             fingerprint,
             records: state.records,
             warnings: state.warnings,
@@ -437,12 +444,28 @@ fn stable_record_id(metadata_path: &str, key: &str) -> String {
 }
 
 fn fingerprint(
+    project_identity: &str,
     records: &[LegacyRecord],
     files: &[LegacyFileEvidence],
     warnings: &[MigrationWarning],
 ) -> String {
-    let bytes = serde_json::to_vec(&(records, files, warnings)).unwrap_or_default();
+    let bytes = serde_json::to_vec(&(project_identity, records, files, warnings)).unwrap_or_default();
     sha256(&bytes)
+}
+
+fn project_identity(root: &Path, metadata: &fs::Metadata) -> String {
+    let canonical = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/");
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    sha256(format!("{canonical}\n{modified}").as_bytes())
 }
 
 fn sha256(bytes: &[u8]) -> String {

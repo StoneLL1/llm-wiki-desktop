@@ -8,7 +8,7 @@ use crate::errors::BackendError;
 use crate::models::git::{CheckpointPurpose, GitCheckpoint};
 use crate::models::import_v2_migration::{
     LegacyInventory, MigrationApplyResult, MigrationConfirmation, MigrationDecision,
-    MigrationPlan, MigrationReport, MigrationStatus,
+    MigrationPlan, MigrationReport, MigrationStatus, MigrationStatusSnapshot,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::migration::planner::{DefaultMigrationPlanner, MigrationPlanner};
@@ -159,37 +159,29 @@ impl MigrationService {
         self.apply_metadata(core, git, context, plan, confirmation, cancellation)
     }
 
+    pub fn status(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<MigrationStatusSnapshot, BackendError> {
+        let report = self.read_report(context)?;
+        Ok(MigrationStatusSnapshot {
+            status: report
+                .as_ref()
+                .map(|report| report.status)
+                .unwrap_or(MigrationStatus::NotScanned),
+            plan_fingerprint: report.as_ref().map(|report| report.plan_fingerprint.clone()),
+            report,
+        })
+    }
+
     fn read_idempotent_result(
         &self,
         context: &ProjectContext,
         plan: &MigrationPlan,
     ) -> Result<Option<MigrationApplyResult>, BackendError> {
-        let path = context.resolve_project_path(REPORT_PATH)?;
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(io_error("MIGRATION_REPORT_READ_FAILED", error)),
+        let Some(report) = self.read_report(context)? else {
+            return Ok(None);
         };
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || is_project_reparse_point(&metadata)
-        {
-            return Err(BackendError::new(
-                "MIGRATION_REPORT_INVALID",
-                "The migration report is not a safe regular file.",
-                false,
-                true,
-            ));
-        }
-        let bytes = read_project_file_nofollow(&context.root, &path)?;
-        let report: MigrationReport = serde_json::from_slice(&bytes).map_err(|_| {
-            BackendError::new(
-                "MIGRATION_REPORT_INVALID",
-                "The migration report is not valid migration metadata.",
-                false,
-                true,
-            )
-        })?;
         if report.status == MigrationStatus::Applied {
             if report.plan_fingerprint == plan.fingerprint() {
                 return Ok(Some(MigrationApplyResult {
@@ -218,6 +210,37 @@ impl MigrationService {
             false,
             true,
         ))
+    }
+
+    fn read_report(&self, context: &ProjectContext) -> Result<Option<MigrationReport>, BackendError> {
+        let path = context.resolve_project_path(REPORT_PATH)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error("MIGRATION_REPORT_READ_FAILED", error)),
+        };
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || is_project_reparse_point(&metadata)
+        {
+            return Err(BackendError::new(
+                "MIGRATION_REPORT_INVALID",
+                "The migration report is not a safe regular file.",
+                false,
+                true,
+            ));
+        }
+        let bytes = read_project_file_nofollow(&context.root, &path)?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| {
+                BackendError::new(
+                    "MIGRATION_REPORT_INVALID",
+                    "The migration report is not valid migration metadata.",
+                    false,
+                    true,
+                )
+            })
     }
 }
 
