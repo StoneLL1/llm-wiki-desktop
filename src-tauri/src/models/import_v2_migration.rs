@@ -168,6 +168,41 @@ pub struct MigrationStatusSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct LegacyHistoryEntry {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    pub evidence_path: String,
+    pub legacy_read_only: bool,
+    pub available_actions: Vec<String>,
+    pub can_retry: bool,
+    pub can_delete: bool,
+    pub can_replace_source: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyHistoryWarning {
+    pub code: String,
+    pub message: String,
+    pub evidence_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyHistoryView {
+    pub entries: Vec<LegacyHistoryEntry>,
+    pub warnings: Vec<LegacyHistoryWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct MigrationReport {
     pub report_version: u32,
     pub plan_version: u32,
