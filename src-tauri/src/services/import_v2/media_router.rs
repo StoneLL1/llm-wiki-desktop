@@ -72,6 +72,7 @@ pub struct MediaRoutePlan {
 pub enum MediaRouteStatus {
     Ready,
     WaitingCapability,
+    WaitingAuthorization,
 }
 
 #[derive(Default)]
@@ -79,18 +80,31 @@ pub struct MediaRouter;
 
 impl MediaRouter {
     pub fn plan(&self, input: &MediaInput, whisper_available: bool) -> MediaRoutePlan {
+        self.plan_authorized(input, whisper_available, true)
+    }
+
+    pub fn plan_authorized(
+        &self,
+        input: &MediaInput,
+        whisper_available: bool,
+        user_authorized: bool,
+    ) -> MediaRoutePlan {
         let subtitle = input
             .subtitles
             .iter()
             .min_by_key(|candidate| subtitle_rank(candidate.kind))
             .cloned();
-        let status = if subtitle.is_none() && !whisper_available {
+        let status = if subtitle.is_some() {
+            MediaRouteStatus::Ready
+        } else if !whisper_available {
             MediaRouteStatus::WaitingCapability
+        } else if !user_authorized {
+            MediaRouteStatus::WaitingAuthorization
         } else {
             MediaRouteStatus::Ready
         };
         MediaRoutePlan {
-            requires_asr: subtitle.is_none() && whisper_available,
+            requires_asr: subtitle.is_none() && whisper_available && user_authorized,
             subtitle,
             artifacts: MediaArtifactPlan::subtitle_markdown_cover_metadata(),
             chunk_bytes: MEDIA_CHUNK_BYTES,

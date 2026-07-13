@@ -22,8 +22,10 @@ use crate::services::import_v2::native_file_engine::NativeFileEngine;
 use crate::services::import_v2::pack_engine::PackProcessEngine;
 use crate::services::import_v2::quality_gate::QualityGate;
 use crate::services::import_v2::transaction::FileTransaction;
+use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::services::import_v2::SessionStore;
 use crate::services::FileStore;
+use crate::services::SecretService;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
@@ -32,10 +34,17 @@ pub struct ImportV2Service {
     engines: EngineRegistry,
     quality: QualityGate,
     pub(super) mutation_lock: Mutex<()>,
+    web_targets: Arc<WebTargetStore>,
 }
 
 impl Default for ImportV2Service {
     fn default() -> Self {
+        Self::with_secret_service(SecretService::default())
+    }
+}
+
+impl ImportV2Service {
+    pub fn with_secret_service(secrets: SecretService) -> Self {
         let engines = EngineRegistry::default();
         engines
             .register(Arc::new(NativeFileEngine::default()))
@@ -45,11 +54,25 @@ impl Default for ImportV2Service {
             engines,
             quality: QualityGate::default(),
             mutation_lock: Mutex::new(()),
+            web_targets: Arc::new(WebTargetStore::new(secrets)),
         }
     }
-}
-
-impl ImportV2Service {
+    pub fn store_web_target(
+        &self,
+        target: &crate::services::import_v2::url_policy::SessionWebTarget,
+    ) -> Result<String, BackendError> {
+        self.web_targets.store(target)
+    }
+    pub fn delete_web_target(&self, reference: &str) -> Result<(), BackendError> {
+        self.web_targets.delete(reference)
+    }
+    pub fn resolve_web_target(
+        &self,
+        locator: &str,
+        public: Option<&str>,
+    ) -> Result<crate::services::import_v2::url_policy::SessionWebTarget, BackendError> {
+        self.web_targets.resolve(locator, public)
+    }
     pub fn create_session(
         &self,
         context: &ProjectContext,
@@ -150,6 +173,7 @@ impl ImportV2Service {
             route,
             supported_extensions,
             timeout,
+            self.web_targets.clone(),
         )))
     }
     pub fn set_item_selected(
@@ -284,6 +308,18 @@ impl ImportV2Service {
                         crate::models::import_v2::AttemptOutcome::Failed,
                         Vec::new(),
                     )?;
+                    if is_web_user_wait(&error) {
+                        return self.finish_waiting_login(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
+                        );
+                    }
                     if is_non_fallback_error(&error) {
                         return self.finish_failed(
                             context,
@@ -614,6 +650,30 @@ impl ImportV2Service {
         task_call(tasks.transition_status(task_id, TaskStatus::Failed))?;
         Err(issue_safe_error(&error))
     }
+    fn finish_waiting_login(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        error: BackendError,
+        stage: ImportStage,
+    ) -> Result<ImportItem, BackendError> {
+        let item = self.mutate_item(context, files, session_id, item_id, |item| {
+            transition_item(item, ImportItemStatus::WaitingLogin)?;
+            item.issue = Some(ImportIssue::for_web_code(&error.code, stage));
+            Ok(())
+        })?;
+        task_call(tasks.append_log(
+            task_id,
+            LogLevel::Warn,
+            "Web import is waiting for user authentication.".into(),
+        ))?;
+        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        Ok(item)
+    }
     fn mutate_item<F>(
         &self,
         context: &ProjectContext,
@@ -647,10 +707,41 @@ impl ImportV2Service {
 
 fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
     if input.kind == crate::models::import_v2::ImportInputKind::Url {
-        let host = url::Url::parse(input.normalized_locator.as_deref().unwrap_or(&input.locator)).ok().and_then(|url| url.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
-        if host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com") || host == "x.com" || host.ends_with(".x.com") || host == "twitter.com" || host.ends_with(".twitter.com") { return Vec::new(); }
-        let platform = if host == "mp.weixin.qq.com" { Some("web.wechat.article") } else if host == "zhihu.com" || host.ends_with(".zhihu.com") { Some("web.zhihu.content") } else if host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv" { Some("web.bilibili.video") } else { None };
-        let mut routes = platform.into_iter().collect::<Vec<_>>(); routes.extend(["web.generic.readability", "web.generic.browser"]); return routes;
+        let host = url::Url::parse(
+            input
+                .normalized_locator
+                .as_deref()
+                .unwrap_or(&input.locator),
+        )
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+        if host == "xiaohongshu.com"
+            || host.ends_with(".xiaohongshu.com")
+            || host == "x.com"
+            || host.ends_with(".x.com")
+            || host == "twitter.com"
+            || host.ends_with(".twitter.com")
+        {
+            return Vec::new();
+        }
+        if host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv" {
+            return vec![
+                "web.bilibili.metadata",
+                "web.bilibili.video",
+                "web.generic.browser",
+            ];
+        }
+        let platform = if host == "mp.weixin.qq.com" {
+            Some("web.wechat.article")
+        } else if host == "zhihu.com" || host.ends_with(".zhihu.com") {
+            Some("web.zhihu.content")
+        } else {
+            None
+        };
+        let mut routes = platform.into_iter().collect::<Vec<_>>();
+        routes.extend(["web.generic.readability", "web.generic.browser"]);
+        return routes;
     }
     let extension = Path::new(&input.locator)
         .extension()
@@ -702,6 +793,14 @@ fn is_non_fallback_error(error: &BackendError) -> bool {
     error.code == crate::errors::IMPORT_V2_CANCELLED
         || error.code.contains("PASSWORD")
         || error.code.contains("LOGIN")
+}
+fn is_web_user_wait(error: &BackendError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "IMPORT_WEB_LOGIN_REQUIRED"
+            | "IMPORT_WEB_CHALLENGE_DETECTED"
+            | "IMPORT_WEB_CAPTCHA_REQUIRED"
+    )
 }
 
 fn classify_route_failure(
@@ -958,6 +1057,14 @@ fn transition_item(item: &mut ImportItem, next: ImportItemStatus) -> Result<(), 
     Ok(())
 }
 fn issue_from_engine_error(error: &BackendError, stage: ImportStage) -> ImportIssue {
+    if error.code.starts_with("IMPORT_WEB_")
+        || error.code.starts_with("IMPORT_V2_URL_")
+        || error.code.starts_with("IMPORT_V2_REDIRECT_")
+        || error.code.starts_with("IMPORT_V2_RESPONSE_")
+        || error.code == "IMPORT_V2_CONNECTOR_RATE_LIMITED"
+    {
+        return ImportIssue::for_web_code(&error.code, stage);
+    }
     let code = stable_file_error_code(&error.code);
     ImportIssue::for_file_code(code, stage)
 }

@@ -5,7 +5,9 @@ use serde::Serialize;
 use crate::{errors::BackendError, models::import_v2_file::CapabilityRequirement};
 
 use super::{
-    capability_pack::CapabilityPackManager, file_router::CapabilitySnapshot, ImportV2Service,
+    capability_pack::{CapabilityPackManager, ResolvedCapabilityPack},
+    file_router::CapabilitySnapshot,
+    ImportV2Service,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -20,6 +22,7 @@ pub struct CapabilityRuntimeStatus {
 #[derive(Default)]
 pub struct ImportCapabilityRuntime {
     statuses: RwLock<Vec<CapabilityRuntimeStatus>>,
+    browser_pack: RwLock<Option<ResolvedCapabilityPack>>,
 }
 
 impl ImportCapabilityRuntime {
@@ -44,6 +47,7 @@ impl ImportCapabilityRuntime {
                 accepted_license_expressions: spec.licenses.iter().map(|v| (*v).into()).collect(),
             };
             let result = manager.resolve(&requirement).and_then(|pack| {
+                let browser_pack = (spec.id == "browser-runtime").then(|| pack.clone());
                 if spec.id == "office-oxide"
                     && !CapabilitySnapshot::from_installation(
                         false,
@@ -66,7 +70,18 @@ impl ImportCapabilityRuntime {
                     spec.route.into(),
                     spec.extensions.iter().map(|v| (*v).into()).collect(),
                     Duration::from_secs(180),
-                )
+                )?;
+                if let Some(pack) = browser_pack {
+                    *self.browser_pack.write().map_err(|_| {
+                        BackendError::new(
+                            "IMPORT_V2_CAPABILITY_LOCKED",
+                            "Capability runtime is unavailable.",
+                            true,
+                            false,
+                        )
+                    })? = Some(pack);
+                }
+                Ok(())
             });
             statuses.push(CapabilityRuntimeStatus {
                 capability_id: spec.id.into(),
@@ -83,6 +98,12 @@ impl ImportCapabilityRuntime {
     pub fn statuses(&self) -> Vec<CapabilityRuntimeStatus> {
         self.statuses.read().map(|v| v.clone()).unwrap_or_default()
     }
+    pub fn browser_pack(&self) -> Option<ResolvedCapabilityPack> {
+        self.browser_pack
+            .read()
+            .ok()
+            .and_then(|value| value.clone())
+    }
 }
 
 struct PackSpec {
@@ -92,11 +113,42 @@ struct PackSpec {
     licenses: &'static [&'static str],
 }
 const PACK_SPECS: &[PackSpec] = &[
-    PackSpec { id: "browser-runtime-lite", route: "web.generic.readability", extensions: &[], licenses: &["Apache-2.0 AND MIT"] },
-    PackSpec { id: "browser-runtime", route: "web.generic.browser", extensions: &[], licenses: &["Apache-2.0"] },
-    PackSpec { id: "browser-runtime", route: "web.wechat.article", extensions: &[], licenses: &["Apache-2.0"] },
-    PackSpec { id: "browser-runtime", route: "web.zhihu.content", extensions: &[], licenses: &["Apache-2.0"] },
-    PackSpec { id: "browser-runtime", route: "web.bilibili.video", extensions: &[], licenses: &["Apache-2.0"] },
+    PackSpec {
+        id: "browser-runtime-lite",
+        route: "web.generic.readability",
+        extensions: &[],
+        licenses: &["Apache-2.0 AND MIT"],
+    },
+    PackSpec {
+        id: "browser-runtime",
+        route: "web.generic.browser",
+        extensions: &[],
+        licenses: &["Apache-2.0"],
+    },
+    PackSpec {
+        id: "browser-runtime-lite",
+        route: "web.wechat.article",
+        extensions: &[],
+        licenses: &["Apache-2.0 AND MIT"],
+    },
+    PackSpec {
+        id: "browser-runtime-lite",
+        route: "web.zhihu.content",
+        extensions: &[],
+        licenses: &["Apache-2.0 AND MIT"],
+    },
+    PackSpec {
+        id: "browser-runtime-lite",
+        route: "web.bilibili.video",
+        extensions: &[],
+        licenses: &["Apache-2.0 AND MIT"],
+    },
+    PackSpec {
+        id: "media-metadata",
+        route: "web.bilibili.metadata",
+        extensions: &[],
+        licenses: &["Unlicense AND permissive-bundled-notices"],
+    },
     PackSpec {
         id: "document-standard",
         route: "pack.markitdown",
@@ -199,7 +251,8 @@ mod tests {
 
     #[test]
     fn signed_installed_pack_is_registered_but_untrusted_placeholder_is_not() {
-        let root = std::env::temp_dir().join(format!("cap-runtime-signed-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("cap-runtime-signed-{}", uuid::Uuid::new_v4()));
         let pack_root = root.join("document-standard/1.2.0");
         std::fs::create_dir_all(&pack_root).unwrap();
         std::fs::write(pack_root.join("runner.bin"), b"verified runtime").unwrap();
@@ -235,10 +288,7 @@ mod tests {
         runtime.load_installed_with_keys(
             &root,
             &service,
-            HashMap::from([(
-                "release-test".into(),
-                key.public_key().as_ref().to_vec(),
-            )]),
+            HashMap::from([("release-test".into(), key.public_key().as_ref().to_vec())]),
         );
         let status = runtime
             .statuses()
