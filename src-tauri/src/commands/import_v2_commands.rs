@@ -10,6 +10,7 @@ use crate::models::import_v2::{
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::import_v2::agent_assistance::AgentAssistanceService;
+use crate::services::import_v2::agent_candidate::AgentCandidateService;
 
 macro_rules! request {
     ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
@@ -54,9 +55,18 @@ pub fn get_import_session_v2(
     request: GetImportSessionV2Request,
 ) -> Result<ImportSession, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)
+    state.import_v2_service.recover_session(
+        &context,
+        &state.file_store,
+        &state.task_service,
+        &request.session_id,
+    )?;
+    AgentCandidateService::new(
+        &state.import_v2_service,
+        &state.file_store,
+        &state.task_service,
+    )
+    .recover_completed_outputs(&context, &request.session_id)
 }
 #[tauri::command]
 pub fn add_import_items_v2(
@@ -158,32 +168,17 @@ pub fn start_import_items_v2(
                         &task_id,
                     )
                 });
-            if let Err(error) = result {
-                fail_task_unless_cancelled(&state, &task_id, error);
-                if let Ok(context) = state.resolve_project_context(&project_id, &root) {
-                    let settings = state.settings_service.read_settings(&context);
-                    if let Ok(settings) = settings {
-                        if let Some(agent_kind) = settings.agent_default {
-                            let assistance = AgentAssistanceService::new(
-                                &state.import_v2_service,
-                                &state.file_store,
-                                &state.settings_service,
-                                &state.agent_service,
-                                &state.task_service,
-                                AgentAssistanceService::bundled_skill_path(),
-                            );
-                            if let Ok(agent_task) = assistance.start_local(
-                                &context,
-                                &session_id,
-                                &item_id,
-                                AgentAssistanceTrigger::DeterministicHardFailure,
-                                agent_kind,
-                            ) {
-                                let _ = assistance.run_local(
+            match result {
+                Err(error) => {
+                    fail_task_unless_cancelled(&state, &task_id, error);
+                    if let Ok(context) = state.resolve_project_context(&project_id, &root) {
+                        if let Ok(settings) = state.settings_service.read_settings(&context) {
+                            if let Some(agent_kind) = settings.agent_default {
+                                run_local_agent_candidate(
+                                    &state,
                                     &context,
                                     &session_id,
                                     &item_id,
-                                    &agent_task.id,
                                     AgentAssistanceTrigger::DeterministicHardFailure,
                                     agent_kind,
                                 );
@@ -191,11 +186,60 @@ pub fn start_import_items_v2(
                         }
                     }
                 }
+                Ok(_) => {}
             }
         });
         tasks.push(task);
     }
     Ok(tasks)
+}
+
+fn run_local_agent_candidate(
+    state: &AppState,
+    context: &crate::models::paths::ProjectContext,
+    session_id: &str,
+    item_id: &str,
+    trigger: AgentAssistanceTrigger,
+    agent_kind: crate::models::agent::AgentKind,
+) {
+    let assistance = AgentAssistanceService::new(
+        &state.import_v2_service,
+        &state.file_store,
+        &state.settings_service,
+        &state.agent_service,
+        &state.task_service,
+        AgentAssistanceService::bundled_skill_path(),
+    );
+    let Ok(agent_task) =
+        assistance.start_local(context, session_id, item_id, trigger, agent_kind)
+    else {
+        return;
+    };
+    if assistance
+        .run_local(
+            context,
+            session_id,
+            item_id,
+            &agent_task.id,
+            trigger,
+            agent_kind,
+        )
+        .is_ok()
+    {
+        let accepted = AgentCandidateService::new(
+            &state.import_v2_service,
+            &state.file_store,
+            &state.task_service,
+        )
+        .accept_staged_output(context, session_id, item_id, &agent_task.id);
+        if accepted.is_err() {
+            let _ = state.task_service.append_log(
+                &agent_task.id,
+                crate::tasks::task_model::LogLevel::Warn,
+                "Agent output was staged but candidate validation failed; the deterministic result was preserved.".into(),
+            );
+        }
+    }
 }
 
 fn prepare_all<T>(

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::errors::BackendError;
-use crate::models::import_v2::{ImportArtifact, ImportItem};
+use crate::models::import_v2::{
+    ArtifactKind, ImportArtifact, ImportItem, ImportPreviewArtifact,
+};
 use crate::models::import_v2_agent::{AgentCandidate, AgentCandidateDiff, AgentCandidateManifest};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResultReference, TaskStatus, TaskType};
@@ -28,6 +30,7 @@ const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 struct StoredAgentCandidate {
     candidate: AgentCandidate,
     diff: AgentCandidateDiff,
+    deterministic_preview: Option<ImportPreviewArtifact>,
 }
 
 pub struct AgentCandidateService<'a> {
@@ -46,6 +49,64 @@ impl<'a> AgentCandidateService<'a> {
     }
 
     pub fn accept_staged_output(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<AgentCandidate, BackendError> {
+        let task = self
+            .tasks
+            .get_task(task_id)
+            .ok_or_else(|| candidate_error("Agent task was not found."))?;
+        if task.status != TaskStatus::Succeeded
+            || task.task_type != TaskType::AgentRun
+            || task.project_id.as_deref() != Some(context.project_id.as_str())
+        {
+            return Err(candidate_error(
+                "Only a succeeded task bound to this project may be validated.",
+            ));
+        }
+        let result = task
+            .result
+            .as_ref()
+            .ok_or_else(|| candidate_error("Agent task has no result."))?;
+        if !matches!(result.reference.as_ref(), Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item }) if bound_session == session_id && bound_item == item_id) {
+            return Err(candidate_error("Agent task result belongs to another import item."));
+        }
+        let session = self.imports.load_session(context, self.files, session_id)?;
+        let item = session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .ok_or_else(|| candidate_error("Import item was not found."))?;
+        if item.task_id.as_deref() != Some(task_id) {
+            return Err(candidate_error("Agent task is not bound to this import item."));
+        }
+        let previous = self.imports.begin_agent_candidate_validation(
+            context,
+            self.files,
+            session_id,
+            item_id,
+            task_id,
+        )?;
+        match self.accept_staged_output_validating(context, session_id, item_id, task_id) {
+            Ok(candidate) => Ok(candidate),
+            Err(validation_error) => {
+                self.imports.reject_agent_candidate_validation(
+                    context,
+                    self.files,
+                    session_id,
+                    item_id,
+                    task_id,
+                    previous,
+                )?;
+                Err(validation_error)
+            }
+        }
+    }
+
+    fn accept_staged_output_validating(
         &self,
         context: &ProjectContext,
         session_id: &str,
@@ -143,7 +204,17 @@ impl<'a> AgentCandidateService<'a> {
         self.ensure_not_cancelled(task_id)?;
         let candidate_id = hash_bytes(format!("{task_id}:{source_hash}:{}", manifest.markdown_sha256).as_bytes());
         let candidate_root_relative = candidate_root_path(session_id, item_id, &candidate_id)?;
+        let candidate_artifact_prefix = candidate_artifact_prefix(&candidate_id)?;
         let candidate_root = context.resolve_project_path(&candidate_root_relative)?;
+        let record_relative = candidate_record_path(session_id, item_id, &candidate_id)?;
+        if candidate_root.exists() && !self.files.exists(context, &record_relative) {
+            reject_links_between(&context.root, &candidate_root)?;
+            let metadata = fs::symlink_metadata(&candidate_root).map_err(io_error)?;
+            if !metadata.is_dir() {
+                return Err(candidate_error("Incomplete candidate storage is not a directory."));
+            }
+            fs::remove_dir_all(&candidate_root).map_err(io_error)?;
+        }
         fs::create_dir_all(&candidate_root).map_err(io_error)?;
         reject_links_between(&context.root, &candidate_root)?;
         write_sealed_file(&candidate_root.join("source.bin"), &source_bytes)?;
@@ -168,8 +239,8 @@ impl<'a> AgentCandidateService<'a> {
             continuation: None,
         };
         let mut preview = QualityGate.evaluate_agent_candidate(&candidate_root, &engine_result)?;
-        prefix_artifact(&mut preview.markdown, &candidate_root_relative);
-        for asset in &mut preview.assets { prefix_artifact(asset, &candidate_root_relative); }
+        prefix_artifact(&mut preview.markdown, &candidate_artifact_prefix);
+        for asset in &mut preview.assets { prefix_artifact(asset, &candidate_artifact_prefix); }
         let deterministic_path = workspace.join("deterministic/candidate.md");
         let deterministic_markdown = if deterministic_path.is_file() {
             String::from_utf8(read_regular_file(&deterministic_path, MAX_OUTPUT_BYTES)?).map_err(|_| candidate_error("Deterministic baseline is not UTF-8 Markdown."))?
@@ -187,7 +258,7 @@ impl<'a> AgentCandidateService<'a> {
             .as_ref()
             .is_some_and(|current| current != &baseline_markdown);
         let unified_diff = GitService::diff_candidate_files(context, &baseline_path, &agent_path)?;
-        let candidate = AgentCandidate {
+        let mut candidate = AgentCandidate {
             candidate_id: candidate_id.clone(),
             task_id: task_id.into(),
             trigger: bundle.trigger,
@@ -210,13 +281,27 @@ impl<'a> AgentCandidateService<'a> {
             needs_three_way_merge,
         };
         self.ensure_not_cancelled(task_id)?;
-        let relative = candidate_record_path(session_id, item_id, &candidate_id)?;
+        let deterministic_preview = if self.files.exists(context, &record_relative) {
+            let existing: StoredAgentCandidate = self.files.read_json(context, &record_relative)?;
+            let mut expected = candidate.clone();
+            expected.created_at = existing.candidate.created_at.to_owned();
+            if existing.candidate != expected || existing.diff != diff {
+                return Err(candidate_error(
+                    "An existing candidate record does not match the revalidated output.",
+                ));
+            }
+            candidate = expected;
+            existing.deterministic_preview
+        } else {
+            item.preview.clone()
+        };
         self.files.write_json_atomic(
             context,
-            &relative,
+            &record_relative,
             &StoredAgentCandidate {
                 candidate: candidate.clone(),
                 diff,
+                deterministic_preview,
             },
         )?;
         self.ensure_not_cancelled(task_id)?;
@@ -244,6 +329,218 @@ impl<'a> AgentCandidateService<'a> {
         Ok((stored.candidate, stored.diff))
     }
 
+    pub fn select_candidate(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+        merged_markdown: Option<&str>,
+        expected_current_wiki_sha256: Option<&str>,
+    ) -> Result<ImportItem, BackendError> {
+        let stored = self.load_stored(context, session_id, item_id, candidate_id)?;
+        let expected_candidate_id = hash_bytes(
+            format!(
+                "{}:{}:{}",
+                stored.candidate.task_id,
+                stored.candidate.source_snapshot_sha256,
+                stored.candidate.markdown.sha256
+            )
+            .as_bytes(),
+        );
+        if stored.candidate.candidate_id != candidate_id
+            || expected_candidate_id != candidate_id
+        {
+            return Err(candidate_error("Candidate identity no longer matches its sealed content."));
+        }
+        let session = self.imports.load_session(context, self.files, session_id)?;
+        let item = session.items.iter().find(|item| item.item_id == item_id)
+            .ok_or_else(|| candidate_error("Import item was not found."))?;
+        if item.task_id.as_deref() != Some(stored.candidate.task_id.as_str()) {
+            return Err(candidate_error("Candidate is no longer bound to this import item task."));
+        }
+        let root_relative = candidate_root_path(session_id, item_id, candidate_id)?;
+        let artifact_prefix = candidate_artifact_prefix(candidate_id)?;
+        let root = context.resolve_project_path(&root_relative)?;
+        reject_links_between(&context.root, &root)?;
+        let source_bytes = read_regular_file(&root.join("source.bin"), MAX_OUTPUT_BYTES)?;
+        if hash_bytes(&source_bytes) != stored.candidate.source_snapshot_sha256 {
+            return Err(candidate_error("Candidate source snapshot changed after validation."));
+        }
+        let agent_bytes = read_regular_file(&root.join("candidate.md"), MAX_OUTPUT_BYTES)?;
+        if hash_bytes(&agent_bytes) != stored.candidate.markdown.sha256 {
+            return Err(candidate_error("Candidate Markdown changed after validation."));
+        }
+        for asset in &stored.candidate.assets {
+            let relative = strip_candidate_prefix(&asset.relative_path, &artifact_prefix)?;
+            let bytes = read_regular_file(&root.join(&relative), MAX_OUTPUT_BYTES)?;
+            if bytes.len() as u64 != asset.size_bytes || hash_bytes(&bytes) != asset.sha256 {
+                return Err(candidate_error("Candidate asset changed after validation."));
+            }
+        }
+        let mut selected_markdown = stored.candidate.markdown.clone();
+        let mut selected_quality = stored.candidate.quality.clone();
+        if stored.diff.needs_three_way_merge {
+            let merged = merged_markdown.ok_or_else(|| candidate_error("A three-way merge requires explicit merged Markdown."))?;
+            let expected = expected_current_wiki_sha256.ok_or_else(|| candidate_error("A three-way merge requires the expected current Wiki hash."))?;
+            let (_, current) = registry_markdown_views(
+                context,
+                self.files,
+                item.input.normalized_locator.as_deref(),
+                &stored.candidate.source_snapshot_sha256,
+            )?;
+            let current = current.ok_or_else(|| candidate_error("Current Wiki content is unavailable for merge."))?;
+            if hash_bytes(current.as_bytes()) != expected || stored.diff.current_markdown.as_deref() != Some(current.as_str()) {
+                return Err(BackendError::new("IMPORT_AGENT_MERGE_STALE", "Current Wiki changed after the Agent Diff was generated.", false, true));
+            }
+            let merged_name = format!("merged-{}.md", hash_bytes(merged.as_bytes()));
+            let merged_path = root.join(&merged_name);
+            write_sealed_file(&merged_path, merged.as_bytes())?;
+            let asset_paths = stored.candidate.assets.iter().map(|artifact| strip_candidate_prefix(&artifact.relative_path, &artifact_prefix)).collect::<Result<Vec<_>, _>>()?;
+            let result = EngineResult {
+                source_snapshot_path: "source.bin".into(),
+                markdown_path: merged_name,
+                asset_paths,
+                metadata_path: None,
+                title: format!("AI-assisted merged: {}", item.input.display_name),
+                warnings: vec!["AGENT_THREE_WAY_MERGE_REQUIRES_CONFIRMATION".into(), "AGENT_QUALITY_NOT_MEASURED".into()],
+                text_coverage: None,
+                table_cell_accuracy: None,
+                sheet_count_exact: None,
+                slide_count_exact: None,
+                non_empty_cell_coverage: None,
+                formula_value_pairs: None,
+                meaningful_image_coverage: None,
+                continuation: None,
+            };
+            let merged_preview = QualityGate.evaluate_agent_candidate(&root, &result)?;
+            selected_markdown = merged_preview.markdown;
+            prefix_artifact(&mut selected_markdown, &artifact_prefix);
+            selected_quality = merged_preview.quality;
+        } else if merged_markdown.is_some() || expected_current_wiki_sha256.is_some() {
+            return Err(candidate_error("Merge content is accepted only for a three-way candidate."));
+        }
+        let source = ImportArtifact {
+            kind: ArtifactKind::SourceSnapshot,
+            relative_path: format!("{artifact_prefix}/source.bin"),
+            sha256: stored.candidate.source_snapshot_sha256.clone(),
+            size_bytes: source_bytes.len() as u64,
+        };
+        let preview = ImportPreviewArtifact {
+            markdown: selected_markdown,
+            assets: stored.candidate.assets.clone(),
+            source_snapshot: source,
+            quality: selected_quality,
+            title: format!("AI-assisted: {}", item.input.display_name),
+        };
+        self.imports.select_agent_candidate(
+            context,
+            self.files,
+            session_id,
+            item_id,
+            &stored.candidate.task_id,
+            preview,
+            stored.diff.needs_three_way_merge,
+        )
+    }
+
+    pub fn discard_candidate(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        let stored = self.load_stored(context, session_id, item_id, candidate_id)?;
+        let item = self.imports.discard_agent_candidate(
+            context,
+            self.files,
+            session_id,
+            item_id,
+            &stored.candidate.task_id,
+            stored.deterministic_preview,
+        )?;
+        let root_relative = candidate_root_path(session_id, item_id, candidate_id)?;
+        let root = context.resolve_project_path(&root_relative)?;
+        reject_links_between(&context.root, &root)?;
+        fs::remove_dir_all(&root).map_err(io_error)?;
+        Ok(item)
+    }
+
+    pub fn recover_completed_outputs(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
+        let session = self.imports.load_session(context, self.files, session_id)?;
+        let completed = session
+            .items
+            .iter()
+            .filter_map(|item| {
+                let task_id = item.task_id.as_deref()?;
+                let task = self.tasks.get_task(task_id)?;
+                let exact_reference = matches!(
+                    task.result.as_ref().and_then(|result| result.reference.as_ref()),
+                    Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item })
+                        if bound_session == session_id && bound_item == &item.item_id
+                );
+                let exact_attempt = item.attempts.iter().any(|attempt| {
+                    (attempt.route == format!("agent_assistance/{task_id}")
+                        || attempt.route == format!("byok_assistance/{task_id}"))
+                        && attempt.outcome == crate::models::import_v2::AttemptOutcome::Succeeded
+                        && !attempt
+                            .warnings
+                            .iter()
+                            .any(|warning| {
+                                warning == "AGENT_CANDIDATE_REJECTED"
+                                    || warning == "AGENT_CANDIDATE_DISCARDED"
+                            })
+                });
+                (task.status == TaskStatus::Succeeded
+                    && task.task_type == TaskType::AgentRun
+                    && exact_reference
+                    && exact_attempt)
+                    .then(|| (item.item_id.clone(), task_id.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        for (item_id, task_id) in completed {
+            if let Err(error) =
+                self.accept_staged_output(context, session_id, &item_id, &task_id)
+            {
+                let latest = self.imports.load_session(context, self.files, session_id)?;
+                let rejection_persisted = latest
+                    .items
+                    .iter()
+                    .find(|item| item.item_id == item_id)
+                    .is_some_and(|item| {
+                        item.attempts.iter().any(|attempt| {
+                            (attempt.route == format!("agent_assistance/{task_id}")
+                                || attempt.route == format!("byok_assistance/{task_id}"))
+                                && attempt
+                                    .warnings
+                                    .iter()
+                                    .any(|warning| warning == "AGENT_CANDIDATE_REJECTED")
+                        })
+                    });
+                if !rejection_persisted {
+                    return Err(error);
+                }
+            }
+        }
+        self.imports.load_session(context, self.files, session_id)
+    }
+
+    fn load_stored(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+    ) -> Result<StoredAgentCandidate, BackendError> {
+        let relative = candidate_record_path(session_id, item_id, candidate_id)?;
+        self.files.read_json(context, &relative)
+    }
+
     fn ensure_not_cancelled(&self, task_id: &str) -> Result<(), BackendError> {
         if self.tasks.is_cancelled(task_id) {
             Err(candidate_error("Cancelled Agent output cannot become a candidate."))
@@ -251,6 +548,12 @@ impl<'a> AgentCandidateService<'a> {
             Ok(())
         }
     }
+}
+
+fn strip_candidate_prefix(path: &str, root: &str) -> Result<String, BackendError> {
+    path.strip_prefix(&format!("{root}/"))
+        .map(str::to_owned)
+        .ok_or_else(|| candidate_error("Candidate artifact is outside its immutable set."))
 }
 
 fn candidate_record_path(
@@ -268,13 +571,20 @@ fn candidate_record_path(
         }
     }
     Ok(format!(
-        ".app/import-sessions/{session_id}/items/{item_id}/agent-candidates/{candidate_id}/candidate.json"
+        ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-candidates/{candidate_id}/candidate.json"
     ))
 }
 
 fn candidate_root_path(session_id: &str, item_id: &str, candidate_id: &str) -> Result<String, BackendError> {
     let record = candidate_record_path(session_id, item_id, candidate_id)?;
     Ok(record.trim_end_matches("/candidate.json").into())
+}
+
+fn candidate_artifact_prefix(candidate_id: &str) -> Result<String, BackendError> {
+    if candidate_id.len() != 64 || !candidate_id.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(candidate_error("Candidate identity is invalid."));
+    }
+    Ok(format!("agent-candidates/{candidate_id}"))
 }
 
 fn validate_manifest(manifest: &AgentCandidateManifest) -> Result<(), BackendError> {

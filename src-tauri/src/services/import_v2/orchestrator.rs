@@ -324,6 +324,188 @@ impl ImportV2Service {
             Ok(())
         })
     }
+
+    pub fn begin_agent_candidate_validation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<ImportItemStatus, BackendError> {
+        let mut previous = ImportItemStatus::Failed;
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.task_id.as_deref() != Some(task_id) {
+                return Err(task_error("Agent candidate validation is not bound to this item task."));
+            }
+            if !matches!(
+                item.status,
+                ImportItemStatus::Failed
+                    | ImportItemStatus::PreviewReady
+                    | ImportItemStatus::NeedsMerge
+                    | ImportItemStatus::Validating
+            ) {
+                return Err(task_error("This import item cannot enter Agent candidate validation."));
+            }
+            previous = item.status.clone();
+            item.status = ImportItemStatus::Validating;
+            Ok(())
+        })?;
+        Ok(previous)
+    }
+
+    pub fn fail_agent_candidate_validation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        previous: ImportItemStatus,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.task_id.as_deref() != Some(task_id) {
+                return Err(task_error("Agent candidate validation failure is not bound to this item task."));
+            }
+            item.status = match previous {
+                ImportItemStatus::PreviewReady | ImportItemStatus::NeedsMerge => previous,
+                _ if item.preview.is_some() => ImportItemStatus::PreviewReady,
+                _ => ImportItemStatus::Failed,
+            };
+            Ok(())
+        })
+    }
+
+    pub fn mark_agent_candidate_rejected(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.task_id.as_deref() != Some(task_id) {
+                return Err(task_error("Rejected Agent candidate is not bound to this item task."));
+            }
+            let local_route = format!("agent_assistance/{task_id}");
+            let byok_route = format!("byok_assistance/{task_id}");
+            let attempt = item
+                .attempts
+                .iter_mut()
+                .rev()
+                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
+                .ok_or_else(|| task_error("Agent assistance attempt was not found."))?;
+            if !attempt
+                .warnings
+                .iter()
+                .any(|warning| warning == "AGENT_CANDIDATE_REJECTED")
+            {
+                attempt.warnings.push("AGENT_CANDIDATE_REJECTED".into());
+            }
+            Ok(())
+        })
+    }
+
+    pub fn reject_agent_candidate_validation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        previous: ImportItemStatus,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.task_id.as_deref() != Some(task_id) {
+                return Err(task_error("Rejected Agent candidate is not bound to this item task."));
+            }
+            item.status = match previous {
+                ImportItemStatus::PreviewReady | ImportItemStatus::NeedsMerge => previous,
+                _ if item.preview.is_some() => ImportItemStatus::PreviewReady,
+                _ => ImportItemStatus::Failed,
+            };
+            let local_route = format!("agent_assistance/{task_id}");
+            let byok_route = format!("byok_assistance/{task_id}");
+            let attempt = item
+                .attempts
+                .iter_mut()
+                .rev()
+                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
+                .ok_or_else(|| task_error("Agent assistance attempt was not found."))?;
+            if !attempt
+                .warnings
+                .iter()
+                .any(|warning| warning == "AGENT_CANDIDATE_REJECTED")
+            {
+                attempt.warnings.push("AGENT_CANDIDATE_REJECTED".into());
+            }
+            Ok(())
+        })
+    }
+
+    pub fn select_agent_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        preview: crate::models::import_v2::ImportPreviewArtifact,
+        needs_three_way_merge: bool,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.task_id.as_deref() != Some(task_id) {
+                return Err(task_error("Agent candidate selection is not bound to this item task."));
+            }
+            item.preview = Some(preview);
+            item.status = if needs_three_way_merge {
+                ImportItemStatus::NeedsMerge
+            } else {
+                ImportItemStatus::PreviewReady
+            };
+            Ok(())
+        })
+    }
+
+    pub fn discard_agent_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        deterministic_preview: Option<crate::models::import_v2::ImportPreviewArtifact>,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.task_id.as_deref() != Some(task_id) {
+                return Err(task_error("Agent candidate discard is not bound to this item task."));
+            }
+            item.preview = deterministic_preview;
+            item.status = if item.preview.is_some() {
+                ImportItemStatus::PreviewReady
+            } else {
+                ImportItemStatus::Failed
+            };
+            let local_route = format!("agent_assistance/{task_id}");
+            let byok_route = format!("byok_assistance/{task_id}");
+            if let Some(attempt) = item
+                .attempts
+                .iter_mut()
+                .rev()
+                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
+            {
+                if !attempt
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "AGENT_CANDIDATE_DISCARDED")
+                {
+                    attempt.warnings.push("AGENT_CANDIDATE_DISCARDED".into());
+                }
+            }
+            Ok(())
+        })
+    }
     pub fn recover_session(
         &self,
         context: &ProjectContext,
@@ -364,6 +546,17 @@ impl ImportV2Service {
                 } else {
                     false
                 };
+                if matches!(
+                    task_status,
+                    Some(
+                        TaskStatus::Queued
+                            | TaskStatus::Running
+                            | TaskStatus::WaitingForConfirmation
+                            | TaskStatus::Cancelling
+                    )
+                ) {
+                    continue;
+                }
                 attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
                 match task_status {
                     Some(TaskStatus::Succeeded) => {

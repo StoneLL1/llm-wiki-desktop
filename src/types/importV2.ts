@@ -1,6 +1,16 @@
 import type { TaskProgress } from "./task";
 import type { AgentRecoveryAction } from "./importV2Agent";
 
+export type {
+  AcceptImportAgentCandidateRequest,
+  AgentCandidate,
+  AgentCandidateActionResult,
+  AgentCandidateDiff,
+  AgentCandidateView,
+  DiscardImportAgentCandidateRequest,
+  SelectImportAgentCandidateRequest,
+} from "./importV2Agent";
+
 export type ImportResourceMode = "balanced" | "performance" | "saver";
 export type ImportInputKind = "file" | "folder" | "url";
 export type ImportStage = "inspect" | "route" | "extract" | "validate" | "commit";

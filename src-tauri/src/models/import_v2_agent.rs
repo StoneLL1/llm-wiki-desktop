@@ -190,6 +190,58 @@ pub struct AgentCandidateDiff {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AcceptImportAgentCandidateRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectImportAgentCandidateRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub candidate_id: String,
+    pub merged_markdown: Option<String>,
+    pub expected_current_wiki_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardImportAgentCandidateRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub candidate_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCandidateView {
+    pub project_id: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub candidate: AgentCandidate,
+    pub diff: AgentCandidateDiff,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCandidateActionResult {
+    pub project_id: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub candidate_id: String,
+    pub item: super::import_v2::ImportItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentAuditRecord {
     pub audit_id: String,
     pub task_id: String,
