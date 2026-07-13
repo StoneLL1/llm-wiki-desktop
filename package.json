@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "check:import-v2-cutover": "node scripts/check-import-v2-cutover.mjs",
     "lint": "eslint . --max-warnings=0",
     "check:console": "node scripts/check-console-log.mjs",
     "check:rust:gui": "cargo check --manifest-path src-tauri/Cargo.toml",
