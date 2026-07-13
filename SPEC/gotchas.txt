@@ -1,5 +1,9 @@
 # 踩坑清单 (gotchas.txt)
 
+An atomic lease temp could block every later recovery after a crash — Directory scans treated partial `.tmp` files as formal JSON records — Scope-clean atomic-writer errors, safely remove internal regular `.tmp` files during recovery, reject unknown names, and test both truncated and complete pre-rename temporaries.
+
+BYOK Candidate validation rejected every normal HTTP(S) destination — A slash-delimited audit route was parsed with an exact segment count even though the destination itself contains slashes — Persist provider and destination as structured audit fields, reconstruct the route for exact comparison, and keep a real BYOK run-to-candidate success test.
+
 Windows file-symlink security tests failed with privilege error 1314 — Creating file symlinks may require Developer Mode or elevated privilege even though directory junctions do not — Use a temporary `mklink /J` junction to exercise reparse-point rejection portably on Windows tests.
 
 An EngineResult continuation was executed before the base result paths were validated — The continuation code trusted markdownPath early and could read or overwrite outside staging — Validate the complete base result before any continuation, reject pack-authored privileged continuations, and validate again after composition.

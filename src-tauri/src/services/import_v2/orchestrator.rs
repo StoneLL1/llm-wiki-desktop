@@ -403,6 +403,14 @@ impl ImportV2Service {
             {
                 attempt.warnings.push("AGENT_CANDIDATE_REJECTED".into());
             }
+            if attempt.route == byok_route
+                && !attempt
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "BYOK_CHARGE_STATUS_UNKNOWN")
+            {
+                attempt.warnings.push("BYOK_CHARGE_STATUS_UNKNOWN".into());
+            }
             Ok(())
         })
     }
@@ -439,6 +447,14 @@ impl ImportV2Service {
                 .any(|warning| warning == "AGENT_CANDIDATE_REJECTED")
             {
                 attempt.warnings.push("AGENT_CANDIDATE_REJECTED".into());
+            }
+            if attempt.route == byok_route
+                && !attempt
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "BYOK_CHARGE_STATUS_UNKNOWN")
+            {
+                attempt.warnings.push("BYOK_CHARGE_STATUS_UNKNOWN".into());
             }
             Ok(())
         })

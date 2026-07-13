@@ -88,6 +88,10 @@ fn policy_rejects_automatic_cloud_and_unbounded_attempts() {
             max_attempts_per_item: 4,
             ..AgentAssistancePolicy::default()
         },
+        AgentAssistancePolicy {
+            auto_local_on_quality_warning: true,
+            ..AgentAssistancePolicy::default()
+        },
     ] {
         let error = service
             .set_import_agent_policy(&context, policy, None)

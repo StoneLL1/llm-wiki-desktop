@@ -1,12 +1,13 @@
 use llm_wiki_desktop_lib::{
     models::{
+        agent::AgentKind,
         import_v2::{
             AttemptOutcome, AttemptRecord, CommitConflictAction, CommitImportSessionRequest,
             CommitItemDecision, ImportInput, ImportInputKind, ImportItem, ImportItemStatus,
             ImportResourceMode, ImportSession, ImportStage, QualityLevel, QualityReport,
         },
         import_v2_agent::{
-            AgentAssistanceTrigger, AgentCandidateManifest, AgentToolGrant,
+            AgentAssistanceTrigger, AgentAuditRecord, AgentCandidateManifest, AgentToolGrant,
         },
         paths::ProjectContext,
         task::{TaskResult, TaskResultReference, TaskStatus, TaskType},
@@ -234,12 +235,59 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
             },
         )
         .unwrap();
+    files
+        .write_json_atomic(
+            &context,
+            &format!(
+                ".app/import-sessions/session-a/items/item-a/agent-audit/{}.json",
+                task.id
+            ),
+            &AgentAuditRecord {
+                audit_id: "audit-a".into(),
+                task_id: task.id.clone(),
+                session_id: "session-a".into(),
+                item_id: "item-a".into(),
+                trigger: AgentAssistanceTrigger::DeterministicHardFailure,
+                route: "local/claude".into(),
+                agent_kind: Some(AgentKind::Claude),
+                agent_version: "test-version".into(),
+                prompt_template_version: "wiki-ingest-assist/local-v1".into(),
+                approved_cost_micros: None,
+                tool_calls: vec![],
+                approved_scope_sha256: None,
+                byok_provider: None,
+                byok_destination: None,
+                workspace_relative_path: relative_workspace.clone(),
+                granted_tools: vec![AgentToolGrant::ValidateCandidate],
+                input_hashes: vec![source_hash.clone()],
+                output_hashes: vec![format!("{:x}", Sha256::digest(agent.as_bytes()))],
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                outcome: "output_staged".into(),
+                warnings: vec![],
+            },
+        )
+        .unwrap();
 
     let service = AgentCandidateService::new(&imports, &files, &tasks);
     let candidate = service
         .accept_staged_output(&context, "session-a", "item-a", &task.id)
         .unwrap();
     assert_eq!(candidate.source_snapshot_sha256, source_hash);
+    assert_eq!(candidate.audit_id, "audit-a");
+    assert_eq!(candidate.agent_kind, Some(AgentKind::Claude));
+    assert_eq!(candidate.agent_version, "test-version");
+    assert_eq!(candidate.prompt_template_version, "wiki-ingest-assist/local-v1");
+    let reconciled_audit: AgentAuditRecord = files
+        .read_json(
+            &context,
+            &format!(
+                ".app/import-sessions/session-a/items/item-a/agent-audit/{}.json",
+                task.id
+            ),
+        )
+        .unwrap();
+    assert_eq!(reconciled_audit.outcome, "succeeded");
     assert_eq!(candidate.markdown.sha256, format!("{:x}", Sha256::digest(agent.as_bytes())));
     let (_, diff) = service
         .load_candidate(&context, "session-a", "item-a", &candidate.candidate_id)
@@ -424,6 +472,11 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
             Some(&current_hash),
         )
         .unwrap();
+    let sibling_workspace = root.path().join(
+        ".app/import-sessions/session-a/items/item-a/staging/agent/new-workspace",
+    );
+    std::fs::create_dir_all(&sibling_workspace).unwrap();
+    std::fs::write(sibling_workspace.join("keep.txt"), b"new task").unwrap();
     assert_eq!(selected.status, ImportItemStatus::NeedsMerge);
     assert!(selected
         .preview
@@ -443,8 +496,26 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         .unwrap();
     assert_eq!(discarded.status, ImportItemStatus::Failed);
     assert!(discarded.preview.is_none());
+    assert!(!workspace.exists());
+    assert!(sibling_workspace.join("keep.txt").is_file());
     assert_eq!(std::fs::read_to_string(root.path().join(wiki_path)).unwrap(), current);
 
+    for directory in ["source", "deterministic", "logs", "output/assets"] {
+        std::fs::create_dir_all(workspace.join(directory)).unwrap();
+    }
+    std::fs::write(workspace.join("source/source.bin"), source).unwrap();
+    std::fs::write(workspace.join("output/candidate.md"), agent).unwrap();
+    std::fs::write(workspace.join("output/assets/notes.txt"), asset).unwrap();
+    std::fs::write(
+        workspace.join("output/manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("task.json"),
+        serde_json::to_vec_pretty(&bundle).unwrap(),
+    )
+    .unwrap();
     let candidate = service
         .accept_staged_output(&context, "session-a", "item-a", &task.id)
         .unwrap();
@@ -458,6 +529,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
             Some(&current_hash),
         )
         .unwrap();
+    assert!(!workspace.exists());
     let git = GitService;
     git.initialize_repository(&context, "Initial fixture")
         .unwrap();

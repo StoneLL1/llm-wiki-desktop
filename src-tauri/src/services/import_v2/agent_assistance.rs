@@ -24,7 +24,10 @@ use crate::{
     tasks::TaskService,
 };
 
-use super::{agent_workspace::AgentWorkspaceBuilder, ImportV2Service};
+use super::{
+    agent_workspace::{AgentTaskBundle, AgentWorkspaceBuilder},
+    ImportV2Service,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalAgentStartDecision {
@@ -361,7 +364,7 @@ impl<'a> AgentAssistanceService<'a> {
                 return Err(error);
             }
         };
-        let workspace = match AgentWorkspaceBuilder.build(context, &session, item, trigger) {
+        let workspace = match AgentWorkspaceBuilder.build_for_task(context, &session, item, trigger, task_id) {
             Ok(workspace) => workspace,
             Err(error) => {
                 self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
@@ -396,6 +399,12 @@ impl<'a> AgentAssistanceService<'a> {
         let audit_path = format!(
             ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
         );
+        let workspace_relative_path = workspace
+            .root
+            .strip_prefix(&context.root)
+            .map_err(|_| assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent workspace escaped the project."))?
+            .to_string_lossy()
+            .replace('\\', "/");
         let mut audit = AgentAuditRecord {
             audit_id: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.into(),
@@ -403,7 +412,15 @@ impl<'a> AgentAssistanceService<'a> {
             item_id: item_id.into(),
             trigger,
             route: format!("byok/{}/{}/{}", scope.provider, scope.model, scope.destination),
+            agent_kind: None,
+            agent_version: scope.model.clone(),
+            prompt_template_version: "wiki-ingest-assist/byok-v1".into(),
+            approved_cost_micros: scope.estimated_cost_micros,
+            tool_calls: Vec::new(),
             approved_scope_sha256: Some(scope.scope_sha256.clone()),
+            byok_provider: Some(scope.provider.clone()),
+            byok_destination: Some(scope.destination.clone()),
+            workspace_relative_path: workspace_relative_path.clone(),
             granted_tools: Vec::new(),
             input_hashes: scope.files.iter().map(|file| file.sha256.clone()).collect(),
             output_hashes: Vec::new(),
@@ -428,7 +445,7 @@ impl<'a> AgentAssistanceService<'a> {
         let secret = match secrets.get(provider) {
             Ok(secret) => secret,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, false);
+                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
                 return Err(error);
             }
         };
@@ -504,17 +521,22 @@ impl<'a> AgentAssistanceService<'a> {
                 "byok-model",
                 &format!("{:x}", Sha256::digest(output.as_bytes())),
             )?;
-            workspace.root.strip_prefix(&context.root).map(|path| path.to_string_lossy().replace('\\', "/")).map_err(|_| assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent workspace escaped the project."))
+            Ok(workspace_relative_path.clone())
         })();
         let relative_workspace = match staged {
             Ok(path) => path,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, false);
+                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
                 return Err(error);
             }
         };
         audit.output_hashes = vec![format!("{:x}", Sha256::digest(output.as_bytes()))];
         audit.completed_at = Some(Utc::now());
+        audit.outcome = "output_staged".into();
+        if let Err(error) = self.files.write_json_atomic(context, &audit_path, &audit) {
+            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
+            return Err(error);
+        }
         if let Err(error) = self.tasks.complete_running_with_result(task_id, TaskResult {
             summary: "BYOK output is staged for candidate validation.".into(),
             affected_paths: vec![format!("{relative_workspace}/output")],
@@ -525,7 +547,7 @@ impl<'a> AgentAssistanceService<'a> {
             pending_action: None,
         }) {
             let error = assistance_error("IMPORT_AGENT_TASK_FAILED", &error);
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, false);
+            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
             return Err(error);
         }
         audit.outcome = "succeeded".into();
@@ -725,6 +747,9 @@ impl<'a> AgentAssistanceService<'a> {
         trigger: AgentAssistanceTrigger,
         agent_kind: AgentKind,
     ) -> Result<(), BackendError> {
+        let audit_path = format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
+        );
         if self.tasks.is_cancelled(task_id) {
             let _ = self.imports.finish_agent_assistance_attempt(
                 context,
@@ -758,7 +783,58 @@ impl<'a> AgentAssistanceService<'a> {
                     "Agent task is not bound to this Import item.",
                 ));
             }
-            let workspace = AgentWorkspaceBuilder.build(context, &session, item, trigger)?;
+            let workspace = AgentWorkspaceBuilder.build_for_task(
+                context,
+                &session,
+                item,
+                trigger,
+                task_id,
+            )?;
+            let bundle_bytes = super::agent_workspace::read_isolated_regular_file(
+                &workspace.root,
+                &workspace.task_path,
+                64 * 1024,
+            )?;
+            let bundle: AgentTaskBundle = serde_json::from_slice(&bundle_bytes).map_err(|_| {
+                assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent task bundle is invalid.")
+            })?;
+            let agent_version = self
+                .agents
+                .detect_agents(None)
+                .into_iter()
+                .find(|status| status.kind == agent_kind)
+                .and_then(|status| status.version)
+                .unwrap_or_else(|| "unknown".into());
+            let mut audit = AgentAuditRecord {
+                audit_id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.into(),
+                session_id: session_id.into(),
+                item_id: item_id.into(),
+                trigger,
+                route: format!("local/{}", agent_kind.command()),
+                agent_kind: Some(agent_kind),
+                agent_version,
+                prompt_template_version: "wiki-ingest-assist/local-v1".into(),
+                approved_cost_micros: None,
+                tool_calls: Vec::new(),
+                approved_scope_sha256: None,
+                byok_provider: None,
+                byok_destination: None,
+                workspace_relative_path: workspace
+                    .root
+                    .strip_prefix(&context.root)
+                    .map_err(|_| assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent workspace escaped the project."))?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                granted_tools: bundle.allowed_tools.clone(),
+                input_hashes: bundle.input_hashes.clone(),
+                output_hashes: Vec::new(),
+                started_at: Utc::now(),
+                completed_at: None,
+                outcome: "running".into(),
+                warnings: Vec::new(),
+            };
+            self.files.write_json_atomic(context, &audit_path, &audit)?;
             if self.tasks.is_cancelled(task_id) {
                 let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
                 return Err(assistance_error(
@@ -833,17 +909,11 @@ impl<'a> AgentAssistanceService<'a> {
                 let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
                 return Err(error);
             }
-            let relative_workspace = workspace
-                .root
-                .strip_prefix(&context.root)
-                .map_err(|_| {
-                    assistance_error(
-                        "IMPORT_AGENT_WORKSPACE_INVALID",
-                        "Agent workspace escaped the project.",
-                    )
-                })?
-                .to_string_lossy()
-                .replace('\\', "/");
+            audit.output_hashes = vec![format!("{:x}", Sha256::digest(output.as_bytes()))];
+            audit.completed_at = Some(Utc::now());
+            audit.outcome = "output_staged".into();
+            self.files.write_json_atomic(context, &audit_path, &audit)?;
+            let relative_workspace = audit.workspace_relative_path.clone();
             if let Err(error) = self.tasks.complete_running_with_result(
                 task_id,
                 TaskResult {
@@ -859,6 +929,8 @@ impl<'a> AgentAssistanceService<'a> {
                 let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
                 return Err(assistance_error("IMPORT_AGENT_TASK_FAILED", &error));
             }
+            audit.outcome = "succeeded".into();
+            let _ = self.files.write_json_atomic(context, &audit_path, &audit);
             // The durable task result is the recovery authority. If session
             // persistence is interrupted here, recover_session reconciles the
             // unfinished attempt from this Succeeded task without rerunning or
@@ -879,6 +951,14 @@ impl<'a> AgentAssistanceService<'a> {
             Ok(()) => Ok(()),
             Err(error) => {
                 let cancelled = self.tasks.is_cancelled(task_id) || error.code == "AGENT_CANCELLED";
+                if self.files.exists(context, &audit_path) {
+                    if let Ok(mut audit) = self.files.read_json::<AgentAuditRecord>(context, &audit_path) {
+                        audit.completed_at = Some(Utc::now());
+                        audit.outcome = if cancelled { "cancelled" } else { "failed" }.into();
+                        audit.warnings.push(error.code.clone());
+                        let _ = self.files.write_json_atomic(context, &audit_path, &audit);
+                    }
+                }
                 let outcome = if cancelled {
                     AttemptOutcome::Cancelled
                 } else {
@@ -1026,6 +1106,7 @@ fn collect_scope_files(
     label: &str,
     files: &mut Vec<SendScopeFile>,
 ) -> Result<(), BackendError> {
+    super::agent_workspace::validate_isolated_directory(root, current)?;
     for entry in std::fs::read_dir(current).map_err(|_| {
         assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send files could not be inspected.")
     })? {
@@ -1041,7 +1122,11 @@ fn collect_scope_files(
         if !metadata.is_file() {
             return Err(assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Only regular files may enter the BYOK send scope."));
         }
-        let bytes = std::fs::read(entry.path()).map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send file could not be read."))?;
+        let bytes = super::agent_workspace::read_isolated_regular_file(
+            root,
+            &entry.path(),
+            8 * 1024 * 1024,
+        )?;
         let (encoded, redactions) = canonical_send_text(&bytes)?;
         let relative = entry.path().strip_prefix(root).map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send file escaped its scope."))?.to_string_lossy().replace('\\', "/");
         files.push(SendScopeFile {
@@ -1092,7 +1177,12 @@ fn build_byok_prompt(
             return Err(assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send path is invalid."));
         }
         let path = workspace.root.join(relative);
-        let bytes = std::fs::read(&path).map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_CHANGED", "An approved send file is unavailable."))?;
+        let bytes = super::agent_workspace::read_isolated_regular_file(
+            &workspace.root,
+            &path,
+            8 * 1024 * 1024,
+        )
+        .map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_CHANGED", "An approved send file changed or escaped its scope."))?;
         let (encoded, redactions) = canonical_send_text(&bytes)?;
         if format!("{:x}", Sha256::digest(encoded.as_bytes())) != file.sha256
             || redactions != file.redactions

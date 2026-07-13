@@ -15,7 +15,9 @@ use llm_wiki_desktop_lib::{
             AttemptOutcome, AttemptRecord, ImportInput, ImportInputKind, ImportIssue, ImportItem,
             ImportItemStatus, ImportResourceMode, ImportSession, ImportStage,
         },
-        import_v2_agent::{AgentAssistancePolicy, AgentAssistanceTrigger, AgentRecoveryAction},
+        import_v2_agent::{
+            AgentAssistancePolicy, AgentAssistanceTrigger, AgentAuditRecord, AgentRecoveryAction,
+        },
         paths::ProjectContext,
         task::{TaskStatus, TaskType},
     },
@@ -334,6 +336,21 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
         .iter()
         .all(|line| !line.message.contains("secret stdout")));
     assert_eq!(runner.invocations.lock().unwrap().len(), 1);
+    let audit: AgentAuditRecord = files
+        .read_json(
+            &context,
+            &format!(
+                ".app/import-sessions/session-a/items/item-a/agent-audit/{}.json",
+                task.id
+            ),
+        )
+        .unwrap();
+    assert_eq!(audit.task_id, task.id);
+    assert_eq!(audit.agent_kind, Some(AgentKind::Claude));
+    assert_eq!(audit.prompt_template_version, "wiki-ingest-assist/local-v1");
+    assert_eq!(audit.approved_cost_micros, None);
+    assert_eq!(audit.outcome, "succeeded");
+    assert_eq!(audit.output_hashes.len(), 1);
 
     for (item_id, mode) in [
         ("item-empty", "empty"),
@@ -403,6 +420,23 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
         }));
         let agent_root = staging.join("agent");
         assert!(!agent_root.exists() || std::fs::read_dir(agent_root).unwrap().next().is_none());
+        if mode != "pre_cancel" {
+            let audit: AgentAuditRecord = files
+                .read_json(
+                    &context,
+                    &format!(
+                        ".app/import-sessions/session-a/items/{item_id}/agent-audit/{}.json",
+                        task.id
+                    ),
+                )
+                .unwrap();
+            assert_eq!(audit.task_id, task.id);
+            assert_eq!(
+                audit.outcome,
+                if mode == "cancel" { "cancelled" } else { "failed" }
+            );
+            assert!(!audit.warnings.is_empty());
+        }
     }
 }
 
@@ -411,6 +445,22 @@ fn seed_workspace(root: &std::path::Path) {
         std::fs::create_dir_all(root.join(name)).unwrap();
     }
     std::fs::write(root.join("task.json"), "{}").unwrap();
+}
+
+#[test]
+fn text_only_import_profile_rejects_binary_source_before_process_invocation() {
+    let root = tempfile::tempdir().unwrap();
+    seed_workspace(root.path());
+    std::fs::write(root.path().join("source/source.bin"), [0xff, 0xfe, 0x00]).unwrap();
+    let skill = root.path().join("SKILL.md");
+    std::fs::write(&skill, "safe").unwrap();
+    let error = AgentService::import_assistance_invocation(
+        AgentKind::Claude,
+        root.path(),
+        &skill,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "IMPORT_AGENT_BINARY_INPUT_UNSUPPORTED");
 }
 
 #[test]
@@ -454,17 +504,25 @@ fn system_runner_redacts_stdout_stderr_and_stops_a_cancelled_process() {
     tasks
         .transition_status(&task.id, TaskStatus::Running)
         .unwrap();
-    let invocation = test_process_invocation(
-        root.path(),
-        "Start-Sleep -Seconds 30; Write-Output 'too-late'",
-        "sleep 30; printf 'too-late\\n'",
-    );
+    let grandchild_pid = root.path().join("grandchild.pid");
+    let invocation = process_tree_invocation(root.path(), &grandchild_pid);
     let tasks_for_worker = tasks.clone();
     let task_id = task.id.clone();
     let worker = std::thread::spawn(move || {
         AgentService::default().run_import_assistance(&invocation, &tasks_for_worker, &task_id)
     });
-    std::thread::sleep(Duration::from_millis(200));
+    for _ in 0..40 {
+        if grandchild_pid.is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(grandchild_pid.is_file());
+    let pid = std::fs::read_to_string(&grandchild_pid)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
     tasks.cancel_task(&task.id).unwrap();
     let error = worker.join().unwrap().unwrap_err();
     assert_eq!(error.code, "AGENT_CANCELLED");
@@ -472,6 +530,43 @@ fn system_runner_redacts_stdout_stderr_and_stops_a_cancelled_process() {
         tasks.get_task(&task.id).unwrap().status,
         TaskStatus::Cancelled
     );
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!process_is_alive(pid), "grandchild process {pid} survived cancellation");
+}
+
+fn process_tree_invocation(cwd: &std::path::Path, pid_file: &std::path::Path) -> AgentInvocation {
+    if cfg!(windows) {
+        let path = pid_file.to_string_lossy().replace('\'', "''");
+        test_process_invocation(
+            cwd,
+            &format!(
+                "$p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30'; Set-Content -LiteralPath '{path}' -Value $p.Id; Start-Sleep -Seconds 30"
+            ),
+            "",
+        )
+    } else {
+        let path = pid_file.to_string_lossy().replace('\'', "'\\''");
+        test_process_invocation(
+            cwd,
+            "",
+            &format!("sleep 30 & echo $! > '{path}'; sleep 30"),
+        )
+    }
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if cfg!(windows) {
+        let output = std::process::Command::new("tasklist.exe")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+    } else {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 }
 
 fn test_process_invocation(

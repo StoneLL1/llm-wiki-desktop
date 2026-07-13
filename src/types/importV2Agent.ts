@@ -65,7 +65,13 @@ export interface AgentSendScope {
 export interface AgentCandidate {
   candidateId: string;
   taskId: string;
+  auditId: string;
   trigger: AgentAssistanceTrigger;
+  agentKind: AgentKind | null;
+  agentVersion: string;
+  promptTemplateVersion: string;
+  approvedCostMicros: number | null;
+  toolCalls: string[];
   markdown: ImportArtifact;
   assets: ImportArtifact[];
   quality: QualityReport;
@@ -135,7 +141,15 @@ export interface AgentAuditRecord {
   itemId: string;
   trigger: AgentAssistanceTrigger;
   route: string;
+  agentKind: AgentKind | null;
+  agentVersion: string;
+  promptTemplateVersion: string;
+  approvedCostMicros: number | null;
+  toolCalls: string[];
   approvedScopeSha256: string | null;
+  byokProvider: string | null;
+  byokDestination: string | null;
+  workspaceRelativePath: string;
   grantedTools: AgentToolGrant[];
   inputHashes: string[];
   outputHashes: string[];

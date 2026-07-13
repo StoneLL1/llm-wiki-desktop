@@ -606,6 +606,7 @@ impl ProcessRunner for SystemProcessRunner {
         )
         .spawn()
         .map_err(|error| BackendError::new("AGENT_SPAWN_FAILED", error.to_string(), true, false))?;
+        let _process_lifetime = ProcessLifetimeGuard::attach(&mut child)?;
         if let Some(input) = &invocation.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(input.as_bytes()).map_err(|error| {
@@ -684,6 +685,7 @@ fn run_streaming_process(
     let mut child = command
         .spawn()
         .map_err(|error| BackendError::new("AGENT_SPAWN_FAILED", error.to_string(), true, false))?;
+    let _process_lifetime = ProcessLifetimeGuard::attach(&mut child)?;
     // Never let a CLI that stops reading stdin block cancellation or the
     // runtime deadline. Closing/killing the child breaks this writer's pipe.
     let mut stdin_writer = invocation.stdin.as_ref().and_then(|input| {
@@ -1174,10 +1176,233 @@ fn build_command(program: &str, args: &[String], cwd: &Path, stdin_piped: bool) 
 fn isolate_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
+    unsafe {
+        command.pre_exec(|| {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if libc::getppid() == 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Agent parent exited before process launch completed.",
+                ));
+            }
+            Ok(())
+        });
+    }
 }
 
 #[cfg(not(unix))]
-fn isolate_process_group(_command: &mut Command) {}
+fn isolate_process_group(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        command.creation_flags(CREATE_SUSPENDED);
+    }
+}
+
+#[cfg(unix)]
+struct ProcessLifetimeGuard {
+    watchdog_write: std::os::fd::RawFd,
+    watchdog_pid: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl ProcessLifetimeGuard {
+    fn attach(child: &mut std::process::Child) -> Result<Self, BackendError> {
+        let mut pipe = [-1; 2];
+        if unsafe { libc::pipe(pipe.as_mut_ptr()) } != 0 {
+            terminate_agent_tree(child);
+            return Err(BackendError::new(
+                "AGENT_PROCESS_ISOLATION_FAILED",
+                "The Agent process watchdog could not be created.",
+                true,
+                true,
+            ));
+        }
+        for fd in pipe {
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        let process_group = child.id() as libc::pid_t;
+        let watchdog_pid = unsafe { libc::fork() };
+        if watchdog_pid == 0 {
+            unsafe {
+                libc::close(pipe[1]);
+                let mut byte = 0_u8;
+                loop {
+                    let read = libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+                    if read == 0 {
+                        break;
+                    }
+                    if read < 0 {
+                        break;
+                    }
+                }
+                libc::kill(-process_group, libc::SIGKILL);
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(pipe[0]) };
+        if watchdog_pid < 0 {
+            unsafe { libc::close(pipe[1]) };
+            terminate_agent_tree(child);
+            return Err(BackendError::new(
+                "AGENT_PROCESS_ISOLATION_FAILED",
+                "The Agent process watchdog could not be started.",
+                true,
+                true,
+            ));
+        }
+        Ok(Self {
+            watchdog_write: pipe[1],
+            watchdog_pid,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessLifetimeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.watchdog_write);
+            libc::waitpid(self.watchdog_pid, std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ProcessLifetimeGuard;
+
+#[cfg(not(any(unix, windows)))]
+impl ProcessLifetimeGuard {
+    fn attach(_child: &mut std::process::Child) -> Result<Self, BackendError> {
+        Ok(Self)
+    }
+}
+
+#[cfg(windows)]
+struct ProcessLifetimeGuard(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ProcessLifetimeGuard {
+    fn attach(child: &mut std::process::Child) -> Result<Self, BackendError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, HANDLE},
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            terminate_agent_tree(child);
+            return Err(BackendError::new(
+                "AGENT_PROCESS_ISOLATION_FAILED",
+                "The Agent process lifetime could not be isolated.",
+                true,
+                true,
+            ));
+        }
+        let mut information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &information as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&information) as u32,
+            )
+        } != 0;
+        let assigned = configured
+            && unsafe {
+                AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE)
+            } != 0;
+        if !assigned {
+            unsafe { CloseHandle(job) };
+            terminate_agent_tree(child);
+            return Err(BackendError::new(
+                "AGENT_PROCESS_ISOLATION_FAILED",
+                "The Agent process could not be bound to the application lifetime.",
+                true,
+                true,
+            ));
+        }
+        if let Err(error) = resume_suspended_child(child.id()) {
+            unsafe { CloseHandle(job) };
+            terminate_agent_tree(child);
+            return Err(error);
+        }
+        Ok(Self(job))
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_child(process_id: u32) -> Result<(), BackendError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+                TH32CS_SNAPTHREAD,
+            },
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        },
+    };
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(BackendError::new(
+            "AGENT_PROCESS_ISOLATION_FAILED",
+            "The suspended Agent thread could not be enumerated.",
+            true,
+            true,
+        ));
+    }
+    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+    let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    let mut resumed = false;
+    while found {
+        if entry.th32OwnerProcessID == process_id {
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if !thread.is_null() {
+                resumed = unsafe { ResumeThread(thread) } != u32::MAX;
+                unsafe { CloseHandle(thread) };
+                if resumed {
+                    break;
+                }
+            }
+        }
+        found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    if resumed {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            "AGENT_PROCESS_ISOLATION_FAILED",
+            "The Agent process could not be resumed after Job assignment.",
+            true,
+            true,
+        ))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessLifetimeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
 
 fn run_with_timeout(
     command: &str,
@@ -1289,60 +1514,18 @@ fn import_workspace_materials(workspace: &Path) -> Result<String, BackendError> 
     const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
     let mut files = vec![workspace.join("task.json")];
     for root in [workspace.join("source"), workspace.join("deterministic")] {
-        collect_import_material_paths(&root, &mut files)?;
+        super::import_v2::agent_workspace::validate_isolated_directory(workspace, &root)?;
+        collect_import_material_paths(workspace, &root, &mut files)?;
     }
     files.sort();
     let mut used = 0usize;
     let mut output = String::new();
-    let canonical_workspace = workspace.canonicalize().map_err(|_| {
-        BackendError::new(
-            "IMPORT_AGENT_WORKSPACE_INVALID",
-            "The isolated Agent workspace could not be verified.",
-            false,
-            true,
-        )
-    })?;
     for path in files {
-        let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
-            BackendError::new(
-                "IMPORT_AGENT_WORKSPACE_INVALID",
-                "An authorized Agent input could not be verified.",
-                false,
-                true,
-            )
-        })?;
-        if import_metadata_is_link(&metadata) || !metadata.is_file() {
-            return Err(BackendError::new(
-                "IMPORT_AGENT_WORKSPACE_INVALID",
-                "Links and non-files are not accepted as Agent prompt inputs.",
-                false,
-                true,
-            ));
-        }
-        let bytes = std::fs::read(&path).map_err(|_| {
-            BackendError::new(
-                "IMPORT_AGENT_WORKSPACE_INVALID",
-                "An authorized Agent input could not be read.",
-                false,
-                true,
-            )
-        })?;
-        let final_path = path.canonicalize().map_err(|_| {
-            BackendError::new(
-                "IMPORT_AGENT_WORKSPACE_INVALID",
-                "An authorized Agent input changed while it was being read.",
-                false,
-                true,
-            )
-        })?;
-        if !final_path.starts_with(&canonical_workspace) {
-            return Err(BackendError::new(
-                "IMPORT_AGENT_WORKSPACE_INVALID",
-                "An authorized Agent input escaped the isolated workspace.",
-                false,
-                true,
-            ));
-        }
+        let bytes = super::import_v2::agent_workspace::read_isolated_regular_file(
+            workspace,
+            &path,
+            MAX_INPUT_BYTES.saturating_sub(used),
+        )?;
         used = used.checked_add(bytes.len()).ok_or_else(|| {
             BackendError::new(
                 "IMPORT_AGENT_INPUT_TOO_LARGE",
@@ -1374,22 +1557,26 @@ fn import_workspace_materials(workspace: &Path) -> Result<String, BackendError> 
         output.push_str("\n<file path=\"");
         output.push_str(&relative);
         output.push_str("\">\n");
-        match String::from_utf8(bytes) {
-            Ok(text) => output.push_str(&text),
-            Err(error) => output.push_str(&format!(
-                "[binary input omitted from text prompt: {} bytes]",
-                error.as_bytes().len()
-            )),
-        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            BackendError::new(
+                "IMPORT_AGENT_BINARY_INPUT_UNSUPPORTED",
+                "Local text-only Agent assistance requires a reviewed text baseline.",
+                true,
+                true,
+            )
+        })?;
+        output.push_str(&text);
         output.push_str("\n</file>\n");
     }
     Ok(output)
 }
 
 fn collect_import_material_paths(
+    workspace_root: &Path,
     root: &Path,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), BackendError> {
+    super::import_v2::agent_workspace::validate_isolated_directory(workspace_root, root)?;
     for entry in std::fs::read_dir(root).map_err(|_| {
         BackendError::new(
             "IMPORT_AGENT_WORKSPACE_INVALID",
@@ -1425,7 +1612,7 @@ fn collect_import_material_paths(
             ));
         }
         if metadata.is_dir() {
-            collect_import_material_paths(&path, files)?;
+            collect_import_material_paths(workspace_root, &path, files)?;
         } else if metadata.is_file() {
             files.push(path);
         }
@@ -1494,6 +1681,22 @@ fn unsupported_convenience_agent(kind: AgentKind) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_runner_resumes_child_only_after_job_assignment() {
+        let cwd = tempfile::tempdir().unwrap();
+        let (stdout, stderr) = SystemProcessRunner
+            .run_capture(&AgentInvocation {
+                program: "cmd".into(),
+                args: vec!["/C".into(), "echo capture-ok".into()],
+                stdin: None,
+                cwd: cwd.path().to_path_buf(),
+            })
+            .unwrap();
+        assert!(stdout.contains("capture-ok"));
+        assert!(stderr.trim().is_empty());
+    }
 
     #[test]
     fn invocation_profiles_are_non_interactive_and_workspace_scoped() {
