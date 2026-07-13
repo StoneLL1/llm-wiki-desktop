@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -34,6 +35,14 @@ struct SessionEntry {
     reference: ConnectorSessionRef,
     path: PathBuf,
     child: Option<Arc<Mutex<ManagedChild>>>,
+    binding: Option<ConnectorSessionBinding>,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct ConnectorSessionBinding {
+    project_id: String,
+    import_session_id: String,
+    item_id: String,
+    target_sha256: String,
 }
 #[derive(Default)]
 pub struct ConnectorSessionService {
@@ -87,6 +96,7 @@ impl ConnectorSessionService {
                     reference: r.clone(),
                     path,
                     child: None,
+                    binding: None,
                 },
             );
         Ok(r)
@@ -97,15 +107,27 @@ impl ConnectorSessionService {
         profiles_root: &Path,
         pack: &ResolvedCapabilityPack,
         url: &str,
+        project_id: &str,
+        import_session_id: &str,
+        item_id: &str,
     ) -> Result<ConnectorSessionRef, BackendError> {
         validate_entrypoint_unchanged(pack)?;
         let reference = self.create(platform, profiles_root)?;
+        let binding = ConnectorSessionBinding {
+            project_id: project_id.to_string(),
+            import_session_id: import_session_id.to_string(),
+            item_id: item_id.to_string(),
+            target_sha256: format!("{:x}", Sha256::digest(url.as_bytes())),
+        };
         let profile = self
             .sessions
             .lock()
             .map_err(|_| e("Connector sessions are unavailable."))?
-            .get(&reference.session_id)
-            .map(|entry| entry.path.clone())
+            .get_mut(&reference.session_id)
+            .map(|entry| {
+                entry.binding = Some(binding);
+                entry.path.clone()
+            })
             .ok_or_else(|| e("Connector session was not found."))?;
         let mut command = Command::new(&pack.entrypoint);
         let runtime_temp = profile.join("runtime-temp");
@@ -224,6 +246,28 @@ impl ConnectorSessionService {
         }
         Ok(entry.path.clone())
     }
+    pub fn take_authenticated_profile_bound(
+        &self,
+        id: &str,
+        project_id: &str,
+        import_session_id: &str,
+        item_id: &str,
+        target_url: &str,
+    ) -> Result<(ConnectorSessionRef, PathBuf), BackendError> {
+        let expected = ConnectorSessionBinding {
+            project_id: project_id.to_string(),
+            import_session_id: import_session_id.to_string(),
+            item_id: item_id.to_string(),
+            target_sha256: format!("{:x}", Sha256::digest(target_url.as_bytes())),
+        };
+        let mut sessions = self.sessions.lock().map_err(|_| e("Connector sessions are unavailable."))?;
+        let entry = sessions.get(id).ok_or_else(|| e("Connector session was not found."))?;
+        if entry.reference.state != "authenticated" || entry.binding.as_ref() != Some(&expected) || !entry.path.is_dir() {
+            return Err(e("The authenticated connector is not bound to this import item."));
+        }
+        let entry = sessions.remove(id).ok_or_else(|| e("Connector session was not found."))?;
+        Ok((entry.reference, entry.path))
+    }
     pub fn revoke(&self, id: &str) -> Result<(), BackendError> {
         if let Some(entry) = self
             .sessions
@@ -311,4 +355,30 @@ fn reject_daily_profile(path: &Path) -> Result<(), BackendError> {
 }
 fn e(m: &str) -> BackendError {
     BackendError::new("IMPORT_V2_BROWSER_SESSION_FAILED", m, true, true)
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_profile_is_exactly_bound_and_single_use() {
+        let service = ConnectorSessionService::default();
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        std::fs::create_dir(&profile).unwrap();
+        let id = "connector-a".to_string();
+        let target = "https://www.bilibili.com/video/BV1exact?token=secret";
+        service.sessions.lock().unwrap().insert(id.clone(), SessionEntry {
+            reference: ConnectorSessionRef { session_id: id.clone(), platform: "bilibili".into(), profile_ref: "connector-profile:connector-a".into(), state: "authenticated".into() },
+            path: profile.clone(),
+            child: None,
+            binding: Some(ConnectorSessionBinding { project_id: "project-a".into(), import_session_id: "session-a".into(), item_id: "item-a".into(), target_sha256: format!("{:x}", Sha256::digest(target.as_bytes())) }),
+        });
+        assert!(service.take_authenticated_profile_bound(&id, "project-b", "session-a", "item-a", target).is_err());
+        assert!(service.resume(&id).is_ok());
+        let (_, taken) = service.take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target).unwrap();
+        assert_eq!(taken, profile);
+        assert!(service.take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target).is_err());
+    }
 }

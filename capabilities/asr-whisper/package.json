@@ -1,6 +1,6 @@
 {
-  "name": "media-metadata",
-  "version": "2026.6.9",
+  "name": "asr-whisper-capability",
+  "version": "1.8.3",
   "private": true,
   "type": "module",
   "scripts": {

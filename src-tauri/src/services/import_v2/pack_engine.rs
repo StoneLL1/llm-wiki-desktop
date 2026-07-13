@@ -12,6 +12,7 @@ use crate::services::import_v2::engine::{
     validate_engine_result, EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
 };
 use crate::services::import_v2::pack_protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::services::import_v2::media_router::TemporaryMediaWorkspace;
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
 use crate::services::import_v2::web_target_store::WebTargetStore;
@@ -78,7 +79,12 @@ impl ImportEngine for PackProcessEngine {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
-        let request = if request.input.kind == ImportInputKind::Url {
+        let asr_authorization_url = if request.local_asr_authorized && self.descriptor.route == "web.bilibili.metadata" {
+            Some(self.web_targets.resolve(&request.input.locator, request.input.normalized_locator.as_deref())?.request_url.to_string())
+        } else {
+            None
+        };
+        let mut request = if request.input.kind == ImportInputKind::Url {
             prepare_web_request(
                 request,
                 cancellation,
@@ -88,8 +94,19 @@ impl ImportEngine for PackProcessEngine {
         } else {
             request.clone()
         };
+        if self.descriptor.route == "web.bilibili.metadata" {
+            request.input.locator = request.input.normalized_locator.clone().ok_or_else(|| engine_error("The Bilibili public target is unavailable."))?;
+        }
+        let _fetched_cleanup = if request.input.kind == ImportInputKind::Url {
+            if let Some(relative) = request.chained_input.as_deref() {
+            let path = std::path::Path::new(&request.project_root).join(&request.staging_root).join(relative);
+            Some(TemporaryMediaWorkspace::create(path.parent().ok_or_else(|| engine_error("The fetched web workspace is invalid."))?)?)
+            } else { None }
+        } else {
+            None
+        };
         let authenticated_profile = if self.descriptor.route == "web.generic.browser" {
-            self.web_targets.take_authenticated_profile(&request.item_id)?
+            self.web_targets.take_authenticated_profile(&request.project_id, &request.session_id, &request.item_id)?
         } else {
             None
         };
@@ -205,7 +222,7 @@ impl ImportEngine for PackProcessEngine {
                         .as_ref()
                         .and_then(|data| data.get("code"))
                         .and_then(|code| code.as_str())
-                        .filter(|code| code.starts_with("IMPORT_WEB_"))
+                        .filter(|code| code.starts_with("IMPORT_WEB_") || code.starts_with("IMPORT_ASR_"))
                         .unwrap_or(crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE);
                     return Err(BackendError::new(
                         stable.to_string(),
@@ -218,12 +235,18 @@ impl ImportEngine for PackProcessEngine {
                     .rpc
                     .result
                     .ok_or_else(|| engine_error("The capability process reported an error."))?;
+                if result.continuation.is_some() {
+                    return Err(engine_error("Capability packs cannot create privileged continuations directly."));
+                }
+                validate_engine_result(&request.staging_root, &result)?;
                 localize_remote_assets(
                     &request,
                     &mut result,
                     response.remote_assets,
                     cancellation,
                     self.domain_limiter.clone(),
+                    self.web_targets.clone(),
+                    asr_authorization_url.as_deref(),
                 )?;
                 validate_engine_result(&request.staging_root, &result)?;
                 terminate_tree(&mut child.0);
@@ -284,12 +307,17 @@ fn prepare_web_request(
     let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
     std::fs::create_dir_all(&root)
         .map_err(|_| engine_error("The web staging directory could not be created."))?;
-    std::fs::write(root.join("fetched.html"), &fetched.bytes)
+    let fetch_workspace = TemporaryMediaWorkspace::create(
+        &root.join("runtime-temp").join(format!("fetch-{}", uuid::Uuid::new_v4())),
+    )?;
+    let fetch_path = fetch_workspace.path().join("page.html");
+    std::fs::write(&fetch_path, &fetched.bytes)
         .map_err(|_| engine_error("The fetched web response could not be staged."))?;
     let mut prepared = request.clone();
     prepared.input.locator = fetched.final_session_target.request_url.to_string();
     prepared.input.normalized_locator = Some(fetched.final_public_url);
-    prepared.chained_input = Some("fetched.html".into());
+    let workspace = fetch_workspace.retain();
+    prepared.chained_input = Some(workspace.join("page.html").strip_prefix(&root).map_err(|_| engine_error("The fetched web response escaped staging."))?.to_string_lossy().replace('\\', "/"));
     Ok(prepared)
 }
 
@@ -387,7 +415,7 @@ struct PackResponse {
 
 fn read_response(reader: impl Read) -> Result<PackResponse, ()> {
     let mut reader = BufReader::new(reader);
-    let mut remote_assets = Vec::new();
+    let mut remote_assets: Vec<RemoteAssetRequest> = Vec::new();
     for _ in 0..MAX_STDOUT_LINES {
         let mut bytes = Vec::new();
         match reader
@@ -419,7 +447,12 @@ fn read_response(reader: impl Read) -> Result<PackResponse, ()> {
                         .placeholder
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-')
-                    || !matches!(request.kind.as_str(), "image" | "subtitle")
+                    || !matches!(request.kind.as_str(), "image" | "subtitle" | "temporary_media")
+                {
+                    return Err(());
+                }
+                if request.kind == "temporary_media"
+                    && remote_assets.iter().any(|asset| asset.kind == "temporary_media")
                 {
                     return Err(());
                 }
@@ -440,6 +473,8 @@ fn localize_remote_assets(
     assets: Vec<RemoteAssetRequest>,
     cancellation: &CancellationToken,
     limiter: Arc<DomainLimiter>,
+    web_targets: Arc<WebTargetStore>,
+    asr_authorization_url: Option<&str>,
 ) -> Result<(), BackendError> {
     if assets.is_empty() {
         return Ok(());
@@ -458,17 +493,25 @@ fn localize_remote_assets(
         let target = UrlPolicy.normalize_for_session(&asset.url)?;
         let token = cancellation.clone();
         let item_id = request.item_id.clone();
-        let content = if asset.kind == "image" {
-            WebFetchContent::Image
-        } else {
-            WebFetchContent::Subtitle
+        let content = match asset.kind.as_str() {
+            "image" => WebFetchContent::Image,
+            "subtitle" => WebFetchContent::Subtitle,
+            "temporary_media" => WebFetchContent::TemporaryMedia,
+            _ => return Err(engine_error("The remote asset kind is not allowed.")),
         };
+        if content == WebFetchContent::TemporaryMedia {
+            let expected = asr_authorization_url.ok_or_else(|| engine_error("Temporary media requires explicit local ASR authorization."))?;
+            if !web_targets.reserve_bilibili_asr(&request.project_id, &request.session_id, &request.item_id, expected)? {
+                return Err(engine_error("The local ASR authorization is missing or expired."));
+            }
+        }
         let mut policy = WebFetchPolicy::default();
         policy.content = content;
-        policy.max_response_bytes = if content == WebFetchContent::Image {
-            8 * 1024 * 1024
-        } else {
-            4 * 1024 * 1024
+        policy.max_response_bytes = match content {
+            WebFetchContent::Image => 8 * 1024 * 1024,
+            WebFetchContent::Subtitle => 4 * 1024 * 1024,
+            WebFetchContent::TemporaryMedia => 256 * 1024 * 1024,
+            WebFetchContent::Page => unreachable!(),
         };
         let limiter = limiter.clone();
         let fetched = std::thread::spawn(move || {
@@ -485,12 +528,23 @@ fn localize_remote_assets(
         .join()
         .map_err(|_| engine_error("The asset fetch worker failed."))??;
         let extension = safe_asset_extension(&fetched.content_type, content)?;
-        let directory = if content == WebFetchContent::Image {
-            "assets"
-        } else {
-            "subtitles"
+        let directory = match content {
+            WebFetchContent::Image => "assets",
+            WebFetchContent::Subtitle => "subtitles",
+            WebFetchContent::TemporaryMedia => "runtime-temp",
+            WebFetchContent::Page => unreachable!(),
         };
-        let relative = format!("{directory}/web-{index}.{extension}");
+        let workspace = if content == WebFetchContent::TemporaryMedia {
+            Some(TemporaryMediaWorkspace::create(&root.join(directory).join(format!("asr-{}", uuid::Uuid::new_v4())))?)
+        } else {
+            None
+        };
+        let relative = if let Some(workspace) = workspace.as_ref() {
+            let name = workspace.path().file_name().unwrap_or_default().to_string_lossy();
+            format!("{directory}/{name}/input.{extension}")
+        } else {
+            format!("{directory}/web-{index}.{extension}")
+        };
         let destination = root.join(&relative);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)
@@ -501,6 +555,16 @@ fn localize_remote_assets(
             .flatten();
         std::fs::write(&destination, fetched.bytes)
             .map_err(|_| engine_error("A localized web asset could not be written."))?;
+        if content == WebFetchContent::TemporaryMedia {
+            if let Some(workspace) = workspace { workspace.retain(); }
+            result.continuation = Some(
+                crate::services::import_v2::engine::EngineContinuation::LocalAsr {
+                    temporary_input_path: relative,
+                    media_kind: "audio".into(),
+                },
+            );
+            continue;
+        }
         let marker = format!("asset://{}", asset.placeholder);
         markdown = markdown.replace(&marker, &relative);
         if let Some(transcript) = transcript {
@@ -562,6 +626,12 @@ fn safe_asset_extension(
         (WebFetchContent::Subtitle, "application/x-subrip")
         | (WebFetchContent::Subtitle, "text/plain") => Ok("srt"),
         (WebFetchContent::Subtitle, "application/json") => Ok("json"),
+        (WebFetchContent::TemporaryMedia, "audio/mpeg") => Ok("mp3"),
+        (WebFetchContent::TemporaryMedia, "audio/wav")
+        | (WebFetchContent::TemporaryMedia, "audio/x-wav") => Ok("wav"),
+        (WebFetchContent::TemporaryMedia, "audio/mp4")
+        | (WebFetchContent::TemporaryMedia, "video/mp4")
+        | (WebFetchContent::TemporaryMedia, "application/octet-stream") => Ok("m4a"),
         _ => Err(engine_error("The remote asset MIME type is not allowed.")),
     }
 }

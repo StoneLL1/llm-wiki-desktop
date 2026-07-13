@@ -15,6 +15,7 @@ pub enum WebFetchContent {
     Page,
     Image,
     Subtitle,
+    TemporaryMedia,
 }
 #[derive(Debug, Clone)]
 pub struct WebFetchPolicy {
@@ -182,6 +183,11 @@ impl WebFetchService {
                         || content_type.contains("json")
                         || content_type.contains("vtt")
                         || content_type.contains("subrip")
+                }
+                WebFetchContent::TemporaryMedia => {
+                    content_type.starts_with("audio/")
+                        || content_type == "video/mp4"
+                        || content_type == "application/octet-stream"
                 }
             };
             if !accepted {

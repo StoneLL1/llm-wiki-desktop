@@ -1,5 +1,8 @@
 use llm_wiki_desktop_lib::services::{
-    import_v2::{url_policy::{PrivateTargetGrant, UrlPolicy}, web_target_store::WebTargetStore},
+    import_v2::{
+        url_policy::{PrivateTargetGrant, UrlPolicy},
+        web_target_store::{asr_target_sha256, BilibiliAsrGrant, WebTargetStore},
+    },
     SecretService,
 };
 
@@ -55,4 +58,97 @@ fn secure_reference_cannot_be_rebound_to_another_public_target() {
         Err(error) => error,
     };
     assert_eq!(error.code, "IMPORT_V2_URL_REFERENCE_MISMATCH");
+}
+
+#[test]
+fn bilibili_asr_grant_is_exact_expiring_and_single_use() {
+    let store = WebTargetStore::new(SecretService::memory());
+    let exact_url = "https://www.bilibili.com/video/BV1exact?token=secret-a";
+    let grant = BilibiliAsrGrant {
+        project_id: "project-a".into(),
+        session_id: "session-a".into(),
+        item_id: "item-a".into(),
+        target_sha256: asr_target_sha256(exact_url),
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+    };
+    store.authorize_bilibili_asr(grant.clone()).unwrap();
+    assert!(store
+        .take_bilibili_asr(
+            "project-a",
+            "session-a",
+            "item-b",
+            exact_url,
+        )
+        .unwrap()
+        .is_none());
+    let mismatch = store
+        .take_bilibili_asr(
+            "project-a",
+            "session-a",
+            "item-a",
+            "https://www.bilibili.com/video/BV1exact?token=secret-b",
+        )
+        .unwrap_err();
+    assert_eq!(mismatch.code, "IMPORT_V2_URL_REFERENCE_MISMATCH");
+    assert!(store.has_bilibili_asr("project-a", "session-a", "item-a", exact_url).unwrap());
+    assert!(store.reserve_bilibili_asr("project-a", "session-a", "item-a", exact_url).unwrap());
+    assert!(!store.has_bilibili_asr("project-a", "session-a", "item-a", exact_url).unwrap());
+    assert!(!store.reserve_bilibili_asr("project-a", "session-a", "item-a", exact_url).unwrap());
+    assert_eq!(
+        store
+            .take_bilibili_asr(
+                "project-a",
+                "session-a",
+                "item-a",
+                exact_url,
+            )
+            .unwrap(),
+        Some(grant),
+    );
+    assert!(store
+        .take_bilibili_asr(
+            "project-a",
+            "session-a",
+            "item-a",
+            exact_url,
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn expired_bilibili_asr_grant_is_not_returned() {
+    let store = WebTargetStore::new(SecretService::memory());
+    store
+        .authorize_bilibili_asr(BilibiliAsrGrant {
+            project_id: "project-a".into(),
+            session_id: "session-a".into(),
+            item_id: "item-a".into(),
+            target_sha256: asr_target_sha256("https://www.bilibili.com/video/BV1expired"),
+            expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+        })
+        .unwrap();
+    assert!(store
+        .take_bilibili_asr(
+            "project-a",
+            "session-a",
+            "item-a",
+            "https://www.bilibili.com/video/BV1expired",
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn authenticated_profiles_cannot_cross_project_session_or_item() {
+    let store = WebTargetStore::new(SecretService::memory());
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir(&profile).unwrap();
+    store.bind_authenticated_profile("project-a", "session-a", "item-a", profile.clone()).unwrap();
+    assert!(store.take_authenticated_profile("project-b", "session-a", "item-a").unwrap().is_none());
+    assert!(store.take_authenticated_profile("project-a", "session-b", "item-a").unwrap().is_none());
+    assert!(store.take_authenticated_profile("project-a", "session-a", "item-b").unwrap().is_none());
+    assert_eq!(store.take_authenticated_profile("project-a", "session-a", "item-a").unwrap(), Some(profile));
+    assert!(store.take_authenticated_profile("project-a", "session-a", "item-a").unwrap().is_none());
 }

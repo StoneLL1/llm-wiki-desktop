@@ -213,6 +213,7 @@ pub enum ImportRecoveryAction {
     AuthorizePrivateTarget,
     InstallBrowserCapability,
     InstallMediaCapability,
+    AuthorizeLocalAsr,
 }
 
 impl ImportIssue {
@@ -228,8 +229,15 @@ impl ImportIssue {
             "IMPORT_V2_CONNECTOR_RATE_LIMITED" => (true, false, vec![RetryRoute, SwitchRoute]),
             "IMPORT_WEB_STRUCTURE_CHANGED" => (true, true, vec![SwitchRoute, InvokeAgent]),
             "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => {
-                (true, true, vec![InstallMediaCapability, InvokeAgent])
+                (true, true, vec![AuthorizeLocalAsr, InstallMediaCapability, InvokeAgent])
             }
+            "IMPORT_ASR_ENGINE_UNAVAILABLE" | "IMPORT_ASR_ENGINE_INTEGRITY_FAILED" => {
+                (true, true, vec![InstallMediaCapability, RetryRoute])
+            }
+            "IMPORT_ASR_TIMEOUT" | "IMPORT_ASR_ENGINE_FAILED" | "IMPORT_ASR_OUTPUT_INVALID" => {
+                (true, true, vec![RetryRoute, InstallMediaCapability])
+            }
+            code if code.starts_with("IMPORT_ASR_") => (false, true, vec![InstallMediaCapability, InvokeAgent]),
             "IMPORT_V2_ENGINE_UNAVAILABLE" => (true, true, vec![InstallBrowserCapability]),
             _ => (true, false, vec![RetryRoute, SwitchRoute]),
         };
@@ -407,5 +415,28 @@ mod tests {
         assert!(ImportItemStatus::Validating.can_transition_to(&ImportItemStatus::PreviewReady));
         assert!(!ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Completed));
         assert!(ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Committing));
+    }
+
+    #[test]
+    fn missing_web_subtitles_require_explicit_local_asr_authorization() {
+        let issue = ImportIssue::for_web_code(
+            "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
+            ImportStage::Extract,
+        );
+        assert!(issue.user_action_required);
+        assert!(issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::AuthorizeLocalAsr));
+    }
+
+    #[test]
+    fn asr_failures_preserve_actionable_recovery_codes() {
+        let unavailable = ImportIssue::for_web_code("IMPORT_ASR_ENGINE_UNAVAILABLE", ImportStage::Extract);
+        assert_eq!(unavailable.code, "IMPORT_ASR_ENGINE_UNAVAILABLE");
+        assert!(unavailable.user_action_required);
+        assert!(unavailable.recovery_actions.contains(&ImportRecoveryAction::InstallMediaCapability));
+        let timeout = ImportIssue::for_web_code("IMPORT_ASR_TIMEOUT", ImportStage::Extract);
+        assert_eq!(timeout.code, "IMPORT_ASR_TIMEOUT");
+        assert!(timeout.recovery_actions.contains(&ImportRecoveryAction::RetryRoute));
     }
 }

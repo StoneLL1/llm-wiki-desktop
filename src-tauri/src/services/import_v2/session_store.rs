@@ -271,6 +271,18 @@ fn public_import_input(mut input: ImportInput) -> Result<ImportInput, BackendErr
     if input.kind != crate::models::import_v2::ImportInputKind::Url {
         return Ok(input);
     }
+    if let Some(suffix) = input.locator.strip_prefix("import-web-target:") {
+        uuid::Uuid::parse_str(suffix)
+            .map_err(|_| invalid_session("Secure import URL reference is invalid."))?;
+        let reference = input.locator.clone();
+        input.locator = input
+            .normalized_locator
+            .clone()
+            .ok_or_else(|| invalid_session("Secure import URL reference requires a public locator."))?;
+        let mut sanitized = public_import_input(input)?;
+        sanitized.locator = reference;
+        return Ok(sanitized);
+    }
     let mut locator =
         url::Url::parse(&input.locator).map_err(|_| invalid_session("Import URL is invalid."))?;
     if !matches!(locator.scheme(), "http" | "https") || locator.host_str().is_none() {

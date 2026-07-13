@@ -111,6 +111,7 @@ fn office_metrics_extend_the_gate_without_bypassing_core_checks() {
         non_empty_cell_coverage: Some(0.90),
         formula_value_pairs: Some(1.0),
         meaningful_image_coverage: Some(0.95),
+        continuation: None,
         warnings: vec![],
     };
     let preview = QualityGate::default()

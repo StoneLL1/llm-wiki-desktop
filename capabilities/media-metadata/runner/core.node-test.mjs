@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
-import { FIXED_ARGS, parseYtDlpMetadata, validateBilibiliUrl } from "./core.mjs";
+import { URL } from "node:url";
+import { FIXED_ARGS, parseBilibiliHtml, parseYtDlpMetadata, selectTemporaryAudio, validateBilibiliUrl } from "./core.mjs";
 
 test("accepts only exact supported Bilibili video URLs", () => {
   assert.equal(validateBilibiliUrl("https://www.bilibili.com/video/BV1Ab411c7de?p=2"), "https://www.bilibili.com/video/BV1Ab411c7de?p=2");
@@ -55,4 +57,28 @@ test("parsing caps subtitle and chapter fan-out", () => {
   const parsed = parseYtDlpMetadata({ title: "Video", requested_subtitles: subtitles, chapters }, "https://b23.tv/AbCd12");
   assert.equal(parsed.remoteAssets.length, 16);
   assert.equal(parsed.safe.chapters.length, 500);
+});
+
+test("authorized ASR selects one bounded audio-only HTTPS format", () => {
+  assert.equal(selectTemporaryAudio({ formats: [
+    { url: "https://cdn.example/video", vcodec: "avc", acodec: "aac", abr: 500 },
+    { url: "http://cdn.example/insecure", vcodec: "none", acodec: "aac", abr: 300 },
+    { url: "https://cdn.example/huge", vcodec: "none", acodec: "aac", filesize: 300 * 1024 * 1024, abr: 250 },
+    { url: "https://cdn.example/audio", vcodec: "none", acodec: "aac", filesize: 10_000, abr: 128 },
+  ] }), "https://cdn.example/audio");
+});
+
+test("parses Bilibili embedded state offline without granting yt-dlp a network socket", () => {
+  const html = `<script>window.__INITIAL_STATE__={"videoData":{"title":"Offline video","owner":{"name":"Author"},"desc":"Description","duration":12,"pubdate":1783900800,"pages":[{"part":"Part 1"}]}};</script>
+    <script>window.__playinfo__={"data":{"dash":{"audio":[{"baseUrl":"https://cdn.example/audio.m4a?token=runtime-only","codecs":"mp4a.40.2","bandwidth":128000}]},"subtitle":{"subtitles":[{"lan":"zh-CN","lan_doc":"中文","subtitle_url":"//subtitle.example/sub.json?signature=runtime-only"}]}}};</script>`;
+  const parsed = parseBilibiliHtml(html);
+  assert.equal(parsed.title, "Offline video");
+  assert.equal(parsed.formats[0].vcodec, "none");
+  assert.match(parsed.formats[0].url, /^https:\/\/cdn\.example/);
+  assert.match(parsed.requested_subtitles["中文"].url, /^https:\/\/subtitle\.example/);
+});
+
+test("production runner has no child process or direct network client", () => {
+  const source = fs.readFileSync(new URL("./index.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /child_process|execFile|spawn\(|fetch\(|https?\.request|yt-dlp/);
 });

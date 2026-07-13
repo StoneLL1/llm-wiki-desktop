@@ -6,7 +6,8 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+use sha2::{Digest, Sha256};
+use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::{Arc, Mutex}};
 
 use super::url_policy::PrivateTargetGrant;
 
@@ -16,7 +17,18 @@ const PREFIX: &str = "import-web-target:";
 pub struct WebTargetStore {
     secrets: SecretService,
     private_grants: Arc<Mutex<HashMap<String, PrivateTargetGrant>>>,
-    authenticated_profiles: Arc<Mutex<HashMap<String, PathBuf>>>,
+    asr_grants: Arc<Mutex<HashMap<(String, String, String), BilibiliAsrGrant>>>,
+    asr_reservations: Arc<Mutex<HashSet<(String, String, String)>>>,
+    authenticated_profiles: Arc<Mutex<HashMap<(String, String, String), PathBuf>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BilibiliAsrGrant {
+    pub project_id: String,
+    pub session_id: String,
+    pub item_id: String,
+    pub target_sha256: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,13 +42,15 @@ impl Default for WebTargetStore {
         Self {
             secrets: SecretService::default(),
             private_grants: Arc::new(Mutex::new(HashMap::new())),
+            asr_grants: Arc::new(Mutex::new(HashMap::new())),
+            asr_reservations: Arc::new(Mutex::new(HashSet::new())),
             authenticated_profiles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 impl WebTargetStore {
     pub fn new(secrets: SecretService) -> Self {
-        Self { secrets, private_grants: Arc::new(Mutex::new(HashMap::new())), authenticated_profiles: Arc::new(Mutex::new(HashMap::new())) }
+        Self { secrets, private_grants: Arc::new(Mutex::new(HashMap::new())), asr_grants: Arc::new(Mutex::new(HashMap::new())), asr_reservations: Arc::new(Mutex::new(HashSet::new())), authenticated_profiles: Arc::new(Mutex::new(HashMap::new())) }
     }
     pub fn store(&self, target: &SessionWebTarget) -> Result<String, BackendError> {
         let reference = format!("{PREFIX}{}", uuid::Uuid::new_v4());
@@ -96,13 +110,94 @@ impl WebTargetStore {
     pub fn take_private(&self, item_id: &str) -> Result<Option<PrivateTargetGrant>, BackendError> {
         Ok(self.private_grants.lock().map_err(|_| store_error())?.remove(item_id))
     }
-    pub fn bind_authenticated_profile(&self, item_id: &str, profile: PathBuf) -> Result<(), BackendError> {
-        self.authenticated_profiles.lock().map_err(|_| store_error())?.insert(item_id.to_string(), profile);
+    pub fn authorize_bilibili_asr(&self, grant: BilibiliAsrGrant) -> Result<(), BackendError> {
+        let key = (
+            grant.project_id.clone(),
+            grant.session_id.clone(),
+            grant.item_id.clone(),
+        );
+        self.asr_grants
+            .lock()
+            .map_err(|_| store_error())?
+            .insert(key.clone(), grant);
+        self.asr_reservations.lock().map_err(|_| store_error())?.remove(&key);
         Ok(())
     }
-    pub fn take_authenticated_profile(&self, item_id: &str) -> Result<Option<PathBuf>, BackendError> {
-        Ok(self.authenticated_profiles.lock().map_err(|_| store_error())?.remove(item_id).filter(|path| path.is_dir()))
+    pub fn take_bilibili_asr(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        item_id: &str,
+        expected_request_url: &str,
+    ) -> Result<Option<BilibiliAsrGrant>, BackendError> {
+        let key = (
+            project_id.to_string(),
+            session_id.to_string(),
+            item_id.to_string(),
+        );
+        let mut grants = self.asr_grants.lock().map_err(|_| store_error())?;
+        grants.retain(|_, grant| grant.expires_at > chrono::Utc::now());
+        if grants.get(&key).is_some_and(|grant| {
+            grant.target_sha256 != asr_target_sha256(expected_request_url)
+        })
+        {
+            return Err(BackendError::new(
+                "IMPORT_V2_URL_REFERENCE_MISMATCH",
+                "The local ASR authorization does not match this import target.",
+                false,
+                true,
+            ));
+        }
+        let value = grants.remove(&key);
+        self.asr_reservations.lock().map_err(|_| store_error())?.remove(&key);
+        Ok(value)
     }
+    pub fn has_bilibili_asr(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        item_id: &str,
+        expected_request_url: &str,
+    ) -> Result<bool, BackendError> {
+        let key = (project_id.to_string(), session_id.to_string(), item_id.to_string());
+        let mut grants = self.asr_grants.lock().map_err(|_| store_error())?;
+        grants.retain(|_, grant| grant.expires_at > chrono::Utc::now());
+        let Some(grant) = grants.get(&key) else { return Ok(false); };
+        if grant.target_sha256 != asr_target_sha256(expected_request_url) {
+            return Err(BackendError::new(
+                "IMPORT_V2_URL_REFERENCE_MISMATCH",
+                "The local ASR authorization does not match this import target.",
+                false,
+                true,
+            ));
+        }
+        Ok(!self.asr_reservations.lock().map_err(|_| store_error())?.contains(&key))
+    }
+    pub fn reserve_bilibili_asr(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        item_id: &str,
+        expected_request_url: &str,
+    ) -> Result<bool, BackendError> {
+        if !self.has_bilibili_asr(project_id, session_id, item_id, expected_request_url)? {
+            return Ok(false);
+        }
+        let key = (project_id.to_string(), session_id.to_string(), item_id.to_string());
+        Ok(self.asr_reservations.lock().map_err(|_| store_error())?.insert(key))
+    }
+    pub fn bind_authenticated_profile(&self, project_id: &str, session_id: &str, item_id: &str, profile: PathBuf) -> Result<(), BackendError> {
+        let key = (project_id.to_string(), session_id.to_string(), item_id.to_string());
+        self.authenticated_profiles.lock().map_err(|_| store_error())?.insert(key, profile);
+        Ok(())
+    }
+    pub fn take_authenticated_profile(&self, project_id: &str, session_id: &str, item_id: &str) -> Result<Option<PathBuf>, BackendError> {
+        let key = (project_id.to_string(), session_id.to_string(), item_id.to_string());
+        Ok(self.authenticated_profiles.lock().map_err(|_| store_error())?.remove(&key).filter(|path| path.is_dir()))
+    }
+}
+pub fn asr_target_sha256(request_url: &str) -> String {
+    format!("{:x}", Sha256::digest(request_url.as_bytes()))
 }
 fn missing() -> BackendError {
     BackendError::new(
