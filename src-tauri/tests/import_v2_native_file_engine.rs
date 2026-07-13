@@ -26,6 +26,7 @@ fn request(root: &TempDir, name: &str) -> EngineRequest {
     EngineRequest {
         protocol_version: "2.0".into(),
         request_id: "request-1".into(),
+        project_id: "project-1".into(),
         session_id: "session-1".into(),
         item_id: "item-1".into(),
         task_id: "task-1".into(),
@@ -40,6 +41,7 @@ fn request(root: &TempDir, name: &str) -> EngineRequest {
         project_root: root.path().to_string_lossy().into_owned(),
         staging_root: "staging".into(),
         chained_input: None,
+        local_asr_authorized: false,
     }
 }
 

@@ -124,6 +124,7 @@ fn subtitle_rank(kind: SubtitleKind) -> u8 {
 
 pub struct TemporaryMediaWorkspace {
     path: PathBuf,
+    cleanup_on_drop: bool,
 }
 
 impl TemporaryMediaWorkspace {
@@ -132,16 +133,23 @@ impl TemporaryMediaWorkspace {
             .map_err(|_| media_error("Could not create the temporary media workspace."))?;
         Ok(Self {
             path: path.to_path_buf(),
+            cleanup_on_drop: true,
         })
     }
     pub fn path(&self) -> &Path {
         &self.path
     }
+    pub fn retain(mut self) -> PathBuf {
+        self.cleanup_on_drop = false;
+        self.path.clone()
+    }
 }
 
 impl Drop for TemporaryMediaWorkspace {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        if self.cleanup_on_drop {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }
 

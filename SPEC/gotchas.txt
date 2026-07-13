@@ -1,5 +1,15 @@
 # 踩坑清单 (gotchas.txt)
 
+An EngineResult continuation was executed before the base result paths were validated — The continuation code trusted markdownPath early and could read or overwrite outside staging — Validate the complete base result before any continuation, reject pack-authored privileged continuations, and validate again after composition.
+
+Restricting yt-dlp flags did not restrict its sockets — yt-dlp still performed its own DNS resolution and redirect traversal outside the Rust SSRF ledger — Parse the already Rust-fetched Bilibili embedded state offline; keep yt-dlp disabled until a Rust network broker can mediate every connection.
+
+An authenticated browser profile was keyed only by item ID — Connector sessions could be replayed across projects or import sessions with the same platform — Bind and atomically consume profiles by project, import session, item, exact target hash, and platform.
+
+Bilibili audio was accepted as M4A without proving decoder support — whisper.cpp 1.8.3 requires the optional WHISPER_FFMPEG build for that container — Require signed runtime build features, audited LGPL components, and a real Bilibili M4A qualification fixture before registration.
+
+Temporary media and ASR outputs used loose files and fixed names — Crashes left large media behind and later retries hit EEXIST — Put every fetch/ASR attempt in a request-scoped TemporaryMediaWorkspace and reconcile runtime-temp on restart.
+
 Visible account/avatar DOM was treated as login proof — Public article pages and logged-out headers can render those same elements — Require a known platform authentication cookie scoped to the target domain; DOM absence/presence alone never changes connector auth state.
 
 Validating a browser subresource hostname with Node DNS did not pin Chromium's later connection — Chromium performed an independent lookup after the public-answer check, leaving an allowed CDN host open to DNS rebinding — Permit only the initial host, map it to one address from an all-public DNS set before launch, and localize cross-host assets through the Rust pinned fetcher.

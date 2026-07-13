@@ -2,12 +2,13 @@ use crate::{
     app_state::AppState,
     errors::BackendError,
     models::{
-        import_v2::{ImportInput, ImportInputKind, ImportSession},
-        import_v2_web::AddImportUrlV2Request,
+        import_v2::{ImportInput, ImportInputKind, ImportItem, ImportItemStatus, ImportSession},
+        import_v2_web::{AddImportUrlV2Request, AuthorizeBilibiliAsrV2Request},
     },
     services::import_v2::{
         connector_session::ConnectorSessionRef,
         url_policy::{PrivateTargetGrant, UrlPolicy},
+        web_target_store::{asr_target_sha256, BilibiliAsrGrant},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -140,6 +141,9 @@ pub fn begin_import_login_v2(
         &root,
         &pack,
         target.request_url.as_str(),
+        &request.project_id,
+        &request.session_id,
+        &request.item_id,
     )
 }
 #[tauri::command]
@@ -160,12 +164,17 @@ pub fn complete_import_login_v2(
         BackendError::new("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.", false, true)
     })?;
     let target = state.import_v2_service.resolve_web_target(&item.input.locator, item.input.normalized_locator.as_deref())?;
-    let reference = state.connector_session_service.resume(&request.connector_session_id)?;
+    let (reference, profile) = state.connector_session_service.take_authenticated_profile_bound(
+        &request.connector_session_id,
+        &request.project_id,
+        &request.import_session_id,
+        &request.item_id,
+        target.request_url.as_str(),
+    )?;
     if !platform_matches_host(&reference.platform, &target.public.host) {
         return Err(BackendError::new("IMPORT_V2_BROWSER_SESSION_FAILED", "The authenticated connector does not match this item.", false, true));
     }
-    let profile = state.connector_session_service.authenticated_profile(&request.connector_session_id)?;
-    state.import_v2_service.bind_authenticated_profile(&request.item_id, profile)?;
+    state.import_v2_service.bind_authenticated_profile(&request.project_id, &request.import_session_id, &request.item_id, profile)?;
     state.import_v2_service.release_item_after_login(&context, &state.file_store, &request.import_session_id, &request.item_id)?;
     Ok(reference)
 }
@@ -213,6 +222,72 @@ pub async fn authorize_import_private_target_v2(
     state.import_v2_service.authorize_private_target(grant)
 }
 
+#[tauri::command]
+pub fn authorize_bilibili_asr_v2(
+    state: State<'_, AppState>,
+    request: AuthorizeBilibiliAsrV2Request,
+) -> Result<(), BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session = state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "IMPORT_V2_ITEM_NOT_FOUND",
+                "Import item was not found.",
+                false,
+                true,
+            )
+        })?;
+    validate_bilibili_asr_item(item)?;
+    let target = state.import_v2_service.resolve_web_target(
+        &item.input.locator,
+        item.input.normalized_locator.as_deref(),
+    )?;
+    validate_bilibili_asr_host(&target.public.host)?;
+    state
+        .import_v2_service
+        .authorize_bilibili_asr(BilibiliAsrGrant {
+            project_id: request.project_id,
+            session_id: request.session_id,
+            item_id: request.item_id,
+            target_sha256: asr_target_sha256(target.request_url.as_str()),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        })
+}
+
+fn validate_bilibili_asr_item(item: &ImportItem) -> Result<(), BackendError> {
+    if item.input.kind != ImportInputKind::Url
+        || item.status != ImportItemStatus::Failed
+        || item.issue.as_ref().map(|issue| issue.code.as_str())
+            != Some("IMPORT_WEB_SUBTITLE_UNAVAILABLE")
+    {
+        return Err(BackendError::new(
+            "IMPORT_V2_STATE_INVALID",
+            "Local ASR can be authorized only for a failed Bilibili item currently missing subtitles.",
+            false,
+            true,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bilibili_asr_host(host: &str) -> Result<(), BackendError> {
+    if !platform_matches_host("bilibili", host) {
+        return Err(BackendError::new(
+            "IMPORT_V2_URL_REJECTED",
+            "Local ASR authorization is limited to the exact Bilibili import target.",
+            false,
+            true,
+        ));
+    }
+    Ok(())
+}
+
 fn platform_matches_host(platform: &str, host: &str) -> bool {
     match platform {
         "wechat" => host == "mp.weixin.qq.com",
@@ -221,5 +296,47 @@ fn platform_matches_host(platform: &str, host: &str) -> bool {
         "xiaohongshu" => host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com"),
         "x" => host == "x.com" || host.ends_with(".x.com") || host == "twitter.com" || host.ends_with(".twitter.com"),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::import_v2::{ImportIssue, ImportStage};
+
+    fn failed_url_item(code: &str) -> ImportItem {
+        let mut item = ImportItem::queued(
+            "item-a",
+            ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "Bilibili".into(),
+                locator: "import-web-target:opaque".into(),
+                normalized_locator: Some("https://www.bilibili.com/video/BV1exact".into()),
+                source_identity: None,
+            },
+        );
+        item.status = ImportItemStatus::Failed;
+        item.issue = Some(ImportIssue::for_web_code(code, ImportStage::Extract));
+        item
+    }
+
+    #[test]
+    fn local_asr_authorization_requires_exact_issue_and_bilibili_host() {
+        let item = failed_url_item("IMPORT_WEB_SUBTITLE_UNAVAILABLE");
+        assert!(validate_bilibili_asr_item(&item).is_ok());
+        assert!(validate_bilibili_asr_host("www.bilibili.com").is_ok());
+        assert_eq!(
+            validate_bilibili_asr_host("example.com")
+                .unwrap_err()
+                .code,
+            "IMPORT_V2_URL_REJECTED"
+        );
+        let wrong_issue = failed_url_item("IMPORT_WEB_STRUCTURE_CHANGED");
+        assert_eq!(
+            validate_bilibili_asr_item(&wrong_issue)
+                .unwrap_err()
+                .code,
+            "IMPORT_V2_STATE_INVALID"
+        );
     }
 }

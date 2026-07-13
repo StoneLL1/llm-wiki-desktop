@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 const MAX_TITLE = 500;
 const MAX_DESCRIPTION = 100_000;
 const MAX_CHAPTERS = 500;
@@ -79,10 +81,76 @@ export function validateBilibiliUrl(raw) {
 function safeRemoteUrl(raw) {
   if (typeof raw !== "string" || raw.length > 4096) return null;
   try {
-    const parsed = new URL(raw);
+    const parsed = new URL(raw.startsWith("//") ? `https:${raw}` : raw);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
     return parsed.href;
   } catch { return null; }
+}
+
+function extractAssignedJson(html, marker) {
+  const markerIndex = html.indexOf(marker);
+  if (markerIndex < 0) return null;
+  let index = markerIndex + marker.length;
+  while (/\s/.test(html[index] || "")) index += 1;
+  if (html[index] !== "{") return null;
+  const start = index;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (; index < html.length; index += 1) {
+    const character = html[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+      continue;
+    }
+    if (character === '"') quoted = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) {
+      try { return JSON.parse(html.slice(start, index + 1)); } catch { return null; }
+    }
+  }
+  return null;
+}
+
+export function parseBilibiliHtml(html) {
+  if (typeof html !== "string" || Buffer.byteLength(html, "utf8") > 16 * 1024 * 1024) {
+    throw new Error("IMPORT_WEB_RESPONSE_TOO_LARGE");
+  }
+  const initial = extractAssignedJson(html, "window.__INITIAL_STATE__=") || extractAssignedJson(html, "window.__INITIAL_STATE__ =");
+  const play = extractAssignedJson(html, "window.__playinfo__=") || extractAssignedJson(html, "window.__playinfo__ =");
+  const video = initial?.videoData || initial?.videoInfo;
+  const playData = play?.data;
+  if (!video || !playData) throw new Error("IMPORT_WEB_STRUCTURE_CHANGED");
+  const requestedSubtitles = {};
+  for (const subtitle of playData.subtitle?.subtitles || []) {
+    const key = clipped(subtitle?.lan_doc || subtitle?.lan || `subtitle-${Object.keys(requestedSubtitles).length}`, 80);
+    const url = safeRemoteUrl(subtitle?.subtitle_url || subtitle?.subtitleUrl);
+    if (key && url) requestedSubtitles[key] = { ext: "json", url };
+  }
+  const formats = (playData.dash?.audio || []).slice(0, 32).map((audio) => ({
+    url: safeRemoteUrl(audio?.baseUrl || audio?.base_url),
+    vcodec: "none",
+    acodec: clipped(audio?.codecs || audio?.mimeType || "aac", 80),
+    abr: Number.isFinite(audio?.bandwidth) ? audio.bandwidth / 1000 : 0,
+    filesize: null,
+  })).filter((audio) => audio.url);
+  const published = Number(video.pubdate);
+  const uploadDate = Number.isFinite(published)
+    ? new Date(published * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+    : null;
+  return {
+    __extractor: "bilibili-embedded",
+    title: video.title,
+    uploader: video.owner?.name,
+    description: video.desc,
+    duration: video.duration,
+    upload_date: uploadDate,
+    chapters: Array.isArray(video.pages) ? video.pages.map((page) => ({ title: page?.part })) : [],
+    requested_subtitles: requestedSubtitles,
+    formats,
+  };
 }
 
 function subtitleCandidates(info) {
@@ -103,6 +171,20 @@ function subtitleCandidates(info) {
     }
   }
   return candidates;
+}
+
+export function selectTemporaryAudio(info) {
+  if (!Array.isArray(info?.formats)) return null;
+  const candidates = info.formats
+    .filter((format) => format && format.vcodec === "none" && format.acodec && format.acodec !== "none")
+    .map((format) => ({
+      url: safeRemoteUrl(format.url),
+      bytes: Number.isFinite(format.filesize) ? format.filesize : Number.isFinite(format.filesize_approx) ? format.filesize_approx : null,
+      bitrate: Number.isFinite(format.abr) ? format.abr : 0,
+    }))
+    .filter((format) => format.url && (format.bytes === null || format.bytes <= 256 * 1024 * 1024))
+    .sort((left, right) => right.bitrate - left.bitrate);
+  return candidates[0]?.url || null;
 }
 
 export function parseYtDlpMetadata(info, requestedUrl) {
@@ -140,8 +222,8 @@ export function parseYtDlpMetadata(info, requestedUrl) {
     uploadDate: typeof info.upload_date === "string" && /^\d{8}$/.test(info.upload_date) ? info.upload_date : null,
     chapters,
     subtitleCount: remoteAssets.length,
-    extractor: "yt-dlp",
-    extractorVersion: YTDLP_RELEASE,
+    extractor: info.__extractor === "bilibili-embedded" ? "bilibili-embedded" : "yt-dlp",
+    extractorVersion: info.__extractor === "bilibili-embedded" ? "1" : YTDLP_RELEASE,
   };
 
   const lines = [`# ${title}`, "", `Source: ${publicUrl}`];

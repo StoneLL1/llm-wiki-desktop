@@ -20,6 +20,8 @@ pub enum EngineOperation {
 pub struct EngineRequest {
     pub protocol_version: String,
     pub request_id: String,
+    #[serde(default)]
+    pub project_id: String,
     pub session_id: String,
     pub item_id: String,
     pub task_id: String,
@@ -32,6 +34,8 @@ pub struct EngineRequest {
     /// the validated OOXML emitted by the legacy Office converter).
     #[serde(default)]
     pub chained_input: Option<String>,
+    #[serde(default)]
+    pub local_asr_authorized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -55,7 +59,18 @@ pub struct EngineResult {
     pub formula_value_pairs: Option<f64>,
     #[serde(default)]
     pub meaningful_image_coverage: Option<f64>,
+    #[serde(default)]
+    pub continuation: Option<EngineContinuation>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EngineContinuation {
+    LocalAsr {
+        temporary_input_path: String,
+        media_kind: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +175,12 @@ pub fn validate_engine_result(
     validate_staging_relative_path(staging_root, &result.markdown_path)?;
     for asset_path in &result.asset_paths {
         validate_staging_relative_path(staging_root, asset_path)?;
+    }
+    if let Some(EngineContinuation::LocalAsr { temporary_input_path, media_kind, .. }) = &result.continuation {
+        validate_staging_relative_path(staging_root, temporary_input_path)?;
+        if media_kind != "audio" && media_kind != "video" {
+            return Err(output_error());
+        }
     }
     if let Some(metadata_path) = &result.metadata_path {
         validate_staging_relative_path(staging_root, metadata_path)?;
@@ -271,6 +292,7 @@ mod tests {
             non_empty_cell_coverage: None,
             formula_value_pairs: None,
             meaningful_image_coverage: None,
+            continuation: None,
             warnings: Vec::new(),
         }
     }
@@ -352,6 +374,7 @@ mod tests {
         let value = serde_json::to_value(EngineRequest {
             protocol_version: "2".into(),
             request_id: "r".into(),
+            project_id: "p".into(),
             session_id: "s".into(),
             item_id: "i".into(),
             task_id: "t".into(),
@@ -366,6 +389,7 @@ mod tests {
             project_root: "root".into(),
             staging_root: "staging".into(),
             chained_input: Some("converted/legacy.docx".into()),
+            local_asr_authorized: false,
         })
         .unwrap();
         assert_eq!(value["chainedInput"], "converted/legacy.docx");

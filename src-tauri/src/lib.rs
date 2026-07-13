@@ -174,6 +174,7 @@ pub fn run() {
             commands::import_v2_web_commands::complete_import_login_v2,
             commands::import_v2_web_commands::revoke_import_login_v2,
             commands::import_v2_web_commands::authorize_import_private_target_v2,
+            commands::import_v2_web_commands::authorize_bilibili_asr_v2,
             commands::task_commands::create_task,
             commands::task_commands::list_tasks,
             commands::task_commands::get_task,

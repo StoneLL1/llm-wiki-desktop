@@ -147,7 +147,7 @@ const PACK_SPECS: &[PackSpec] = &[
         id: "media-metadata",
         route: "web.bilibili.metadata",
         extensions: &[],
-        licenses: &["Unlicense AND permissive-bundled-notices"],
+        licenses: &["MIT"],
     },
     PackSpec {
         id: "document-standard",
@@ -195,7 +195,7 @@ const PACK_SPECS: &[PackSpec] = &[
         id: "asr-whisper",
         route: "media.asr",
         extensions: &["mp3", "wav", "m4a", "mp4", "mov", "mkv"],
-        licenses: &["MIT"],
+        licenses: &["MIT AND LGPL-2.1-or-later"],
     },
 ];
 

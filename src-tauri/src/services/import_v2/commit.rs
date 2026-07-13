@@ -975,6 +975,7 @@ mod tests {
                 non_empty_cell_coverage: None,
                 formula_value_pairs: None,
                 meaningful_image_coverage: None,
+                continuation: None,
                 warnings: vec![],
             })
         }
