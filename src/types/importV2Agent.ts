@@ -55,9 +55,12 @@ export interface AgentSendScope {
   itemId: string;
   provider: string;
   model: string;
+  destination: string;
+  publicMetadata: string[];
   files: SendScopeFile[];
   estimatedInputTokens: number;
   estimatedCostMicros: number | null;
+  requiresDuplicateChargeAcknowledgement: boolean;
   scopeSha256: string;
   expiresAt: string;
 }

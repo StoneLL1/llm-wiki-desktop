@@ -9,6 +9,15 @@ import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { ImportedSource } from "../../types/import";
 import type { CommitItemDecision, ImportItem, ImportSession } from "../../types/importV2";
+import type { AgentKind } from "../../types/agent";
+import type { LlmProviderKind } from "../../types/llm";
+import type {
+  AgentAssistancePolicy,
+  AgentAssistanceTrigger,
+  AgentCandidateActionResult,
+  AgentCandidateView,
+  AgentSendScope,
+} from "../../types/importV2Agent";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
 import type { ProjectSummary } from "../../types/project";
 import type { BackendEvent, BackendTask } from "../../types/task";
@@ -37,6 +46,28 @@ export interface ImportWorkflow {
   refreshSession: () => Promise<void>;
   selectItem: (itemId: string | null) => void;
   setFilter: (filter: ImportQueueFilter) => void;
+
+  getAgentPolicy: () => Promise<AgentAssistancePolicy | null>;
+  setAgentPolicy: (policy: AgentAssistancePolicy, localAgentKind: AgentKind | null) => Promise<AgentAssistancePolicy | null>;
+  invokeLocalAgent: (itemId: string, trigger: AgentAssistanceTrigger, agentKind: AgentKind) => Promise<BackendTask | null>;
+  previewByokScope: (itemId: string, trigger: AgentAssistanceTrigger, provider: LlmProviderKind) => Promise<AgentSendScope | null>;
+  approveByokAssistance: (request: {
+    itemId: string;
+    trigger: AgentAssistanceTrigger;
+    provider: LlmProviderKind;
+    model: string;
+    approvalId: string;
+    scopeSha256: string;
+    acknowledgePossibleDuplicateCharge: boolean;
+  }) => Promise<BackendTask | null>;
+  acceptAgentCandidate: (itemId: string, taskId: string) => Promise<AgentCandidateView | null>;
+  selectAgentCandidate: (request: {
+    itemId: string;
+    candidateId: string;
+    mergedMarkdown: string | null;
+    expectedCurrentWikiSha256: string | null;
+  }) => Promise<AgentCandidateActionResult | null>;
+  discardAgentCandidate: (itemId: string, candidateId: string) => Promise<AgentCandidateActionResult | null>;
 
   // Compatibility fields are retained only until ImportView is replaced in Task 10.
   importedSources: ImportedSource[];
@@ -343,6 +374,125 @@ export function useImportWorkflow(
     pushToast("warning", t("importV2.workflow.legacyActionUnavailable"));
   }, [pushToast, t]);
 
+  const getAgentPolicy = useCallback(async () => {
+    try {
+      const result = await importV2Api.getAgentPolicy({ projectId, projectRootPath: rootPath });
+      return latestProjectKey.current === projectKey ? result : null;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      return null;
+    }
+  }, [projectId, projectKey, pushToast, rootPath, t]);
+
+  const setAgentPolicy = useCallback(async (policy: AgentAssistancePolicy, localAgentKind: AgentKind | null) => {
+    try {
+      const result = await importV2Api.setAgentPolicy({ projectId, projectRootPath: rootPath, policy, localAgentKind });
+      return latestProjectKey.current === projectKey ? result : null;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [projectId, projectKey, pushToast, rootPath, t]);
+
+  const invokeLocalAgent = useCallback(async (itemId: string, trigger: AgentAssistanceTrigger, agentKind: AgentKind) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const task = await importV2Api.startAgentAssistance({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, trigger, agentKind });
+      if (!isScopeCurrent(projectKey, epoch)) return null;
+      selectedTaskUpsert(task);
+      openTaskDrawer(task.id);
+      return task;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+
+  const previewByokScope = useCallback(async (itemId: string, trigger: AgentAssistanceTrigger, provider: LlmProviderKind) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const scope = await importV2Api.previewByokScope({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, trigger, provider });
+      return isScopeCurrent(projectKey, epoch) ? scope : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
+  const approveByokAssistance = useCallback(async (request: {
+    itemId: string;
+    trigger: AgentAssistanceTrigger;
+    provider: LlmProviderKind;
+    model: string;
+    approvalId: string;
+    scopeSha256: string;
+    acknowledgePossibleDuplicateCharge: boolean;
+  }) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === request.itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const task = await importV2Api.approveByokAssistance({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, ...request });
+      if (!isScopeCurrent(projectKey, epoch)) return null;
+      selectedTaskUpsert(task);
+      openTaskDrawer(task.id);
+      return task;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+
+  const acceptAgentCandidate = useCallback(async (itemId: string, taskId: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const view = await importV2Api.acceptAgentCandidate({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, taskId });
+      return isScopeCurrent(projectKey, epoch) ? view : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
+  const selectAgentCandidate = useCallback(async (request: {
+    itemId: string;
+    candidateId: string;
+    mergedMarkdown: string | null;
+    expectedCurrentWikiSha256: string | null;
+  }) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === request.itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const result = await importV2Api.selectAgentCandidate({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, ...request });
+      if (isScopeCurrent(projectKey, epoch)) useImportStore.getState().replaceItem(projectKey, result.item, epoch);
+      return isScopeCurrent(projectKey, epoch) ? result : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
+  const discardAgentCandidate = useCallback(async (itemId: string, candidateId: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const result = await importV2Api.discardAgentCandidate({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, candidateId });
+      if (isScopeCurrent(projectKey, epoch)) useImportStore.getState().replaceItem(projectKey, result.item, epoch);
+      return isScopeCurrent(projectKey, epoch) ? result : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
   return {
     session,
     readiness,
@@ -363,6 +513,14 @@ export function useImportWorkflow(
     refreshSession,
     selectItem,
     setFilter,
+    getAgentPolicy,
+    setAgentPolicy,
+    invokeLocalAgent,
+    previewByokScope,
+    approveByokAssistance,
+    acceptAgentCandidate,
+    selectAgentCandidate,
+    discardAgentCandidate,
     importedSources,
     isConfirming,
     requestPreview,

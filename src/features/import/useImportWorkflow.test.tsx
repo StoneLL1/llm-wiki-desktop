@@ -18,6 +18,14 @@ const api = vi.hoisted(() => ({
   setSelection: vi.fn(),
   startItems: vi.fn(),
   confirmSession: vi.fn(),
+  getAgentPolicy: vi.fn(),
+  setAgentPolicy: vi.fn(),
+  startAgentAssistance: vi.fn(),
+  previewByokScope: vi.fn(),
+  approveByokAssistance: vi.fn(),
+  acceptAgentCandidate: vi.fn(),
+  selectAgentCandidate: vi.fn(),
+  discardAgentCandidate: vi.fn(),
 }));
 
 vi.mock("../../services/importV2Api", () => ({ importV2Api: api }));
@@ -117,6 +125,44 @@ beforeEach(() => {
   api.setSelection.mockResolvedValue(session(projectA.projectId, [item("file.md", "preview_ready")]));
   api.startItems.mockResolvedValue([]);
   api.confirmSession.mockResolvedValue(task("confirm"));
+  api.getAgentPolicy.mockResolvedValue({
+    autoLocalOnHardFailure: false,
+    autoLocalOnQualityWarning: false,
+    autoByok: false,
+    maxAttemptsPerItem: 1,
+  });
+  api.setAgentPolicy.mockImplementation(async ({ policy }: { policy: unknown }) => policy);
+  api.startAgentAssistance.mockResolvedValue(task("agent-task", projectA.projectId, "queued"));
+  api.previewByokScope.mockResolvedValue({
+    approvalId: "approval-1",
+    itemId: "failed.md",
+    provider: "open_ai",
+    model: "gpt-5",
+    destination: "api.openai.com/v1/responses",
+    publicMetadata: [],
+    files: [],
+    estimatedInputTokens: 100,
+    estimatedCostMicros: null,
+    requiresDuplicateChargeAcknowledgement: false,
+    scopeSha256: "a".repeat(64),
+    expiresAt: "2099-01-01T00:00:00Z",
+  });
+  api.approveByokAssistance.mockResolvedValue(task("byok-task", projectA.projectId, "queued"));
+  api.acceptAgentCandidate.mockResolvedValue({});
+  api.selectAgentCandidate.mockImplementation(async ({ itemId }: { itemId: string }) => ({
+    projectId: projectA.projectId,
+    sessionId: `session-${projectA.projectId}`,
+    itemId,
+    candidateId: "candidate-1",
+    item: item(itemId, "preview_ready"),
+  }));
+  api.discardAgentCandidate.mockImplementation(async ({ itemId }: { itemId: string }) => ({
+    projectId: projectA.projectId,
+    sessionId: `session-${projectA.projectId}`,
+    itemId,
+    candidateId: "candidate-1",
+    item: item(itemId, "failed"),
+  }));
 });
 
 describe("useImportWorkflow", () => {
@@ -224,5 +270,47 @@ describe("useImportWorkflow", () => {
       projectRootPath: projectA.rootPath,
       sessionId: "session-project-a",
     }));
+  });
+
+  it("routes Agent, BYOK, and candidate actions through typed project-scoped contracts", async () => {
+    const failed = item("failed.md", "failed");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [failed]));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    await act(async () => expect(await result.current.getAgentPolicy()).toEqual({
+      autoLocalOnHardFailure: false,
+      autoLocalOnQualityWarning: false,
+      autoByok: false,
+      maxAttemptsPerItem: 1,
+    }));
+    await act(async () => result.current.setAgentPolicy({
+      autoLocalOnHardFailure: true,
+      autoLocalOnQualityWarning: false,
+      autoByok: false,
+      maxAttemptsPerItem: 1,
+    }, "codex"));
+    await act(async () => result.current.invokeLocalAgent("failed.md", "manual", "codex"));
+    await act(async () => result.current.previewByokScope("failed.md", "manual", "open_ai"));
+    await act(async () => result.current.approveByokAssistance({
+      itemId: "failed.md",
+      trigger: "manual",
+      provider: "open_ai",
+      model: "gpt-5",
+      approvalId: "approval-1",
+      scopeSha256: "a".repeat(64),
+      acknowledgePossibleDuplicateCharge: false,
+    }));
+    await act(async () => result.current.selectAgentCandidate({ itemId: "failed.md", candidateId: "candidate-1", mergedMarkdown: null, expectedCurrentWikiSha256: null }));
+    await act(async () => result.current.discardAgentCandidate("failed.md", "candidate-1"));
+
+    expect(api.getAgentPolicy).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath });
+    expect(api.setAgentPolicy).toHaveBeenCalledWith(expect.objectContaining({ projectId: projectA.projectId, localAgentKind: "codex" }));
+    expect(api.startAgentAssistance).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-project-a", itemId: "failed.md", trigger: "manual", agentKind: "codex" }));
+    expect(api.previewByokScope).toHaveBeenCalledWith(expect.objectContaining({ provider: "open_ai" }));
+    expect(api.approveByokAssistance).toHaveBeenCalledWith(expect.objectContaining({ approvalId: "approval-1", scopeSha256: "a".repeat(64) }));
+    expect(api.selectAgentCandidate).toHaveBeenCalledWith(expect.objectContaining({ candidateId: "candidate-1" }));
+    expect(api.discardAgentCandidate).toHaveBeenCalledWith(expect.objectContaining({ candidateId: "candidate-1" }));
+    expect(useTaskStore.getState().tasks.map((entry) => entry.id)).toEqual(expect.arrayContaining(["agent-task", "byok-task"]));
   });
 });
