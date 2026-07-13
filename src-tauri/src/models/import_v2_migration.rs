@@ -50,6 +50,18 @@ pub struct LegacyInventory {
     pub fingerprint: String,
     pub records: Vec<LegacyRecord>,
     pub warnings: Vec<MigrationWarning>,
+    #[serde(default)]
+    pub scanned_files: Vec<LegacyFileEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyFileEvidence {
+    pub relative_path: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub modified_nanos: Option<u128>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,6 +151,25 @@ pub struct MigrationApplyResult {
     pub report_relative_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationReport {
+    pub report_version: u32,
+    pub plan_version: u32,
+    pub inventory_fingerprint: String,
+    pub status: MigrationStatus,
+    pub summary: MigrationSummary,
+    pub automatic_links: Vec<MigrationCandidate>,
+    pub proposed_records: Vec<MigrationCandidate>,
+    pub conflicts: Vec<MigrationCandidate>,
+    pub legacy_unmanaged: Vec<MigrationCandidate>,
+    pub warnings: Vec<MigrationWarning>,
+    pub affected_metadata_paths: Vec<String>,
+    pub untouched_content_paths: Vec<String>,
+    pub rollback_statement: String,
+    pub required_confirmation: bool,
+}
+
 impl LegacyInventory {
     pub fn validate(&self) -> Result<(), BackendError> {
         if self.schema_version != IMPORT_V2_MIGRATION_SCHEMA_VERSION {
@@ -146,6 +177,9 @@ impl LegacyInventory {
         }
         for record in &self.records {
             record.validate()?;
+        }
+        for file in &self.scanned_files {
+            validate_project_relative(&file.relative_path)?;
         }
         Ok(())
     }
@@ -218,6 +252,158 @@ impl MigrationPlan {
             candidate.validate()?;
         }
         Ok(())
+    }
+}
+
+impl MigrationReport {
+    pub fn from_plan(
+        plan: &MigrationPlan,
+        inventory: &LegacyInventory,
+    ) -> Result<Self, BackendError> {
+        inventory.validate()?;
+        plan.validate()?;
+        if plan.inventory_fingerprint != inventory.fingerprint {
+            return Err(BackendError::new(
+                "IMPORT_V2_MIGRATION_PLAN_STALE",
+                "The migration plan does not match the scanned inventory.",
+                true,
+                true,
+            ));
+        }
+        let mut automatic_links = Vec::new();
+        let mut proposed_records = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut legacy_unmanaged = Vec::new();
+        for candidate in &plan.candidates {
+            let candidate = redact_candidate(candidate);
+            match &candidate.decision {
+                MigrationDecision::LinkExisting { .. } => automatic_links.push(candidate),
+                MigrationDecision::CreateV2Record { .. } => proposed_records.push(candidate),
+                MigrationDecision::Conflict { .. } => conflicts.push(candidate),
+                MigrationDecision::LegacyUnmanaged { .. } => legacy_unmanaged.push(candidate),
+            }
+        }
+        let warnings = inventory
+            .warnings
+            .iter()
+            .map(|warning| MigrationWarning {
+                code: warning.code.clone(),
+                message: if warning.redacted {
+                    "Sensitive legacy metadata was omitted from this report.".into()
+                } else {
+                    "Legacy evidence requires review before apply.".into()
+                },
+                relative_path: warning.relative_path.clone(),
+                redacted: warning.redacted,
+            })
+            .collect();
+        Ok(Self {
+            report_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+            plan_version: plan.plan_version,
+            inventory_fingerprint: plan.inventory_fingerprint.clone(),
+            status: MigrationStatus::DryRunReady,
+            summary: plan.summary.clone(),
+            automatic_links,
+            proposed_records,
+            conflicts,
+            legacy_unmanaged,
+            warnings,
+            affected_metadata_paths: vec![
+                ".app/source-index-v2.json".into(),
+                ".app/import-v2-migration/report.json".into(),
+            ],
+            untouched_content_paths: vec![
+                "raw/".into(),
+                "wiki/".into(),
+                ".app/source-index.json".into(),
+                ".app/import-history/".into(),
+                ".app/tasks/".into(),
+            ],
+            rollback_statement: "Rollback is release-based: open the prior application release, which reads the preserved legacy metadata and ignores V2 metadata.".into(),
+            required_confirmation: true,
+        })
+    }
+
+    pub fn canonical_json(&self) -> Result<serde_json::Value, BackendError> {
+        serde_json::to_value(self).map_err(|error| {
+            BackendError::new("JSON_SERIALIZE_FAILED", error.to_string(), false, true)
+        })
+    }
+
+    pub fn to_markdown(&self) -> String {
+        format!(
+            "# Import V2 migration dry run\n\n- Inventory fingerprint: `{}`\n- Status: `{}`\n- Automatic links: {}\n- Proposed V2 records: {}\n- Conflicts: {}\n- Legacy unmanaged: {}\n- Warnings: {}\n- Confirmation required: {}\n\n## Metadata that may be written after confirmation\n\n{}\n\n## Guaranteed untouched\n\n{}\n\n## Rollback\n\n{}\n",
+            self.inventory_fingerprint,
+            serde_json::to_string(&self.status).unwrap_or_else(|_| "unknown".into()),
+            self.summary.automatic_links,
+            self.summary.proposed_records,
+            self.summary.conflicts,
+            self.summary.legacy_unmanaged,
+            self.summary.warnings,
+            if self.required_confirmation { "yes" } else { "no" },
+            self.affected_metadata_paths
+                .iter()
+                .map(|path| format!("- `{path}`"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            self.untouched_content_paths
+                .iter()
+                .map(|path| format!("- `{path}`"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            self.rollback_statement,
+        )
+    }
+}
+
+fn redact_candidate(candidate: &MigrationCandidate) -> MigrationCandidate {
+    let mut candidate = candidate.clone();
+    candidate.record.normalized_url = candidate
+        .record
+        .normalized_url
+        .as_deref()
+        .and_then(|value| {
+            let mut url = url::Url::parse(value).ok()?;
+            url.set_username("").ok()?;
+            url.set_password(None).ok()?;
+            url.set_query(None);
+            url.set_fragment(None);
+            Some(url.to_string())
+        });
+    candidate.decision = match candidate.decision {
+        MigrationDecision::LinkExisting {
+            source_id,
+            confidence,
+        } => MigrationDecision::LinkExisting {
+            source_id: safe_identifier(&source_id),
+            confidence,
+        },
+        MigrationDecision::CreateV2Record { proposed_source_id } => {
+            MigrationDecision::CreateV2Record {
+                proposed_source_id: safe_identifier(&proposed_source_id),
+            }
+        }
+        MigrationDecision::LegacyUnmanaged { .. } => MigrationDecision::LegacyUnmanaged {
+            reason: "unmanaged legacy evidence requires review".into(),
+        },
+        MigrationDecision::Conflict { candidates, .. } => MigrationDecision::Conflict {
+            candidates: candidates.iter().map(|value| safe_identifier(value)).collect(),
+            reason: "conflicting identity evidence requires review".into(),
+        },
+    };
+    candidate
+}
+
+fn safe_identifier(value: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        value.into()
+    } else {
+        "[REDACTED]".into()
     }
 }
 
