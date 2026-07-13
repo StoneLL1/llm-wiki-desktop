@@ -188,6 +188,8 @@ pub fn run() {
             commands::import_v2_migration::apply_import_v2_migration,
             commands::import_v2_migration::get_import_v2_migration_status,
             commands::import_v2_migration::resume_import_v2_migration,
+            commands::import_v2_activation::activate_import_v2,
+            commands::import_v2_activation::get_import_backend_activation,
             commands::task_commands::create_task,
             commands::task_commands::list_tasks,
             commands::task_commands::get_task,

@@ -23,9 +23,11 @@ The machine-readable source of truth is `docs/import-v2-cutover-evidence.json`;
 4. Apply may write only `.app/source-index-v2.json` and
    `.app/import-v2-migration/report.json`, plus the shared Core journal while
    the transaction is in progress.
-5. `raw/`, `wiki/`, `.app/source-index.json`, old task logs, and old import
+5. Activation requires a fully passing readiness evidence set, a release-bound
+   confirmation token, and writes only `.app/import-v2-migration/activation.json`.
+6. `raw/`, `wiki/`, `.app/source-index.json`, old task logs, and old import
    history remain byte- and timestamp-preserved.
-6. Rollback means closing the new release and opening the prior release. The
+7. Rollback means closing the new release and opening the prior release. The
    prior release reads the preserved legacy state and ignores V2 metadata; no
    V1/V2 dual-write toggle is supported.
 

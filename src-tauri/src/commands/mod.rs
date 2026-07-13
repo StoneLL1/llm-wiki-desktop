@@ -11,6 +11,7 @@ pub mod import_v2_agent_commands;
 pub mod import_v2_file_commands;
 pub mod import_v2_web_commands;
 pub mod import_v2_migration;
+pub mod import_v2_activation;
 pub mod lint_commands;
 pub mod llm_commands;
 pub mod project_commands;
