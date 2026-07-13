@@ -12,6 +12,7 @@ use llm_wiki_desktop_lib::services::import_v2::source_registry::{SourceIndex, So
 fn inventory(records: Vec<LegacyRecord>) -> LegacyInventory {
     LegacyInventory {
         schema_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+        project_identity: "project-test".into(),
         fingerprint: "inventory-test".into(),
         records,
         warnings: Vec::new(),

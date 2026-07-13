@@ -28,6 +28,7 @@ fn contracts_use_stable_camel_case_json() {
 
     let plan = MigrationPlan {
         plan_version: 1,
+        v2_index_fingerprint: "v2-index-1".into(),
         inventory_fingerprint: "inventory-1".into(),
         candidates: vec![MigrationCandidate {
             candidate_id: "candidate-1".into(),
@@ -51,6 +52,7 @@ fn contracts_use_stable_camel_case_json() {
 fn invalid_plan_rejects_unknown_schema_paths_duplicates_and_unsupported_links() {
     let mut plan = MigrationPlan {
         plan_version: 99,
+        v2_index_fingerprint: "v2-index-1".into(),
         inventory_fingerprint: "inventory-1".into(),
         candidates: vec![MigrationCandidate {
             candidate_id: "candidate-1".into(),

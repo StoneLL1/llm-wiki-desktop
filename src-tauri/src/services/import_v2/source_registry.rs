@@ -394,6 +394,10 @@ fn validate_index(index: &SourceIndex) -> Result<(), BackendError> {
     Ok(())
 }
 
+pub(crate) fn validate_for_migration(index: &SourceIndex) -> Result<(), BackendError> {
+    validate_index(index)
+}
+
 fn invalid_pointer(pointer: &SourcePointer) -> bool {
     !is_safe_id(&pointer.source_id) || !is_safe_id(&pointer.version_id)
 }

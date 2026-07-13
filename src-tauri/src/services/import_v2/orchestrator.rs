@@ -1357,6 +1357,19 @@ impl ImportV2Service {
     fn preflight_locked(&self, context: &ProjectContext) -> Result<(), BackendError> {
         FileTransaction::reconcile_project(&context.root)
     }
+
+    pub(crate) fn acquire_migration_lock(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
+        self.lock()
+    }
+
+    pub(crate) fn preflight_migration_locked(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<(), BackendError> {
+        self.preflight_locked(context)
+    }
 }
 
 fn is_agent_eligible_failure(original_code: &str, issue: &ImportIssue) -> bool {
