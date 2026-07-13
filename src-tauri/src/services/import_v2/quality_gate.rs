@@ -37,6 +37,53 @@ const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 pub struct QualityGate;
 
 impl QualityGate {
+    pub fn validate_agent_text_fields<'a>(
+        values: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), BackendError> {
+        for value in values {
+            validate_agent_secret_text(value)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_agent_asset(relative_path: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        let extension = Path::new(relative_path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match extension.as_str() {
+            "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Ok(()),
+            "jpg" | "jpeg" if bytes.starts_with(&[0xff, 0xd8, 0xff]) => Ok(()),
+            "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Ok(()),
+            "webp" if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => Ok(()),
+            "json" => {
+                let text = std::str::from_utf8(bytes).map_err(|_| quality_error())?;
+                let _: serde_json::Value = serde_json::from_str(text).map_err(|_| quality_error())?;
+                validate_agent_secret_text(text)
+            }
+            "txt" | "csv" => validate_agent_secret_text(
+                std::str::from_utf8(bytes).map_err(|_| quality_error())?,
+            ),
+            _ => Err(quality_error()),
+        }
+    }
+
+    pub fn evaluate_agent_candidate(
+        &self,
+        staging_root: &Path,
+        result: &EngineResult,
+    ) -> Result<ImportPreviewArtifact, BackendError> {
+        let preview = self.evaluate(staging_root, result)?;
+        let markdown_path = staging_root.join(&preview.markdown.relative_path);
+        let markdown = std::fs::read_to_string(markdown_path).map_err(|_| quality_error())?;
+        validate_agent_secret_text(&markdown)?;
+        if has_unclosed_fenced_block(&markdown) {
+            return Err(quality_error());
+        }
+        Ok(preview)
+    }
+
     pub fn evaluate(
         &self,
         staging_root: &Path,
@@ -140,6 +187,49 @@ impl QualityGate {
             title: result.title.clone(),
         })
     }
+}
+
+fn validate_agent_secret_text(markdown: &str) -> Result<(), BackendError> {
+    let lower = markdown.to_ascii_lowercase();
+    let markers = [
+        "-----begin private key-----",
+        "authorization: bearer ",
+        "api_key=",
+        "api-key=",
+        "ghp_",
+    ];
+    if markers.iter().any(|marker| lower.contains(marker))
+        || markdown
+            .split(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+            })
+            .any(|token| token.starts_with("sk-") && token.len() >= 20)
+        || markdown
+            .split_whitespace()
+            .any(|token| token.starts_with("AKIA") && token.len() == 20)
+    {
+        return Err(quality_error());
+    }
+    Ok(())
+}
+
+fn has_unclosed_fenced_block(markdown: &str) -> bool {
+    let mut fence: Option<(char, usize)> = None;
+    for line in markdown.lines() {
+        let Some((character, length, whitespace_tail)) = fence_marker(line) else {
+            continue;
+        };
+        match fence {
+            Some((active, active_len))
+                if character == active && length >= active_len && whitespace_tail =>
+            {
+                fence = None
+            }
+            None => fence = Some((character, length)),
+            _ => {}
+        }
+    }
+    fence.is_some()
 }
 
 struct ReadArtifact {
@@ -1069,5 +1159,43 @@ mod tests {
                 .code,
             IMPORT_V2_QUALITY_FAILED
         );
+    }
+
+    #[test]
+    fn agent_candidate_rejects_secret_corpus_and_unclosed_fence() {
+        for markdown in [
+            "# leaked\n\nAuthorization: Bearer secret-value",
+            "# leaked\n\nsk-123456789012345678901234",
+            "# malformed\n\n```text\nnever closed",
+        ] {
+            let fixture = quality_fixture(markdown);
+            assert_eq!(
+                QualityGate::default()
+                    .evaluate_agent_candidate(&fixture.root, &fixture.result)
+                    .unwrap_err()
+                    .code,
+                IMPORT_V2_QUALITY_FAILED
+            );
+        }
+    }
+
+    #[test]
+    fn agent_candidate_assets_reject_secrets_active_svg_and_renamed_executables() {
+        assert!(QualityGate::validate_agent_asset(
+            "notes.txt",
+            b"api_key=do-not-persist"
+        )
+        .is_err());
+        assert!(QualityGate::validate_agent_asset(
+            "image.svg",
+            b"<svg><script>alert(1)</script></svg>"
+        )
+        .is_err());
+        assert!(QualityGate::validate_agent_asset("image.png", b"MZ executable").is_err());
+        assert!(QualityGate::validate_agent_asset(
+            "image.png",
+            b"\x89PNG\r\n\x1a\nminimal"
+        )
+        .is_ok());
     }
 }

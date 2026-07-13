@@ -92,6 +92,10 @@ impl AgentWorkspaceBuilder {
                     &preview.markdown,
                     &deterministic_copy,
                 )?;
+                let mut preview_hashes = vec![
+                    preview.source_snapshot.sha256.clone(),
+                    preview.markdown.sha256.clone(),
+                ];
                 for (index, asset) in preview.assets.iter().enumerate() {
                     let asset_dir = deterministic_dir.join("assets");
                     fs::create_dir_all(&asset_dir).map_err(workspace_io_error)?;
@@ -103,14 +107,9 @@ impl AgentWorkspaceBuilder {
                         asset,
                         &asset_dir.join(name),
                     )?;
+                    preview_hashes.push(asset.sha256.clone());
                 }
-                (
-                    source_name,
-                    vec![
-                        preview.source_snapshot.sha256.clone(),
-                        preview.markdown.sha256.clone(),
-                    ],
-                )
+                (source_name, preview_hashes)
             } else {
                 copy_hard_failure_source(context, session, item, &source_dir)?
             };
