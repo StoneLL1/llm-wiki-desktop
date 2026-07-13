@@ -1,4 +1,5 @@
 pub mod capability_pack;
+pub mod agent_workspace;
 pub mod capability_runtime;
 mod commit;
 pub mod connector_session;

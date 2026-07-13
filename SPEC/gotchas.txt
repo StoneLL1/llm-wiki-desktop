@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Windows file-symlink security tests failed with privilege error 1314 — Creating file symlinks may require Developer Mode or elevated privilege even though directory junctions do not — Use a temporary `mklink /J` junction to exercise reparse-point rejection portably on Windows tests.
+
 An EngineResult continuation was executed before the base result paths were validated — The continuation code trusted markdownPath early and could read or overwrite outside staging — Validate the complete base result before any continuation, reject pack-authored privileged continuations, and validate again after composition.
 
 Restricting yt-dlp flags did not restrict its sockets — yt-dlp still performed its own DNS resolution and redirect traversal outside the Rust SSRF ledger — Parse the already Rust-fetched Bilibili embedded state offline; keep yt-dlp disabled until a Rust network broker can mediate every connection.
