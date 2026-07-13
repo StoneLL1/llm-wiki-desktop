@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 frontend Task 2 — Added recoverable project-scoped session state, epoch-guarded refresh/append/replace transitions, queue selectors, progress counts, and identity-keyed dialogs — Key decision: task facts remain in the global task store while import presentation state clears on project changes.
+
 [2026-07-13] Import V2 frontend Task 1 — Added identity-bound preview/readiness/history/capability presentation DTOs and one typed Tauri IPC adapter — Key decision: preview reads are capped and hash-checked; capability installation remains fail-closed until the signed-pack installer exists.
 
 [2026-07-13] Import V2 conflict safety review — Compatibility confirmation no longer guesses `CreateNew` for V2 `NeedsMerge`; unresolved V2 conflicts now return Core’s explicit conflict error — Key decision: the unchanged legacy UI cannot authorize a V2 conflict action on the user’s behalf.
