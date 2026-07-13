@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 frontend Task 9 — Added backend-read migration notice, dry-run/report review, explicit fingerprint/no-Git confirmation, resumable apply intents, and read-only legacy history — Key decision: migration writes remain disabled without a backend-bound confirmation token; the UI never infers activation or exposes a V1/V2 switch.
+
 [2026-07-13] Import V2 frontend Task 8 — Added dedicated connector login, captcha/private-target authorization, and capability-pack requirement/install gates with bilingual accessible dialogs; extended workflow routing for begin/complete/revoke login, one-target grants, capability facts, and cancellable backend install tasks — Key decision: credentials, cookies, signed URLs, and pack lifecycle remain backend-owned; unsupported capability installation is rendered as a fallback instead of a fabricated UI action.
 
 [2026-07-13] Import V2 frontend Task 7 — Added project-scoped Agent policy controls, explicit local assistance and BYOK scope/approval UI, deterministic/current/Agent candidate evidence, and typed workflow routing for candidate actions and backend tasks — Key decision: Agent/BYOK controls never hold secrets or write results; only the backend task/candidate contracts can authorize work, and all UI review choices remain intents until normal Import confirmation.

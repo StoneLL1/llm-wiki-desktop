@@ -59,6 +59,12 @@ const importWorkflow: ImportWorkflow = {
   authorizePrivateTarget: vi.fn(),
   getCapabilityRequirement: vi.fn(),
   installCapability: vi.fn(),
+  scanMigration: vi.fn(),
+  planMigration: vi.fn(),
+  applyMigration: vi.fn(),
+  getMigrationStatus: vi.fn(),
+  resumeMigration: vi.fn(),
+  listHistory: vi.fn(),
 };
 const agentWorkflow: AgentWorkflow = {
   agents: [],

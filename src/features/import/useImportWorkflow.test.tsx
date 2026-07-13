@@ -8,6 +8,8 @@ import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { ImportItem, ImportSession } from "../../types/importV2";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
 import type { BackendTask } from "../../types/task";
+import type { ImportHistoryPage } from "../../types/importV2Presentation";
+import type { LegacyInventory, MigrationConfirmation, MigrationPlan } from "../../types/importV2Migration";
 
 const api = vi.hoisted(() => ({
   getReadiness: vi.fn(),
@@ -32,6 +34,12 @@ const api = vi.hoisted(() => ({
   authorizePrivateTarget: vi.fn(),
   getCapabilityRequirement: vi.fn(),
   installCapability: vi.fn(),
+  scanMigration: vi.fn(),
+  planMigration: vi.fn(),
+  applyMigration: vi.fn(),
+  getMigrationStatus: vi.fn(),
+  resumeMigration: vi.fn(),
+  listHistory: vi.fn(),
 }));
 
 vi.mock("../../services/importV2Api", () => ({ importV2Api: api }));
@@ -185,6 +193,16 @@ beforeEach(() => {
     fallback: "Use the signed release pack.",
   });
   api.installCapability.mockResolvedValue(task("capability-task", projectA.projectId, "queued"));
+  const inventory: LegacyInventory = { schemaVersion: 1, projectIdentity: "identity-a", fingerprint: "inventory-fingerprint", records: [], warnings: [], scannedFiles: [] };
+  const migrationPlan: MigrationPlan = { planVersion: 2, v2IndexFingerprint: "index-fingerprint", inventoryFingerprint: inventory.fingerprint, candidates: [], summary: { total: 0, automaticLinks: 0, proposedRecords: 0, conflicts: 0, legacyUnmanaged: 0, warnings: 0 } };
+  const migrationConfirmation: MigrationConfirmation = { planFingerprint: "plan-fingerprint", token: "opaque-token", acknowledgeNoGitRollback: true };
+  const history: ImportHistoryPage = { entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] };
+  api.scanMigration.mockResolvedValue(inventory);
+  api.planMigration.mockResolvedValue(migrationPlan);
+  api.applyMigration.mockResolvedValue(task("migration-task", projectA.projectId, "queued"));
+  api.getMigrationStatus.mockResolvedValue({ status: "dry_run_ready", planFingerprint: migrationConfirmation.planFingerprint, report: null });
+  api.resumeMigration.mockResolvedValue(task("migration-resume-task", projectA.projectId, "queued"));
+  api.listHistory.mockResolvedValue(history);
 });
 
 describe("useImportWorkflow", () => {
@@ -356,5 +374,26 @@ describe("useImportWorkflow", () => {
     expect(api.getCapabilityRequirement).toHaveBeenCalledWith(expect.objectContaining({ itemId: "gated-url" }));
     expect(api.installCapability).toHaveBeenCalledWith(expect.objectContaining({ capabilityId: "browser-runtime", acknowledgeInstall: true }));
     expect(useTaskStore.getState().tasks).toContainEqual(expect.objectContaining({ id: "capability-task" }));
+  });
+
+  it("routes migration and history reads through the current project identity", async () => {
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    const inventory = await act(async () => result.current.scanMigration());
+    const migrationPlan = await act(async () => result.current.planMigration(inventory!));
+    const confirmation: MigrationConfirmation = { planFingerprint: "plan-fingerprint", token: "opaque-token", acknowledgeNoGitRollback: true };
+    await act(async () => result.current.applyMigration(migrationPlan!, confirmation));
+    await act(async () => result.current.getMigrationStatus());
+    await act(async () => result.current.resumeMigration(migrationPlan!, confirmation));
+    await act(async () => result.current.listHistory("cursor-1"));
+
+    expect(api.scanMigration).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath });
+    expect(api.planMigration).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, inventory });
+    expect(api.applyMigration).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, plan: migrationPlan, confirmation });
+    expect(api.getMigrationStatus).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath });
+    expect(api.resumeMigration).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, plan: migrationPlan, confirmation });
+    expect(api.listHistory).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, cursor: "cursor-1", limit: 50 });
+    expect(useTaskStore.getState().tasks.map((entry) => entry.id)).toEqual(expect.arrayContaining(["migration-task", "migration-resume-task"]));
   });
 });
