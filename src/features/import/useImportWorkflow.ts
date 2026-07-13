@@ -25,6 +25,8 @@ import type {
 } from "../../types/importV2Presentation";
 import type { ProjectSummary } from "../../types/project";
 import type { BackendEvent, BackendTask } from "../../types/task";
+import type { ImportHistoryPage } from "../../types/importV2Presentation";
+import type { MigrationConfirmation, LegacyInventory, MigrationPlan, MigrationStatusSnapshot } from "../../types/importV2Migration";
 import { selectQueueCounts, selectSessionProgress, selectVisibleItems, type ImportQueueCounts, type ImportSessionProgress } from "./importViewModel";
 import type { AppView } from "../../stores/navigationStore";
 
@@ -78,6 +80,12 @@ export interface ImportWorkflow {
   authorizePrivateTarget: (itemId: string, url: string) => Promise<string | null>;
   getCapabilityRequirement: (itemId: string) => Promise<ImportCapabilityRequirement | null>;
   installCapability: (itemId: string, capabilityId: string) => Promise<BackendTask | null>;
+  scanMigration: () => Promise<LegacyInventory | null>;
+  planMigration: (inventory: LegacyInventory) => Promise<MigrationPlan | null>;
+  applyMigration: (plan: MigrationPlan, confirmation: MigrationConfirmation) => Promise<BackendTask | null>;
+  getMigrationStatus: () => Promise<MigrationStatusSnapshot | null>;
+  resumeMigration: (plan: MigrationPlan, confirmation: MigrationConfirmation) => Promise<BackendTask | null>;
+  listHistory: (cursor?: string | null) => Promise<ImportHistoryPage | null>;
 
   // Compatibility fields are retained only until ImportView is replaced in Task 10.
   importedSources: ImportedSource[];
@@ -582,6 +590,78 @@ export function useImportWorkflow(
     }
   }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
 
+  const scanMigration = useCallback(async () => {
+    if (latestProjectKey.current !== projectKey) return null;
+    try {
+      const inventory = await importV2Api.scanMigration({ projectId, projectRootPath: rootPath });
+      return latestProjectKey.current === projectKey ? inventory : null;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [projectId, projectKey, pushToast, rootPath, t]);
+
+  const planMigration = useCallback(async (inventory: LegacyInventory) => {
+    if (latestProjectKey.current !== projectKey) return null;
+    try {
+      const plan = await importV2Api.planMigration({ projectId, projectRootPath: rootPath, inventory });
+      return latestProjectKey.current === projectKey ? plan : null;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [projectId, projectKey, pushToast, rootPath, t]);
+
+  const applyMigration = useCallback(async (plan: MigrationPlan, confirmation: MigrationConfirmation) => {
+    if (latestProjectKey.current !== projectKey) return null;
+    try {
+      const task = await importV2Api.applyMigration({ projectId, projectRootPath: rootPath, plan, confirmation });
+      if (latestProjectKey.current !== projectKey) return null;
+      selectedTaskUpsert(task);
+      openTaskDrawer(task.id);
+      return task;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+
+  const getMigrationStatus = useCallback(async () => {
+    if (latestProjectKey.current !== projectKey) return null;
+    try {
+      const status = await importV2Api.getMigrationStatus({ projectId, projectRootPath: rootPath });
+      return latestProjectKey.current === projectKey ? status : null;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [projectId, projectKey, pushToast, rootPath, t]);
+
+  const resumeMigration = useCallback(async (plan: MigrationPlan, confirmation: MigrationConfirmation) => {
+    if (latestProjectKey.current !== projectKey) return null;
+    try {
+      const task = await importV2Api.resumeMigration({ projectId, projectRootPath: rootPath, plan, confirmation });
+      if (latestProjectKey.current !== projectKey) return null;
+      selectedTaskUpsert(task);
+      openTaskDrawer(task.id);
+      return task;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+
+  const listHistory = useCallback(async (cursor: string | null = null) => {
+    if (latestProjectKey.current !== projectKey) return null;
+    try {
+      const page = await importV2Api.listHistory({ projectId, projectRootPath: rootPath, cursor, limit: 50 });
+      return latestProjectKey.current === projectKey ? page : null;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [projectId, projectKey, pushToast, rootPath, t]);
+
   return {
     session,
     readiness,
@@ -616,6 +696,12 @@ export function useImportWorkflow(
     authorizePrivateTarget,
     getCapabilityRequirement,
     installCapability,
+    scanMigration,
+    planMigration,
+    applyMigration,
+    getMigrationStatus,
+    resumeMigration,
+    listHistory,
     importedSources,
     isConfirming,
     requestPreview,
