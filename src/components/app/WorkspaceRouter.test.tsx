@@ -19,6 +19,23 @@ const taskLauncher: TaskLauncher = {
   cancel: vi.fn(),
 };
 const importWorkflow: ImportWorkflow = {
+  session: null,
+  readiness: null,
+  bootstrapState: "loading",
+  visibleItems: [],
+  counts: { all: 0, active: 0, ready: 0, needsAction: 0, failed: 0, completed: 0 },
+  progress: { completed: 0, total: 0, active: 0 },
+  selectedItemId: null,
+  filter: "all",
+  addPaths: vi.fn(),
+  addUrl: vi.fn(),
+  setItemSelected: vi.fn(),
+  startItems: vi.fn(),
+  retryItem: vi.fn(),
+  cancelItem: vi.fn(),
+  refreshSession: vi.fn(),
+  selectItem: vi.fn(),
+  setFilter: vi.fn(),
   importedSources: [],
   isConfirming: false,
   requestPreview: vi.fn(),
@@ -27,6 +44,7 @@ const importWorkflow: ImportWorkflow = {
   requestDeleteSource: vi.fn(),
   requestReplaceSource: vi.fn(),
   confirm: vi.fn(),
+  confirmLegacy: vi.fn(),
 };
 const agentWorkflow: AgentWorkflow = {
   agents: [],

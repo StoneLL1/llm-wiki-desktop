@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 frontend Task 5 — Rebuilt workflow orchestration around typed V2 readiness/session/task APIs, project-epoch guards, task-event reconciliation, nonblocking add/start, cancellation, retry, and explicit commit decisions — Key decision: active workflow code contains no V1 mutation calls; temporary legacy UI props adapt to V2 or fail closed until the final ImportView replacement.
+
 [2026-07-13] Import Core TOCTOU hardening — Added cross-platform same-file identity checks around artifact open/read so a same-size replacement between validation and open is rejected — Key decision: reuse the existing Core quality gate and journal boundary; no second transaction protocol.
 
 [2026-07-13] Import V2 frontend Task 4 — Added the persistent queue presentation with full Core status matrix, typed action derivation, filters/counts, stable row selection, commit eligibility, partial-success visibility, and measured/indeterminate progress — Key decision: JSX receives presentation actions from a typed status adapter and never switches on raw backend status codes to invoke APIs.

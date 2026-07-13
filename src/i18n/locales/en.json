@@ -1254,5 +1254,8 @@
   "importV2.action.compare_candidate": "Compare candidate",
   "importV2.action.discard_candidate": "Discard candidate",
   "importV2.action.resolve_merge": "Resolve merge",
-  "importV2.action.open_result": "Open result"
+  "importV2.action.open_result": "Open result",
+  "importV2.workflow.error": "Import workflow error: {{message}}",
+  "importV2.workflow.clipboardUnavailable": "Clipboard import is not part of the V2 source contract yet.",
+  "importV2.workflow.legacyActionUnavailable": "Legacy source mutation is disabled after V2 cutover."
 }

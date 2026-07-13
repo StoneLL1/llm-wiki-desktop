@@ -91,7 +91,7 @@ export function WorkspaceRouter({
             importedSources={importWorkflow.importedSources}
             onDeleteSource={importWorkflow.requestDeleteSource}
             onReplaceSource={importWorkflow.requestReplaceSource}
-            onConfirm={importWorkflow.confirm}
+            onConfirm={importWorkflow.confirmLegacy}
           />
         );
       case "agent":
