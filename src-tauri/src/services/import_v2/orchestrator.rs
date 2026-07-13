@@ -195,6 +195,7 @@ impl ImportV2Service {
                             crate::models::import_v2::ImportRecoveryAction::Retry,
                             crate::models::import_v2::ImportRecoveryAction::ViewLog,
                         ],
+                        available_actions: Vec::new(),
                     });
                 }
             }

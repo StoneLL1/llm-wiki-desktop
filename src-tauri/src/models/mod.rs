@@ -8,6 +8,7 @@ pub mod git;
 pub mod graph;
 pub mod import;
 pub mod import_v2;
+pub mod import_v2_agent;
 pub mod import_v2_file;
 pub mod import_v2_web;
 pub mod lint;

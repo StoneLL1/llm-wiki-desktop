@@ -1,4 +1,5 @@
 import type { TaskProgress } from "./task";
+import type { AgentRecoveryAction } from "./importV2Agent";
 
 export type ImportResourceMode = "balanced" | "performance" | "saver";
 export type ImportInputKind = "file" | "folder" | "url";
@@ -15,7 +16,7 @@ export interface QualityReport { level: QualityLevel; metrics: QualityMetric[]; 
 export interface ImportArtifact { kind: ArtifactKind; relativePath: string; sha256: string; sizeBytes: number; }
 export interface AttemptRecord { route: string; engineId: string; engineVersion: string; stage: ImportStage; startedAt: string; completedAt: string | null; outcome: AttemptOutcome; warnings: string[]; }
 export type ImportRecoveryAction = "install_capability" | "retry" | "switch_parser" | "enable_ocr" | "invoke_agent" | "skip" | "view_log" | "retry_route" | "switch_route" | "begin_login" | "authorize_private_target" | "install_browser_capability" | "install_media_capability" | "authorize_local_asr";
-export interface ImportIssue { code: string; message: string; stage: ImportStage; retryable: boolean; userActionRequired: boolean; recoveryActions: ImportRecoveryAction[]; }
+export interface ImportIssue { code: string; message: string; stage: ImportStage; retryable: boolean; userActionRequired: boolean; recoveryActions: ImportRecoveryAction[]; availableActions: AgentRecoveryAction[]; }
 export interface ImportPreviewArtifact { markdown: ImportArtifact; assets: ImportArtifact[]; sourceSnapshot: ImportArtifact; quality: QualityReport; title: string; }
 export interface ImportItem { itemId: string; input: ImportInput; status: ImportItemStatus; selected: boolean; taskId: string | null; progress: TaskProgress | null; attempts: AttemptRecord[]; preview: ImportPreviewArtifact | null; issue: ImportIssue | null; }
 export interface ImportSession { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; items: ImportItem[]; }

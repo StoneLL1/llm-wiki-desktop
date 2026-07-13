@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 Agent Assistance contracts — Froze Rust/TypeScript policy, trigger, tool grant, candidate, Diff, send-scope, audit, and recovery action DTOs while preserving legacy ImportIssue recoveryActions with a defaulted availableActions extension — Key decision: balanced policy never auto-invokes BYOK or low-quality optimization; hard-failure local automation remains opt-in.
+
 [2026-07-13] Import V2 Web authorized Bilibili ASR and final security closure — Added exact per-item local-ASR authorization, reusable media.asr continuation, whisper.cpp 1.8.3/ggml-small qualification contracts, offline Bilibili embedded metadata parsing, crash-recoverable temporary workspaces, and exact single-use login profiles; closed both independent review sets and passed the full check — Key decision: yt-dlp direct networking, unsigned payloads, and OS sandbox claims remain fail-closed release gates; only Rust-pinned fetches may reach the network.
 
 [2026-07-13] Import V2 Web login retry closure — Requeued verified waiting-login items, required platform auth cookies instead of public DOM selectors, and made authenticated profiles single-use with deletion after the browser retry — Key decision: profile credentials authorize exactly one matching item attempt and are never retained as a general browser session.

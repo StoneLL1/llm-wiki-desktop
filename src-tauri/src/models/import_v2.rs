@@ -195,6 +195,8 @@ pub struct ImportIssue {
     pub user_action_required: bool,
     #[serde(default)]
     pub recovery_actions: Vec<ImportRecoveryAction>,
+    #[serde(default)]
+    pub available_actions: Vec<crate::models::import_v2_agent::AgentRecoveryAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +251,7 @@ impl ImportIssue {
             retryable,
             user_action_required,
             recovery_actions,
+            available_actions: Vec::new(),
         }
     }
     pub fn for_file_code(code: &str, stage: ImportStage) -> Self {
@@ -275,6 +278,7 @@ impl ImportIssue {
             retryable,
             user_action_required,
             recovery_actions,
+            available_actions: Vec::new(),
         }
     }
 }
