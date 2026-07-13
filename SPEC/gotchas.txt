@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Connector login state can be stale if a dialog keeps its local session after the backend returns a new auth state — Sync the dialog to the typed ConnectorSessionRef, keep captcha instructions user-completed, and revoke only the opaque connector session id; never add password or cookie fields.
+
 The final BYOK scope DTO includes destination, public metadata, duplicate-charge acknowledgement, and expiry facts in addition to file hashes — Keep the frontend type aligned with the Rust wire contract and render only bounded metadata; never add API-key fields or infer approval from local Agent policy.
 
 Markdown preview links/images can become an implicit network/file fetch if rendered with default URL/image behavior — Keep links limited to safe external schemes and replace all image nodes with an omission marker; load content only through the identity-bound backend callback.
