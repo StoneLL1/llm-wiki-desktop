@@ -789,6 +789,7 @@ describe("App", () => {
           content: "# Pasted notes\n\nUseful text.",
           title: null,
           author: null,
+          sourceLocator: null,
         },
       }),
     );
