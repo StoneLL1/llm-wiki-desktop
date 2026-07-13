@@ -48,6 +48,7 @@ impl MigrationPlanner for DefaultMigrationPlanner {
         let summary = summarize(&candidates, inventory.warnings.len());
         let plan = MigrationPlan {
             plan_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+            v2_index_fingerprint: fingerprint_source_index(v2_index),
             inventory_fingerprint: inventory.fingerprint.clone(),
             candidates,
             summary,
@@ -55,6 +56,11 @@ impl MigrationPlanner for DefaultMigrationPlanner {
         plan.validate()?;
         Ok(plan)
     }
+}
+
+pub fn fingerprint_source_index(index: &SourceIndex) -> String {
+    let bytes = serde_json::to_vec(index).unwrap_or_default();
+    digest(&bytes)
 }
 
 fn plan_record(

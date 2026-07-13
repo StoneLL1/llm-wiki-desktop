@@ -158,6 +158,16 @@ pub struct MigrationApplyResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct MigrationStatusSnapshot {
+    pub status: MigrationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<MigrationReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct MigrationReport {
     pub report_version: u32,
     pub plan_version: u32,
