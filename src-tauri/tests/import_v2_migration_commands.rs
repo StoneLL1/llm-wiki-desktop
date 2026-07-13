@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 use serde_json::json;
 
 use llm_wiki_desktop_lib::commands::import_v2_migration::{
