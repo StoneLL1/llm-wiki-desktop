@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-13] Import V2 Web adversarial re-review hardening — Pinned the only browser-connected host, required positive platform login evidence, authenticated every capability runtime sibling, wired single-use private grants and exact redirect state, rebound dedicated login profiles to items, preserved WeChat public identity, and added startup/shutdown profile cleanup — Key decision: Bilibili subtitle absence is a typed failure rather than a metadata-only success; unsigned release payloads and unimplemented authorized ASR remain fail-closed release blockers.
+
 [2026-07-13] Import V2 Web production-path review fixes — Connected SSRF-pinned HTTP prefetch, real Readability and isolated Playwright packs, opaque keyring URL targets, authenticated connector profiles, remote-asset localization, restricted yt-dlp metadata/subtitle fallback, and Windows/Unix process-tree cleanup — Key decision: Bilibili without a verified subtitle fails closed; local ASR requires both an installed signed capability and explicit per-item authorization, while phase-two connectors remain release-gated.
 
 [2026-07-12] Import V2 final execution-boundary hardening — Rebuilt authorized staging without static links/reparse points, revalidated hash-verified pack entrypoints immediately before spawn, killed Unix process groups even after parent exit, and made accurate CJK OCR independently addressable — Key decision: preserve signed pack-relative runtime layout; immutable install-root enforcement and handle-bound cross-platform spawn remain release-hardening gates.

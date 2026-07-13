@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::errors::{BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_UNAVAILABLE};
 use crate::models::import_v2::{ImportInput, ImportInputKind};
-use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
+use crate::services::import_v2::capability_pack::{verify_runtime_integrity, ResolvedCapabilityPack};
 use crate::services::import_v2::domain_limiter::DomainLimiter;
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
@@ -88,7 +88,13 @@ impl ImportEngine for PackProcessEngine {
         } else {
             request.clone()
         };
+        let authenticated_profile = self.web_targets.authenticated_profile(&request.item_id)?;
         validate_entrypoint_unchanged(&self.pack)?;
+        let runtime_temp = std::path::Path::new(&request.project_root)
+            .join(&request.staging_root)
+            .join("runtime-temp");
+        std::fs::create_dir_all(&runtime_temp)
+            .map_err(|_| engine_error("The capability runtime temp directory could not be created."))?;
         let mut command = Command::new(&self.pack.entrypoint);
         command
             .current_dir(&self.pack.root)
@@ -96,19 +102,14 @@ impl ImportEngine for PackProcessEngine {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env_clear();
-        for key in [
-            "SystemRoot",
-            "WINDIR",
-            "TEMP",
-            "TMP",
-            "HOME",
-            "USERPROFILE",
-            "LOCALAPPDATA",
-            "APPDATA",
-        ] {
+        for key in ["SystemRoot", "WINDIR"] {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        command.env("TEMP", &runtime_temp).env("TMP", &runtime_temp);
+        if let Some(profile) = authenticated_profile {
+            command.env("LLM_WIKI_CONNECTOR_PROFILE", profile);
         }
         #[cfg(unix)]
         {
@@ -248,6 +249,7 @@ fn prepare_web_request(
         &request.input.locator,
         request.input.normalized_locator.as_deref(),
     )?;
+    let private_grant = targets.take_private(&request.item_id)?;
     let sensitive = matches!(target.public.host.as_str(), "mp.weixin.qq.com")
         || target.public.host.ends_with(".xiaohongshu.com")
         || matches!(target.public.host.as_str(), "x.com" | "twitter.com");
@@ -262,7 +264,7 @@ fn prepare_web_request(
                 .await
                 .map_err(|_| engine_error("The domain limiter is unavailable."))?;
             let policy = WebFetchPolicy::default();
-            fetch_with_safe_retries(target, &policy, &item_id, &token).await
+            fetch_with_safe_retries(target, &policy, private_grant, &item_id, &token).await
         })
     })
     .join()
@@ -273,7 +275,7 @@ fn prepare_web_request(
     std::fs::write(root.join("fetched.html"), &fetched.bytes)
         .map_err(|_| engine_error("The fetched web response could not be staged."))?;
     let mut prepared = request.clone();
-    prepared.input.locator = fetched.final_public_url.clone();
+    prepared.input.locator = fetched.final_session_target.request_url.to_string();
     prepared.input.normalized_locator = Some(fetched.final_public_url);
     prepared.chained_input = Some("fetched.html".into());
     Ok(prepared)
@@ -282,6 +284,7 @@ fn prepare_web_request(
 async fn fetch_with_safe_retries(
     target: crate::services::import_v2::url_policy::SessionWebTarget,
     policy: &WebFetchPolicy,
+    private_grant: Option<crate::services::import_v2::url_policy::PrivateTargetGrant>,
     item_id: &str,
     token: &CancellationToken,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
@@ -295,7 +298,7 @@ async fn fetch_with_safe_retries(
                 target.clone(),
                 &UrlPolicy,
                 policy,
-                None,
+                private_grant.as_ref(),
                 item_id,
                 |_| {},
                 || token.is_cancelled(),
@@ -322,6 +325,7 @@ async fn fetch_with_safe_retries(
 pub(super) fn validate_entrypoint_unchanged(
     pack: &ResolvedCapabilityPack,
 ) -> Result<(), BackendError> {
+    verify_runtime_integrity(pack)?;
     let metadata = std::fs::symlink_metadata(&pack.entrypoint)
         .map_err(|_| engine_error("The capability entrypoint is unavailable."))?;
     if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_file() {
@@ -463,7 +467,7 @@ fn localize_remote_assets(
                     .acquire(&target.public.host, false)
                     .await
                     .map_err(|_| engine_error("The domain limiter is unavailable."))?;
-                fetch_with_safe_retries(target, &policy, &item_id, &token).await
+                fetch_with_safe_retries(target, &policy, None, &item_id, &token).await
             })
         })
         .join()
@@ -706,6 +710,7 @@ mod tests {
                 installed_bytes: 0,
                 signing_key_id: "fixture".into(),
                 signature: String::new(),
+                files: vec![],
             },
             root: root.canonicalize().unwrap(),
             entrypoint: entrypoint.canonicalize().unwrap(),

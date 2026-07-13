@@ -1,5 +1,9 @@
 # 踩坑清单 (gotchas.txt)
 
+Validating a browser subresource hostname with Node DNS did not pin Chromium's later connection — Chromium performed an independent lookup after the public-answer check, leaving an allowed CDN host open to DNS rebinding — Permit only the initial host, map it to one address from an all-public DNS set before launch, and localize cross-host assets through the Rust pinned fetcher.
+
+Signing only a capability entrypoint or archive did not authenticate mutable installed siblings — JavaScript policies, dependencies, and helper binary digests can live outside the entrypoint while still controlling execution — Sign a sorted per-file path/size/SHA-256 inventory, reject missing/unexpected/symlink files, and reverify the whole runtime immediately before every spawn.
+
 Node smoke scripts named `*.test.mjs` are collected by Vitest even when they use `node:test` or top-level assertions — Vitest reports “No test suite found” after the standalone assertions pass — Name manual scripts `*.smoke.mjs` and keep Node test-runner files outside the Vitest `*.test.*` pattern.
 
 Bilibili “ASR available” was mistaken for “ASR authorized” — Capability presence alone does not grant permission to download or process temporary media, and a metadata-only success suppresses all fallbacks — Model availability and per-item user authorization separately, fail closed when subtitles are absent, and never claim ASR completion without the signed media runtime and cleanup chain.

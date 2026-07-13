@@ -6,12 +6,17 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+
+use super::url_policy::PrivateTargetGrant;
 
 const PREFIX: &str = "import-web-target:";
 
 #[derive(Clone)]
 pub struct WebTargetStore {
     secrets: SecretService,
+    private_grants: Arc<Mutex<HashMap<String, PrivateTargetGrant>>>,
+    authenticated_profiles: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,12 +29,14 @@ impl Default for WebTargetStore {
     fn default() -> Self {
         Self {
             secrets: SecretService::default(),
+            private_grants: Arc::new(Mutex::new(HashMap::new())),
+            authenticated_profiles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 impl WebTargetStore {
     pub fn new(secrets: SecretService) -> Self {
-        Self { secrets }
+        Self { secrets, private_grants: Arc::new(Mutex::new(HashMap::new())), authenticated_profiles: Arc::new(Mutex::new(HashMap::new())) }
     }
     pub fn store(&self, target: &SessionWebTarget) -> Result<String, BackendError> {
         let reference = format!("{PREFIX}{}", uuid::Uuid::new_v4());
@@ -77,6 +84,24 @@ impl WebTargetStore {
             self.secrets.delete_account(reference)?;
         }
         Ok(())
+    }
+    pub fn authorize_private(&self, grant: PrivateTargetGrant) -> Result<String, BackendError> {
+        let id = format!("private-grant:{}", uuid::Uuid::new_v4());
+        self.private_grants
+            .lock()
+            .map_err(|_| store_error())?
+            .insert(grant.item_id.clone(), grant);
+        Ok(id)
+    }
+    pub fn take_private(&self, item_id: &str) -> Result<Option<PrivateTargetGrant>, BackendError> {
+        Ok(self.private_grants.lock().map_err(|_| store_error())?.remove(item_id))
+    }
+    pub fn bind_authenticated_profile(&self, item_id: &str, profile: PathBuf) -> Result<(), BackendError> {
+        self.authenticated_profiles.lock().map_err(|_| store_error())?.insert(item_id.to_string(), profile);
+        Ok(())
+    }
+    pub fn authenticated_profile(&self, item_id: &str) -> Result<Option<PathBuf>, BackendError> {
+        Ok(self.authenticated_profiles.lock().map_err(|_| store_error())?.get(item_id).filter(|path| path.is_dir()).cloned())
     }
 }
 fn missing() -> BackendError {

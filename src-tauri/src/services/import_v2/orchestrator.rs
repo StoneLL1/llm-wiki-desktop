@@ -73,6 +73,15 @@ impl ImportV2Service {
     ) -> Result<crate::services::import_v2::url_policy::SessionWebTarget, BackendError> {
         self.web_targets.resolve(locator, public)
     }
+    pub fn authorize_private_target(
+        &self,
+        grant: crate::services::import_v2::url_policy::PrivateTargetGrant,
+    ) -> Result<String, BackendError> {
+        self.web_targets.authorize_private(grant)
+    }
+    pub fn bind_authenticated_profile(&self, item_id: &str, profile: std::path::PathBuf) -> Result<(), BackendError> {
+        self.web_targets.bind_authenticated_profile(item_id, profile)
+    }
     pub fn create_session(
         &self,
         context: &ProjectContext,
