@@ -60,7 +60,7 @@ export function ImportQueue({
   const { t } = useTranslation();
   const percent = progressPercent(progress);
   return (
-    <section className="import-v2-queue" aria-label={t("importV2.queue.label")}>
+    <section className="import-v2-queue" aria-label={t("importV2.queue.label")} aria-live="polite">
       <header className="import-v2-queue__header">
         <div className="flex min-w-0 items-baseline gap-2">
           <h2 className="m-0 text-[15px] font-semibold">{t("importV2.queue.title")}</h2>

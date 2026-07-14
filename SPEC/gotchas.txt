@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+History DTOs can advertise result/log actions without a typed detail endpoint — Do not render inert buttons; keep those actions hidden until a backend-bound callback is available, while preserving legacy history as read-only evidence.
+
 Migration apply requests require a token derived from the backend's plan/project identity, but the current presentation DTO has no token endpoint or token field — Keep apply disabled when no typed confirmation is supplied; do not reproduce the Rust token algorithm in React or invent a second transaction protocol.
 
 Connector login state can be stale if a dialog keeps its local session after the backend returns a new auth state — Sync the dialog to the typed ConnectorSessionRef, keep captcha instructions user-completed, and revoke only the opaque connector session id; never add password or cookie fields.

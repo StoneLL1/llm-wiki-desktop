@@ -22,6 +22,7 @@ import type {
   ConnectorSessionRef,
   ImportCapabilityRequirement,
   ImportFrontendReadiness,
+  ImportPreviewContent,
 } from "../../types/importV2Presentation";
 import type { ProjectSummary } from "../../types/project";
 import type { BackendEvent, BackendTask } from "../../types/task";
@@ -52,6 +53,7 @@ export interface ImportWorkflow {
   refreshSession: () => Promise<void>;
   selectItem: (itemId: string | null) => void;
   setFilter: (filter: ImportQueueFilter) => void;
+  loadPreview: (identity: { sessionId: string; itemId: string; candidateId: string | null }) => Promise<ImportPreviewContent>;
 
   getAgentPolicy: () => Promise<AgentAssistancePolicy | null>;
   setAgentPolicy: (policy: AgentAssistancePolicy, localAgentKind: AgentKind | null) => Promise<AgentAssistancePolicy | null>;
@@ -374,6 +376,22 @@ export function useImportWorkflow(
       : Promise.resolve();
   }, [projectKey, refreshForScope]);
 
+  const loadPreview = useCallback(async (identity: { sessionId: string; itemId: string; candidateId: string | null }) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || current.session.sessionId !== identity.sessionId || !current.session.items.some((item) => item.itemId === identity.itemId)) {
+      throw new Error("Preview identity is no longer current");
+    }
+    const epoch = current.sessionEpoch;
+    try {
+      const content = await importV2Api.getPreviewContent({ projectId, projectRootPath: rootPath, ...identity });
+      if (!isScopeCurrent(projectKey, epoch)) throw new Error("Preview identity is no longer current");
+      return content;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+
   const visibleItems = useMemo(() => selectVisibleItems(session, filter), [filter, session]);
   const counts = useMemo(() => selectQueueCounts(session), [session]);
   const progress = useMemo(() => selectSessionProgress(session), [session]);
@@ -682,6 +700,7 @@ export function useImportWorkflow(
     refreshSession,
     selectItem,
     setFilter,
+    loadPreview,
     getAgentPolicy,
     setAgentPolicy,
     invokeLocalAgent,
