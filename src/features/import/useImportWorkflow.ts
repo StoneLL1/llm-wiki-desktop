@@ -234,10 +234,6 @@ export function useImportWorkflow(
         const nextReadiness = await importV2Api.getReadiness({ projectId, projectRootPath: rootPath });
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
         setReadiness(nextReadiness);
-        if (!nextReadiness.active) {
-          setBootstrapState("blocked");
-          return;
-        }
         const nextSession = nextReadiness.unfinishedSessionId
           ? await importV2Api.getSession({ projectId, projectRootPath: rootPath, sessionId: nextReadiness.unfinishedSessionId })
           : await importV2Api.createSession({ projectId, projectRootPath: rootPath, resourceMode: "balanced" });

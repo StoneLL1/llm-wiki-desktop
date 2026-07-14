@@ -122,17 +122,16 @@ describe("Import V2 end-to-end presentation boundary", () => {
     expect(screen.getByRole("region", { name: /import queue/i })).toHaveAttribute("aria-live", "polite");
   });
 
-  it("keeps an unsafe migration gate visible without offering a legacy write switch", () => {
+  it("keeps import entry points available while migration activation is pending", () => {
     const workflow = makeWorkflow([]);
-    workflow.session = null;
-    workflow.visibleItems = [];
-    workflow.bootstrapState = "blocked";
+    workflow.bootstrapState = "ready";
     workflow.readiness = { backendVersion: "2.0.0", active: false, migrationStatus: "awaiting_confirmation", unfinishedSessionId: null, legacyHistoryAvailable: true };
     workflow.counts = { all: 0, active: 0, ready: 0, needsAction: 0, failed: 0, completed: 0 };
     workflow.progress = { completed: 0, total: 0, active: 0 };
     render(<ImportView workflow={workflow} />);
 
     expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add files|choose files/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /switch to v1|legacy write/i })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /confirm import/i })).toBeDisabled();
   });

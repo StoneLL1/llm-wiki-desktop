@@ -142,7 +142,8 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   }
 
   const privateItem = itemById(session?.items ?? [], privateItemId);
-  const blocked = workflow.bootstrapState === "blocked" || workflow.bootstrapState === "error" || workflow.readiness?.active === false;
+  const blocked = workflow.bootstrapState === "blocked" || workflow.bootstrapState === "error";
+  const writesBlocked = blocked || workflow.readiness?.active === false;
 
   if (workflow.bootstrapState === "loading") {
     return <div className="import-v2-layout"><ImportV2Header session={null} /><div role="status" className="import-v2-state">{t("importV2.state.loading")}</div></div>;
@@ -173,7 +174,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
           </>
         )}
       </div>
-      <ImportCommitBar selectedReadyCount={selectedReadyCount} unresolvedActionCount={workflow.counts.needsAction} isConfirming={workflow.isConfirming} disabled={blocked} onConfirm={() => { void workflow.confirm(decisions); }} />
+      <ImportCommitBar selectedReadyCount={selectedReadyCount} unresolvedActionCount={workflow.counts.needsAction} isConfirming={workflow.isConfirming} disabled={writesBlocked} onConfirm={() => { void workflow.confirm(decisions); }} />
       <ImportV2Dialogs
         workflow={workflow}
         capabilities={capabilities}

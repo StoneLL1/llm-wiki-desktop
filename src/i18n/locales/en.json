@@ -1347,7 +1347,7 @@
   "importV2.capability.installedState": "Already available",
   "importV2.common.loading": "Working",
   "importV2.migration.noticeTitle": "Import V2 migration needs confirmation",
-  "importV2.migration.noticeBody": "The backend has not activated V2 writes for this project. Review the migration report before importing; no legacy write path is available here.",
+  "importV2.migration.noticeBody": "The backend has not activated V2 writes for this project. You can still add sources, preview, and prepare the queue; final commit becomes available after activation. No legacy write path is available here.",
   "importV2.migration.review": "Review migration",
   "importV2.migration.title": "Import V2 migration",
   "importV2.migration.status": "Migration status: {{status}}",
