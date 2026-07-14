@@ -82,18 +82,7 @@ export function WorkspaceRouter({
       case "exports":
         return <ExportsView />;
       case "import":
-        return (
-          <ImportView
-            isConfirming={importWorkflow.isConfirming}
-            onRequestPreview={importWorkflow.requestPreview}
-            onRequestClipboard={importWorkflow.requestClipboard}
-            onRequestUrl={importWorkflow.requestUrl}
-            importedSources={importWorkflow.importedSources}
-            onDeleteSource={importWorkflow.requestDeleteSource}
-            onReplaceSource={importWorkflow.requestReplaceSource}
-            onConfirm={importWorkflow.confirmLegacy}
-          />
-        );
+        return <ImportView workflow={importWorkflow} capabilities={capabilities} />;
       case "agent":
         return (
           <AgentView

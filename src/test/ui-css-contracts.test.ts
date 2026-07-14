@@ -100,6 +100,16 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".app-topbar__project-menu-row.is-missing");
   });
 
+  it("defines the Import V2 dense panes, sticky commit bar, and narrow-screen wrapping", () => {
+    const css = readStyles();
+    expect(css).toContain(".import-v2-layout");
+    expect(css).toContain(".import-v2-scroll");
+    expect(css).toContain(".import-v2-commit-bar");
+    expect(css).toMatch(/\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
+    expect(css).toMatch(/@media \(max-width: 820px\)[\s\S]*\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*1fr/s);
+    expect(css).toMatch(/\.import-v2-queue__list\s*\{[^}]*overflow:\s*hidden/s);
+  });
+
   it("defines launch metadata and generated project path styles", () => {
     expect(styles).toContain(".project-path-preview");
     expect(styles).toContain(".projcard__meta");

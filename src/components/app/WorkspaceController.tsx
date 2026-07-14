@@ -50,7 +50,8 @@ export function WorkspaceController() {
     activeView === "graph" ||
     activeView === "chat" ||
     activeView === "lint" ||
-    activeView === "exports"
+    activeView === "exports" ||
+    activeView === "import"
       ? "min-h-0 flex-1 overflow-hidden"
       : "min-h-0 flex-1 overflow-auto p-4";
 

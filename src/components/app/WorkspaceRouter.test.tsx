@@ -36,6 +36,7 @@ const importWorkflow: ImportWorkflow = {
   refreshSession: vi.fn(),
   selectItem: vi.fn(),
   setFilter: vi.fn(),
+  loadPreview: vi.fn(),
   importedSources: [],
   isConfirming: false,
   requestPreview: vi.fn(),

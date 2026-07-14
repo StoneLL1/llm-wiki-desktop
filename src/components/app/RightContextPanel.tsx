@@ -10,6 +10,7 @@ import { useNavigationStore } from "../../stores/navigationStore";
 import { useGraphStore } from "../../stores/graphStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useImportStore } from "../../stores/importStore";
 import { useProjectStatus } from "../../hooks/useProjectStatus";
 import type { GraphState, IndexState } from "../../types/project";
 import { RightPanelHeader } from "./RightPanelHeader";
@@ -33,6 +34,8 @@ export function RightContextPanel() {
   const currentProject = useProjectStore((state) => state.currentProject);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const tasks = useTaskStore((state) => state.tasks);
+  const importSession = useImportStore((state) => state.session);
+  const importSelectedItemId = useImportStore((state) => state.selectedItemId);
   const wikiContent = useWikiStore((state) => state.page);
   const wikiPage = wikiContent?.meta ?? null;
   const wikiTree = useWikiStore((state) => state.tree);
@@ -309,7 +312,8 @@ export function RightContextPanel() {
   }
 
   if (activeView === "import") {
-    return <ImportRightPanel />;
+    const selectedItem = importSession?.items.find((item) => item.itemId === importSelectedItemId) ?? null;
+    return <ImportRightPanel selectedItem={selectedItem} onPreviewMarkdown={(itemId) => useImportStore.getState().openPreview(itemId)} />;
   }
 
   if (activeView === "agent") {

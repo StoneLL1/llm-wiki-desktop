@@ -13,6 +13,7 @@ import type { LegacyInventory, MigrationConfirmation, MigrationPlan } from "../.
 
 const api = vi.hoisted(() => ({
   getReadiness: vi.fn(),
+  getPreviewContent: vi.fn(),
   createSession: vi.fn(),
   getSession: vi.fn(),
   addPaths: vi.fn(),
@@ -134,6 +135,7 @@ beforeEach(() => {
   api.getReadiness.mockResolvedValue(readiness);
   api.createSession.mockResolvedValue(session(projectA.projectId));
   api.getSession.mockResolvedValue(session(projectA.projectId));
+  api.getPreviewContent.mockResolvedValue({ sessionId: `session-${projectA.projectId}`, itemId: "file.md", candidateId: null, title: "file.md", markdown: "# Preview", truncated: false, totalBytes: 9, sha256: "hash" });
   api.addPaths.mockResolvedValue(task("add-paths"));
   api.addUrl.mockResolvedValue(session(projectA.projectId, [item("url-1")]));
   api.setSelection.mockResolvedValue(session(projectA.projectId, [item("file.md", "preview_ready")]));

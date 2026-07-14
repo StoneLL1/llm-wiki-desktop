@@ -7,7 +7,7 @@ import type { MigrationConfirmation, MigrationGitCheckpoint, MigrationPlan, Migr
 
 export interface ImportMigrationDialogProps {
   open: boolean;
-  status: MigrationStatus;
+  status: ImportMigrationUiStatus;
   inventory?: LegacyInventory | null;
   plan: MigrationPlan | null;
   report: MigrationReport | null;
@@ -21,12 +21,19 @@ export interface ImportMigrationDialogProps {
   onClose: () => void;
 }
 
-const STATUS_KEYS: Record<MigrationStatus, string> = {
+export type ImportMigrationUiStatus = MigrationStatus | "scanning" | "interrupted" | "resumable" | "not_activated" | "activated";
+
+const STATUS_KEYS: Record<ImportMigrationUiStatus, string> = {
   not_scanned: "importV2.migration.status.not_scanned",
+  scanning: "importV2.migration.status.scanning",
   dry_run_ready: "importV2.migration.status.dry_run_ready",
   awaiting_confirmation: "importV2.migration.status.awaiting_confirmation",
   applying: "importV2.migration.status.applying",
+  interrupted: "importV2.migration.status.interrupted",
+  resumable: "importV2.migration.status.resumable",
   applied: "importV2.migration.status.applied",
+  not_activated: "importV2.migration.status.not_activated",
+  activated: "importV2.migration.status.activated",
   verification_failed: "importV2.migration.status.verification_failed",
   cancelled: "importV2.migration.status.cancelled",
 };
