@@ -11,6 +11,7 @@ export interface ImportAgentControlsProps {
   policy: AgentAssistancePolicy;
   localAgentKind: AgentKind | null;
   localAgentAvailable?: boolean;
+  byokAvailable?: boolean;
   onPolicyChange: (policy: AgentAssistancePolicy) => Promise<AgentAssistancePolicy | void>;
   onInvokeLocalAgent: (itemId: string, agentKind: AgentKind) => Promise<void> | void;
   onRequestByok: (itemId: string) => void;
@@ -23,6 +24,7 @@ export function ImportAgentControls({
   policy,
   localAgentKind,
   localAgentAvailable = false,
+  byokAvailable = true,
   onPolicyChange,
   onInvokeLocalAgent,
   onRequestByok,
@@ -34,7 +36,7 @@ export function ImportAgentControls({
   const [policyError, setPolicyError] = useState(false);
   const available = new Set(item.issue?.availableActions ?? []);
   const canRunLocal = available.has("invoke_local_agent") && localAgentAvailable && localAgentKind !== null;
-  const canRequestByok = available.has("request_byok");
+  const canRequestByok = available.has("request_byok") && byokAvailable;
   const canCompare = available.has("compare_candidate");
   const canDiscard = available.has("discard_candidate");
 
@@ -87,6 +89,7 @@ export function ImportAgentControls({
         <p className="m-0 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-2 py-1.5 text-[11px] text-[var(--text-muted)]" role="note">
           {t("importV2.agent.byokExplicit")}
         </p>
+        {available.has("request_byok") && !byokAvailable ? <p className="m-0 text-[11px] text-[var(--text-muted)]" role="status">{t("importV2.agent.byokUnavailable")}</p> : null}
         {policyError ? <p className="m-0 text-[11px] text-[var(--danger-text)]" role="alert">{t("importV2.agent.policyError")}</p> : null}
       </div>
 

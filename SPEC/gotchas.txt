@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Large sessions can make a visually simple queue expensive if every row is mounted — Keep the queue bounded to 200 rendered rows with explicit incremental loading, while retaining full-session counts and commit decisions in the workflow layer.
+
 History DTOs can advertise result/log actions without a typed detail endpoint — Do not render inert buttons; keep those actions hidden until a backend-bound callback is available, while preserving legacy history as read-only evidence.
 
 Migration apply requests require a token derived from the backend's plan/project identity, but the current presentation DTO has no token endpoint or token field — Keep apply disabled when no typed confirmation is supplied; do not reproduce the Rust token algorithm in React or invent a second transaction protocol.

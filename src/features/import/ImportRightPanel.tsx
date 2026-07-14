@@ -12,7 +12,7 @@ import { ImportQualitySummary } from "./ImportQualitySummary";
 
 export interface ImportRightPanelProps {
   selectedItem?: ImportItem | null;
-  onPreviewMarkdown?: (itemId: string) => void;
+  onPreviewMarkdown: (itemId: string) => void;
 }
 
 function urlHost(locator: string): string {
@@ -36,7 +36,7 @@ function InspectorHeading({ children }: { children: ReactNode }) {
   return <h3 className="import-v2-inspector-heading">{children}</h3>;
 }
 
-export function ImportRightPanel({ selectedItem = null, onPreviewMarkdown = () => undefined }: ImportRightPanelProps) {
+export function ImportRightPanel({ selectedItem = null, onPreviewMarkdown }: ImportRightPanelProps) {
   const { t } = useTranslation();
   return (
     <aside id="right-context-panel" aria-label={t("importV2.inspector.title")} className="right-panel">
@@ -52,7 +52,7 @@ export function ImportRightPanel({ selectedItem = null, onPreviewMarkdown = () =
   );
 }
 
-function SelectedSource({ item, onPreviewMarkdown = () => undefined }: ImportRightPanelProps & { item: ImportItem }) {
+function SelectedSource({ item, onPreviewMarkdown }: ImportRightPanelProps & { item: ImportItem }) {
   const { t } = useTranslation();
   const presentation = presentImportItem(item);
   const route = routeFor(item);

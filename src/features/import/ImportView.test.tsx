@@ -103,7 +103,7 @@ describe("ImportView V2 composition", () => {
     const view = render(<ImportView workflow={currentWorkflow} />);
     expect(screen.getAllByText("研究笔记.md").length).toBeGreaterThan(0);
     expect(screen.getByText(/needs review/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /confirm import/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /confirm import/i })).toBeEnabled();
     fireEvent.keyDown(view.getByTestId("import-item-研究笔记.md"), { key: "Enter" });
     expect(currentWorkflow.selectItem).toHaveBeenCalledWith("研究笔记.md");
     expect(screen.getByRole("region", { name: /import queue/i })).toHaveAttribute("aria-live", "polite");

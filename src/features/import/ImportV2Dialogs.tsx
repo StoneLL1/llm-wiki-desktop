@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useImportStore } from "../../stores/importStore";
@@ -56,6 +57,7 @@ function providerFor(capabilities: AiCapabilitiesWorkflow) {
 }
 
 export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedItem, privateItem, migrationOpen, onCloseMigration, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate, onCompareCandidate, onDiscardCandidate }: ImportV2DialogsProps) {
+  const { t } = useTranslation();
   const session = useImportStore((state) => state.session);
   const previewItemId = useImportStore((state) => state.previewItemId);
   const byokItemId = useImportStore((state) => state.byokItemId);
@@ -165,9 +167,10 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedIte
         policy={policy}
         localAgentKind={localAgent?.kind ?? null}
         localAgentAvailable={localAgent !== null}
+        byokAvailable={provider !== null}
         onPolicyChange={async (next) => {
           const saved = await workflow.setAgentPolicy(next, localAgent?.kind ?? null);
-          if (!saved) throw new Error("Agent policy was not saved");
+          if (!saved) throw new Error(t("importV2.agent.policySaveFailed"));
           setPolicy(saved);
           return saved;
         }}
@@ -211,8 +214,8 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedIte
         open={Boolean(privateItem)}
         itemId={privateItem?.itemId ?? ""}
         target={privateItem?.input.normalizedLocator ?? privateItem?.input.locator ?? ""}
-        addressCategory="private target"
-        reason={privateItem?.issue?.message ?? "Authorization required"}
+        addressCategory={t("importV2.private.addressCategory")}
+        reason={privateItem?.issue?.message ?? t("importV2.private.authorizationRequired")}
         onAuthorize={async (itemId, target) => { await workflow.authorizePrivateTarget(itemId, target); onClosePrivate(); await workflow.refreshSession(); }}
         onCancel={onClosePrivate}
       />
