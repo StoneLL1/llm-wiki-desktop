@@ -81,6 +81,8 @@ export interface ImportPreview {
   files: ImportFileEntry[];
   conflicts: ImportConflict[];
   summary: ImportSummary;
+  /** Present only when the preview was produced by the post-cutover V2 route. */
+  v2SessionId?: string | null;
 }
 
 export interface ExtractResult {
@@ -114,6 +116,7 @@ export interface ConfirmImportRequest {
   /** When true, the backend creates a scoped Git checkpoint of the archived
    * files plus source/conflict indices. Backward-compatible default: false. */
   createCheckpoint?: boolean;
+  v2SessionId?: string | null;
 }
 
 export interface ExtractTextRequest {
@@ -134,6 +137,7 @@ export interface PreviewTextImportRequest {
   content: string;
   title: string | null;
   author: string | null;
+  sourceLocator?: string | null;
 }
 
 export interface FetchedImportUrl {

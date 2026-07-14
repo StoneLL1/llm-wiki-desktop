@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -9,8 +12,15 @@ use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
 };
 use crate::models::import::{ConfirmedImport, ImportPreview, ImportRequest};
+use crate::models::import_v2::{
+    CommitImportSessionRequest, CommitItemDecision, ImportInput, ImportInputKind,
+    ImportResourceMode,
+};
 use crate::models::paths::ProjectContext;
-use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
+use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
+use crate::services::import_v2::activation::ImportV2ActivationService;
+use crate::services::import_v2::legacy_route::LegacyPreviewAdapter;
+use crate::services::import_v2::file_discovery::{new_import_inputs, FileDiscoveryService};
 use crate::tasks::task_model::LogLevel;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,6 +45,10 @@ pub struct ConfirmImportRequest {
     /// Defaults to false for backward compatibility with existing callers.
     #[serde(default)]
     pub create_checkpoint: bool,
+    /// V2 route session selected by the activation-aware import facade.
+    /// Legacy callers omit this and keep the pre-cutover request shape.
+    #[serde(default)]
+    pub v2_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +90,8 @@ pub struct PreviewTextImportRequest {
     pub content: String,
     pub title: Option<String>,
     pub author: Option<String>,
+    #[serde(default)]
+    pub source_locator: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,6 +148,8 @@ pub fn request_delete_source(
     request: SourceActionRequest,
 ) -> Result<PendingAction, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     state
         .import_service
         .validate_imported_source_path(&context, &request.target_path)?;
@@ -188,6 +206,8 @@ pub fn request_replace_source(
     request: ReplaceSourceRequest,
 ) -> Result<PendingAction, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let target = state
         .import_service
         .validate_imported_source_path(&context, &request.target_path)?;
@@ -290,6 +310,10 @@ pub fn preview_import(
     request: ImportPreviewRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if ImportV2ActivationService::is_active(&context)? {
+        return preview_import_v2(app, state, request, context);
+    }
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let task = state
         .task_service
         .create_project_task(
@@ -330,6 +354,8 @@ fn run_import_preview(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    ImportV2ActivationService::legacy_mutation_guard(context)?;
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
@@ -399,6 +425,7 @@ fn run_import_preview(
             TaskResult {
                 summary: format!("Previewed {} source files.", preview.summary.total_files),
                 affected_paths: vec![preview_path],
+                reference: None,
                 pending_action: None,
             },
         )
@@ -431,10 +458,329 @@ pub fn get_import_preview(
             true,
         ));
     }
+    if let Some(TaskResultReference::ImportV2SessionPreview { session_id }) = task
+        .result
+        .as_ref()
+        .and_then(|result| result.reference.as_ref())
+    {
+        let session = state.import_v2_service.load_session(
+            &context,
+            &state.file_store,
+            session_id,
+        )?;
+        return LegacyPreviewAdapter::from_session(&session);
+    }
     state.file_store.read_json(
         &context,
         &format!(".app/import-previews/{}.json", request.task_id),
     )
+}
+
+fn preview_import_v2(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: ImportPreviewRequest,
+    context: ProjectContext,
+) -> Result<BackendTask, BackendError> {
+    let task = state
+        .task_service
+        .create_project_task(
+            TaskType::Import,
+            request.project_id.clone(),
+            context.root,
+            "Preview Import V2 sources".into(),
+            true,
+        )
+        .map_err(task_error)?;
+    let task_id = task.id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let result = (|| -> Result<(), BackendError> {
+            state
+                .task_service
+                .transition_status(&task_id, TaskStatus::Running)
+                .map_err(task_error)?;
+            let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            let session = state.import_v2_service.create_session(
+                &context,
+                &state.file_store,
+                ImportResourceMode::Balanced,
+            )?;
+            let roots = request
+                .source_paths
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            let scan = FileDiscoveryService::default().scan(
+                &context,
+                &roots,
+                crate::models::import_v2_file::FileScanPolicy::default(),
+                |_| {},
+                || state.task_service.is_cancelled(&task_id),
+            )?;
+            let inputs = new_import_inputs(&session, scan.files);
+            if inputs.is_empty() {
+                return Err(BackendError::new(
+                    "IMPORT_FILE_SCAN_EMPTY",
+                    "No supported files were found for Import V2.",
+                    true,
+                    true,
+                ));
+            }
+            let session = state.import_v2_service.add_inputs(
+                &context,
+                &state.file_store,
+                &session.session_id,
+                inputs,
+            )?;
+            let parent_token = state
+                .task_service
+                .get_cancellation_token(&task_id)
+                .ok_or_else(|| {
+                    task_error("Import preview cancellation state is unavailable.".into())
+                })?;
+            let mut first_error = None;
+            for item in &session.items {
+                if state.task_service.is_cancelled(&task_id) {
+                    return Err(BackendError::new(
+                        "IMPORT_V2_CANCELLED",
+                        "Import V2 preview was cancelled.",
+                        true,
+                        false,
+                    ));
+                }
+                let child = state
+                    .task_service
+                    .create_project_task(
+                        TaskType::Import,
+                        request.project_id.clone(),
+                        context.root.clone(),
+                        format!("Import V2 {}", item.input.display_name),
+                        true,
+                    )
+                    .map_err(task_error)?;
+                if let Err(error) = run_v2_item_with_parent_cancellation(
+                    &state.import_v2_service,
+                    &state.file_store,
+                    &state.task_service,
+                    &context,
+                    &session.session_id,
+                    &item.item_id,
+                    &child.id,
+                    &parent_token,
+                ) {
+                    first_error.get_or_insert(error);
+                }
+            }
+            let session = state.import_v2_service.load_session(
+                &context,
+                &state.file_store,
+                &session.session_id,
+            )?;
+            let preview = LegacyPreviewAdapter::from_session(&session)?;
+            if preview.files.iter().all(|file| {
+                matches!(
+                    file.extraction_status,
+                    crate::models::import::ExtractionStatus::Failed
+                        | crate::models::import::ExtractionStatus::Pending
+                )
+            }) {
+                if let Some(error) = first_error {
+                    return Err(error);
+                }
+            }
+            state
+                .task_service
+                .complete_running_with_result(
+                    &task_id,
+                    TaskResult {
+                        summary: "Import V2 preview ready.".into(),
+                        affected_paths: vec![format!(
+                            ".app/import-sessions/{}/session.json",
+                            session.session_id
+                        )],
+                        reference: Some(TaskResultReference::ImportV2SessionPreview {
+                            session_id: session.session_id,
+                        }),
+                        pending_action: None,
+                    },
+                )
+                .map_err(task_error)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = state.task_service.set_error(&task_id, error);
+            if !state.task_service.is_cancelled(&task_id) {
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, TaskStatus::Failed);
+            }
+        }
+    });
+    Ok(task)
+}
+
+fn preview_text_import_v2(
+    state: &AppState,
+    request: &PreviewTextImportRequest,
+    context: &ProjectContext,
+) -> Result<ImportPreview, BackendError> {
+    let session = state.import_v2_service.create_session(
+        context,
+        &state.file_store,
+        ImportResourceMode::Balanced,
+    )?;
+    let session = if matches!(request.kind, StagedImportKind::Url) {
+        if let Some(locator) = request.source_locator.as_deref() {
+            state.import_v2_service.add_inputs(
+                context,
+                &state.file_store,
+                &session.session_id,
+                vec![ImportInput {
+                    kind: ImportInputKind::Url,
+                    display_name: request.source_name.clone(),
+                    locator: locator.to_string(),
+                    normalized_locator: None,
+                    source_identity: None,
+                }],
+            )?
+        } else {
+            state.import_v2_service.add_text_input(
+                context,
+                &state.file_store,
+                &session.session_id,
+                &request.source_name,
+                &request.content,
+            )?
+        }
+    } else {
+        state.import_v2_service.add_text_input(
+            context,
+            &state.file_store,
+            &session.session_id,
+            &request.source_name,
+            &request.content,
+        )?
+    };
+    let item = session.items.first().ok_or_else(|| {
+        BackendError::new(
+            "IMPORT_V2_STATE_INVALID",
+            "The V2 text input did not create an item.",
+            false,
+            true,
+        )
+    })?;
+    let child = state
+        .task_service
+        .create_project_task(
+            TaskType::Import,
+            request.project_id.clone(),
+            context.root.clone(),
+            format!("Import V2 {}", item.input.display_name),
+            true,
+        )
+        .map_err(task_error)?;
+    state.import_v2_service.run_item(
+        context,
+        &state.file_store,
+        &state.task_service,
+        &session.session_id,
+        &item.item_id,
+        &child.id,
+    )?;
+    let session = state.import_v2_service.load_session(
+        context,
+        &state.file_store,
+        &session.session_id,
+    )?;
+    LegacyPreviewAdapter::from_session(&session)
+}
+
+fn confirm_import_v2(
+    state: &AppState,
+    request: &ConfirmImportRequest,
+    context: &ProjectContext,
+    session_id: &str,
+) -> Result<ConfirmedImport, BackendError> {
+    let session = state.import_v2_service.load_session(
+        context,
+        &state.file_store,
+        session_id,
+    )?;
+    let decisions = session
+        .items
+        .iter()
+        .filter(|item| {
+            item.selected
+                && matches!(
+                    item.status,
+                    crate::models::import_v2::ImportItemStatus::PreviewReady
+                        | crate::models::import_v2::ImportItemStatus::NeedsMerge
+                )
+        })
+        .map(|item| CommitItemDecision {
+            item_id: item.item_id.clone(),
+            // The compatibility UI has no explicit V2 conflict action. Keep
+            // conflicts unresolved rather than guessing CreateNew/KeepWiki.
+            conflict_action: None,
+            expected_wiki_hash: None,
+        })
+        .collect();
+    state.import_v2_service.commit_items(
+        context,
+        &state.file_store,
+        &state.git_service,
+        &CommitImportSessionRequest {
+            project_id: request.project_id.clone(),
+            project_root_path: request.project_root_path.clone(),
+            session_id: session_id.into(),
+            decisions,
+        },
+    )?;
+    Ok(ConfirmedImport {
+        preview: request.preview.clone(),
+        confirmed_at: chrono::Utc::now().to_rfc3339(),
+        checkpoint_hash: None,
+    })
+}
+
+fn run_v2_item_with_parent_cancellation(
+    service: &crate::services::import_v2::ImportV2Service,
+    files: &crate::services::FileStore,
+    tasks: &crate::tasks::TaskService,
+    context: &ProjectContext,
+    session_id: &str,
+    item_id: &str,
+    child_task_id: &str,
+    parent_token: &crate::tasks::task_model::CancellationToken,
+) -> Result<crate::models::import_v2::ImportItem, BackendError> {
+    let child_token = tasks
+        .get_cancellation_token(child_task_id)
+        .ok_or_else(|| task_error("Import child cancellation state is unavailable.".into()))?;
+    let watcher_done = Arc::new(AtomicBool::new(false));
+    let watcher_done_ref = Arc::clone(&watcher_done);
+    let parent_token = parent_token.clone();
+    let child_token_ref = child_token.clone();
+    let watcher = thread::spawn(move || {
+        while !watcher_done_ref.load(Ordering::SeqCst) {
+            if parent_token.is_cancelled() {
+                child_token_ref.cancel();
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    });
+    let result = service.run_item(
+        context,
+        files,
+        tasks,
+        session_id,
+        item_id,
+        child_task_id,
+    );
+    watcher_done.store(true, Ordering::SeqCst);
+    let _ = watcher.join();
+    result
 }
 
 fn task_error(message: String) -> BackendError {
@@ -447,6 +793,11 @@ pub fn preview_text_import(
     request: PreviewTextImportRequest,
 ) -> Result<ImportPreview, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if ImportV2ActivationService::is_active(&context)? {
+        return preview_text_import_v2(&state, &request, &context);
+    }
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
     let extension = match request.kind {
         StagedImportKind::Clipboard => "md",
         StagedImportKind::Url => "url",
@@ -599,6 +950,19 @@ pub fn confirm_import_preview(
     request: ConfirmImportRequest,
 ) -> Result<ConfirmedImport, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if let Some(session_id) = request.v2_session_id.as_deref() {
+        if !ImportV2ActivationService::is_active(&context)? {
+            return Err(BackendError::new(
+                "IMPORT_V2_NOT_ACTIVE",
+                "Import V2 session commits require an active V2 cutover.",
+                true,
+                true,
+            ));
+        }
+        return confirm_import_v2(&state, &request, &context, session_id);
+    }
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
 
     state
         .import_service
@@ -632,6 +996,8 @@ pub fn extract_text_preview(
     request: ExtractTextRequest,
 ) -> Result<crate::models::import::ExtractResult, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    ImportV2ActivationService::legacy_mutation_guard(&context)?;
 
     let output_dir = context.raw_dir.join("extracted");
     let path = PathBuf::from(&request.source_path);

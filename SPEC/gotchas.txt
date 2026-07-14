@@ -1,5 +1,69 @@
 # 踩坑清单 (gotchas.txt)
 
+Markdown local-image references can follow symlinks or Windows reparse points when copied with `Path::is_file`/`fs::copy` — staging code checked the main source identity but not referenced assets — Validate asset metadata with no-follow checks and canonical containment before copying, and add a regression test.
+
+Import V2 text staging canonicalized a new session input before the transaction created it — `Path::canonicalize` requires the destination to exist — Commit the guarded `write_new` transaction first, then derive the source identity from the created file.
+
+Local Agent subprocesses must not inherit host `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` — explicit environment forwarding bypasses the OS credential-storage boundary — Keep only non-secret runtime variables after `env_clear` and use an explicit authorized credential flow for Agent authentication.
+
+`rg.exe` fails with `Access is denied` in the managed Windows workspace even for read-only documentation scans — The bundled executable is blocked by the current execution policy rather than by repository contents — Fall back to PowerShell `Select-String` for the same scoped scan, and do not treat the tool-launch failure as a project test failure.
+
+Large sessions can make a visually simple queue expensive if every row is mounted — Keep the queue bounded to 200 rendered rows with explicit incremental loading, while retaining full-session counts and commit decisions in the workflow layer.
+
+History DTOs can advertise result/log actions without a typed detail endpoint — Do not render inert buttons; keep those actions hidden until a backend-bound callback is available, while preserving legacy history as read-only evidence.
+
+Migration apply requests require a token derived from the backend's plan/project identity, but the current presentation DTO has no token endpoint or token field — Keep apply disabled when no typed confirmation is supplied; do not reproduce the Rust token algorithm in React or invent a second transaction protocol.
+
+Connector login state can be stale if a dialog keeps its local session after the backend returns a new auth state — Sync the dialog to the typed ConnectorSessionRef, keep captcha instructions user-completed, and revoke only the opaque connector session id; never add password or cookie fields.
+
+The final BYOK scope DTO includes destination, public metadata, duplicate-charge acknowledgement, and expiry facts in addition to file hashes — Keep the frontend type aligned with the Rust wire contract and render only bounded metadata; never add API-key fields or infer approval from local Agent policy.
+
+Markdown preview links/images can become an implicit network/file fetch if rendered with default URL/image behavior — Keep links limited to safe external schemes and replace all image nodes with an omission marker; load content only through the identity-bound backend callback.
+
+The old App import tests hard-code V1 commands while the old ImportView remains during the staged cutover — keeping them active would assert removed behavior, but leaving skips past final integration would hide regressions — Keep the temporary six skips scoped to Task 5 and rewrite/replace them when Task 10 installs the V2 ImportView.
+
+Windows same-size artifact swaps can preserve coarse metadata timestamps — metadata-only identity checks may accept a replacement — Reuse same-file handle identity before/after artifact reads and keep the replacement regression test in the validation/open window.
+
+The frontend capability install affordance cannot be backed by a download task yet — the current runtime exposes only signed installed-pack resolution — Keep the adapter installable=false and surface the release/fallback path instead of fabricating a task or silently downloading.
+
+Legacy import confirmation has no V2 conflict-action control — Mapping `NeedsMerge` to `CreateNew` would silently choose a destination and violate fail-closed correlation — Leave the Core decision unset and surface the conflict until a V2 confirmation surface supplies an explicit action.
+
+Parent preview cancellation could race a separate result write — The facade set a task result and then transitioned status, while cancellation could land between those operations — Use the existing TaskService atomic completion boundary and link parent/child cancellation tokens; never manually promote a cancelled parent to success.
+
+Activation-only backend guards left the existing import UI unable to commit after cutover — The old facade still created V1 previews and confirmation did not carry the V2 session identity — Route preview/text preview through V2 when activation is recorded, project V2 sessions into the old preview DTO, and include the session id in confirmation while keeping the old path guarded and read-only after cutover.
+
+An atomic lease temp could block every later recovery after a crash — Directory scans treated partial `.tmp` files as formal JSON records — Scope-clean atomic-writer errors, safely remove internal regular `.tmp` files during recovery, reject unknown names, and test both truncated and complete pre-rename temporaries.
+
+BYOK Candidate validation rejected every normal HTTP(S) destination — A slash-delimited audit route was parsed with an exact segment count even though the destination itself contains slashes — Persist provider and destination as structured audit fields, reconstruct the route for exact comparison, and keep a real BYOK run-to-candidate success test.
+
+Windows file-symlink security tests failed with privilege error 1314 — Creating file symlinks may require Developer Mode or elevated privilege even though directory junctions do not — Use a temporary `mklink /J` junction to exercise reparse-point rejection portably on Windows tests.
+
+An EngineResult continuation was executed before the base result paths were validated — The continuation code trusted markdownPath early and could read or overwrite outside staging — Validate the complete base result before any continuation, reject pack-authored privileged continuations, and validate again after composition.
+
+Restricting yt-dlp flags did not restrict its sockets — yt-dlp still performed its own DNS resolution and redirect traversal outside the Rust SSRF ledger — Parse the already Rust-fetched Bilibili embedded state offline; keep yt-dlp disabled until a Rust network broker can mediate every connection.
+
+An authenticated browser profile was keyed only by item ID — Connector sessions could be replayed across projects or import sessions with the same platform — Bind and atomically consume profiles by project, import session, item, exact target hash, and platform.
+
+Bilibili audio was accepted as M4A without proving decoder support — whisper.cpp 1.8.3 requires the optional WHISPER_FFMPEG build for that container — Require signed runtime build features, audited LGPL components, and a real Bilibili M4A qualification fixture before registration.
+
+Temporary media and ASR outputs used loose files and fixed names — Crashes left large media behind and later retries hit EEXIST — Put every fetch/ASR attempt in a request-scoped TemporaryMediaWorkspace and reconcile runtime-temp on restart.
+
+Visible account/avatar DOM was treated as login proof — Public article pages and logged-out headers can render those same elements — Require a known platform authentication cookie scoped to the target domain; DOM absence/presence alone never changes connector auth state.
+
+Validating a browser subresource hostname with Node DNS did not pin Chromium's later connection — Chromium performed an independent lookup after the public-answer check, leaving an allowed CDN host open to DNS rebinding — Permit only the initial host, map it to one address from an all-public DNS set before launch, and localize cross-host assets through the Rust pinned fetcher.
+
+Signing only a capability entrypoint or archive did not authenticate mutable installed siblings — JavaScript policies, dependencies, and helper binary digests can live outside the entrypoint while still controlling execution — Sign a sorted per-file path/size/SHA-256 inventory, reject missing/unexpected/symlink files, and reverify the whole runtime immediately before every spawn.
+
+Node smoke scripts named `*.test.mjs` are collected by Vitest even when they use `node:test` or top-level assertions — Vitest reports “No test suite found” after the standalone assertions pass — Name manual scripts `*.smoke.mjs` and keep Node test-runner files outside the Vitest `*.test.*` pattern.
+
+Bilibili “ASR available” was mistaken for “ASR authorized” — Capability presence alone does not grant permission to download or process temporary media, and a metadata-only success suppresses all fallbacks — Model availability and per-item user authorization separately, fail closed when subtitles are absent, and never claim ASR completion without the signed media runtime and cleanup chain.
+
+Copying only a verified capability entrypoint broke its runtime layout — Pack launchers may import sibling modules or load adjacent DLLs/resources, while a path-level hash check still has a narrow check-to-spawn race — Preserve the signed pack directory layout; release packaging must enforce an immutable install root and platform handle-bound execution, and process groups/trees must still be terminated unconditionally.
+
+Capability pack fallback rejected ordinary project-external imports or bypassed scan identity — Passing the original locator to a pack either violates its project/staging sandbox or reopens a scan-to-execute TOCTOU window — Revalidate the persisted source identity in Core, copy exact bytes to the item staging `authorized/` area, and expose only that snapshot plus staging-contained chained artifacts to every pack.
+
+Same-length source or staging replacement passed length-only race checks — Path canonicalization and byte count do not establish that the opened handle is the object validated at discovery — Persist SHA-256/magic/canonical identity for sources, compare opened-vs-path file identity around staging reads, and keep deterministic validate/open swap hooks in tests.
+
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
 
 Symptom — Chat history 按 newest-first 选取后再反转为 chronological order 时，较旧消息若恰好被字符预算截断，会与下一条较新消息的 `User:` / `Assistant:` 标签粘成一行。— Root cause — 每条原始 line 自带尾随换行，但 `take_chars` 截断时会把该换行裁掉；最终直接 `push_str` selected chunks，没有额外分隔符。— How to avoid — truncated chunk 必须在原预算内保留分隔：用最后一个已预算字符替换为 `\n`，不要额外追加导致超预算；测试要让 newest 完整、older partial，并同时断言 chronological order、角色前换行和总 history chars 不超 budget。
@@ -221,3 +285,11 @@ serde tagged enum `#[serde(tag="kind")]` 不 camelCase 结构变体字段 — `r
 
 [2026-07-06] 现象 — React.lazy 包裹的 feature view（Graph/Wiki/Chat 等）在打包后的 Tauri 桌面应用里偶发白屏整片 shell，DevTools 显示 `Failed to fetch dynamically imported module: ...chunk-xxx.js`，但开发期（`npm run tauri dev`）从不复现，测试套件也无法捕获。 — 根因 — 开发期 Vite 直连 `/src/*.tsx`，模块已在内存里、import 必成功；打包后是 `tauri://` 协议加载 Rollup 切出的 async chunk，Windows 下杀毒扫描/部分更新/路径解析失败会让 `import()` reject。React.lazy 默认只对 reject 抛错到最近 ErrorBoundary，**没有 ErrorBoundary 时错会冒到 React 根，整棵 shell 卸载成白屏**。本次首屏分包（Batch 3）首版只加了 Suspense 没加 ErrorBoundary，两位审查子代理都把这点列为头号 finding。隐蔽点：(1) csp:`null` 让人以为模块加载稳，但 CSP 不是 chunk fetch 失败的防护层；(2) 没有边界时失败静默成白屏，难与"我的代码挂了"区分。 — 规避做法 — **每个 React.lazy 必须配套 ErrorBoundary**（class 组件 getDerivedStateFromError + componentDidCatch，最小 ~45 行），与 Suspense 同址包裹。错误态给 `role="alert"` + "重新加载" 按钮（`window.location.reload()`），key 用 `activeView` 之类导航标识以便切换视图时重置边界。见 `src/components/app/ViewErrorBoundary.tsx`，三处包裹点：AppShell 视图派发、WikiView WikiEditor、RightContextPanel PageChatPanel。审查新加 lazy 边界时同步检查「有没有配 ErrorBoundary」。
 [2026-07-07] Symptom — `apply_patch` failed repeatedly when matching Rust comments that display as mojibake in PowerShell. — Root cause — Existing non-ASCII/comment text can be decoded differently between the terminal view and patch matcher, so long context hunks around those lines become brittle. — How to avoid — Anchor patches on ASCII function signatures or use very small hunks; for log files with damaged-looking headers, prefer no-context top insertions and verify placement afterward.
+Running `cargo fmt -- <paths>` reformatted the entire Rust crate and created broad unrelated diffs — Cargo did not scope rustfmt to those source paths — Use `rustfmt <new-file.rs>` only for standalone new files and local patches for existing files; inspect `git status` immediately after formatting.
+Repository-root Cargo commands fail because Cargo.toml lives under src-tauri — Run focused Cargo format/tests with `--manifest-path src-tauri/Cargo.toml` or from `src-tauri`; reserve repository root for `npm run check`.
+Signed image query leaked through serialized connector HTML even though the image request DTO was skipped — Sanitizing only metadata leaves credentials embedded in HTML attributes — Replace every in-memory signed resource URL with its public normalized URL before any snapshot, Markdown, metadata, log, or history serialization.
+Query-parameter secret denylist missed common cloud/API credential names — Unknown signed parameters are open-ended and inevitably outgrow a denylist — Persist only a tiny reviewed query-key allowlist while retaining the exact request URL solely inside the protected connector session.
+Frontend and browser-runtime tests fail before execution when `node_modules` is absent — Vitest and the browser fixture's `jsdom` package are not installed in this worktree — Keep the check fail-closed and install dependencies only through the approved environment setup; never treat the missing-run result as a pass.
+The broad Cargo import-v2 filter also executes the GUI lib test binary on Windows — the binary exits with `STATUS_ENTRYPOINT_NOT_FOUND` even though focused integration suites pass — Record the harness/platform failure separately and rely on named integration suites plus the no-default run for evidence.
+Windows Rust integration tests can intermittently fail with a file-in-use error when the full suite overlaps temporary process cleanup — A focused rerun can pass without code changes — Record the failure as flaky harness evidence and rerun the complete check from the beginning before treating the release gate as failed.
+Migration readiness was incorrectly treated as a whole-page blocked state — `active=false` must allow V2 staging and preview while disabling only final writes; never reintroduce a V1 write fallback.

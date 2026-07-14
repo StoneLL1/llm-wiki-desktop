@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "packId": "office-oxide",
+  "version": "0.1.0-probation",
+  "protocolVersion": "2",
+  "targetTriples": [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu"
+  ],
+  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "licenseExpression": "MIT OR Apache-2.0",
+  "entrypoint": "runner/office-oxide-pack",
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "",
+  "qualificationStatus": "disabled_missing_independent_qualification",
+  "qualificationFile": "office-oxide-qualification.json"
+}

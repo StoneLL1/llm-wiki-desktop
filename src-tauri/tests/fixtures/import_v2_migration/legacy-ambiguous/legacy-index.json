@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "records": [
+    { "recordId": "ambiguous-a", "sha256": "duplicate-hash", "wikiPath": "wiki/A.md" },
+    { "recordId": "ambiguous-b", "sha256": "duplicate-hash", "wikiPath": "wiki/B.md" },
+    { "recordId": "case-a", "wikiPath": "wiki/Readme.md" },
+    { "recordId": "case-b", "wikiPath": "wiki/readme.md" }
+  ]
+}

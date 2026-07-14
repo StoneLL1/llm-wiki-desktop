@@ -106,6 +106,7 @@ fn run_graph_build(
             TaskResult {
                 summary: format!("Built graph with {} pages.", result.data.nodes.len()),
                 affected_paths: vec![".app/graph-cache.json".to_string()],
+                reference: None,
                 pending_action: None,
             },
         )

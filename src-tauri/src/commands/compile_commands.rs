@@ -154,7 +154,7 @@ async fn run_compile(
                 project_id: request.project_id.clone(), root_path: request.project_root_path.clone(), task_id: task_id.into(), route,
                 plan, manifest, current_hashes, checkpoint_hash: checkpoint.commit_hash.clone(),
             }))?;
-            state.task_service.set_result(task_id, TaskResult { summary: "Compile requires conflict confirmation.".into(), affected_paths: applied.affected_paths, pending_action: Some(action) }).map_err(task_error)?;
+            state.task_service.set_result(task_id, TaskResult { summary: "Compile requires conflict confirmation.".into(), affected_paths: applied.affected_paths, reference: None, pending_action: Some(action) }).map_err(task_error)?;
             state.task_service.transition_status(task_id, TaskStatus::WaitingForConfirmation).map_err(task_error)?;
             return Ok(());
         }
@@ -443,6 +443,7 @@ fn finish_compile(
             TaskResult {
                 summary: format!("Wiki compiled through {:?}.", route),
                 affected_paths,
+                reference: None,
                 pending_action: None,
             },
         )

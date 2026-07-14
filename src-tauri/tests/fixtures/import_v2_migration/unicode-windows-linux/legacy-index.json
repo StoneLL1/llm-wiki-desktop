@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "records": [
+    { "recordId": "cjk-nfc", "rawPath": "raw/资料/说明.md", "wikiPath": "wiki/资料/说明.md" },
+    { "recordId": "cjk-nfd", "rawPath": "raw/e\u0301.md", "wikiPath": "wiki/e\u0301.md" },
+    { "recordId": "windows-separators", "rawPath": "raw\\Windows\\path.md", "wikiPath": "wiki\\Windows\\path.md" },
+    { "recordId": "reparse-standin", "rawPath": "raw/link-to-outside.md", "wikiPath": "wiki/link-to-outside.md" }
+  ]
+}

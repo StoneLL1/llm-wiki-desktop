@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "packId": "document-layout",
+  "version": "2.48.0",
+  "protocolVersion": "2",
+  "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
+  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "licenseExpression": "MIT",
+  "entrypoint": "runner/document-layout-pack",
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "9e0f91e15db3501ecae6983a65dac8f32ba0b1f9fcdca53defbb1a4b4c0308b6d87ce0e33ff5bb4e690072e59b0c19c87c50cd5177193700ea9985781b1f2403"
+}

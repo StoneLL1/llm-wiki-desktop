@@ -5,6 +5,9 @@ use std::sync::RwLock;
 use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
 use crate::models::confirmation::ConfirmationRegistry;
 use crate::models::paths::ProjectContext;
+use crate::services::import_v2::capability_runtime::ImportCapabilityRuntime;
+use crate::services::import_v2::ImportV2Service;
+use crate::services::import_v2::connector_session::ConnectorSessionService;
 use crate::services::{
     AgentService, BookmarkService, ChatConvenienceService, ChatService, ExportService,
     ExtractionService, FileStore, GitService, GraphService, ImportService, LintService, LlmService,
@@ -18,6 +21,9 @@ pub struct AppState {
     pub project_service: ProjectService,
     pub file_store: FileStore,
     pub import_service: ImportService,
+    pub import_v2_service: ImportV2Service,
+    pub import_capability_runtime: ImportCapabilityRuntime,
+    pub connector_session_service: ConnectorSessionService,
     pub extraction_service: ExtractionService,
     pub git_service: GitService,
     pub agent_service: AgentService,
@@ -594,6 +600,7 @@ mod import_checkpoint_tests {
                 failed_files: 0,
                 conflicts_count: 0,
             },
+            v2_session_id: None,
         };
 
         let hash = state.create_import_checkpoint(&context, &preview).unwrap();

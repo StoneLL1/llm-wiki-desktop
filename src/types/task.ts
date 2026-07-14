@@ -41,8 +41,18 @@ export interface TaskProgress {
 export interface TaskResult {
   summary: string;
   affectedPaths: string[];
+  reference?: TaskResultReference;
   pendingAction?: import("./backend").PendingAction;
 }
+
+export type TaskResultReference = {
+  type: "import_preview";
+  sessionId: string;
+  itemId: string;
+} | {
+  type: "import_v2_session_preview";
+  sessionId: string;
+};
 
 export interface BackendError {
   code: string;

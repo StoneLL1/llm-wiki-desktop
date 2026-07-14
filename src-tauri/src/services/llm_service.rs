@@ -293,6 +293,9 @@ impl LlmService {
         C: Fn() -> bool + Send + Sync,
         D: FnMut(&str) + Send,
     {
+        if is_cancelled() {
+            return Err(llm_cancelled_error());
+        }
         let request = Self::build_streaming_request(config, secret, prompt)?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -304,7 +307,21 @@ impl LlmService {
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
-        let response = builder.send().await.map_err(|error| {
+        if is_cancelled() {
+            return Err(llm_cancelled_error());
+        }
+        let send = builder.send();
+        tokio::pin!(send);
+        let response = loop {
+            tokio::select! {
+                result = &mut send => break result,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                    if is_cancelled() {
+                        return Err(llm_cancelled_error());
+                    }
+                }
+            }
+        }.map_err(|error| {
             let (code, message) = if error.is_timeout() {
                 ("LLM_REQUEST_TIMEOUT", "Provider request timed out.")
             } else {
@@ -331,15 +348,20 @@ impl LlmService {
         let provider = config.provider;
         let mut full = String::new();
         let mut buf = String::new();
-        while let Some(chunk_result) = stream.next().await {
-            if is_cancelled() {
-                return Err(BackendError::new(
-                    "LLM_CANCELLED",
-                    "Generation was cancelled.",
-                    true,
-                    false,
-                ));
-            }
+        loop {
+            let next = stream.next();
+            tokio::pin!(next);
+            let chunk_result = loop {
+                tokio::select! {
+                    value = &mut next => break value,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                        if is_cancelled() {
+                            return Err(llm_cancelled_error());
+                        }
+                    }
+                }
+            };
+            let Some(chunk_result) = chunk_result else { break; };
             let chunk = chunk_result.map_err(|_| {
                 BackendError::new(
                     "LLM_RESPONSE_INVALID",
@@ -378,6 +400,15 @@ impl LlmService {
         }
         Ok(full)
     }
+}
+
+fn llm_cancelled_error() -> BackendError {
+    BackendError::new(
+        "LLM_CANCELLED",
+        "Generation was cancelled.",
+        true,
+        false,
+    )
 }
 
 fn extract_text(provider: LlmProviderKind, value: &serde_json::Value) -> Option<String> {

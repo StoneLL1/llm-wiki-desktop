@@ -1,0 +1,2 @@
+use std::fs;
+#[test] fn lite_pack_is_offline_locked_and_fail_closed(){let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();let runner=fs::read_to_string(root.join("capabilities/browser-runtime-lite/runner/index.mjs")).unwrap();assert!(runner.contains("Readability")&&runner.contains("DOMPurify")&&runner.contains("Turndown"));assert!(!runner.contains("fetch(")&&!runner.contains("http.request"));let manifest=fs::read_to_string(root.join("capabilities/browser-runtime-lite/manifest.json")).unwrap();assert!(manifest.contains("\"targetTriples\":[]"));}
