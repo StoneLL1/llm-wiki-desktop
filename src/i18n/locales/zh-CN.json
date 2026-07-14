@@ -1348,7 +1348,7 @@
   "importV2.capability.installedState": "已可用",
   "importV2.common.loading": "处理中",
   "importV2.migration.noticeTitle": "Import V2 迁移需要确认",
-  "importV2.migration.noticeBody": "后端尚未为此项目激活 V2 写入。请先审查迁移报告；此处不会提供旧版本写入路径。",
+  "importV2.migration.noticeBody": "后端尚未为此项目激活 V2 写入。仍可添加来源、预览并准备队列；激活后才可最终确认写入。此处不会提供旧版本写入路径。",
   "importV2.migration.review": "审查迁移",
   "importV2.migration.title": "Import V2 迁移",
   "importV2.migration.status": "迁移状态：{{status}}",

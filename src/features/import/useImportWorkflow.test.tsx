@@ -236,14 +236,18 @@ describe("useImportWorkflow", () => {
     });
   });
 
-  it("blocks the import surface until migration activation is ready", async () => {
+  it("keeps the import surface usable while migration activation is pending", async () => {
     api.getReadiness.mockResolvedValue({ ...readiness, active: false, migrationStatus: "awaiting_confirmation" });
 
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
 
-    await waitFor(() => expect(result.current.bootstrapState).toBe("blocked"));
-    expect(result.current.session).toBeNull();
-    expect(api.createSession).not.toHaveBeenCalled();
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+    expect(result.current.session?.projectId).toBe(projectA.projectId);
+    expect(api.createSession).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      resourceMode: "balanced",
+    });
   });
 
   it("ignores late project A readiness and session responses after switching to project B", async () => {
