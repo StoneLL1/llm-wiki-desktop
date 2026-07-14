@@ -109,7 +109,7 @@ export function ImportSourceMethods({
   return (
     <section className="import-v2-methods" aria-label={t("importV2.methods.label")}>
       <article className="import-v2-method-pane">
-        <p className="import-section__label">{t("importV2.files.eyebrow")}</p>
+        <p className="import-v2-method-pane__eyebrow">{t("importV2.files.eyebrow")}</p>
         <h2 className="m-0 text-[16px] font-semibold">{t("importV2.files.title")}</h2>
         <p className="m-0 text-[12px] text-[var(--text-secondary)]">{t("importV2.files.description")}</p>
         <button
@@ -144,7 +144,7 @@ export function ImportSourceMethods({
       </article>
 
       <article className="import-v2-method-pane">
-        <p className="import-section__label">{t("importV2.url.eyebrow")}</p>
+        <p className="import-v2-method-pane__eyebrow">{t("importV2.url.eyebrow")}</p>
         <h2 className="m-0 text-[16px] font-semibold">{t("importV2.url.title")}</h2>
         <p className="m-0 text-[12px] text-[var(--text-secondary)]">{t("importV2.url.description")}</p>
         <form

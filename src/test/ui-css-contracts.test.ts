@@ -105,6 +105,7 @@ describe("responsive UI CSS contracts", () => {
     expect(css).toContain(".import-v2-layout");
     expect(css).toContain(".import-v2-scroll");
     expect(css).toContain(".import-v2-commit-bar");
+    expect(css).toContain(".import-v2-queue__paging");
     expect(css).toMatch(/\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
     expect(css).toMatch(/@media \(max-width: 820px\)[\s\S]*\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*1fr/s);
     expect(css).toMatch(/\.import-v2-queue__list\s*\{[^}]*overflow:\s*hidden/s);

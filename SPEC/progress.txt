@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-07-14] Import V2 frontend Task 11 — Added end-to-end presentation evidence for partial commit, retry/cancel, migration blocking, and bounded 2,000-item queue rendering; completed focused gates, final unified check, and two manual independent reviews — Key decision: frontend certification records only the Windows/automated evidence actually run; GUI, macOS/Linux, real external-platform, and migration-token gates remain explicit release conditions.
+
 [2026-07-14] Import V2 frontend Task 10 — Replaced the staged V1 ImportView with the composed V2 header, source methods, queue, inspector/dialog surface, migration notice, history, sticky commit bar, and bilingual responsive tokens; removed obsolete import dialogs and legacy skipped App tests — Key decision: the active frontend exposes only typed workflow intents, keeps ambiguous/history actions fail-closed, and commits only selected preview-ready items.
 
 [2026-07-13] Import V2 frontend Task 9 — Added backend-read migration notice, dry-run/report review, explicit fingerprint/no-Git confirmation, resumable apply intents, and read-only legacy history — Key decision: migration writes remain disabled without a backend-bound confirmation token; the UI never infers activation or exposes a V1/V2 switch.

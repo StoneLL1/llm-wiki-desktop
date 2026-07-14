@@ -82,4 +82,24 @@ describe("ImportAgentControls", () => {
     fireEvent.click(screen.getByRole("button", { name: /review BYOK scope/i }));
     expect(onRequestByok).toHaveBeenCalledWith("item-failed");
   });
+
+  it("does not open a dead BYOK dialog when no provider is configured", () => {
+    render(
+      <ImportAgentControls
+        item={item}
+        policy={policy}
+        localAgentKind={null}
+        localAgentAvailable={false}
+        byokAvailable={false}
+        onPolicyChange={vi.fn()}
+        onInvokeLocalAgent={vi.fn()}
+        onRequestByok={vi.fn()}
+        onCompareCandidate={vi.fn()}
+        onDiscardCandidate={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /review BYOK scope/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/no configured BYOK provider/i);
+  });
 });

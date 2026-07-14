@@ -11,7 +11,7 @@ export interface ImportCommitBarProps {
 
 export function ImportCommitBar({ selectedReadyCount, unresolvedActionCount, isConfirming, disabled = false, onConfirm }: ImportCommitBarProps) {
   const { t } = useTranslation();
-  const canConfirm = selectedReadyCount > 0 && unresolvedActionCount === 0 && !isConfirming && !disabled;
+  const canConfirm = selectedReadyCount > 0 && !isConfirming && !disabled;
   return (
     <footer className="import-v2-commit-bar">
       <div className="min-w-0 text-[11px] text-[var(--text-secondary)]" aria-live="polite">

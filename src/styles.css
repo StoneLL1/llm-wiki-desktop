@@ -1332,66 +1332,8 @@ select:focus-visible {
 }
 .skip-link:focus { top: 12px; }
 
-/* ===== Import view (design: import.html) ===== */
-.import-layout { display: grid; grid-template-rows: auto 1fr auto; height: 100%; min-height: 0; }
-.import-section { padding: var(--sp-4) var(--sp-6); border-bottom: 1px solid var(--border-subtle); }
-.import-section__label {
-  font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--text-muted); margin: 0 0 var(--sp-3);
-}
-.import-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
-}
-.import-source {
-  display: flex; flex-direction: column;
-  padding: 16px;
-  border: 1.5px dashed var(--border-strong);
-  border-radius: var(--radius-lg);
-  background: var(--background);
-  cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
-  text-align: left;
-  font: inherit;
-  color: inherit;
-}
-.import-source:hover { border-color: var(--accent); }
-.import-source:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); border-color: var(--accent); }
-.import-source--disabled { opacity: 0.5; cursor: not-allowed; }
-.import-source--disabled:hover { border-color: var(--border-strong); }
-.import-source--drop { border-color: var(--accent); background: var(--accent-soft); }
-.import-source__icon {
-  width: 32px; height: 32px;
-  border-radius: var(--radius-md);
-  background: var(--surface-muted);
-  color: var(--text-secondary);
-  display: grid; place-items: center;
-  margin-bottom: 10px;
-}
-.import-source__title { font-size: 13px; font-weight: 600; margin: 0; color: var(--text-primary); }
-.import-source__desc { font-size: 11.5px; color: var(--text-muted); margin: 2px 0 0; }
-
-.import-paths { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-4); }
-.import-paths__row { display: flex; gap: var(--sp-2); align-items: stretch; }
-.import-paths__row .input-group { flex: 1; min-width: 0; }
-.import-paths__hint { font-size: 11.5px; color: var(--text-muted); }
-
-/* File table */
-.file-table-wrap { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.file-table__toolbar {
-  display: flex; align-items: center; gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-6);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border-subtle);
-}
-.file-table__caption {
-  font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--text-muted);
-}
-.file-table__badges { margin-left: auto; display: flex; gap: var(--sp-2); align-items: center; }
-.file-table__total { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
-.table-wrap { flex: 1; overflow: auto; }
+/* Shared table primitives remain available to exports and lint; Import V2 owns
+   its queue styles below and does not reuse the removed preview table. */
 .table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .table thead th {
   position: sticky; top: 0; z-index: 1;
@@ -1417,18 +1359,6 @@ select:focus-visible {
 .table .col-check { width: 30px; }
 .table .col-action { width: 60px; text-align: right; }
 .table input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
-
-/* Actions bar */
-.import-actions {
-  padding: var(--sp-3) var(--sp-6);
-  border-top: 1px solid var(--border);
-  background: var(--surface);
-  display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap;
-}
-.import-actions__note { font-size: 12.5px; color: var(--text-secondary); min-width: 0; flex: 1; }
-.import-actions__note strong { color: var(--text-primary); }
-.import-actions__controls { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
-.import-actions__controls .btn--primary .lucide { margin-right: 4px; vertical-align: -2px; }
 
 /* ===== Agent view style families (UI-Frontend-design/agent.html) ===== */
 .agent-section { margin-bottom: var(--sp-6); }
@@ -3263,6 +3193,14 @@ select:focus-visible {
   background: var(--background);
   padding: var(--sp-5);
 }
+.import-v2-method-pane__eyebrow {
+  margin: 0 0 var(--sp-2);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
 .import-v2-dropzone {
   display: flex;
   min-height: 92px;
@@ -3339,6 +3277,15 @@ select:focus-visible {
   overflow: hidden;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+}
+.import-v2-queue__paging {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 .import-v2-queue__row {
   display: grid;

@@ -1,4 +1,5 @@
 import { File, Folder, Globe2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ImportItem } from "../../types/importV2";
 import type { ImportQueueFilter } from "../../stores/importStore";
@@ -32,6 +33,8 @@ const FILTERS: readonly { key: ImportQueueFilter; labelKey: string; count: (coun
   { key: "completed", labelKey: "importV2.queue.filter.completed", count: (counts) => counts.completed },
 ];
 
+const QUEUE_PAGE_SIZE = 200;
+
 function itemIcon(item: ImportItem) {
   if (item.input.kind === "url") return Globe2;
   if (item.input.kind === "folder") return Folder;
@@ -58,7 +61,13 @@ export function ImportQueue({
   onFocusUrl,
 }: ImportQueueProps) {
   const { t } = useTranslation();
+  const [visibleLimit, setVisibleLimit] = useState(QUEUE_PAGE_SIZE);
+  useEffect(() => {
+    setVisibleLimit(QUEUE_PAGE_SIZE);
+  }, [filter, items.length]);
   const percent = progressPercent(progress);
+  const renderedItems = items.slice(0, visibleLimit);
+  const hasMoreItems = renderedItems.length < items.length;
   return (
     <section className="import-v2-queue" aria-label={t("importV2.queue.label")} aria-live="polite">
       <header className="import-v2-queue__header">
@@ -91,7 +100,7 @@ export function ImportQueue({
               {onFocusUrl ? <button type="button" className="btn btn--sm" onClick={onFocusUrl}>{t("importV2.url.submit")}</button> : null}
             </div>
           </div>
-        ) : items.map((item) => {
+        ) : renderedItems.map((item) => {
           const presentation = presentImportItem(item);
           const SourceIcon = itemIcon(item);
           const isSelected = selectedItemId === item.itemId;
@@ -136,6 +145,7 @@ export function ImportQueue({
           );
         })}
       </div>
+      {hasMoreItems ? <div className="import-v2-queue__paging" role="status"><span>{t("importV2.queue.showing", { shown: renderedItems.length, total: items.length })}</span><button type="button" className="btn btn--sm" onClick={() => setVisibleLimit((limit) => Math.min(limit + QUEUE_PAGE_SIZE, items.length))}>{t("importV2.queue.loadMore")}</button></div> : null}
     </section>
   );
 }
