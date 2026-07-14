@@ -19,6 +19,10 @@ impl SecretService {
     }
 
     pub fn set(&self, provider: LlmProviderKind, secret: &str) -> Result<(), BackendError> {
+        self.set_account(provider.credential_account(), secret)
+    }
+
+    pub fn set_account(&self, account: &str, secret: &str) -> Result<(), BackendError> {
         if secret.trim().is_empty() {
             return Err(BackendError::new(
                 "SECRET_EMPTY",
@@ -31,23 +35,27 @@ impl SecretService {
             memory
                 .write()
                 .expect("secret lock poisoned")
-                .insert(provider.credential_account().into(), secret.into());
+                .insert(valid_account(account)?.into(), secret.into());
             return Ok(());
         }
-        keyring_entry(provider)?
+        keyring_account(valid_account(account)?)?
             .set_password(secret)
             .map_err(secret_error)
     }
 
     pub fn get(&self, provider: LlmProviderKind) -> Result<Option<String>, BackendError> {
+        self.get_account(provider.credential_account())
+    }
+
+    pub fn get_account(&self, account: &str) -> Result<Option<String>, BackendError> {
         if let Some(memory) = &self.memory {
             return Ok(memory
                 .read()
                 .expect("secret lock poisoned")
-                .get(provider.credential_account())
+                .get(valid_account(account)?)
                 .cloned());
         }
-        match keyring_entry(provider)?.get_password() {
+        match keyring_account(valid_account(account)?)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(secret_error(error)),
@@ -55,14 +63,18 @@ impl SecretService {
     }
 
     pub fn delete(&self, provider: LlmProviderKind) -> Result<(), BackendError> {
+        self.delete_account(provider.credential_account())
+    }
+
+    pub fn delete_account(&self, account: &str) -> Result<(), BackendError> {
         if let Some(memory) = &self.memory {
             memory
                 .write()
                 .expect("secret lock poisoned")
-                .remove(provider.credential_account());
+                .remove(valid_account(account)?);
             return Ok(());
         }
-        match keyring_entry(provider)?.delete_credential() {
+        match keyring_account(valid_account(account)?)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(secret_error(error)),
         }
@@ -83,8 +95,25 @@ impl SecretService {
     }
 }
 
-fn keyring_entry(provider: LlmProviderKind) -> Result<keyring::Entry, BackendError> {
-    keyring::Entry::new(SERVICE_NAME, provider.credential_account()).map_err(secret_error)
+fn keyring_account(account: &str) -> Result<keyring::Entry, BackendError> {
+    keyring::Entry::new(SERVICE_NAME, account).map_err(secret_error)
+}
+
+fn valid_account(account: &str) -> Result<&str, BackendError> {
+    if account.is_empty()
+        || account.len() > 200
+        || !account
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+    {
+        return Err(BackendError::new(
+            "SECRET_ACCOUNT_INVALID",
+            "Secret account identifier is invalid.",
+            false,
+            true,
+        ));
+    }
+    Ok(account)
 }
 
 fn secret_error(error: keyring::Error) -> BackendError {

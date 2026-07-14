@@ -34,6 +34,18 @@ const TASK_EVENT_CHANNELS = [
   "agent://output",
 ] as const;
 
+type TaskEventListener = (event: BackendEvent) => void;
+const taskEventListeners = new Set<TaskEventListener>();
+
+export function registerTaskEventListener(listener: TaskEventListener): () => void {
+  taskEventListeners.add(listener);
+  return () => taskEventListeners.delete(listener);
+}
+
+export function notifyTaskEventListeners(event: BackendEvent): void {
+  for (const listener of taskEventListeners) listener(event);
+}
+
 /**
  * Subscribes to all backend task/event channels and keeps the task store in sync.
  * Also recovers persisted tasks when the active project root changes, so background
@@ -54,6 +66,7 @@ export function useTaskEvents(): void {
       listen<BackendEvent>(channel, (evt) => {
         const event = evt.payload as BackendEvent;
         handleTaskEvent(event);
+        notifyTaskEventListeners(event);
         void notifyTaskEvent(event);
       })
         .then((unlisten) => {

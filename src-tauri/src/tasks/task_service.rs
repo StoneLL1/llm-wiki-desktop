@@ -391,6 +391,50 @@ impl TaskService {
         Ok(task)
     }
 
+    /// Atomically installs a result and completes a running task. This is used
+    /// at cancellation-sensitive boundaries where `set_result` followed by a
+    /// separate status transition would allow a Cancelled task to retain a
+    /// successful result.
+    pub fn complete_running_with_result(
+        &self,
+        id: &str,
+        result: TaskResult,
+    ) -> Result<BackendTask, String> {
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {}", id))?;
+        if entry.task.status != TaskStatus::Running || entry.cancellation.is_cancelled() {
+            return Err(format!("Task is no longer running: {id}"));
+        }
+        let previous = entry.task.clone();
+        let now = Utc::now().to_rfc3339();
+        entry.task.result = Some(result);
+        entry.task.status = TaskStatus::Succeeded;
+        entry.task.updated_at = now.clone();
+        entry.task.completed_at = Some(now);
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task(id) {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.task = previous;
+            }
+            drop(tasks);
+            let _ = self.persist_current_task(id);
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskCompleted,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
     pub fn set_error(
         &self,
         id: &str,
@@ -448,6 +492,50 @@ impl TaskService {
         }
 
         before - tasks.len()
+    }
+
+    /// Remove tasks that were prepared for a batch which failed before any
+    /// worker was started. This is intentionally narrower than user-facing
+    /// completed-task cleanup and must never be used for running work.
+    pub fn discard_unstarted_tasks(&self, ids: &[String]) -> Result<(), String> {
+        let persisted_paths = {
+            let tasks = self.tasks.read().expect("lock poisoned");
+            let mut paths = Vec::new();
+            for id in ids {
+                let entry = tasks
+                    .get(id)
+                    .ok_or_else(|| format!("Task not found: {id}"))?;
+                if entry.task.status != TaskStatus::Queued {
+                    return Err(format!("Task is not queued: {id}"));
+                }
+                if let Some(path) = &entry.persisted_path {
+                    paths.push(path.clone());
+                }
+            }
+            paths
+        };
+        for path in &persisted_paths {
+            if path.exists() {
+                std::fs::remove_file(path).map_err(|error| {
+                    format!(
+                        "Failed to discard prepared task {}: {error}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        self.tasks
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !ids.contains(id));
+        self.task_roots
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !ids.contains(id));
+        for id in ids {
+            self.cancellation.remove(id);
+        }
+        Ok(())
     }
 
     pub fn persist_task(&self, id: &str, project_root: &Path) -> Result<(), String> {
@@ -579,6 +667,49 @@ mod tests {
     use crate::tasks::task_events::CapturedEvent;
     use crate::tasks::task_model::LogLevel;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn cancellation_and_atomic_completion_never_leave_a_cancelled_result() {
+        for _ in 0..64 {
+            let service = Arc::new(TaskService::default());
+            let task = service.create_task(TaskType::Import, None, "race".into(), true);
+            service
+                .transition_status(&task.id, TaskStatus::Running)
+                .unwrap();
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let cancel_service = Arc::clone(&service);
+            let cancel_id = task.id.clone();
+            let cancel_barrier = Arc::clone(&barrier);
+            let cancel = std::thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_service.cancel_task(&cancel_id)
+            });
+            let complete_service = Arc::clone(&service);
+            let complete_id = task.id.clone();
+            let complete_barrier = Arc::clone(&barrier);
+            let complete = std::thread::spawn(move || {
+                complete_barrier.wait();
+                complete_service.complete_running_with_result(
+                    &complete_id,
+                    TaskResult {
+                        summary: "candidate".into(),
+                        affected_paths: Vec::new(),
+                        reference: None,
+                        pending_action: None,
+                    },
+                )
+            });
+            barrier.wait();
+            let _ = cancel.join().unwrap();
+            let _ = complete.join().unwrap();
+            let final_task = service.get_task(&task.id).unwrap();
+            match final_task.status {
+                TaskStatus::Succeeded => assert!(final_task.result.is_some()),
+                TaskStatus::Cancelled => assert!(final_task.result.is_none()),
+                status => panic!("unexpected race terminal state: {status:?}"),
+            }
+        }
+    }
 
     fn make_service() -> (TaskService, Arc<Mutex<Vec<CapturedEvent>>>) {
         let (event_bus, events) = EventBus::new_test_capture();
@@ -822,6 +953,7 @@ mod tests {
         let result = TaskResult {
             summary: "Compiled 10 pages".to_string(),
             affected_paths: vec!["wiki/index.md".to_string(), "wiki/overview.md".to_string()],
+            reference: None,
             pending_action: None,
         };
 
@@ -920,6 +1052,7 @@ mod tests {
                     TaskResult {
                         summary: "Done".to_string(),
                         affected_paths: vec![],
+                        reference: None,
                         pending_action: None,
                     },
                 )
@@ -1006,6 +1139,30 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn queued_task_recovers_as_retryable_interrupted_work() {
+        let root = std::env::temp_dir().join(format!("task-recover-queued-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (service, _) = make_service();
+        service.set_project_root(Some(root.clone())).unwrap();
+        let queued = service.create_task(
+            TaskType::Import,
+            Some("p".into()),
+            "Queued import".into(),
+            true,
+        );
+        service.persist_task(&queued.id, &root).unwrap();
+
+        let (restarted, _) = make_service();
+        restarted.recover_tasks(&root).unwrap();
+        let recovered = restarted.get_task(&queued.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        let error = recovered.error.unwrap();
+        assert_eq!(error.code, "TASK_RECOVERY");
+        assert!(error.recoverable);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1130,6 +1287,47 @@ mod tests {
         let remaining = service.list_tasks(None);
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, t3.id);
+    }
+
+    #[test]
+    fn discard_unstarted_tasks_removes_memory_and_persisted_files() {
+        let (service, _events) = make_service();
+        let root = std::env::temp_dir().join(format!("task-discard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = service
+            .create_project_task(
+                TaskType::Import,
+                "project".into(),
+                root.clone(),
+                "first".into(),
+                true,
+            )
+            .unwrap();
+        let second = service
+            .create_project_task(
+                TaskType::Import,
+                "project".into(),
+                root.clone(),
+                "second".into(),
+                true,
+            )
+            .unwrap();
+
+        service
+            .discard_unstarted_tasks(&[first.id.clone(), second.id.clone()])
+            .unwrap();
+
+        assert!(service.get_task(&first.id).is_none());
+        assert!(service.get_task(&second.id).is_none());
+        assert!(!root
+            .join(".app/tasks")
+            .join(format!("{}.json", first.id))
+            .exists());
+        assert!(!root
+            .join(".app/tasks")
+            .join(format!("{}.json", second.id))
+            .exists());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

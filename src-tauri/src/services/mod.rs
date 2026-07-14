@@ -10,6 +10,7 @@ mod file_store;
 mod git_service;
 mod graph_service;
 mod import_service;
+pub mod import_v2;
 mod lint_service;
 mod llm_service;
 mod project_service;

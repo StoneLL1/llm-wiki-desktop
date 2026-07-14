@@ -28,6 +28,15 @@ pub fn run() {
             state
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
+            if let Ok(app_data) = app.path().app_local_data_dir() {
+                state.import_capability_runtime.load_installed(
+                    &app_data.join("installed-capabilities"),
+                    &state.import_v2_service,
+                );
+            }
+            if let Ok(app_data) = app.path().app_data_dir() {
+                let _ = state.connector_session_service.recover_orphans(&app_data.join("connector-profiles"));
+            }
 
             // Build tray menu: Show / Hide / Quit. Labels + tooltip are
             // localized to the user's UI language preference (CLAUDE.md: i18n
@@ -151,6 +160,42 @@ pub fn run() {
             commands::import_commands::confirm_import_preview,
             commands::import_commands::extract_text_preview,
             commands::import_commands::validate_import_url,
+            commands::import_v2_commands::create_import_session_v2,
+            commands::import_v2_commands::get_import_session_v2,
+            commands::import_v2_commands::add_import_items_v2,
+            commands::import_v2_commands::add_import_text_v2,
+            commands::import_v2_commands::set_import_item_selection_v2,
+            commands::import_v2_commands::start_import_items_v2,
+            commands::import_v2_commands::confirm_import_session_v2,
+            commands::import_v2_agent_commands::get_import_agent_policy_v2,
+            commands::import_v2_agent_commands::set_import_agent_policy_v2,
+            commands::import_v2_agent_commands::start_import_agent_assistance_v2,
+            commands::import_v2_agent_commands::preview_import_byok_scope_v2,
+            commands::import_v2_agent_commands::approve_import_byok_assistance_v2,
+            commands::import_v2_agent_commands::accept_import_agent_candidate_v2,
+            commands::import_v2_agent_commands::select_import_agent_candidate_v2,
+            commands::import_v2_agent_commands::discard_import_agent_candidate_v2,
+            commands::import_v2_file_commands::start_add_import_paths_v2,
+            commands::import_v2_file_commands::get_import_capability_statuses,
+            commands::import_v2_file_commands::get_import_scan_result_v2,
+            commands::import_v2_web_commands::add_import_url_v2,
+            commands::import_v2_web_commands::begin_import_login_v2,
+            commands::import_v2_web_commands::complete_import_login_v2,
+            commands::import_v2_web_commands::revoke_import_login_v2,
+            commands::import_v2_web_commands::authorize_import_private_target_v2,
+            commands::import_v2_web_commands::authorize_bilibili_asr_v2,
+            commands::import_v2_migration::scan_import_v2_migration,
+            commands::import_v2_migration::plan_import_v2_migration,
+            commands::import_v2_migration::apply_import_v2_migration,
+            commands::import_v2_migration::get_import_v2_migration_status,
+            commands::import_v2_migration::resume_import_v2_migration,
+            commands::import_v2_activation::activate_import_v2,
+            commands::import_v2_activation::get_import_backend_activation,
+            commands::import_v2_presentation_commands::get_import_preview_content_v2,
+            commands::import_v2_presentation_commands::get_import_frontend_readiness_v2,
+            commands::import_v2_presentation_commands::list_import_history_v2,
+            commands::import_v2_presentation_commands::get_import_capability_requirement_v2,
+            commands::import_v2_presentation_commands::install_import_capability_v2,
             commands::task_commands::create_task,
             commands::task_commands::list_tasks,
             commands::task_commands::get_task,

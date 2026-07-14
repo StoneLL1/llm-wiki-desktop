@@ -1,45 +1,126 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
-import { useImportStore } from "../../stores/importStore";
+import type { ImportItem, ImportSession } from "../../types/importV2";
+import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
+import type { ImportWorkflow } from "./useImportWorkflow";
 import { ImportView } from "./ImportView";
 
-const openDialog = vi.hoisted(() => vi.fn());
+function item(itemId: string, status: ImportItem["status"], selected = false): ImportItem {
+  return {
+    itemId,
+    input: { kind: itemId.startsWith("url") ? "url" : "file", displayName: itemId, locator: itemId, normalizedLocator: null },
+    status,
+    selected,
+    taskId: null,
+    progress: status === "extracting" ? { current: 2, total: 4, label: null } : null,
+    attempts: [],
+    preview: status === "preview_ready" ? { title: itemId, markdown: { kind: "markdown", relativePath: "wiki/item.md", sha256: "a", sizeBytes: 10 }, assets: [], sourceSnapshot: { kind: "source_snapshot", relativePath: "raw/item", sha256: "b", sizeBytes: 10 }, quality: { level: "pass", metrics: [], warnings: [] } } : null,
+    issue: status === "failed" ? { code: "EXTRACT_FAILED", message: "Needs review", stage: "extract", retryable: true, userActionRequired: true, recoveryActions: ["retry"], availableActions: [] } : null,
+  };
+}
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openDialog }));
+function session(items: ImportItem[]): ImportSession {
+  return { schemaVersion: 2, sessionId: "session-a", projectId: "project-a", status: "draft", resourceMode: "balanced", createdAt: "2026-07-13T00:00:00Z", updatedAt: "2026-07-13T00:00:00Z", items };
+}
+
+function workflow(overrides: Partial<ImportWorkflow> = {}): ImportWorkflow {
+  const current = session([]);
+  return {
+    session: current,
+    readiness: { backendVersion: "2.0.0", active: true, migrationStatus: "applied", unfinishedSessionId: current.sessionId, legacyHistoryAvailable: false },
+    bootstrapState: "ready",
+    visibleItems: current.items,
+    counts: { all: 0, active: 0, ready: 0, needsAction: 0, failed: 0, completed: 0 },
+    progress: { completed: 0, total: 0, active: 0 },
+    selectedItemId: null,
+    filter: "all",
+    addPaths: vi.fn(),
+    addUrl: vi.fn(),
+    setItemSelected: vi.fn(),
+    startItems: vi.fn(),
+    retryItem: vi.fn(),
+    cancelItem: vi.fn(),
+    confirm: vi.fn(),
+    confirmLegacy: vi.fn(),
+    refreshSession: vi.fn(),
+    selectItem: vi.fn(),
+    setFilter: vi.fn(),
+    loadPreview: vi.fn(),
+    getAgentPolicy: vi.fn().mockResolvedValue(null),
+    setAgentPolicy: vi.fn(),
+    invokeLocalAgent: vi.fn(),
+    previewByokScope: vi.fn(),
+    approveByokAssistance: vi.fn(),
+    acceptAgentCandidate: vi.fn(),
+    selectAgentCandidate: vi.fn(),
+    discardAgentCandidate: vi.fn(),
+    beginLogin: vi.fn(),
+    completeLogin: vi.fn(),
+    revokeLogin: vi.fn(),
+    authorizePrivateTarget: vi.fn(),
+    getCapabilityRequirement: vi.fn(),
+    installCapability: vi.fn(),
+    scanMigration: vi.fn(),
+    planMigration: vi.fn(),
+    applyMigration: vi.fn(),
+    getMigrationStatus: vi.fn(),
+    resumeMigration: vi.fn(),
+    listHistory: vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] }),
+    importedSources: [],
+    isConfirming: false,
+    requestPreview: vi.fn(),
+    requestClipboard: vi.fn(),
+    requestUrl: vi.fn(),
+    requestDeleteSource: vi.fn(),
+    requestReplaceSource: vi.fn(),
+    ...overrides,
+  };
+}
 
 beforeEach(async () => {
-  openDialog.mockReset();
-  useImportStore.getState().reset();
   await i18next.changeLanguage("en");
 });
 
-describe("ImportView native file selection", () => {
-  it("previews the files selected from the Local files card", async () => {
-    const onRequestPreview = vi.fn();
-    openDialog.mockResolvedValue(["D:\\资料\\论文.pdf", "C:\\Notes\\研究.docx"]);
+describe("ImportView V2 composition", () => {
+  it("renders a loading state without exposing legacy controls", () => {
+    render(<ImportView workflow={workflow({ bootstrapState: "loading", session: null })} />);
+    expect(screen.getByRole("status")).toHaveTextContent(/loading import workspace/i);
+    expect(screen.queryByRole("button", { name: /delete|replace source|legacy/i })).not.toBeInTheDocument();
+  });
 
-    render(
-      <ImportView
-        isConfirming={false}
-        onRequestPreview={onRequestPreview}
-        onRequestClipboard={vi.fn()}
-        onRequestUrl={vi.fn()}
-        importedSources={[]}
-        onDeleteSource={vi.fn()}
-        onReplaceSource={vi.fn()}
-        onConfirm={vi.fn()}
-      />,
-    );
+  it("composes methods, empty queue, and a disabled commit bar for an empty draft", () => {
+    render(<ImportView workflow={workflow()} />);
+    expect(screen.getByRole("region", { name: /import methods/i })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /import queue/i })).toHaveTextContent(/no sources/i);
+    expect(screen.getByRole("button", { name: /confirm import/i })).toBeDisabled();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Local files" }));
+  it("keeps mixed queue states actionable and selection keyboard accessible", () => {
+    const mixed = [item("研究笔记.md", "preview_ready", true), item("processing.pdf", "extracting"), item("failed.docx", "failed")];
+    const currentWorkflow = workflow({ session: session(mixed), visibleItems: mixed, counts: { all: 3, active: 1, ready: 1, needsAction: 1, failed: 1, completed: 0 }, progress: { completed: 0, total: 3, active: 1 } });
+    const view = render(<ImportView workflow={currentWorkflow} />);
+    expect(screen.getAllByText("研究笔记.md").length).toBeGreaterThan(0);
+    expect(screen.getByText(/needs review/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /confirm import/i })).toBeEnabled();
+    fireEvent.keyDown(view.getByTestId("import-item-研究笔记.md"), { key: "Enter" });
+    expect(currentWorkflow.selectItem).toHaveBeenCalledWith("研究笔记.md");
+    expect(screen.getByRole("region", { name: /import queue/i })).toHaveAttribute("aria-live", "polite");
+  });
 
-    await waitFor(() => {
-      expect(onRequestPreview).toHaveBeenCalledWith([
-        "D:\\资料\\论文.pdf",
-        "C:\\Notes\\研究.docx",
-      ]);
-    });
+  it("blocks import with a migration review notice and never offers a V1 switch", () => {
+    const readiness: ImportFrontendReadiness = { backendVersion: "2.0.0", active: false, migrationStatus: "awaiting_confirmation", unfinishedSessionId: null, legacyHistoryAvailable: true };
+    render(<ImportView workflow={workflow({ readiness, bootstrapState: "blocked", session: null })} />);
+    expect(screen.getAllByRole("alert")[0]).toHaveTextContent(/migration/i);
+    expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch to v1|legacy write/i })).not.toBeInTheDocument();
+  });
+
+  it("renders the same shell with Chinese copy", async () => {
+    await i18next.changeLanguage("zh-CN");
+    render(<ImportView workflow={workflow()} />);
+    expect(screen.getByRole("region", { name: /导入方式/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /确认导入/ })).toBeDisabled();
   });
 });

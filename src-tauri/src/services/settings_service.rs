@@ -4,6 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::errors::BackendError;
 use crate::models::agent::{AgentConfig, AgentKind};
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+use crate::models::import_v2_agent::AgentAssistancePolicy;
 use crate::models::paths::ProjectContext;
 use crate::models::settings::{
     ChatConvenienceAuthorization, CloseBehavior, GlobalSettingsFile, ProjectSettingsFile, Settings,
@@ -85,6 +86,50 @@ impl SettingsService {
         store.write_json_atomic(context, ".app/agent-config.json", &config)?;
         store.write_json_atomic(context, ".app/settings.json", &settings.to_project_file())?;
         Ok(config)
+    }
+
+    pub fn get_import_agent_policy(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<AgentAssistancePolicy, BackendError> {
+        Ok(self.read_settings(context)?.import_agent_policy)
+    }
+
+    pub fn set_import_agent_policy(
+        &self,
+        context: &ProjectContext,
+        policy: AgentAssistancePolicy,
+        local_agent_kind: Option<AgentKind>,
+    ) -> Result<AgentAssistancePolicy, BackendError> {
+        if policy.max_attempts_per_item == 0 || policy.max_attempts_per_item > 3 {
+            return Err(BackendError::new(
+                "IMPORT_AGENT_POLICY_INVALID",
+                "Agent assistance attempt budget must be between one and three.",
+                false,
+                true,
+            ));
+        }
+        if policy.auto_byok {
+            return Err(BackendError::new(
+                "IMPORT_AGENT_POLICY_INVALID",
+                "BYOK assistance always requires explicit per-send approval.",
+                false,
+                true,
+            ));
+        }
+        if policy.auto_local_on_quality_warning {
+            return Err(BackendError::new(
+                "IMPORT_AGENT_POLICY_INVALID",
+                "Low-quality optimization is manual-only and cannot be enabled as automation.",
+                false,
+                true,
+            ));
+        }
+        let mut settings = self.read_settings(context)?;
+        settings.import_agent_policy = policy.clone();
+        settings.agent_default = local_agent_kind;
+        self.save_settings(context, &settings)?;
+        Ok(policy)
     }
 
     pub fn list_providers(

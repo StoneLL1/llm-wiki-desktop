@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "packId": "media-runtime",
+  "version": "8.0.1",
+  "protocolVersion": "2",
+  "targetTriples": [],
+  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "licenseExpression": "LGPL-2.1-or-later",
+  "entrypoint": "runner/media-runtime-pack",
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "payloadStatus": "release_ci_required",
+  "buildProvenance": {
+    "configureFlags": ["--disable-gpl", "--disable-nonfree", "--enable-shared"],
+    "componentInventory": [
+      {"name": "FFmpeg", "version": "8.0.1", "license": "LGPL-2.1-or-later"},
+      {"name": "libavformat", "license": "LGPL-2.1-or-later"},
+      {"name": "libavcodec", "license": "LGPL-2.1-or-later"},
+      {"name": "libavutil", "license": "LGPL-2.1-or-later"},
+      {"name": "libswresample", "license": "LGPL-2.1-or-later"}
+    ],
+    "sourceRecipe": "Release CI fetches the signed ffmpeg-8.0.1 source archive, verifies its pinned digest, configures only the audited LGPL component inventory with the declared flags, builds shared libraries, emits SBOM/notices, and substitutes real hashes/sizes/signatures."
+  },
+  "execution": {"process": "independent", "shell": false, "protocol": "json-rpc-2.0-stdio", "stagingOnly": true},
+  "distributionNote": "This source manifest is intentionally not installable. Qualified release CI must publish separately signed Windows, macOS, and Linux payloads."
+}
