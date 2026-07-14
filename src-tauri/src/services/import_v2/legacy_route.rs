@@ -9,8 +9,8 @@ use crate::models::import_v2::{ImportInputKind, ImportItemStatus, ImportSession}
 
 /// Compatibility projection for the existing import surface. It is a view
 /// adapter only: it never writes legacy source indexes, raw files, or wiki
-/// pages. The activation-aware frontend can consume the existing table shape
-/// while commits continue through Import V2's typed session API.
+/// pages. Compatibility callers can consume the existing table shape while
+/// all staging and commits continue through Import V2's typed session API.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LegacyPreviewAdapter;
 

@@ -23,17 +23,20 @@ The machine-readable source of truth is `docs/import-v2-cutover-evidence.json`;
 4. Apply may write only `.app/source-index-v2.json` and
    `.app/import-v2-migration/report.json`, plus the shared Core journal while
    the transaction is in progress.
-5. Activation requires a fully passing readiness evidence set, a release-bound
-   confirmation token, and writes only `.app/import-v2-migration/activation.json`.
+5. Activation records release-readiness evidence and writes only
+   `.app/import-v2-migration/activation.json`; it is not required to create,
+   stage, preview, retry, cancel, or commit a new Import V2 session.
 6. `raw/`, `wiki/`, `.app/source-index.json`, old task logs, and old import
    history remain byte- and timestamp-preserved.
 7. Rollback means closing the new release and opening the prior release. The
-   prior release reads the preserved legacy state and ignores V2 metadata; no
-   V1/V2 dual-write toggle is supported.
+   prior release reads the preserved legacy state and ignores V2 metadata. The
+   current release has one import write path: the Import V2 session pipeline.
+   Legacy command names may remain as typed protocol compatibility, but they
+   route to V2 or fail closed and never perform legacy writes.
 
-## Soak window
+## Legacy compatibility
 
-The initial activation retains legacy mutation code and read-only history
-compatibility. Removal is a separate approved change after the soak window,
-with a new review and regenerated schemas. It is not part of initial apply or
-activation.
+Legacy source indexes, task logs, and import history remain read-only evidence
+for migration and rollback. Their absence or unreadability must not prevent a
+new V2 session on an otherwise valid project. No V1/V2 runtime switch or
+dual-write mode is exposed by the current release.

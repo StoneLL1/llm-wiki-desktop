@@ -1,5 +1,9 @@
 # 踩坑清单 (gotchas.txt)
 
+Migration readiness can fail on an old or partially written optional record and hide a valid new import session — the UI treated release activation evidence as a V2 write prerequisite — Treat migration readiness as advisory, preserve the evidence, and let project/session safety checks decide whether V2 can start.
+
+Legacy import command names can accidentally become a second writer when retained for protocol compatibility — the old facade selected V1 whenever activation was absent — Route every current preview/text/confirm entry point to V2 and make no-session legacy confirmation fail closed.
+
 Markdown local-image references can follow symlinks or Windows reparse points when copied with `Path::is_file`/`fs::copy` — staging code checked the main source identity but not referenced assets — Validate asset metadata with no-follow checks and canonical containment before copying, and add a regression test.
 
 Import V2 text staging canonicalized a new session input before the transaction created it — `Path::canonicalize` requires the destination to exist — Commit the guarded `write_new` transaction first, then derive the source identity from the created file.

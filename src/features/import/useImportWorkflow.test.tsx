@@ -250,6 +250,22 @@ describe("useImportWorkflow", () => {
     });
   });
 
+  it("keeps V2 usable when optional migration readiness cannot be read", async () => {
+    api.getReadiness.mockRejectedValue(new Error("MIGRATION_REPORT_INVALID: old metadata"));
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+    expect(result.current.session?.projectId).toBe(projectA.projectId);
+    expect(result.current.readiness).toBeNull();
+    expect(result.current.readinessWarning).toContain("MIGRATION_REPORT_INVALID");
+    expect(api.createSession).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      resourceMode: "balanced",
+    });
+  });
+
   it("ignores late project A readiness and session responses after switching to project B", async () => {
     let resolveA!: (value: ImportFrontendReadiness) => void;
     const readinessA = new Promise<ImportFrontendReadiness>((resolve) => { resolveA = resolve; });

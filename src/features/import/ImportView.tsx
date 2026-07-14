@@ -143,7 +143,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
 
   const privateItem = itemById(session?.items ?? [], privateItemId);
   const blocked = workflow.bootstrapState === "blocked" || workflow.bootstrapState === "error";
-  const writesBlocked = blocked || workflow.readiness?.active === false;
+  // Migration is read-only metadata reconciliation. All current imports use
+  // V2, so an inactive/unknown migration record must not disable V2 commits.
+  const writesBlocked = blocked;
 
   if (workflow.bootstrapState === "loading") {
     return <div className="import-v2-layout"><ImportV2Header session={null} /><div role="status" className="import-v2-state">{t("importV2.state.loading")}</div></div>;
@@ -153,9 +155,13 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     <div className="import-v2-layout">
       <ImportV2Header session={session} />
       <div className="import-v2-scroll app-pane-scrollbar">
-        <ImportMigrationNotice readiness={workflow.readiness} onOpenMigration={() => setMigrationOpen(true)} />
+        <ImportMigrationNotice readiness={workflow.readiness} unavailable={Boolean(workflow.readinessWarning)} onOpenMigration={() => setMigrationOpen(true)} />
         {blocked ? (
-          <div role="alert" className="import-v2-state import-v2-state--blocked">{workflow.bootstrapState === "error" ? t("importV2.state.error") : t("importV2.state.blocked")}</div>
+          <div role="alert" className="import-v2-state import-v2-state--blocked">
+            <strong>{workflow.bootstrapState === "error" ? t("importV2.state.error") : t("importV2.state.blocked")}</strong>
+            {workflow.bootstrapState === "error" && workflow.bootstrapError ? <p className="m-0 mt-2 text-[11px] text-[var(--text-secondary)]">{workflow.bootstrapError}</p> : null}
+            {workflow.bootstrapState === "error" && workflow.retryBootstrap ? <button type="button" className="btn btn--sm mt-3" onClick={workflow.retryBootstrap}>{t("importV2.state.retry")}</button> : null}
+          </div>
         ) : (
           <>
             <ImportSourceMethods onAddPaths={workflow.addPaths} onAddUrl={workflow.addUrl} />
