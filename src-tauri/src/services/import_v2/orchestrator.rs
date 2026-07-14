@@ -86,7 +86,21 @@ impl ImportV2Service {
             .collect::<Vec<_>>();
         ids.sort();
         for id in ids {
-            let session = self.load_session(context, files, &id)?;
+            let session = match self.load_session(context, files, &id) {
+                Ok(session) => session,
+                // A stale or partially written session is evidence to leave
+                // untouched, not a reason to make every new V2 import
+                // unavailable. Unsafe session roots still fail above.
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        crate::errors::IMPORT_V2_SESSION_INVALID
+                            | crate::errors::IMPORT_V2_SESSION_NOT_FOUND
+                            | "JSON_PARSE_FAILED"
+                            | "FILE_READ_FAILED"
+                    ) => continue,
+                Err(error) => return Err(error),
+            };
             if !matches!(session.status, ImportSessionStatus::Completed | ImportSessionStatus::Cancelled)
                 && !session.items.is_empty()
             {

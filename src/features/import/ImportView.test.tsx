@@ -109,12 +109,27 @@ describe("ImportView V2 composition", () => {
     expect(screen.getByRole("region", { name: /import queue/i })).toHaveAttribute("aria-live", "polite");
   });
 
-  it("blocks import with a migration review notice and never offers a V1 switch", () => {
+  it("shows migration review without blocking V2 and never offers a V1 switch", () => {
     const readiness: ImportFrontendReadiness = { backendVersion: "2.0.0", active: false, migrationStatus: "awaiting_confirmation", unfinishedSessionId: null, legacyHistoryAvailable: true };
     render(<ImportView workflow={workflow({ readiness, bootstrapState: "blocked", session: null })} />);
     expect(screen.getAllByRole("alert")[0]).toHaveTextContent(/migration/i);
     expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /switch to v1|legacy write/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the V2 commit action enabled when migration is not active", () => {
+    const ready = item("old-project.md", "preview_ready", true);
+    const readiness: ImportFrontendReadiness = { backendVersion: "2.0.0", active: false, migrationStatus: "not_scanned", unfinishedSessionId: null, legacyHistoryAvailable: true };
+    const currentWorkflow = workflow({
+      readiness,
+      session: session([ready]),
+      visibleItems: [ready],
+      counts: { all: 1, active: 0, ready: 1, needsAction: 0, failed: 0, completed: 0 },
+      progress: { completed: 0, total: 1, active: 0 },
+    });
+    render(<ImportView workflow={currentWorkflow} />);
+
+    expect(screen.getByRole("button", { name: /confirm import/i })).toBeEnabled();
   });
 
   it("renders the same shell with Chinese copy", async () => {

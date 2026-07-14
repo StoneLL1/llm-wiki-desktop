@@ -11,7 +11,7 @@ use crate::errors::BackendError;
 use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
 };
-use crate::models::import::{ConfirmedImport, ImportPreview, ImportRequest};
+use crate::models::import::{ConfirmedImport, ImportPreview};
 use crate::models::import_v2::{
     CommitImportSessionRequest, CommitItemDecision, ImportInput, ImportInputKind,
     ImportResourceMode,
@@ -21,7 +21,6 @@ use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStat
 use crate::services::import_v2::activation::ImportV2ActivationService;
 use crate::services::import_v2::legacy_route::LegacyPreviewAdapter;
 use crate::services::import_v2::file_discovery::{new_import_inputs, FileDiscoveryService};
-use crate::tasks::task_model::LogLevel;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -310,131 +309,7 @@ pub fn preview_import(
     request: ImportPreviewRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    if ImportV2ActivationService::is_active(&context)? {
-        return preview_import_v2(app, state, request, context);
-    }
-    ImportV2ActivationService::legacy_mutation_guard(&context)?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::Import,
-            request.project_id.clone(),
-            context.root.clone(),
-            "Preview imported sources".to_string(),
-            true,
-        )
-        .map_err(task_error)?;
-    let task_id = task.id.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        if let Err(error) = run_import_preview(&state, request, &context, &task_id) {
-            let _ = state
-                .task_service
-                .append_log(&task_id, LogLevel::Error, error.message.clone());
-            let _ = state.task_service.set_error(&task_id, error);
-            if !matches!(
-                state
-                    .task_service
-                    .get_task(&task_id)
-                    .map(|task| task.status),
-                Some(TaskStatus::Cancelled)
-            ) {
-                let _ = state
-                    .task_service
-                    .transition_status(&task_id, TaskStatus::Failed);
-            }
-        }
-    });
-    Ok(task)
-}
-
-fn run_import_preview(
-    state: &AppState,
-    request: ImportPreviewRequest,
-    context: &ProjectContext,
-    task_id: &str,
-) -> Result<(), BackendError> {
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    ImportV2ActivationService::legacy_mutation_guard(context)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Running)
-        .map_err(task_error)?;
-    let paths = state
-        .import_service
-        .collect_source_paths(&request.source_paths)?;
-    let total = paths.len() as u64;
-    let output_dir = context.raw_dir.join("extracted");
-    let mut extraction_results = Vec::with_capacity(paths.len());
-    for (index, path) in paths.iter().enumerate() {
-        if state.task_service.is_cancelled(task_id) {
-            return Err(BackendError::new(
-                "IMPORT_PREVIEW_CANCELLED",
-                "Import preview was cancelled.",
-                true,
-                false,
-            ));
-        }
-        state
-            .task_service
-            .update_progress(
-                task_id,
-                index as u64,
-                Some(total),
-                Some(format!("Extracting {}", path.to_string_lossy())),
-            )
-            .map_err(task_error)?;
-        let source = path.to_string_lossy().into_owned();
-        extraction_results.extend(state.extraction_service.extract_batch(
-            context,
-            &state.file_store,
-            std::slice::from_ref(&source),
-            &output_dir,
-        ));
-    }
-    let import_request = ImportRequest {
-        source_paths: request.source_paths,
-        allow_duplicates: request.allow_duplicates,
-        link_duplicates: request.link_duplicates,
-    };
-    let preview = state.import_service.preview_import(
-        context,
-        &state.file_store,
-        &import_request,
-        &extraction_results,
-    )?;
-    let preview_dir = ".app/import-previews";
-    let preview_path = format!("{preview_dir}/{task_id}.json");
-    state.file_store.ensure_dir(context, preview_dir)?;
-    state
-        .file_store
-        .write_json_atomic(context, &preview_path, &preview)?;
-    state
-        .task_service
-        .update_progress(
-            task_id,
-            total,
-            Some(total),
-            Some("Preview ready".to_string()),
-        )
-        .map_err(task_error)?;
-    state
-        .task_service
-        .set_result(
-            task_id,
-            TaskResult {
-                summary: format!("Previewed {} source files.", preview.summary.total_files),
-                affected_paths: vec![preview_path],
-                reference: None,
-                pending_action: None,
-            },
-        )
-        .map_err(task_error)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Succeeded)
-        .map_err(task_error)?;
-    Ok(())
+    preview_import_v2(app, state, request, context)
 }
 
 #[tauri::command]
@@ -793,47 +668,7 @@ pub fn preview_text_import(
     request: PreviewTextImportRequest,
 ) -> Result<ImportPreview, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    if ImportV2ActivationService::is_active(&context)? {
-        return preview_text_import_v2(&state, &request, &context);
-    }
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    ImportV2ActivationService::legacy_mutation_guard(&context)?;
-    let extension = match request.kind {
-        StagedImportKind::Clipboard => "md",
-        StagedImportKind::Url => "url",
-    };
-    let staged = state.import_service.stage_text_source(
-        &context,
-        &state.file_store,
-        &request.source_name,
-        extension,
-        &request.content,
-    )?;
-    let source_path = staged.to_string_lossy().into_owned();
-    let output_dir = context.raw_dir.join("extracted");
-    let extraction = state.extraction_service.extract_batch(
-        &context,
-        &state.file_store,
-        std::slice::from_ref(&source_path),
-        &output_dir,
-    );
-    let mut preview = state.import_service.preview_import(
-        &context,
-        &state.file_store,
-        &ImportRequest {
-            source_paths: vec![source_path],
-            allow_duplicates: false,
-            link_duplicates: false,
-        },
-        &extraction,
-    )?;
-    if let Some(entry) = preview.files.first_mut() {
-        if let Some(metadata) = entry.metadata.as_mut() {
-            metadata.title = request.title;
-            metadata.author = request.author;
-        }
-    }
-    Ok(preview)
+    preview_text_import_v2(&state, &request, &context)
 }
 
 #[tauri::command]
@@ -951,42 +786,14 @@ pub fn confirm_import_preview(
 ) -> Result<ConfirmedImport, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     if let Some(session_id) = request.v2_session_id.as_deref() {
-        if !ImportV2ActivationService::is_active(&context)? {
-            return Err(BackendError::new(
-                "IMPORT_V2_NOT_ACTIVE",
-                "Import V2 session commits require an active V2 cutover.",
-                true,
-                true,
-            ));
-        }
         return confirm_import_v2(&state, &request, &context, session_id);
     }
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    ImportV2ActivationService::legacy_mutation_guard(&context)?;
-
-    state
-        .import_service
-        .confirm_import(&context, &state.file_store, &request.preview)?;
-
-    state
-        .file_store
-        .write_json_atomic(&context, ".app/import-conflicts.json", &request.preview)
-        .map_err(|err| {
-            BackendError::new("IMPORT_CONFLICT_WRITE_FAILED", err.message, true, false)
-        })?;
-
-    let checkpoint_hash = if request.create_checkpoint {
-        state.create_import_checkpoint(&context, &request.preview)?
-    } else {
-        None
-    };
-
-    let confirmed_at = chrono::Utc::now().to_rfc3339();
-    Ok(ConfirmedImport {
-        preview: request.preview,
-        confirmed_at,
-        checkpoint_hash,
-    })
+    Err(BackendError::new(
+        "IMPORT_V2_REQUIRED",
+        "Import confirmation requires an Import V2 session.",
+        false,
+        true,
+    ))
 }
 
 #[tauri::command]
@@ -995,15 +802,13 @@ pub fn extract_text_preview(
     state: State<'_, AppState>,
     request: ExtractTextRequest,
 ) -> Result<crate::models::import::ExtractResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    ImportV2ActivationService::legacy_mutation_guard(&context)?;
-
-    let output_dir = context.raw_dir.join("extracted");
-    let path = PathBuf::from(&request.source_path);
-    state
-        .extraction_service
-        .extract_text(&context, &state.file_store, &path, &output_dir)
+    let _ = (state, request);
+    Err(BackendError::new(
+        "IMPORT_V2_REQUIRED",
+        "Text extraction is owned by the Import V2 session pipeline.",
+        false,
+        true,
+    ))
 }
 
 #[tauri::command]

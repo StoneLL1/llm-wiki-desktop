@@ -122,7 +122,7 @@ describe("Import V2 end-to-end presentation boundary", () => {
     expect(screen.getByRole("region", { name: /import queue/i })).toHaveAttribute("aria-live", "polite");
   });
 
-  it("keeps import entry points available while migration activation is pending", () => {
+  it("keeps V2 entry points available while migration activation is pending", () => {
     const workflow = makeWorkflow([]);
     workflow.bootstrapState = "ready";
     workflow.readiness = { backendVersion: "2.0.0", active: false, migrationStatus: "awaiting_confirmation", unfinishedSessionId: null, legacyHistoryAvailable: true };

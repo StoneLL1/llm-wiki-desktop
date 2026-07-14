@@ -1,5 +1,9 @@
 # 进度记录 (progress.txt)
 
+[2026-07-14] Import V2 gate removal review complete — Two independent reviews found the unified V2 path consistent with typed IPC, immutable legacy evidence, project-scoped safety, and Agent/BYOK credential rules; final npm check passed — Remaining release evidence is platform/external-capability certification, not a runtime import prerequisite.
+
+[2026-07-14] Import V2 unified write path — Current import bootstrap treats migration metadata as advisory, skips stale safe session evidence, and uses V2 as the sole import writer — Activation remains release evidence and is not a user import gate.
+
 [2026-07-14] Import V2 final integration — Merged `codex/import-v2-frontend` into `codex/import-v2-final-integration`, preserved master shell/theme/document history, and resolved the two-file merge conflict without broad ours/theirs replacement — Key decision: keep V2 as the only active staging/commit path; final GUI, signed capability, platform, Agent, BYOK, and migration-token gates remain release-environment work.
 
 [2026-07-14] Import V2 review fixes — Closed review findings for fail-closed connector presentation, text staging order, Markdown image symlink containment, and local Agent credential environment isolation — Key decision: capability readiness must be explicit and host API-key environment variables are never inherited by Agent subprocesses.

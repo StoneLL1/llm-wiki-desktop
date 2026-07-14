@@ -10,7 +10,7 @@ beforeEach(async () => {
 });
 
 describe("ImportMigrationNotice", () => {
-  it("blocks the import entry until backend readiness is active and offers migration review", () => {
+  it("shows migration review without blocking the V2 import entry", () => {
     const readiness: ImportFrontendReadiness = {
       backendVersion: "2.0.0",
       active: false,
@@ -21,9 +21,16 @@ describe("ImportMigrationNotice", () => {
     const onOpenMigration = vi.fn();
     render(<ImportMigrationNotice readiness={readiness} onOpenMigration={onOpenMigration} />);
 
-    expect(screen.getByRole("alert")).toHaveTextContent(/migration.*confirmation/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/migration status/i);
     fireEvent.click(screen.getByRole("button", { name: /review migration/i }));
     expect(onOpenMigration).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains when migration metadata is unavailable without hiding V2", () => {
+    render(<ImportMigrationNotice readiness={null} unavailable onOpenMigration={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/migration status is unavailable/i);
+    expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
   });
 
   it("does not show an emergency V1 switch after activation", () => {

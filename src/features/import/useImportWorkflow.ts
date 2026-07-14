@@ -36,6 +36,11 @@ export type ImportBootstrapState = "loading" | "ready" | "blocked" | "error";
 export interface ImportWorkflow {
   session: ImportSession | null;
   readiness: ImportFrontendReadiness | null;
+  /** Readiness is advisory; a warning must not prevent V2 staging. */
+  readinessWarning?: string | null;
+  /** Only session/project bootstrap failures block the import surface. */
+  bootstrapError?: string | null;
+  retryBootstrap?: () => void;
   bootstrapState: ImportBootstrapState;
   visibleItems: ImportItem[];
   counts: ImportQueueCounts;
@@ -105,7 +110,10 @@ const hasTauri = (): boolean =>
 function errorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = (error as { message: unknown }).message;
-    if (typeof message === "string") return message;
+    if (typeof message === "string") {
+      const code = "code" in error ? (error as { code: unknown }).code : null;
+      return typeof code === "string" && code.length > 0 ? `${code}: ${message}` : message;
+    }
   }
   return String(error);
 }
@@ -126,7 +134,10 @@ export function useImportWorkflow(
   const latestProjectKey = useRef(projectKey);
   latestProjectKey.current = projectKey;
   const [readiness, setReadiness] = useState<ImportFrontendReadiness | null>(null);
+  const [readinessWarning, setReadinessWarning] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [bootstrapState, setBootstrapState] = useState<ImportBootstrapState>("loading");
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const session = useImportStore((state) => state.session);
   const selectedItemId = useImportStore((state) => state.selectedItemId);
   const filter = useImportStore((state) => state.filter);
@@ -137,6 +148,7 @@ export function useImportWorkflow(
   const pushToast = useToastStore((state) => state.pushToast);
   const pendingPathTasks = useRef(new Map<string, { projectKey: string; epoch: number; existingItemIds: ReadonlySet<string> }>());
   const refreshInFlight = useRef<Promise<void> | null>(null);
+  const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), []);
 
   const isScopeCurrent = useCallback(
     (requestKey: string, epoch: number) =>
@@ -218,6 +230,8 @@ export function useImportWorkflow(
     store.setImportedSources([]);
     const epoch = store.beginSessionEpoch(projectKey);
     setReadiness(null);
+    setReadinessWarning(null);
+    setBootstrapError(null);
     setBootstrapState("loading");
     pendingPathTasks.current.clear();
     if (activeView !== "import" || !projectId) {
@@ -231,17 +245,40 @@ export function useImportWorkflow(
     let cancelled = false;
     void (async () => {
       try {
-        const nextReadiness = await importV2Api.getReadiness({ projectId, projectRootPath: rootPath });
+        // Migration and activation metadata describe project history. They are
+        // not a prerequisite for creating a new V2 session. Older projects can
+        // have no report yet, and a damaged optional report must not hide the
+        // current V2 import path.
+        let nextReadiness: ImportFrontendReadiness | null = null;
+        try {
+          nextReadiness = await importV2Api.getReadiness({ projectId, projectRootPath: rootPath });
+        } catch (error) {
+          if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
+          setReadinessWarning(errorMessage(error));
+        }
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
         setReadiness(nextReadiness);
-        const nextSession = nextReadiness.unfinishedSessionId
-          ? await importV2Api.getSession({ projectId, projectRootPath: rootPath, sessionId: nextReadiness.unfinishedSessionId })
-          : await importV2Api.createSession({ projectId, projectRootPath: rootPath, resourceMode: "balanced" });
+
+        let nextSession: ImportSession;
+        if (nextReadiness?.unfinishedSessionId) {
+          try {
+            nextSession = await importV2Api.getSession({ projectId, projectRootPath: rootPath, sessionId: nextReadiness.unfinishedSessionId });
+          } catch (error) {
+            // A stale/corrupt unfinished record must not prevent a fresh V2
+            // session. The old record remains untouched for later inspection.
+            if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
+            setReadinessWarning(errorMessage(error));
+            nextSession = await importV2Api.createSession({ projectId, projectRootPath: rootPath, resourceMode: "balanced" });
+          }
+        } else {
+          nextSession = await importV2Api.createSession({ projectId, projectRootPath: rootPath, resourceMode: "balanced" });
+        }
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
         store.attachSession(projectKey, nextSession, epoch);
         setBootstrapState("ready");
       } catch (error) {
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
+        setBootstrapError(errorMessage(error));
         setBootstrapState("error");
         pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
       }
@@ -249,7 +286,7 @@ export function useImportWorkflow(
     return () => {
       cancelled = true;
     };
-  }, [activeView, isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+  }, [activeView, bootstrapAttempt, isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
 
   const addPaths = useCallback(async (paths: string[]) => {
     const sourcePaths = paths.map((path) => path.trim()).filter(Boolean);
@@ -679,6 +716,9 @@ export function useImportWorkflow(
   return {
     session,
     readiness,
+    readinessWarning,
+    bootstrapError,
+    retryBootstrap,
     bootstrapState,
     visibleItems,
     counts,
