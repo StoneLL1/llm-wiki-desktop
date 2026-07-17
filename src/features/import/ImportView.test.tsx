@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
 import type { ImportItem, ImportSession } from "../../types/importV2";
+import type { AgentCandidateView } from "../../types/importV2Agent";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
 import type { ImportWorkflow } from "./useImportWorkflow";
-import { ImportView } from "./ImportView";
+import { buildCandidateSelectionRequest, ImportView } from "./ImportView";
+import type { ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
 
 function item(itemId: string, status: ImportItem["status"], selected = false): ImportItem {
   return {
@@ -42,12 +44,15 @@ function workflow(overrides: Partial<ImportWorkflow> = {}): ImportWorkflow {
     startItems: vi.fn(),
     retryItem: vi.fn(),
     cancelItem: vi.fn(),
+    skipItem: vi.fn(),
+    authorizeLocalAsr: vi.fn(),
     confirm: vi.fn(),
     confirmLegacy: vi.fn(),
     refreshSession: vi.fn(),
     selectItem: vi.fn(),
     setFilter: vi.fn(),
     loadPreview: vi.fn(),
+    loadSession: vi.fn(),
     getAgentPolicy: vi.fn().mockResolvedValue(null),
     setAgentPolicy: vi.fn(),
     invokeLocalAgent: vi.fn(),
@@ -84,6 +89,55 @@ beforeEach(async () => {
 });
 
 describe("ImportView V2 composition", () => {
+  it("binds a three-way merge selection to the Wiki version shown in the diff", () => {
+    const view = {
+      projectId: "project-a",
+      sessionId: "session-a",
+      itemId: "item-a",
+      candidate: { candidateId: "candidate-a" },
+      diff: {
+        candidateId: "candidate-a",
+        baselineMarkdown: "# Baseline",
+        currentMarkdown: "# Current",
+        currentMarkdownSha256: "current-hash",
+        agentMarkdown: "# Agent",
+        unifiedDiff: "@@",
+        needsThreeWayMerge: true,
+      },
+    } as unknown as AgentCandidateView;
+    const intent: ImportCandidateDiffIntent = { kind: "apply_merged", candidateId: "candidate-a", mergedMarkdown: "# Human merged" };
+
+    expect(buildCandidateSelectionRequest(view, intent)).toEqual({
+      itemId: "item-a",
+      candidateId: "candidate-a",
+      mergedMarkdown: "# Human merged",
+      expectedCurrentWikiSha256: "current-hash",
+    });
+  });
+
+  it("does not send merge-only fields for a clean Agent candidate", () => {
+    const view = {
+      itemId: "item-a",
+      candidate: { candidateId: "candidate-a" },
+      diff: {
+        candidateId: "candidate-a",
+        baselineMarkdown: "# Baseline",
+        currentMarkdown: null,
+        currentMarkdownSha256: null,
+        agentMarkdown: "# Agent",
+        unifiedDiff: "@@",
+        needsThreeWayMerge: false,
+      },
+    } as unknown as AgentCandidateView;
+
+    expect(buildCandidateSelectionRequest(view, { kind: "choose_agent", candidateId: "candidate-a" })).toEqual({
+      itemId: "item-a",
+      candidateId: "candidate-a",
+      mergedMarkdown: null,
+      expectedCurrentWikiSha256: null,
+    });
+  });
+
   it("renders a loading state without exposing legacy controls", () => {
     render(<ImportView workflow={workflow({ bootstrapState: "loading", session: null })} />);
     expect(screen.getByRole("status")).toHaveTextContent(/loading import workspace/i);
@@ -106,7 +160,7 @@ describe("ImportView V2 composition", () => {
     expect(screen.getByRole("button", { name: /confirm import/i })).toBeEnabled();
     fireEvent.keyDown(view.getByTestId("import-item-研究笔记.md"), { key: "Enter" });
     expect(currentWorkflow.selectItem).toHaveBeenCalledWith("研究笔记.md");
-    expect(screen.getByRole("region", { name: /import queue/i })).toHaveAttribute("aria-live", "polite");
+    expect(screen.getAllByRole("status").some((element) => /0\/3 processed/i.test(element.textContent ?? ""))).toBe(true);
   });
 
   it("shows migration review without blocking V2 and never offers a V1 switch", () => {

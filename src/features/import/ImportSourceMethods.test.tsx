@@ -35,7 +35,7 @@ describe("ImportSourceMethods", () => {
     const onAddPaths = vi.fn();
     render(<ImportSourceMethods onAddPaths={onAddPaths} onAddUrl={vi.fn()} />);
 
-    fireEvent.drop(screen.getByRole("button", { name: /drop files or folders/i }), {
+    fireEvent.drop(screen.getByRole("region", { name: /drop files or folders/i }), {
       dataTransfer: { files: [], items: [] },
     });
 
@@ -68,10 +68,50 @@ describe("ImportSourceMethods", () => {
     expect(input).toHaveValue("https://example.com/retry");
   });
 
+  it("shows localized validation for malformed public URLs", () => {
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} />);
+    const input = screen.getByRole("textbox", { name: "URL" });
+    fireEvent.change(input, { target: { value: "not-a-url" } });
+
+    expect(screen.getByText(/enter a public http or https url/i)).toBeInTheDocument();
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: "Add URL" })).toBeDisabled();
+  });
+
+  it("locks file entry points while a discovery task is running", () => {
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} addingPaths />);
+
+    expect(screen.getByRole("button", { name: /choose files/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /choose folder/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /choose files/i })).toBeDisabled();
+    expect(screen.getAllByText(/adding/i).length).toBeGreaterThan(0);
+  });
+
+  it("locks URL entry while another source addition is in flight", () => {
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} addingUrl />);
+
+    expect(screen.getByRole("textbox", { name: "URL" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add URL" })).toBeDisabled();
+  });
+
   it("marks phase-two connectors as unavailable", () => {
     render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} />);
 
     expect(screen.getByLabelText("HTTP: available")).toBeInTheDocument();
+    expect(screen.getByLabelText("WeChat: available")).toBeInTheDocument();
     expect(screen.getByLabelText("Xiaohongshu: unavailable")).toBeInTheDocument();
+  });
+
+  it("explains a capability-gated platform without blocking other sources", () => {
+    render(
+      <ImportSourceMethods
+        onAddPaths={vi.fn()}
+        onAddUrl={vi.fn()}
+        platforms={[{ label: "Zhihu", available: false, reasonCode: "capability_missing" }]}
+      />,
+    );
+
+    expect(screen.getByTitle(/install the required capability pack/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose files" })).toBeEnabled();
   });
 });

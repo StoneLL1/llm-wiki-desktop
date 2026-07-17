@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
 import type { ImportItem } from "../../types/importV2";
+import type { BackendTask } from "../../types/task";
 import { ImportQueue } from "./ImportQueue";
 
 function item(itemId: string, status: ImportItem["status"], selected = false): ImportItem {
@@ -53,7 +54,7 @@ describe("ImportQueue", () => {
     );
 
     expect(screen.getByText("3 items")).toBeInTheDocument();
-    expect(screen.getByText("33% complete")).toBeInTheDocument();
+    expect(screen.getByText("1/3 processed · 33%")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /ready 1/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /failed 1/i }));
     expect(onFilterChange).toHaveBeenCalledWith("failed");
@@ -61,7 +62,43 @@ describe("ImportQueue", () => {
     expect(screen.getByTestId("import-item-failed")).toBeInTheDocument();
   });
 
-  it("selects rows and only exposes checkboxes for preview-ready or merge items", () => {
+  it("shows discovery progress instead of an empty 0/0 session progress", () => {
+    const discoveryTask: BackendTask = {
+      id: "scan-task",
+      taskType: "import",
+      projectId: "project-a",
+      title: "Scan sources",
+      status: "running",
+      progress: { current: 12, total: null, label: "Discovering files" },
+      startedAt: "2026-07-15T00:00:00Z",
+      updatedAt: "2026-07-15T00:00:01Z",
+      completedAt: null,
+      cancellable: true,
+      logPath: null,
+      result: null,
+      error: null,
+    };
+    render(
+      <ImportQueue
+        items={[]}
+        counts={{ all: 0, active: 0, ready: 0, needsAction: 0, failed: 0, completed: 0 }}
+        progress={{ completed: 0, total: 0, active: 0 }}
+        discoveryTask={discoveryTask}
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={vi.fn()}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/scanning.*12 discovered/i)).toBeInTheDocument();
+    expect(screen.getByText(/building the queue/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /choose files/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/0\/0 processed/i)).not.toBeInTheDocument();
+  });
+
+  it("selects rows and keeps unresolved merge items out of commit selection", () => {
     const onSelectItem = vi.fn();
     const onSetItemSelected = vi.fn();
     render(
@@ -81,11 +118,32 @@ describe("ImportQueue", () => {
     fireEvent.click(screen.getByTestId("import-item-ready"));
     expect(onSelectItem).toHaveBeenCalledWith("ready");
     expect(screen.getByRole("checkbox", { name: "Select ready.md" })).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Select merge.md" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Select merge.md" })).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Select running.md" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Select ready.md" }));
     expect(onSetItemSelected).toHaveBeenCalledWith("ready", true);
+  });
+
+  it("does not let row keyboard handling steal checkbox or action keys", () => {
+    const onSelectItem = vi.fn();
+    render(
+      <ImportQueue
+        items={[item("ready", "preview_ready"), item("failed", "failed")]}
+        counts={{ all: 2, active: 0, ready: 1, needsAction: 0, failed: 1, completed: 0 }}
+        progress={{ completed: 0, total: 2, active: 0 }}
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={onSelectItem}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+      />,
+    );
+
+    fireEvent.keyDown(screen.getByRole("checkbox", { name: "Select ready.md" }), { key: " " });
+    fireEvent.keyDown(screen.getByRole("button", { name: /Retry failed/ }), { key: "Enter" });
+    expect(onSelectItem).not.toHaveBeenCalled();
   });
 
   it("routes row actions without calling backend code from the component", () => {
@@ -106,5 +164,47 @@ describe("ImportQueue", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Retry failed/ }));
     expect(onAction).toHaveBeenCalledWith("retry", "failed");
+  });
+
+  it("offers a keyboard-accessible copy action for long source locators", () => {
+    const onCopyLocator = vi.fn();
+    render(
+      <ImportQueue
+        items={[item("very-long-source-name", "failed")]}
+        counts={{ all: 1, active: 0, ready: 0, needsAction: 0, failed: 1, completed: 0 }}
+        progress={{ completed: 0, total: 1, active: 0 }}
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={vi.fn()}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+        onCopyLocator={onCopyLocator}
+      />,
+    );
+
+    const copy = screen.getByRole("button", { name: "Copy path for very-long-source-name.md" });
+    expect(copy).toHaveAttribute("title", "C:\\sources\\very-long-source-name.md");
+    fireEvent.click(copy);
+    expect(onCopyLocator).toHaveBeenCalledWith("C:\\sources\\very-long-source-name.md");
+  });
+
+  it("labels the short interval between task completion and session refresh", () => {
+    render(
+      <ImportQueue
+        items={[item("syncing", "extracting")]}
+        counts={{ all: 1, active: 1, ready: 0, needsAction: 0, failed: 0, completed: 0 }}
+        progress={{ completed: 0, total: 1, active: 1 }}
+        sessionSyncing
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={vi.fn()}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Updating queue…")).toBeInTheDocument();
   });
 });

@@ -10,6 +10,8 @@ import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
 import type { BackendTask } from "../../types/task";
 import type { ImportHistoryPage } from "../../types/importV2Presentation";
 import type { LegacyInventory, MigrationConfirmation, MigrationPlan } from "../../types/importV2Migration";
+import type { AppView } from "../../stores/navigationStore";
+import { notifyTaskEventListeners } from "../../hooks/useTaskEvents";
 
 const api = vi.hoisted(() => ({
   getReadiness: vi.fn(),
@@ -20,6 +22,8 @@ const api = vi.hoisted(() => ({
   addUrl: vi.fn(),
   setSelection: vi.fn(),
   startItems: vi.fn(),
+  cancelBatch: vi.fn(),
+  skipItem: vi.fn(),
   confirmSession: vi.fn(),
   getAgentPolicy: vi.fn(),
   setAgentPolicy: vi.fn(),
@@ -42,8 +46,10 @@ const api = vi.hoisted(() => ({
   resumeMigration: vi.fn(),
   listHistory: vi.fn(),
 }));
+const tauriInvoke = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/importV2Api", () => ({ importV2Api: api }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriInvoke }));
 
 import { useImportWorkflow } from "./useImportWorkflow";
 
@@ -123,12 +129,13 @@ function launcher(): TaskLauncher {
     startCompile: vi.fn(),
     startDeepLint: vi.fn(),
     startExport: vi.fn(),
-    cancel: vi.fn().mockResolvedValue(undefined),
+    cancel: vi.fn().mockResolvedValue(true),
   };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  tauriInvoke.mockResolvedValue([]);
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   useImportStore.getState().reset();
   useTaskStore.setState({ tasks: [], logs: {}, drawerOpen: false, selectedTaskId: null, runningCount: 0 });
@@ -140,6 +147,8 @@ beforeEach(() => {
   api.addUrl.mockResolvedValue(session(projectA.projectId, [item("url-1")]));
   api.setSelection.mockResolvedValue(session(projectA.projectId, [item("file.md", "preview_ready")]));
   api.startItems.mockResolvedValue([]);
+  api.cancelBatch.mockResolvedValue([]);
+  api.skipItem.mockResolvedValue(session(projectA.projectId));
   api.confirmSession.mockResolvedValue(task("confirm"));
   api.getAgentPolicy.mockResolvedValue({
     autoLocalOnHardFailure: false,
@@ -219,6 +228,26 @@ describe("useImportWorkflow", () => {
       resourceMode: "balanced",
     });
     expect(result.current.session?.sessionId).toBe("session-project-a");
+  });
+
+  it("keeps the session and batch context when the user visits another workspace view", async () => {
+    const queued = item("queued.md");
+    const started = task("queued-task");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [queued]));
+    api.startItems.mockResolvedValue([started]);
+    const { result, rerender } = renderHook(({ activeView }: { activeView: AppView }) => useImportWorkflow(projectA, activeView, launcher()), {
+      initialProps: { activeView: "import" as AppView },
+    });
+
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+    await act(async () => result.current.startItems(["queued.md"]));
+    expect(result.current.batch).toMatchObject({ total: 1, active: 1, tasks: [{ id: "queued-task" }] });
+
+    rerender({ activeView: "wiki" });
+    expect(result.current.session?.sessionId).toBe(`session-${projectA.projectId}`);
+    expect(result.current.batch).toMatchObject({ total: 1, active: 1 });
+    rerender({ activeView: "import" });
+    expect(api.createSession).toHaveBeenCalledTimes(1);
   });
 
   it("recovers the unfinished session without creating a competing draft", async () => {
@@ -308,6 +337,356 @@ describe("useImportWorkflow", () => {
     expect(useTaskStore.getState().tasks).toContainEqual(started);
   });
 
+  it("keeps the source entry busy through discovery and surfaces task progress", async () => {
+    const scanTask = task("scan-task");
+    api.addPaths.mockResolvedValue(scanTask);
+    const taskLauncher = launcher();
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", taskLauncher));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    await act(async () => result.current.addPaths(["D:\\知识库\\资料"]));
+    expect(result.current.isAddingPaths).toBe(true);
+    expect(result.current.discoveryTask?.id).toBe("scan-task");
+
+    const progressTask = { ...scanTask, status: "running" as const, progress: { current: 12, total: null, label: "Discovering files" } };
+    useTaskStore.getState().upsertTask(progressTask);
+    await act(async () => notifyTaskEventListeners({
+      eventId: "scan-progress",
+      eventType: "task_updated",
+      projectId: projectA.projectId,
+      taskId: scanTask.id,
+      timestamp: "2026-07-14T00:00:00Z",
+      payload: progressTask,
+    }));
+    expect(result.current.discoveryTask?.progress?.current).toBe(12);
+
+    const completedTask = {
+      ...progressTask,
+      status: "succeeded" as const,
+      result: { summary: "Added 12 files; skipped 2.", affectedPaths: ["scan.json"] },
+    };
+    useTaskStore.getState().upsertTask(completedTask);
+    await act(async () => notifyTaskEventListeners({
+      eventId: "scan-completed",
+      eventType: "task_completed",
+      projectId: projectA.projectId,
+      taskId: scanTask.id,
+      timestamp: "2026-07-14T00:00:01Z",
+      payload: completedTask,
+    }));
+    await waitFor(() => expect(result.current.isAddingPaths).toBe(false));
+    expect(result.current.discoveryTask?.result?.summary).toContain("Added 12 files");
+  });
+
+  it("adds a selected Markdown file when the terminal task snapshot arrives without an event", async () => {
+    const scanQueued = task("markdown-scan");
+    const scanSucceeded = {
+      ...scanQueued,
+      status: "succeeded" as const,
+      result: { summary: "Added 1 file; skipped 0.", affectedPaths: ["scan.json"] },
+    };
+    let listTasksCalls = 0;
+    tauriInvoke.mockImplementation(async (command: string) => {
+      if (command !== "list_tasks") return [];
+      listTasksCalls += 1;
+      return [listTasksCalls === 1 ? scanQueued : scanSucceeded];
+    });
+    api.addPaths.mockResolvedValue(scanQueued);
+    api.getSession.mockResolvedValue(session(projectA.projectId, [item("notes.md")]));
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    await act(async () => result.current.addPaths(["D:\\sources\\notes.md"]));
+
+    await waitFor(() => expect(result.current.session?.items.map((entry) => entry.input.displayName)).toEqual(["notes.md"]), { timeout: 2_000 });
+    expect(listTasksCalls).toBeGreaterThanOrEqual(2);
+    expect(api.startItems).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      sessionId: "session-project-a",
+      itemIds: ["notes.md"],
+    });
+  });
+
+  it("does not merge an individual retry into a previously active batch", async () => {
+    const first = item("first.md");
+    const second = item("second.md");
+    const firstTask = task("first-task");
+    const secondTask = task("second-task");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [first, second]));
+    api.startItems.mockResolvedValueOnce([firstTask]).mockResolvedValueOnce([secondTask]);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(2));
+
+    await act(async () => result.current.startItems(["first.md"]));
+    await act(async () => result.current.startItems(["second.md"]));
+    expect(result.current.batches?.map((batch) => batch.tasks[0]?.id)).toEqual(["first-task", "second-task"]);
+  });
+
+  it("keeps parallel backend batches independent and cancels only the requested batch", async () => {
+    const first = item("first.md");
+    const second = item("second.md");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [first, second]));
+    api.startItems
+      .mockResolvedValueOnce([{ ...task("first-task"), batchId: "batch-a" }])
+      .mockResolvedValueOnce([{ ...task("second-task"), batchId: "batch-b" }]);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(2));
+
+    await act(async () => result.current.startItems(["first.md"]));
+    await act(async () => result.current.startItems(["second.md"]));
+
+    expect(result.current.batches?.map((batch) => batch.id)).toEqual(["batch-a", "batch-b"]);
+    await act(async () => result.current.cancelBatch?.("batch-a"));
+    expect(api.cancelBatch).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      sessionId: `session-${projectA.projectId}`,
+      batchId: "batch-a",
+    });
+  });
+
+  it("rebuilds an unfinished batch from the recovered session and task identity", async () => {
+    const recovered = item("recover.md", "extracting");
+    recovered.taskId = "recover-task";
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
+    api.getSession.mockResolvedValue({ ...session(projectA.projectId, [recovered]), sessionId: "session-recover" });
+    useTaskStore.getState().upsertTask({ ...task("recover-task"), batchId: "batch-recovered" });
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+
+    await waitFor(() => expect(result.current.batches?.[0]).toMatchObject({ id: "batch-recovered", total: 1, active: 1 }));
+  });
+
+  it("reattaches a persisted discovery task after the import workspace is reopened", async () => {
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
+    api.getSession.mockResolvedValue({ ...session(projectA.projectId), sessionId: "session-recover", discoveryTaskId: "scan-task" });
+    const scanTask = task("scan-task", projectA.projectId, "failed");
+    useTaskStore.getState().upsertTask({ ...scanTask, error: { code: "TASK_RECOVERY", message: "The scan was interrupted.", details: null, recoverable: true, userActionRequired: true } });
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+
+    await waitFor(() => expect(result.current.discoveryTask).toMatchObject({ id: "scan-task", status: "failed" }));
+    expect(result.current.discoveryTaskUnavailable).toBe(false);
+  });
+
+  it("passes a selected recovery route through retry and persists skip as a session update", async () => {
+    const failed = item("failed.pdf", "failed");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [failed]));
+    api.startItems.mockResolvedValue([]);
+    api.skipItem.mockResolvedValue(session(projectA.projectId, [item("failed.pdf", "skipped")]));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    await act(async () => result.current.retryItem("failed.pdf", "enable_ocr"));
+    expect(api.startItems).toHaveBeenCalledWith(expect.objectContaining({
+      itemIds: ["failed.pdf"],
+      recoveryAction: "enable_ocr",
+    }));
+
+    await act(async () => result.current.skipItem?.("failed.pdf"));
+    expect(api.skipItem).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      sessionId: `session-${projectA.projectId}`,
+      itemId: "failed.pdf",
+    });
+  });
+
+  it("settles a discovery when its terminal task event arrived before IPC returned", async () => {
+    const scanTask = task("fast-scan-task");
+    api.addPaths.mockResolvedValue(scanTask);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    useTaskStore.getState().upsertTask({ ...scanTask, status: "succeeded", result: { summary: "Added 1 file", affectedPaths: [] } });
+    await act(async () => result.current.addPaths(["D:\\sources\\fast"]));
+
+    await waitFor(() => expect(result.current.isAddingPaths).toBe(false));
+    expect(result.current.discoveryTask?.status).toBe("succeeded");
+    expect(api.getSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-project-a" }));
+  });
+
+  it("optimistically updates selection and ignores a duplicate item action while pending", async () => {
+    const ready = item("ready.md", "preview_ready");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [ready]));
+    let resolveSelection!: (value: ImportSession) => void;
+    api.setSelection.mockReturnValue(new Promise<ImportSession>((resolve) => { resolveSelection = resolve; }));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    act(() => { void result.current.setItemSelected("ready.md", false); });
+    await waitFor(() => expect(result.current.session?.items[0].selected).toBe(false));
+    expect(result.current.pendingItemIds?.has("ready.md")).toBe(true);
+
+    act(() => { void result.current.setItemSelected("ready.md", true); });
+    expect(api.setSelection).toHaveBeenCalledTimes(1);
+
+    resolveSelection(session(projectA.projectId, [item("ready.md", "preview_ready")]));
+    await waitFor(() => expect(result.current.pendingItemIds?.has("ready.md")).toBe(false));
+  });
+
+  it("keeps a started item locked until its task reaches a terminal state", async () => {
+    const queued = item("queued.md");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [queued]));
+    let resolveStart!: (value: BackendTask[]) => void;
+    api.startItems.mockReturnValue(new Promise<BackendTask[]>((resolve) => { resolveStart = resolve; }));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    act(() => { void result.current.startItems(["queued.md"]); });
+    await waitFor(() => expect(result.current.pendingItemIds?.has("queued.md")).toBe(true));
+    act(() => { void result.current.startItems(["queued.md"]); });
+    expect(api.startItems).toHaveBeenCalledTimes(1);
+
+    const started = task("queued-task");
+    await act(async () => resolveStart([started]));
+    expect(result.current.pendingItemIds?.has("queued.md")).toBe(true);
+    expect(result.current.batch).toMatchObject({ total: 1, active: 1, processed: 0 });
+    useTaskStore.getState().upsertTask({ ...started, status: "succeeded" });
+    await act(async () => notifyTaskEventListeners({
+      eventId: "queued-task-completed",
+      eventType: "task_completed",
+      projectId: projectA.projectId,
+      taskId: started.id,
+      timestamp: "2026-07-14T00:00:00Z",
+      payload: { ...started, status: "succeeded" },
+    }));
+    await waitFor(() => expect(result.current.pendingItemIds?.has("queued.md")).toBe(false));
+    await waitFor(() => expect(result.current.batch).toMatchObject({ total: 1, active: 0, processed: 1, completed: 1 }));
+  });
+
+  it("releases the item lock when parsing pauses for user confirmation", async () => {
+    const queued = item("review.md");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [queued]));
+    let resolveStart!: (value: BackendTask[]) => void;
+    api.startItems.mockReturnValue(new Promise<BackendTask[]>((resolve) => { resolveStart = resolve; }));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    act(() => { void result.current.startItems(["review.md"]); });
+    const started = task("review-task");
+    await act(async () => resolveStart([started]));
+    expect(result.current.pendingItemIds?.has("review.md")).toBe(true);
+
+    const waitingTask = { ...started, status: "waiting_for_confirmation" as const };
+    useTaskStore.getState().upsertTask(waitingTask);
+    await act(async () => notifyTaskEventListeners({
+      eventId: "review-task-waiting",
+      eventType: "task_updated",
+      projectId: projectA.projectId,
+      taskId: waitingTask.id,
+      timestamp: "2026-07-14T00:00:00Z",
+      payload: waitingTask,
+    }));
+
+    await waitFor(() => expect(result.current.pendingItemIds?.has("review.md")).toBe(false));
+    expect(result.current.batch).toMatchObject({ total: 1, active: 0, processed: 1, waitingForConfirmation: 1 });
+  });
+
+  it("releases the item lock for the backend confirmation_requested event", async () => {
+    const queued = item("markdown.md");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [queued]));
+    const started = task("markdown-task");
+    api.startItems.mockResolvedValue([started]);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    await act(async () => result.current.startItems(["markdown.md"]));
+    expect(result.current.pendingItemIds?.has("markdown.md")).toBe(true);
+
+    const waitingTask = { ...started, status: "waiting_for_confirmation" as const };
+    useTaskStore.getState().upsertTask(waitingTask);
+    await act(async () => notifyTaskEventListeners({
+      eventId: "markdown-task-confirmation",
+      eventType: "confirmation_requested",
+      projectId: projectA.projectId,
+      taskId: waitingTask.id,
+      timestamp: "2026-07-14T00:00:00Z",
+      payload: waitingTask,
+    }));
+
+    await waitFor(() => expect(result.current.pendingItemIds?.has("markdown.md")).toBe(false));
+  });
+
+  it("keeps a child task settled when its waiting snapshot arrived before IPC returned", async () => {
+    const queued = item("fast.md");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [queued]));
+    const started = task("fast-item-task");
+    api.startItems.mockResolvedValue([started]);
+    const waitingTask = { ...started, status: "waiting_for_confirmation" as const };
+    useTaskStore.getState().upsertTask(waitingTask);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    await act(async () => result.current.startItems(["fast.md"]));
+
+    await waitFor(() => expect(result.current.pendingItemIds?.has("fast.md")).toBe(false));
+    expect(useTaskStore.getState().tasks.find((entry) => entry.id === started.id)?.status).toBe("waiting_for_confirmation");
+  });
+
+  it("ignores a duplicate confirm action while the commit task is being created", async () => {
+    api.createSession.mockResolvedValue(session(projectA.projectId, [item("ready.md", "preview_ready")]));
+    let resolveConfirm!: (value: BackendTask) => void;
+    api.confirmSession.mockReturnValue(new Promise<BackendTask>((resolve) => { resolveConfirm = resolve; }));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    const decisions = [{ itemId: "ready.md", conflictAction: null, expectedWikiHash: null }];
+    act(() => { void result.current.confirm(decisions); });
+    expect(useImportStore.getState().isConfirming).toBe(true);
+    act(() => { void result.current.confirm(decisions); });
+    expect(api.confirmSession).toHaveBeenCalledTimes(1);
+    await act(async () => resolveConfirm(task("confirm-task")));
+  });
+
+  it("unlocks the commit bar when a confirmation task finished before IPC returned", async () => {
+    api.createSession.mockResolvedValue(session(projectA.projectId, [item("ready.md", "preview_ready")]));
+    let resolveConfirm!: (value: BackendTask) => void;
+    api.confirmSession.mockReturnValue(new Promise<BackendTask>((resolve) => { resolveConfirm = resolve; }));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
+
+    act(() => { void result.current.confirm([{ itemId: "ready.md", conflictAction: "create_new", expectedWikiHash: null }]); });
+    await waitFor(() => expect(result.current.isConfirming).toBe(true));
+
+    const completed = task("confirm-race", projectA.projectId, "succeeded");
+    useTaskStore.getState().upsertTask(completed);
+    await act(async () => resolveConfirm(task("confirm-race")));
+
+    await waitFor(() => expect(result.current.isConfirming).toBe(false));
+    expect(useTaskStore.getState().tasks.find((entry) => entry.id === completed.id)?.status).toBe("succeeded");
+  });
+
+  it("refreshes the session when a started import task reaches a terminal state", async () => {
+    api.createSession.mockResolvedValue(session(projectA.projectId));
+    api.addUrl.mockResolvedValue(session(projectA.projectId, [item("url-1")]));
+    const started = task("url-task");
+    api.startItems.mockResolvedValue([started]);
+    const completed = session(projectA.projectId, [item("url-1", "preview_ready")]);
+    api.getSession.mockResolvedValueOnce(completed);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    await act(async () => result.current.addUrl("https://example.com/article"));
+    await act(async () => notifyTaskEventListeners({
+      eventId: "event-url-task",
+      eventType: "task_completed",
+      projectId: projectA.projectId,
+      taskId: started.id,
+      timestamp: "2026-07-14T00:00:00Z",
+      payload: { ...started, status: "succeeded" },
+    }));
+
+    await waitFor(() => expect(result.current.session?.items[0].status).toBe("preview_ready"));
+    expect(api.getSession).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      sessionId: "session-project-a",
+    });
+  });
+
   it("routes selection, retry, cancellation, and confirmation through V2 contracts", async () => {
     const retryable = item("retry.md", "failed");
     retryable.taskId = "retry-task";
@@ -383,6 +762,7 @@ describe("useImportWorkflow", () => {
     await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
 
     await act(async () => result.current.beginLogin("gated-url", "wechat"));
+    api.getSession.mockResolvedValueOnce(session(projectA.projectId, [item("gated-url", "failed")]));
     await act(async () => result.current.completeLogin("gated-url", "connector-1"));
     await act(async () => result.current.revokeLogin("connector-1"));
     await act(async () => result.current.authorizePrivateTarget("gated-url", "https://private.example.com/article"));
