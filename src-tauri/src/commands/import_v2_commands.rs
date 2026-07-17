@@ -1,14 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tauri::{AppHandle, Manager, State};
+use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::import_v2::{
-    CommitImportSessionRequest, ImportInput, ImportResourceMode, ImportSession,
+    CommitImportSessionRequest, ImportInput, ImportRecoveryAction, ImportResourceMode,
+    ImportSession,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
-use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
+use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
+use crate::models::paths::ProjectContext;
 use crate::services::import_v2::agent_assistance::AgentAssistanceService;
 use crate::services::import_v2::agent_candidate::AgentCandidateService;
 
@@ -27,9 +30,22 @@ request!(CreateImportSessionV2Request {
 request!(GetImportSessionV2Request {
     project_id: String,
     project_root_path: String,
-    session_id: String
+    session_id: String,
+    history_batch_id: Option<String>
 });
 request!(AddImportItemsV2Request { project_id: String, project_root_path: String, session_id: String, inputs: Vec<ImportInput> });
+request!(CancelImportItemV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    item_id: String
+});
+request!(CancelImportBatchV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    batch_id: String
+});
 request!(AddImportTextV2Request {
     project_id: String,
     project_root_path: String,
@@ -44,7 +60,16 @@ request!(SetImportItemSelectionV2Request {
     item_id: String,
     selected: bool
 });
-request!(StartImportItemsV2Request { project_id: String, project_root_path: String, session_id: String, item_ids: Vec<String> });
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartImportItemsV2Request {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub item_ids: Vec<String>,
+    #[serde(default)]
+    pub recovery_action: Option<ImportRecoveryAction>,
+}
 
 #[tauri::command]
 pub fn create_import_session_v2(
@@ -121,6 +146,106 @@ pub fn set_import_item_selection_v2(
         .load_session(&context, &state.file_store, &request.session_id)
 }
 
+/// Read a historical session without recovery side effects. History views are
+/// inspection-only; opening them must not resume tasks, accept candidates, or
+/// rewrite staging/session evidence.
+#[tauri::command]
+pub fn get_import_history_session_v2(
+    state: State<'_, AppState>,
+    request: GetImportSessionV2Request,
+) -> Result<ImportSession, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if let Some(batch_id) = request.history_batch_id.as_deref() {
+        if let Some(snapshot) = load_history_snapshot(&context, &request.session_id, batch_id)? {
+            return Ok(snapshot);
+        }
+    }
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)
+}
+
+pub(crate) fn load_history_snapshot(
+    context: &ProjectContext,
+    session_id: &str,
+    batch_id: &str,
+) -> Result<Option<ImportSession>, BackendError> {
+    if batch_id.is_empty()
+        || batch_id.len() > 64
+        || !batch_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(BackendError::new(
+            "IMPORT_V2_HISTORY_INVALID",
+            "The historical import identity is invalid.",
+            false,
+            true,
+        ));
+    }
+    let path = context.resolve_project_path(&format!(".app/import-history/{batch_id}.json"))?;
+    let bytes = std::fs::read(&path).map_err(|_| {
+        BackendError::new(
+            "IMPORT_V2_HISTORY_NOT_FOUND",
+            "The historical import record could not be opened.",
+            true,
+            true,
+        )
+    })?;
+    let batch: crate::models::import_v2::ImportBatchResult = serde_json::from_slice(&bytes).map_err(|_| {
+        BackendError::new(
+            "IMPORT_V2_HISTORY_CORRUPT",
+            "The historical import record is incomplete.",
+            true,
+            true,
+        )
+    })?;
+    if batch.session_id != session_id {
+        return Err(BackendError::new(
+            "IMPORT_V2_HISTORY_SCOPE_MISMATCH",
+            "The historical import record does not belong to this session.",
+            false,
+            true,
+        ));
+    }
+    Ok(batch.history_snapshot)
+}
+
+#[tauri::command]
+pub fn cancel_import_item_v2(
+    state: State<'_, AppState>,
+    request: CancelImportItemV2Request,
+) -> Result<ImportSession, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.cancel_queued_item(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+    )?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)
+}
+
+#[tauri::command]
+pub fn skip_import_item_v2(
+    state: State<'_, AppState>,
+    request: CancelImportItemV2Request,
+) -> Result<ImportSession, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.skip_item(
+        &context,
+        &state.file_store,
+        &state.task_service,
+        &request.session_id,
+        &request.item_id,
+    )?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)
+}
+
 #[tauri::command]
 pub fn start_import_items_v2(
     app: AppHandle,
@@ -141,6 +266,11 @@ pub fn start_import_items_v2(
             return Err(task_error("Import item was not found."));
         }
     }
+    // One IPC call is one user-visible import operation. Persist the identity
+    // on every child task so parallel operations remain independently
+    // observable and cancellable after navigation or app restart.
+    let batch_id = Uuid::new_v4().to_string();
+    let recovery_action = request.recovery_action.clone();
     let prepared = prepare_all(
         request.item_ids,
         |item_id| {
@@ -151,12 +281,13 @@ pub fn start_import_items_v2(
                 .expect("all item ids were validated before task creation");
             state
                 .task_service
-                .create_project_task(
+                .create_project_task_with_batch(
                     TaskType::Import,
                     request.project_id.clone(),
                     context.root.clone(),
                     format!("Import {}", item.input.display_name),
                     true,
+                    batch_id.clone(),
                 )
                 .map_err(|error| task_error(&error))
         },
@@ -167,27 +298,46 @@ pub fn start_import_items_v2(
                 .map_err(|error| task_error(&error))
         },
     )?;
+    let bindings = prepared
+        .iter()
+        .map(|(item_id, task)| (item_id.clone(), task.id.clone()))
+        .collect::<Vec<_>>();
+    if let Err(error) = state.import_v2_service.bind_item_task_ids(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &bindings,
+    ) {
+        for (_, task) in &prepared {
+            let _ = state
+                .task_service
+                .discard_unstarted_tasks(std::slice::from_ref(&task.id));
+        }
+        return Err(error);
+    }
     let mut tasks = Vec::with_capacity(prepared.len());
     for (item_id, task) in prepared {
-        let (app, project_id, root, session_id, task_id) = (
+        let (app, project_id, root, session_id, task_id, recovery_action) = (
             app.clone(),
             request.project_id.clone(),
             request.project_root_path.clone(),
             request.session_id.clone(),
             task.id.clone(),
+            recovery_action.clone(),
         );
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
             let result = state
                 .resolve_project_context(&project_id, &root)
                 .and_then(|context| {
-                    state.import_v2_service.run_item(
+                    state.import_v2_service.run_item_with_recovery(
                         &context,
                         &state.file_store,
                         &state.task_service,
                         &session_id,
                         &item_id,
                         &task_id,
+                        recovery_action.as_ref(),
                     )
                 });
             match result {
@@ -216,6 +366,53 @@ pub fn start_import_items_v2(
     Ok(tasks)
 }
 
+/// Cancel only the import tasks belonging to one backend-issued batch. The
+/// session lookup is intentional: a batch id alone must never reach tasks
+/// from another import session in the same project.
+#[tauri::command]
+pub fn cancel_import_batch_v2(
+    state: State<'_, AppState>,
+    request: CancelImportBatchV2Request,
+) -> Result<Vec<BackendTask>, BackendError> {
+    if request.batch_id.trim().is_empty() {
+        return Err(task_error("Import batch id must not be empty."));
+    }
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let _session = state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)?;
+    // Do not depend on the orchestrator having claimed the session item yet.
+    // The task is created and returned before `claim_item_for_run` persists
+    // `item.task_id`, so an immediate user cancellation must discover the
+    // group from the durable task identity instead of the eventually-written
+    // session mapping.
+    let task_ids = state
+        .task_service
+        .list_tasks(None)
+        .into_iter()
+        .filter(|task| {
+            task.project_id.as_deref() == Some(request.project_id.as_str())
+                && task.batch_id.as_deref() == Some(request.batch_id.as_str())
+                && task.cancellable
+                && matches!(
+                    task.status,
+                    TaskStatus::Queued | TaskStatus::Running | TaskStatus::Cancelling
+                )
+        })
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+
+    task_ids
+        .into_iter()
+        .map(|task_id| {
+            state
+                .task_service
+                .cancel_task(&task_id)
+                .map_err(|error| task_error(&error))
+        })
+        .collect()
+}
+
 fn run_local_agent_candidate(
     state: &AppState,
     context: &crate::models::paths::ProjectContext,
@@ -232,8 +429,7 @@ fn run_local_agent_candidate(
         &state.task_service,
         AgentAssistanceService::bundled_skill_path(),
     );
-    let Ok(agent_task) =
-        assistance.start_local(context, session_id, item_id, trigger, agent_kind)
+    let Ok(agent_task) = assistance.start_local(context, session_id, item_id, trigger, agent_kind)
     else {
         return;
     };
@@ -305,6 +501,8 @@ pub fn confirm_import_session_v2(
         )
         .map_err(|error| task_error(&error))?;
     let task_id = task.id.clone();
+    let mut commit_request = request.clone();
+    commit_request.batch_task_id = Some(task_id.clone());
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         let result = (|| -> Result<TaskResult, BackendError> {
@@ -318,7 +516,7 @@ pub fn confirm_import_session_v2(
                 &context,
                 &state.file_store,
                 &state.git_service,
-                &request,
+                &commit_request,
                 || state.task_service.is_cancelled(&task_id),
             )?;
             Ok(TaskResult {
@@ -327,16 +525,18 @@ pub fn confirm_import_session_v2(
                     batch.committed_count, batch.failed_count
                 ),
                 affected_paths: vec![format!(".app/import-history/{}.json", batch.batch_id)],
-                reference: None,
+                reference: Some(TaskResultReference::ImportV2SessionPreview {
+                    session_id: batch.session_id.clone(),
+                    batch_id: Some(batch.batch_id.clone()),
+                }),
                 pending_action: None,
             })
         })();
         match result {
             Ok(result) => {
-                let _ = state.task_service.set_result(&task_id, result);
                 let _ = state
                     .task_service
-                    .transition_status(&task_id, TaskStatus::Succeeded);
+                    .complete_running_with_result(&task_id, result);
             }
             Err(error) => {
                 fail_task_unless_cancelled(&state, &task_id, error);
@@ -354,7 +554,7 @@ fn fail_task_unless_cancelled(state: &AppState, task_id: &str, error: BackendErr
     let _ = state.task_service.set_error(task_id, error);
     if !matches!(
         state.task_service.get_task(task_id).map(|task| task.status),
-        Some(TaskStatus::Cancelled)
+        Some(TaskStatus::Cancelled | TaskStatus::WaitingForConfirmation)
     ) {
         let _ = state
             .task_service

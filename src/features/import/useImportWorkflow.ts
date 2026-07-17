@@ -5,10 +5,10 @@ import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import { registerTaskEventListener } from "../../hooks/useTaskEvents";
 import { importV2Api } from "../../services/importV2Api";
 import { importProjectKey, useImportStore, type ImportQueueFilter } from "../../stores/importStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { fetchTasks, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { ImportedSource } from "../../types/import";
-import type { CommitItemDecision, ImportItem, ImportSession } from "../../types/importV2";
+import type { CommitItemDecision, ImportItem, ImportRecoveryAction, ImportSession } from "../../types/importV2";
 import type { AgentKind } from "../../types/agent";
 import type { LlmProviderKind } from "../../types/llm";
 import type {
@@ -25,13 +25,56 @@ import type {
   ImportPreviewContent,
 } from "../../types/importV2Presentation";
 import type { ProjectSummary } from "../../types/project";
-import type { BackendEvent, BackendTask } from "../../types/task";
+import { isTerminalStatus, type BackendEvent, type BackendTask } from "../../types/task";
 import type { ImportHistoryPage } from "../../types/importV2Presentation";
 import type { MigrationConfirmation, LegacyInventory, MigrationPlan, MigrationStatusSnapshot } from "../../types/importV2Migration";
 import { selectQueueCounts, selectSessionProgress, selectVisibleItems, type ImportQueueCounts, type ImportSessionProgress } from "./importViewModel";
 import type { AppView } from "../../stores/navigationStore";
 
 export type ImportBootstrapState = "loading" | "ready" | "blocked" | "error";
+
+export interface ImportBatchTask {
+  id: string;
+  itemId: string;
+  title: string;
+  status: BackendTask["status"] | "unknown";
+  cancellable: boolean;
+}
+
+export interface ImportBatchProgress {
+  id: string;
+  sessionId: string;
+  total: number;
+  taskIds: readonly string[];
+  processed: number;
+  active: number;
+  completed: number;
+  /** Number of child tasks waiting for any user action, including login. */
+  waitingForConfirmation?: number;
+  /** Subset of waiting tasks whose item is ready for preview/commit review. */
+  reviewReady?: number;
+  failed: number;
+  cancelled: number;
+  cancelling: number;
+  unknown: number;
+  nonCancellable: number;
+  failedItemIds: readonly string[];
+  tasks: readonly ImportBatchTask[];
+}
+
+interface ImportBatchTaskRef {
+  taskId: string;
+  itemId: string;
+  title: string;
+}
+
+interface ImportBatchRecord {
+  id: string;
+  sessionId: string;
+  projectKey: string;
+  epoch: number;
+  tasks: readonly ImportBatchTaskRef[];
+}
 
 export interface ImportWorkflow {
   session: ImportSession | null;
@@ -45,20 +88,38 @@ export interface ImportWorkflow {
   visibleItems: ImportItem[];
   counts: ImportQueueCounts;
   progress: ImportSessionProgress;
+  discoveryTask?: BackendTask | null;
+  discoveryTaskUnavailable?: boolean;
+  isAddingPaths?: boolean;
+  isAddingUrl?: boolean;
+  pendingItemIds?: ReadonlySet<string>;
+  isSyncingSession?: boolean;
+  batches?: readonly ImportBatchProgress[];
+  batch?: ImportBatchProgress | null;
+  isCancellingBatch?: boolean;
+  isBatchCancelling?: (batchId: string) => boolean;
   selectedItemId: string | null;
   filter: ImportQueueFilter;
   addPaths: (paths: string[]) => Promise<void>;
   addUrl: (url: string) => Promise<void>;
+  cancelDiscovery?: () => Promise<void>;
+  dismissDiscovery?: () => void;
+  cancelBatch?: (batchId?: string) => Promise<void>;
+  dismissBatch?: (batchId?: string) => void;
+  retryBatch?: (batchId: string) => Promise<void>;
   setItemSelected: (itemId: string, selected: boolean) => Promise<void>;
-  startItems: (itemIds: string[]) => Promise<void>;
-  retryItem: (itemId: string) => Promise<void>;
+  startItems: (itemIds: readonly string[], recoveryAction?: ImportRecoveryAction | null) => Promise<void>;
+  retryItem: (itemId: string, recoveryAction?: ImportRecoveryAction | null) => Promise<void>;
   cancelItem: (itemId: string) => Promise<void>;
+  skipItem: (itemId: string) => Promise<void>;
+  authorizeLocalAsr: (itemId: string) => Promise<void>;
   confirm: (decisions: CommitItemDecision[]) => Promise<void>;
   confirmLegacy: (options: { createCheckpoint: boolean; compileAfterImport: boolean }) => void;
   refreshSession: () => Promise<void>;
   selectItem: (itemId: string | null) => void;
   setFilter: (filter: ImportQueueFilter) => void;
-  loadPreview: (identity: { sessionId: string; itemId: string; candidateId: string | null }) => Promise<ImportPreviewContent>;
+  loadPreview: (identity: { sessionId: string; itemId: string; candidateId: string | null; historyBatchId?: string | null }) => Promise<ImportPreviewContent>;
+  loadSession: (sessionId: string, historyBatchId?: string | null) => Promise<ImportSession | null>;
 
   getAgentPolicy: () => Promise<AgentAssistancePolicy | null>;
   setAgentPolicy: (policy: AgentAssistancePolicy, localAgentKind: AgentKind | null) => Promise<AgentAssistancePolicy | null>;
@@ -118,8 +179,47 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function copyTextWithDomFallback(content: string): boolean {
+  if (typeof document === "undefined" || typeof document.execCommand !== "function") return false;
+  const textarea = document.createElement("textarea");
+  textarea.value = content;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
+}
+
 function isTerminalTaskEvent(event: BackendEvent): boolean {
   return event.eventType === "task_completed" || event.eventType === "task_failed" || event.eventType === "task_cancelled";
+}
+
+function isWaitingTaskEvent(event: BackendEvent): boolean {
+  return (event.eventType === "task_updated" || event.eventType === "confirmation_requested")
+    && (event.payload as Partial<BackendTask> | null)?.status === "waiting_for_confirmation";
+}
+
+function isSettledImportTask(task: BackendTask): boolean {
+  return isTerminalStatus(task.status) || task.status === "waiting_for_confirmation";
+}
+
+function isRecoverableImportItemStatus(status: ImportItem["status"]): boolean {
+  return [
+    "queued",
+    "inspecting",
+    "waiting_capability",
+    "waiting_login",
+    "waiting_log",
+    "extracting",
+    "validating",
+    "committing",
+    "paused",
+  ].includes(status);
 }
 
 export function useImportWorkflow(
@@ -138,6 +238,7 @@ export function useImportWorkflow(
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [bootstrapState, setBootstrapState] = useState<ImportBootstrapState>("loading");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const [isSyncingSession, setIsSyncingSession] = useState(false);
   const session = useImportStore((state) => state.session);
   const selectedItemId = useImportStore((state) => state.selectedItemId);
   const filter = useImportStore((state) => state.filter);
@@ -145,43 +246,248 @@ export function useImportWorkflow(
   const isConfirming = useImportStore((state) => state.isConfirming);
   const selectedTaskUpsert = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
+  const taskList = useTaskStore((state) => state.tasks);
+  const tasksHydrated = useTaskStore((state) => state.tasksHydrated);
   const pushToast = useToastStore((state) => state.pushToast);
-  const pendingPathTasks = useRef(new Map<string, { projectKey: string; epoch: number; existingItemIds: ReadonlySet<string> }>());
-  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const mutationKeys = useImportStore((state) => state.mutationKeys);
+  const pendingPathTasks = useRef(new Map<string, { projectKey: string; epoch: number; existingItemIds: ReadonlySet<string>; mutationKey: string }>());
+  const pendingItemTasks = useRef(new Map<string, { projectKey: string; epoch: number; itemIds: readonly string[] }>());
+  const pendingConfirmationTasks = useRef(new Map<string, { projectKey: string; epoch: number }>());
+  const pendingActionKeysRef = useRef(new Set<string>());
+  const [pendingActionKeys, setPendingActionKeys] = useState<ReadonlySet<string>>(new Set());
+  const [discoveryTaskId, setDiscoveryTaskId] = useState<string | null>(null);
+  const [batchRecords, setBatchRecords] = useState<readonly ImportBatchRecord[]>([]);
+  const [cancellingBatchIds, setCancellingBatchIds] = useState<ReadonlySet<string>>(new Set());
+  const [dismissedBatchIds, setDismissedBatchIds] = useState<ReadonlySet<string>>(new Set());
+  const localBatchCounter = useRef(0);
+  const initializedProjectKeyRef = useRef<string | null>(null);
+  const refreshInFlight = useRef<{ scopeKey: string; promise: Promise<void> } | null>(null);
+  const discoveryPollTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const sessionMutationRevisionRef = useRef(0);
+  const nextSessionMutationRevision = useCallback(() => {
+    sessionMutationRevisionRef.current += 1;
+    return sessionMutationRevisionRef.current;
+  }, []);
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), []);
 
   const isScopeCurrent = useCallback(
-    (requestKey: string, epoch: number) =>
+    (requestKey: string, epoch: number, expectedSessionId?: string) =>
       latestProjectKey.current === requestKey &&
       useImportStore.getState().projectKey === requestKey &&
-      useImportStore.getState().sessionEpoch === epoch,
+      useImportStore.getState().sessionEpoch === epoch &&
+      (!expectedSessionId || useImportStore.getState().session?.sessionId === expectedSessionId),
     [],
   );
+
+  const beginPendingItems = useCallback((itemIds: readonly string[], requestKey: string, epoch: number): string[] => {
+    const accepted: string[] = [];
+    for (const itemId of [...new Set(itemIds)]) {
+      const key = `${requestKey}\0${epoch}\0${itemId}`;
+      if (pendingActionKeysRef.current.has(key)) continue;
+      pendingActionKeysRef.current.add(key);
+      accepted.push(itemId);
+    }
+    if (accepted.length > 0) {
+      setPendingActionKeys((current) => {
+        const next = new Set(current);
+        for (const itemId of accepted) next.add(`${requestKey}\0${epoch}\0${itemId}`);
+        return next;
+      });
+    }
+    return accepted;
+  }, []);
+
+  const endPendingItems = useCallback((itemIds: readonly string[], requestKey: string, epoch: number) => {
+    const keys = [...new Set(itemIds)].map((itemId) => `${requestKey}\0${epoch}\0${itemId}`);
+    for (const key of keys) pendingActionKeysRef.current.delete(key);
+    if (keys.length > 0) {
+      setPendingActionKeys((current) => {
+        const next = new Set(current);
+        for (const key of keys) next.delete(key);
+        return next;
+      });
+    }
+  }, []);
+
+  const sessionEpoch = useImportStore((state) => state.sessionEpoch);
+  const pendingItemIds = useMemo(() => {
+    const prefix = `${projectKey}\0${sessionEpoch}\0`;
+    const ids = new Set<string>();
+    for (const key of pendingActionKeys) {
+      if (key.startsWith(prefix)) ids.add(key.slice(prefix.length));
+    }
+    return ids;
+  }, [pendingActionKeys, projectKey, sessionEpoch]);
+  const discoveryTask = useMemo(
+    () => discoveryTaskId ? taskList.find((task) => task.id === discoveryTaskId) ?? null : null,
+    [discoveryTaskId, taskList],
+  );
+  const discoveryTaskUnavailable = Boolean(discoveryTaskId && tasksHydrated && !discoveryTask);
+  const isAddingPaths = [...mutationKeys].some((key) => key.startsWith(`add-paths:${projectKey}:`));
+  const isAddingUrl = [...mutationKeys].some((key) => key.startsWith(`add-url:${projectKey}:`));
+  const batches = useMemo<readonly ImportBatchProgress[]>(() => {
+    const taskById = new Map(taskList.map((task) => [task.id, task]));
+    return batchRecords.map((record) => {
+      let completed = 0;
+      let waitingForConfirmation = 0;
+      let reviewReady = 0;
+      let failed = 0;
+      let cancelled = 0;
+      let cancelling = 0;
+      let unknown = 0;
+      let nonCancellable = 0;
+      const failedItemIds: string[] = [];
+      const tasks = record.tasks.map((reference) => {
+        const task = taskById.get(reference.taskId);
+        const status = task?.status ?? "unknown";
+        if (status === "succeeded") completed += 1;
+        if (status === "waiting_for_confirmation") {
+          waitingForConfirmation += 1;
+          if (session?.items.find((item) => item.itemId === reference.itemId)?.status === "preview_ready") reviewReady += 1;
+        }
+        if (status === "failed") {
+          failed += 1;
+          failedItemIds.push(reference.itemId);
+        }
+        if (status === "cancelled") cancelled += 1;
+        if (status === "cancelling") cancelling += 1;
+        if (status === "unknown") unknown += 1;
+        if (task && !task.cancellable && !isTerminalStatus(task.status) && task.status !== "waiting_for_confirmation") nonCancellable += 1;
+        return {
+          id: reference.taskId,
+          itemId: reference.itemId,
+          title: task?.title ?? reference.title,
+          status,
+          cancellable: task?.cancellable ?? false,
+        } satisfies ImportBatchTask;
+      });
+      const processed = completed + waitingForConfirmation + failed + cancelled;
+      return {
+        id: record.id,
+        sessionId: record.sessionId,
+        total: record.tasks.length,
+        taskIds: record.tasks.map((task) => task.taskId),
+        processed,
+        active: Math.max(0, record.tasks.length - processed - unknown),
+        completed,
+        waitingForConfirmation,
+        reviewReady,
+        failed,
+        cancelled,
+        cancelling,
+        unknown,
+        nonCancellable,
+        failedItemIds,
+        tasks,
+      };
+    });
+  }, [batchRecords, session, taskList]);
+  const batch = batches[0] ?? null;
+  const isCancellingBatch = cancellingBatchIds.size > 0;
+  const isBatchCancelling = useCallback((batchId: string) => cancellingBatchIds.has(batchId), [cancellingBatchIds]);
+  const nextLocalBatchId = useCallback(() => {
+    localBatchCounter.current += 1;
+    return `local:${Date.now()}:${localBatchCounter.current}`;
+  }, []);
+  const recordItemBatch = useCallback((tasks: readonly BackendTask[], itemIds: readonly string[], requestKey: string, epoch: number, sessionId: string) => {
+    if (tasks.length === 0 || !isScopeCurrent(requestKey, epoch, sessionId)) return;
+    const currentSession = useImportStore.getState().session;
+    const itemById = new Map((currentSession?.items ?? []).map((item) => [item.itemId, item]));
+    const batchId = tasks.find((task) => task.batchId)?.batchId ?? nextLocalBatchId();
+    const taskRefs = tasks.map((task, index) => ({
+      taskId: task.id,
+      itemId: itemIds[index] ?? "",
+      title: itemById.get(itemIds[index] ?? "")?.input.displayName ?? task.title,
+    }));
+    setBatchRecords((current) => [
+      ...current.filter((record) => record.id !== batchId),
+      { id: batchId, sessionId, projectKey: requestKey, epoch, tasks: taskRefs },
+    ]);
+    setCancellingBatchIds((current) => {
+      if (!current.has(batchId)) return current;
+      const next = new Set(current);
+      next.delete(batchId);
+      return next;
+    });
+  }, [isScopeCurrent, nextLocalBatchId]);
+
+  const registerItemTasks = useCallback((tasks: readonly BackendTask[], itemIds: readonly string[], requestKey: string, epoch: number) => {
+    const trackedIds = new Set<string>();
+    const terminalIds: string[] = [];
+    tasks.forEach((task, index) => {
+      const itemId = itemIds[index];
+      if (!itemId) return;
+      trackedIds.add(itemId);
+      if (isSettledImportTask(task)) {
+        terminalIds.push(itemId);
+      } else {
+        pendingItemTasks.current.set(task.id, { projectKey: requestKey, epoch, itemIds: [itemId] });
+      }
+    });
+    const untrackedIds = itemIds.filter((itemId) => !trackedIds.has(itemId));
+    endPendingItems([...untrackedIds, ...terminalIds], requestKey, epoch);
+    return { terminalIds };
+  }, [endPendingItems]);
 
   const refreshForScope = useCallback(async (requestKey: string, epoch: number, expectedSessionId?: string) => {
     if (!isScopeCurrent(requestKey, epoch)) return;
     const currentSession = useImportStore.getState().session;
     const sessionId = expectedSessionId ?? currentSession?.sessionId;
     if (!sessionId) return;
-    if (refreshInFlight.current) return refreshInFlight.current;
+    const scopeKey = `${requestKey}\0${epoch}\0${sessionId}`;
+    if (refreshInFlight.current?.scopeKey === scopeKey) return refreshInFlight.current.promise;
+    const refreshRevision = sessionMutationRevisionRef.current;
+    let refreshAgain = false;
+    setIsSyncingSession(true);
     const request = importV2Api.getSession({ projectId, projectRootPath: rootPath, sessionId });
     const refresh = request
       .then((nextSession) => {
-        if (isScopeCurrent(requestKey, epoch)) {
+        if (isScopeCurrent(requestKey, epoch) && sessionMutationRevisionRef.current === refreshRevision) {
           useImportStore.getState().replaceSession(requestKey, nextSession, epoch);
+        } else if (isScopeCurrent(requestKey, epoch) && sessionMutationRevisionRef.current !== refreshRevision) {
+          refreshAgain = true;
         }
       })
       .catch((error) => {
         if (isScopeCurrent(requestKey, epoch)) {
           pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
         }
-      })
-      .finally(() => {
-        refreshInFlight.current = null;
+        // A caller that depends on the refreshed session must not continue
+        // against the stale in-memory snapshot after a failed request.
+        throw error;
       });
-    refreshInFlight.current = refresh;
-    return refresh;
+    refreshInFlight.current = { scopeKey, promise: refresh };
+    try {
+      await refresh;
+      if (refreshAgain && isScopeCurrent(requestKey, epoch, sessionId)) {
+        // Do not let callers continue against the stale session returned by
+        // the first request. Clear the in-flight marker before recursing so
+        // the latest request is not mistaken for the current one.
+        refreshInFlight.current = null;
+        await refreshForScope(requestKey, epoch, sessionId);
+      }
+    } finally {
+      if (refreshInFlight.current?.promise === refresh) {
+        refreshInFlight.current = null;
+        if (isScopeCurrent(requestKey, epoch, sessionId)) setIsSyncingSession(false);
+      }
+    }
   }, [isScopeCurrent, projectId, pushToast, rootPath, t]);
+
+  const settleItemTask = useCallback((task: BackendTask): boolean => {
+    const pending = pendingItemTasks.current.get(task.id);
+    if (!pending || !isSettledImportTask(task)) return false;
+    pendingItemTasks.current.delete(task.id);
+    endPendingItems(pending.itemIds, pending.projectKey, pending.epoch);
+    if (isScopeCurrent(pending.projectKey, pending.epoch)) {
+      void refreshForScope(pending.projectKey, pending.epoch).catch(() => undefined);
+    }
+    return true;
+  }, [endPendingItems, isScopeCurrent, refreshForScope]);
+
+  const reconcilePendingItemTasks = useCallback((tasks: readonly BackendTask[] = useTaskStore.getState().tasks) => {
+    for (const task of tasks) settleItemTask(task);
+  }, [settleItemTask]);
 
   const startNewQueuedItems = useCallback(async (requestKey: string, epoch: number, before: ReadonlySet<string>) => {
     if (!isScopeCurrent(requestKey, epoch)) return;
@@ -191,40 +497,145 @@ export function useImportWorkflow(
       .filter((item) => !before.has(item.itemId) && item.status === "queued")
       .map((item) => item.itemId);
     if (itemIds.length === 0) return;
-    const tasks = await importV2Api.startItems({
-      projectId,
-      projectRootPath: rootPath,
-      sessionId: current.sessionId,
-      itemIds,
-    });
-    for (const task of tasks) {
-      selectedTaskUpsert(task);
-      if (isScopeCurrent(requestKey, epoch)) openTaskDrawer(task.id);
+    const acceptedIds = beginPendingItems(itemIds, requestKey, epoch);
+    if (acceptedIds.length === 0) return;
+    nextSessionMutationRevision();
+    try {
+      const tasks = await importV2Api.startItems({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId: current.sessionId,
+        itemIds: acceptedIds,
+      });
+      tasks.forEach((task) => selectedTaskUpsert(task));
+      const resolvedTasks = tasks.map((task) => useTaskStore.getState().tasks.find((current) => current.id === task.id) ?? task);
+      recordItemBatch(resolvedTasks, acceptedIds, requestKey, epoch, current.sessionId);
+      const { terminalIds } = registerItemTasks(resolvedTasks, acceptedIds, requestKey, epoch);
+      if (terminalIds.length > 0 && isScopeCurrent(requestKey, epoch)) {
+        void refreshForScope(requestKey, epoch).catch(() => undefined);
+      }
+      void fetchTasks().then(() => reconcilePendingItemTasks()).catch(() => undefined);
+    } catch (error) {
+      if (isScopeCurrent(requestKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      endPendingItems(acceptedIds, requestKey, epoch);
     }
-  }, [isScopeCurrent, openTaskDrawer, projectId, rootPath, selectedTaskUpsert]);
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, pushToast, recordItemBatch, reconcilePendingItemTasks, refreshForScope, registerItemTasks, rootPath, selectedTaskUpsert, t]);
+
+  const settlePathTask = useCallback((task: BackendTask): boolean => {
+    const pending = pendingPathTasks.current.get(task.id);
+    if (!pending || !isSettledImportTask(task)) return false;
+    pendingPathTasks.current.delete(task.id);
+    const timer = discoveryPollTimers.current.get(task.id);
+    if (timer) {
+      clearTimeout(timer);
+      discoveryPollTimers.current.delete(task.id);
+    }
+    useImportStore.getState().endMutation(pending.mutationKey);
+    if (task.status === "succeeded") {
+      void refreshForScope(pending.projectKey, pending.epoch).then(() =>
+        startNewQueuedItems(pending.projectKey, pending.epoch, pending.existingItemIds),
+      ).catch(() => undefined);
+    }
+    return true;
+  }, [refreshForScope, startNewQueuedItems]);
+
+  const reconcilePendingTasks = useCallback((tasks: readonly BackendTask[] = useTaskStore.getState().tasks) => {
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    for (const taskId of pendingPathTasks.current.keys()) {
+      const task = byId.get(taskId);
+      if (task) settlePathTask(task);
+    }
+    for (const taskId of pendingItemTasks.current.keys()) {
+      const task = byId.get(taskId);
+      if (task) settleItemTask(task);
+    }
+  }, [settleItemTask, settlePathTask]);
+
+  const watchDiscoveryTask = useCallback((taskId: string, requestKey: string, epoch: number) => {
+    let attempts = 0;
+    const poll = async () => {
+      if (!isScopeCurrent(requestKey, epoch) || !pendingPathTasks.current.has(taskId)) {
+        discoveryPollTimers.current.delete(taskId);
+        return;
+      }
+      attempts += 1;
+      try {
+        // Tauri events are the low-latency path. The task snapshot is the
+        // recovery path for a completion that happened while the listener was
+        // reconnecting or before the IPC creation response returned.
+        await fetchTasks();
+        reconcilePendingTasks();
+      } catch {
+        // A task event can still settle the operation; do not turn a failed
+        // observability poll into a second import error.
+      }
+      if (!pendingPathTasks.current.has(taskId) || !isScopeCurrent(requestKey, epoch) || attempts >= 120) {
+        discoveryPollTimers.current.delete(taskId);
+        return;
+      }
+      discoveryPollTimers.current.set(taskId, setTimeout(() => { void poll(); }, 250));
+    };
+    void poll();
+  }, [isScopeCurrent, reconcilePendingTasks]);
+
+  useEffect(() => () => {
+    for (const timer of discoveryPollTimers.current.values()) clearTimeout(timer);
+    discoveryPollTimers.current.clear();
+  }, []);
+
+  useEffect(() => {
+    reconcilePendingTasks(taskList);
+  }, [reconcilePendingTasks, taskList]);
 
   const handleTaskEvent = useCallback((event: BackendEvent) => {
-    if (!isTerminalTaskEvent(event) || !event.taskId) return;
-    const pending = pendingPathTasks.current.get(event.taskId);
-    if (pending) {
-      pendingPathTasks.current.delete(event.taskId);
+    if ((!isTerminalTaskEvent(event) && !isWaitingTaskEvent(event)) || !event.taskId) return;
+    settlePathTask(event.payload as BackendTask);
+    const confirmation = pendingConfirmationTasks.current.get(event.taskId);
+    if (confirmation) {
+      pendingConfirmationTasks.current.delete(event.taskId);
       const task = event.payload as BackendTask;
-      if (task.status === "succeeded") {
-        void refreshForScope(pending.projectKey, pending.epoch).then(() =>
-          startNewQueuedItems(pending.projectKey, pending.epoch, pending.existingItemIds),
-        );
+      if (isScopeCurrent(confirmation.projectKey, confirmation.epoch)) {
+        useImportStore.getState().setIsConfirming(false);
+        void refreshForScope(confirmation.projectKey, confirmation.epoch).catch(() => undefined);
+        if (task.status === "failed") {
+          pushToast("error", t("importV2.workflow.confirmFailed"));
+        }
       }
     }
+    settleItemTask(event.payload as BackendTask);
     const current = useImportStore.getState();
     if (event.projectId !== projectId || current.projectKey !== projectKey || !current.session) return;
     if (current.session.items.some((item) => item.taskId === event.taskId)) {
-      void refreshForScope(projectKey, current.sessionEpoch);
+      void refreshForScope(projectKey, current.sessionEpoch).catch(() => undefined);
     }
-  }, [projectId, projectKey, refreshForScope, startNewQueuedItems]);
+  }, [isScopeCurrent, projectId, projectKey, pushToast, refreshForScope, settleItemTask, settlePathTask, t]);
 
   useEffect(() => registerTaskEventListener(handleTaskEvent), [handleTaskEvent]);
 
   useEffect(() => {
+    if (!projectId) {
+      setBootstrapState("ready");
+      return;
+    }
+    if (activeView !== "import") {
+      // Keep the import session, pending work, and batch task ids alive while
+      // the user visits another workspace view. The task event listener stays
+      // mounted, so returning to Import can show the latest state immediately.
+      setBootstrapState("ready");
+      return;
+    }
+    const currentStore = useImportStore.getState();
+    if (currentStore.projectKey === projectKey && currentStore.session?.projectId === projectId) {
+      // A hook remount can reuse the Zustand session while its local task id
+      // state starts empty. Reattach once for a fresh hook instance, but do
+      // not resurrect a status the user dismissed during ordinary navigation.
+      if (initializedProjectKeyRef.current !== projectKey) {
+        setDiscoveryTaskId(currentStore.session.discoveryTaskId ?? null);
+      }
+      initializedProjectKeyRef.current = projectKey;
+      setBootstrapState("ready");
+      return;
+    }
     const store = useImportStore.getState();
     store.resetProjectPresentation(projectKey);
     store.setImportedSources([]);
@@ -232,8 +643,17 @@ export function useImportWorkflow(
     setReadiness(null);
     setReadinessWarning(null);
     setBootstrapError(null);
+    setIsSyncingSession(false);
     setBootstrapState("loading");
     pendingPathTasks.current.clear();
+    pendingItemTasks.current.clear();
+    pendingConfirmationTasks.current.clear();
+    pendingActionKeysRef.current.clear();
+    setPendingActionKeys(new Set());
+    setDiscoveryTaskId(null);
+    setBatchRecords([]);
+    setCancellingBatchIds(new Set());
+    setDismissedBatchIds(new Set());
     if (activeView !== "import" || !projectId) {
       setBootstrapState("ready");
       return;
@@ -275,6 +695,8 @@ export function useImportWorkflow(
         }
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
         store.attachSession(projectKey, nextSession, epoch);
+        setDiscoveryTaskId(nextSession.discoveryTaskId ?? null);
+        initializedProjectKeyRef.current = projectKey;
         setBootstrapState("ready");
       } catch (error) {
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
@@ -288,37 +710,97 @@ export function useImportWorkflow(
     };
   }, [activeView, bootstrapAttempt, isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
 
+  // Rebuild visible batch cards from persisted session/task identities after
+  // a remount or application restart. Only unfinished item work is restored;
+  // completed historical batches remain available through History instead of
+  // cluttering the live import surface.
+  useEffect(() => {
+    if (!session || session.projectId !== projectId) return;
+    const hasReferencedTaskSnapshot = session.items.some((item) => item.taskId && taskList.some((task) => task.id === item.taskId));
+    if (hasTauri() && !tasksHydrated && !hasReferencedTaskSnapshot) return;
+    const taskById = new Map(taskList.map((task) => [task.id, task]));
+    const recovered = new Map<string, ImportBatchRecord>();
+    session.items.forEach((item) => {
+      if (!item.taskId || !isRecoverableImportItemStatus(item.status)) return;
+      const task = taskById.get(item.taskId);
+      if (task && isTerminalStatus(task.status)) return;
+      const batchId = task?.batchId ?? `recovered:${session.sessionId}:${item.taskId}`;
+      const current = recovered.get(batchId) ?? {
+        id: batchId,
+        sessionId: session.sessionId,
+        projectKey,
+        epoch: sessionEpoch,
+        tasks: [],
+      };
+      if (!current.tasks.some((reference) => reference.taskId === item.taskId)) {
+        recovered.set(batchId, {
+          ...current,
+          tasks: [...current.tasks, {
+            taskId: item.taskId,
+            itemId: item.itemId,
+            title: item.input.displayName,
+          }],
+        });
+      }
+    });
+    if (recovered.size === 0) return;
+    setBatchRecords((current) => {
+      const existing = new Set(current.map((record) => record.id));
+      const additions = [...recovered.values()].filter((record) => !existing.has(record.id) && !dismissedBatchIds.has(record.id));
+      return additions.length > 0 ? [...current, ...additions] : current;
+    });
+  }, [dismissedBatchIds, projectId, projectKey, session, sessionEpoch, taskList, tasksHydrated]);
+
   const addPaths = useCallback(async (paths: string[]) => {
     const sourcePaths = paths.map((path) => path.trim()).filter(Boolean);
     const current = useImportStore.getState();
     if (sourcePaths.length === 0 || !current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
     const existingItemIds = new Set(current.session.items.map((item) => item.itemId));
-    const mutationKey = `add-paths:${projectKey}`;
+    const mutationKey = `add-paths:${projectKey}:${epoch}`;
+    if (current.mutationKeys.has(mutationKey) || current.mutationKeys.has(`add-url:${projectKey}:${epoch}`)) return;
+    nextSessionMutationRevision();
     current.beginMutation(mutationKey);
+    let taskStarted = false;
     try {
       const task = await importV2Api.addPaths({
         projectId,
         projectRootPath: rootPath,
-        sessionId: current.session.sessionId,
+        sessionId: current.session!.sessionId,
         sourcePaths,
       });
-      selectedTaskUpsert(task);
-      pendingPathTasks.current.set(task.id, { projectKey, epoch, existingItemIds });
-      if (isScopeCurrent(projectKey, epoch)) openTaskDrawer(task.id);
+      // The global task listener may have received a terminal event while
+      // this IPC call was still resolving. Preserve that newer fact instead
+      // of overwriting it with the task snapshot returned at creation time.
+      const knownTask = useTaskStore.getState().tasks.find((candidate) => candidate.id === task.id);
+      const observedTask = knownTask && isSettledImportTask(knownTask) ? knownTask : task;
+      selectedTaskUpsert(observedTask);
+      pendingPathTasks.current.set(task.id, { projectKey, epoch, existingItemIds, mutationKey });
+      taskStarted = true;
+      if (isScopeCurrent(projectKey, epoch)) {
+        setDiscoveryTaskId(task.id);
+      }
+      // A very fast local scan can finish before the task event subscription
+      // observes it. Resolve from both the returned task and the persisted
+      // task snapshot so a source cannot stay busy waiting for a missed event.
+      settlePathTask(observedTask);
+      watchDiscoveryTask(task.id, projectKey, epoch);
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
     } finally {
-      useImportStore.getState().endMutation(mutationKey);
+      if (!taskStarted) useImportStore.getState().endMutation(mutationKey);
     }
-  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+  }, [fetchTasks, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcilePendingTasks, rootPath, selectedTaskUpsert, settlePathTask, t, watchDiscoveryTask]);
 
   const addUrl = useCallback(async (url: string) => {
     const current = useImportStore.getState();
     if (!url.trim() || !current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
     const existingItemIds = new Set(current.session.items.map((item) => item.itemId));
-    const mutationKey = `add-url:${projectKey}`;
+    const mutationKey = `add-url:${projectKey}:${epoch}`;
+    if (current.mutationKeys.has(mutationKey) || current.mutationKeys.has(`add-paths:${projectKey}:${epoch}`)) return;
+    const mutationRevision = nextSessionMutationRevision();
     current.beginMutation(mutationKey);
     try {
       const nextSession = await importV2Api.addUrl({
@@ -327,7 +809,7 @@ export function useImportWorkflow(
         sessionId: current.session.sessionId,
         url: url.trim(),
       });
-      if (!isScopeCurrent(projectKey, epoch)) return;
+      if (!isScopeCurrent(projectKey, epoch) || sessionMutationRevisionRef.current !== mutationRevision) return;
       useImportStore.getState().replaceSession(projectKey, nextSession, epoch);
       await startNewQueuedItems(projectKey, epoch, existingItemIds);
     } catch (error) {
@@ -336,69 +818,254 @@ export function useImportWorkflow(
     } finally {
       useImportStore.getState().endMutation(mutationKey);
     }
-  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, startNewQueuedItems, t]);
+  }, [isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, rootPath, startNewQueuedItems, t]);
+
+  const cancelDiscovery = useCallback(async () => {
+    const taskId = discoveryTaskId;
+    if (!taskId) return;
+    try {
+      await taskLauncher.cancel(taskId);
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      throw error;
+    }
+  }, [discoveryTaskId, projectKey, pushToast, t, taskLauncher]);
+
+  const dismissDiscovery = useCallback(() => setDiscoveryTaskId(null), []);
+
+  const cancelBatch = useCallback(async (requestedBatchId?: string) => {
+    const target = batches.find((candidate) => candidate.id === requestedBatchId) ?? batches[0];
+    if (!target || cancellingBatchIds.has(target.id)) return;
+    const activeTasks = target.tasks.filter((task) => task.status !== "unknown" && !isTerminalStatus(task.status) && task.status !== "waiting_for_confirmation" && task.cancellable);
+    if (activeTasks.length === 0) return;
+    setCancellingBatchIds((current) => new Set(current).add(target.id));
+    try {
+      const isBackendBatch = !target.id.startsWith("local:") && !target.id.startsWith("recovered:");
+      if (isBackendBatch) {
+        const cancelled = await importV2Api.cancelBatch({
+          projectId,
+          projectRootPath: rootPath,
+          sessionId: target.sessionId,
+          batchId: target.id,
+        });
+        cancelled.forEach((task) => selectedTaskUpsert(task));
+      } else {
+        const results = await Promise.allSettled(activeTasks.map((task) => taskLauncher.cancel(task.id, { suppressToast: true })));
+        if (results.some((result) => result.status === "rejected" || (result.status === "fulfilled" && !result.value))) {
+          throw new Error(t("importV2.workflow.batchCancelFailed"));
+        }
+      }
+    } catch (error) {
+      pushToast("error", error instanceof Error ? error.message : t("importV2.workflow.batchCancelFailed"));
+    } finally {
+      setCancellingBatchIds((current) => {
+        const next = new Set(current);
+        next.delete(target.id);
+        return next;
+      });
+    }
+  }, [batches, cancellingBatchIds, projectId, pushToast, rootPath, selectedTaskUpsert, t, taskLauncher]);
+
+  const dismissBatch = useCallback((requestedBatchId?: string) => {
+    const target = batches.find((candidate) => candidate.id === requestedBatchId) ?? batches[0];
+    if (!target || target.active > 0 || target.cancelling > 0) return;
+    setDismissedBatchIds((current) => new Set(current).add(target.id));
+    setBatchRecords((current) => current.filter((record) => record.id !== target.id));
+    setCancellingBatchIds((current) => {
+      if (!current.has(target.id)) return current;
+      const next = new Set(current);
+      next.delete(target.id);
+      return next;
+    });
+  }, [batches]);
 
   const setItemSelected = useCallback(async (itemId: string, selected: boolean) => {
     const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey) return;
+    const originalItem = current.session?.items.find((item) => item.itemId === itemId);
+    if (!current.session || !originalItem || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
+    const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
+    if (acceptedIds.length === 0) return;
+    const mutationRevision = nextSessionMutationRevision();
+    useImportStore.getState().replaceItem(projectKey, { ...originalItem, selected }, epoch);
     try {
       const nextSession = await importV2Api.setSelection({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, selected });
-      if (isScopeCurrent(projectKey, epoch)) useImportStore.getState().replaceSession(projectKey, nextSession, epoch);
+      if (isScopeCurrent(projectKey, epoch) && sessionMutationRevisionRef.current === mutationRevision) {
+        useImportStore.getState().replaceSession(projectKey, nextSession, epoch);
+      }
     } catch (error) {
-      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      if (isScopeCurrent(projectKey, epoch) && sessionMutationRevisionRef.current === mutationRevision) {
+        useImportStore.getState().replaceItem(projectKey, originalItem, epoch);
+        pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      }
+    } finally {
+      endPendingItems(acceptedIds, projectKey, epoch);
     }
-  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, rootPath, t]);
 
-  const startItems = useCallback(async (itemIds: string[]) => {
+  const startItems = useCallback(async (itemIds: readonly string[], recoveryAction: ImportRecoveryAction | null = null) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const ids = [...new Set(itemIds)].filter((id) => current.session?.items.some((item) => item.itemId === id));
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
+    const acceptedIds = beginPendingItems(ids, projectKey, epoch);
+    if (acceptedIds.length === 0) return;
+    nextSessionMutationRevision();
     try {
-      const tasks = await importV2Api.startItems({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemIds: ids });
-      for (const task of tasks) {
-        selectedTaskUpsert(task);
-        if (isScopeCurrent(projectKey, epoch)) openTaskDrawer(task.id);
+      const tasks = await importV2Api.startItems({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId: current.session.sessionId,
+        itemIds: acceptedIds,
+        ...(recoveryAction ? { recoveryAction } : {}),
+      });
+      tasks.forEach((task) => selectedTaskUpsert(task));
+      const resolvedTasks = tasks.map((task) => useTaskStore.getState().tasks.find((current) => current.id === task.id) ?? task);
+      recordItemBatch(resolvedTasks, acceptedIds, projectKey, epoch, current.session.sessionId);
+      const { terminalIds } = registerItemTasks(resolvedTasks, acceptedIds, projectKey, epoch);
+      if (terminalIds.length > 0 && isScopeCurrent(projectKey, epoch)) {
+        void refreshForScope(projectKey, epoch);
+      }
+      reconcilePendingTasks(resolvedTasks);
+      void fetchTasks().then(() => reconcilePendingTasks()).catch(() => undefined);
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      endPendingItems(acceptedIds, projectKey, epoch);
+    }
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, recordItemBatch, reconcilePendingTasks, refreshForScope, registerItemTasks, rootPath, selectedTaskUpsert, t]);
+
+  const retryItem = useCallback(async (itemId: string, recoveryAction: ImportRecoveryAction | null = null) => startItems([itemId], recoveryAction), [startItems]);
+
+  const retryBatch = useCallback(async (batchId: string) => {
+    const target = batches.find((candidate) => candidate.id === batchId);
+    if (!target || target.failedItemIds.length === 0 || target.active > 0) return;
+    await startItems(target.failedItemIds);
+  }, [batches, startItems]);
+
+  const skipItem = useCallback(async (itemId: string) => {
+    const current = useImportStore.getState();
+    const item = current.session?.items.find((candidate) => candidate.itemId === itemId);
+    if (!item || current.projectKey !== projectKey) return;
+    const epoch = current.sessionEpoch;
+    const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
+    if (acceptedIds.length === 0) return;
+    const mutationRevision = nextSessionMutationRevision();
+    try {
+      const nextSession = await importV2Api.skipItem({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId: current.session!.sessionId,
+        itemId,
+      });
+      if (isScopeCurrent(projectKey, epoch) && sessionMutationRevisionRef.current === mutationRevision) {
+        useImportStore.getState().replaceSession(projectKey, nextSession, epoch);
       }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+    } finally {
+      endPendingItems(acceptedIds, projectKey, epoch);
     }
-  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, rootPath, t]);
 
-  const retryItem = useCallback(async (itemId: string) => startItems([itemId]), [startItems]);
+  const authorizeLocalAsr = useCallback(async (itemId: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return;
+    const epoch = current.sessionEpoch;
+    const mutationRevision = nextSessionMutationRevision();
+    try {
+      await importV2Api.authorizeBilibiliAsr({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId: current.session.sessionId,
+        itemId,
+      });
+      if (!isScopeCurrent(projectKey, epoch) || sessionMutationRevisionRef.current !== mutationRevision) return;
+      await refreshForScope(projectKey, epoch);
+      await startItems([itemId]);
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+    }
+  }, [isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, refreshForScope, rootPath, startItems, t]);
 
   const cancelItem = useCallback(async (itemId: string) => {
     const current = useImportStore.getState();
     const item = current.session?.items.find((candidate) => candidate.itemId === itemId);
-    if (!item?.taskId || current.projectKey !== projectKey) return;
+    if (!item || current.projectKey !== projectKey) return;
+    if (!item.taskId) {
+      if (item.status === "queued") {
+        const epoch = current.sessionEpoch;
+        const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
+        if (acceptedIds.length === 0) return;
+        const mutationRevision = nextSessionMutationRevision();
+        try {
+          const nextSession = await importV2Api.cancelItem({
+            projectId,
+            projectRootPath: rootPath,
+            sessionId: current.session!.sessionId,
+            itemId,
+          });
+          if (isScopeCurrent(projectKey, epoch) && sessionMutationRevisionRef.current === mutationRevision) {
+            useImportStore.getState().replaceSession(projectKey, nextSession, epoch);
+          }
+        } catch (error) {
+          if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+        } finally {
+          endPendingItems(acceptedIds, projectKey, epoch);
+        }
+      }
+      return;
+    }
     const epoch = current.sessionEpoch;
-    await taskLauncher.cancel(item.taskId);
-    if (isScopeCurrent(projectKey, epoch)) await refreshForScope(projectKey, epoch);
-  }, [isScopeCurrent, projectKey, refreshForScope, taskLauncher]);
+    const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
+    if (acceptedIds.length === 0) return;
+    nextSessionMutationRevision();
+    try {
+      await taskLauncher.cancel(item.taskId);
+      if (isScopeCurrent(projectKey, epoch)) await refreshForScope(projectKey, epoch);
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+    } finally {
+      endPendingItems(acceptedIds, projectKey, epoch);
+    }
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, refreshForScope, rootPath, t, taskLauncher]);
 
   const confirm = useCallback(async (decisions: CommitItemDecision[]) => {
     const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey || decisions.length === 0) return;
+    if (!current.session || current.projectKey !== projectKey || decisions.length === 0 || current.isConfirming) return;
     const epoch = current.sessionEpoch;
     current.setIsConfirming(true);
     try {
       const task = await importV2Api.confirmSession({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, decisions });
-      selectedTaskUpsert(task);
+      // A commit can finish before this IPC response resolves. Keep a newer
+      // terminal snapshot from the global task store instead of reintroducing
+      // a queued task and leaving the commit bar locked.
+      const knownTask = useTaskStore.getState().tasks.find((candidate) => candidate.id === task.id);
+      const observedTask = knownTask && isTerminalStatus(knownTask.status) ? knownTask : task;
+      selectedTaskUpsert(observedTask);
+      pendingConfirmationTasks.current.set(task.id, { projectKey, epoch });
       if (isScopeCurrent(projectKey, epoch)) openTaskDrawer(task.id);
+      if (isTerminalStatus(observedTask.status)) {
+        pendingConfirmationTasks.current.delete(task.id);
+        if (isScopeCurrent(projectKey, epoch)) {
+          useImportStore.getState().setIsConfirming(false);
+          void refreshForScope(projectKey, epoch).catch(() => undefined);
+          if (observedTask.status === "failed") pushToast("error", t("importV2.workflow.confirmFailed"));
+        }
+      }
     } catch (error) {
-      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
-    } finally {
-      if (isScopeCurrent(projectKey, epoch)) useImportStore.getState().setIsConfirming(false);
+      if (isScopeCurrent(projectKey, epoch)) {
+        useImportStore.getState().setIsConfirming(false);
+        pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      }
     }
-  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, t]);
+  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, pushToast, refreshForScope, rootPath, selectedTaskUpsert, t]);
 
   const confirmLegacy = useCallback((options: { createCheckpoint: boolean; compileAfterImport: boolean }) => {
     void options;
     const decisions: CommitItemDecision[] = (useImportStore.getState().session?.items ?? [])
       .filter((item) => item.selected && item.status === "preview_ready")
-      .map((item) => ({ itemId: item.itemId, conflictAction: null, expectedWikiHash: null }));
+      .map((item) => ({ itemId: item.itemId, conflictAction: "create_new", expectedWikiHash: null }));
     void confirm(decisions);
   }, [confirm]);
 
@@ -409,21 +1076,31 @@ export function useImportWorkflow(
       : Promise.resolve();
   }, [projectKey, refreshForScope]);
 
-  const loadPreview = useCallback(async (identity: { sessionId: string; itemId: string; candidateId: string | null }) => {
+  const loadPreview = useCallback(async (identity: { sessionId: string; itemId: string; candidateId: string | null; historyBatchId?: string | null }) => {
     const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey || current.session.sessionId !== identity.sessionId || !current.session.items.some((item) => item.itemId === identity.itemId)) {
+    if (current.projectKey !== projectKey) {
       throw new Error("Preview identity is no longer current");
     }
-    const epoch = current.sessionEpoch;
     try {
       const content = await importV2Api.getPreviewContent({ projectId, projectRootPath: rootPath, ...identity });
-      if (!isScopeCurrent(projectKey, epoch)) throw new Error("Preview identity is no longer current");
+      if (latestProjectKey.current !== projectKey) throw new Error("Preview identity is no longer current");
       return content;
     } catch (error) {
-      if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
       throw error;
     }
-  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+  }, [projectId, projectKey, pushToast, rootPath, t]);
+
+  const loadSession = useCallback(async (sessionId: string, historyBatchId: string | null = null) => {
+    if (!sessionId || latestProjectKey.current !== projectKey) return null;
+    try {
+      const result = await (importV2Api.getHistorySession ?? importV2Api.getSession)({ projectId, projectRootPath: rootPath, sessionId, historyBatchId });
+      return latestProjectKey.current === projectKey && useImportStore.getState().projectKey === projectKey ? result : null;
+    } catch (error) {
+      if (latestProjectKey.current === projectKey) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      return null;
+    }
+  }, [projectId, projectKey, pushToast, rootPath, t]);
 
   const visibleItems = useMemo(() => selectVisibleItems(session, filter), [filter, session]);
   const counts = useMemo(() => selectQueueCounts(session), [session]);
@@ -431,10 +1108,24 @@ export function useImportWorkflow(
   const selectItem = useImportStore((state) => state.selectItem);
   const setFilter = useImportStore((state) => state.setFilter);
 
-  const requestPreview = useCallback((paths: string[]) => { void addPaths(paths); }, [addPaths]);
+  const requestPreview = useCallback((paths: string[]) => { void addPaths(paths).catch(() => undefined); }, [addPaths]);
   const requestUrl = useCallback((url: string) => addUrl(url), [addUrl]);
-  const requestClipboard = useCallback(async () => {
-    pushToast("warning", t("importV2.workflow.clipboardUnavailable"));
+  const requestClipboard = useCallback(async (content: string) => {
+    if (!content.trim()) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(content);
+      } else if (!copyTextWithDomFallback(content)) {
+        throw new Error("Clipboard unavailable");
+      }
+      pushToast("info", t("importV2.workflow.clipboardCopied"));
+    } catch {
+      if (copyTextWithDomFallback(content)) {
+        pushToast("info", t("importV2.workflow.clipboardCopied"));
+      } else {
+        pushToast("warning", t("importV2.workflow.clipboardUnavailable"));
+      }
+    }
   }, [pushToast, t]);
   const requestDeleteSource = useCallback(async () => {
     pushToast("warning", t("importV2.workflow.legacyActionUnavailable"));
@@ -581,12 +1272,15 @@ export function useImportWorkflow(
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.completeLogin({ projectId, projectRootPath: rootPath, importSessionId: current.session.sessionId, itemId, connectorSessionId });
-      return isScopeCurrent(projectKey, epoch) ? result : null;
+      if (!isScopeCurrent(projectKey, epoch)) return null;
+      await refreshForScope(projectKey, epoch);
+      await startItems([itemId]);
+      return result;
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
       throw error;
     }
-  }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+  }, [isScopeCurrent, projectId, projectKey, pushToast, refreshForScope, rootPath, startItems, t]);
 
   const revokeLogin = useCallback(async (connectorSessionId: string) => {
     if (latestProjectKey.current !== projectKey) return false;
@@ -723,20 +1417,38 @@ export function useImportWorkflow(
     visibleItems,
     counts,
     progress,
+    discoveryTask,
+    discoveryTaskUnavailable,
+    isAddingPaths,
+    isAddingUrl,
+    pendingItemIds,
+    isSyncingSession,
+    batch,
+    batches,
+    isCancellingBatch,
+    isBatchCancelling,
     selectedItemId,
     filter,
     addPaths,
     addUrl,
+    cancelDiscovery,
+    dismissDiscovery,
+    cancelBatch,
+    dismissBatch,
+    retryBatch,
     setItemSelected,
     startItems,
     retryItem,
     cancelItem,
+    skipItem,
+    authorizeLocalAsr,
     confirm,
     confirmLegacy,
     refreshSession,
     selectItem,
     setFilter,
     loadPreview,
+    loadSession,
     getAgentPolicy,
     setAgentPolicy,
     invokeLocalAgent,

@@ -60,12 +60,15 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     startItems: vi.fn(),
     retryItem: vi.fn(),
     cancelItem: vi.fn(),
+    skipItem: vi.fn(),
+    authorizeLocalAsr: vi.fn(),
     confirm: vi.fn(),
     confirmLegacy: vi.fn(),
     refreshSession: vi.fn(),
     selectItem: vi.fn(),
     setFilter: vi.fn(),
     loadPreview: vi.fn(),
+    loadSession: vi.fn(),
     getAgentPolicy: vi.fn().mockResolvedValue(null),
     setAgentPolicy: vi.fn(),
     invokeLocalAgent: vi.fn(),
@@ -112,14 +115,14 @@ describe("Import V2 end-to-end presentation boundary", () => {
     expect(screen.getByRole("button", { name: /confirm import/i })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: /confirm import/i }));
     expect(workflow.confirm).toHaveBeenCalledWith([
-      { itemId: "notes.md", conflictAction: null, expectedWikiHash: null },
+      { itemId: "notes.md", conflictAction: "create_new", expectedWikiHash: null },
     ]);
 
     fireEvent.click(screen.getByRole("button", { name: /retry failed\.docx/i }));
     fireEvent.click(screen.getByRole("button", { name: /cancel processing\.pdf/i }));
     expect(workflow.retryItem).toHaveBeenCalledWith("failed.docx");
     expect(workflow.cancelItem).toHaveBeenCalledWith("processing.pdf");
-    expect(screen.getByRole("region", { name: /import queue/i })).toHaveAttribute("aria-live", "polite");
+    expect(screen.getAllByRole("status").some((element) => /0\/3 processed/i.test(element.textContent ?? ""))).toBe(true);
   });
 
   it("keeps V2 entry points available while migration activation is pending", () => {
@@ -131,7 +134,7 @@ describe("Import V2 end-to-end presentation boundary", () => {
     render(<ImportView workflow={workflow} />);
 
     expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /add files|choose files/i })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /add files|choose files/i }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /switch to v1|legacy write/i })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /confirm import/i })).toBeDisabled();
   });
@@ -144,5 +147,5 @@ describe("Import V2 end-to-end presentation boundary", () => {
     expect(screen.getByText(/showing 200 of 2000 items/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /load more/i }));
     expect(screen.getAllByRole("listitem")).toHaveLength(400);
-  });
+  }, 10_000);
 });

@@ -4,14 +4,11 @@ import { useTranslation } from "react-i18next";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useImportStore } from "../../stores/importStore";
 import type { ImportItem } from "../../types/importV2";
-import { balancedAgentAssistancePolicy } from "../../types/importV2Agent";
-import type { AgentAssistancePolicy } from "../../types/importV2Agent";
 import type { AgentCandidateView as AgentCandidateViewType, AgentSendScope } from "../../types/importV2Agent";
 import type { ConnectorSessionRef, ImportCapabilityRequirement, ImportFrontendReadiness } from "../../types/importV2Presentation";
 import type { MigrationConfirmation, LegacyInventory, MigrationPlan, MigrationReport } from "../../types/importV2Migration";
 import type { WebAuthState } from "../../types/importV2Web";
 import type { LlmProviderKind } from "../../types/llm";
-import { ImportAgentControls } from "./ImportAgentControls";
 import { ImportByokApprovalDialog } from "./ImportByokApprovalDialog";
 import { ImportCandidateDiffDialog, type ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
 import { ImportCapabilityDialog } from "./ImportCapabilityDialog";
@@ -25,7 +22,6 @@ export interface ImportV2DialogsProps {
   workflow: ImportWorkflow;
   capabilities: AiCapabilitiesWorkflow;
   readiness: ImportFrontendReadiness | null;
-  selectedItem: ImportItem | null;
   privateItem: ImportItem | null;
   migrationOpen: boolean;
   onCloseMigration: () => void;
@@ -33,8 +29,6 @@ export interface ImportV2DialogsProps {
   onCloseCandidate: () => void;
   onCandidateIntent: (intent: ImportCandidateDiffIntent) => void;
   onClosePrivate: () => void;
-  onCompareCandidate: (itemId: string) => void;
-  onDiscardCandidate: (itemId: string) => void;
 }
 
 function hostFor(locator: string): string {
@@ -56,7 +50,7 @@ function providerFor(capabilities: AiCapabilitiesWorkflow) {
   return capabilities.providers.find((provider) => provider.config.enabled && (provider.hasSecret || provider.config.provider === "ollama"))?.config.provider ?? null;
 }
 
-export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedItem, privateItem, migrationOpen, onCloseMigration, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate, onCompareCandidate, onDiscardCandidate }: ImportV2DialogsProps) {
+export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem, migrationOpen, onCloseMigration, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate }: ImportV2DialogsProps) {
   const { t } = useTranslation();
   const session = useImportStore((state) => state.session);
   const previewItemId = useImportStore((state) => state.previewItemId);
@@ -76,24 +70,13 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedIte
   const [scope, setScope] = useState<AgentSendScope | null>(null);
   const [capability, setCapability] = useState<ImportCapabilityRequirement | null>(null);
   const [connector, setConnector] = useState<ConnectorSessionRef | null>(null);
-  const [policy, setPolicy] = useState<AgentAssistancePolicy>(balancedAgentAssistancePolicy());
   const [migrationState, setMigrationState] = useState<ImportMigrationUiStatus>(() => migrationStatus(readiness));
   const [inventory, setInventory] = useState<LegacyInventory | null>(null);
   const [plan, setPlan] = useState<MigrationPlan | null>(null);
   const [report, setReport] = useState<MigrationReport | null>(null);
   const [confirmation] = useState<MigrationConfirmation | null>(null);
 
-  const localAgent = useMemo(() => capabilities.agents.find((agent) => agent.state === "installed" && agent.isDefault) ?? capabilities.agents.find((agent) => agent.state === "installed") ?? null, [capabilities.agents]);
   const provider = useMemo(() => providerFor(capabilities), [capabilities]);
-
-  useEffect(() => {
-    if (!selectedItem || workflow.bootstrapState !== "ready") return;
-    let current = true;
-    void workflow.getAgentPolicy().then((next) => {
-      if (current && next) setPolicy(next);
-    }).catch(() => undefined);
-    return () => { current = false; };
-  }, [selectedItem?.itemId, workflow.bootstrapState, workflow.getAgentPolicy]);
 
   useEffect(() => {
     if (!byokItemId || !provider) {
@@ -157,29 +140,13 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedIte
     setMigrationState(snapshot?.status ?? "awaiting_confirmation");
   }
 
-  const loginPlatform = loginItem?.input.kind === "url" ? hostFor(loginItem.input.normalizedLocator ?? loginItem.input.locator) : "connector";
+  const loginDomain = loginItem?.input.kind === "url" ? hostFor(loginItem.input.normalizedLocator ?? loginItem.input.locator) : "connector";
+  const loginPlatform = connectorIdForHost(loginDomain);
+  const loginPlatformLabel = t(`importV2.platform.${loginPlatform}`, { defaultValue: loginPlatform });
   const loginAuthState: WebAuthState = loginItem?.status === "waiting_login" ? "waiting_login" : connector?.state === "authenticated" ? "authenticated" : "public";
 
   return (
     <>
-      {selectedItem ? <ImportAgentControls
-        item={selectedItem}
-        policy={policy}
-        localAgentKind={localAgent?.kind ?? null}
-        localAgentAvailable={localAgent !== null}
-        byokAvailable={provider !== null}
-        onPolicyChange={async (next) => {
-          const saved = await workflow.setAgentPolicy(next, localAgent?.kind ?? null);
-          if (!saved) throw new Error(t("importV2.agent.policySaveFailed"));
-          setPolicy(saved);
-          return saved;
-        }}
-        onInvokeLocalAgent={async (itemId, agentKind) => { await workflow.invokeLocalAgent(itemId, "manual", agentKind); }}
-        onRequestByok={(itemId) => useImportStore.getState().openByok(itemId)}
-        onCompareCandidate={onCompareCandidate}
-        onDiscardCandidate={onDiscardCandidate}
-      /> : null}
-
       <ImportMarkdownPreviewDialog open={Boolean(previewIdentity)} identity={previewIdentity} loadContent={workflow.loadPreview} onClose={closePreview} />
       <ImportByokApprovalDialog
         open={Boolean(byokItemId && scope)}
@@ -201,8 +168,8 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedIte
       />
       <ImportLoginDialog
         open={Boolean(loginItem)}
-        platform={loginPlatform}
-        publicDomain={loginPlatform}
+        platform={loginPlatformLabel}
+        publicDomain={loginDomain}
         authState={loginAuthState}
         connectorSession={connector}
         onBeginLogin={() => workflow.beginLogin(loginItem!.itemId, loginPlatform).then((next) => { setConnector(next); return next ?? undefined; })}
@@ -237,4 +204,14 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, selectedIte
       />
     </>
   );
+}
+
+function connectorIdForHost(host: string): string {
+  const normalized = host.toLowerCase();
+  if (normalized === "mp.weixin.qq.com") return "wechat";
+  if (normalized === "zhihu.com" || normalized.endsWith(".zhihu.com")) return "zhihu";
+  if (normalized === "bilibili.com" || normalized.endsWith(".bilibili.com") || normalized === "b23.tv") return "bilibili";
+  if (normalized === "xiaohongshu.com" || normalized.endsWith(".xiaohongshu.com")) return "xiaohongshu";
+  if (normalized === "x.com" || normalized.endsWith(".x.com") || normalized === "twitter.com" || normalized.endsWith(".twitter.com")) return "x";
+  return "connector";
 }

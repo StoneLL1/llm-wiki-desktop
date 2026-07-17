@@ -1,0 +1,84 @@
+import { CircleAlert, CircleCheck, LoaderCircle, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
+
+import type { BackendTask } from "../../types/task";
+
+export interface ImportDiscoveryStatusProps {
+  task: BackendTask | null;
+  unavailable?: boolean;
+  onCancel: () => void;
+  onDismiss: () => void;
+  cancelling?: boolean;
+}
+
+function parseDiscoverySummary(summary: string | undefined): { added: number; skipped: number } | null {
+  if (!summary) return null;
+  const match = summary.match(/added\s+(\d+)\s+files?\s*;\s*skipped\s+(\d+)/i);
+  return match ? { added: Number(match[1]), skipped: Number(match[2]) } : null;
+}
+
+export function ImportDiscoveryStatus({ task, unavailable = false, onCancel, onDismiss, cancelling = false }: ImportDiscoveryStatusProps) {
+  const { t } = useTranslation();
+  if (!task) {
+    if (!unavailable) return null;
+    return (
+      <section className="mx-4 mb-3 flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[11px] text-[var(--warning-text)]" role="alert">
+        <CircleAlert size={15} className="shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1">{t("importV2.discovery.interrupted")}</span>
+        <button type="button" className="icon-button" aria-label={t("importV2.discovery.dismiss")} title={t("importV2.discovery.dismiss")} onClick={onDismiss}><X size={14} aria-hidden="true" /></button>
+      </section>
+    );
+  }
+
+  const isActive = task.status === "queued" || task.status === "running" || task.status === "cancelling";
+  const cancelRequested = cancelling || task.status === "cancelling";
+  const discovered = task.progress?.current ?? 0;
+  const resultSummary = parseDiscoverySummary(task.result?.summary);
+  const liveSummary = resultSummary ?? { added: discovered, skipped: 0 };
+
+  if (isActive) {
+    return (
+      <section className="mx-4 mb-3 flex items-center gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5" role="status" aria-live="polite" aria-busy="true">
+        <LoaderCircle size={16} className="shrink-0 animate-spin text-[var(--accent)]" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--text-primary)]">
+            <span>{t("importV2.discovery.scanning")}</span>
+            <span className="font-mono text-[10.5px] text-[var(--text-muted)]">{t("importV2.discovery.stage")}</span>
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">
+            <span>{t("importV2.discovery.discovered", { count: discovered })}</span>
+            <span>{t("importV2.discovery.added", { count: liveSummary.added })}</span>
+            <span>{t("importV2.discovery.skipped", { count: liveSummary.skipped })}</span>
+          </div>
+          <div className="mt-1 h-1 overflow-hidden rounded-full bg-[var(--border)]" aria-hidden="true"><div className="h-full w-full rounded-full bg-[var(--accent)] animate-pulse opacity-60" /></div>
+        </div>
+        {task.cancellable ? <button type="button" className="btn btn--sm" disabled={cancelRequested} aria-busy={cancelRequested} onClick={onCancel}>{t(cancelRequested ? "importV2.discovery.cancelling" : "importV2.discovery.cancel")}</button> : null}
+      </section>
+    );
+  }
+
+  if (task.status === "succeeded") {
+    return (
+      <section className="mx-4 mb-3 flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-[11px] text-[var(--text-secondary)]" role="status" aria-live="polite">
+        <CircleCheck size={15} className="shrink-0 text-[var(--accent)]" aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate">
+          {t("importV2.discovery.complete")}
+          {discovered > 0 ? ` · ${t("importV2.discovery.discovered", { count: discovered })}` : ""}
+          {resultSummary ? ` · ${t("importV2.discovery.added", { count: resultSummary.added })} · ${t("importV2.discovery.skipped", { count: resultSummary.skipped })}` : ""}
+        </span>
+        <button type="button" className="icon-button" aria-label={t("importV2.discovery.dismiss")} title={t("importV2.discovery.dismiss")} onClick={onDismiss}><X size={14} aria-hidden="true" /></button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="mx-4 mb-3 flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[11px] text-[var(--danger-text)]" role="alert">
+      <CircleAlert size={15} className="shrink-0" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <p className="m-0">{task.status === "cancelled" ? t("importV2.discovery.cancelled") : t("importV2.discovery.failed")}</p>
+        {task.status !== "cancelled" && task.error?.message ? <p className="m-0 mt-0.5 break-words text-[10.5px] text-[var(--danger-text)]">{t("importV2.discovery.errorDetail", { message: task.error.message })}</p> : null}
+      </div>
+      <button type="button" className="icon-button" aria-label={t("importV2.discovery.dismiss")} title={t("importV2.discovery.dismiss")} onClick={onDismiss}><X size={14} aria-hidden="true" /></button>
+    </section>
+  );
+}

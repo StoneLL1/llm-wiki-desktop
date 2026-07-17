@@ -3199,11 +3199,11 @@ select:focus-visible {
 }
 .import-v2-header {
   display: flex;
-  min-height: 74px;
-  align-items: flex-end;
+  min-height: 52px;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--sp-5);
-  padding: var(--sp-5) max(var(--sp-5), 3vw) var(--sp-4);
+  gap: var(--sp-4);
+  padding: var(--sp-3) max(var(--sp-5), 3vw);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--background);
 }
@@ -3230,17 +3230,17 @@ select:focus-visible {
   max-width: 1080px;
   margin: 0 auto;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--sp-4);
+  gap: var(--sp-3);
 }
 .import-v2-method-pane {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: var(--background);
-  padding: var(--sp-5);
+  background: var(--surface-raised);
+  padding: var(--sp-4);
 }
 .import-v2-method-pane__eyebrow {
   margin: 0 0 var(--sp-2);
@@ -3252,11 +3252,11 @@ select:focus-visible {
 }
 .import-v2-dropzone {
   display: flex;
-  min-height: 92px;
+  min-height: 68px;
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  margin-top: var(--sp-2);
+  margin-top: 0;
   border: 1.5px dashed var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-muted);
