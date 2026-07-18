@@ -19,6 +19,8 @@ import type {
 } from "./importV2";
 import type {
   AddImportPathsV2Request,
+  FileScanResult,
+  GetImportScanResultV2Request,
   CapabilityRequirement,
 } from "./importV2File";
 import type {
@@ -240,6 +242,7 @@ export interface ImportV2CommandNames {
   readonly getSession: "get_import_session_v2";
   readonly addItems: "add_import_items_v2";
   readonly addPaths: "start_add_import_paths_v2";
+  readonly getScanResult: "get_import_scan_result_v2";
   readonly addUrl: "add_import_url_v2";
   readonly setSelection: "set_import_item_selection_v2";
   readonly startItems: "start_import_items_v2";
@@ -276,6 +279,7 @@ export type ImportV2Api = {
   readonly getSession: (request: GetImportSessionV2Request) => Promise<ImportSession>;
   readonly addItems: (request: AddImportItemsV2Request) => Promise<ImportSession>;
   readonly addPaths: (request: AddImportPathsV2Request) => Promise<BackendTask>;
+  readonly getScanResult: (request: GetImportScanResultV2Request) => Promise<FileScanResult>;
   readonly addUrl: (request: import("./importV2Web").AddImportUrlV2Request) => Promise<ImportSession>;
   readonly setSelection: (request: SetImportItemSelectionV2Request) => Promise<ImportSession>;
   readonly startItems: (request: StartImportItemsV2Request) => Promise<BackendTask[]>;

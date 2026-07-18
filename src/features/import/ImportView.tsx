@@ -391,6 +391,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
             <ImportSourceMethods onAddPaths={workflow.addPaths} onAddUrl={workflow.addUrl} addingPaths={workflow.isAddingPaths} addingUrl={Boolean(workflow.isAddingUrl) || discoveryActive} sessionSyncing={workflow.isSyncingSession} platforms={sourcePlatforms} />
             <ImportDiscoveryStatus
               task={workflow.discoveryTask ?? null}
+              scan={workflow.discoveryScan}
               unavailable={workflow.discoveryTaskUnavailable}
               cancelling={isCancellingDiscovery}
               onCancel={() => {

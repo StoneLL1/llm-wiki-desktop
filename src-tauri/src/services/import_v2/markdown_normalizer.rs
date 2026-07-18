@@ -1,14 +1,38 @@
 use crate::errors::{BackendError, IMPORT_V2_ENGINE_OUTPUT_INVALID};
+use encoding_rs::{GB18030, UTF_16BE, UTF_16LE};
 
-pub fn decode_utf8(bytes: &[u8]) -> Result<&str, BackendError> {
-    std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes)).map_err(|_| {
-        BackendError::new(
-            IMPORT_V2_ENGINE_OUTPUT_INVALID,
-            "The lightweight document is not valid UTF-8.",
-            false,
-            true,
-        )
-    })
+/// Decode lightweight text sources into UTF-8 without silently replacing
+/// malformed input. UTF-8 remains preferred; BOM-marked UTF-16 and GB18030
+/// cover the common Windows-editor Markdown variants.
+pub fn decode_text(bytes: &[u8]) -> Result<String, BackendError> {
+    let without_utf8_bom = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    if let Ok(value) = std::str::from_utf8(without_utf8_bom) {
+        return Ok(value.to_owned());
+    }
+
+    if let Some(encoded) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        let (value, had_errors) = UTF_16LE.decode_without_bom_handling(encoded);
+        if !had_errors {
+            return Ok(value.into_owned());
+        }
+    } else if let Some(encoded) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        let (value, had_errors) = UTF_16BE.decode_without_bom_handling(encoded);
+        if !had_errors {
+            return Ok(value.into_owned());
+        }
+    }
+
+    let (value, had_errors) = GB18030.decode_without_bom_handling(bytes);
+    if !had_errors {
+        return Ok(value.into_owned());
+    }
+
+    Err(BackendError::new(
+        IMPORT_V2_ENGINE_OUTPUT_INVALID,
+        "The lightweight document encoding is not recognized. Save it as UTF-8, UTF-16, or GB18030 and try again.",
+        false,
+        true,
+    ))
 }
 
 pub fn normalize_markdown(value: &str) -> String {
@@ -182,4 +206,36 @@ fn collapse_blank_lines(value: &str) -> String {
         output.push('\n');
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_text;
+    use encoding_rs::GB18030;
+
+    #[test]
+    fn decodes_utf8_with_or_without_bom() {
+        assert_eq!(decode_text(b"\xef\xbb\xbf# title\n").unwrap(), "# title\n");
+        assert_eq!(decode_text("# 标题\n".as_bytes()).unwrap(), "# 标题\n");
+    }
+
+    #[test]
+    fn decodes_utf16_with_bom() {
+        assert_eq!(
+            decode_text(b"\xff\xfe#\0 \0t\0i\0t\0l\0e\0\n\0").unwrap(),
+            "# title\n"
+        );
+    }
+
+    #[test]
+    fn decodes_gb18030_markdown() {
+        let (encoded, _, had_errors) = GB18030.encode("# 标题\n");
+        assert!(!had_errors);
+        assert_eq!(decode_text(&encoded).unwrap(), "# 标题\n");
+    }
+
+    #[test]
+    fn rejects_unrecognized_binary_bytes() {
+        assert!(decode_text(&[0xff, 0xfe, 0x00]).is_err());
+    }
 }

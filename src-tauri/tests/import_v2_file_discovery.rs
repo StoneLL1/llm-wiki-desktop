@@ -94,17 +94,59 @@ fn requires_real_ooxml_structure_and_sniffs_magic() {
     assert!(identify_file(&unsafe_docx, &prefix[..prefix.len().min(8192)]).is_err());
     let pdf = temp.path().join("paper.pdf");
     fs::write(&pdf, b"%PDF-1.7\n").unwrap();
-    assert_eq!(identify_file(&pdf, b"%PDF-1.7\n").unwrap().mime, "application/pdf");
+    assert_eq!(
+        identify_file(&pdf, b"%PDF-1.7\n").unwrap().mime,
+        "application/pdf"
+    );
     let markdown = temp.path().join("note.md");
     fs::write(&markdown, "你好").unwrap();
-    assert_eq!(identify_file(&markdown, "你好".as_bytes()).unwrap().mime, "text/markdown");
+    assert_eq!(
+        identify_file(&markdown, "你好".as_bytes()).unwrap().mime,
+        "text/markdown"
+    );
+    let (legacy, _, had_errors) = encoding_rs::GB18030.encode("# 标题");
+    assert!(!had_errors);
+    let legacy_path = temp.path().join("legacy.md");
+    fs::write(&legacy_path, &legacy).unwrap();
+    assert_eq!(
+        identify_file(&legacy_path, &legacy).unwrap().mime,
+        "text/markdown"
+    );
 }
 
 #[test]
 fn repeated_append_drops_existing_and_in_batch_duplicates() {
     let mut session = ImportSession::new("s", "p", ImportResourceMode::Balanced);
-    session.items.push(ImportItem::queued("i", ImportInput { kind: ImportInputKind::File, display_name: "a.md".into(), locator: "C:/Input/A.md".into(), normalized_locator: Some("c:/input/a.md".into()), source_identity: None }));
-    let file = llm_wiki_desktop_lib::models::import_v2_file::DiscoveredFile { source_path: "C:/Input/A.md".into(), relative_path: "A.md".into(), display_name: "A.md".into(), format: llm_wiki_desktop_lib::models::import_v2_file::FileFormat::Markdown, size_bytes: 1, identity: llm_wiki_desktop_lib::models::import_v2_file::FileIdentity { extension: "md".into(), magic: "utf-8".into(), mime: "text/markdown".into() }, source_identity: llm_wiki_desktop_lib::models::import_v2::SourceIdentity { canonical_path: "C:/Input/A.md".into(), size_bytes: 1, modified_nanos: None, file_id: None, sha256: "00".repeat(32), magic: "11".repeat(32) } };
+    session.items.push(ImportItem::queued(
+        "i",
+        ImportInput {
+            kind: ImportInputKind::File,
+            display_name: "a.md".into(),
+            locator: "C:/Input/A.md".into(),
+            normalized_locator: Some("c:/input/a.md".into()),
+            source_identity: None,
+        },
+    ));
+    let file = llm_wiki_desktop_lib::models::import_v2_file::DiscoveredFile {
+        source_path: "C:/Input/A.md".into(),
+        relative_path: "A.md".into(),
+        display_name: "A.md".into(),
+        format: llm_wiki_desktop_lib::models::import_v2_file::FileFormat::Markdown,
+        size_bytes: 1,
+        identity: llm_wiki_desktop_lib::models::import_v2_file::FileIdentity {
+            extension: "md".into(),
+            magic: "utf-8".into(),
+            mime: "text/markdown".into(),
+        },
+        source_identity: llm_wiki_desktop_lib::models::import_v2::SourceIdentity {
+            canonical_path: "C:/Input/A.md".into(),
+            size_bytes: 1,
+            modified_nanos: None,
+            file_id: None,
+            sha256: "00".repeat(32),
+            magic: "11".repeat(32),
+        },
+    };
     assert!(new_import_inputs(&session, [file.clone(), file]).is_empty());
 }
 

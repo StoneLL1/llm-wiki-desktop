@@ -1,10 +1,12 @@
 import { CircleAlert, CircleCheck, LoaderCircle, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import type { FileScanResult } from "../../types/importV2File";
 import type { BackendTask } from "../../types/task";
 
 export interface ImportDiscoveryStatusProps {
   task: BackendTask | null;
+  scan?: FileScanResult | null;
   unavailable?: boolean;
   onCancel: () => void;
   onDismiss: () => void;
@@ -17,7 +19,7 @@ function parseDiscoverySummary(summary: string | undefined): { added: number; sk
   return match ? { added: Number(match[1]), skipped: Number(match[2]) } : null;
 }
 
-export function ImportDiscoveryStatus({ task, unavailable = false, onCancel, onDismiss, cancelling = false }: ImportDiscoveryStatusProps) {
+export function ImportDiscoveryStatus({ task, scan = null, unavailable = false, onCancel, onDismiss, cancelling = false }: ImportDiscoveryStatusProps) {
   const { t } = useTranslation();
   if (!task) {
     if (!unavailable) return null;
@@ -35,6 +37,28 @@ export function ImportDiscoveryStatus({ task, unavailable = false, onCancel, onD
   const discovered = task.progress?.current ?? 0;
   const resultSummary = parseDiscoverySummary(task.result?.summary);
   const liveSummary = resultSummary ?? { added: discovered, skipped: 0 };
+  const skipped = scan?.skipped ?? [];
+
+  const skippedDetails = skipped.length > 0 ? (
+    <details className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2 text-[11px]">
+      <summary className="cursor-pointer text-[var(--text-secondary)]">
+        {t("importV2.discovery.skippedDetails", { count: skipped.length })}
+      </summary>
+      <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto pl-4">
+        {skipped.slice(0, 50).map((entry, index) => (
+          <li key={`${entry.sourcePath}-${index}`} className="min-w-0" title={entry.detail ?? undefined}>
+            <div className="truncate font-mono text-[10.5px] text-[var(--text-primary)]">
+              {entry.relativePath ?? entry.sourcePath}
+            </div>
+            <div className="text-[10.5px] text-[var(--text-muted)]">
+              {t(`importV2.discovery.reason.${entry.reason}`, { defaultValue: entry.detail ?? entry.reason })}
+            </div>
+          </li>
+        ))}
+      </ul>
+      {skipped.length > 50 ? <p className="m-0 mt-1 text-[10.5px] text-[var(--text-muted)]">{t("importV2.discovery.skippedMore", { count: skipped.length - 50 })}</p> : null}
+    </details>
+  ) : null;
 
   if (isActive) {
     return (
@@ -59,7 +83,7 @@ export function ImportDiscoveryStatus({ task, unavailable = false, onCancel, onD
 
   if (task.status === "succeeded") {
     return (
-      <section className="mx-4 mb-3 flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-[11px] text-[var(--text-secondary)]" role="status" aria-live="polite">
+      <section className="mx-4 mb-3 flex flex-wrap items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-[11px] text-[var(--text-secondary)]" role="status" aria-live="polite">
         <CircleCheck size={15} className="shrink-0 text-[var(--accent)]" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate">
           {t("importV2.discovery.complete")}
@@ -67,6 +91,7 @@ export function ImportDiscoveryStatus({ task, unavailable = false, onCancel, onD
           {resultSummary ? ` · ${t("importV2.discovery.added", { count: resultSummary.added })} · ${t("importV2.discovery.skipped", { count: resultSummary.skipped })}` : ""}
         </span>
         <button type="button" className="icon-button" aria-label={t("importV2.discovery.dismiss")} title={t("importV2.discovery.dismiss")} onClick={onDismiss}><X size={14} aria-hidden="true" /></button>
+        {skippedDetails}
       </section>
     );
   }

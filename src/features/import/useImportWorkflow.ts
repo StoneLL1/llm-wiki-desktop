@@ -9,6 +9,7 @@ import { fetchTasks, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { ImportedSource } from "../../types/import";
 import type { CommitItemDecision, ImportItem, ImportRecoveryAction, ImportSession } from "../../types/importV2";
+import type { FileScanResult } from "../../types/importV2File";
 import type { AgentKind } from "../../types/agent";
 import type { LlmProviderKind } from "../../types/llm";
 import type {
@@ -89,6 +90,7 @@ export interface ImportWorkflow {
   counts: ImportQueueCounts;
   progress: ImportSessionProgress;
   discoveryTask?: BackendTask | null;
+  discoveryScan?: FileScanResult | null;
   discoveryTaskUnavailable?: boolean;
   isAddingPaths?: boolean;
   isAddingUrl?: boolean;
@@ -256,6 +258,9 @@ export function useImportWorkflow(
   const pendingActionKeysRef = useRef(new Set<string>());
   const [pendingActionKeys, setPendingActionKeys] = useState<ReadonlySet<string>>(new Set());
   const [discoveryTaskId, setDiscoveryTaskId] = useState<string | null>(null);
+  const [discoveryScan, setDiscoveryScan] = useState<FileScanResult | null>(null);
+  const discoveryScanTaskIdRef = useRef<string | null>(null);
+  const discoveryScanLoadingTaskIdRef = useRef<string | null>(null);
   const [batchRecords, setBatchRecords] = useState<readonly ImportBatchRecord[]>([]);
   const [cancellingBatchIds, setCancellingBatchIds] = useState<ReadonlySet<string>>(new Set());
   const [dismissedBatchIds, setDismissedBatchIds] = useState<ReadonlySet<string>>(new Set());
@@ -489,6 +494,34 @@ export function useImportWorkflow(
     for (const task of tasks) settleItemTask(task);
   }, [settleItemTask]);
 
+  const loadDiscoveryScan = useCallback(async (taskId: string, requestKey: string, epoch: number, sessionId: string) => {
+    if (discoveryScanLoadingTaskIdRef.current === taskId) return;
+    discoveryScanLoadingTaskIdRef.current = taskId;
+    try {
+      const scan = await importV2Api.getScanResult({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId,
+        taskId,
+      });
+      if (isScopeCurrent(requestKey, epoch) && discoveryScanTaskIdRef.current === taskId) {
+        setDiscoveryScan(scan);
+      }
+    } catch {
+      // Scan details are supplementary; older sessions may not have an
+      // artifact even though the task/session reconciliation succeeded.
+    } finally {
+      if (discoveryScanLoadingTaskIdRef.current === taskId) discoveryScanLoadingTaskIdRef.current = null;
+    }
+  }, [isScopeCurrent, projectId, rootPath]);
+
+  useEffect(() => {
+    if (discoveryTask?.status !== "succeeded" || !session?.sessionId) return;
+    if (discoveryScanTaskIdRef.current === discoveryTask.id && discoveryScan) return;
+    discoveryScanTaskIdRef.current = discoveryTask.id;
+    void loadDiscoveryScan(discoveryTask.id, projectKey, sessionEpoch, session.sessionId);
+  }, [discoveryScan, discoveryTask?.id, discoveryTask?.status, loadDiscoveryScan, projectKey, session?.sessionId, sessionEpoch]);
+
   const startNewQueuedItems = useCallback(async (requestKey: string, epoch: number, before: ReadonlySet<string>) => {
     if (!isScopeCurrent(requestKey, epoch)) return;
     const current = useImportStore.getState().session;
@@ -535,9 +568,11 @@ export function useImportWorkflow(
       void refreshForScope(pending.projectKey, pending.epoch).then(() =>
         startNewQueuedItems(pending.projectKey, pending.epoch, pending.existingItemIds),
       ).catch(() => undefined);
+      const sessionId = useImportStore.getState().session?.sessionId;
+      if (sessionId) void loadDiscoveryScan(task.id, pending.projectKey, pending.epoch, sessionId);
     }
     return true;
-  }, [refreshForScope, startNewQueuedItems]);
+  }, [loadDiscoveryScan, refreshForScope, startNewQueuedItems]);
 
   const reconcilePendingTasks = useCallback((tasks: readonly BackendTask[] = useTaskStore.getState().tasks) => {
     const byId = new Map(tasks.map((task) => [task.id, task]));
@@ -651,6 +686,9 @@ export function useImportWorkflow(
     pendingActionKeysRef.current.clear();
     setPendingActionKeys(new Set());
     setDiscoveryTaskId(null);
+    discoveryScanTaskIdRef.current = null;
+    discoveryScanLoadingTaskIdRef.current = null;
+    setDiscoveryScan(null);
     setBatchRecords([]);
     setCancellingBatchIds(new Set());
     setDismissedBatchIds(new Set());
@@ -779,6 +817,9 @@ export function useImportWorkflow(
       taskStarted = true;
       if (isScopeCurrent(projectKey, epoch)) {
         setDiscoveryTaskId(task.id);
+        discoveryScanTaskIdRef.current = task.id;
+        discoveryScanLoadingTaskIdRef.current = null;
+        setDiscoveryScan(null);
       }
       // A very fast local scan can finish before the task event subscription
       // observes it. Resolve from both the returned task and the persisted
@@ -1418,6 +1459,7 @@ export function useImportWorkflow(
     counts,
     progress,
     discoveryTask,
+    discoveryScan,
     discoveryTaskUnavailable,
     isAddingPaths,
     isAddingUrl,

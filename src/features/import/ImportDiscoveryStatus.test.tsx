@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
+import type { FileScanResult } from "../../types/importV2File";
 import type { BackendTask } from "../../types/task";
 import { ImportDiscoveryStatus } from "./ImportDiscoveryStatus";
 
@@ -63,5 +64,24 @@ describe("ImportDiscoveryStatus", () => {
 
     expect(screen.queryByRole("button", { name: /rescan files/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /rescan folder/i })).not.toBeInTheDocument();
+  });
+
+  it("reveals the path and localized reason for skipped files", () => {
+    const scan: FileScanResult = {
+      files: [],
+      skipped: [{
+        sourcePath: "D:/Wiki/project/wiki/internal.md",
+        relativePath: "wiki/internal.md",
+        reason: "project_internal",
+        detail: "Current project content cannot be imported into itself.",
+      }],
+      truncated: false,
+    };
+
+    render(<ImportDiscoveryStatus task={task("succeeded")} scan={scan} onCancel={vi.fn()} onDismiss={vi.fn()} />);
+
+    fireEvent.click(screen.getByText(/view 1 skipped item/i));
+    expect(screen.getByText("wiki/internal.md")).toBeInTheDocument();
+    expect(screen.getByText(/inside the current Wiki project/i)).toBeInTheDocument();
   });
 });
