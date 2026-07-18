@@ -362,3 +362,9 @@ Chat 的主闭环已经具备：多会话、Agent/BYOK 路由、流式输出、�
 - `npm run check` 已从头运行两次；两次均在 frontend test 阶段被同一个非 Chat 用例阻断：`src/app/App.test.tsx > does not emit jsdom canvas getContext noise when the graph view renders`，全套并发运行时在 5–6 秒内找不到 `Graph canvas is unavailable in this environment.`。
 - 该失败用例单独重跑通过：`1 passed | 28 skipped`，测试体约 739ms；因此当前证据指向全量并发负载下的既有时序/超时不稳定，而不是本次 Markdown 文档造成的回归。
 - 因统一检查在 `npm run test` 即停止，不能声称 lint、build、console scan 和 Rust 阶段在本轮完整链路中通过。
+
+## 修复跟踪（2026-07-18 当前 worktree）
+
+综合报告前文同样是审查快照。当前实现已补齐：路径级 Chat convenience rollback、回滚前文件 hash 检查、全局 Chat send/save/delete/convenience mutation gate、取消清理后的终态事件、会话与页面 selection epoch、保存路径和引用可信度诊断。后端 `cargo check --no-default-features` 与 Rust library tests（624/624）通过；TypeScript 与 ESLint 通过。
+
+保留的安全限制是：HardViolation 自动清理无法识别 Agent 执行期间对同一路径发生的外部编辑；这需要 Agent 写集或人工复审策略，当前不应宣称已完全解决。项目切换后后端 confirmation registry 的孤儿 action、导出知识卡片未传入回答上下文、跨组件卸载后的草稿持久化也仍属后续项。

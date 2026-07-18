@@ -356,6 +356,58 @@ impl GitService {
         remove_new_ignored_paths(context, preserved_ignored_paths)?;
         Ok(())
     }
+
+    /// Restore only the paths known to have been touched by one operation.
+    ///
+    /// Chat convenience runs can overlap with edits made elsewhere in the
+    /// worktree.  A whole-worktree `restore`/`clean` would therefore erase
+    /// unrelated user changes.  This scoped variant deliberately accepts an
+    /// explicit path list and never traverses or cleans any other path.
+    pub fn rollback_paths_to_head_preserving_ignored(
+        &self,
+        context: &ProjectContext,
+        paths: &[String],
+        preserved_ignored_paths: &[String],
+    ) -> Result<(), BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before rolling back changes.",
+                true,
+                true,
+            ));
+        }
+
+        for path in paths {
+            validate_relative_git_path(path)?;
+            if preserved_ignored_paths.iter().any(|preserved| preserved == path) {
+                continue;
+            }
+
+            let head_spec = format!("HEAD:{path}");
+            let exists_in_head = run_git(
+                context,
+                &["cat-file", "-e", head_spec.as_str()],
+            )
+            .is_ok();
+            if exists_in_head {
+                run_git(
+                    context,
+                    &[
+                        "restore",
+                        "--source=HEAD",
+                        "--staged",
+                        "--worktree",
+                        "--",
+                        path.as_str(),
+                    ],
+                )?;
+            } else if context.root.join(path).exists() {
+                remove_project_path(context, path)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn run_git(context: &ProjectContext, args: &[&str]) -> Result<String, BackendError> {
@@ -588,6 +640,24 @@ fn remove_project_path(context: &ProjectContext, path: &str) -> Result<(), Backe
         fs::remove_file(&target)
     }
     .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))
+}
+
+fn validate_relative_git_path(path: &str) -> Result<(), BackendError> {
+    let candidate = std::path::Path::new(path);
+    if path.trim().is_empty()
+        || candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(BackendError::new(
+            "GIT_ROLLBACK_FAILED",
+            format!("Refusing to roll back unsafe path: {path}"),
+            true,
+            false,
+        ));
+    }
+    Ok(())
 }
 
 fn untracked_file_diff(context: &ProjectContext) -> Result<String, BackendError> {
@@ -916,6 +986,49 @@ mod tests {
         assert_eq!(restored, "stable\n");
         assert!(root.join("keep.log").exists());
         assert!(!root.join("agent.log").exists());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn scoped_rollback_preserves_unrelated_worktree_edits() {
+        let root = unique_temp_dir("scoped-rollback");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki").join("page.md"), "stable\n").unwrap();
+        fs::write(root.join("notes.md"), "stable notes\n").unwrap();
+
+        let service = GitService;
+        service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap();
+
+        fs::write(root.join("wiki").join("page.md"), "agent edit\n").unwrap();
+        fs::write(root.join("wiki").join("agent-new.md"), "draft\n").unwrap();
+        fs::write(root.join("notes.md"), "user edit\n").unwrap();
+
+        service
+            .rollback_paths_to_head_preserving_ignored(
+                &context,
+                &[
+                    "wiki/page.md".to_string(),
+                    "wiki/agent-new.md".to_string(),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/page.md"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "stable\n"
+        );
+        assert!(!root.join("wiki/agent-new.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("notes.md")).unwrap(),
+            "user edit\n"
+        );
 
         fs::remove_dir_all(root).ok();
     }

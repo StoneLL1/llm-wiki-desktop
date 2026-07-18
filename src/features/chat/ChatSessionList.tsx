@@ -12,6 +12,9 @@ interface ChatSessionListProps {
   onCreate: () => void;
   onRename: (sessionId: string, title: string) => void;
   onDelete: (sessionId: string) => void;
+  deleteDisabled?: boolean;
+  deleteDisabledSessionId?: string | null;
+  createDisabled?: boolean;
 }
 
 /** Format an ISO timestamp as HH:MM (locale-independent, 24h). Mirrors the
@@ -30,6 +33,9 @@ export function ChatSessionList({
   onCreate,
   onRename,
   onDelete,
+  deleteDisabled = false,
+  deleteDisabledSessionId = null,
+  createDisabled = false,
 }: ChatSessionListProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
@@ -70,6 +76,7 @@ export function ChatSessionList({
         <button
           type="button"
           onClick={onCreate}
+          disabled={createDisabled}
           className="icon-button shrink-0"
           aria-label={t("chat.sessions.new")}
           title={t("chat.sessions.new")}
@@ -99,7 +106,6 @@ export function ChatSessionList({
                     ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]"
                     : "text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
                 }`}
-                aria-current={isActive ? "true" : undefined}
               >
                 {isEditing ? (
                   <input
@@ -119,6 +125,7 @@ export function ChatSessionList({
                       type="button"
                       onClick={() => onSelect(session.id)}
                       onDoubleClick={() => startEdit(session)}
+                      aria-current={isActive ? "page" : undefined}
                       className="min-w-0 flex-1 truncate text-left"
                       title={session.title}
                     >
@@ -128,7 +135,7 @@ export function ChatSessionList({
                     <button
                       type="button"
                       onClick={() => startEdit(session)}
-                      className="hidden h-[24px] w-[24px] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] group-hover:flex"
+                      className="flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] opacity-0 pointer-events-none transition-opacity hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
                       aria-label={t("chat.sessions.rename")}
                       title={t("chat.sessions.rename")}
                     >
@@ -137,7 +144,8 @@ export function ChatSessionList({
                     <button
                       type="button"
                       onClick={() => onDelete(session.id)}
-                      className="hidden h-[24px] w-[24px] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--danger)] group-hover:flex"
+                      disabled={deleteDisabled || deleteDisabledSessionId === session.id}
+                      className="flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] opacity-0 pointer-events-none transition-opacity hover:bg-[var(--surface-muted)] hover:text-[var(--danger)] group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
                       aria-label={t("chat.sessions.delete")}
                       title={t("chat.sessions.delete")}
                     >

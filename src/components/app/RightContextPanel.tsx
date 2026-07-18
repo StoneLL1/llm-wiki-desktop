@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
@@ -58,10 +58,18 @@ export function RightContextPanel() {
   const graphExportPng = useGraphStore((state) => state.exportPng);
   const graphRecomputeLayout = useGraphStore((state) => state.recomputeLayout);
   const chatSession = useChatStore((state) => state.activeSession);
+  const chatLoadingSession = useChatStore((state) => state.loadingSession);
+  const chatSendTaskId = useChatStore((state) => state.sendTaskId);
+  const chatSendSessionId = useChatStore((state) => state.sendSessionId);
+  const chatSendStarting = useChatStore((state) => state.sendStarting);
   // Subscribe (don't getState) so the save button re-renders when the
   // per-message saveStatus map or the saveAnswer action identity changes.
   const chatSaveStatus = useChatStore((state) => state.saveStatus);
+  const chatSaveInFlightMessageId = useChatStore((state) => state.saveInFlightMessageId);
+  const chatConvenienceMutationKey = useChatStore((state) => state.convenienceMutationKey);
   const chatSaveAnswer = useChatStore((state) => state.saveAnswer);
+  const chatOverwriteRequest = useChatStore((state) => state.overwriteRequest);
+  const [chatCopied, setChatCopied] = useState(false);
 
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
@@ -77,8 +85,23 @@ export function RightContextPanel() {
   };
 
   if (activeView === "chat") {
-    const latestAssistant = latestAssistantMessage(chatSession);
+    const chatSendTask = chatSendTaskId
+      ? tasks.find((task) => task.id === chatSendTaskId) ?? null
+      : null;
+    const chatGenerating = chatLoadingSession || chatSendStarting || Boolean(
+      chatSession?.id &&
+        chatSendSessionId === chatSession.id &&
+        chatSendTask &&
+        (chatSendTask.status === "queued" ||
+          chatSendTask.status === "running" ||
+          chatSendTask.status === "cancelling"),
+    );
+    // Do not present the previous answer's citations as if they belonged to
+    // the answer currently streaming. The transcript shows the live delta;
+    // this panel waits for the terminal reload before exposing new metadata.
+    const latestAssistant = chatGenerating ? null : latestAssistantMessage(chatSession);
     const citations = latestAssistant?.citations ?? [];
+    const diagnostics = latestAssistant?.retrievalDiagnostics ?? null;
     const route = latestAssistant?.route ?? null;
     const provider = latestAssistant?.provider ?? null;
     const wikiCount = currentProject.wikiPageCount;
@@ -94,15 +117,22 @@ export function RightContextPanel() {
     };
 
     const handleCopyMarkdown = () => {
-      if (!latestAssistant) return;
-      void navigator.clipboard.writeText(latestAssistant.content);
+      if (!latestAssistant || !navigator.clipboard) return;
+      void navigator.clipboard
+        .writeText(latestAssistant.content)
+        .then(() => {
+          setChatCopied(true);
+          window.setTimeout(() => setChatCopied(false), 1600);
+        })
+        .catch(() => setChatCopied(false));
     };
 
+    const providerLabel = provider ? t(`provider.name.${provider}`) : null;
     const routeLabel = route
       ? route === "agent"
         ? t("chat.composer.route.agent")
-        : provider
-          ? `BYOK · ${provider}`
+        : providerLabel
+          ? t("rightpanel.route.byokLabel", { provider: providerLabel })
           : t("chat.composer.route.byok")
       : null;
 
@@ -124,12 +154,14 @@ export function RightContextPanel() {
                 )}
               </h4>
               {citations.length === 0 ? (
-                <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("chat.citations.empty")}</p>
+                <p className="m-0 text-[11px] text-[var(--text-muted)]">
+                  {chatGenerating ? t("chat.citations.updating") : t("chat.citations.empty")}
+                </p>
               ) : (
                 <div className="flex flex-col gap-1.5">
                   {citations.map((citation, index) => (
                     <button
-                      key={citation.pagePath}
+                      key={citation.sourceId ?? citation.pagePath}
                       type="button"
                       onClick={() => {
                         setActiveView("wiki");
@@ -138,7 +170,7 @@ export function RightContextPanel() {
                       className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] p-2 text-left hover:bg-[var(--surface-muted)]"
                     >
                       <span className="flex h-[18px] w-[18px] items-center justify-center rounded-full bg-[var(--accent-soft)] text-[10.5px] font-semibold text-[var(--accent-hover)] font-mono shrink-0">
-                        {index + 1}
+                        {citation.sourceId ?? `S${index + 1}`}
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-1.5">
@@ -155,6 +187,21 @@ export function RightContextPanel() {
                   ))}
                 </div>
               )}
+              {diagnostics && (diagnostics.invalidCitationIds?.length || diagnostics.hasUnverified) ? (
+                <div
+                  className="mt-2 flex flex-col gap-1 rounded-[var(--radius-sm)] border border-[var(--warning)] bg-[var(--warning-soft)] px-2.5 py-2 text-[11px] text-[var(--text-secondary)]"
+                  role="status"
+                >
+                  {diagnostics.invalidCitationIds?.length ? (
+                    <span>
+                      {t("chat.trust.invalidCitations", {
+                        ids: diagnostics.invalidCitationIds.join(", "),
+                      })}
+                    </span>
+                  ) : null}
+                  {diagnostics.hasUnverified ? <span>{t("chat.trust.unverified")}</span> : null}
+                </div>
+              ) : null}
             </div>
 
             {/* 执行路径 */}
@@ -185,7 +232,12 @@ export function RightContextPanel() {
                 <button
                   type="button"
                   onClick={handleSave}
-                  disabled={!latestAssistant || saveStatus === "saving" || saveStatus === "saved"}
+                  disabled={
+                    !latestAssistant ||
+                    saveStatus === "saving" ||
+                    saveStatus === "saved" ||
+                    Boolean(chatSaveInFlightMessageId || chatOverwriteRequest || chatConvenienceMutationKey)
+                  }
                   className="flex h-[28px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
                 >
                   {saveStatus === "saved" ? t("chat.thread.saveDone") : t("chat.thread.saveAnswer")}
@@ -196,7 +248,7 @@ export function RightContextPanel() {
                   disabled={!latestAssistant}
                   className="flex h-[28px] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
                 >
-                  {t("chat.citations.copyMd")}
+                  {chatCopied ? t("chat.citations.copied") : t("chat.citations.copyMd")}
                 </button>
                 <button
                   type="button"

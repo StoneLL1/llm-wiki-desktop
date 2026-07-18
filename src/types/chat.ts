@@ -66,6 +66,8 @@ export interface ChatMessage {
   taskId?: string;
   convenienceEdit?: ChatConvenienceEdit | null;
   retrievalDiagnostics?: ChatRetrievalDiagnostics | null;
+  /** Relative query-page path after Save to Wiki succeeds. */
+  savedPath?: string | null;
 }
 
 export interface ChatConvenienceEdit {
@@ -77,6 +79,7 @@ export interface ChatConvenienceEdit {
   violationReason?: string | null;
   rollbackTaskId?: string | null;
   ignoredBaselinePaths?: string[];
+  affectedPathHashes?: Array<{ path: string; hash: string | null }>;
 }
 
 export interface ChatSession {
@@ -134,6 +137,7 @@ export interface SaveAnswerToWikiRequest {
 
 /** Inline overwrite confirm surfaced when saving would overwrite an existing page. */
 export interface ChatOverwriteRequest {
+  sessionId: string;
   messageId: string;
   path: string;
   currentHash: string;

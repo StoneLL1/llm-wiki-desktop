@@ -157,6 +157,18 @@ impl FileStore {
         hash_file(&path)
     }
 
+    pub fn file_hash_if_exists(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+    ) -> Result<Option<String>, BackendError> {
+        let path = context.resolve_project_path(relative_path)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        hash_file(&path).map(Some)
+    }
+
     pub fn assert_unique_project_paths(&self, paths: &[&str]) -> Result<(), BackendError> {
         let mut seen = HashSet::new();
         for path in paths {

@@ -430,6 +430,38 @@ impl TaskService {
         }
     }
 
+    /// Request cancellation for a long-running task without publishing a
+    /// terminal state before its worker has finished cleanup. The worker is
+    /// responsible for transitioning to Failed/Cancelled after it observes
+    /// the token, so callers cannot start a replacement operation while the
+    /// original still owns its resources.
+    pub fn request_cancel(&self, id: &str) -> Result<BackendTask, String> {
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let entry = tasks
+            .get(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if !entry.task.cancellable {
+            return Err(format!("Task is not cancellable: {id}"));
+        }
+        if matches!(
+            entry.task.status,
+            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            return Ok(entry.task.clone());
+        }
+        let status = entry.task.status.clone();
+        drop(tasks);
+        self.cancellation.cancel(id);
+        if status == TaskStatus::Queued {
+            self.transition_status(id, TaskStatus::Cancelled)
+        } else if status == TaskStatus::Cancelling {
+            self.get_task(id)
+                .ok_or_else(|| format!("Task not found: {id}"))
+        } else {
+            self.transition_status(id, TaskStatus::Cancelling)
+        }
+    }
+
     pub fn set_result(&self, id: &str, result: TaskResult) -> Result<BackendTask, String> {
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
@@ -507,8 +539,16 @@ impl TaskService {
         entry.task.error = Some(error);
         entry.task.updated_at = Utc::now().to_rfc3339();
         let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
         drop(tasks);
         self.persist_current_task(id)?;
+        self.emit(
+            crate::models::task::BackendEventType::TaskUpdated,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
         Ok(task)
     }
 

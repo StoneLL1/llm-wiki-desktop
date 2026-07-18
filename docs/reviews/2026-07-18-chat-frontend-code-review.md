@@ -377,3 +377,15 @@ Chat 前端已经具备会话列表、全局问答、页面级 Ask AI、Agent/BY
 - Chat 定向前端测试通过：`5 passed` 测试文件、`44 passed` 用例。
 - 完整 `npm run check` 通过：前端 `97 passed` 测试文件、`612 passed` 用例，ESLint、TypeScript/Vite production build、console-log scan、Tauri GUI `cargo check`、Rust no-default-features 单元/集成/doc tests 均成功。
 - Rust 编译仍报告 Import V2 `FileTransaction::write/track/capture_installed` 的既有 dead-code warning；它不属于 Chat 前端审查范围，也没有阻断检查。
+
+## 10. 修复跟踪（2026-07-18）
+
+本报告前文保留的是审查时点快照；以下项目已在当前 worktree 修复并重新核对：
+
+- Chat 发送、保存、便捷编辑决策、删除会话统一使用全局互斥；保存按钮与 Composer 会在其他 Chat mutation 进行时禁用。
+- overwrite 确认改为单一中心入口，支持跨会话/无 transcript 时仍可确认或取消；跨项目异步响应不会恢复旧请求。
+- Composer 草稿按 project/session/page 分桶，并以 revision 与 scope lineage 清理，避免异步提交覆盖新编辑。
+- PageChat session、Windows 路径大小写、selection epoch、terminal reload 错误和便捷编辑响应均加入作用域保护；新会话按钮加入创建中禁用态。
+- 便捷编辑回滚改为受影响路径级操作，并保存 Agent 完成后的文件 hash；回滚前路径发生外部变化时拒绝覆盖并要求复核。
+
+仍待后续产品/架构决策的项目：便捷写入在 Agent 执行期间与用户同路径并发编辑的精确写集区分、跨项目后端 pending confirmation 的生命周期、导出知识卡片按钮的真实导出上下文，以及跨页面卸载后的草稿持久化。完整 `npm run check` 在本机被 Tailwind native binding 加载失败和 Vite `spawn EPERM` 阻断，不能据此声称 Vitest 全套通过。

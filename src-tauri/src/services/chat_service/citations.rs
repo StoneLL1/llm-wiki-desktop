@@ -14,7 +14,8 @@ impl ChatService {
         let mut citations = Vec::new();
         let mut invalid_source_ids = Vec::new();
         let mut has_unverified = false;
-        let mut rest = answer;
+        let masked_answer = mask_code_spans(answer);
+        let mut rest = masked_answer.as_str();
         while let Some(open) = rest.find('[') {
             let after_open = &rest[open + 1..];
             let Some(close) = after_open.find(']') else {
@@ -53,6 +54,79 @@ impl ChatService {
             has_unverified,
         }
     }
+}
+
+/// Keep citation markers inside Markdown code spans/fences from being treated
+/// as claims made by the model. Newlines are preserved so the surrounding
+/// scanner remains stable for multi-line answers.
+fn mask_code_spans(answer: &str) -> String {
+    let chars: Vec<char> = answer.chars().collect();
+    let mut output = String::with_capacity(answer.len());
+    let mut index = 0;
+    let mut fence: Option<(char, usize)> = None;
+    let mut inline_ticks: Option<usize> = None;
+    while index < chars.len() {
+        let delimiter = chars[index];
+        let run_length = if delimiter == '`' || delimiter == '~' {
+            let mut length = 0;
+            while index + length < chars.len() && chars[index + length] == delimiter {
+                length += 1;
+            }
+            length
+        } else {
+            0
+        };
+
+        if let Some((fence_delimiter, fence_length)) = fence {
+            if delimiter == fence_delimiter && run_length >= fence_length {
+                for _ in 0..run_length {
+                    output.push(' ');
+                }
+                index += run_length;
+                fence = None;
+                continue;
+            }
+            output.push(if delimiter == '\n' { '\n' } else { ' ' });
+            index += 1;
+            continue;
+        }
+        if let Some(inline_length) = inline_ticks {
+            if delimiter == '`' && run_length >= inline_length {
+                for _ in 0..inline_length {
+                    output.push(' ');
+                }
+                index += inline_length;
+                inline_ticks = None;
+                continue;
+            }
+            output.push(if delimiter == '\n' { '\n' } else { ' ' });
+            index += 1;
+            continue;
+        }
+        if run_length >= 3 {
+            for _ in 0..run_length {
+                output.push(' ');
+            }
+            fence = Some((delimiter, run_length));
+            index += run_length;
+            continue;
+        }
+        if delimiter == '`' && run_length > 0 {
+            for _ in 0..run_length {
+                output.push(' ');
+            }
+            inline_ticks = Some(run_length);
+            index += run_length;
+            continue;
+        }
+        if delimiter == '\n' {
+            output.push(if chars[index] == '\n' { '\n' } else { ' ' });
+        } else {
+            output.push(chars[index]);
+        }
+        index += 1;
+    }
+    output
 }
 
 fn is_source_marker_id(value: &str) -> bool {
@@ -118,5 +192,29 @@ mod tests {
         assert!(no_marker.citations.is_empty());
         assert!(unverified.citations.is_empty());
         assert!(unverified.has_unverified);
+    }
+
+    #[test]
+    fn citation_parser_ignores_markers_inside_code() {
+        let refs = vec![source_ref("S1", "wiki/a.md", "A")];
+        let parsed = ChatService::parse_model_citations(
+            "Code `[S9]` and:\n```md\n[S8]\n```\nReal [S1].",
+            &refs,
+        );
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(parsed.citations[0].source_id.as_deref(), Some("S1"));
+        assert!(parsed.invalid_source_ids.is_empty());
+    }
+
+    #[test]
+    fn citation_parser_ignores_tilde_and_long_backtick_fences() {
+        let refs = vec![source_ref("S1", "wiki/a.md", "A")];
+        let parsed = ChatService::parse_model_citations(
+            "~~~~md\n[S9]\n~~~~\n````md\n[S8]\n````\nReal [S1].",
+            &refs,
+        );
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(parsed.citations[0].source_id.as_deref(), Some("S1"));
+        assert!(parsed.invalid_source_ids.is_empty());
     }
 }

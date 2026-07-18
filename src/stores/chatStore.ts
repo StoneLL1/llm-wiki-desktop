@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { i18next } from "../i18n";
 
 import type {
   ChatMessage,
@@ -66,8 +67,16 @@ interface ChatState {
   /** Session the in-flight send targeted, so a terminal-status reload only
    *  refreshes that session — not whatever the user switched to mid-send. */
   sendSessionId: string | null;
+  /** Prevents two panes from racing before the backend returns a task id. */
+  sendStarting: boolean;
   /** Per-message save status keyed by message id. */
   saveStatus: Record<string, "idle" | "saving" | "saved" | "exists" | "error">;
+  /** A single save mutation may be in flight across all Chat surfaces. */
+  saveInFlightMessageId: string | null;
+  /** Save paths returned by the backend before the active session is reloaded. */
+  savedAnswerPaths: Record<string, string>;
+  /** Serializes keep/rollback decisions for convenience edits. */
+  convenienceMutationKey: string | null;
   overwriteRequest: ChatOverwriteRequest | null;
   error: string | null;
   loadingSessions: boolean;
@@ -78,13 +87,17 @@ interface ChatState {
   streamingText: string;
   streamingRoute: ChatRoute | null;
   /** Deltas can arrive before the send IPC response binds the task id. */
-  pendingStreamDeltas: Record<string, { text: string; route: ChatRoute | null }>;
+  pendingStreamDeltas: Record<string, { text: string; route: ChatRoute | null; receivedAt: number }>;
+  /** User messages accepted by the backend but not yet visible in a reloaded session. */
+  pendingUserMessages: Record<string, ChatMessage>;
 
   /** Monotonic counter bumped each time ensurePageSession starts. An in-flight
    *  ensure bails after any await if a newer page focus has superseded it,
    *  so a slow list/select for page A can't drop page A's thread onto page B
    *  after the user switched away. */
   pageSessionEpoch: number;
+  /** Invalidates out-of-order ordinary session loads/selections. */
+  selectionEpoch: number;
 
   loadSessions: (
     projectId: string,
@@ -130,9 +143,12 @@ interface ChatState {
     route: ChatRoutePreference,
     options?: SendChatOptions,
   ) => Promise<string | null>;
+  cancelTask: (taskId: string) => Promise<void>;
   clearSendTask: (error?: string | null) => void;
   /** Reload the active session (used by the view once the send task reaches terminal status). */
   reloadActive: (projectId: string, rootPath: string) => Promise<void>;
+  /** Reload a known session without allowing a later selection to clobber it. */
+  reloadSession: (projectId: string, rootPath: string, sessionId: string) => Promise<void>;
   saveAnswer: (
     projectId: string,
     rootPath: string,
@@ -164,7 +180,11 @@ const initial = {
   activeSession: null as ChatSession | null,
   sendTaskId: null as string | null,
   sendSessionId: null as string | null,
+  sendStarting: false,
   saveStatus: {} as ChatState["saveStatus"],
+  saveInFlightMessageId: null as string | null,
+  savedAnswerPaths: {} as ChatState["savedAnswerPaths"],
+  convenienceMutationKey: null as string | null,
   overwriteRequest: null as ChatOverwriteRequest | null,
   error: null as string | null,
   loadingSessions: false,
@@ -172,7 +192,9 @@ const initial = {
   streamingText: "",
   streamingRoute: null as ChatRoute | null,
   pendingStreamDeltas: {} as ChatState["pendingStreamDeltas"],
+  pendingUserMessages: {} as ChatState["pendingUserMessages"],
   pageSessionEpoch: 0,
+  selectionEpoch: 0,
 };
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -208,6 +230,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   createSession: async (projectId, rootPath, title, contextPagePath) => {
     if (!hasTauri()) return null;
     const scope = captureProjectScope();
+    const selectionEpoch = get().selectionEpoch;
     set({ error: null });
     try {
       const session = await invoke<ChatSession>("create_chat_session", {
@@ -219,7 +242,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
       });
       if (!isProjectScopeCurrent(scope)) return null;
-      await get().loadSessions(projectId, rootPath);
+      await get().loadSessions(projectId, rootPath, { autoSelect: false });
+      if (!isProjectScopeCurrent(scope)) return null;
+      // A user selection that happened while creation was in flight owns the
+      // view. The new session remains persisted and appears in the refreshed
+      // list, but must not steal the selection back.
+      if (get().selectionEpoch !== selectionEpoch) return session;
       await get().selectSession(projectId, rootPath, session.id);
       return session;
     } catch (error) {
@@ -237,14 +265,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // list/select for page A cannot drop page A's thread onto page B after a
     // rapid switch.
     const epoch = get().pageSessionEpoch + 1;
+    const selectionEpoch = get().selectionEpoch + 1;
     set({
       pageSessionEpoch: epoch,
+      selectionEpoch,
       activeSessionId: null,
       activeSession: null,
-      overwriteRequest: null,
       error: null,
     });
-    const superseded = () => get().pageSessionEpoch !== epoch;
+    const superseded = () =>
+      get().pageSessionEpoch !== epoch || get().selectionEpoch !== selectionEpoch;
     try {
       // Make sure the session list reflects disk before we search it, so a
       // previously-created page session is reused rather than duplicated.
@@ -253,9 +283,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // the epoch below).
       await get().loadSessions(projectId, rootPath, { autoSelect: false });
       if (!isProjectScopeCurrent(scope) || superseded()) return null;
-      const normalized = pagePath.replace(/\\/g, "/").trim();
+      const normalized = normalizePagePath(pagePath);
       const existing = get().sessions.find(
-        (summary) => (summary.contextPagePath ?? "").replace(/\\/g, "/").trim() === normalized,
+        (summary) => normalizePagePath(summary.contextPagePath ?? "") === normalized,
       );
       if (existing && !forceNew) {
         // Load + commit inline. Going through selectSession would set
@@ -267,7 +297,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           request: { projectId, projectRootPath: rootPath, sessionId: existing.id },
         });
         if (!isProjectScopeCurrent(scope) || superseded()) return null;
-        set({ activeSessionId: existing.id, activeSession: loaded, overwriteRequest: null });
+        set({ activeSessionId: existing.id, activeSession: loaded });
         return loaded;
       }
       if (!forceNew) {
@@ -288,7 +318,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!isProjectScopeCurrent(scope) || superseded()) return null;
       await get().loadSessions(projectId, rootPath, { autoSelect: false });
       if (!isProjectScopeCurrent(scope) || superseded()) return null;
-      set({ activeSessionId: created.id, activeSession: created, overwriteRequest: null });
+      set({ activeSessionId: created.id, activeSession: created });
       return created;
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || superseded()) return null;
@@ -300,15 +330,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selectSession: async (projectId, rootPath, sessionId) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
-    set({ loadingSession: true, activeSessionId: sessionId, error: null, overwriteRequest: null });
+    const selectionEpoch = get().selectionEpoch + 1;
+    set({
+      selectionEpoch,
+      loadingSession: true,
+      activeSessionId: sessionId,
+      activeSession: null,
+      error: null,
+    });
     try {
       const session = await invoke<ChatSession>("load_chat_session", {
         request: { projectId, projectRootPath: rootPath, sessionId },
       });
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || get().selectionEpoch !== selectionEpoch) return;
       set({ activeSession: session, loadingSession: false });
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || get().selectionEpoch !== selectionEpoch) return;
       set({ loadingSession: false, error: errorMessage(error) });
     }
   },
@@ -335,13 +372,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   deleteSession: async (projectId, rootPath, sessionId) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
+    const deletingActive = get().activeSessionId === sessionId;
+    if (deletingActive) {
+      // Invalidate any in-flight load and stop its skeleton immediately. The
+      // stale response will be ignored by selectionEpoch after deletion.
+      set((state) => ({ selectionEpoch: state.selectionEpoch + 1, loadingSession: false }));
+    }
     set({ error: null });
     try {
       await invoke("delete_chat_session", {
         request: { projectId, projectRootPath: rootPath, sessionId },
       });
       if (!isProjectScopeCurrent(scope)) return;
-      if (get().activeSessionId === sessionId) {
+      if (deletingActive && get().activeSessionId === sessionId) {
         set({ activeSessionId: null, activeSession: null });
       }
       await get().loadSessions(projectId, rootPath);
@@ -353,8 +396,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   send: async (projectId, rootPath, sessionId, content, route, options) => {
     if (!hasTauri()) return null;
+    if (
+      get().sendStarting ||
+      get().sendTaskId ||
+      get().saveInFlightMessageId ||
+      get().overwriteRequest ||
+      get().convenienceMutationKey
+    ) return null;
     const scope = captureProjectScope();
-    set({ error: null });
+    set({ error: null, sendStarting: true });
     try {
       const task = await invoke<BackendTask>("send_chat_message", {
         request: {
@@ -369,8 +419,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           convenienceEnabled: options?.convenienceEnabled ?? false,
         },
       });
-      if (!isProjectScopeCurrent(scope)) return null;
+      // Task facts are global history and must survive a project switch. Only
+      // the presentation binding below is project-scoped.
       useTaskStore.getState().upsertTask(task);
+      if (!isProjectScopeCurrent(scope)) return null;
       const pending = get().pendingStreamDeltas[task.id];
       set((state) => {
         const pendingStreamDeltas = { ...state.pendingStreamDeltas };
@@ -380,6 +432,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           sendSessionId: sessionId,
           streamingText: pending?.text ?? "",
           streamingRoute: pending?.route ?? null,
+          pendingUserMessages: {
+            ...state.pendingUserMessages,
+            [task.id]: {
+              id: `pending-user-${task.id}`,
+              role: "user",
+              content,
+              createdAt: new Date().toISOString(),
+              taskId: task.id,
+            },
+          },
           pendingStreamDeltas,
         };
       });
@@ -389,20 +451,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!isProjectScopeCurrent(scope)) return null;
       set({ error: errorMessage(error) });
       return null;
+    } finally {
+      // A late response from a previous project must not release the start
+      // gate for a newer project's send attempt.
+      if (isProjectScopeCurrent(scope)) set({ sendStarting: false });
+    }
+  },
+
+  cancelTask: async (taskId) => {
+    if (!hasTauri()) return;
+    const scope = captureProjectScope();
+    try {
+      const task = await invoke<BackendTask>("cancel_task", { request: { taskId } });
+      useTaskStore.getState().upsertTask(task);
+    } catch (error) {
+      if (isProjectScopeCurrent(scope)) set({ error: errorMessage(error) });
     }
   },
 
   clearSendTask: (error = null) =>
     set((state) => {
       const pendingStreamDeltas = { ...state.pendingStreamDeltas };
+      const pendingUserMessages = { ...state.pendingUserMessages };
       if (state.sendTaskId) delete pendingStreamDeltas[state.sendTaskId];
+      if (state.sendTaskId) delete pendingUserMessages[state.sendTaskId];
       return {
         sendTaskId: null,
         sendSessionId: null,
+        sendStarting: false,
         streamingText: "",
         streamingRoute: null,
         pendingStreamDeltas,
-        error,
+        pendingUserMessages,
+        error: error ?? state.error,
       };
     }),
 
@@ -411,15 +492,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // mid-send, leave their current view alone rather than yanking it back.
     const sessionId = get().sendSessionId;
     if (!sessionId) return;
-    if (get().activeSessionId !== sessionId) return;
-    await get().selectSession(projectId, rootPath, sessionId);
+    await get().reloadSession(projectId, rootPath, sessionId);
+  },
+
+  reloadSession: async (projectId, rootPath, sessionId) => {
+    if (!hasTauri() || get().activeSessionId !== sessionId) return;
+    const scope = captureProjectScope();
+    const selectionEpoch = get().selectionEpoch;
+    set({ loadingSession: true });
+    try {
+      const session = await invoke<ChatSession>("load_chat_session", {
+        request: { projectId, projectRootPath: rootPath, sessionId },
+      });
+      if (
+        !isProjectScopeCurrent(scope) ||
+        get().selectionEpoch !== selectionEpoch ||
+        get().activeSessionId !== sessionId
+      ) return;
+      set({ activeSession: session, loadingSession: false });
+    } catch (error) {
+      if (
+        !isProjectScopeCurrent(scope) ||
+        get().selectionEpoch !== selectionEpoch ||
+        get().activeSessionId !== sessionId
+      ) return;
+      set({ loadingSession: false, error: errorMessage(error) });
+    }
   },
 
   saveAnswer: async (projectId, rootPath, sessionId, messageId, targetPath) => {
     if (!hasTauri()) return null;
+    const pendingOverwrite = get().overwriteRequest;
+    if (pendingOverwrite || get().saveInFlightMessageId) {
+      // A pending backend-issued action owns the exact answer/path. Do not
+      // clear it and create another action when a save button is clicked
+      // again; both same-message retries and cross-session saves must wait
+      // for the visible confirm/cancel decision.
+      set({
+        error: i18next.t(
+          pendingOverwrite ? "chat.errors.overwritePending" : "chat.errors.savePending",
+        ),
+      });
+      return null;
+    }
     const scope = captureProjectScope();
     set((state) => ({
       saveStatus: { ...state.saveStatus, [messageId]: "saving" },
+      saveInFlightMessageId: messageId,
       overwriteRequest: null,
       error: null,
     }));
@@ -436,7 +555,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
       });
       if (!isProjectScopeCurrent(scope)) return null;
-      set((state) => ({ saveStatus: { ...state.saveStatus, [messageId]: "saved" } }));
+      set((state) => ({
+        saveStatus: { ...state.saveStatus, [messageId]: "saved" },
+        savedAnswerPaths: { ...state.savedAnswerPaths, [messageId]: result.path },
+      }));
       return result;
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return null;
@@ -447,7 +569,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const actionId = details?.actionId ?? "";
         set((state) => ({
           saveStatus: { ...state.saveStatus, [messageId]: "exists" },
-          overwriteRequest: { messageId, path, currentHash, actionId },
+          overwriteRequest: { sessionId, messageId, path, currentHash, actionId },
         }));
         return null;
       }
@@ -456,6 +578,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         error: errorMessage(error),
       }));
       return null;
+    } finally {
+      set((state) =>
+        state.saveInFlightMessageId === messageId ? { saveInFlightMessageId: null } : {},
+      );
     }
   },
 
@@ -463,12 +589,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!hasTauri()) return;
     const scope = captureProjectScope();
     const request = get().overwriteRequest;
-    const sessionId = get().activeSessionId;
+    const sessionId = request?.sessionId;
     if (!request || !sessionId) return;
+    if (get().saveInFlightMessageId) return;
     const messageId = request.messageId;
-    set((state) => ({ saveStatus: { ...state.saveStatus, [messageId]: "saving" } }));
+    set((state) => ({
+      saveStatus: { ...state.saveStatus, [messageId]: "saving" },
+      saveInFlightMessageId: messageId,
+      error: null,
+    }));
     try {
-      await invoke<SaveAnswerResult>("save_answer_to_wiki", {
+      const result = await invoke<SaveAnswerResult>("save_answer_to_wiki", {
         request: {
           projectId,
           projectRootPath: rootPath,
@@ -485,6 +616,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!isProjectScopeCurrent(scope)) return;
       set((state) => ({
         saveStatus: { ...state.saveStatus, [messageId]: "saved" },
+        savedAnswerPaths: { ...state.savedAnswerPaths, [messageId]: result.path },
         overwriteRequest: null,
       }));
     } catch (error) {
@@ -494,11 +626,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         overwriteRequest: null,
         error: errorMessage(error),
       }));
+    } finally {
+      set((state) =>
+        state.saveInFlightMessageId === messageId ? { saveInFlightMessageId: null } : {},
+      );
     }
   },
 
   cancelOverwrite: async () => {
-    const actionId = get().overwriteRequest?.actionId;
+    const scope = captureProjectScope();
+    const request = get().overwriteRequest;
+    if (get().saveInFlightMessageId) return;
+    const actionId = request?.actionId;
     set({ overwriteRequest: null });
     if (!actionId || !hasTauri()) return;
     try {
@@ -506,41 +645,75 @@ export const useChatStore = create<ChatState>((set, get) => ({
         request: { actionId, status: "cancelled" },
       });
     } catch (error) {
-      set({ error: errorMessage(error) });
+      if (isProjectScopeCurrent(scope)) {
+        set({ overwriteRequest: request, error: errorMessage(error) });
+      }
     }
   },
 
   resolveConvenienceEdit: async (projectId, rootPath, sessionId, messageId, keep) => {
     if (!hasTauri()) return;
+    const mutationKey = `resolve:${sessionId}:${messageId}`;
+    if (get().convenienceMutationKey) return;
     const scope = captureProjectScope();
-    set({ error: null });
+    const selectionEpoch = get().selectionEpoch;
+    set({ error: null, convenienceMutationKey: mutationKey });
     try {
       const session = await invoke<ChatSession>("resolve_chat_convenience_edit", {
         request: { projectId, projectRootPath: rootPath, sessionId, messageId, keep },
       });
       if (!isProjectScopeCurrent(scope)) return;
-      set({ activeSession: session, activeSessionId: session.id });
-      await get().loadSessions(projectId, rootPath);
+      if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
+        set({ activeSession: session, activeSessionId: session.id });
+      }
+      await get().loadSessions(projectId, rootPath, { autoSelect: false });
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
-      set({ error: errorMessage(error) });
+      if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
+        await get().reloadSession(projectId, rootPath, sessionId);
+        if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
+          set({ error: errorMessage(error) });
+        }
+      }
+    } finally {
+      if (isProjectScopeCurrent(scope)) {
+        set((state) =>
+          state.convenienceMutationKey === mutationKey ? { convenienceMutationKey: null } : {},
+        );
+      }
     }
   },
 
   rollbackLastConvenienceEdit: async (projectId, rootPath, sessionId) => {
     if (!hasTauri()) return;
+    const mutationKey = `rollback:${sessionId}`;
+    if (get().convenienceMutationKey) return;
     const scope = captureProjectScope();
-    set({ error: null });
+    const selectionEpoch = get().selectionEpoch;
+    set({ error: null, convenienceMutationKey: mutationKey });
     try {
       const session = await invoke<ChatSession>("rollback_last_chat_convenience_edit", {
         request: { projectId, projectRootPath: rootPath, sessionId },
       });
       if (!isProjectScopeCurrent(scope)) return;
-      set({ activeSession: session, activeSessionId: session.id });
-      await get().loadSessions(projectId, rootPath);
+      if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
+        set({ activeSession: session, activeSessionId: session.id });
+      }
+      await get().loadSessions(projectId, rootPath, { autoSelect: false });
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
-      set({ error: errorMessage(error) });
+      if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
+        await get().reloadSession(projectId, rootPath, sessionId);
+        if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
+          set({ error: errorMessage(error) });
+        }
+      }
+    } finally {
+      if (isProjectScopeCurrent(scope)) {
+        set((state) =>
+          state.convenienceMutationKey === mutationKey ? { convenienceMutationKey: null } : {},
+        );
+      }
     }
   },
 
@@ -551,13 +724,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // bleeding into the next generation.
     if (taskId !== get().sendTaskId) {
       set((state) => {
-        const existing = state.pendingStreamDeltas[taskId] ?? { text: "", route: null };
+        const now = Date.now();
+        const pendingStreamDeltas = Object.fromEntries(
+          Object.entries(state.pendingStreamDeltas)
+            .filter(([, value]) => now - (value.receivedAt ?? now) < 30_000)
+            .sort(([, left], [, right]) => (left.receivedAt ?? 0) - (right.receivedAt ?? 0))
+            .slice(-7),
+        ) as ChatState["pendingStreamDeltas"];
+        const existing = pendingStreamDeltas[taskId] ?? { text: "", route: null, receivedAt: now };
         const text = `${existing.text}${delta}`.slice(-256 * 1024);
+        pendingStreamDeltas[taskId] = {
+          text,
+          route: route ?? existing.route,
+          receivedAt: existing.receivedAt ?? now,
+        };
         return {
-          pendingStreamDeltas: {
-            ...state.pendingStreamDeltas,
-            [taskId]: { text, route: route ?? existing.route },
-          },
+          pendingStreamDeltas,
         };
       });
       return;
@@ -570,6 +752,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   reset: () => set({ ...initial }),
 }));
+
+function normalizePagePath(path: string): string {
+  const normalized = path.replace(/\\/g, "/").trim();
+  // Windows paths are case-insensitive. Keep Linux/macOS matching
+  // case-sensitive so two intentionally distinct wiki pages remain distinct.
+  return typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent)
+    ? normalized.toLowerCase()
+    : normalized;
+}
 
 /** The latest assistant message in a session (used for the citations panel). */
 export function latestAssistantMessage(session: ChatSession | null): ChatMessage | null {
