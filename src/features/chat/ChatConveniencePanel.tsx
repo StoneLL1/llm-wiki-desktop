@@ -11,6 +11,7 @@ export interface ChatConveniencePanelProps {
   onKeep?: () => void;
   onRollback?: () => void;
   onRollbackLast?: () => void;
+  busy?: boolean;
 }
 
 export function ChatConveniencePanel({
@@ -21,6 +22,7 @@ export function ChatConveniencePanel({
   onKeep,
   onRollback,
   onRollbackLast,
+  busy = false,
 }: ChatConveniencePanelProps) {
   const { t } = useTranslation();
 
@@ -65,15 +67,15 @@ export function ChatConveniencePanel({
         ) : null}
         {softPending ? (
           <div className="flex gap-2">
-            <button type="button" className="settings-button" onClick={onKeep}>
+            <button type="button" className="settings-button" disabled={busy} onClick={onKeep}>
               {t("chat.convenience.keep")}
             </button>
-            <button type="button" className="settings-button settings-button--danger" onClick={onRollback}>
+            <button type="button" className="settings-button settings-button--danger" disabled={busy} onClick={onRollback}>
               {t("chat.convenience.rollback")}
             </button>
           </div>
         ) : rolledBack || failed ? null : onRollback ? (
-          <button type="button" className="settings-button settings-button--danger w-fit" onClick={onRollback}>
+          <button type="button" className="settings-button settings-button--danger w-fit" disabled={busy} onClick={onRollback}>
             <RotateCcw size={13} />
             {t("chat.convenience.rollback")}
           </button>
@@ -87,7 +89,7 @@ export function ChatConveniencePanel({
       <button
         type="button"
         aria-pressed={enabled}
-        disabled={pending}
+        disabled={pending || busy}
         onClick={() => onSetEnabled(!enabled)}
         className={`h-[26px] rounded-[var(--radius-sm)] border px-2 text-[11px] font-medium ${
           enabled
@@ -106,6 +108,7 @@ export function ChatConveniencePanel({
           type="button"
           className="h-[26px] rounded-[var(--radius-sm)] px-2 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
           onClick={onRollbackLast}
+          disabled={busy}
           aria-label={t("chat.convenience.rollbackLast")}
           title={t("chat.convenience.rollbackLast")}
         >

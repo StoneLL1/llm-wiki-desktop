@@ -45,6 +45,18 @@ pub struct ChatConvenienceEdit {
     pub rollback_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored_baseline_paths: Vec<String>,
+    /// Hashes captured immediately after the Agent run. Rollback refuses to
+    /// touch a path if it changed after that snapshot, preserving external
+    /// edits made while the decision was pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_path_hashes: Vec<ChatAffectedPathHash>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAffectedPathHash {
+    pub path: String,
+    pub hash: Option<String>,
 }
 
 /// A numbered source supplied to the model prompt. These are retrieval/planner
@@ -139,6 +151,10 @@ pub struct ChatMessage {
     pub convenience_edit: Option<ChatConvenienceEdit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieval_diagnostics: Option<ChatRetrievalDiagnostics>,
+    /// Relative path of the query page created by Save to Wiki. Persisting it
+    /// lets a reloaded Chat session show where an answer was saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_path: Option<String>,
 }
 
 /// Persisted chat session at `.app/chats/{id}.json`.
@@ -334,6 +350,7 @@ mod tests {
             task_id: Some("task-1".into()),
             convenience_edit: None,
             retrieval_diagnostics: None,
+            saved_path: None,
         };
         let value = serde_json::to_value(&message).unwrap();
         assert_eq!(value["role"], json!("assistant"));
@@ -360,6 +377,7 @@ mod tests {
             task_id: None,
             convenience_edit: None,
             retrieval_diagnostics: None,
+            saved_path: None,
         };
         let value = serde_json::to_value(&message).unwrap();
         assert!(value.get("citations").is_none() || value["citations"].is_null());
@@ -459,6 +477,7 @@ mod tests {
                 invalid_citation_ids: vec!["S9".into()],
                 has_unverified: true,
             }),
+            saved_path: None,
         };
 
         let value = serde_json::to_value(&message).unwrap();
@@ -494,8 +513,10 @@ mod tests {
                 violation_reason: Some("too many files".into()),
                 rollback_task_id: None,
                 ignored_baseline_paths: vec!["keep.log".into()],
+                affected_path_hashes: vec![],
             }),
             retrieval_diagnostics: None,
+            saved_path: None,
         };
 
         let value = serde_json::to_value(&message).unwrap();

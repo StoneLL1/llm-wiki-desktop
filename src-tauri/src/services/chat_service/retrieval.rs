@@ -17,7 +17,9 @@ const DEFAULT_CONTEXT_CHARS: usize = 24_000;
 const AGENT_CONTEXT_CHARS: usize = 48_000;
 const MIN_CONTEXT_CHARS: usize = 2_000;
 const MAX_CONTEXT_CHARS: usize = 120_000;
+const MAX_PURPOSE_CHARS: usize = 4_000;
 const MIN_KEYWORD_SOURCE_CHARS: usize = 240;
+const MIN_PINNED_SOURCE_CHARS: usize = 2_000;
 const MAX_GRAPH_EXPANSIONS: usize = 3;
 const MAX_SOURCE_OVERLAP_EXPANSIONS: usize = 3;
 
@@ -94,7 +96,14 @@ impl ChatService {
         // retrieval stage, including pages later omitted by prompt budgets.
         let (budget_chars, source_budget_chars, history_budget_chars) =
             retrieval_budgets(route, context_window);
-        let purpose = self.file_store.read_markdown(context, "purpose.md").ok();
+        // purpose.md is project-owned input, so bound it before prompt
+        // assembly just like page excerpts. Otherwise one large local file
+        // can bypass the retrieval budget and overflow the provider window.
+        let purpose = self
+            .file_store
+            .read_markdown(context, "purpose.md")
+            .ok()
+            .map(|purpose| take_chars(purpose.trim(), MAX_PURPOSE_CHARS).0);
         let mut diagnostic_hits = Vec::new();
         let mut candidates = Vec::new();
         let mut seen_paths = HashSet::new();
@@ -130,6 +139,17 @@ impl ChatService {
             seed_paths.push(hit.path.clone());
             if seen_paths.insert(hit.path.clone()) {
                 candidates.push(SourceCandidate::from_hit(hit, true));
+            } else if let Some(candidate) = candidates
+                .iter_mut()
+                .find(|candidate| candidate.path == hit.path)
+            {
+                // wiki/index.md is added first as required context. If the
+                // user also pins it, upgrade that existing candidate instead
+                // of dropping the pinned marker and its reserved budget.
+                candidate.title = hit.title;
+                candidate.excerpt = hit.excerpt.or(hit.snippet).unwrap_or_default();
+                candidate.score = hit.score;
+                candidate.is_pinned = true;
             }
         }
         let search_hits = search_service.retrieve_with_excerpts(
@@ -183,19 +203,40 @@ impl ChatService {
             }
         }
         let mut remaining_source_chars = source_budget_chars;
+        // Index/purpose context is useful, but a page-scoped Chat must never
+        // spend the entire source budget before its pinned page receives any
+        // body text. Reserve a bounded slice for every pinned candidate; a
+        // very small provider window still gets the maximum available slice.
+        let mut reserved_pinned_chars: usize = candidates
+            .iter()
+            .filter(|candidate| candidate.is_pinned)
+            .map(|candidate| char_len(&candidate.excerpt).min(MIN_PINNED_SOURCE_CHARS))
+            .sum();
         let mut source_refs = Vec::new();
         let mut omitted_pages = Vec::new();
         for candidate in candidates {
             let excerpt_len = char_len(&candidate.excerpt);
+            let pinned_reservation = if candidate.is_pinned {
+                excerpt_len.min(MIN_PINNED_SOURCE_CHARS)
+            } else {
+                0
+            };
+            if candidate.is_pinned {
+                reserved_pinned_chars = reserved_pinned_chars.saturating_sub(pinned_reservation);
+            }
+            let available_chars = if candidate.is_pinned {
+                remaining_source_chars
+            } else {
+                remaining_source_chars.saturating_sub(reserved_pinned_chars)
+            };
             let can_include = candidate.required
                 || candidate.is_pinned
-                || (remaining_source_chars >= MIN_KEYWORD_SOURCE_CHARS
-                    && excerpt_len <= remaining_source_chars);
+                || (available_chars >= MIN_KEYWORD_SOURCE_CHARS && excerpt_len <= available_chars);
             if !can_include {
                 omitted_pages.push(candidate.path);
                 continue;
             }
-            let take = remaining_source_chars;
+            let take = available_chars;
             let (excerpt, used_chars) = take_chars(&candidate.excerpt, take);
             remaining_source_chars = remaining_source_chars.saturating_sub(used_chars);
             let page_path = candidate.path.clone();
@@ -910,10 +951,13 @@ mod tests {
             .map(super::char_len)
             .sum();
         assert!(excerpt_chars <= ctx.diagnostics.source_budget_chars);
-        assert!(ctx
-            .diagnostics
-            .omitted_pages
-            .contains(&"wiki/concepts/huge-pinned.md".to_string()));
+        let pinned = ctx
+            .source_refs
+            .iter()
+            .find(|source| source.page_path == "wiki/concepts/huge-pinned.md")
+            .expect("pinned page remains represented even under a tight budget");
+        assert!(pinned.excerpt.as_deref().is_some_and(|excerpt| !excerpt.is_empty()));
+        assert!(ctx.diagnostics.omitted_pages.iter().any(|path| path == "wiki/index.md"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1120,6 +1164,7 @@ mod tests {
                 task_id: None,
                 convenience_edit: None,
                 retrieval_diagnostics: None,
+                saved_path: None,
             });
         }
 
@@ -1303,6 +1348,44 @@ mod tests {
             1
         );
         assert!(ctx.source_refs.len() <= super::RETRIEVAL_LIMIT + 1);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_context_marks_index_as_pinned_when_it_is_current_page() {
+        let (context, root) = tmp_context("retrieval-pinned-index");
+        seed_vault(&context);
+        let service = ChatService::default();
+        let search = SearchService::default();
+        let session = service.create_session(&context, None, None).unwrap();
+
+        let ctx = service
+            .build_retrieval_context(
+                &context,
+                &search,
+                "wiki overview",
+                &session,
+                "en",
+                ChatRoute::Byok,
+                Some(8_000),
+                Some("wiki/index.md"),
+            )
+            .unwrap();
+
+        let index = ctx
+            .source_refs
+            .iter()
+            .find(|source| source.page_path == "wiki/index.md")
+            .expect("index should remain in retrieved sources");
+        assert!(index.is_pinned);
+        assert_eq!(
+            ctx.source_refs
+                .iter()
+                .filter(|source| source.page_path == "wiki/index.md")
+                .count(),
+            1
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

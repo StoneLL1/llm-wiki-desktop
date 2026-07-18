@@ -460,6 +460,7 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         task_id: None,
         convenience_edit: None,
         retrieval_diagnostics: None,
+        saved_path: None,
     };
     chat.append_message(&context, &mut session, question.clone())
         .unwrap();
@@ -507,6 +508,7 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         task_id: None,
         convenience_edit: None,
         retrieval_diagnostics: Some(retrieval.diagnostics),
+        saved_path: None,
     };
     chat.append_message(&context, &mut session, answer.clone())
         .unwrap();

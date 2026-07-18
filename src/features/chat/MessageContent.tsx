@@ -13,7 +13,26 @@ const CITATION_SCHEME = "citation://";
  * citation references. Footnote-style `[^1]` references are left untouched.
  */
 function preprocessCitations(body: string): string {
-  return body
+  const protectedParts: string[] = [];
+  let nonce = 0;
+  let markerPrefix = "";
+  do {
+    markerPrefix = `\uE000chat-protected-${body.length}-${nonce++}-`;
+  } while (body.includes(markerPrefix));
+  const escapedMarkerPrefix = markerPrefix.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+  const markerPattern = new RegExp(`${escapedMarkerPrefix}(\\d+)\\uE001`, "g");
+  const protect = (match: string) => {
+    const index = protectedParts.push(match) - 1;
+    return `${markerPrefix}${index}\uE001`;
+  };
+  // Citation-looking text in fenced/inline code and existing Markdown links
+  // is literal content, not a model citation. Mask it before rewriting bare
+  // markers, then restore the original bytes after the replacement.
+  const masked = body
+    .replace(/(`{3,}[\s\S]*?`{3,}|~{3,}[\s\S]*?~{3,})/g, protect)
+    .replace(/`[^`\n]*`/g, protect)
+    .replace(/\[[^\]]+\]\([^\n)]*\)/g, protect);
+  const rewritten = masked
     .replace(/\[(S\d+(?:\s*,\s*S\d+)*)\]/gi, (_match, marker: string) => {
       return marker
         .split(",")
@@ -26,6 +45,9 @@ function preprocessCitations(body: string): string {
     .replace(/(?<!\])\[(\d+)\](?!\s*(?:\(|:))/g, (_match, index: string) => {
       return `[${index}](${CITATION_SCHEME}${index})`;
     });
+  return rewritten.replace(markerPattern, (_match, index: string) => {
+    return protectedParts[Number(index)] ?? _match;
+  });
 }
 
 interface MessageContentProps {
@@ -35,6 +57,8 @@ interface MessageContentProps {
   citationCount: number;
   /** Valid model source ids (`S1`, `S2`, ...), used for `[S#]` markers. */
   citationIds?: string[];
+  /** Streaming text has no finalized citation contract yet. */
+  enableCitations?: boolean;
   /** Jump to a citation by model source id or legacy 1-based index. */
   onCitationClick: (ref: string) => void;
 }
@@ -47,10 +71,14 @@ export function MessageContent({
   content,
   citationCount,
   citationIds = [],
+  enableCitations = true,
   onCitationClick,
 }: MessageContentProps) {
   const { t } = useTranslation();
-  const processed = useMemo(() => preprocessCitations(content), [content]);
+  const processed = useMemo(
+    () => (enableCitations ? preprocessCitations(content) : content),
+    [content, enableCitations],
+  );
   const normalizedCitationIds = useMemo(
     () => new Set(citationIds.map((id) => id.toUpperCase())),
     [citationIds],
@@ -64,27 +92,32 @@ export function MessageContent({
         components={{
           a({ href, children, ...props }) {
             if (href?.startsWith(CITATION_SCHEME)) {
-              const ref = decodeURIComponent(href.slice(CITATION_SCHEME.length)).toUpperCase();
-              const index = Number.parseInt(ref, 10);
-              const isKnownSource = normalizedCitationIds.has(ref);
-              const isLegacyIndex = Number.isFinite(index) && index >= 1 && index <= citationCount;
-              if (isKnownSource || isLegacyIndex) {
-                return (
-                  <sup className="citation-ref">
-                    <button
-                      type="button"
-                      className="citation-ref__btn"
-                      aria-label={t("chat.thread.citationRef", { index: ref })}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        onCitationClick(ref);
-                      }}
-                    >
-                      {children}
-                    </button>
-                  </sup>
-                );
+              try {
+                const ref = decodeURIComponent(href.slice(CITATION_SCHEME.length)).toUpperCase();
+                const index = Number.parseInt(ref, 10);
+                const isKnownSource = normalizedCitationIds.has(ref);
+                const isLegacyIndex = Number.isFinite(index) && index >= 1 && index <= citationCount;
+                if (isKnownSource || isLegacyIndex) {
+                  return (
+                    <sup className="citation-ref">
+                      <button
+                        type="button"
+                        className="citation-ref__btn"
+                        aria-label={t("chat.thread.citationRef", { index: ref })}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          onCitationClick(ref);
+                        }}
+                      >
+                        {children}
+                      </button>
+                    </sup>
+                  );
+                }
+              } catch {
+                // Treat malformed citation URLs as plain text below.
               }
+              return <span {...props}>{children}</span>;
             }
             return (
               <a href={href} target="_blank" rel="noreferrer" {...props}>

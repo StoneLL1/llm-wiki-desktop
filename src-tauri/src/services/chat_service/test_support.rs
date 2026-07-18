@@ -57,6 +57,7 @@ pub(super) fn user_message(content: &str) -> ChatMessage {
         task_id: None,
         convenience_edit: None,
         retrieval_diagnostics: None,
+        saved_path: None,
     }
 }
 

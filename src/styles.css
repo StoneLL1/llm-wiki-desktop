@@ -2168,14 +2168,14 @@ select:focus-visible {
 }
 
 /* ---------- Chat: route segment switcher ---------- */
-.seg {
+.chat-route-seg {
   display: inline-flex;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
 }
-.seg__btn {
+.chat-route-seg__btn {
   min-width: 0;
   flex-shrink: 0;
   height: 28px;
@@ -2189,12 +2189,12 @@ select:focus-visible {
   cursor: pointer;
   white-space: nowrap;
 }
-.seg__btn:hover { color: var(--text-primary); }
-.seg__btn.is-active {
+.chat-route-seg__btn:hover { color: var(--text-primary); }
+.chat-route-seg__btn.is-active {
   background: var(--accent-soft);
   color: var(--accent-hover);
 }
-.seg__btn + .seg__btn { border-left: 1px solid var(--border-subtle); }
+.chat-route-seg__btn + .chat-route-seg__btn { border-left: 1px solid var(--border-subtle); }
 
 /* Chat session meta line (time · N messages) */
 .chat-session__meta {

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, Pencil, Sparkles, Trash2 } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
@@ -12,7 +11,6 @@ import { useWikiStore } from "../../features/wiki/wikiStore";
 import { isTerminalStatus } from "../../types/task";
 import type { TaskActivity, TaskStatus } from "../../types/task";
 import type { ChatMessage, ChatRoutePreference } from "../../types/chat";
-import type { LlmProviderKind } from "../../types/llm";
 import { ChatComposer } from "./ChatComposer";
 import { ChatConveniencePanel } from "./ChatConveniencePanel";
 import { ChatSessionList } from "./ChatSessionList";
@@ -24,14 +22,6 @@ const SEGMENT_OPTIONS: readonly { value: ChatRoutePreference; key: string }[] = 
   { value: "agent", key: "chat.composer.route.agent" },
   { value: "byok", key: "chat.composer.route.byok" },
 ];
-
-const PROVIDER_LABEL: Record<LlmProviderKind, string> = {
-  open_ai: "OpenAI",
-  anthropic: "Anthropic",
-  google: "Google",
-  ollama: "Ollama",
-  custom: "Custom",
-};
 
 /** Format an ISO timestamp as HH:MM (locale-independent, 24h). */
 export function formatTime(iso: string): string {
@@ -52,19 +42,26 @@ export function ChatView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
   const [routePreference, setRoutePreference] = useState<ChatRoutePreference>("auto");
+  const [creatingSession, setCreatingSession] = useState(false);
 
   const sessions = useChatStore((state) => state.sessions);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const activeSession = useChatStore((state) => state.activeSession);
   const loadingSessions = useChatStore((state) => state.loadingSessions);
+  const loadingSession = useChatStore((state) => state.loadingSession);
   const sendTaskId = useChatStore((state) => state.sendTaskId);
   const sendSessionId = useChatStore((state) => state.sendSessionId);
+  const sendStarting = useChatStore((state) => state.sendStarting);
   const clearSendTask = useChatStore((state) => state.clearSendTask);
   const saveStatus = useChatStore((state) => state.saveStatus);
+  const saveInFlightMessageId = useChatStore((state) => state.saveInFlightMessageId);
   const overwriteRequest = useChatStore((state) => state.overwriteRequest);
+  const convenienceMutationKey = useChatStore((state) => state.convenienceMutationKey);
+  const savedAnswerPaths = useChatStore((state) => state.savedAnswerPaths);
   const error = useChatStore((state) => state.error);
   const streamingText = useChatStore((state) => state.streamingText);
   const streamingRoute = useChatStore((state) => state.streamingRoute);
+  const pendingUserMessages = useChatStore((state) => state.pendingUserMessages);
 
   const loadSessions = useChatStore((state) => state.loadSessions);
   const createSession = useChatStore((state) => state.createSession);
@@ -72,6 +69,7 @@ export function ChatView() {
   const renameSession = useChatStore((state) => state.renameSession);
   const deleteSession = useChatStore((state) => state.deleteSession);
   const send = useChatStore((state) => state.send);
+  const cancelChatTask = useChatStore((state) => state.cancelTask);
   const reloadActive = useChatStore((state) => state.reloadActive);
   const saveAnswer = useChatStore((state) => state.saveAnswer);
   const confirmOverwrite = useChatStore((state) => state.confirmOverwrite);
@@ -79,13 +77,13 @@ export function ChatView() {
   const resolveConvenienceEdit = useChatStore((state) => state.resolveConvenienceEdit);
   const rollbackLastConvenienceEdit = useChatStore((state) => state.rollbackLastConvenienceEdit);
   const chatConvenienceAuthorization = useSettingsStore((state) => state.chatConvenienceAuthorization);
+  const chatConvenienceSaving = useSettingsStore((state) => state.chatConvenienceSaving);
   const loadChatConvenienceAuthorization = useSettingsStore((state) => state.loadChatConvenienceAuthorization);
   const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
 
   const tasks = useTaskStore((state) => state.tasks);
   const activities = useTaskStore((state) => state.activities);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
-  const cancelTask = useTaskStore((state) => state.upsertTask);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const openWikiPage = useWikiStore((state) => state.openPage);
 
@@ -96,6 +94,23 @@ export function ChatView() {
     (sendTask?.status === "running" ||
       sendTask?.status === "queued" ||
       sendTask?.status === "cancelling");
+  const chatBusy = Boolean(
+    sendStarting ||
+      (sendTask &&
+      (sendTask.status === "running" ||
+        sendTask.status === "queued" ||
+        sendTask.status === "cancelling" ||
+        sendTask.status === "cancelled")),
+  );
+  const convenienceBusy = Boolean(convenienceMutationKey || chatConvenienceSaving);
+  const saveBlocked = Boolean(saveInFlightMessageId || overwriteRequest || convenienceBusy);
+  const destructiveActionBlocked = Boolean(
+    chatBusy || overwriteRequest || convenienceBusy,
+  );
+  const pendingUserMessage =
+    sendTaskId && sendSessionId === activeSessionId && chatBusy
+      ? pendingUserMessages[sendTaskId] ?? null
+      : null;
   const streamActivities = sendTaskId ? activities[sendTaskId] ?? [] : [];
   const activityTaskIds = activeSession?.messages
     .map((message) => message.taskId)
@@ -124,8 +139,8 @@ export function ChatView() {
   useEffect(() => {
     if (!sendTask || !isTerminalStatus(sendTask.status)) return;
     let cancelled = false;
-    const terminalError = sendTask.status === "failed"
-      ? (sendTask.error?.message ?? sendTask.title)
+    const terminalError = sendSessionId === activeSessionId
+      ? (sendTask.error?.message ?? (sendTask.status === "failed" ? sendTask.title : null))
       : null;
     void reloadActive(projectId, rootPath).finally(() => {
       if (!cancelled) clearSendTask(terminalError);
@@ -133,13 +148,19 @@ export function ChatView() {
     return () => {
       cancelled = true;
     };
-  }, [sendTask, projectId, rootPath, reloadActive, clearSendTask]);
+  }, [sendTask, sendSessionId, activeSessionId, projectId, rootPath, reloadActive, clearSendTask]);
 
   const handleSend = async (content: string): Promise<boolean> => {
+    if (chatBusy) return false;
     let sessionId = activeSessionId;
     if (!sessionId) {
       const created = await createSession(projectId, rootPath);
-      sessionId = created?.id ?? useChatStore.getState().activeSessionId;
+      // A project/page switch can invalidate creation after the IPC returns;
+      // never combine the old request scope with a newly active session.
+      if (!created || useChatStore.getState().activeSessionId !== created.id) {
+        return false;
+      }
+      sessionId = created.id;
     }
     if (!sessionId) return false;
     const canUseConvenience = routePreference !== "byok";
@@ -153,9 +174,7 @@ export function ChatView() {
 
   const handleCancel = () => {
     if (!sendTaskId) return;
-    void invoke("cancel_task", { request: { taskId: sendTaskId } }).then((task) => {
-      if (task) cancelTask(task as never);
-    });
+    void cancelChatTask(sendTaskId);
   };
 
   const latestAssistant = latestAssistantMessage(activeSession);
@@ -184,8 +203,15 @@ export function ChatView() {
           activeSessionId={activeSessionId}
           loading={loadingSessions}
           onSelect={(sessionId) => void selectSession(projectId, rootPath, sessionId)}
-          onCreate={() => void createSession(projectId, rootPath)}
+          createDisabled={creatingSession || destructiveActionBlocked}
+          onCreate={() => {
+            if (creatingSession || destructiveActionBlocked) return;
+            setCreatingSession(true);
+            void createSession(projectId, rootPath).finally(() => setCreatingSession(false));
+          }}
           onRename={(sessionId, title) => void renameSession(projectId, rootPath, sessionId, title)}
+          deleteDisabled={destructiveActionBlocked}
+          deleteDisabledSessionId={destructiveActionBlocked ? sendSessionId : null}
           onDelete={(sessionId) => {
             if (window.confirm(t("chat.sessions.deleteConfirm"))) {
               void deleteSession(projectId, rootPath, sessionId);
@@ -208,6 +234,8 @@ export function ChatView() {
             convenienceEnabled={convenienceEnabled}
             conveniencePending={conveniencePending}
             onConvenienceEnabledChange={setConvenienceEnabled}
+            convenienceBusy={convenienceBusy}
+            deleteDisabled={destructiveActionBlocked}
             onRollbackLast={() => {
               if (!activeSessionId) return;
               void rollbackLastConvenienceEdit(projectId, rootPath, activeSessionId);
@@ -221,16 +249,21 @@ export function ChatView() {
           className="chat-scroll-region relative min-h-0 flex-1 overflow-y-auto px-6 py-4"
           role="log"
           aria-label={t("chat.thread.transcriptLabel")}
-          aria-live="polite"
           aria-busy={generating}
         >
-          {!activeSession ? (
+          {loadingSession ? (
+            <div className="mx-auto flex w-full max-w-[820px] flex-col gap-3 px-4 py-3" aria-busy="true">
+              <div className="h-3 w-2/5 animate-pulse rounded bg-[var(--surface-muted)]" />
+              <div className="h-16 w-4/5 animate-pulse rounded-[var(--radius-md)] bg-[var(--surface-muted)]" />
+              <div className="h-3 w-1/3 animate-pulse rounded bg-[var(--surface-muted)]" />
+            </div>
+          ) : !activeSession ? (
             <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
               {t("chat.thread.empty")}
             </div>
           ) : (
             <div className="chat-stream mx-auto w-full max-w-[820px] px-4">
-              {activeSession.messages.map((message) => (
+              {[...activeSession.messages, ...(pendingUserMessage ? [pendingUserMessage] : [])].map((message) => (
                 <MessageBubble
                   key={message.id}
                   message={message}
@@ -239,6 +272,9 @@ export function ChatView() {
                   t={t}
                   generating={generating}
                   saveStatus={saveStatus[message.id] ?? "idle"}
+                  saveBlocked={saveBlocked}
+                  convenienceBusy={convenienceBusy}
+                  savedPath={message.savedPath ?? savedAnswerPaths[message.id]}
                   onCitationClick={(ref) => {
                     const citation = resolveCitationRef(message.citations ?? [], ref);
                     if (citation) openCitation(citation.pagePath);
@@ -270,32 +306,11 @@ export function ChatView() {
                   openLogsLabel={t("chat.thread.openLogs")}
                 />
               ) : null}
-              {overwriteRequest ? (
-                <div className="flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] p-3">
-                  <div className="text-[12px] font-medium">{t("chat.thread.overwriteTitle")}</div>
-                  <p className="m-0 text-[11.5px] text-[var(--text-secondary)]">
-                    {t("chat.thread.overwriteBody", { path: overwriteRequest.path })}
-                  </p>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void confirmOverwrite(projectId, rootPath)}
-                    className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)]"
-                    >
-                      {t("chat.thread.overwrite")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={cancelOverwrite}
-                      className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)]"
-                    >
-                      {t("chat.thread.cancel")}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
             </div>
           )}
+          <div className="sr-only" aria-live="polite">
+            {generating ? t("chat.composer.busy") : ""}
+          </div>
           {transcriptScroll.showBackToLatest ? (
             <button
               type="button"
@@ -307,12 +322,23 @@ export function ChatView() {
             </button>
           ) : null}
         </div>
+        {overwriteRequest ? (
+          <ChatOverwritePrompt
+            request={overwriteRequest}
+            busy={Boolean(saveInFlightMessageId)}
+            onConfirm={() => void confirmOverwrite(projectId, rootPath)}
+            onCancel={() => void cancelOverwrite()}
+            t={t}
+          />
+        ) : null}
         <ChatComposer
           routePreference={routePreference}
           lastResolvedRoute={resolvedRoute}
           generating={generating}
           onSend={handleSend}
           onCancel={handleCancel}
+          draftKey={activeSessionId ? `${projectId}:chat:${activeSessionId}` : `${projectId}:chat:new`}
+          blocked={chatBusy || saveBlocked || convenienceBusy}
         />
       </div>
     </div>
@@ -326,11 +352,54 @@ export interface MessageBubbleProps {
   t: (k: string, opts?: Record<string, unknown>) => string;
   generating: boolean;
   saveStatus: "idle" | "saving" | "saved" | "exists" | "error";
+  saveBlocked?: boolean;
+  convenienceBusy?: boolean;
+  savedPath?: string | null;
   onCitationClick: (ref: string) => void;
   onOpenCitation: (path: string) => void;
   onSave: () => void;
   onKeepConvenience?: () => void;
   onRollbackConvenience?: () => void;
+}
+
+export interface ChatOverwritePromptProps {
+  request: { path: string };
+  onConfirm: () => void;
+  onCancel: () => void;
+  busy?: boolean;
+  t: (k: string, opts?: Record<string, unknown>) => string;
+}
+
+export function ChatOverwritePrompt({ request, onConfirm, onCancel, busy = false, t }: ChatOverwritePromptProps) {
+  return (
+    <div
+      className="flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] p-3"
+      role="alert"
+    >
+      <div className="text-[12px] font-medium">{t("chat.thread.overwriteTitle")}</div>
+      <p className="m-0 text-[11.5px] text-[var(--text-secondary)]">
+        {t("chat.thread.overwriteBody", { path: request.path })}
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onConfirm}
+          className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:cursor-wait disabled:opacity-50"
+        >
+          {t("chat.thread.overwrite")}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onCancel}
+          className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {t("chat.thread.cancel")}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export function MessageBubble({
@@ -340,6 +409,9 @@ export function MessageBubble({
   t,
   generating,
   saveStatus,
+  saveBlocked = false,
+  convenienceBusy = false,
+  savedPath,
   onCitationClick,
   onOpenCitation,
   onSave,
@@ -348,9 +420,11 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const citations = message.citations ?? [];
+  const diagnostics = message.retrievalDiagnostics;
+  const invalidCitationIds = diagnostics?.invalidCitationIds ?? [];
   const time = formatTime(message.createdAt);
   const routeLabel = message.route ? t(`chat.composer.route.${message.route}`) : null;
-  const providerLabel = message.provider ? PROVIDER_LABEL[message.provider] : null;
+  const providerLabel = message.provider ? t(`provider.name.${message.provider}`) : null;
 
   return (
     <div className={`msg ${isUser ? "msg--user" : ""}`}>
@@ -378,6 +452,23 @@ export function MessageBubble({
               citationIds={citations.flatMap((citation) => citation.sourceId ?? [])}
               onCitationClick={onCitationClick}
             />
+            {invalidCitationIds.length > 0 || diagnostics?.hasUnverified ? (
+              <div
+                className="mt-2 flex flex-col gap-1 rounded-[var(--radius-sm)] border border-[var(--warning)] bg-[var(--warning-soft)] px-2.5 py-2 text-[11px] text-[var(--text-secondary)]"
+                role="status"
+              >
+                {invalidCitationIds.length > 0 ? (
+                  <span>
+                    {t("chat.trust.invalidCitations", {
+                      ids: invalidCitationIds.join(", "),
+                    })}
+                  </span>
+                ) : null}
+                {diagnostics?.hasUnverified ? (
+                  <span>{t("chat.trust.unverified")}</span>
+                ) : null}
+              </div>
+            ) : null}
             {!isUser && citations.length > 0 ? (
               <div className="msg__citations">
                 {citations.map((citation, index) => (
@@ -402,7 +493,12 @@ export function MessageBubble({
             ) : null}
             {!isUser ? (
               <div className="mt-2 flex items-center gap-2">
-                <SaveAnswerButton status={saveStatus} disabled={generating} onSave={onSave} />
+                <SaveAnswerButton
+                  status={saveStatus}
+                  savedPath={savedPath}
+                  disabled={generating || saveBlocked}
+                  onSave={onSave}
+                />
               </div>
             ) : null}
             {message.convenienceEdit ? (
@@ -413,6 +509,7 @@ export function MessageBubble({
                 onSetEnabled={() => {}}
                 onKeep={onKeepConvenience}
                 onRollback={onRollbackConvenience}
+                busy={convenienceBusy}
               />
             ) : null}
           </>
@@ -439,6 +536,8 @@ interface SessionToolbarProps {
   convenienceEnabled: boolean;
   conveniencePending: boolean;
   onConvenienceEnabledChange: (enabled: boolean) => void;
+  deleteDisabled: boolean;
+  convenienceBusy: boolean;
   onRollbackLast: () => void;
   t: (k: string, opts?: Record<string, unknown>) => string;
 }
@@ -450,6 +549,8 @@ function SessionToolbar({
   convenienceEnabled,
   conveniencePending,
   onConvenienceEnabledChange,
+  deleteDisabled,
+  convenienceBusy,
   onRollbackLast,
   t,
 }: SessionToolbarProps) {
@@ -477,12 +578,13 @@ function SessionToolbar({
 
   return (
     <div className="view-toolbar border-b border-[var(--border-subtle)] px-4">
-      <div className="seg">
+      <div className="chat-route-seg" role="group" aria-label={t("chat.composer.route.label")}>
         {SEGMENT_OPTIONS.map((opt) => (
           <button
             key={opt.value}
             type="button"
-            className={`seg__btn${routePreference === opt.value ? " is-active" : ""}`}
+            className={`chat-route-seg__btn${routePreference === opt.value ? " is-active" : ""}`}
+            aria-pressed={routePreference === opt.value}
             onClick={() => onRouteChange(opt.value)}
           >
             {t(opt.key)}
@@ -494,6 +596,7 @@ function SessionToolbar({
         pending={conveniencePending}
         onSetEnabled={onConvenienceEnabledChange}
         onRollbackLast={convenienceEnabled ? onRollbackLast : undefined}
+        busy={convenienceBusy}
       />
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {editing ? (
@@ -529,6 +632,7 @@ function SessionToolbar({
         </button>
         <button
           type="button"
+          disabled={deleteDisabled}
           onClick={() => {
             if (window.confirm(t("chat.sessions.deleteConfirm"))) {
               void del(projectId, rootPath, session.id);
@@ -575,7 +679,12 @@ export function StreamingBubble({ text, activities, taskStatus, routeLabel, agen
       <div className="chat-agent-answer">
         {text ? (
           <div className="chat-prose">
-            <MessageContent content={text} citationCount={0} onCitationClick={() => {}} />
+            <MessageContent
+              content={text}
+              citationCount={0}
+              enableCitations={false}
+              onCitationClick={() => {}}
+            />
             <span className="stream-cursor" aria-hidden="true" />
           </div>
         ) : (
@@ -632,14 +741,19 @@ export function useTranscriptScroll(
 
 interface SaveAnswerButtonProps {
   status: "idle" | "saving" | "saved" | "exists" | "error";
+  savedPath?: string | null;
   disabled: boolean;
   onSave: () => void;
 }
 
-function SaveAnswerButton({ status, disabled, onSave }: SaveAnswerButtonProps) {
+function SaveAnswerButton({ status, savedPath, disabled, onSave }: SaveAnswerButtonProps) {
   const { t } = useTranslation();
-  if (status === "saved") {
-    return <span className="text-[10.5px] text-[var(--text-muted)]">{t("chat.thread.saveDone")}</span>;
+  if (status === "saved" || savedPath) {
+    return (
+      <span className="max-w-full truncate text-[10.5px] text-[var(--text-muted)]" title={savedPath ?? undefined}>
+        {savedPath ? t("chat.thread.savePath", { path: savedPath }) : t("chat.thread.saveDone")}
+      </span>
+    );
   }
   return (
     <button

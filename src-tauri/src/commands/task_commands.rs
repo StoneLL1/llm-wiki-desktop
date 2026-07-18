@@ -69,9 +69,16 @@ pub fn cancel_task(
     state: State<'_, AppState>,
     request: TaskByIdRequest,
 ) -> Result<BackendTask, BackendError> {
-    state
+    let result = if state
         .task_service
-        .cancel_task(&request.task_id)
+        .get_task(&request.task_id)
+        .is_some_and(|task| task.task_type == TaskType::LlmRequest)
+    {
+        state.task_service.request_cancel(&request.task_id)
+    } else {
+        state.task_service.cancel_task(&request.task_id)
+    };
+    result
         .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
 }
 

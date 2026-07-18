@@ -1,15 +1,20 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke } from "@tauri-apps/api/core";
 import { BookOpenText, ChevronDown, Plus } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { fetchTaskActivities, useTaskStore } from "../../stores/taskStore";
 import type { ChatMessage } from "../../types/chat";
 import { isTerminalStatus } from "../../types/task";
 import type { WikiPageContent } from "../../types/wiki";
 import { ChatComposer } from "./ChatComposer";
-import { MessageBubble, StreamingBubble, useTranscriptScroll } from "./ChatView";
+import {
+  ChatOverwritePrompt,
+  MessageBubble,
+  StreamingBubble,
+  useTranscriptScroll,
+} from "./ChatView";
 
 interface PageChatPanelProps {
   page: WikiPageContent | null;
@@ -29,24 +34,33 @@ export function PageChatPanel({
   onOpenCitation,
 }: PageChatPanelProps) {
   const { t } = useTranslation();
+  const [creatingPageSession, setCreatingPageSession] = useState(false);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const activeSession = useChatStore((state) => state.activeSession);
+  const loadingSession = useChatStore((state) => state.loadingSession);
   const sendTaskId = useChatStore((state) => state.sendTaskId);
   const sendSessionId = useChatStore((state) => state.sendSessionId);
+  const sendStarting = useChatStore((state) => state.sendStarting);
   const clearSendTask = useChatStore((state) => state.clearSendTask);
   const error = useChatStore((state) => state.error);
+  const overwriteRequest = useChatStore((state) => state.overwriteRequest);
   const streamingText = useChatStore((state) => state.streamingText);
   const streamingRoute = useChatStore((state) => state.streamingRoute);
-  const createSession = useChatStore((state) => state.createSession);
+  const pendingUserMessages = useChatStore((state) => state.pendingUserMessages);
   const ensurePageSession = useChatStore((state) => state.ensurePageSession);
   const send = useChatStore((state) => state.send);
+  const cancelChatTask = useChatStore((state) => state.cancelTask);
   const saveStatus = useChatStore((state) => state.saveStatus);
+  const saveInFlightMessageId = useChatStore((state) => state.saveInFlightMessageId);
+  const convenienceMutationKey = useChatStore((state) => state.convenienceMutationKey);
+  const chatConvenienceSaving = useSettingsStore((state) => state.chatConvenienceSaving);
+  const savedAnswerPaths = useChatStore((state) => state.savedAnswerPaths);
   const saveAnswer = useChatStore((state) => state.saveAnswer);
+  const resolveConvenienceEdit = useChatStore((state) => state.resolveConvenienceEdit);
   const reloadActive = useChatStore((state) => state.reloadActive);
 
   const tasks = useTaskStore((state) => state.tasks);
   const activities = useTaskStore((state) => state.activities);
-  const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;
@@ -61,10 +75,25 @@ export function PageChatPanel({
     (sendTask?.status === "running" ||
       sendTask?.status === "queued" ||
       sendTask?.status === "cancelling");
-  const latestAssistant = latestAssistantMessage(pageSession);
-  const pinnedCitation = latestAssistant?.citations?.find(
-    (citation) => citation.isPinned && citation.pagePath === page?.meta.path,
+  const chatBusy = Boolean(
+    sendStarting ||
+      (sendTask &&
+      (sendTask.status === "running" ||
+        sendTask.status === "queued" ||
+        sendTask.status === "cancelling" ||
+        sendTask.status === "cancelled")),
   );
+  const convenienceBusy = Boolean(convenienceMutationKey || chatConvenienceSaving);
+  const saveBlocked = Boolean(saveInFlightMessageId || overwriteRequest || convenienceBusy);
+  const pendingUserMessage =
+    sendTaskId && sendSessionId === pageSessionId && chatBusy
+      ? pendingUserMessages[sendTaskId] ?? null
+      : null;
+  const latestAssistant = latestAssistantMessage(pageSession);
+  const pinnedCitation = !chatBusy && !loadingSession ? latestAssistant?.citations?.find(
+    (citation) =>
+      citation.isPinned && normalizePagePath(citation.pagePath) === normalizePagePath(page?.meta.path ?? ""),
+  ) : undefined;
   const streamActivities = sendTaskId ? activities[sendTaskId] ?? [] : [];
   const activityTaskIds = pageSession?.messages
     .map((message) => message.taskId)
@@ -81,14 +110,16 @@ export function PageChatPanel({
     if (!sendTask || !isTerminalStatus(sendTask.status)) return;
     let cancelled = false;
     const terminalError =
-      sendTask.status === "failed" ? (sendTask.error?.message ?? sendTask.title) : null;
+      sendSessionId === pageSessionId
+        ? (sendTask.error?.message ?? (sendTask.status === "failed" ? sendTask.title : null))
+        : null;
     void reloadActive(projectId, rootPath).finally(() => {
       if (!cancelled) clearSendTask(terminalError);
     });
     return () => {
       cancelled = true;
     };
-  }, [sendTask, projectId, rootPath, reloadActive, clearSendTask]);
+  }, [sendTask, sendSessionId, pageSessionId, projectId, rootPath, reloadActive, clearSendTask]);
 
   useEffect(() => {
     const taskIds = activityTaskIds ? activityTaskIds.split("|") : [];
@@ -108,16 +139,17 @@ export function PageChatPanel({
   }, [projectId, rootPath, page?.meta.path, page?.meta.title, ensurePageSession]);
 
   const handleSend = async (content: string): Promise<boolean> => {
-    if (!page) return false;
+    if (!page || chatBusy) return false;
     let sessionId = pageSessionId;
     if (!sessionId) {
-      const created = await createSession(
+      const created = await ensurePageSession(
         projectId,
         rootPath,
-        `Ask: ${page.meta.title}`,
         page.meta.path,
+        page.meta.title,
+        true,
       );
-      sessionId = created?.id ?? useChatStore.getState().activeSessionId;
+      sessionId = created?.id ?? null;
     }
     if (!sessionId) return false;
     const taskId = await send(projectId, rootPath, sessionId, content, "auto", {
@@ -127,15 +159,15 @@ export function PageChatPanel({
   };
 
   const handleNewPageChat = () => {
-    if (!page) return;
-    void ensurePageSession(projectId, rootPath, page.meta.path, page.meta.title, true);
+    if (!page || creatingPageSession || chatBusy || convenienceBusy) return;
+    setCreatingPageSession(true);
+    void ensurePageSession(projectId, rootPath, page.meta.path, page.meta.title, true)
+      .finally(() => setCreatingPageSession(false));
   };
 
   const handleCancel = () => {
     if (!sendTaskId) return;
-    void invoke("cancel_task", { request: { taskId: sendTaskId } }).then((task) => {
-      if (task) upsertTask(task as never);
-    });
+    void cancelChatTask(sendTaskId);
   };
 
   if (!page) {
@@ -162,6 +194,7 @@ export function PageChatPanel({
             aria-label={t("chat.sessions.new")}
             className="icon-button shrink-0"
             onClick={handleNewPageChat}
+            disabled={creatingPageSession || chatBusy || convenienceBusy}
             title={t("chat.sessions.new")}
             type="button"
           >
@@ -196,16 +229,21 @@ export function PageChatPanel({
         className="page-chat__body app-pane-scrollbar relative min-h-0 flex-1 overflow-y-auto px-3 py-3"
         role="log"
         aria-label={t("chat.thread.transcriptLabel")}
-        aria-live="polite"
         aria-busy={generating}
       >
-        {!pageSession ? (
+        {loadingSession ? (
+          <div className="flex h-full flex-col gap-3 px-3 py-3" aria-busy="true">
+            <div className="h-3 w-2/5 animate-pulse rounded bg-[var(--surface-muted)]" />
+            <div className="h-14 w-4/5 animate-pulse rounded-[var(--radius-md)] bg-[var(--surface-muted)]" />
+            <div className="h-3 w-1/3 animate-pulse rounded bg-[var(--surface-muted)]" />
+          </div>
+        ) : !pageSession ? (
           <div className="flex h-full items-center justify-center text-center text-[12px] text-[var(--text-muted)]">
             {t("wiki.askAi.currentPage")}
           </div>
         ) : (
           <div className="chat-stream w-full">
-            {pageSession.messages.map((message) => (
+            {[...pageSession.messages, ...(pendingUserMessage ? [pendingUserMessage] : [])].map((message) => (
               <MessageBubble
                 key={message.id}
                 message={message}
@@ -214,6 +252,9 @@ export function PageChatPanel({
                 t={t}
                 generating={generating}
                 saveStatus={saveStatus[message.id] ?? "idle"}
+                saveBlocked={saveBlocked}
+                convenienceBusy={convenienceBusy}
+                savedPath={message.savedPath ?? savedAnswerPaths[message.id]}
                 onCitationClick={(ref) => {
                   const citation = resolveCitationRef(message.citations ?? [], ref);
                   if (citation && onOpenCitation) onOpenCitation(citation.pagePath);
@@ -224,6 +265,14 @@ export function PageChatPanel({
                 onSave={() => {
                   if (!pageSessionId) return;
                   void saveAnswer(projectId, rootPath, pageSessionId, message.id);
+                }}
+                onKeepConvenience={() => {
+                  if (!pageSessionId) return;
+                  void resolveConvenienceEdit(projectId, rootPath, pageSessionId, message.id, true);
+                }}
+                onRollbackConvenience={() => {
+                  if (!pageSessionId) return;
+                  void resolveConvenienceEdit(projectId, rootPath, pageSessionId, message.id, false);
                 }}
               />
             ))}
@@ -241,6 +290,9 @@ export function PageChatPanel({
             ) : null}
           </div>
         )}
+        <div className="sr-only" aria-live="polite">
+          {generating ? t("chat.composer.busy") : ""}
+        </div>
         {transcriptScroll.showBackToLatest ? (
           <button type="button" className="chat-back-latest" onClick={transcriptScroll.backToLatest}>
             <ChevronDown size={14} aria-hidden="true" />
@@ -248,6 +300,15 @@ export function PageChatPanel({
           </button>
         ) : null}
       </div>
+      {overwriteRequest ? (
+        <ChatOverwritePrompt
+          request={overwriteRequest}
+          busy={Boolean(saveInFlightMessageId)}
+          onConfirm={() => void useChatStore.getState().confirmOverwrite(projectId, rootPath)}
+          onCancel={() => void useChatStore.getState().cancelOverwrite()}
+          t={t}
+        />
+      ) : null}
       <ChatComposer
         routePreference="auto"
         lastResolvedRoute={latestAssistant?.route ?? null}
@@ -256,6 +317,8 @@ export function PageChatPanel({
         onCancel={handleCancel}
         placeholderKey="wiki.askAi.placeholder"
         compact
+        draftKey={`${projectId}:page:${page.meta.path}`}
+        blocked={chatBusy || saveBlocked || convenienceBusy}
       />
     </div>
   );
@@ -272,5 +335,8 @@ function resolveCitationRef(citations: NonNullable<ChatMessage["citations"]>, re
 }
 
 function normalizePagePath(path: string): string {
-  return path.replace(/\\/g, "/").trim();
+  const normalized = path.replace(/\\/g, "/").trim();
+  return typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent)
+    ? normalized.toLowerCase()
+    : normalized;
 }

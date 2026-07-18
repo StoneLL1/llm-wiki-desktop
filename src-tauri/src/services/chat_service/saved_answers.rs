@@ -253,6 +253,7 @@ mod tests {
             task_id: None,
             convenience_edit: None,
             retrieval_diagnostics: None,
+            saved_path: None,
         };
         let (slug, markdown) = service.build_answer_markdown(&session, &question, &answer);
         assert!(slug.contains("react"));
@@ -289,6 +290,7 @@ mod tests {
             task_id: None,
             convenience_edit: None,
             retrieval_diagnostics: None,
+            saved_path: None,
         };
         let (_, markdown) = service.build_answer_markdown(&session, &question, &answer);
         assert!(markdown.contains("  - wiki/model-used.md"));

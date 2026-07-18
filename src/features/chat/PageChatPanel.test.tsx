@@ -71,14 +71,15 @@ describe("PageChatPanel", () => {
   });
 
   it("creates a page chat session when no active session exists", async () => {
-    const createSession = vi.fn(async () => session({ id: "created-session" }));
+    const ensurePageSession = vi.fn(async (_projectId, _rootPath, _path, _title, forceNew) =>
+      forceNew ? session({ id: "created-session", contextPagePath: page.meta.path }) : null,
+    );
     const send = vi.fn(async () => "task-1");
     useChatStore.setState({
-      createSession,
       send,
       activeSessionId: null,
       activeSession: null,
-      ensurePageSession: vi.fn(async () => null),
+      ensurePageSession: ensurePageSession as never,
     });
 
     render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
@@ -88,11 +89,12 @@ describe("PageChatPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
-      expect(createSession).toHaveBeenCalledWith(
+      expect(ensurePageSession).toHaveBeenCalledWith(
         "project-1",
         "/wiki",
-        "Ask: ReAct Pattern",
         "wiki/concepts/react-pattern.md",
+        "ReAct Pattern",
+        true,
       );
       expect(send).toHaveBeenCalled();
     });
@@ -182,8 +184,8 @@ describe("PageChatPanel", () => {
   });
 
   it("does not show or send through a stale page-scoped session from another page", async () => {
-    const createSession = vi.fn(async () =>
-      session({ id: "created-for-current", contextPagePath: page.meta.path }),
+    const ensurePageSession = vi.fn(async (_projectId, _rootPath, _path, _title, forceNew) =>
+      forceNew ? session({ id: "created-for-current", contextPagePath: page.meta.path }) : null,
     );
     const send = vi.fn(async () => "task-1");
     useChatStore.setState({
@@ -201,9 +203,8 @@ describe("PageChatPanel", () => {
           },
         ],
       }),
-      createSession,
       send,
-      ensurePageSession: vi.fn(async () => null),
+      ensurePageSession: ensurePageSession as never,
     });
 
     render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
@@ -216,11 +217,12 @@ describe("PageChatPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
-      expect(createSession).toHaveBeenCalledWith(
+      expect(ensurePageSession).toHaveBeenCalledWith(
         "project-1",
         "/wiki",
-        "Ask: ReAct Pattern",
         page.meta.path,
+        page.meta.title,
+        true,
       );
       expect(send).toHaveBeenCalledWith(
         "project-1",

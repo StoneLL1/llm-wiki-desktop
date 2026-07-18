@@ -4,6 +4,7 @@ use crate::models::chat::{ChatMessage, ChatSession, ChatSessionSummary};
 use crate::models::paths::ProjectContext;
 use crate::services::WriteMode;
 use crate::utils::time_utils::now_rfc3339;
+use std::sync::{Arc, Mutex};
 
 const CHATS_DIR: &str = ".app/chats";
 const DEFAULT_TITLE: &str = "New chat";
@@ -95,6 +96,14 @@ impl ChatService {
         context: &ProjectContext,
         session_id: &str,
     ) -> Result<ChatSession, BackendError> {
+        self.load_session_unlocked(context, session_id)
+    }
+
+    fn load_session_unlocked(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+    ) -> Result<ChatSession, BackendError> {
         let path = session_path(session_id);
         self.file_store.read_json(context, &path).map_err(|err| {
             BackendError::new(
@@ -117,7 +126,9 @@ impl ChatService {
         session_id: &str,
         title: &str,
     ) -> Result<ChatSession, BackendError> {
-        let mut session = self.load_session(context, session_id)?;
+        let lock = self.session_lock(context, session_id);
+        let _guard = lock.lock().map_err(|_| session_lock_error())?;
+        let mut session = self.load_session_unlocked(context, session_id)?;
         let trimmed = title.trim();
         if trimmed.is_empty() {
             return Err(BackendError::new(
@@ -129,7 +140,7 @@ impl ChatService {
         }
         session.title = trimmed.to_string();
         session.updated_at = now_rfc3339();
-        self.save_session(context, &session)?;
+        self.save_session_unlocked(context, &session)?;
         Ok(session)
     }
 
@@ -138,6 +149,8 @@ impl ChatService {
         context: &ProjectContext,
         session_id: &str,
     ) -> Result<(), BackendError> {
+        let lock = self.session_lock(context, session_id);
+        let _guard = lock.lock().map_err(|_| session_lock_error())?;
         let path = context.resolve_project_path(&session_path(session_id))?;
         if path.exists() {
             std::fs::remove_file(&path).map_err(|err| {
@@ -154,9 +167,100 @@ impl ChatService {
         session: &mut ChatSession,
         message: ChatMessage,
     ) -> Result<(), BackendError> {
-        session.messages.push(message);
+        self.append_message_if(context, session, message, || false)
+            .map(|_| ())
+    }
+
+    /// Append a message only if the caller's predicate is still false while
+    /// holding the session mutation lock. This closes the cancellation race
+    /// where a worker checks task state, waits for another writer, and then
+    /// persists an answer after the user has cancelled it.
+    pub fn append_message_if<F>(
+        &self,
+        context: &ProjectContext,
+        session: &mut ChatSession,
+        message: ChatMessage,
+        should_abort: F,
+    ) -> Result<bool, BackendError>
+    where
+        F: FnOnce() -> bool,
+    {
+        let lock = self.session_lock(context, &session.id);
+        let _guard = lock.lock().map_err(|_| session_lock_error())?;
+        // Always merge into the latest on-disk snapshot. The caller may have
+        // loaded its session before another send/rename completed; writing
+        // that stale snapshot would silently discard the other turn/title.
+        let mut latest = self.load_session_unlocked(context, &session.id)?;
+        if should_abort() {
+            *session = latest;
+            return Ok(false);
+        }
+        latest.messages.push(message);
+        latest.updated_at = now_rfc3339();
+        self.save_session_unlocked(context, &latest)?;
+        *session = latest;
+        Ok(true)
+    }
+
+    pub fn mark_answer_saved(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        message_id: &str,
+        path: &str,
+    ) -> Result<ChatSession, BackendError> {
+        let lock = self.session_lock(context, session_id);
+        let _guard = lock.lock().map_err(|_| session_lock_error())?;
+        let mut session = self.load_session_unlocked(context, session_id)?;
+        let message = session
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+            .ok_or_else(|| {
+                BackendError::new(
+                    "CHAT_MESSAGE_NOT_FOUND",
+                    "The selected answer message no longer exists.",
+                    true,
+                    true,
+                )
+            })?;
+        message.saved_path = Some(path.to_string());
         session.updated_at = now_rfc3339();
-        self.save_session(context, session)
+        self.file_store
+            .write_json_atomic(context, &session_path(&session.id), &session)?;
+        Ok(session)
+    }
+
+    /// Remove a just-written message when its task failed before the terminal
+    /// task result could be committed. The message id and task id are checked
+    /// under the same per-session lock used by appends, so a cancelled answer
+    /// cannot remain as a durable assistant turn after its task is cancelled.
+    pub fn remove_message_if<F>(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        message_id: &str,
+        task_id: &str,
+        should_remove: F,
+    ) -> Result<bool, BackendError>
+    where
+        F: FnOnce() -> bool,
+    {
+        let lock = self.session_lock(context, session_id);
+        let _guard = lock.lock().map_err(|_| session_lock_error())?;
+        let mut session = self.load_session_unlocked(context, session_id)?;
+        let Some(index) = session.messages.iter().position(|message| {
+            message.id == message_id && message.task_id.as_deref() == Some(task_id)
+        }) else {
+            return Ok(false);
+        };
+        if !should_remove() {
+            return Ok(false);
+        }
+        session.messages.remove(index);
+        session.updated_at = now_rfc3339();
+        self.save_session_unlocked(context, &session)?;
+        Ok(true)
     }
 
     pub fn save_session(
@@ -164,9 +268,81 @@ impl ChatService {
         context: &ProjectContext,
         session: &ChatSession,
     ) -> Result<(), BackendError> {
-        self.file_store
-            .write_json_atomic(context, &session_path(&session.id), session)
+        let lock = self.session_lock(context, &session.id);
+        let _guard = lock.lock().map_err(|_| session_lock_error())?;
+        self.save_session_unlocked(context, session)
     }
+
+    fn save_session_unlocked(
+        &self,
+        context: &ProjectContext,
+        session: &ChatSession,
+    ) -> Result<(), BackendError> {
+        let session = match self.load_session_unlocked(context, &session.id) {
+            Ok(mut latest) => {
+                // Rename/confirmation commands may have loaded their snapshot
+                // before a background send appended a new turn. Merge the
+                // intentional metadata/message edits instead of replacing the
+                // newer session wholesale.
+                let message_mutation = session.messages.iter().any(|incoming| {
+                    latest
+                        .messages
+                        .iter()
+                        .find(|message| message.id == incoming.id)
+                        .map(|existing| incoming.convenience_edit != existing.convenience_edit)
+                        .unwrap_or(true)
+                });
+                if !message_mutation {
+                    latest.title = session.title.clone();
+                }
+                if session.updated_at > latest.updated_at {
+                    latest.updated_at = session.updated_at.clone();
+                }
+                for incoming in &session.messages {
+                    if let Some(existing) = latest
+                        .messages
+                        .iter_mut()
+                        .find(|message| message.id == incoming.id)
+                    {
+                        // The only in-place session mutation callers use here
+                        // is convenience-edit resolution. Preserve newer
+                        // answer fields (saved path, citations, diagnostics)
+                        // written by a concurrent task.
+                        if incoming.convenience_edit != existing.convenience_edit {
+                            existing.convenience_edit = incoming.convenience_edit.clone();
+                        }
+                    } else {
+                        latest.messages.push(incoming.clone());
+                    }
+                }
+                latest
+            }
+            Err(error) => return Err(error),
+        };
+        self.file_store
+            .write_json_atomic(context, &session_path(&session.id), &session)
+    }
+
+    fn session_lock(&self, context: &ProjectContext, session_id: &str) -> Arc<Mutex<()>> {
+        let key = format!("{}::{session_id}", context.root.to_string_lossy());
+        let mut locks = self
+            .session_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+}
+
+fn session_lock_error() -> BackendError {
+    BackendError::new(
+        "CHAT_SESSION_LOCK_FAILED",
+        "Chat session is unavailable because its mutation lock was poisoned.",
+        true,
+        false,
+    )
 }
 
 fn session_path(id: &str) -> String {
@@ -204,6 +380,7 @@ fn validate_context_page_path(
 mod tests {
     use super::super::test_support::{tmp_context, user_message, write_file};
     use super::ChatService;
+    use std::sync::Arc;
 
     #[test]
     fn chat_session_persists_and_round_trips() {
@@ -221,6 +398,33 @@ mod tests {
             service.load_session(&context, &session.id).unwrap(),
             session
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_appends_merge_into_the_latest_session_snapshot() {
+        let (context, root) = tmp_context("concurrent-appends");
+        let service = Arc::new(ChatService::default());
+        let session = service.create_session(&context, None, None).unwrap();
+
+        std::thread::scope(|scope| {
+            for content in ["first concurrent turn", "second concurrent turn"] {
+                let service = Arc::clone(&service);
+                let context = context.clone();
+                let mut stale_session = session.clone();
+                scope.spawn(move || {
+                    service
+                        .append_message(&context, &mut stale_session, user_message(content))
+                        .unwrap();
+                });
+            }
+        });
+
+        let loaded = service.load_session(&context, &session.id).unwrap();
+        let contents: Vec<_> = loaded.messages.iter().map(|message| message.content.as_str()).collect();
+        assert_eq!(contents.len(), 2);
+        assert!(contents.contains(&"first concurrent turn"));
+        assert!(contents.contains(&"second concurrent turn"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -225,6 +225,7 @@ async function applyLanguagePreference(language: Settings["language"]) {
 export interface SettingsState {
   settings: Settings;
   chatConvenienceAuthorization: ChatConvenienceAuthorization | null;
+  chatConvenienceSaving: boolean;
   loading: boolean;
   saving: boolean;
   loadedProjectKey: string | null;
@@ -251,6 +252,7 @@ export interface SettingsState {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: defaultSettings,
   chatConvenienceAuthorization: null,
+  chatConvenienceSaving: false,
   loading: false,
   saving: false,
   loadedProjectKey: null,
@@ -314,6 +316,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setChatConvenienceAuthorization: async (projectId, projectRootPath, enabled) => {
     const scope = captureProjectScope();
+    set({ chatConvenienceSaving: true, error: null });
     try {
       const authorization = hasTauri()
         ? await invoke<ChatConvenienceAuthorization>("set_chat_convenience_authorization", {
@@ -337,6 +340,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         set({ chatConvenienceAuthorization: fallback, error: errorMessage(error) });
       }
       return fallback;
+    } finally {
+      if (isProjectScopeCurrent(scope)) set({ chatConvenienceSaving: false });
     }
   },
 
@@ -420,6 +425,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       saving: false,
       loadedProjectKey: null,
       chatConvenienceAuthorization: null,
+      chatConvenienceSaving: false,
       error: null,
     })),
 }));

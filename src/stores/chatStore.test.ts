@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatSession, ChatSessionSummary, SaveAnswerResult } from "../types/chat";
+import { invalidateProjectScope } from "./projectScope";
+import { useTaskStore } from "./taskStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -38,6 +40,7 @@ const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0));
 beforeEach(() => {
   invokeMock.mockReset();
   useChatStore.getState().reset();
+  useTaskStore.getState().setTasks([]);
   // Pretend the desktop runtime is present so the hasTauri() guard passes.
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 });
@@ -86,6 +89,23 @@ describe("chatStore", () => {
     expect(invokeMock.mock.calls[0][0]).toBe("list_chat_sessions");
   });
 
+  it("does not let an older session load overwrite a newer selection", async () => {
+    const resolvers: Array<(value: ChatSession) => void> = [];
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== "load_chat_session") return Promise.resolve([]);
+      return new Promise<ChatSession>((resolve) => resolvers.push(resolve));
+    });
+
+    const first = useChatStore.getState().selectSession(PROJECT.projectId, PROJECT.rootPath, "s1");
+    const second = useChatStore.getState().selectSession(PROJECT.projectId, PROJECT.rootPath, "s2");
+    resolvers[1]?.(session({ id: "s2", title: "Second" }));
+    resolvers[0]?.(session({ id: "s1", title: "First" }));
+    await Promise.all([first, second]);
+
+    expect(useChatStore.getState().activeSessionId).toBe("s2");
+    expect(useChatStore.getState().activeSession?.title).toBe("Second");
+  });
+
   it("send stores the task id returned by the backend", async () => {
     invokeMock.mockResolvedValueOnce({ id: "task-1" });
     const taskId = await useChatStore.getState().send(
@@ -97,12 +117,31 @@ describe("chatStore", () => {
     );
     expect(taskId).toBe("task-1");
     expect(useChatStore.getState().sendTaskId).toBe("task-1");
+    expect(useChatStore.getState().pendingUserMessages["task-1"]?.content).toBe("Hello");
     const call = invokeMock.mock.calls[0];
     expect(call[0]).toBe("send_chat_message");
     expect(call[1].request.route).toBe("auto");
     expect(call[1].request.content).toBe("Hello");
     expect(call[1].request.pinnedPagePath).toBeNull();
     expect(call[1].request.convenienceEnabled).toBe(false);
+  });
+
+  it("keeps returned task facts when the project scope changes before IPC resolves", async () => {
+    let resolveTask: ((task: { id: string }) => void) | undefined;
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => { resolveTask = resolve; }));
+    const pending = useChatStore.getState().send(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "s1",
+      "Hello",
+      "auto",
+    );
+
+    invalidateProjectScope();
+    resolveTask?.({ id: "task-after-switch" });
+    await pending;
+
+    expect(useTaskStore.getState().tasks.some((task) => task.id === "task-after-switch")).toBe(true);
   });
 
   it("replays stream deltas that arrive before the send response binds the task", async () => {
@@ -199,6 +238,7 @@ describe("chatStore", () => {
     );
     expect(result).toBeNull();
     expect(useChatStore.getState().overwriteRequest).toEqual({
+      sessionId: "s1",
       messageId: "m1",
       path: "wiki/queries/foo.md",
       currentHash: "abc",
@@ -210,6 +250,7 @@ describe("chatStore", () => {
   it("confirmOverwrite re-invokes with allowOverwrite and the expected hash", async () => {
     useChatStore.setState({
       overwriteRequest: {
+        sessionId: "s1",
         messageId: "m1",
         path: "wiki/queries/foo.md",
         currentHash: "abc",
@@ -221,11 +262,28 @@ describe("chatStore", () => {
     invokeMock.mockResolvedValueOnce({} as SaveAnswerResult);
     await useChatStore.getState().confirmOverwrite(PROJECT.projectId, PROJECT.rootPath);
     const call = invokeMock.mock.calls[0];
-    expect(call[1].request.allowOverwrite).toBe(true);
+      expect(call[1].request.allowOverwrite).toBe(true);
+      expect(call[1].request.sessionId).toBe("s1");
     expect(call[1].request.expectedHash).toBe("abc");
     expect(call[1].request.actionId).toBe("action-1");
     expect(useChatStore.getState().overwriteRequest).toBeNull();
     expect(useChatStore.getState().saveStatus.m1).toBe("saved");
+  });
+
+  it("does not replace an existing overwrite action when the same answer is saved again", async () => {
+    const pending = {
+      sessionId: "s1",
+      messageId: "m1",
+      path: "wiki/queries/foo.md",
+      currentHash: "abc",
+      actionId: "action-1",
+    };
+    useChatStore.setState({ overwriteRequest: pending });
+
+    await useChatStore.getState().saveAnswer(PROJECT.projectId, PROJECT.rootPath, "s1", "m1");
+
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(useChatStore.getState().overwriteRequest).toEqual(pending);
   });
 
   describe("ensurePageSession (lazy / page-scoped)", () => {

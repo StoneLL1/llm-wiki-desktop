@@ -4,7 +4,7 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::chat::{
-    ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute, ChatSession,
+    ChatAffectedPathHash, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute, ChatSession,
     ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest, ListChatsRequest,
     LoadChatRequest, RenameChatRequest, ResolveChatConvenienceEditRequest,
     RollbackLastChatConvenienceEditRequest, SaveAnswerResult, SaveAnswerToWikiRequest,
@@ -26,6 +26,8 @@ use crate::services::{
     AgentService, ChatIntent, ConvenienceAuditStatus, LlmService, RetrievalContext,
 };
 use crate::tasks::task_model::LogLevel;
+
+const MAX_CHAT_CONTENT_CHARS: usize = 32_000;
 
 #[tauri::command]
 pub fn create_chat_session(
@@ -77,6 +79,21 @@ pub fn delete_chat_session(
     request: DeleteChatRequest,
 ) -> Result<(), BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    // Sending holds this process-wide guard until its task has finished
+    // persisting the assistant turn (or cleaning up after cancellation).
+    // Reject deletion at the command boundary as well as in the UI so a
+    // second window or an IPC caller cannot remove a session mid-send.
+    let _send_guard = state.chat_service.try_acquire_send()?;
+    // The UI asks for explicit confirmation before invoking this command. A
+    // scoped checkpoint makes that destructive action recoverable without
+    // committing unrelated dirty files in the project.
+    let session_path = format!(".app/chats/{}.json", request.session_id);
+    state.git_service.create_scoped_checkpoint(
+        &context,
+        CheckpointPurpose::HighRiskOperation,
+        "Before deleting Chat session",
+        std::slice::from_ref(&session_path),
+    )?;
     state
         .chat_service
         .delete_session(&context, &request.session_id)
@@ -91,7 +108,10 @@ pub fn send_chat_message(
     state: State<'_, AppState>,
     request: SendChatMessageRequest,
 ) -> Result<BackendTask, BackendError> {
+    let content = validate_chat_content(&request.content)?;
+    let request = SendChatMessageRequest { content, ..request };
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let send_guard = state.chat_service.try_acquire_send()?;
     let task = state
         .task_service
         .create_project_task(
@@ -104,19 +124,25 @@ pub fn send_chat_message(
         .map_err(task_error)?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
+        let _send_guard = send_guard;
         let state = app.state::<AppState>();
         if let Err(error) = run_chat_send(&state, request, &context, &task_id).await {
             let _ = state
                 .task_service
                 .append_log(&task_id, LogLevel::Error, error.message.clone());
             let _ = state.task_service.set_error(&task_id, error);
-            if !matches!(
-                state.task_service.get_task(&task_id).map(|t| t.status),
-                Some(TaskStatus::Cancelled)
-            ) {
-                let _ = state
-                    .task_service
-                    .transition_status(&task_id, TaskStatus::Failed);
+            match state.task_service.get_task(&task_id).map(|t| t.status) {
+                Some(TaskStatus::Cancelling) => {
+                    let _ = state
+                        .task_service
+                        .transition_status(&task_id, TaskStatus::Cancelled);
+                }
+                Some(TaskStatus::Cancelled) => {}
+                _ => {
+                    let _ = state
+                        .task_service
+                        .transition_status(&task_id, TaskStatus::Failed);
+                }
             }
         }
     });
@@ -129,6 +155,9 @@ async fn run_chat_send(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
+    if state.task_service.is_cancelled(task_id) {
+        return Err(chat_cancelled_error());
+    }
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
@@ -147,6 +176,7 @@ async fn run_chat_send(
         task_id: None,
         convenience_edit: None,
         retrieval_diagnostics: None,
+        saved_path: None,
     };
     state
         .chat_service
@@ -390,38 +420,40 @@ async fn run_chat_send(
         task_id: Some(task_id.to_string()),
         convenience_edit: None,
         retrieval_diagnostics: Some(diagnostics),
+        saved_path: None,
     };
-    // Re-check cancellation immediately before persisting: there is a window
-    // between the post-generation check above and the write below where the
-    // user may have pressed cancel. Don't save an answer the user abandoned.
-    if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "CHAT_CANCELLED",
-            "Chat was cancelled.",
-            true,
-            false,
-        ));
+    let assistant_message_id = assistant_message.id.clone();
+    // Check cancellation again while holding the session mutation lock so a
+    // cancel that races with another writer cannot persist an abandoned answer.
+    if !state.chat_service.append_message_if(
+        context,
+        &mut session,
+        assistant_message,
+        || state.task_service.is_cancelled(task_id),
+    )? {
+        return Err(chat_cancelled_error());
     }
-    state
-        .chat_service
-        .append_message(context, &mut session, assistant_message)?;
 
-    state
-        .task_service
-        .set_result(
+    let result = TaskResult {
+        summary: "Chat answer ready.".into(),
+        affected_paths: vec![format!(".app/chats/{}.json", session.id)],
+        reference: None,
+        pending_action: None,
+    };
+    if let Err(error) = state.task_service.complete_running_with_result(task_id, result) {
+        let _ = state.chat_service.remove_message_if(
+            context,
+            &session.id,
+            &assistant_message_id,
             task_id,
-            TaskResult {
-                summary: "Chat answer ready.".into(),
-                affected_paths: vec![format!(".app/chats/{}.json", session.id)],
-                reference: None,
-                pending_action: None,
-            },
-        )
-        .map_err(task_error)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Succeeded)
-        .map_err(task_error)?;
+            || true,
+        );
+        return if state.task_service.is_cancelled(task_id) {
+            Err(chat_cancelled_error())
+        } else {
+            Err(task_error(error))
+        };
+    }
     Ok(())
 }
 
@@ -517,7 +549,13 @@ async fn run_chat_convenience_send(
                     label: Some("Agent response failed".into()),
                 },
             );
-            return Err(error);
+            return Err(cleanup_convenience_failure(
+                state,
+                context,
+                task_id,
+                &ignored_baseline,
+                error,
+            ));
         }
     };
     state.task_service.emit_activity(
@@ -530,11 +568,12 @@ async fn run_chat_convenience_send(
     );
 
     if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "CHAT_CANCELLED",
-            "Chat was cancelled.",
-            true,
-            false,
+        return Err(cleanup_convenience_failure(
+            state,
+            context,
+            task_id,
+            &ignored_baseline,
+            chat_cancelled_error(),
         ));
     }
 
@@ -543,6 +582,16 @@ async fn run_chat_convenience_send(
         .changed_files_since_head_with_ignored_baseline(context, &ignored_baseline)?;
     changes.retain(|change| !is_current_task_runtime_path(task_id, change));
     let audit = state.chat_convenience_service.audit_git_changes(changes);
+    let affected_path_hashes = audit
+        .affected_paths
+        .iter()
+        .map(|path| {
+            Ok(ChatAffectedPathHash {
+                path: path.clone(),
+                hash: state.chat_service.file_hash_if_exists(context, path)?,
+            })
+        })
+        .collect::<Result<Vec<_>, BackendError>>()?;
     let diff_text = state
         .git_service
         .diff_since_head(context)
@@ -561,23 +610,24 @@ async fn run_chat_convenience_send(
             let reason = violation_reason
                 .clone()
                 .unwrap_or_else(|| "Convenience edit violated project safety rules.".to_string());
-            match state
-                .git_service
-                .rollback_worktree_to_head_preserving_ignored(context, &ignored_baseline)
-            {
+            match state.git_service.rollback_paths_to_head_preserving_ignored(
+                context,
+                &audit.affected_paths,
+                &ignored_baseline,
+            ) {
                 Ok(()) => (
                     format!("Chat convenience edit was rolled back: {reason}"),
                     ChatConvenienceEditStatus::RolledBack,
                     Some(task_id.to_string()),
                 ),
-                Err(error) => (
-                    format!(
-                        "Chat convenience edit could not be rolled back: {}. Original violation: {reason}",
-                        error.message
-                    ),
-                    ChatConvenienceEditStatus::RollbackFailed,
-                    Some(task_id.to_string()),
-                ),
+                Err(error) => {
+                    return Err(convenience_cleanup_error(
+                        task_id,
+                        &audit.affected_paths,
+                        &reason,
+                        error,
+                    ));
+                }
             }
         }
     };
@@ -605,45 +655,142 @@ async fn run_chat_convenience_send(
             diff_text: diff_text.filter(|diff| !diff.trim().is_empty()),
             violation_reason,
             rollback_task_id,
-            ignored_baseline_paths: ignored_baseline,
+            ignored_baseline_paths: ignored_baseline.clone(),
+            affected_path_hashes,
         }),
         retrieval_diagnostics: Some(diagnostics),
+        saved_path: None,
     };
-    if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "CHAT_CANCELLED",
-            "Chat was cancelled.",
-            true,
-            false,
+    let assistant_message_id = assistant_message.id.clone();
+    if !state.chat_service.append_message_if(
+        context,
+        session,
+        assistant_message,
+        || state.task_service.is_cancelled(task_id),
+    )? {
+        return Err(cleanup_convenience_failure(
+            state,
+            context,
+            task_id,
+            &ignored_baseline,
+            chat_cancelled_error(),
         ));
     }
-    state
-        .chat_service
-        .append_message(context, session, assistant_message)?;
 
     let mut affected_paths = vec![format!(".app/chats/{}.json", session.id)];
     affected_paths.extend(audit.affected_paths);
-    state
-        .task_service
-        .set_result(
+    let result = TaskResult {
+        summary: "Chat convenience edit finished.".into(),
+        affected_paths,
+        reference: None,
+        pending_action: None,
+    };
+    if let Err(error) = state.task_service.complete_running_with_result(task_id, result) {
+        let cancelled = state.task_service.is_cancelled(task_id);
+        let _ = state.chat_service.remove_message_if(
+            context,
+            &session.id,
+            &assistant_message_id,
             task_id,
-            TaskResult {
-                summary: "Chat convenience edit finished.".into(),
-                affected_paths,
-                reference: None,
-                pending_action: None,
-            },
-        )
-        .map_err(task_error)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Succeeded)
-        .map_err(task_error)?;
+            || true,
+        );
+        return if cancelled {
+            Err(cleanup_convenience_failure(
+                state,
+                context,
+                task_id,
+                &ignored_baseline,
+                chat_cancelled_error(),
+            ))
+        } else {
+            Err(task_error(error))
+        };
+    }
     Ok(())
 }
 
 fn should_use_convenience_flow(enabled: bool, intent: ChatIntent) -> bool {
     enabled && matches!(intent, ChatIntent::Write)
+}
+
+fn chat_cancelled_error() -> BackendError {
+    BackendError::new("CHAT_CANCELLED", "Chat was cancelled.", true, false)
+}
+
+fn cleanup_convenience_failure(
+    state: &AppState,
+    context: &ProjectContext,
+    task_id: &str,
+    ignored_baseline: &[String],
+    original: BackendError,
+) -> BackendError {
+    let mut changes = match state
+        .git_service
+        .changed_files_since_head_with_ignored_baseline(context, ignored_baseline)
+    {
+        Ok(changes) => changes,
+        Err(error) => {
+            return convenience_cleanup_error(task_id, &[], &original.message, error)
+                .with_details(serde_json::json!({
+                    "original": original,
+                    "cleanup": "audit_failed",
+                }));
+        }
+    };
+    changes.retain(|change| !is_current_task_runtime_path(task_id, change));
+    if changes.is_empty() {
+        return original;
+    }
+    let paths: Vec<String> = changes.into_iter().map(|change| change.path).collect();
+    // An Agent error/cancellation does not provide a write-set. Any path that
+    // changed while it was running could also have been edited by the user;
+    // never guess ownership and roll it back automatically. Surface the
+    // exact paths so the user can review them against the checkpoint instead.
+    convenience_partial_edit_error(task_id, &paths, original)
+}
+
+fn convenience_partial_edit_error(
+    task_id: &str,
+    paths: &[String],
+    original: BackendError,
+) -> BackendError {
+    BackendError::new(
+        "CHAT_CONVENIENCE_REVIEW_REQUIRED",
+        format!(
+            "Chat convenience stopped, but partial edits remain for review: {}",
+            paths.join(", ")
+        ),
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({
+        "taskId": task_id,
+        "affectedPaths": paths,
+        "original": original,
+        "cleanup": "manual_review_required",
+    }))
+}
+
+fn convenience_cleanup_error(
+    task_id: &str,
+    paths: &[String],
+    reason: &str,
+    cleanup: BackendError,
+) -> BackendError {
+    BackendError::new(
+        "CHAT_CONVENIENCE_CLEANUP_FAILED",
+        format!(
+            "Chat convenience run stopped ({reason}), but its partial edits could not be safely cleaned up: {}",
+            cleanup.message
+        ),
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({
+        "taskId": task_id,
+        "affectedPaths": paths,
+        "cleanupError": cleanup,
+    }))
 }
 
 fn is_current_task_runtime_path(task_id: &str, change: &GitChangedFile) -> bool {
@@ -829,6 +976,11 @@ pub fn save_answer_to_wiki(
     state: State<'_, AppState>,
     request: SaveAnswerToWikiRequest,
 ) -> Result<SaveAnswerResult, BackendError> {
+    // Keep wiki write + saved-path session mutation atomic with respect to
+    // deletion and background Chat runs. Acquire before consuming an
+    // overwrite confirmation so a busy request leaves the confirmation
+    // pending and retryable.
+    let _send_guard = state.chat_service.try_acquire_send()?;
     let mut project_id = request.project_id;
     let mut root_path = request.project_root_path;
     let mut session_id = request.session_id;
@@ -984,7 +1136,11 @@ pub fn save_answer_to_wiki(
             })));
         }
     }
-    result
+    let result = result?;
+    state
+        .chat_service
+        .mark_answer_saved(&context, &session_id, &message_id, &result.path)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -992,6 +1148,7 @@ pub fn resolve_chat_convenience_edit(
     state: State<'_, AppState>,
     request: ResolveChatConvenienceEditRequest,
 ) -> Result<ChatSession, BackendError> {
+    let _send_guard = state.chat_service.try_acquire_send()?;
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let mut session = state
         .chat_service
@@ -1037,6 +1194,7 @@ pub fn rollback_last_chat_convenience_edit(
     state: State<'_, AppState>,
     request: RollbackLastChatConvenienceEditRequest,
 ) -> Result<ChatSession, BackendError> {
+    let _send_guard = state.chat_service.try_acquire_send()?;
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let mut session = state
         .chat_service
@@ -1073,18 +1231,26 @@ fn rollback_convenience_message(
     session: &mut ChatSession,
     index: usize,
 ) -> Result<(), BackendError> {
-    let edit = session.messages[index]
-        .convenience_edit
-        .as_mut()
-        .ok_or_else(convenience_edit_missing)?;
-    let checkpoint = edit.checkpoint_hash.clone().ok_or_else(|| {
-        BackendError::new(
-            "CHAT_ROLLBACK_CHECKPOINT_MISSING",
-            "This convenience edit has no Git checkpoint to roll back to.",
-            true,
-            true,
+    let (checkpoint, ignored_baseline, affected_paths, affected_path_hashes) = {
+        let edit = session.messages[index]
+            .convenience_edit
+            .as_ref()
+            .ok_or_else(convenience_edit_missing)?;
+        let checkpoint = edit.checkpoint_hash.clone().ok_or_else(|| {
+            BackendError::new(
+                "CHAT_ROLLBACK_CHECKPOINT_MISSING",
+                "This convenience edit has no Git checkpoint to roll back to.",
+                true,
+                true,
+            )
+        })?;
+        (
+            checkpoint,
+            edit.ignored_baseline_paths.clone(),
+            edit.affected_paths.clone(),
+            edit.affected_path_hashes.clone(),
         )
-    })?;
+    };
     let current_head = state.git_service.repository_status(context)?.head;
     if current_head.as_deref() != Some(checkpoint.as_str()) {
         return Err(BackendError::new(
@@ -1098,21 +1264,77 @@ fn rollback_convenience_message(
             "currentHead": current_head,
         })));
     }
-    let ignored_baseline = edit.ignored_baseline_paths.clone();
-    match state
-        .git_service
-        .rollback_worktree_to_head_preserving_ignored(context, &ignored_baseline)
-    {
+    let rollback_result = ensure_convenience_paths_unchanged(
+        state,
+        context,
+        &affected_paths,
+        &affected_path_hashes,
+    )
+    .and_then(|()| {
+        state.git_service.rollback_paths_to_head_preserving_ignored(
+            context,
+            &affected_paths,
+            &ignored_baseline,
+        )
+    });
+    match rollback_result {
         Ok(()) => {
-            edit.status = ChatConvenienceEditStatus::RolledBack;
+            if let Some(edit) = session.messages[index].convenience_edit.as_mut() {
+                edit.status = ChatConvenienceEditStatus::RolledBack;
+            }
             Ok(())
         }
         Err(error) => {
-            edit.status = ChatConvenienceEditStatus::RollbackFailed;
-            edit.violation_reason = Some(error.message.clone());
-            Ok(())
+            let message = error.message.clone();
+            if let Some(edit) = session.messages[index].convenience_edit.as_mut() {
+                edit.status = ChatConvenienceEditStatus::RollbackFailed;
+                edit.violation_reason = Some(message);
+            }
+            // Preserve the failure state so the UI does not continue to show
+            // a rollbackable edit after the filesystem operation failed.
+            state.chat_service.save_session(context, session)?;
+            Err(error)
         }
     }
+}
+
+fn ensure_convenience_paths_unchanged(
+    state: &AppState,
+    context: &ProjectContext,
+    affected_paths: &[String],
+    snapshots: &[ChatAffectedPathHash],
+) -> Result<(), BackendError> {
+    if affected_paths.is_empty() {
+        return Ok(());
+    }
+    if snapshots.len() != affected_paths.len() {
+        return Err(BackendError::new(
+            "CHAT_ROLLBACK_NOT_CURRENT",
+            "This convenience edit has no complete file snapshot; review the affected files before rolling back.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "affectedPaths": affected_paths })));
+    }
+    for snapshot in snapshots {
+        let current = state
+            .chat_service
+            .file_hash_if_exists(context, &snapshot.path)?;
+        if current != snapshot.hash {
+            return Err(BackendError::new(
+                "CHAT_ROLLBACK_NOT_CURRENT",
+                "A convenience-edit file changed after the Agent finished; rollback was not applied.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "path": snapshot.path,
+                "expectedHash": snapshot.hash,
+                "currentHash": current,
+            })));
+        }
+    }
+    Ok(())
 }
 
 fn convenience_edit_missing() -> BackendError {
@@ -1126,6 +1348,32 @@ fn convenience_edit_missing() -> BackendError {
 
 fn task_error(message: String) -> BackendError {
     BackendError::new("TASK_OPERATION_FAILED", message, true, false)
+}
+
+fn validate_chat_content(content: &str) -> Result<String, BackendError> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(BackendError::new(
+            "CHAT_CONTENT_EMPTY",
+            "Chat message cannot be empty.",
+            true,
+            true,
+        ));
+    }
+    let length = trimmed.chars().count();
+    if length > MAX_CHAT_CONTENT_CHARS {
+        return Err(BackendError::new(
+            "CHAT_CONTENT_TOO_LONG",
+            format!("Chat message exceeds the {MAX_CHAT_CONTENT_CHARS}-character limit."),
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "maxChars": MAX_CHAT_CONTENT_CHARS,
+            "actualChars": length,
+        })));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn truncate_title(content: &str) -> String {
@@ -1161,6 +1409,14 @@ mod tests {
         let long = "x".repeat(200);
         let t = truncate_title(&long);
         assert!(t.chars().count() <= 60);
+    }
+
+    #[test]
+    fn validate_chat_content_trims_and_rejects_empty_or_oversized_input() {
+        assert_eq!(validate_chat_content("  hello\n").unwrap(), "hello");
+        assert_eq!(validate_chat_content("  \n\t").unwrap_err().code, "CHAT_CONTENT_EMPTY");
+        let err = validate_chat_content(&"x".repeat(MAX_CHAT_CONTENT_CHARS + 1)).unwrap_err();
+        assert_eq!(err.code, "CHAT_CONTENT_TOO_LONG");
     }
 
     #[test]
