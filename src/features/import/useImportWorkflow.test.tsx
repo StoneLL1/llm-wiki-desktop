@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   createSession: vi.fn(),
   getSession: vi.fn(),
   addPaths: vi.fn(),
+  getScanResult: vi.fn(),
   addUrl: vi.fn(),
   setSelection: vi.fn(),
   startItems: vi.fn(),
@@ -142,6 +143,7 @@ beforeEach(() => {
   api.getReadiness.mockResolvedValue(readiness);
   api.createSession.mockResolvedValue(session(projectA.projectId));
   api.getSession.mockResolvedValue(session(projectA.projectId));
+  api.getScanResult.mockResolvedValue({ files: [], skipped: [], truncated: false });
   api.getPreviewContent.mockResolvedValue({ sessionId: `session-${projectA.projectId}`, itemId: "file.md", candidateId: null, title: "file.md", markdown: "# Preview", truncated: false, totalBytes: 9, sha256: "hash" });
   api.addPaths.mockResolvedValue(task("add-paths"));
   api.addUrl.mockResolvedValue(session(projectA.projectId, [item("url-1")]));
@@ -365,6 +367,11 @@ describe("useImportWorkflow", () => {
       status: "succeeded" as const,
       result: { summary: "Added 12 files; skipped 2.", affectedPaths: ["scan.json"] },
     };
+    api.getScanResult.mockResolvedValueOnce({
+      files: [],
+      skipped: [{ sourcePath: "D:/Wiki/internal.md", relativePath: "internal.md", reason: "project_internal", detail: "internal" }],
+      truncated: false,
+    });
     useTaskStore.getState().upsertTask(completedTask);
     await act(async () => notifyTaskEventListeners({
       eventId: "scan-completed",
@@ -376,6 +383,7 @@ describe("useImportWorkflow", () => {
     }));
     await waitFor(() => expect(result.current.isAddingPaths).toBe(false));
     expect(result.current.discoveryTask?.result?.summary).toContain("Added 12 files");
+    await waitFor(() => expect(result.current.discoveryScan?.skipped[0]?.reason).toBe("project_internal"));
   });
 
   it("adds a selected Markdown file when the terminal task snapshot arrives without an event", async () => {

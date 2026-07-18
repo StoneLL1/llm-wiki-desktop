@@ -4,7 +4,7 @@ use crate::services::import_v2::engine::{
     EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
 };
 use crate::services::import_v2::markdown_normalizer::{
-    csv_to_gfm, decode_utf8, html_to_markdown, normalize_markdown,
+    csv_to_gfm, decode_text, html_to_markdown, normalize_markdown,
 };
 use crate::tasks::task_model::CancellationToken;
 use serde::Serialize;
@@ -36,7 +36,8 @@ impl ImportEngine for NativeFileEngine {
             && extension(&input.locator).is_some_and(|ext| {
                 matches!(
                     ext.as_str(),
-                    "md" | "markdown" | "txt" | "csv" | "html" | "htm"
+                    "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn"
+                        | "rmd" | "txt" | "csv" | "html" | "htm"
                 )
             })
     }
@@ -62,12 +63,12 @@ impl ImportEngine for NativeFileEngine {
             .as_ref()
             .ok_or_else(source_changed)?;
         let bytes = safe_read_source(&source, identity)?;
-        let text = decode_utf8(&bytes)?;
+        let text = decode_text(&bytes)?;
         let format = extension(&request.input.locator).unwrap_or_default();
         let (markdown, warnings) = match format.as_str() {
-            "csv" => (normalize_markdown(&csv_to_gfm(text)?), Vec::new()),
-            "html" | "htm" => html_to_markdown(text),
-            _ => (normalize_markdown(text), Vec::new()),
+            "csv" => (normalize_markdown(&csv_to_gfm(&text)?), Vec::new()),
+            "html" | "htm" => html_to_markdown(&text),
+            _ => (normalize_markdown(&text), Vec::new()),
         };
         if cancellation.is_cancelled() {
             return Err(cancelled());
@@ -270,16 +271,22 @@ fn copy_local_images(
         {
             continue;
         }
-        let relative = Path::new(destination.split('#').next().unwrap_or(""));
-        if relative
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-        {
-            return Err(invalid(
-                "A Markdown image path escapes its authorized source directory.",
-            ));
+        let mut relative = PathBuf::new();
+        let mut escapes_source_root = false;
+        for part in Path::new(destination.split('#').next().unwrap_or("")).components() {
+            match part {
+                Component::Normal(part) => relative.push(part),
+                Component::CurDir => {}
+                // Keep the Markdown text intact, but do not copy an asset
+                // outside the source document's directory into staging.
+                Component::ParentDir => escapes_source_root = true,
+                Component::RootDir | Component::Prefix(_) => escapes_source_root = true,
+            }
         }
-        let source = root.join(relative);
+        if escapes_source_root || relative.as_os_str().is_empty() {
+            continue;
+        }
+        let source = root.join(&relative);
         let metadata = match std::fs::symlink_metadata(&source) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -301,7 +308,7 @@ fn copy_local_images(
                 "A Markdown image path escapes its authorized source directory.",
             ));
         }
-        let target = staging.join(relative);
+        let target = staging.join(&relative);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|_| invalid("A Markdown image could not be staged."))?;

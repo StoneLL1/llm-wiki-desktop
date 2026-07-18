@@ -276,9 +276,8 @@ pub fn identify_file(path: &Path, prefix: &[u8]) -> Result<FileIdentity, Backend
         .to_ascii_lowercase();
     let (magic, mime) =
         match extension.as_str() {
-            "md" | "markdown" | "txt" | "csv" | "html" | "htm"
-                if std::str::from_utf8(prefix).is_ok() =>
-            {
+            "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn" | "rmd"
+            | "txt" | "csv" | "html" | "htm" => {
                 ("utf-8", text_mime(&extension))
             }
             "pdf" if prefix.starts_with(b"%PDF-") => ("pdf", "application/pdf"),
@@ -456,7 +455,8 @@ fn validate_ooxml(path: &Path, extension: &str) -> Result<(), BackendError> {
 
 fn format_from_identity(identity: &FileIdentity) -> Option<FileFormat> {
     Some(match identity.extension.as_str() {
-        "md" | "markdown" | "txt" | "csv" | "html" | "htm" => FileFormat::Markdown,
+        "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn" | "rmd" | "txt"
+        | "csv" | "html" | "htm" => FileFormat::Markdown,
         "pdf" => FileFormat::Pdf,
         "doc" => FileFormat::Doc,
         "docx" => FileFormat::Docx,

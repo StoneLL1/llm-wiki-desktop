@@ -9,7 +9,7 @@ import type {
   SetImportItemSelectionV2Request,
   StartImportItemsV2Request,
 } from "../types/importV2";
-import type { AddImportPathsV2Request } from "../types/importV2File";
+import type { AddImportPathsV2Request, FileScanResult, GetImportScanResultV2Request } from "../types/importV2File";
 import type { AddImportUrlV2Request } from "../types/importV2Web";
 import type { AgentCandidateActionResult, AgentCandidateView, AgentAssistancePolicy, AgentSendScope } from "../types/importV2Agent";
 import type {
@@ -60,6 +60,7 @@ const commandNames: ImportV2CommandNames = {
   getSession: "get_import_session_v2",
   addItems: "add_import_items_v2",
   addPaths: "start_add_import_paths_v2",
+  getScanResult: "get_import_scan_result_v2",
   addUrl: "add_import_url_v2",
   setSelection: "set_import_item_selection_v2",
   startItems: "start_import_items_v2",
@@ -99,6 +100,7 @@ export const importV2Api: ImportV2Api = {
   getSession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getSession, value),
   addItems: (value: AddImportItemsV2Request) => request<ImportSession>(commandNames.addItems, value),
   addPaths: (value: AddImportPathsV2Request) => request<BackendTask>(commandNames.addPaths, value),
+  getScanResult: (value: GetImportScanResultV2Request) => request<FileScanResult>(commandNames.getScanResult, value),
   addUrl: (value: AddImportUrlV2Request) => request<ImportSession>(commandNames.addUrl, value),
   setSelection: (value: SetImportItemSelectionV2Request) => request<ImportSession>(commandNames.setSelection, value),
   startItems: (value: StartImportItemsV2Request) => request<BackendTask[]>(commandNames.startItems, value),

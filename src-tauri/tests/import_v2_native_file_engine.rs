@@ -67,7 +67,9 @@ fn descriptor_and_supported_extensions_are_stable() {
     let descriptor = engine.descriptor();
     assert_eq!(descriptor.engine_id, "builtin.native-file");
     assert_eq!(descriptor.route, "file.native");
-    for name in ["a.md", "a.markdown", "a.txt", "a.csv", "a.html", "a.htm"] {
+    for name in [
+        "a.md", "a.markdown", "a.mdx", "a.mkd", "a.txt", "a.csv", "a.html", "a.htm",
+    ] {
         assert!(engine.supports(&request(&TempDir::new().unwrap(), name).input));
     }
     assert!(!engine.supports(&request(&TempDir::new().unwrap(), "a.docx").input));
@@ -97,6 +99,38 @@ fn markdown_snapshot_is_byte_exact_while_candidate_is_utf8_lf() {
         .assets
         .iter()
         .any(|artifact| artifact.kind == ArtifactKind::Metadata));
+}
+
+#[test]
+fn markdown_normalizes_dot_image_paths_and_keeps_escaping_links_non_fatal() {
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("images")).unwrap();
+    fs::write(root.path().join("images/a.png"), b"png").unwrap();
+    let (result, markdown) = run(
+        &root,
+        "paths.md",
+        b"![local](./images/a.png)\n![external](../images/outside.png)\n",
+    );
+
+    assert!(markdown.contains("![local](./images/a.png)"));
+    assert!(markdown.contains("![external](../images/outside.png)"));
+    assert_eq!(result.asset_paths, vec!["images/a.png"]);
+}
+
+#[test]
+fn markdown_accepts_gb18030_and_utf16_sources() {
+    let root = TempDir::new().unwrap();
+    let (gb18030, _, had_errors) = encoding_rs::GB18030.encode("# 标题\n");
+    assert!(!had_errors);
+    let (_, markdown) = run(&root, "legacy.md", &gb18030);
+    assert_eq!(markdown, "# 标题\n");
+
+    let (_, markdown) = run(
+        &root,
+        "utf16.md",
+        b"\xff\xfe#\0 \0t\0i\0t\0l\0e\0\n\0",
+    );
+    assert_eq!(markdown, "# title\n");
 }
 
 #[test]
@@ -145,7 +179,7 @@ fn local_html_removes_executable_content_and_emits_typed_warnings() {
 #[test]
 fn invalid_utf8_and_pre_cancel_leave_no_staging_artifacts() {
     let root = TempDir::new().unwrap();
-    fs::write(root.path().join("bad.txt"), [0xff, 0xfe]).unwrap();
+    fs::write(root.path().join("bad.txt"), [0xff, 0xfe, 0x00]).unwrap();
     let error = NativeFileEngine::default()
         .execute(&request(&root, "bad.txt"), &CancellationToken::new())
         .unwrap_err();

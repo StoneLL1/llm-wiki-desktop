@@ -85,4 +85,18 @@ describe("Import V2 presentation API", () => {
       request: readinessRequest,
     });
   });
+
+  it("loads the persisted scan result for per-file skip details", async () => {
+    const request = {
+      projectId: "project-1",
+      projectRootPath: "D:/Wiki/project-1",
+      sessionId: "session-1",
+      taskId: "scan-1",
+    };
+    invoke.mockResolvedValueOnce({ files: [], skipped: [], truncated: false });
+
+    await importV2Api.getScanResult(request);
+
+    expect(invoke).toHaveBeenLastCalledWith("get_import_scan_result_v2", { request });
+  });
 });

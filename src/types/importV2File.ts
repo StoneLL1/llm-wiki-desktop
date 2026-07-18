@@ -33,3 +33,10 @@ export interface AddImportPathsV2Request {
   sessionId: string;
   sourcePaths: string[];
 }
+
+export interface GetImportScanResultV2Request {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  taskId: string;
+}
