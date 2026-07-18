@@ -8,6 +8,11 @@ pub struct BackendTask {
     pub id: String,
     pub task_type: TaskType,
     pub project_id: Option<String>,
+    /// Optional operation identity shared by tasks created from one user
+    /// action. Existing task files omit this field, so it must remain
+    /// backwards-compatible and absent for non-grouped tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
     pub title: String,
     pub status: TaskStatus,
     pub progress: Option<TaskProgress>,
@@ -72,7 +77,11 @@ pub struct TaskResult {
 )]
 pub enum TaskResultReference {
     ImportPreview { session_id: String, item_id: String },
-    ImportV2SessionPreview { session_id: String },
+    ImportV2SessionPreview {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -105,12 +114,16 @@ pub enum BackendEventType {
     /// chat session file on task completion; these deltas are only live UI
     /// hints. Frontend channel: `task://stream-output`.
     TaskStreamOutput,
+    /// Safe, structured progress for Agent/LLM runs. Raw hidden reasoning,
+    /// tool arguments, file contents, and command output never cross this
+    /// boundary. Frontend channel: `task://activity`.
+    TaskActivity,
 }
 
 /// Payload of a [`BackendEventType::TaskStreamOutput`] event. `delta` is the
 /// incremental text (the frontend concatenates); `route` is an optional
-/// human-readable label ("agent" / "byok") so the UI can render a live model
-/// badge before the persisted answer exists.
+/// internal stream label ("chat-agent", "chat-byok", or "task-agent") so the
+/// appropriate live surface can render it before the persisted result exists.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamDelta {
@@ -119,10 +132,51 @@ pub struct StreamDelta {
     pub route: Option<String>,
 }
 
+/// A safe presentation event for an Agent run. Raw hidden reasoning, tool
+/// arguments, file contents, and command output never cross this boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum TaskActivity {
+    Phase {
+        name: String,
+        status: TaskActivityStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    Thinking {
+        status: TaskActivityStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    ToolResult {
+        call_id: String,
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskActivityStatus {
+    Started,
+    Completed,
+    Failed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendEvent, BackendEventType, BackendTask, TaskProgress, TaskResult, TaskStatus, TaskType,
+        BackendEvent, BackendEventType, BackendTask, TaskProgress, TaskResult, TaskResultReference,
+        TaskStatus, TaskType,
     };
     use crate::errors::BackendError;
     use serde_json::json;
@@ -170,6 +224,7 @@ mod tests {
             id: "task-1".to_string(),
             task_type: TaskType::GraphBuild,
             project_id: Some("project-1".to_string()),
+            batch_id: None,
             title: "Build graph".to_string(),
             status: TaskStatus::Running,
             progress: Some(TaskProgress {
@@ -195,6 +250,7 @@ mod tests {
 
         assert_eq!(value["taskType"], json!("graph_build"));
         assert_eq!(value["projectId"], json!("project-1"));
+        assert!(value.get("batchId").is_none());
         assert_eq!(value["startedAt"], json!("2026-06-19T00:00:00Z"));
         assert_eq!(value["progress"]["current"], json!(1));
         assert_eq!(
@@ -203,6 +259,53 @@ mod tests {
         );
         assert_eq!(value["error"]["userActionRequired"], json!(false));
         assert!(value.get("task_type").is_none());
+    }
+
+    #[test]
+    fn accepts_a_persisted_task_batch_identity() {
+        let value = serde_json::json!({
+            "id": "task-1",
+            "taskType": "import",
+            "projectId": "project-1",
+            "batchId": "batch-1",
+            "title": "Import notes.md",
+            "status": "queued",
+            "progress": null,
+            "startedAt": "2026-07-15T00:00:00Z",
+            "updatedAt": "2026-07-15T00:00:00Z",
+            "completedAt": null,
+            "cancellable": true,
+            "logPath": null,
+            "result": null,
+            "error": null
+        });
+        let task: BackendTask = serde_json::from_value(value).unwrap();
+        assert_eq!(task.batch_id.as_deref(), Some("batch-1"));
+    }
+
+    #[test]
+    fn import_v2_batch_reference_round_trips_and_accepts_legacy_shape() {
+        let reference = TaskResultReference::ImportV2SessionPreview {
+            session_id: "session-1".into(),
+            batch_id: Some("batch-1".into()),
+        };
+        let value = serde_json::to_value(&reference).unwrap();
+        assert_eq!(value["type"], json!("import_v2_session_preview"));
+        assert_eq!(value["sessionId"], json!("session-1"));
+        assert_eq!(value["batchId"], json!("batch-1"));
+
+        let legacy: TaskResultReference = serde_json::from_value(json!({
+            "type": "import_v2_session_preview",
+            "sessionId": "session-1"
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy,
+            TaskResultReference::ImportV2SessionPreview {
+                session_id: "session-1".into(),
+                batch_id: None,
+            }
+        );
     }
 
     #[test]

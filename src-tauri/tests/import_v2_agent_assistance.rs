@@ -22,7 +22,8 @@ use llm_wiki_desktop_lib::{
                 ImportAgentToolBroker, ImportAgentToolCall, ImportAgentToolExecutor,
                 ImportAgentToolResult, ImportAgentToolTaskContext,
             },
-            quality_gate::QualityGate, ImportV2Service, SessionStore,
+            quality_gate::QualityGate,
+            ImportV2Service, SessionStore,
         },
         AgentService, FileStore, SettingsService,
     },
@@ -63,20 +64,37 @@ fn threat_corpus_denies_injected_authority_secret_echo_and_executables() {
         session_id: "session-a".into(),
         item_id: "item-a".into(),
         workspace_root: workspace,
-        grants: vec![AgentToolGrant::RunDeterministicRoute, AgentToolGrant::ValidateCandidate],
+        grants: vec![
+            AgentToolGrant::RunDeterministicRoute,
+            AgentToolGrant::ValidateCandidate,
+        ],
         input_hashes: vec!["input-hash".into()],
         cancelled: false,
     };
     let executor = Arc::new(RecordingExecutor::default());
     let broker = ImportAgentToolBroker::new(executor.clone());
     let malicious_calls = [
-        ImportAgentToolCall::RunDeterministicRoute { route: "cmd.exe /c echo %TOKEN%".into() },
-        ImportAgentToolCall::RunDeterministicRoute { route: "https://evil.example/steal".into() },
-        ImportAgentToolCall::RunDeterministicRoute { route: "git.status".into() },
-        ImportAgentToolCall::RunDeterministicRoute { route: "browser.captcha_bypass".into() },
-        ImportAgentToolCall::RunDeterministicRoute { route: "fetch.paywall".into() },
-        ImportAgentToolCall::ValidateCandidate { relative_markdown_path: "../item-b/output.md".into() },
-        ImportAgentToolCall::ValidateCandidate { relative_markdown_path: "output/payload.exe".into() },
+        ImportAgentToolCall::RunDeterministicRoute {
+            route: "cmd.exe /c echo %TOKEN%".into(),
+        },
+        ImportAgentToolCall::RunDeterministicRoute {
+            route: "https://evil.example/steal".into(),
+        },
+        ImportAgentToolCall::RunDeterministicRoute {
+            route: "git.status".into(),
+        },
+        ImportAgentToolCall::RunDeterministicRoute {
+            route: "browser.captcha_bypass".into(),
+        },
+        ImportAgentToolCall::RunDeterministicRoute {
+            route: "fetch.paywall".into(),
+        },
+        ImportAgentToolCall::ValidateCandidate {
+            relative_markdown_path: "../item-b/output.md".into(),
+        },
+        ImportAgentToolCall::ValidateCandidate {
+            relative_markdown_path: "output/payload.exe".into(),
+        },
     ];
     for call in malicious_calls {
         assert!(broker.invoke(&context, call).is_err());
@@ -153,7 +171,9 @@ fn restart_twice_closes_inflight_tasks_without_formal_content_mutation() {
             true,
         )
         .unwrap();
-    tasks.transition_status(&task.id, TaskStatus::Running).unwrap();
+    tasks
+        .transition_status(&task.id, TaskStatus::Running)
+        .unwrap();
 
     let first_restart = TaskService::default();
     let first = first_restart.recover_tasks(root.path()).unwrap();
@@ -163,7 +183,10 @@ fn restart_twice_closes_inflight_tasks_without_formal_content_mutation() {
     let second = second_restart.recover_tasks(root.path()).unwrap();
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].status, TaskStatus::Failed);
-    assert_eq!(std::fs::read_to_string(root.path().join("wiki/keep.md")).unwrap(), "# keep");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("wiki/keep.md")).unwrap(),
+        "# keep"
+    );
 }
 
 #[test]
@@ -187,7 +210,11 @@ fn uncertain_byok_charge_requires_new_explicit_acknowledgement_before_task_creat
         )
         .unwrap();
     settings
-        .set_import_agent_policy(&context, AgentAssistancePolicy::default(), Some(AgentKind::Codex))
+        .set_import_agent_policy(
+            &context,
+            AgentAssistancePolicy::default(),
+            Some(AgentKind::Codex),
+        )
         .unwrap();
     let mut item = ImportItem::queued(
         "item-a",
@@ -221,8 +248,12 @@ fn uncertain_byok_charge_requires_new_explicit_acknowledgement_before_task_creat
     });
     let mut session = ImportSession::new("session-a", "project-a", ImportResourceMode::Balanced);
     session.items.push(item);
-    SessionStore::default().save(&context, &files, &session).unwrap();
-    let staging = root.path().join(".app/import-sessions/session-a/items/item-a/staging");
+    SessionStore::default()
+        .save(&context, &files, &session)
+        .unwrap();
+    let staging = root
+        .path()
+        .join(".app/import-sessions/session-a/items/item-a/staging");
     std::fs::create_dir_all(&staging).unwrap();
     std::fs::write(staging.join("source.bin"), "safe source").unwrap();
     let agents = AgentService::default();

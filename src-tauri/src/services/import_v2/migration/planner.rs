@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::errors::{BackendError, IMPORT_V2_SOURCE_INDEX_INVALID};
-use crate::models::import_v2::{IMPORT_V2_SCHEMA_VERSION};
+use crate::models::import_v2::IMPORT_V2_SCHEMA_VERSION;
 use crate::models::import_v2_migration::{
     LegacyInventory, LegacyRecord, MatchConfidence, MigrationCandidate, MigrationDecision,
     MigrationPlan, MigrationSummary, IMPORT_V2_MIGRATION_SCHEMA_VERSION,
@@ -75,12 +75,12 @@ fn plan_record(
         .or(record.original_sha256.as_deref())
         .filter(|value| !value.trim().is_empty());
     let hash_pointer = hash.and_then(|value| index.by_content_hash.get(value));
-    let url = record.normalized_url.as_deref().and_then(normalize_public_url);
-    let url_pointer = url.as_deref().and_then(|value| index.by_locator.get(value));
-    let destination_key = record
-        .destination_path
+    let url = record
+        .normalized_url
         .as_deref()
-        .map(case_fold_path);
+        .and_then(normalize_public_url);
+    let url_pointer = url.as_deref().and_then(|value| index.by_locator.get(value));
+    let destination_key = record.destination_path.as_deref().map(case_fold_path);
     let duplicate_hash = hash
         .and_then(|value| hash_counts.get(value))
         .is_some_and(|count| *count > 1);
@@ -204,7 +204,10 @@ fn count_hashes(records: &[LegacyRecord]) -> BTreeMap<String, usize> {
 
 fn count_destinations(records: &[LegacyRecord]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
-    for destination in records.iter().filter_map(|record| record.destination_path.as_deref()) {
+    for destination in records
+        .iter()
+        .filter_map(|record| record.destination_path.as_deref())
+    {
         *counts.entry(case_fold_path(destination)).or_insert(0) += 1;
     }
     counts
@@ -250,5 +253,9 @@ fn normalize_public_url(value: &str) -> Option<String> {
 fn digest(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
-    digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

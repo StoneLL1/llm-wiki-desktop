@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::errors::BackendError;
-use crate::models::import_v2::{
-    ArtifactKind, ImportArtifact, ImportItem, ImportPreviewArtifact,
-};
+use crate::models::import_v2::{ArtifactKind, ImportArtifact, ImportItem, ImportPreviewArtifact};
 use crate::models::import_v2_agent::{
     AgentAuditRecord, AgentCandidate, AgentCandidateDiff, AgentCandidateManifest,
 };
@@ -73,8 +71,11 @@ impl<'a> AgentCandidateService<'a> {
             .result
             .as_ref()
             .ok_or_else(|| candidate_error("Agent task has no result."))?;
-        if !matches!(result.reference.as_ref(), Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item }) if bound_session == session_id && bound_item == item_id) {
-            return Err(candidate_error("Agent task result belongs to another import item."));
+        if !matches!(result.reference.as_ref(), Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item }) if bound_session == session_id && bound_item == item_id)
+        {
+            return Err(candidate_error(
+                "Agent task result belongs to another import item.",
+            ));
         }
         let session = self.imports.load_session(context, self.files, session_id)?;
         let item = session
@@ -83,25 +84,18 @@ impl<'a> AgentCandidateService<'a> {
             .find(|item| item.item_id == item_id)
             .ok_or_else(|| candidate_error("Import item was not found."))?;
         if item.task_id.as_deref() != Some(task_id) {
-            return Err(candidate_error("Agent task is not bound to this import item."));
+            return Err(candidate_error(
+                "Agent task is not bound to this import item.",
+            ));
         }
-        let previous = self.imports.begin_agent_candidate_validation(
-            context,
-            self.files,
-            session_id,
-            item_id,
-            task_id,
-        )?;
+        let previous = self
+            .imports
+            .begin_agent_candidate_validation(context, self.files, session_id, item_id, task_id)?;
         match self.accept_staged_output_validating(context, session_id, item_id, task_id) {
             Ok(candidate) => Ok(candidate),
             Err(validation_error) => {
                 self.imports.reject_agent_candidate_validation(
-                    context,
-                    self.files,
-                    session_id,
-                    item_id,
-                    task_id,
-                    previous,
+                    context, self.files, session_id, item_id, task_id, previous,
                 )?;
                 Err(validation_error)
             }
@@ -132,11 +126,20 @@ impl<'a> AgentCandidateService<'a> {
                 "Cancelled Agent output cannot become a candidate.",
             ));
         }
-        let result = task.result.as_ref().ok_or_else(|| candidate_error("Agent task has no result."))?;
-        if !matches!(result.reference.as_ref(), Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item }) if bound_session == session_id && bound_item == item_id) {
-            return Err(candidate_error("Agent task result belongs to another import item."));
+        let result = task
+            .result
+            .as_ref()
+            .ok_or_else(|| candidate_error("Agent task has no result."))?;
+        if !matches!(result.reference.as_ref(), Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item }) if bound_session == session_id && bound_item == item_id)
+        {
+            return Err(candidate_error(
+                "Agent task result belongs to another import item.",
+            ));
         }
-        let output_ref = result.affected_paths.iter().find(|path| path.ends_with("/output"))
+        let output_ref = result
+            .affected_paths
+            .iter()
+            .find(|path| path.ends_with("/output"))
             .ok_or_else(|| candidate_error("Agent task has no staged output reference."))?;
         let output_dir = safe_project_directory(context, output_ref)?;
         let workspace = output_dir
@@ -189,22 +192,28 @@ impl<'a> AgentCandidateService<'a> {
                 .chain(manifest.warnings.iter().map(String::as_str)),
         )?;
         let markdown_relative = normalize_relative(&manifest.markdown_path)?;
-        let markdown_bytes = read_regular_file(&output_dir.join(&markdown_relative), MAX_OUTPUT_BYTES)?;
+        let markdown_bytes =
+            read_regular_file(&output_dir.join(&markdown_relative), MAX_OUTPUT_BYTES)?;
         if hash_bytes(&markdown_bytes) != manifest.markdown_sha256 {
-            return Err(candidate_error("Agent Markdown hash does not match its manifest."));
+            return Err(candidate_error(
+                "Agent Markdown hash does not match its manifest.",
+            ));
         }
         let mut asset_bytes = Vec::new();
         for path in &manifest.asset_paths {
             let relative = normalize_relative(path)?;
             let bytes = read_regular_file(&output_dir.join(&relative), MAX_OUTPUT_BYTES)?;
             if manifest.asset_sha256.get(&relative) != Some(&hash_bytes(&bytes)) {
-                return Err(candidate_error("Agent asset hash does not match its manifest."));
+                return Err(candidate_error(
+                    "Agent asset hash does not match its manifest.",
+                ));
             }
             QualityGate::validate_agent_asset(&relative, &bytes)?;
             asset_bytes.push((relative, bytes));
         }
         self.ensure_not_cancelled(task_id)?;
-        let candidate_id = hash_bytes(format!("{task_id}:{source_hash}:{}", manifest.markdown_sha256).as_bytes());
+        let candidate_id =
+            hash_bytes(format!("{task_id}:{source_hash}:{}", manifest.markdown_sha256).as_bytes());
         let candidate_root_relative = candidate_root_path(session_id, item_id, &candidate_id)?;
         let candidate_artifact_prefix = candidate_artifact_prefix(&candidate_id)?;
         let candidate_root = context.resolve_project_path(&candidate_root_relative)?;
@@ -213,7 +222,9 @@ impl<'a> AgentCandidateService<'a> {
             reject_links_between(&context.root, &candidate_root)?;
             let metadata = fs::symlink_metadata(&candidate_root).map_err(io_error)?;
             if !metadata.is_dir() {
-                return Err(candidate_error("Incomplete candidate storage is not a directory."));
+                return Err(candidate_error(
+                    "Incomplete candidate storage is not a directory.",
+                ));
             }
             fs::remove_dir_all(&candidate_root).map_err(io_error)?;
         }
@@ -230,7 +241,12 @@ impl<'a> AgentCandidateService<'a> {
             asset_paths: manifest.asset_paths.clone(),
             metadata_path: None,
             title: format!("AI-assisted: {}", item.input.display_name),
-            warnings: manifest.warnings.iter().cloned().chain(std::iter::once("AGENT_QUALITY_NOT_MEASURED".into())).collect(),
+            warnings: manifest
+                .warnings
+                .iter()
+                .cloned()
+                .chain(std::iter::once("AGENT_QUALITY_NOT_MEASURED".into()))
+                .collect(),
             text_coverage: None,
             table_cell_accuracy: None,
             sheet_count_exact: None,
@@ -242,30 +258,38 @@ impl<'a> AgentCandidateService<'a> {
         };
         let mut preview = QualityGate.evaluate_agent_candidate(&candidate_root, &engine_result)?;
         prefix_artifact(&mut preview.markdown, &candidate_artifact_prefix);
-        for asset in &mut preview.assets { prefix_artifact(asset, &candidate_artifact_prefix); }
+        for asset in &mut preview.assets {
+            prefix_artifact(asset, &candidate_artifact_prefix);
+        }
         let deterministic_path = workspace.join("deterministic/candidate.md");
         let deterministic_markdown = if deterministic_path.is_file() {
-            String::from_utf8(read_regular_file(&deterministic_path, MAX_OUTPUT_BYTES)?).map_err(|_| candidate_error("Deterministic baseline is not UTF-8 Markdown."))?
+            String::from_utf8(read_regular_file(&deterministic_path, MAX_OUTPUT_BYTES)?)
+                .map_err(|_| candidate_error("Deterministic baseline is not UTF-8 Markdown."))?
         } else {
             String::new()
         };
-        let (registry_baseline, current_markdown) =
-            registry_markdown_views(context, self.files, item.input.normalized_locator.as_deref(), &source_hash)?;
+        let (registry_baseline, current_markdown) = registry_markdown_views(
+            context,
+            self.files,
+            item.input.normalized_locator.as_deref(),
+            &source_hash,
+        )?;
         let baseline_markdown = registry_baseline.unwrap_or(deterministic_markdown);
         let baseline_path = candidate_root.join("baseline.md");
         write_sealed_file(&baseline_path, baseline_markdown.as_bytes())?;
         let agent_path = candidate_root.join("candidate.md");
-        let agent_markdown = String::from_utf8(markdown_bytes).map_err(|_| candidate_error("Agent Markdown is not UTF-8."))?;
+        let agent_markdown = String::from_utf8(markdown_bytes)
+            .map_err(|_| candidate_error("Agent Markdown is not UTF-8."))?;
         let needs_three_way_merge = current_markdown
             .as_ref()
             .is_some_and(|current| current != &baseline_markdown);
         let unified_diff = GitService::diff_candidate_files(context, &baseline_path, &agent_path)?;
-        let audit_path = format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
-        );
-        let mut audit: AgentAuditRecord = self.files.read_json(context, &audit_path).map_err(|_| {
-            candidate_error("Agent candidate provenance audit is missing or invalid.")
-        })?;
+        let audit_path =
+            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
+        let mut audit: AgentAuditRecord =
+            self.files.read_json(context, &audit_path).map_err(|_| {
+                candidate_error("Agent candidate provenance audit is missing or invalid.")
+            })?;
         validate_candidate_audit(&audit, &bundle, &manifest, session_id, item_id, task_id)?;
         if audit.outcome == "output_staged" {
             audit.outcome = "succeeded".into();
@@ -294,6 +318,9 @@ impl<'a> AgentCandidateService<'a> {
         let diff = AgentCandidateDiff {
             candidate_id: candidate_id.clone(),
             baseline_markdown,
+            current_markdown_sha256: current_markdown
+                .as_deref()
+                .map(|markdown| hash_bytes(markdown.as_bytes())),
             current_markdown,
             agent_markdown,
             unified_diff,
@@ -304,7 +331,15 @@ impl<'a> AgentCandidateService<'a> {
             let existing: StoredAgentCandidate = self.files.read_json(context, &record_relative)?;
             let mut expected = candidate.clone();
             expected.created_at = existing.candidate.created_at.to_owned();
-            if existing.candidate != expected || existing.diff != diff {
+            // Candidate records written before the hash field was introduced
+            // are still valid when every other sealed fact matches. The new
+            // diff is persisted below, upgrading the record for future merge
+            // actions without accepting a changed current Wiki silently.
+            let mut existing_diff = existing.diff.clone();
+            if existing_diff.current_markdown_sha256.is_none() {
+                existing_diff.current_markdown_sha256 = diff.current_markdown_sha256.clone();
+            }
+            if existing.candidate != expected || existing_diff != diff {
                 return Err(candidate_error(
                     "An existing candidate record does not match the revalidated output.",
                 ));
@@ -367,16 +402,21 @@ impl<'a> AgentCandidateService<'a> {
             )
             .as_bytes(),
         );
-        if stored.candidate.candidate_id != candidate_id
-            || expected_candidate_id != candidate_id
-        {
-            return Err(candidate_error("Candidate identity no longer matches its sealed content."));
+        if stored.candidate.candidate_id != candidate_id || expected_candidate_id != candidate_id {
+            return Err(candidate_error(
+                "Candidate identity no longer matches its sealed content.",
+            ));
         }
         let session = self.imports.load_session(context, self.files, session_id)?;
-        let item = session.items.iter().find(|item| item.item_id == item_id)
+        let item = session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
             .ok_or_else(|| candidate_error("Import item was not found."))?;
         if item.task_id.as_deref() != Some(stored.candidate.task_id.as_str()) {
-            return Err(candidate_error("Candidate is no longer bound to this import item task."));
+            return Err(candidate_error(
+                "Candidate is no longer bound to this import item task.",
+            ));
         }
         let root_relative = candidate_root_path(session_id, item_id, candidate_id)?;
         let artifact_prefix = candidate_artifact_prefix(candidate_id)?;
@@ -384,11 +424,15 @@ impl<'a> AgentCandidateService<'a> {
         reject_links_between(&context.root, &root)?;
         let source_bytes = read_regular_file(&root.join("source.bin"), MAX_OUTPUT_BYTES)?;
         if hash_bytes(&source_bytes) != stored.candidate.source_snapshot_sha256 {
-            return Err(candidate_error("Candidate source snapshot changed after validation."));
+            return Err(candidate_error(
+                "Candidate source snapshot changed after validation.",
+            ));
         }
         let agent_bytes = read_regular_file(&root.join("candidate.md"), MAX_OUTPUT_BYTES)?;
         if hash_bytes(&agent_bytes) != stored.candidate.markdown.sha256 {
-            return Err(candidate_error("Candidate Markdown changed after validation."));
+            return Err(candidate_error(
+                "Candidate Markdown changed after validation.",
+            ));
         }
         for asset in &stored.candidate.assets {
             let relative = strip_candidate_prefix(&asset.relative_path, &artifact_prefix)?;
@@ -400,29 +444,49 @@ impl<'a> AgentCandidateService<'a> {
         let mut selected_markdown = stored.candidate.markdown.clone();
         let mut selected_quality = stored.candidate.quality.clone();
         if stored.diff.needs_three_way_merge {
-            let merged = merged_markdown.ok_or_else(|| candidate_error("A three-way merge requires explicit merged Markdown."))?;
-            let expected = expected_current_wiki_sha256.ok_or_else(|| candidate_error("A three-way merge requires the expected current Wiki hash."))?;
+            let merged = merged_markdown.ok_or_else(|| {
+                candidate_error("A three-way merge requires explicit merged Markdown.")
+            })?;
+            let expected = expected_current_wiki_sha256.ok_or_else(|| {
+                candidate_error("A three-way merge requires the expected current Wiki hash.")
+            })?;
             let (_, current) = registry_markdown_views(
                 context,
                 self.files,
                 item.input.normalized_locator.as_deref(),
                 &stored.candidate.source_snapshot_sha256,
             )?;
-            let current = current.ok_or_else(|| candidate_error("Current Wiki content is unavailable for merge."))?;
-            if hash_bytes(current.as_bytes()) != expected || stored.diff.current_markdown.as_deref() != Some(current.as_str()) {
-                return Err(BackendError::new("IMPORT_AGENT_MERGE_STALE", "Current Wiki changed after the Agent Diff was generated.", false, true));
+            let current = current
+                .ok_or_else(|| candidate_error("Current Wiki content is unavailable for merge."))?;
+            if hash_bytes(current.as_bytes()) != expected
+                || stored.diff.current_markdown.as_deref() != Some(current.as_str())
+            {
+                return Err(BackendError::new(
+                    "IMPORT_AGENT_MERGE_STALE",
+                    "Current Wiki changed after the Agent Diff was generated.",
+                    false,
+                    true,
+                ));
             }
             let merged_name = format!("merged-{}.md", hash_bytes(merged.as_bytes()));
             let merged_path = root.join(&merged_name);
             write_sealed_file(&merged_path, merged.as_bytes())?;
-            let asset_paths = stored.candidate.assets.iter().map(|artifact| strip_candidate_prefix(&artifact.relative_path, &artifact_prefix)).collect::<Result<Vec<_>, _>>()?;
+            let asset_paths = stored
+                .candidate
+                .assets
+                .iter()
+                .map(|artifact| strip_candidate_prefix(&artifact.relative_path, &artifact_prefix))
+                .collect::<Result<Vec<_>, _>>()?;
             let result = EngineResult {
                 source_snapshot_path: "source.bin".into(),
                 markdown_path: merged_name,
                 asset_paths,
                 metadata_path: None,
                 title: format!("AI-assisted merged: {}", item.input.display_name),
-                warnings: vec!["AGENT_THREE_WAY_MERGE_REQUIRES_CONFIRMATION".into(), "AGENT_QUALITY_NOT_MEASURED".into()],
+                warnings: vec![
+                    "AGENT_THREE_WAY_MERGE_REQUIRES_CONFIRMATION".into(),
+                    "AGENT_QUALITY_NOT_MEASURED".into(),
+                ],
                 text_coverage: None,
                 table_cell_accuracy: None,
                 sheet_count_exact: None,
@@ -437,7 +501,9 @@ impl<'a> AgentCandidateService<'a> {
             prefix_artifact(&mut selected_markdown, &artifact_prefix);
             selected_quality = merged_preview.quality;
         } else if merged_markdown.is_some() || expected_current_wiki_sha256.is_some() {
-            return Err(candidate_error("Merge content is accepted only for a three-way candidate."));
+            return Err(candidate_error(
+                "Merge content is accepted only for a three-way candidate.",
+            ));
         }
         let source = ImportArtifact {
             kind: ArtifactKind::SourceSnapshot,
@@ -459,7 +525,7 @@ impl<'a> AgentCandidateService<'a> {
             item_id,
             &stored.candidate.task_id,
             preview,
-            stored.diff.needs_three_way_merge,
+            false,
         )?;
         self.cleanup_task_workspace(context, session_id, item_id, &stored.candidate.task_id)?;
         Ok(selected)
@@ -538,9 +604,7 @@ impl<'a> AgentCandidateService<'a> {
             })
             .collect::<Vec<_>>();
         for (item_id, task_id) in completed {
-            if let Err(error) =
-                self.accept_staged_output(context, session_id, &item_id, &task_id)
-            {
+            if let Err(error) = self.accept_staged_output(context, session_id, &item_id, &task_id) {
                 let latest = self.imports.load_session(context, self.files, session_id)?;
                 let rejection_persisted = latest
                     .items
@@ -572,7 +636,10 @@ impl<'a> AgentCandidateService<'a> {
                 crate::models::import_v2::ImportItemStatus::PreviewReady
                     | crate::models::import_v2::ImportItemStatus::NeedsMerge
             ) && item.preview.as_ref().is_some_and(|preview| {
-                preview.markdown.relative_path.starts_with("agent-candidates/")
+                preview
+                    .markdown
+                    .relative_path
+                    .starts_with("agent-candidates/")
             });
             let terminal_without_candidate = has_agent_attempt
                 && matches!(
@@ -602,7 +669,9 @@ impl<'a> AgentCandidateService<'a> {
 
     fn ensure_not_cancelled(&self, task_id: &str) -> Result<(), BackendError> {
         if self.tasks.is_cancelled(task_id) {
-            Err(candidate_error("Cancelled Agent output cannot become a candidate."))
+            Err(candidate_error(
+                "Cancelled Agent output cannot become a candidate.",
+            ))
         } else {
             Ok(())
         }
@@ -615,15 +684,16 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         task_id: &str,
     ) -> Result<(), BackendError> {
-        let audit_path = format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
-        );
+        let audit_path =
+            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
         if !self.files.exists(context, &audit_path) {
             return Ok(());
         }
         let audit: AgentAuditRecord = self.files.read_json(context, &audit_path)?;
         if audit.task_id != task_id || audit.session_id != session_id || audit.item_id != item_id {
-            return Err(candidate_error("Recorded Agent workspace belongs to another task."));
+            return Err(candidate_error(
+                "Recorded Agent workspace belongs to another task.",
+            ));
         }
         super::agent_workspace::AgentWorkspaceBuilder::cleanup_recorded_workspace(
             context,
@@ -653,7 +723,9 @@ fn validate_candidate_audit(
         && audit.tool_calls.is_empty()
         && exact_output;
     let route_valid = if let Some(command) = audit.route.strip_prefix("local/") {
-        audit.agent_kind.is_some_and(|kind| kind.command() == command)
+        audit
+            .agent_kind
+            .is_some_and(|kind| kind.command() == command)
             && audit.prompt_template_version == "wiki-ingest-assist/local-v1"
             && audit.approved_cost_micros.is_none()
             && audit.approved_scope_sha256.is_none()
@@ -662,8 +734,14 @@ fn validate_candidate_audit(
             && audit.input_hashes == bundle.input_hashes
             && audit.granted_tools == bundle.allowed_tools
     } else if audit.route.starts_with("byok/") {
-        audit.byok_provider.as_ref().is_some_and(|provider| !provider.trim().is_empty())
-            && audit.byok_destination.as_ref().is_some_and(|destination| !destination.trim().is_empty())
+        audit
+            .byok_provider
+            .as_ref()
+            .is_some_and(|provider| !provider.trim().is_empty())
+            && audit
+                .byok_destination
+                .as_ref()
+                .is_some_and(|destination| !destination.trim().is_empty())
             && audit.route
                 == format!(
                     "byok/{}/{}/{}",
@@ -673,7 +751,10 @@ fn validate_candidate_audit(
                 )
             && audit.agent_kind.is_none()
             && audit.prompt_template_version == "wiki-ingest-assist/byok-v1"
-            && audit.approved_scope_sha256.as_ref().is_some_and(|value| !value.is_empty())
+            && audit
+                .approved_scope_sha256
+                .as_ref()
+                .is_some_and(|value| !value.is_empty())
             && audit.approved_cost_micros.is_some()
             && audit.granted_tools.is_empty()
     } else {
@@ -713,7 +794,11 @@ fn candidate_record_path(
     ))
 }
 
-fn candidate_root_path(session_id: &str, item_id: &str, candidate_id: &str) -> Result<String, BackendError> {
+fn candidate_root_path(
+    session_id: &str,
+    item_id: &str,
+    candidate_id: &str,
+) -> Result<String, BackendError> {
     let record = candidate_record_path(session_id, item_id, candidate_id)?;
     Ok(record.trim_end_matches("/candidate.json").into())
 }
@@ -757,7 +842,9 @@ fn validate_manifest(manifest: &AgentCandidateManifest) -> Result<(), BackendErr
         .iter()
         .any(|tool| !allowed_tools.contains(&tool.as_str()))
     {
-        return Err(candidate_error("Agent manifest claims an unauthorized tool."));
+        return Err(candidate_error(
+            "Agent manifest claims an unauthorized tool.",
+        ));
     }
     let mut declared = HashSet::new();
     declared.insert(normalize_relative(&manifest.markdown_path)?);
@@ -778,17 +865,30 @@ fn validate_manifest(manifest: &AgentCandidateManifest) -> Result<(), BackendErr
             ));
         }
     }
-    let declared_assets: HashSet<String> = manifest.asset_paths.iter().map(|path| normalize_relative(path)).collect::<Result<_, _>>()?;
+    let declared_assets: HashSet<String> = manifest
+        .asset_paths
+        .iter()
+        .map(|path| normalize_relative(path))
+        .collect::<Result<_, _>>()?;
     if manifest.asset_sha256.len() != declared_assets.len()
-        || manifest.asset_sha256.iter().any(|(path, hash)| normalize_relative(path).ok().as_ref() != Some(path) || !declared_assets.contains(path) || !valid_sha256(hash))
+        || manifest.asset_sha256.iter().any(|(path, hash)| {
+            normalize_relative(path).ok().as_ref() != Some(path)
+                || !declared_assets.contains(path)
+                || !valid_sha256(hash)
+        })
     {
-        return Err(candidate_error("Agent manifest asset hashes are incomplete or invalid."));
+        return Err(candidate_error(
+            "Agent manifest asset hashes are incomplete or invalid.",
+        ));
     }
     Ok(())
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn validate_declared_output_tree(
@@ -870,7 +970,10 @@ fn registry_markdown_views(
     hash: &str,
 ) -> Result<(Option<String>, Option<String>), BackendError> {
     let index: SourceIndex = super::source_registry::SourceRegistry::read_index(context, files)?;
-    let pointer = index.by_content_hash.get(hash).or_else(|| normalized_locator.and_then(|locator| index.by_locator.get(&locator.trim().replace('\\', "/"))));
+    let pointer = index.by_content_hash.get(hash).or_else(|| {
+        normalized_locator
+            .and_then(|locator| index.by_locator.get(&locator.trim().replace('\\', "/")))
+    });
     let Some(pointer) = pointer else {
         return Ok((None, None));
     };
@@ -878,10 +981,16 @@ fn registry_markdown_views(
     if !files.exists(context, &manifest_path) {
         return Ok((None, None));
     }
-    let manifest: SourceManifest = serde_json::from_slice(&read_project_file(context, &manifest_path, MAX_OUTPUT_BYTES)?)
-        .map_err(|_| candidate_error("Source Registry manifest is malformed."))?;
+    let manifest: SourceManifest = serde_json::from_slice(&read_project_file(
+        context,
+        &manifest_path,
+        MAX_OUTPUT_BYTES,
+    )?)
+    .map_err(|_| candidate_error("Source Registry manifest is malformed."))?;
     if manifest.source_id != pointer.source_id {
-        return Err(candidate_error("Source Registry pointer and manifest do not match."));
+        return Err(candidate_error(
+            "Source Registry pointer and manifest do not match.",
+        ));
     }
     if !files.exists(context, &manifest.wiki_path) {
         return Ok((None, None));
@@ -897,27 +1006,54 @@ fn registry_markdown_views(
     Ok((baseline, Some(current)))
 }
 
-fn validate_deterministic_inputs(workspace: &Path, item: &ImportItem, bundle: &AgentTaskBundle) -> Result<(), BackendError> {
+fn validate_deterministic_inputs(
+    workspace: &Path,
+    item: &ImportItem,
+    bundle: &AgentTaskBundle,
+) -> Result<(), BackendError> {
     let root = workspace.join("deterministic");
     let mut files = Vec::new();
     let mut total = 0;
     collect_output_files(&root, &root, &mut files, &mut total)?;
     let Some(preview) = &item.preview else {
-        return if files.is_empty() { Ok(()) } else { Err(candidate_error("Hard-failure workspace contains an invented deterministic baseline.")) };
+        return if files.is_empty() {
+            Ok(())
+        } else {
+            Err(candidate_error(
+                "Hard-failure workspace contains an invented deterministic baseline.",
+            ))
+        };
     };
     let markdown = read_regular_file(&root.join("candidate.md"), MAX_OUTPUT_BYTES)?;
-    if hash_bytes(&markdown) != preview.markdown.sha256 || !bundle.input_hashes.contains(&preview.markdown.sha256) {
-        return Err(candidate_error("Deterministic baseline changed inside the Agent workspace."));
+    if hash_bytes(&markdown) != preview.markdown.sha256
+        || !bundle.input_hashes.contains(&preview.markdown.sha256)
+    {
+        return Err(candidate_error(
+            "Deterministic baseline changed inside the Agent workspace.",
+        ));
     }
     let mut actual_assets = Vec::new();
     for path in files.iter().filter(|path| path.as_str() != "candidate.md") {
-        actual_assets.push(hash_bytes(&read_regular_file(&root.join(path), MAX_OUTPUT_BYTES)?));
+        actual_assets.push(hash_bytes(&read_regular_file(
+            &root.join(path),
+            MAX_OUTPUT_BYTES,
+        )?));
     }
     actual_assets.sort();
-    let mut expected_assets: Vec<String> = preview.assets.iter().map(|asset| asset.sha256.clone()).collect();
+    let mut expected_assets: Vec<String> = preview
+        .assets
+        .iter()
+        .map(|asset| asset.sha256.clone())
+        .collect();
     expected_assets.sort();
-    if actual_assets != expected_assets || expected_assets.iter().any(|hash| !bundle.input_hashes.contains(hash)) {
-        return Err(candidate_error("Deterministic assets changed inside the Agent workspace."));
+    if actual_assets != expected_assets
+        || expected_assets
+            .iter()
+            .any(|hash| !bundle.input_hashes.contains(hash))
+    {
+        return Err(candidate_error(
+            "Deterministic assets changed inside the Agent workspace.",
+        ));
     }
     Ok(())
 }
@@ -927,13 +1063,27 @@ fn prefix_artifact(artifact: &mut ImportArtifact, root: &str) {
 }
 
 fn write_sealed_file(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(io_error)?; }
-    if path.exists() {
-        return if read_regular_file(path, MAX_OUTPUT_BYTES)? == bytes { Ok(()) } else { Err(candidate_error("An immutable candidate artifact changed during recovery.")) };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(io_error)?;
     }
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(io_error)?;
+    if path.exists() {
+        return if read_regular_file(path, MAX_OUTPUT_BYTES)? == bytes {
+            Ok(())
+        } else {
+            Err(candidate_error(
+                "An immutable candidate artifact changed during recovery.",
+            ))
+        };
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(io_error)?;
     use std::io::Write;
-    file.write_all(bytes).and_then(|_| file.sync_all()).map_err(io_error)
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(io_error)
 }
 
 fn read_project_text(context: &ProjectContext, relative: &str) -> Result<String, BackendError> {
@@ -941,22 +1091,32 @@ fn read_project_text(context: &ProjectContext, relative: &str) -> Result<String,
         .map_err(|_| candidate_error("Source Registry Markdown is not UTF-8."))
 }
 
-fn read_project_file(context: &ProjectContext, relative: &str, limit: u64) -> Result<Vec<u8>, BackendError> {
+fn read_project_file(
+    context: &ProjectContext,
+    relative: &str,
+    limit: u64,
+) -> Result<Vec<u8>, BackendError> {
     let path = context.resolve_project_path(relative)?;
     reject_links_between(&context.root, &path)?;
     let canonical_root = context.root.canonicalize().map_err(io_error)?;
     let canonical = path.canonicalize().map_err(io_error)?;
-    if !canonical.starts_with(canonical_root) { return Err(candidate_error("Source Registry path escaped the project.")); }
+    if !canonical.starts_with(canonical_root) {
+        return Err(candidate_error("Source Registry path escaped the project."));
+    }
     read_regular_file(&canonical, limit)
 }
 
 fn reject_links_between(root: &Path, target: &Path) -> Result<(), BackendError> {
-    let relative = target.strip_prefix(root).map_err(|_| candidate_error("Path escaped the project."))?;
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| candidate_error("Path escaped the project."))?;
     let mut cursor = root.to_path_buf();
     for component in relative.components() {
         cursor.push(component);
         let metadata = fs::symlink_metadata(&cursor).map_err(io_error)?;
-        if metadata.file_type().is_symlink() || is_reparse(&metadata) { return Err(candidate_error("Links and reparse points are forbidden.")); }
+        if metadata.file_type().is_symlink() || is_reparse(&metadata) {
+            return Err(candidate_error("Links and reparse points are forbidden."));
+        }
     }
     Ok(())
 }
@@ -1020,23 +1180,41 @@ fn read_json_limited<T: for<'de> Deserialize<'de>>(
 
 fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, BackendError> {
     let before = fs::symlink_metadata(path).map_err(io_error)?;
-    if !before.is_file() || before.file_type().is_symlink() || is_reparse(&before) || before.len() > limit {
-        return Err(candidate_error("Candidate artifact is missing, linked, or too large."));
+    if !before.is_file()
+        || before.file_type().is_symlink()
+        || is_reparse(&before)
+        || before.len() > limit
+    {
+        return Err(candidate_error(
+            "Candidate artifact is missing, linked, or too large.",
+        ));
     }
     let mut file = fs::File::open(path).map_err(io_error)?;
     let opened = file.metadata().map_err(io_error)?;
-    if !same_file(&before, &opened) { return Err(candidate_error("Candidate artifact changed before open.")); }
+    if !same_file(&before, &opened) {
+        return Err(candidate_error("Candidate artifact changed before open."));
+    }
     let mut bytes = Vec::with_capacity(opened.len() as usize);
     use std::io::Read;
-    file.by_ref().take(limit + 1).read_to_end(&mut bytes).map_err(io_error)?;
+    file.by_ref()
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
     let after = fs::metadata(path).map_err(io_error)?;
-    if bytes.len() as u64 > limit || bytes.len() as u64 != before.len() || !same_file(&opened, &after) {
-        return Err(candidate_error("Candidate artifact changed while it was read."));
+    if bytes.len() as u64 > limit
+        || bytes.len() as u64 != before.len()
+        || !same_file(&opened, &after)
+    {
+        return Err(candidate_error(
+            "Candidate artifact changed while it was read.",
+        ));
     }
     Ok(bytes)
 }
 
-fn hash_bytes(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+fn hash_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 #[cfg(unix)]
 fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
@@ -1046,10 +1224,14 @@ fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 #[cfg(windows)]
 fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
-    left.creation_time() == right.creation_time() && left.last_write_time() == right.last_write_time() && left.file_size() == right.file_size()
+    left.creation_time() == right.creation_time()
+        && left.last_write_time() == right.last_write_time()
+        && left.file_size() == right.file_size()
 }
 #[cfg(not(any(unix, windows)))]
-fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool { left.len() == right.len() && left.modified().ok() == right.modified().ok() }
+fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
+}
 
 #[cfg(windows)]
 fn is_reparse(metadata: &fs::Metadata) -> bool {
@@ -1077,17 +1259,18 @@ fn io_error(error: std::io::Error) -> BackendError {
 mod tests {
     use super::*;
     use crate::models::agent::AgentKind;
-    use crate::models::import_v2_agent::AgentToolGrant;
     use crate::models::import_v2::{
         ArtifactKind, ImportArtifact, ImportInput, ImportInputKind, ImportItem,
         ImportPreviewArtifact, QualityLevel, QualityReport,
     };
+    use crate::models::import_v2_agent::AgentToolGrant;
 
     fn manifest() -> AgentCandidateManifest {
         AgentCandidateManifest {
             markdown_path: "candidate.md".into(),
             asset_paths: Vec::new(),
-            markdown_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            markdown_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
             asset_sha256: Default::default(),
             processing_summary: "AI-assisted extraction".into(),
             tools_used: vec!["tool-free-local-agent".into()],
@@ -1112,7 +1295,8 @@ mod tests {
             approved_scope_sha256: None,
             byok_provider: None,
             byok_destination: None,
-            workspace_relative_path: ".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a".into(),
+            workspace_relative_path:
+                ".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a".into(),
             granted_tools: bundle.allowed_tools.clone(),
             input_hashes: bundle.input_hashes.clone(),
             output_hashes: vec![manifest().markdown_sha256],
@@ -1139,17 +1323,39 @@ mod tests {
         let manifest = manifest();
         let valid = audit(&bundle);
         assert!(validate_candidate_audit(
-            &valid, &bundle, &manifest, "session-a", "item-a", "task-a"
+            &valid,
+            &bundle,
+            &manifest,
+            "session-a",
+            "item-a",
+            "task-a"
         )
         .is_ok());
         for tampered in [
-            AgentAuditRecord { route: "plugin/arbitrary".into(), ..valid.clone() },
-            AgentAuditRecord { prompt_template_version: "unknown".into(), ..valid.clone() },
-            AgentAuditRecord { completed_at: None, ..valid.clone() },
-            AgentAuditRecord { output_hashes: vec![manifest.markdown_sha256.clone(), "c".repeat(64)], ..valid.clone() },
+            AgentAuditRecord {
+                route: "plugin/arbitrary".into(),
+                ..valid.clone()
+            },
+            AgentAuditRecord {
+                prompt_template_version: "unknown".into(),
+                ..valid.clone()
+            },
+            AgentAuditRecord {
+                completed_at: None,
+                ..valid.clone()
+            },
+            AgentAuditRecord {
+                output_hashes: vec![manifest.markdown_sha256.clone(), "c".repeat(64)],
+                ..valid.clone()
+            },
         ] {
             assert!(validate_candidate_audit(
-                &tampered, &bundle, &manifest, "session-a", "item-a", "task-a"
+                &tampered,
+                &bundle,
+                &manifest,
+                "session-a",
+                "item-a",
+                "task-a"
             )
             .is_err());
         }
@@ -1241,7 +1447,11 @@ mod tests {
             untrusted_source_material: Vec::new(),
         };
         assert!(validate_deterministic_inputs(root.path(), &item, &bundle).is_ok());
-        fs::write(root.path().join("deterministic/candidate.md"), b"# Replaced baseline\n").unwrap();
+        fs::write(
+            root.path().join("deterministic/candidate.md"),
+            b"# Replaced baseline\n",
+        )
+        .unwrap();
         assert!(validate_deterministic_inputs(root.path(), &item, &bundle).is_err());
     }
 

@@ -8,6 +8,7 @@ fn preview_content_request_is_identity_bound_and_never_accepts_a_path() {
         session_id: "s1".into(),
         item_id: "i1".into(),
         candidate_id: None,
+        history_batch_id: None,
     };
     let value = serde_json::to_value(request).unwrap();
     assert_eq!(value["sessionId"], "s1");

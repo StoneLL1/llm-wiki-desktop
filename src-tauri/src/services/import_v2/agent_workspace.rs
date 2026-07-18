@@ -4,9 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use chrono::{Duration, Utc};
 
 use crate::{
     errors::BackendError,
@@ -265,22 +265,25 @@ impl AgentWorkspaceBuilder {
         if !is_safe_component(session_id) || !is_safe_component(item_id) {
             return Err(workspace_error("Agent workspace identity is invalid."));
         }
-        let expected_prefix = format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/staging/agent/"
-        );
+        let expected_prefix =
+            format!(".app/import-sessions/{session_id}/items/{item_id}/staging/agent/");
         let normalized = workspace_relative_path.replace('\\', "/");
         let workspace_id = normalized.strip_prefix(&expected_prefix).ok_or_else(|| {
             workspace_error("Recorded Agent workspace is outside the current import item.")
         })?;
         if !is_safe_component(workspace_id) || workspace_id.contains('/') {
-            return Err(workspace_error("Recorded Agent workspace identity is invalid."));
+            return Err(workspace_error(
+                "Recorded Agent workspace identity is invalid.",
+            ));
         }
         let root = context.resolve_project_path(&normalized)?;
         if root.exists() {
             reject_links_between(&context.root, &root)?;
             let metadata = fs::symlink_metadata(&root).map_err(workspace_io_error)?;
             if !metadata.is_dir() {
-                return Err(workspace_error("Agent workspace storage is not a directory."));
+                return Err(workspace_error(
+                    "Agent workspace storage is not a directory.",
+                ));
             }
             make_tree_writable(&root);
             fs::remove_dir_all(root).map_err(workspace_io_error)?;
@@ -324,13 +327,17 @@ impl AgentWorkspaceBuilder {
                     || metadata.file_type().is_symlink()
                     || is_windows_reparse(&metadata)
                 {
-                    return Err(workspace_error("Agent workspace lease temporary is invalid."));
+                    return Err(workspace_error(
+                        "Agent workspace lease temporary is invalid.",
+                    ));
                 }
                 fs::remove_file(path).map_err(workspace_io_error)?;
                 continue;
             }
             if !name.ends_with(".json") {
-                return Err(workspace_error("Agent workspace lease filename is invalid."));
+                return Err(workspace_error(
+                    "Agent workspace lease filename is invalid.",
+                ));
             }
             let bytes = read_isolated_regular_file(&context.root, &path, 64 * 1024)?;
             let lease: AgentWorkspaceLease = serde_json::from_slice(&bytes)
@@ -339,12 +346,16 @@ impl AgentWorkspaceBuilder {
                 || lease.item_id != item_id
                 || !is_safe_component(&lease.workspace_id)
             {
-                return Err(workspace_error("Agent workspace lease identity is invalid."));
+                return Err(workspace_error(
+                    "Agent workspace lease identity is invalid.",
+                ));
             }
             let preserve = match lease.task_id.as_deref() {
                 Some(task_id) => preserve_task(task_id),
-                None => lease.process_instance_id == *process_instance_id()
-                    && lease.expires_at > Utc::now(),
+                None => {
+                    lease.process_instance_id == *process_instance_id()
+                        && lease.expires_at > Utc::now()
+                }
             };
             if !preserve {
                 let relative = format!(
@@ -363,14 +374,21 @@ fn process_instance_id() -> &'static String {
     INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-pub(crate) fn validate_isolated_directory(root: &Path, directory: &Path) -> Result<(), BackendError> {
+pub(crate) fn validate_isolated_directory(
+    root: &Path,
+    directory: &Path,
+) -> Result<(), BackendError> {
     reject_links_between(root, directory)?;
     let canonical_root = root.canonicalize().map_err(workspace_io_error)?;
     let canonical = directory.canonicalize().map_err(workspace_io_error)?;
     if !canonical.starts_with(&canonical_root)
-        || !fs::symlink_metadata(directory).map_err(workspace_io_error)?.is_dir()
+        || !fs::symlink_metadata(directory)
+            .map_err(workspace_io_error)?
+            .is_dir()
     {
-        return Err(workspace_error("Agent input directory escaped its isolated workspace."));
+        return Err(workspace_error(
+            "Agent input directory escaped its isolated workspace.",
+        ));
     }
     Ok(())
 }
@@ -384,7 +402,9 @@ pub(crate) fn read_isolated_regular_file(
     let canonical_root = root.canonicalize().map_err(workspace_io_error)?;
     let before = path.canonicalize().map_err(workspace_io_error)?;
     if !before.starts_with(&canonical_root) {
-        return Err(workspace_error("Agent input escaped its isolated workspace."));
+        return Err(workspace_error(
+            "Agent input escaped its isolated workspace.",
+        ));
     }
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -401,7 +421,9 @@ pub(crate) fn read_isolated_regular_file(
         || is_windows_reparse(&path_metadata)
         || !same_path_metadata(&opened, &path_metadata)
     {
-        return Err(workspace_error("Agent input changed while it was being opened."));
+        return Err(workspace_error(
+            "Agent input changed while it was being opened.",
+        ));
     }
     let mut bytes = Vec::new();
     file.by_ref()
@@ -409,7 +431,9 @@ pub(crate) fn read_isolated_regular_file(
         .read_to_end(&mut bytes)
         .map_err(workspace_io_error)?;
     if bytes.len() > max_bytes {
-        return Err(workspace_error("Agent input exceeds the isolated read limit."));
+        return Err(workspace_error(
+            "Agent input exceeds the isolated read limit.",
+        ));
     }
     let after = path.canonicalize().map_err(workspace_io_error)?;
     let after_metadata = fs::symlink_metadata(path).map_err(workspace_io_error)?;
@@ -421,7 +445,9 @@ pub(crate) fn read_isolated_regular_file(
         || !same_path_metadata(&opened, &after_metadata)
         || !same_open_file(&file, &verification)
     {
-        return Err(workspace_error("Agent input changed while it was being read."));
+        return Err(workspace_error(
+            "Agent input changed while it was being read.",
+        ));
     }
     Ok(bytes)
 }
@@ -457,12 +483,9 @@ fn same_open_file(left: &fs::File, right: &fs::File) -> bool {
     };
     fn identity(file: &fs::File) -> Option<(u32, u32, u32)> {
         let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        let ok = unsafe {
-            GetFileInformationByHandle(
-                file.as_raw_handle() as HANDLE,
-                &mut information,
-            )
-        } != 0;
+        let ok =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut information) }
+                != 0;
         ok.then_some((
             information.dwVolumeSerialNumber,
             information.nFileIndexHigh,

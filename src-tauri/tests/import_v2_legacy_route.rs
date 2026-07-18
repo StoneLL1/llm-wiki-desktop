@@ -34,8 +34,8 @@ fn projects_v2_session_into_the_existing_preview_shape() {
             assets: Vec::new(),
             source_snapshot: ImportArtifact {
                 kind: ArtifactKind::SourceSnapshot,
-                relative_path:
-                    ".app/import-sessions/session-cjk/items/item-1/staging/source.bin".into(),
+                relative_path: ".app/import-sessions/session-cjk/items/item-1/staging/source.bin"
+                    .into(),
                 sha256: "source-hash".into(),
                 size_bytes: 21,
             },
@@ -61,6 +61,9 @@ fn projects_v2_session_into_the_existing_preview_shape() {
         ".app/import-sessions/session-cjk/inputs/资料.md"
     );
     assert_eq!(projected.files[0].file_type, SourceFileType::Markdown);
-    assert_eq!(projected.files[0].archived_path, "wiki/sources/files/资料.md");
+    assert_eq!(
+        projected.files[0].archived_path,
+        "wiki/sources/files/资料.md"
+    );
     assert!(projected.files[0].extracted_assets.is_empty());
 }

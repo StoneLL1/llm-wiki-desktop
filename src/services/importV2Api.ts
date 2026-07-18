@@ -8,9 +8,11 @@ import type {
   ImportSession,
   SetImportItemSelectionV2Request,
   StartImportItemsV2Request,
+  CancelImportItemV2Request,
+  CancelImportBatchV2Request,
 } from "../types/importV2";
 import type { AddImportPathsV2Request, FileScanResult, GetImportScanResultV2Request } from "../types/importV2File";
-import type { AddImportUrlV2Request } from "../types/importV2Web";
+import type { AddImportUrlV2Request, AuthorizeBilibiliAsrV2Request } from "../types/importV2Web";
 import type { AgentCandidateActionResult, AgentCandidateView, AgentAssistancePolicy, AgentSendScope } from "../types/importV2Agent";
 import type {
   ActivateImportV2Request,
@@ -58,12 +60,17 @@ import type { AcceptImportAgentCandidateRequest, DiscardImportAgentCandidateRequ
 const commandNames: ImportV2CommandNames = {
   createSession: "create_import_session_v2",
   getSession: "get_import_session_v2",
+  getHistorySession: "get_import_history_session_v2",
   addItems: "add_import_items_v2",
   addPaths: "start_add_import_paths_v2",
   getScanResult: "get_import_scan_result_v2",
   addUrl: "add_import_url_v2",
   setSelection: "set_import_item_selection_v2",
   startItems: "start_import_items_v2",
+  cancelBatch: "cancel_import_batch_v2",
+  cancelItem: "cancel_import_item_v2",
+  skipItem: "skip_import_item_v2",
+  authorizeBilibiliAsr: "authorize_bilibili_asr_v2",
   confirmSession: "confirm_import_session_v2",
   getPreviewContent: "get_import_preview_content_v2",
   getReadiness: "get_import_frontend_readiness_v2",
@@ -98,12 +105,17 @@ export const importV2Api: ImportV2Api = {
   commandNames,
   createSession: (value: CreateImportSessionV2Request) => request<ImportSession>(commandNames.createSession, value),
   getSession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getSession, value),
+  getHistorySession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getHistorySession ?? commandNames.getSession, value),
   addItems: (value: AddImportItemsV2Request) => request<ImportSession>(commandNames.addItems, value),
   addPaths: (value: AddImportPathsV2Request) => request<BackendTask>(commandNames.addPaths, value),
   getScanResult: (value: GetImportScanResultV2Request) => request<FileScanResult>(commandNames.getScanResult, value),
   addUrl: (value: AddImportUrlV2Request) => request<ImportSession>(commandNames.addUrl, value),
   setSelection: (value: SetImportItemSelectionV2Request) => request<ImportSession>(commandNames.setSelection, value),
   startItems: (value: StartImportItemsV2Request) => request<BackendTask[]>(commandNames.startItems, value),
+  cancelBatch: (value: CancelImportBatchV2Request) => request<BackendTask[]>(commandNames.cancelBatch, value),
+  cancelItem: (value: CancelImportItemV2Request) => request<ImportSession>(commandNames.cancelItem, value),
+  skipItem: (value: CancelImportItemV2Request) => request<ImportSession>(commandNames.skipItem, value),
+  authorizeBilibiliAsr: (value: AuthorizeBilibiliAsrV2Request) => request<void>(commandNames.authorizeBilibiliAsr, value),
   confirmSession: (value: CommitImportSessionRequest) => request<BackendTask>(commandNames.confirmSession, value),
   getPreviewContent: (value: GetImportPreviewContentV2Request) => request<ImportPreviewContent>(commandNames.getPreviewContent, value),
   getReadiness: (value: GetImportFrontendReadinessV2Request) => request<ImportFrontendReadiness>(commandNames.getReadiness, value),

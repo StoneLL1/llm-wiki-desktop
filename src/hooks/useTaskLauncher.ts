@@ -16,6 +16,10 @@ export interface TaskLaunchOptions {
   provider: LlmProviderKind | null;
 }
 
+export interface TaskCancelOptions {
+  suppressToast?: boolean;
+}
+
 export interface TaskLauncher {
   startCompile: (
     options?: Partial<TaskLaunchOptions>,
@@ -26,7 +30,8 @@ export interface TaskLauncher {
     sourcePath: string | null,
     options: TaskLaunchOptions,
   ) => Promise<BackendTask>;
-  cancel: (taskId: string) => Promise<void>;
+  /** Resolves true when the backend accepted the cancellation request. */
+  cancel: (taskId: string, options?: TaskCancelOptions) => Promise<boolean>;
 }
 
 function errorMessage(error: unknown): string {
@@ -115,16 +120,20 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
   );
 
   const cancel = useCallback(
-    async (taskId: string) => {
+    async (taskId: string, options: TaskCancelOptions = {}) => {
       const requestKey = projectKey;
       try {
         await cancelTaskRequest(taskId);
+        return true;
       } catch (error) {
-        if (latestProjectKey.current !== requestKey) return;
-        pushToast(
-          "error",
-          t("task.cancelError", { message: errorMessage(error) }),
-        );
+        if (latestProjectKey.current !== requestKey) return false;
+        if (!options.suppressToast) {
+          pushToast(
+            "error",
+            t("task.cancelError", { message: errorMessage(error) }),
+          );
+        }
+        return false;
       }
     },
     [projectKey, pushToast, t],

@@ -132,6 +132,12 @@ const PACK_SPECS: &[PackSpec] = &[
         licenses: &["Apache-2.0 AND MIT"],
     },
     PackSpec {
+        id: "browser-runtime",
+        route: "web.wechat.article",
+        extensions: &[],
+        licenses: &["Apache-2.0"],
+    },
+    PackSpec {
         id: "browser-runtime-lite",
         route: "web.zhihu.content",
         extensions: &[],

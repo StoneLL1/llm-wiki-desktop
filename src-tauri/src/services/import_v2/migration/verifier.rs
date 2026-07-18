@@ -57,7 +57,10 @@ impl CutoverVerifier {
         for gate in &evidence.package_gates {
             seen.insert(gate.package.clone());
             if !REQUIRED_PACKAGES.contains(&gate.package.as_str()) {
-                warnings.push(format!("Unrecognized package gate evidence: {}", gate.package));
+                warnings.push(format!(
+                    "Unrecognized package gate evidence: {}",
+                    gate.package
+                ));
             }
             if gate.contract_version != REQUIRED_IMPORT_V2_CONTRACT {
                 blockers.push(format!(
@@ -66,12 +69,17 @@ impl CutoverVerifier {
                 ));
             }
             if !gate.release_gate_passed {
-                blockers.push(format!("Package {} release gate is not passed.", gate.package));
+                blockers.push(format!(
+                    "Package {} release gate is not passed.",
+                    gate.package
+                ));
             }
         }
         for package in REQUIRED_PACKAGES {
             if !seen.contains(package) {
-                blockers.push(format!("Missing release gate evidence for package {package}."));
+                blockers.push(format!(
+                    "Missing release gate evidence for package {package}."
+                ));
             }
         }
         if !evidence.fixture_matrix_passed {
@@ -107,7 +115,11 @@ impl CutoverVerifier {
             {
                 blockers.push(format!(
                     "Incomplete external tool provenance for {}.",
-                    if tool.name.is_empty() { "unnamed tool" } else { &tool.name }
+                    if tool.name.is_empty() {
+                        "unnamed tool"
+                    } else {
+                        &tool.name
+                    }
                 ));
             }
         }

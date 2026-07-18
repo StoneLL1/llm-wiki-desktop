@@ -32,8 +32,12 @@ export function useChatStream(): void {
       if (!event.taskId) return;
       const payload = event.payload as StreamDelta | undefined;
       if (!payload) return;
-      const route = payload.route === "agent" || payload.route === "byok" ? payload.route : null;
-      appendStreamDelta(event.taskId, payload.delta, route);
+      const route = payload.route === "chat-agent" || payload.route === "agent"
+        ? "agent"
+        : payload.route === "chat-byok" || payload.route === "byok"
+          ? "byok"
+          : null;
+      if (route) appendStreamDelta(event.taskId, payload.delta, route);
     })
       .then((fn) => {
         if (cancelled) fn();

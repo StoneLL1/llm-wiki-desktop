@@ -1,6 +1,6 @@
 use llm_wiki_desktop_lib::services::import_v2::migration::{
-    CutoverVerifier, ExternalToolLicenseEvidence, MigrationReadinessEvidence,
-    PackageGateEvidence, REQUIRED_IMPORT_V2_CONTRACT,
+    CutoverVerifier, ExternalToolLicenseEvidence, MigrationReadinessEvidence, PackageGateEvidence,
+    REQUIRED_IMPORT_V2_CONTRACT,
 };
 
 fn passing_evidence() -> MigrationReadinessEvidence {
@@ -44,8 +44,14 @@ fn readiness_verifier_blocks_missing_package_evidence_and_bad_licenses() {
     evidence.license_evidence[0].license = "GPL-3.0".into();
     let result = CutoverVerifier::default().verify(&evidence);
     assert!(!result.passed);
-    assert!(result.blockers.iter().any(|blocker| blocker.contains("web")));
-    assert!(result.blockers.iter().any(|blocker| blocker.contains("license")));
+    assert!(result
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("web")));
+    assert!(result
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("license")));
 }
 
 #[test]
@@ -55,5 +61,8 @@ fn readiness_verifier_rejects_missing_external_tool_provenance() {
     evidence.license_evidence[0].fallback.clear();
     let result = CutoverVerifier::default().verify(&evidence);
     assert!(!result.passed);
-    assert!(result.blockers.iter().any(|blocker| blocker.contains("provenance")));
+    assert!(result
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("provenance")));
 }

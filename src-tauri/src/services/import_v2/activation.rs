@@ -195,11 +195,20 @@ impl ImportV2ActivationService {
 }
 
 fn io_error(error: std::io::Error) -> BackendError {
-    BackendError::new("IMPORT_V2_ACTIVATION_READ_FAILED", error.to_string(), true, true)
+    BackendError::new(
+        "IMPORT_V2_ACTIVATION_READ_FAILED",
+        error.to_string(),
+        true,
+        true,
+    )
 }
 
 fn digest(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
-    digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

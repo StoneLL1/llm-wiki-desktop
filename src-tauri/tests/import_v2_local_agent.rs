@@ -433,7 +433,11 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
             assert_eq!(audit.task_id, task.id);
             assert_eq!(
                 audit.outcome,
-                if mode == "cancel" { "cancelled" } else { "failed" }
+                if mode == "cancel" {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
             );
             assert!(!audit.warnings.is_empty());
         }
@@ -454,12 +458,8 @@ fn text_only_import_profile_rejects_binary_source_before_process_invocation() {
     std::fs::write(root.path().join("source/source.bin"), [0xff, 0xfe, 0x00]).unwrap();
     let skill = root.path().join("SKILL.md");
     std::fs::write(&skill, "safe").unwrap();
-    let error = AgentService::import_assistance_invocation(
-        AgentKind::Claude,
-        root.path(),
-        &skill,
-    )
-    .unwrap_err();
+    let error = AgentService::import_assistance_invocation(AgentKind::Claude, root.path(), &skill)
+        .unwrap_err();
     assert_eq!(error.code, "IMPORT_AGENT_BINARY_INPUT_UNSUPPORTED");
 }
 
@@ -531,7 +531,10 @@ fn system_runner_redacts_stdout_stderr_and_stops_a_cancelled_process() {
         TaskStatus::Cancelled
     );
     std::thread::sleep(Duration::from_millis(200));
-    assert!(!process_is_alive(pid), "grandchild process {pid} survived cancellation");
+    assert!(
+        !process_is_alive(pid),
+        "grandchild process {pid} survived cancellation"
+    );
 }
 
 fn process_tree_invocation(cwd: &std::path::Path, pid_file: &std::path::Path) -> AgentInvocation {
@@ -546,11 +549,7 @@ fn process_tree_invocation(cwd: &std::path::Path, pid_file: &std::path::Path) ->
         )
     } else {
         let path = pid_file.to_string_lossy().replace('\'', "'\\''");
-        test_process_invocation(
-            cwd,
-            "",
-            &format!("sleep 30 & echo $! > '{path}'; sleep 30"),
-        )
+        test_process_invocation(cwd, "", &format!("sleep 30 & echo $! > '{path}'; sleep 30"))
     }
 }
 

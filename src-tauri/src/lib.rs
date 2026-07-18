@@ -35,7 +35,9 @@ pub fn run() {
                 );
             }
             if let Ok(app_data) = app.path().app_data_dir() {
-                let _ = state.connector_session_service.recover_orphans(&app_data.join("connector-profiles"));
+                let _ = state
+                    .connector_session_service
+                    .recover_orphans(&app_data.join("connector-profiles"));
             }
 
             // Build tray menu: Show / Hide / Quit. Labels + tooltip are
@@ -162,9 +164,13 @@ pub fn run() {
             commands::import_commands::validate_import_url,
             commands::import_v2_commands::create_import_session_v2,
             commands::import_v2_commands::get_import_session_v2,
+            commands::import_v2_commands::get_import_history_session_v2,
             commands::import_v2_commands::add_import_items_v2,
             commands::import_v2_commands::add_import_text_v2,
             commands::import_v2_commands::set_import_item_selection_v2,
+            commands::import_v2_commands::cancel_import_item_v2,
+            commands::import_v2_commands::cancel_import_batch_v2,
+            commands::import_v2_commands::skip_import_item_v2,
             commands::import_v2_commands::start_import_items_v2,
             commands::import_v2_commands::confirm_import_session_v2,
             commands::import_v2_agent_commands::get_import_agent_policy_v2,
@@ -201,6 +207,7 @@ pub fn run() {
             commands::task_commands::get_task,
             commands::task_commands::cancel_task,
             commands::task_commands::get_task_logs,
+            commands::task_commands::get_task_activities,
             commands::task_commands::remove_completed_tasks,
             commands::task_commands::set_active_project,
             commands::wiki_commands::scan_wiki,

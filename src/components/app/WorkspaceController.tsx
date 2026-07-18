@@ -1,4 +1,5 @@
 import { PanelRightOpen } from "lucide-react";
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 import { RunAgentDialog } from "../../features/agent/RunAgentDialog";
@@ -23,9 +24,13 @@ export function WorkspaceController() {
   );
   const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
   const settingsOpen = useNavigationStore((state) => state.settingsOpen);
+  const agentRunPreset = useNavigationStore((state) => state.agentRunPreset);
+  const clearAgentRunRequest = useNavigationStore((state) => state.clearAgentRunRequest);
   const closeSettings = useNavigationStore((state) => state.closeSettings);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const tasks = useTaskStore((state) => state.tasks);
+  const activities = useTaskStore((state) => state.activities);
+  const taskOutputs = useTaskStore((state) => state.taskOutputs);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const capabilities = useAiCapabilities(
@@ -44,6 +49,12 @@ export function WorkspaceController() {
     capabilities,
     taskLauncher,
   );
+
+  useEffect(() => {
+    if (!agentRunPreset || activeView !== "agent") return;
+    clearAgentRunRequest();
+    agentWorkflow.openRunDialog(agentRunPreset);
+  }, [activeView, agentRunPreset, agentWorkflow.openRunDialog, clearAgentRunRequest]);
 
   const workspaceClass =
     activeView === "wiki" ||
@@ -84,6 +95,8 @@ export function WorkspaceController() {
           importWorkflow={importWorkflow}
           agentWorkflow={agentWorkflow}
           tasks={tasks}
+          activities={activities}
+          taskOutputs={taskOutputs}
           onOpenTask={openTaskDrawer}
           onNavigate={setActiveView}
         />

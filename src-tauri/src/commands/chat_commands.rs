@@ -19,7 +19,9 @@ use crate::models::git::CheckpointPurpose;
 use crate::models::git::GitChangedFile;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
-use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
+use crate::models::task::{
+    BackendTask, TaskActivity, TaskActivityStatus, TaskResult, TaskStatus, TaskType,
+};
 use crate::services::{
     AgentService, ChatIntent, ConvenienceAuditStatus, LlmService, RetrievalContext,
 };
@@ -154,6 +156,14 @@ async fn run_chat_send(
         .task_service
         .append_log(task_id, LogLevel::Info, "Retrieving local context".into())
         .map_err(task_error)?;
+    state.task_service.emit_activity(
+        task_id,
+        TaskActivity::Phase {
+            name: "retrieval".into(),
+            status: TaskActivityStatus::Started,
+            label: Some("Retrieving local context".into()),
+        },
+    );
     let language = state
         .settings_service
         .read_settings(context)
@@ -171,6 +181,14 @@ async fn run_chat_send(
             &language,
             request.pinned_page_path.as_deref(),
         )?;
+        state.task_service.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "retrieval".into(),
+                status: TaskActivityStatus::Completed,
+                label: Some("Local context ready".into()),
+            },
+        );
         return run_chat_convenience_send(
             state,
             request,
@@ -203,6 +221,14 @@ async fn run_chat_send(
         context_window,
         request.pinned_page_path.as_deref(),
     )?;
+    state.task_service.emit_activity(
+        task_id,
+        TaskActivity::Phase {
+            name: "retrieval".into(),
+            status: TaskActivityStatus::Completed,
+            label: Some("Local context ready".into()),
+        },
+    );
 
     let (route, answer, provider) = match resolved {
         ResolvedRoute::Agent(kind) => {
@@ -225,16 +251,51 @@ async fn run_chat_send(
                     &task_id_owned,
                     crate::models::task::StreamDelta {
                         delta: delta.to_string(),
-                        route: Some("agent".to_string()),
+                        route: Some("chat-agent".to_string()),
                     },
                 );
             };
-            let captured = state.agent_service.run_task_streaming_with_delta(
+            let task_service = &state.task_service;
+            let task_id_owned = task_id.to_string();
+            let on_activity = move |activity: TaskActivity| {
+                task_service.emit_activity(&task_id_owned, activity);
+            };
+            state.task_service.emit_activity(
+                task_id,
+                TaskActivity::Phase {
+                    name: "agent".into(),
+                    status: TaskActivityStatus::Started,
+                    label: Some(format!("Running {}", kind.command())),
+                },
+            );
+            let captured = match state.agent_service.run_task_streaming_with_events(
                 &invocation,
                 &state.task_service,
                 task_id,
                 &on_delta,
-            )?;
+                &on_activity,
+            ) {
+                Ok(captured) => captured,
+                Err(error) => {
+                    state.task_service.emit_activity(
+                        task_id,
+                        TaskActivity::Phase {
+                            name: "agent".into(),
+                            status: TaskActivityStatus::Failed,
+                            label: Some("Agent response failed".into()),
+                        },
+                    );
+                    return Err(error);
+                }
+            };
+            state.task_service.emit_activity(
+                task_id,
+                TaskActivity::Phase {
+                    name: "agent".into(),
+                    status: TaskActivityStatus::Completed,
+                    label: Some("Agent response ready".into()),
+                },
+            );
             (ChatRoute::Agent, captured.trim().to_string(), None)
         }
         ResolvedRoute::Byok(provider) => {
@@ -247,6 +308,14 @@ async fn run_chat_send(
                     format!("Calling {:?}", provider_kind),
                 )
                 .map_err(task_error)?;
+            state.task_service.emit_activity(
+                task_id,
+                TaskActivity::Phase {
+                    name: "generation".into(),
+                    status: TaskActivityStatus::Started,
+                    label: Some("Calling BYOK provider".into()),
+                },
+            );
             let secret = state.secret_service.get(provider_kind)?;
             // Real streaming: each text delta is forwarded to the task stream
             // channel for live rendering, and cancellation is polled between
@@ -265,7 +334,7 @@ async fn run_chat_send(
                             &task_id_owned,
                             crate::models::task::StreamDelta {
                                 delta: delta.to_string(),
-                                route: Some("byok".to_string()),
+                                route: Some("chat-byok".to_string()),
                             },
                         );
                     },
@@ -283,6 +352,14 @@ async fn run_chat_send(
                 }
                 Err(error) => return Err(error),
             };
+            state.task_service.emit_activity(
+                task_id,
+                TaskActivity::Phase {
+                    name: "generation".into(),
+                    status: TaskActivityStatus::Completed,
+                    label: Some("Provider response ready".into()),
+                },
+            );
             (ChatRoute::Byok, raw.trim().to_string(), Some(provider_kind))
         }
     };
@@ -406,15 +483,51 @@ async fn run_chat_convenience_send(
             &task_id_owned,
             crate::models::task::StreamDelta {
                 delta: delta.to_string(),
-                route: Some("agent".to_string()),
+                route: Some("chat-agent".to_string()),
             },
         );
     };
-    let answer = state
-        .agent_service
-        .run_task_streaming_with_delta(&invocation, &state.task_service, task_id, &on_delta)?
-        .trim()
-        .to_string();
+    let task_service = &state.task_service;
+    let task_id_owned = task_id.to_string();
+    let on_activity = move |activity: TaskActivity| {
+        task_service.emit_activity(&task_id_owned, activity);
+    };
+    state.task_service.emit_activity(
+        task_id,
+        TaskActivity::Phase {
+            name: "agent".into(),
+            status: TaskActivityStatus::Started,
+            label: Some(format!("Running {} in Chat convenience mode", kind.command())),
+        },
+    );
+    let answer = match state.agent_service.run_task_streaming_with_events(
+        &invocation,
+        &state.task_service,
+        task_id,
+        &on_delta,
+        &on_activity,
+    ) {
+        Ok(answer) => answer.trim().to_string(),
+        Err(error) => {
+            state.task_service.emit_activity(
+                task_id,
+                TaskActivity::Phase {
+                    name: "agent".into(),
+                    status: TaskActivityStatus::Failed,
+                    label: Some("Agent response failed".into()),
+                },
+            );
+            return Err(error);
+        }
+    };
+    state.task_service.emit_activity(
+        task_id,
+        TaskActivity::Phase {
+            name: "agent".into(),
+            status: TaskActivityStatus::Completed,
+            label: Some("Agent response ready".into()),
+        },
+    );
 
     if state.task_service.is_cancelled(task_id) {
         return Err(BackendError::new(

@@ -29,16 +29,18 @@ export type ImportRecoveryAction = "install_capability" | "retry" | "switch_pars
 export interface ImportIssue { code: string; message: string; stage: ImportStage; retryable: boolean; userActionRequired: boolean; recoveryActions: ImportRecoveryAction[]; availableActions: AgentRecoveryAction[]; }
 export interface ImportPreviewArtifact { markdown: ImportArtifact; assets: ImportArtifact[]; sourceSnapshot: ImportArtifact; quality: QualityReport; title: string; }
 export interface ImportItem { itemId: string; input: ImportInput; status: ImportItemStatus; selected: boolean; taskId: string | null; progress: TaskProgress | null; attempts: AttemptRecord[]; preview: ImportPreviewArtifact | null; issue: ImportIssue | null; }
-export interface ImportSession { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; items: ImportItem[]; }
+export interface ImportSession { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; discoveryTaskId?: string | null; items: ImportItem[]; }
 
 export interface CreateImportSessionV2Request { projectId: string; projectRootPath: string; resourceMode: ImportResourceMode; }
-export interface GetImportSessionV2Request { projectId: string; projectRootPath: string; sessionId: string; }
+export interface GetImportSessionV2Request { projectId: string; projectRootPath: string; sessionId: string; historyBatchId?: string | null; }
 export interface AddImportItemsV2Request { projectId: string; projectRootPath: string; sessionId: string; inputs: ImportInput[]; }
 export interface SetImportItemSelectionV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; selected: boolean; }
-export interface StartImportItemsV2Request { projectId: string; projectRootPath: string; sessionId: string; itemIds: string[]; }
+export interface StartImportItemsV2Request { projectId: string; projectRootPath: string; sessionId: string; itemIds: string[]; recoveryAction?: ImportRecoveryAction | null; }
+export interface CancelImportBatchV2Request { projectId: string; projectRootPath: string; sessionId: string; batchId: string; }
+export interface CancelImportItemV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; }
 
 export type CommitConflictAction = "create_new" | "keep_wiki" | "apply_merged_candidate";
 export interface CommitItemDecision { itemId: string; conflictAction: CommitConflictAction | null; expectedWikiHash: string | null; }
-export interface CommitImportSessionRequest { projectId: string; projectRootPath: string; sessionId: string; decisions: CommitItemDecision[]; }
+export interface CommitImportSessionRequest { projectId: string; projectRootPath: string; sessionId: string; batchTaskId?: string | null; decisions: CommitItemDecision[]; }
 export interface ImportItemCommitResult { itemId: string; sourceId: string | null; versionId: string | null; wikiPath: string | null; committed: boolean; errorCode: string | null; }
-export interface ImportBatchResult { batchId: string; sessionId: string; committedCount: number; failedCount: number; items: ImportItemCommitResult[]; }
+export interface ImportBatchResult { batchId: string; sessionId: string; batchTaskId?: string | null; committedCount: number; failedCount: number; items: ImportItemCommitResult[]; }

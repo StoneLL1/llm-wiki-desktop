@@ -31,8 +31,8 @@ describe("presentImportItem", () => {
     ["waiting_login", "importV2.itemStatus.waitingLogin", "login", "none", ["begin_login", "cancel"], false],
     ["extracting", "importV2.itemStatus.extracting", "scan", "indeterminate", ["cancel"], false],
     ["validating", "importV2.itemStatus.validating", "shield", "indeterminate", ["cancel"], false],
-    ["preview_ready", "importV2.itemStatus.previewReady", "ready", "none", ["inspect", "preview_markdown"], true],
-    ["needs_merge", "importV2.itemStatus.needsMerge", "merge", "none", ["compare_candidate", "resolve_merge", "discard_candidate"], true],
+    ["preview_ready", "importV2.itemStatus.previewReady", "ready", "none", ["preview_markdown"], true],
+    ["needs_merge", "importV2.itemStatus.needsMerge", "merge", "none", ["compare_candidate", "resolve_merge", "discard_candidate"], false],
     ["committing", "importV2.itemStatus.committing", "commit", "indeterminate", ["cancel"], false],
     ["completed", "importV2.itemStatus.completed", "completed", "none", ["open_result", "preview_markdown"], false],
     ["paused", "importV2.itemStatus.paused", "pause", "none", ["retry", "cancel"], false],
@@ -74,5 +74,85 @@ describe("presentImportItem", () => {
     }));
 
     expect(presentation.actions).toEqual(["retry", "invoke_local_agent", "request_byok"]);
+  });
+
+  it("does not offer retry when the backend marks a failure non-retryable", () => {
+    const presentation = presentImportItem(item("failed", {
+      input: {
+        kind: "file",
+        displayName: "failed.pdf",
+        locator: "C:\\sources\\failed.pdf",
+        normalizedLocator: null,
+      },
+      issue: {
+        code: "FAILED",
+        message: "failed",
+        stage: "extract",
+        retryable: false,
+        userActionRequired: true,
+        recoveryActions: [],
+        availableActions: [],
+      },
+    }));
+
+    expect(presentation.actions).toEqual([]);
+  });
+
+  it("turns parser, OCR, route, and skip recovery codes into executable queue actions", () => {
+    const presentation = presentImportItem(item("failed", {
+      issue: {
+        code: "IMPORT_FILE_QUALITY_FAILED",
+        message: "quality failed",
+        stage: "validate",
+        retryable: true,
+        userActionRequired: true,
+        recoveryActions: ["enable_ocr", "switch_parser", "switch_route", "retry_route", "skip"],
+        availableActions: [],
+      },
+      input: {
+        kind: "file",
+        displayName: "failed.pdf",
+        locator: "C:\\sources\\failed.pdf",
+        normalizedLocator: null,
+      },
+    }));
+
+    expect(presentation.actions).toEqual([
+      "retry",
+      "retry_route",
+      "switch_route",
+      "switch_parser",
+      "enable_ocr",
+      "skip",
+    ]);
+  });
+
+  it("exposes a task-log recovery action only when the item has a task", () => {
+    const withTask = presentImportItem(item("failed", {
+      taskId: "task-1",
+      issue: {
+        code: "FAILED",
+        message: "failed",
+        stage: "extract",
+        retryable: false,
+        userActionRequired: true,
+        recoveryActions: ["view_log"],
+        availableActions: [],
+      },
+    }));
+    const withoutTask = presentImportItem(item("failed", {
+      issue: {
+        code: "FAILED",
+        message: "failed",
+        stage: "extract",
+        retryable: false,
+        userActionRequired: true,
+        recoveryActions: ["view_log"],
+        availableActions: [],
+      },
+    }));
+
+    expect(withTask.actions).toContain("view_log");
+    expect(withoutTask.actions).not.toContain("view_log");
   });
 });

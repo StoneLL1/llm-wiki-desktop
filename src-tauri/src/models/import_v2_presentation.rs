@@ -13,6 +13,8 @@ pub struct GetImportPreviewContentV2Request {
     pub session_id: String,
     pub item_id: String,
     pub candidate_id: Option<String>,
+    #[serde(default)]
+    pub history_batch_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +45,17 @@ pub struct ImportFrontendReadiness {
     pub migration_status: MigrationStatus,
     pub unfinished_session_id: Option<String>,
     pub legacy_history_available: bool,
+    #[serde(default)]
+    pub platforms: Vec<ImportPlatformReadiness>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPlatformReadiness {
+    pub id: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +68,14 @@ pub struct ListImportHistoryV2Request {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportHistoryAction {
+    OpenDetail,
+    OpenResult,
+    ViewLogs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportHistoryEntry {
     pub id: String,
@@ -62,11 +83,17 @@ pub struct ImportHistoryEntry {
     pub status: String,
     pub session_id: Option<String>,
     pub batch_id: Option<String>,
+    pub task_id: Option<String>,
     pub started_at: Option<String>,
     pub updated_at: Option<String>,
     pub completed_at: Option<String>,
     pub legacy_read_only: bool,
-    pub available_actions: Vec<String>,
+    pub item_ids: Vec<String>,
+    pub available_actions: Vec<ImportHistoryAction>,
+    /// False for pre-snapshot records that can only be shown through a
+    /// best-effort live-session compatibility fallback.
+    #[serde(default)]
+    pub snapshot_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

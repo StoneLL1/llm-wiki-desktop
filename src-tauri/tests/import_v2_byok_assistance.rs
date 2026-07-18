@@ -17,8 +17,7 @@ use llm_wiki_desktop_lib::{
     },
     services::{
         import_v2::{
-            agent_assistance::AgentAssistanceService,
-            agent_candidate::AgentCandidateService,
+            agent_assistance::AgentAssistanceService, agent_candidate::AgentCandidateService,
             ImportV2Service, SessionStore,
         },
         AgentService, FileStore, LlmService, SecretService, SettingsService,
@@ -205,17 +204,19 @@ fn byok_scope_is_exact_expiring_and_one_shot() {
         .unwrap();
     let serialized = serde_json::to_string(&scope).unwrap();
     assert!(!serialized.contains("sk-must-never-persist"));
-    tokio::runtime::Runtime::new().unwrap().block_on(service.run_byok(
-        &context,
-        "session-a",
-        "item-a",
-        &task.id,
-        AgentAssistanceTrigger::Manual,
-        LlmProviderKind::OpenAi,
-        &LlmService,
-        &secrets,
-    ))
-    .unwrap();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(service.run_byok(
+            &context,
+            "session-a",
+            "item-a",
+            &task.id,
+            AgentAssistanceTrigger::Manual,
+            LlmProviderKind::OpenAi,
+            &LlmService,
+            &secrets,
+        ))
+        .unwrap();
     server.join().unwrap();
     let request = captured.lock().unwrap().clone();
     assert!(request.contains("Bearer sk-must-never-persist"));
@@ -237,7 +238,10 @@ fn byok_scope_is_exact_expiring_and_one_shot() {
     assert_eq!(audit.prompt_template_version, "wiki-ingest-assist/byok-v1");
     assert_eq!(audit.approved_cost_micros, scope.estimated_cost_micros);
     assert_eq!(audit.byok_provider.as_deref(), Some("open_ai"));
-    assert_eq!(audit.byok_destination.as_deref(), Some(scope.destination.as_str()));
+    assert_eq!(
+        audit.byok_destination.as_deref(),
+        Some(scope.destination.as_str())
+    );
     assert_eq!(audit.outcome, "succeeded");
     assert_eq!(audit.output_hashes.len(), 1);
 
@@ -246,9 +250,18 @@ fn byok_scope_is_exact_expiring_and_one_shot() {
         .unwrap();
     assert_eq!(candidate.audit_id, audit.audit_id);
 
-    let affected = tasks.get_task(&task.id).unwrap().result.unwrap().affected_paths[0].clone();
-    std::fs::write(root.path().join(affected).join("candidate.md"), "tampered after response")
-        .unwrap();
+    let affected = tasks
+        .get_task(&task.id)
+        .unwrap()
+        .result
+        .unwrap()
+        .affected_paths[0]
+        .clone();
+    std::fs::write(
+        root.path().join(affected).join("candidate.md"),
+        "tampered after response",
+    )
+    .unwrap();
     assert!(AgentCandidateService::new(&imports, &files, &tasks)
         .accept_staged_output(&context, "session-a", "item-a", &task.id)
         .is_err());
@@ -337,7 +350,12 @@ fn byok_server() -> (u16, Arc<Mutex<String>>, thread::JoinHandle<()>) {
                 let headers = String::from_utf8_lossy(&bytes[..header_end + 4]);
                 let length = headers
                     .lines()
-                    .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(str::trim).and_then(|value| value.parse::<usize>().ok()))
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(str::trim)
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
                     .unwrap_or(0);
                 if bytes.len() >= header_end + 4 + length {
                     break;

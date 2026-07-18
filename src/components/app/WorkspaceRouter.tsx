@@ -6,7 +6,7 @@ import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { AppView } from "../../stores/navigationStore";
-import type { BackendTask } from "../../types/task";
+import type { BackendTask, TaskActivity } from "../../types/task";
 import { ViewErrorBoundary } from "./ViewErrorBoundary";
 import { ViewFallback } from "./ViewFallback";
 
@@ -53,6 +53,8 @@ interface WorkspaceRouterProps {
   importWorkflow: ImportWorkflow;
   agentWorkflow: AgentWorkflow;
   tasks: BackendTask[];
+  activities?: Record<string, TaskActivity[]>;
+  taskOutputs?: Record<string, string>;
   onOpenTask: (taskId: string) => void;
   onNavigate: (view: AppView) => void;
 }
@@ -64,6 +66,8 @@ export function WorkspaceRouter({
   importWorkflow,
   agentWorkflow,
   tasks,
+  activities = {},
+  taskOutputs = {},
   onOpenTask,
   onNavigate,
 }: WorkspaceRouterProps) {
@@ -96,6 +100,8 @@ export function WorkspaceRouter({
                 task.taskType === "deep_lint" ||
                 task.taskType === "export",
             )}
+            activities={activities}
+            taskOutputs={taskOutputs}
             onOpenTask={onOpenTask}
             onDetect={capabilities.refresh}
             onRunAgent={agentWorkflow.openRunDialog}

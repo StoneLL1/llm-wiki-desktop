@@ -8,7 +8,14 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, values?: Record<string, string>) =>
-      key === "task.cancelError" ? `Could not cancel task: ${values?.message}` : key,
+      key === "task.cancelError" ? `Could not cancel task: ${values?.message}` :
+        key === "task.importSummary.title" ? "Import activity (visible tasks)" :
+          key === "task.importSummary.progress" ? `${values?.processed}/${values?.total} visible import tasks finished` :
+            key === "task.importSummary.summary" ? `${values?.active} active / ${values?.waitingForConfirmation} waiting for action / ${values?.failed} failed / ${values?.cancelled} cancelled` :
+              key === "task.importBatches.title" ? "Import batches" :
+                  key === "task.importBatches.batch" ? `Batch ${values?.index} · ${values?.title}` :
+                  key === "task.importBatches.progress" ? `${values?.processed}/${values?.total}` :
+                    key === "task.importBatches.summary" ? `${values?.active} active / ${values?.waitingForConfirmation} waiting for action / ${values?.failed} failed / ${values?.cancelled} cancelled` : key,
   }),
 }));
 
@@ -70,6 +77,38 @@ describe("TaskLogDrawer", () => {
     );
   });
 
+  it("deduplicates cancellation requests while one is pending", async () => {
+    let resolveCancel: ((task: BackendTask) => void) | undefined;
+    const pendingCancel = new Promise<BackendTask>((resolve) => { resolveCancel = resolve; });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "cancel_task") return pendingCancel;
+      if (command === "get_task_logs") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+
+    render(<TaskLogDrawer />);
+    const cancelButton = screen.getAllByRole("button", { name: "task.action.cancel" })[0];
+    fireEvent.click(cancelButton);
+    fireEvent.click(cancelButton);
+
+    expect(invokeMock.mock.calls.filter(([command]) => command === "cancel_task")).toHaveLength(1);
+    resolveCancel?.({ ...runningTask, status: "cancelled", cancellable: false, completedAt: "2026-07-15T00:00:02Z" });
+    await waitFor(() => expect(cancelButton).not.toBeDisabled());
+  });
+
+  it("keeps cancellation disabled while the backend reports cancelling", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "cancel_task") return Promise.resolve({ ...runningTask, status: "cancelling" });
+      if (command === "get_task_logs") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+
+    render(<TaskLogDrawer />);
+    const cancelButton = screen.getAllByRole("button", { name: "task.action.cancel" })[0];
+    fireEvent.click(cancelButton);
+    await waitFor(() => expect(cancelButton).toBeDisabled());
+  });
+
   it("shows latest execution tasks first by default regardless of status", () => {
     const oldRunning = {
       ...runningTask,
@@ -128,5 +167,115 @@ describe("TaskLogDrawer", () => {
     fireEvent.click(screen.getByRole("button", { name: "task.sort.status" }));
 
     expect(useTaskStore.getState().selectedTaskId).toBe("new-failed");
+  });
+
+  it("summarizes multiple import tasks above the task list", () => {
+    const failedTask = {
+      ...runningTask,
+      id: "task-failed",
+      title: "Failed import",
+      status: "failed" as const,
+      cancellable: false,
+      completedAt: "2026-07-15T00:00:02Z",
+    };
+    useTaskStore.setState({
+      tasks: [runningTask, failedTask],
+      selectedTaskId: "task-1",
+    });
+
+    render(<TaskLogDrawer />);
+
+    expect(screen.getByText("Import activity (visible tasks)")).toBeInTheDocument();
+    expect(screen.getByText("1/2 visible import tasks finished")).toBeInTheDocument();
+    expect(screen.getByText("1 active / 0 waiting for action / 1 failed / 0 cancelled")).toBeInTheDocument();
+  });
+
+  it("shows preview-ready imports as reviewable rather than active", () => {
+    const waitingTask = {
+      ...runningTask,
+      id: "waiting-task",
+      title: "Ready import",
+      status: "waiting_for_confirmation" as const,
+      cancellable: true,
+    };
+    const failedTask = {
+      ...runningTask,
+      id: "waiting-failed",
+      title: "Failed import",
+      status: "failed" as const,
+      cancellable: false,
+      completedAt: "2026-07-15T00:00:02Z",
+    };
+    useTaskStore.setState({ tasks: [waitingTask, failedTask], selectedTaskId: "waiting-task" });
+
+    render(<TaskLogDrawer />);
+
+    expect(screen.getByText("2/2 visible import tasks finished")).toBeInTheDocument();
+    expect(screen.getByText("0 active / 1 waiting for action / 1 failed / 0 cancelled")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "task.action.cancel" })).not.toBeInTheDocument();
+  });
+
+  it("folds batched imports and exposes their recent logs and child tasks", () => {
+    const first = { ...runningTask, id: "batch-task-1", title: "Import first", batchId: "batch-1" };
+    const second = { ...runningTask, id: "batch-task-2", title: "Import second", batchId: "batch-1", status: "failed" as const, cancellable: false };
+    useTaskStore.setState({
+      tasks: [first, second],
+      logs: { "batch-task-1": [{ timestamp: "2026-06-21T00:00:01Z", level: "info", message: "started" }] },
+      selectedTaskId: "batch-task-1",
+    });
+
+    render(<TaskLogDrawer />);
+
+    expect(screen.getByText("Import batches")).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/Batch 1/));
+    expect(screen.getByText("Import first: started")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Import second$/ }));
+    expect(useTaskStore.getState().selectedTaskId).toBe("batch-task-2");
+  });
+
+  it("moves focus into the drawer and returns it to the opener", async () => {
+    useTaskStore.setState({ drawerOpen: false, selectedTaskId: null });
+
+    render(
+      <>
+        <button type="button" onClick={() => useTaskStore.getState().openDrawer("task-1")}>
+          Open tasks
+        </button>
+        <TaskLogDrawer />
+      </>,
+    );
+
+    const opener = screen.getByRole("button", { name: "Open tasks" });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const closeButton = await screen.findByRole("button", { name: "task.drawer.close" });
+    await waitFor(() => expect(closeButton).toHaveFocus());
+
+    fireEvent.click(closeButton);
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it("closes on Escape without leaking the shortcut to the shell", async () => {
+    useTaskStore.setState({ drawerOpen: false, selectedTaskId: null });
+
+    render(
+      <>
+        <button type="button" onClick={() => useTaskStore.getState().openDrawer("task-1")}>
+          Open tasks
+        </button>
+        <TaskLogDrawer />
+      </>,
+    );
+
+    const opener = screen.getByRole("button", { name: "Open tasks" });
+    opener.focus();
+    fireEvent.click(opener);
+    const closeButton = await screen.findByRole("button", { name: "task.drawer.close" });
+    await waitFor(() => expect(closeButton).toHaveFocus());
+
+    fireEvent.keyDown(closeButton, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(opener).toHaveFocus();
   });
 });

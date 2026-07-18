@@ -1,21 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { Pencil, Trash2 } from "lucide-react";
+import { ChevronDown, Pencil, Sparkles, Trash2 } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { fetchTaskActivities, useTaskStore } from "../../stores/taskStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { isTerminalStatus } from "../../types/task";
+import type { TaskActivity, TaskStatus } from "../../types/task";
 import type { ChatMessage, ChatRoutePreference } from "../../types/chat";
 import type { LlmProviderKind } from "../../types/llm";
 import { ChatComposer } from "./ChatComposer";
 import { ChatConveniencePanel } from "./ChatConveniencePanel";
 import { ChatSessionList } from "./ChatSessionList";
 import { MessageContent } from "./MessageContent";
+import { AgentActivityTimeline } from "../../components/agent/AgentActivityTimeline";
 
 const SEGMENT_OPTIONS: readonly { value: ChatRoutePreference; key: string }[] = [
   { value: "auto", key: "chat.composer.route.auto" },
@@ -56,6 +58,7 @@ export function ChatView() {
   const activeSession = useChatStore((state) => state.activeSession);
   const loadingSessions = useChatStore((state) => state.loadingSessions);
   const sendTaskId = useChatStore((state) => state.sendTaskId);
+  const sendSessionId = useChatStore((state) => state.sendSessionId);
   const clearSendTask = useChatStore((state) => state.clearSendTask);
   const saveStatus = useChatStore((state) => state.saveStatus);
   const overwriteRequest = useChatStore((state) => state.overwriteRequest);
@@ -80,6 +83,7 @@ export function ChatView() {
   const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
 
   const tasks = useTaskStore((state) => state.tasks);
+  const activities = useTaskStore((state) => state.activities);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const cancelTask = useTaskStore((state) => state.upsertTask);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
@@ -88,14 +92,31 @@ export function ChatView() {
   const { projectId, rootPath } = currentProject;
   const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;
   const generating =
-    sendTask?.status === "running" ||
-    sendTask?.status === "queued" ||
-    sendTask?.status === "cancelling";
+    sendSessionId === activeSessionId &&
+    (sendTask?.status === "running" ||
+      sendTask?.status === "queued" ||
+      sendTask?.status === "cancelling");
+  const streamActivities = sendTaskId ? activities[sendTaskId] ?? [] : [];
+  const activityTaskIds = activeSession?.messages
+    .map((message) => message.taskId)
+    .filter((taskId): taskId is string => Boolean(taskId))
+    .join("|") ?? "";
+  const transcriptScroll = useTranscriptScroll(
+    activeSessionId,
+    activeSession?.messages.length ?? 0,
+    streamingText,
+    streamActivities.length,
+  );
 
   useEffect(() => {
     void loadSessions(projectId, rootPath);
     void loadChatConvenienceAuthorization(projectId, rootPath);
   }, [projectId, rootPath, loadSessions, loadChatConvenienceAuthorization]);
+
+  useEffect(() => {
+    const taskIds = activityTaskIds ? activityTaskIds.split("|") : [];
+    taskIds.forEach((taskId) => void fetchTaskActivities(taskId));
+  }, [activityTaskIds]);
 
   // When the send task reaches a terminal status, reload the session to surface
   // the persisted message, then clear the in-flight id without discarding a
@@ -194,7 +215,15 @@ export function ChatView() {
             t={t}
           />
         ) : null}
-        <div className="chat-scroll-region min-h-0 flex-1 overflow-y-auto px-6 py-4" role="log" aria-live="polite">
+        <div
+          ref={transcriptScroll.ref}
+          onScroll={transcriptScroll.onScroll}
+          className="chat-scroll-region relative min-h-0 flex-1 overflow-y-auto px-6 py-4"
+          role="log"
+          aria-label={t("chat.thread.transcriptLabel")}
+          aria-live="polite"
+          aria-busy={generating}
+        >
           {!activeSession ? (
             <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
               {t("chat.thread.empty")}
@@ -205,6 +234,8 @@ export function ChatView() {
                 <MessageBubble
                   key={message.id}
                   message={message}
+                  activities={message.taskId ? activities[message.taskId] ?? [] : []}
+                  taskStatus={message.taskId ? tasks.find((task) => task.id === message.taskId)?.status : undefined}
                   t={t}
                   generating={generating}
                   saveStatus={saveStatus[message.id] ?? "idle"}
@@ -230,7 +261,10 @@ export function ChatView() {
               {generating ? (
                 <StreamingBubble
                   text={streamingText}
+                  activities={streamActivities}
+                  taskStatus={sendTask?.status}
                   routeLabel={streamingRoute ? t(`chat.composer.route.${streamingRoute}`) : null}
+                  agentLabel={t("chat.thread.agent")}
                   placeholder={t("chat.thread.generating")}
                   onOpenLogs={() => openTaskDrawer(sendTaskId ?? undefined)}
                   openLogsLabel={t("chat.thread.openLogs")}
@@ -262,6 +296,16 @@ export function ChatView() {
               ) : null}
             </div>
           )}
+          {transcriptScroll.showBackToLatest ? (
+            <button
+              type="button"
+              className="chat-back-latest"
+              onClick={transcriptScroll.backToLatest}
+            >
+              <ChevronDown size={14} aria-hidden="true" />
+              {t("chat.thread.backToLatest")}
+            </button>
+          ) : null}
         </div>
         <ChatComposer
           routePreference={routePreference}
@@ -277,6 +321,8 @@ export function ChatView() {
 
 export interface MessageBubbleProps {
   message: ChatMessage;
+  activities?: TaskActivity[];
+  taskStatus?: TaskStatus;
   t: (k: string, opts?: Record<string, unknown>) => string;
   generating: boolean;
   saveStatus: "idle" | "saving" | "saved" | "exists" | "error";
@@ -289,6 +335,8 @@ export interface MessageBubbleProps {
 
 export function MessageBubble({
   message,
+  activities = [],
+  taskStatus,
   t,
   generating,
   saveStatus,
@@ -307,11 +355,11 @@ export function MessageBubble({
   return (
     <div className={`msg ${isUser ? "msg--user" : ""}`}>
       <div className={`msg__avatar ${isUser ? "msg__avatar--user" : "msg__avatar--ai"}`}>
-        {isUser ? "YOU" : "AI"}
+        {isUser ? t("chat.thread.youShort") : t("chat.thread.assistantShort")}
       </div>
       <div className="msg__body">
         <div className="msg__head">
-          <span className="msg__name">{isUser ? t("chat.thread.you") : "AI"}</span>
+          <span className="msg__name">{isUser ? t("chat.thread.you") : t("chat.thread.assistant")}</span>
           {time ? <span className="msg__time">{time}</span> : null}
           {!isUser && routeLabel ? (
             <span className="msg__route-badge">
@@ -323,6 +371,7 @@ export function MessageBubble({
           <div className="msg__bubble-user">{message.content}</div>
         ) : (
           <>
+            <AgentActivityTimeline activities={activities} taskStatus={taskStatus} compact />
             <MessageContent
               content={message.content}
               citationCount={citations.length}
@@ -498,31 +547,32 @@ function SessionToolbar({
 
 export interface StreamingBubbleProps {
   text: string;
+  activities: TaskActivity[];
+  taskStatus?: TaskStatus;
   routeLabel: string | null;
+  agentLabel: string;
   placeholder: string;
   onOpenLogs: () => void;
   openLogsLabel: string;
 }
 
-export function StreamingBubble({ text, routeLabel, placeholder, onOpenLogs, openLogsLabel }: StreamingBubbleProps) {
+export function StreamingBubble({ text, activities, taskStatus, routeLabel, agentLabel, placeholder, onOpenLogs, openLogsLabel }: StreamingBubbleProps) {
   return (
-    <div className="msg">
-      <div className="msg__avatar msg__avatar--ai">AI</div>
-      <div className="msg__body">
-        <div className="msg__head">
-          <span className="msg__name">AI</span>
-          <span className="msg__route-badge msg__route-badge--busy">
-            <span className="dotstatus dotstatus--busy" aria-hidden="true" style={{ width: 6, height: 6 }} />
-            {routeLabel}
-          </span>
-          <button
-            type="button"
-            onClick={onOpenLogs}
-            className="text-[11px] text-[var(--accent-hover)] hover:underline"
-          >
-            {openLogsLabel}
-          </button>
-        </div>
+    <div className="chat-transcript-item">
+      <div className="chat-agent-header">
+        <span className="chat-agent-mark" aria-hidden="true"><Sparkles size={15} /></span>
+        <span className="chat-agent-name">{routeLabel ?? agentLabel}</span>
+        <span className="chat-agent-live">{placeholder}</span>
+        <button
+          type="button"
+          onClick={onOpenLogs}
+          className="ml-auto text-[11px] text-[var(--accent-hover)] hover:underline"
+        >
+          {openLogsLabel}
+        </button>
+      </div>
+      <AgentActivityTimeline activities={activities} taskStatus={taskStatus} />
+      <div className="chat-agent-answer">
         {text ? (
           <div className="chat-prose">
             <MessageContent content={text} citationCount={0} onCitationClick={() => {}} />
@@ -537,6 +587,47 @@ export function StreamingBubble({ text, routeLabel, placeholder, onOpenLogs, ope
       </div>
     </div>
   );
+}
+
+export function useTranscriptScroll(
+  sessionId: string | null,
+  messageCount: number,
+  streamingText: string,
+  activityCount: number,
+) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [isPinned, setIsPinned] = useState(true);
+
+  const onScroll = () => {
+    const element = ref.current;
+    if (!element) return;
+    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+    setIsPinned(distance < 72);
+  };
+
+  useEffect(() => {
+    setIsPinned(true);
+    const element = ref.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!isPinned) return;
+    const element = ref.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [isPinned, messageCount, streamingText, activityCount]);
+
+  return {
+    ref,
+    onScroll,
+    showBackToLatest: !isPinned,
+    backToLatest: () => {
+      const element = ref.current;
+      if (!element) return;
+      element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+      setIsPinned(true);
+    },
+  };
 }
 
 interface SaveAnswerButtonProps {

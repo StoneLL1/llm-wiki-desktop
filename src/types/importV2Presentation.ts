@@ -16,12 +16,13 @@ import type {
   ImportSession,
   SetImportItemSelectionV2Request,
   StartImportItemsV2Request,
+  CancelImportBatchV2Request,
 } from "./importV2";
 import type {
   AddImportPathsV2Request,
+  CapabilityRequirement,
   FileScanResult,
   GetImportScanResultV2Request,
-  CapabilityRequirement,
 } from "./importV2File";
 import type {
   ActivateImportV2Request,
@@ -61,7 +62,16 @@ export interface ImportFrontendReadiness {
   migrationStatus: MigrationStatus;
   unfinishedSessionId: string | null;
   legacyHistoryAvailable: boolean;
+  platforms?: ImportPlatformReadiness[];
 }
+
+export interface ImportPlatformReadiness {
+  id: string;
+  available: boolean;
+  reasonCode?: string | null;
+}
+
+export type ImportHistoryAction = "open_detail" | "open_result" | "view_logs";
 
 export interface GetImportPreviewContentV2Request {
   projectId: string;
@@ -69,6 +79,7 @@ export interface GetImportPreviewContentV2Request {
   sessionId: string;
   itemId: string;
   candidateId: string | null;
+  historyBatchId?: string | null;
 }
 
 export interface GetImportFrontendReadinessV2Request {
@@ -82,11 +93,19 @@ export interface ImportHistoryEntry {
   status: string;
   sessionId: string | null;
   batchId: string | null;
+  taskId: string | null;
   startedAt: string | null;
   updatedAt: string | null;
   completedAt: string | null;
   legacyReadOnly: boolean;
-  availableActions: string[];
+  itemIds: string[];
+  availableActions: ImportHistoryAction[];
+  snapshotAvailable?: boolean;
+}
+
+export function canOpenHistoricalResult(entry: Pick<ImportHistoryEntry, "status" | "availableActions">): boolean {
+  return (entry.status === "completed" || entry.status === "partially_committed")
+    && entry.availableActions.includes("open_result");
 }
 
 export interface LegacyHistoryEntry {
@@ -240,12 +259,17 @@ export interface ApproveImportByokAssistanceV2Request {
 export interface ImportV2CommandNames {
   readonly createSession: "create_import_session_v2";
   readonly getSession: "get_import_session_v2";
+  readonly getHistorySession?: "get_import_history_session_v2";
   readonly addItems: "add_import_items_v2";
   readonly addPaths: "start_add_import_paths_v2";
   readonly getScanResult: "get_import_scan_result_v2";
   readonly addUrl: "add_import_url_v2";
   readonly setSelection: "set_import_item_selection_v2";
   readonly startItems: "start_import_items_v2";
+  readonly cancelBatch: "cancel_import_batch_v2";
+  readonly cancelItem: "cancel_import_item_v2";
+  readonly skipItem: "skip_import_item_v2";
+  readonly authorizeBilibiliAsr: "authorize_bilibili_asr_v2";
   readonly confirmSession: "confirm_import_session_v2";
   readonly getPreviewContent: "get_import_preview_content_v2";
   readonly getReadiness: "get_import_frontend_readiness_v2";
@@ -277,12 +301,17 @@ export type ImportV2Api = {
   readonly commandNames: ImportV2CommandNames;
   readonly createSession: (request: CreateImportSessionV2Request) => Promise<ImportSession>;
   readonly getSession: (request: GetImportSessionV2Request) => Promise<ImportSession>;
+  readonly getHistorySession?: (request: GetImportSessionV2Request) => Promise<ImportSession>;
   readonly addItems: (request: AddImportItemsV2Request) => Promise<ImportSession>;
   readonly addPaths: (request: AddImportPathsV2Request) => Promise<BackendTask>;
   readonly getScanResult: (request: GetImportScanResultV2Request) => Promise<FileScanResult>;
   readonly addUrl: (request: import("./importV2Web").AddImportUrlV2Request) => Promise<ImportSession>;
   readonly setSelection: (request: SetImportItemSelectionV2Request) => Promise<ImportSession>;
   readonly startItems: (request: StartImportItemsV2Request) => Promise<BackendTask[]>;
+  readonly cancelBatch: (request: CancelImportBatchV2Request) => Promise<BackendTask[]>;
+  readonly cancelItem: (request: import("./importV2").CancelImportItemV2Request) => Promise<ImportSession>;
+  readonly skipItem: (request: import("./importV2").CancelImportItemV2Request) => Promise<ImportSession>;
+  readonly authorizeBilibiliAsr: (request: import("./importV2Web").AuthorizeBilibiliAsrV2Request) => Promise<void>;
   readonly confirmSession: (request: CommitImportSessionRequest) => Promise<BackendTask>;
   readonly getPreviewContent: (request: GetImportPreviewContentV2Request) => Promise<ImportPreviewContent>;
   readonly getReadiness: (request: GetImportFrontendReadinessV2Request) => Promise<ImportFrontendReadiness>;

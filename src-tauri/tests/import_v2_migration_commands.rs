@@ -3,8 +3,8 @@
 use serde_json::json;
 
 use llm_wiki_desktop_lib::commands::import_v2_migration::{
-    ApplyImportV2MigrationRequest, GetImportV2MigrationStatusRequest,
-    PlanImportV2MigrationRequest, ScanImportV2MigrationRequest,
+    ApplyImportV2MigrationRequest, GetImportV2MigrationStatusRequest, PlanImportV2MigrationRequest,
+    ScanImportV2MigrationRequest,
 };
 use llm_wiki_desktop_lib::models::import_v2_migration::LegacyInventory;
 
@@ -14,7 +14,10 @@ fn migration_command_requests_keep_camel_case_and_explicit_confirmation() {
         project_id: "project-1".into(),
         project_root_path: "D:/Wiki/项目".into(),
     };
-    assert_eq!(serde_json::to_value(scan).unwrap()["projectRootPath"], "D:/Wiki/项目");
+    assert_eq!(
+        serde_json::to_value(scan).unwrap()["projectRootPath"],
+        "D:/Wiki/项目"
+    );
 
     let plan = PlanImportV2MigrationRequest {
         project_id: "project-1".into(),
@@ -28,13 +31,19 @@ fn migration_command_requests_keep_camel_case_and_explicit_confirmation() {
             scanned_files: Vec::new(),
         },
     };
-    assert_eq!(serde_json::to_value(plan).unwrap()["inventory"]["schemaVersion"], 1);
+    assert_eq!(
+        serde_json::to_value(plan).unwrap()["inventory"]["schemaVersion"],
+        1
+    );
 
     let status = GetImportV2MigrationStatusRequest {
         project_id: "project-1".into(),
         project_root_path: "D:/Wiki/项目".into(),
     };
-    assert_eq!(serde_json::to_value(status).unwrap()["projectId"], "project-1");
+    assert_eq!(
+        serde_json::to_value(status).unwrap()["projectId"],
+        "project-1"
+    );
 
     let apply = ApplyImportV2MigrationRequest {
         project_id: "project-1".into(),

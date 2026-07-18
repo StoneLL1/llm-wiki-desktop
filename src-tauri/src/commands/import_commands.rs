@@ -1,5 +1,8 @@
 use std::path::PathBuf;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -19,8 +22,8 @@ use crate::models::import_v2::{
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::activation::ImportV2ActivationService;
-use crate::services::import_v2::legacy_route::LegacyPreviewAdapter;
 use crate::services::import_v2::file_discovery::{new_import_inputs, FileDiscoveryService};
+use crate::services::import_v2::legacy_route::LegacyPreviewAdapter;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -333,16 +336,15 @@ pub fn get_import_preview(
             true,
         ));
     }
-    if let Some(TaskResultReference::ImportV2SessionPreview { session_id }) = task
+    if let Some(TaskResultReference::ImportV2SessionPreview { session_id, .. }) = task
         .result
         .as_ref()
         .and_then(|result| result.reference.as_ref())
     {
-        let session = state.import_v2_service.load_session(
-            &context,
-            &state.file_store,
-            session_id,
-        )?;
+        let session =
+            state
+                .import_v2_service
+                .load_session(&context, &state.file_store, session_id)?;
         return LegacyPreviewAdapter::from_session(&session);
     }
     state.file_store.read_json(
@@ -375,7 +377,8 @@ fn preview_import_v2(
                 .task_service
                 .transition_status(&task_id, TaskStatus::Running)
                 .map_err(task_error)?;
-            let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            let context =
+                state.resolve_project_context(&request.project_id, &request.project_root_path)?;
             let session = state.import_v2_service.create_session(
                 &context,
                 &state.file_store,
@@ -476,6 +479,7 @@ fn preview_import_v2(
                         )],
                         reference: Some(TaskResultReference::ImportV2SessionPreview {
                             session_id: session.session_id,
+                            batch_id: None,
                         }),
                         pending_action: None,
                     },
@@ -563,11 +567,10 @@ fn preview_text_import_v2(
         &item.item_id,
         &child.id,
     )?;
-    let session = state.import_v2_service.load_session(
-        context,
-        &state.file_store,
-        &session.session_id,
-    )?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(context, &state.file_store, &session.session_id)?;
     LegacyPreviewAdapter::from_session(&session)
 }
 
@@ -577,11 +580,9 @@ fn confirm_import_v2(
     context: &ProjectContext,
     session_id: &str,
 ) -> Result<ConfirmedImport, BackendError> {
-    let session = state.import_v2_service.load_session(
-        context,
-        &state.file_store,
-        session_id,
-    )?;
+    let session = state
+        .import_v2_service
+        .load_session(context, &state.file_store, session_id)?;
     let decisions = session
         .items
         .iter()
@@ -609,6 +610,7 @@ fn confirm_import_v2(
             project_id: request.project_id.clone(),
             project_root_path: request.project_root_path.clone(),
             session_id: session_id.into(),
+            batch_task_id: None,
             decisions,
         },
     )?;
@@ -645,14 +647,7 @@ fn run_v2_item_with_parent_cancellation(
             thread::sleep(Duration::from_millis(25));
         }
     });
-    let result = service.run_item(
-        context,
-        files,
-        tasks,
-        session_id,
-        item_id,
-        child_task_id,
-    );
+    let result = service.run_item(context, files, tasks, session_id, item_id, child_task_id);
     watcher_done.store(true, Ordering::SeqCst);
     let _ = watcher.join();
     result

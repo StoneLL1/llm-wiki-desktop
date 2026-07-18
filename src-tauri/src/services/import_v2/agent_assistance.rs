@@ -137,30 +137,36 @@ impl<'a> AgentAssistanceService<'a> {
             .items
             .iter()
             .find(|item| item.item_id == item_id)
-            .ok_or_else(|| assistance_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found."))?;
+            .ok_or_else(|| {
+                assistance_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
+            })?;
         validate_byok_item(item, trigger)?;
         let config = self
             .settings
             .list_providers(context)?
             .into_iter()
             .find(|config| config.provider == provider && config.enabled)
-            .ok_or_else(|| assistance_error("IMPORT_BYOK_PROVIDER_UNAVAILABLE", "The selected BYOK provider is not enabled."))?;
+            .ok_or_else(|| {
+                assistance_error(
+                    "IMPORT_BYOK_PROVIDER_UNAVAILABLE",
+                    "The selected BYOK provider is not enabled.",
+                )
+            })?;
         LlmService::validate_config(&config)?;
         let workspace = AgentWorkspaceBuilder.build(context, &session, item, trigger)?;
         let approval_id = uuid::Uuid::new_v4().to_string();
         let expires_at = Utc::now() + Duration::minutes(10);
-        let result = build_send_scope(
-            &workspace,
-            item,
-            &approval_id,
-            &config,
-            expires_at,
-        );
+        let result = build_send_scope(&workspace, item, &approval_id, &config, expires_at);
         let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
         let scope = result?;
         byok_approvals()
             .lock()
-            .map_err(|_| assistance_error("IMPORT_BYOK_APPROVAL_UNAVAILABLE", "BYOK approvals are unavailable."))?
+            .map_err(|_| {
+                assistance_error(
+                    "IMPORT_BYOK_APPROVAL_UNAVAILABLE",
+                    "BYOK approvals are unavailable.",
+                )
+            })?
             .insert(
                 approval_id,
                 PendingByokApproval {
@@ -204,20 +210,37 @@ impl<'a> AgentAssistanceService<'a> {
             .items
             .iter()
             .find(|item| item.item_id == item_id)
-            .ok_or_else(|| assistance_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found."))?;
+            .ok_or_else(|| {
+                assistance_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
+            })?;
         validate_byok_item(item, trigger)?;
         let previewed = byok_approvals()
             .lock()
-            .map_err(|_| assistance_error("IMPORT_BYOK_APPROVAL_UNAVAILABLE", "BYOK approvals are unavailable."))?
+            .map_err(|_| {
+                assistance_error(
+                    "IMPORT_BYOK_APPROVAL_UNAVAILABLE",
+                    "BYOK approvals are unavailable.",
+                )
+            })?
             .get(approval_id)
             .cloned()
-            .ok_or_else(|| assistance_error("IMPORT_BYOK_APPROVAL_INVALID", "BYOK approval is missing or already used."))?;
+            .ok_or_else(|| {
+                assistance_error(
+                    "IMPORT_BYOK_APPROVAL_INVALID",
+                    "BYOK approval is missing or already used.",
+                )
+            })?;
         let config = self
             .settings
             .list_providers(context)?
             .into_iter()
             .find(|config| config.provider == provider && config.model == model && config.enabled)
-            .ok_or_else(|| assistance_error("IMPORT_BYOK_PROVIDER_UNAVAILABLE", "The approved provider configuration is unavailable."))?;
+            .ok_or_else(|| {
+                assistance_error(
+                    "IMPORT_BYOK_PROVIDER_UNAVAILABLE",
+                    "The approved provider configuration is unavailable.",
+                )
+            })?;
         if config.base_url != previewed.base_url {
             return Err(assistance_error(
                 "IMPORT_BYOK_DESTINATION_CHANGED",
@@ -235,13 +258,26 @@ impl<'a> AgentAssistanceService<'a> {
         let _ = AgentWorkspaceBuilder::cleanup_terminal(&current_workspace);
         let current = current?;
         if current.scope_sha256 != scope_sha256 {
-            return Err(assistance_error("IMPORT_BYOK_SCOPE_CHANGED", "The approved send scope changed."));
+            return Err(assistance_error(
+                "IMPORT_BYOK_SCOPE_CHANGED",
+                "The approved send scope changed.",
+            ));
         }
         let mut pending = byok_approvals()
             .lock()
-            .map_err(|_| assistance_error("IMPORT_BYOK_APPROVAL_UNAVAILABLE", "BYOK approvals are unavailable."))?
+            .map_err(|_| {
+                assistance_error(
+                    "IMPORT_BYOK_APPROVAL_UNAVAILABLE",
+                    "BYOK approvals are unavailable.",
+                )
+            })?
             .remove(approval_id)
-            .ok_or_else(|| assistance_error("IMPORT_BYOK_APPROVAL_INVALID", "BYOK approval is missing or already used."))?;
+            .ok_or_else(|| {
+                assistance_error(
+                    "IMPORT_BYOK_APPROVAL_INVALID",
+                    "BYOK approval is missing or already used.",
+                )
+            })?;
         if pending.expires_at <= Utc::now()
             || pending.project_id != context.project_id
             || pending.project_root != context.root
@@ -252,11 +288,17 @@ impl<'a> AgentAssistanceService<'a> {
             || pending.model != model
             || pending.scope_sha256 != scope_sha256
         {
-            return Err(assistance_error("IMPORT_BYOK_APPROVAL_INVALID", "BYOK approval does not match this exact request."));
+            return Err(assistance_error(
+                "IMPORT_BYOK_APPROVAL_INVALID",
+                "BYOK approval does not match this exact request.",
+            ));
         }
         let charge_unknown = item.attempts.iter().any(|attempt| {
             attempt.route.starts_with("byok_assistance/")
-                && attempt.warnings.iter().any(|warning| warning == "BYOK_CHARGE_STATUS_UNKNOWN")
+                && attempt
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "BYOK_CHARGE_STATUS_UNKNOWN")
         });
         if charge_unknown && !acknowledge_possible_duplicate_charge {
             return Err(assistance_error(
@@ -275,7 +317,10 @@ impl<'a> AgentAssistanceService<'a> {
                 true,
             )
             .map_err(|error| assistance_error("IMPORT_AGENT_TASK_FAILED", &error))?;
-        let max_attempts = self.settings.get_import_agent_policy(context)?.max_attempts_per_item;
+        let max_attempts = self
+            .settings
+            .get_import_agent_policy(context)?
+            .max_attempts_per_item;
         if let Err(error) = self.imports.begin_byok_assistance(
             context,
             self.files,
@@ -286,12 +331,19 @@ impl<'a> AgentAssistanceService<'a> {
             provider,
             max_attempts,
         ) {
-            let _ = self.tasks.discard_unstarted_tasks(std::slice::from_ref(&task.id));
+            let _ = self
+                .tasks
+                .discard_unstarted_tasks(std::slice::from_ref(&task.id));
             return Err(error);
         }
         approved_byok_runs()
             .lock()
-            .map_err(|_| assistance_error("IMPORT_BYOK_APPROVAL_UNAVAILABLE", "BYOK approvals are unavailable."))?
+            .map_err(|_| {
+                assistance_error(
+                    "IMPORT_BYOK_APPROVAL_UNAVAILABLE",
+                    "BYOK approvals are unavailable.",
+                )
+            })?
             .insert(task.id.clone(), pending);
         Ok(task)
     }
@@ -313,8 +365,13 @@ impl<'a> AgentAssistanceService<'a> {
             Err(_) => None,
         };
         let Some(approved) = approved else {
-            let error = assistance_error("IMPORT_BYOK_APPROVAL_INVALID", "The approved BYOK call is missing or already used.");
-            self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
+            let error = assistance_error(
+                "IMPORT_BYOK_APPROVAL_INVALID",
+                "The approved BYOK call is missing or already used.",
+            );
+            self.finalize_byok_error(
+                context, session_id, item_id, task_id, None, None, &error, false,
+            );
             return Err(error);
         };
         if approved.project_id != context.project_id
@@ -325,84 +382,136 @@ impl<'a> AgentAssistanceService<'a> {
             || approved.provider != provider
             || approved.expires_at <= Utc::now()
         {
-            let error = assistance_error("IMPORT_BYOK_APPROVAL_INVALID", "The approved BYOK call does not match this task or has expired.");
-            self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
+            let error = assistance_error(
+                "IMPORT_BYOK_APPROVAL_INVALID",
+                "The approved BYOK call does not match this task or has expired.",
+            );
+            self.finalize_byok_error(
+                context, session_id, item_id, task_id, None, None, &error, false,
+            );
             return Err(error);
         }
         if self.tasks.is_cancelled(task_id) {
-            let error = assistance_error("LLM_CANCELLED", "BYOK assistance was cancelled before transmission.");
-            self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
+            let error = assistance_error(
+                "LLM_CANCELLED",
+                "BYOK assistance was cancelled before transmission.",
+            );
+            self.finalize_byok_error(
+                context, session_id, item_id, task_id, None, None, &error, false,
+            );
             return Err(error);
         }
         let session = match self.imports.load_session(context, self.files, session_id) {
             Ok(session) => session,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
+                self.finalize_byok_error(
+                    context, session_id, item_id, task_id, None, None, &error, false,
+                );
                 return Err(error);
             }
         };
         let Some(item) = session.items.iter().find(|item| item.item_id == item_id) else {
             let error = assistance_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.");
-            self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
+            self.finalize_byok_error(
+                context, session_id, item_id, task_id, None, None, &error, false,
+            );
             return Err(error);
         };
         let configs = match self.settings.list_providers(context) {
             Ok(configs) => configs,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
+                self.finalize_byok_error(
+                    context, session_id, item_id, task_id, None, None, &error, false,
+                );
                 return Err(error);
             }
         };
-        let config = match configs
-            .into_iter()
-            .find(|config| config.provider == provider && config.model == approved.model && config.enabled)
-        {
+        let config = match configs.into_iter().find(|config| {
+            config.provider == provider && config.model == approved.model && config.enabled
+        }) {
             Some(config) if config.base_url == approved.base_url => config,
             _ => {
-                let error = assistance_error("IMPORT_BYOK_DESTINATION_CHANGED", "The approved provider configuration changed.");
-                self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
+                let error = assistance_error(
+                    "IMPORT_BYOK_DESTINATION_CHANGED",
+                    "The approved provider configuration changed.",
+                );
+                self.finalize_byok_error(
+                    context, session_id, item_id, task_id, None, None, &error, false,
+                );
                 return Err(error);
             }
         };
-        let workspace = match AgentWorkspaceBuilder.build_for_task(context, &session, item, trigger, task_id) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, None, None, &error, false);
-                return Err(error);
-            }
-        };
-        let scope = match build_send_scope(
-            &workspace,
-            item,
-            "consumed",
-            &config,
-            approved.expires_at,
-        ) {
-            Ok(scope) => scope,
-            Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), None, &error, false);
-                return Err(error);
-            }
-        };
+        let workspace =
+            match AgentWorkspaceBuilder.build_for_task(context, &session, item, trigger, task_id) {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    self.finalize_byok_error(
+                        context, session_id, item_id, task_id, None, None, &error, false,
+                    );
+                    return Err(error);
+                }
+            };
+        let scope =
+            match build_send_scope(&workspace, item, "consumed", &config, approved.expires_at) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    self.finalize_byok_error(
+                        context,
+                        session_id,
+                        item_id,
+                        task_id,
+                        Some(&workspace),
+                        None,
+                        &error,
+                        false,
+                    );
+                    return Err(error);
+                }
+            };
         if scope.scope_sha256 != approved.scope_sha256 {
-            let error = assistance_error("IMPORT_BYOK_SCOPE_CHANGED", "The approved send scope changed before transmission.");
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), None, &error, false);
+            let error = assistance_error(
+                "IMPORT_BYOK_SCOPE_CHANGED",
+                "The approved send scope changed before transmission.",
+            );
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                None,
+                &error,
+                false,
+            );
             return Err(error);
         }
         let prompt = match build_byok_prompt(&workspace, &scope) {
             Ok(prompt) => prompt,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), None, &error, false);
+                self.finalize_byok_error(
+                    context,
+                    session_id,
+                    item_id,
+                    task_id,
+                    Some(&workspace),
+                    None,
+                    &error,
+                    false,
+                );
                 return Err(error);
             }
         };
-        let audit_path = format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
-        );
+        let audit_path =
+            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
         let workspace_relative_path = workspace
             .root
             .strip_prefix(&context.root)
-            .map_err(|_| assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent workspace escaped the project."))?
+            .map_err(|_| {
+                assistance_error(
+                    "IMPORT_AGENT_WORKSPACE_INVALID",
+                    "Agent workspace escaped the project.",
+                )
+            })?
             .to_string_lossy()
             .replace('\\', "/");
         let mut audit = AgentAuditRecord {
@@ -411,7 +520,10 @@ impl<'a> AgentAssistanceService<'a> {
             session_id: session_id.into(),
             item_id: item_id.into(),
             trigger,
-            route: format!("byok/{}/{}/{}", scope.provider, scope.model, scope.destination),
+            route: format!(
+                "byok/{}/{}/{}",
+                scope.provider, scope.model, scope.destination
+            ),
             agent_kind: None,
             agent_version: scope.model.clone(),
             prompt_template_version: "wiki-ingest-assist/byok-v1".into(),
@@ -434,10 +546,21 @@ impl<'a> AgentAssistanceService<'a> {
             )],
         };
         if approved.acknowledged_duplicate_charge {
-            audit.warnings.push("possibleDuplicateChargeAcknowledged=true".into());
+            audit
+                .warnings
+                .push("possibleDuplicateChargeAcknowledged=true".into());
         }
         if let Err(error) = self.files.write_json_atomic(context, &audit_path, &audit) {
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), None, &error, false);
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                None,
+                &error,
+                false,
+            );
             return Err(error);
         }
         // Load the keyring value only at the provider-call boundary. It is
@@ -445,27 +568,66 @@ impl<'a> AgentAssistanceService<'a> {
         let secret = match secrets.get(provider) {
             Ok(secret) => secret,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
+                self.finalize_byok_error(
+                    context,
+                    session_id,
+                    item_id,
+                    task_id,
+                    Some(&workspace),
+                    Some((&audit_path, &mut audit)),
+                    &error,
+                    true,
+                );
                 return Err(error);
             }
         };
         if self.tasks.is_cancelled(task_id) {
             drop(secret);
-            let error = assistance_error("LLM_CANCELLED", "BYOK assistance was cancelled before transmission.");
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, false);
+            let error = assistance_error(
+                "LLM_CANCELLED",
+                "BYOK assistance was cancelled before transmission.",
+            );
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                Some((&audit_path, &mut audit)),
+                &error,
+                false,
+            );
             return Err(error);
         }
         if let Err(error) = self.tasks.transition_status(task_id, TaskStatus::Running) {
             drop(secret);
             let error = assistance_error("IMPORT_AGENT_TASK_FAILED", &error);
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, false);
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                Some((&audit_path, &mut audit)),
+                &error,
+                false,
+            );
             return Err(error);
         }
         audit.outcome = "send_started".into();
         audit.warnings.push("Provider acceptance and final charge are unknown until a response is durably recorded.".into());
         if let Err(error) = self.files.write_json_atomic(context, &audit_path, &audit) {
             drop(secret);
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, false);
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                Some((&audit_path, &mut audit)),
+                &error,
+                false,
+            );
             return Err(error);
         }
         let output = llm
@@ -494,14 +656,34 @@ impl<'a> AgentAssistanceService<'a> {
         } {
             Ok(output) => output,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
+                self.finalize_byok_error(
+                    context,
+                    session_id,
+                    item_id,
+                    task_id,
+                    Some(&workspace),
+                    Some((&audit_path, &mut audit)),
+                    &error,
+                    true,
+                );
                 return Err(error);
             }
         };
         audit.outcome = "response_received".into();
-        audit.warnings.retain(|warning| !warning.contains("unknown until"));
+        audit
+            .warnings
+            .retain(|warning| !warning.contains("unknown until"));
         if let Err(error) = self.files.write_json_atomic(context, &audit_path, &audit) {
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                Some((&audit_path, &mut audit)),
+                &error,
+                true,
+            );
             return Err(error);
         }
         let staged = (|| {
@@ -512,10 +694,25 @@ impl<'a> AgentAssistanceService<'a> {
                 .write(true)
                 .create_new(true)
                 .open(&candidate)
-                .map_err(|_| assistance_error("IMPORT_AGENT_OUTPUT_INVALID", "BYOK output could not be staged."))?;
+                .map_err(|_| {
+                    assistance_error(
+                        "IMPORT_AGENT_OUTPUT_INVALID",
+                        "BYOK output could not be staged.",
+                    )
+                })?;
             use std::io::Write;
-            file.write_all(output.as_bytes()).map_err(|_| assistance_error("IMPORT_AGENT_OUTPUT_INVALID", "BYOK output could not be staged."))?;
-            file.sync_all().map_err(|_| assistance_error("IMPORT_AGENT_OUTPUT_INVALID", "BYOK output could not be staged."))?;
+            file.write_all(output.as_bytes()).map_err(|_| {
+                assistance_error(
+                    "IMPORT_AGENT_OUTPUT_INVALID",
+                    "BYOK output could not be staged.",
+                )
+            })?;
+            file.sync_all().map_err(|_| {
+                assistance_error(
+                    "IMPORT_AGENT_OUTPUT_INVALID",
+                    "BYOK output could not be staged.",
+                )
+            })?;
             write_candidate_manifest(
                 &workspace.output_dir,
                 "byok-model",
@@ -526,7 +723,16 @@ impl<'a> AgentAssistanceService<'a> {
         let relative_workspace = match staged {
             Ok(path) => path,
             Err(error) => {
-                self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
+                self.finalize_byok_error(
+                    context,
+                    session_id,
+                    item_id,
+                    task_id,
+                    Some(&workspace),
+                    Some((&audit_path, &mut audit)),
+                    &error,
+                    true,
+                );
                 return Err(error);
             }
         };
@@ -534,25 +740,54 @@ impl<'a> AgentAssistanceService<'a> {
         audit.completed_at = Some(Utc::now());
         audit.outcome = "output_staged".into();
         if let Err(error) = self.files.write_json_atomic(context, &audit_path, &audit) {
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                Some((&audit_path, &mut audit)),
+                &error,
+                true,
+            );
             return Err(error);
         }
-        if let Err(error) = self.tasks.complete_running_with_result(task_id, TaskResult {
-            summary: "BYOK output is staged for candidate validation.".into(),
-            affected_paths: vec![format!("{relative_workspace}/output")],
-            reference: Some(TaskResultReference::ImportPreview {
-                session_id: session_id.into(),
-                item_id: item_id.into(),
-            }),
-            pending_action: None,
-        }) {
+        if let Err(error) = self.tasks.complete_running_with_result(
+            task_id,
+            TaskResult {
+                summary: "BYOK output is staged for candidate validation.".into(),
+                affected_paths: vec![format!("{relative_workspace}/output")],
+                reference: Some(TaskResultReference::ImportPreview {
+                    session_id: session_id.into(),
+                    item_id: item_id.into(),
+                }),
+                pending_action: None,
+            },
+        ) {
             let error = assistance_error("IMPORT_AGENT_TASK_FAILED", &error);
-            self.finalize_byok_error(context, session_id, item_id, task_id, Some(&workspace), Some((&audit_path, &mut audit)), &error, true);
+            self.finalize_byok_error(
+                context,
+                session_id,
+                item_id,
+                task_id,
+                Some(&workspace),
+                Some((&audit_path, &mut audit)),
+                &error,
+                true,
+            );
             return Err(error);
         }
         audit.outcome = "succeeded".into();
         let _ = self.files.write_json_atomic(context, &audit_path, &audit);
-        let _ = self.imports.finish_agent_assistance_attempt(context, self.files, session_id, item_id, task_id, AttemptOutcome::Succeeded, Vec::new());
+        let _ = self.imports.finish_agent_assistance_attempt(
+            context,
+            self.files,
+            session_id,
+            item_id,
+            task_id,
+            AttemptOutcome::Succeeded,
+            Vec::new(),
+        );
         Ok(())
     }
 
@@ -599,21 +834,21 @@ impl<'a> AgentAssistanceService<'a> {
             AttemptOutcome::Failed
         };
         let _ = self.imports.finish_agent_assistance_attempt(
-            context,
-            self.files,
-            session_id,
-            item_id,
-            task_id,
-            outcome,
-            warnings,
+            context, self.files, session_id, item_id, task_id, outcome, warnings,
         );
         let status = self.tasks.get_task(task_id).map(|task| task.status);
         if !self.tasks.is_cancelled(task_id)
-            && !matches!(status, Some(TaskStatus::Failed | TaskStatus::Succeeded | TaskStatus::Cancelled))
+            && !matches!(
+                status,
+                Some(TaskStatus::Failed | TaskStatus::Succeeded | TaskStatus::Cancelled)
+            )
         {
             let _ = self.tasks.set_error(
                 task_id,
-                assistance_error(&error.code, "BYOK assistance ended without an accepted candidate."),
+                assistance_error(
+                    &error.code,
+                    "BYOK assistance ended without an accepted candidate.",
+                ),
             );
             let _ = self.tasks.transition_status(task_id, TaskStatus::Failed);
         } else if status == Some(TaskStatus::Cancelling) {
@@ -747,9 +982,8 @@ impl<'a> AgentAssistanceService<'a> {
         trigger: AgentAssistanceTrigger,
         agent_kind: AgentKind,
     ) -> Result<(), BackendError> {
-        let audit_path = format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json"
-        );
+        let audit_path =
+            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
         if self.tasks.is_cancelled(task_id) {
             let _ = self.imports.finish_agent_assistance_attempt(
                 context,
@@ -783,20 +1017,18 @@ impl<'a> AgentAssistanceService<'a> {
                     "Agent task is not bound to this Import item.",
                 ));
             }
-            let workspace = AgentWorkspaceBuilder.build_for_task(
-                context,
-                &session,
-                item,
-                trigger,
-                task_id,
-            )?;
+            let workspace =
+                AgentWorkspaceBuilder.build_for_task(context, &session, item, trigger, task_id)?;
             let bundle_bytes = super::agent_workspace::read_isolated_regular_file(
                 &workspace.root,
                 &workspace.task_path,
                 64 * 1024,
             )?;
             let bundle: AgentTaskBundle = serde_json::from_slice(&bundle_bytes).map_err(|_| {
-                assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent task bundle is invalid.")
+                assistance_error(
+                    "IMPORT_AGENT_WORKSPACE_INVALID",
+                    "Agent task bundle is invalid.",
+                )
             })?;
             let agent_version = self
                 .agents
@@ -823,7 +1055,12 @@ impl<'a> AgentAssistanceService<'a> {
                 workspace_relative_path: workspace
                     .root
                     .strip_prefix(&context.root)
-                    .map_err(|_| assistance_error("IMPORT_AGENT_WORKSPACE_INVALID", "Agent workspace escaped the project."))?
+                    .map_err(|_| {
+                        assistance_error(
+                            "IMPORT_AGENT_WORKSPACE_INVALID",
+                            "Agent workspace escaped the project.",
+                        )
+                    })?
                     .to_string_lossy()
                     .replace('\\', "/"),
                 granted_tools: bundle.allowed_tools.clone(),
@@ -899,13 +1136,11 @@ impl<'a> AgentAssistanceService<'a> {
                     "Agent output could not be staged for candidate validation.",
                 ));
             }
-            if let Err(error) =
-                write_candidate_manifest(
-                    &workspace.output_dir,
-                    "tool-free-local-agent",
-                    &format!("{:x}", Sha256::digest(output.as_bytes())),
-                )
-            {
+            if let Err(error) = write_candidate_manifest(
+                &workspace.output_dir,
+                "tool-free-local-agent",
+                &format!("{:x}", Sha256::digest(output.as_bytes())),
+            ) {
                 let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
                 return Err(error);
             }
@@ -952,7 +1187,10 @@ impl<'a> AgentAssistanceService<'a> {
             Err(error) => {
                 let cancelled = self.tasks.is_cancelled(task_id) || error.code == "AGENT_CANCELLED";
                 if self.files.exists(context, &audit_path) {
-                    if let Ok(mut audit) = self.files.read_json::<AgentAuditRecord>(context, &audit_path) {
+                    if let Ok(mut audit) = self
+                        .files
+                        .read_json::<AgentAuditRecord>(context, &audit_path)
+                    {
                         audit.completed_at = Some(Utc::now());
                         audit.outcome = if cancelled { "cancelled" } else { "failed" }.into();
                         audit.warnings.push(error.code.clone());
@@ -1011,7 +1249,9 @@ fn validate_byok_item(
     }
     if item.status == ImportItemStatus::Failed
         && !item.issue.as_ref().is_some_and(|issue| {
-            issue.available_actions.contains(&AgentRecoveryAction::RequestByok)
+            issue
+                .available_actions
+                .contains(&AgentRecoveryAction::RequestByok)
         })
     {
         return Err(assistance_error(
@@ -1019,7 +1259,10 @@ fn validate_byok_item(
             "This failure is not eligible for BYOK assistance.",
         ));
     }
-    if !matches!(item.status, ImportItemStatus::Failed | ImportItemStatus::PreviewReady) {
+    if !matches!(
+        item.status,
+        ImportItemStatus::Failed | ImportItemStatus::PreviewReady
+    ) {
         return Err(assistance_error(
             "IMPORT_V2_STATE_INVALID",
             "BYOK assistance requires a failed item or deterministic preview.",
@@ -1046,7 +1289,12 @@ fn build_send_scope(
     let provider_name = serde_json::to_value(config.provider)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| assistance_error("IMPORT_BYOK_PROVIDER_UNAVAILABLE", "Provider identity is invalid."))?;
+        .ok_or_else(|| {
+            assistance_error(
+                "IMPORT_BYOK_PROVIDER_UNAVAILABLE",
+                "Provider identity is invalid.",
+            )
+        })?;
     let public_metadata = vec![
         format!("itemId={}", item.item_id),
         format!("displayName={}", item.input.display_name),
@@ -1108,19 +1356,38 @@ fn collect_scope_files(
 ) -> Result<(), BackendError> {
     super::agent_workspace::validate_isolated_directory(root, current)?;
     for entry in std::fs::read_dir(current).map_err(|_| {
-        assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send files could not be inspected.")
+        assistance_error(
+            "IMPORT_BYOK_SCOPE_INVALID",
+            "Approved send files could not be inspected.",
+        )
     })? {
-        let entry = entry.map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send files could not be inspected."))?;
-        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send file metadata is unavailable."))?;
+        let entry = entry.map_err(|_| {
+            assistance_error(
+                "IMPORT_BYOK_SCOPE_INVALID",
+                "Approved send files could not be inspected.",
+            )
+        })?;
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|_| {
+            assistance_error(
+                "IMPORT_BYOK_SCOPE_INVALID",
+                "Approved send file metadata is unavailable.",
+            )
+        })?;
         if metadata.file_type().is_symlink() {
-            return Err(assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Links are forbidden in the BYOK send scope."));
+            return Err(assistance_error(
+                "IMPORT_BYOK_SCOPE_INVALID",
+                "Links are forbidden in the BYOK send scope.",
+            ));
         }
         if metadata.is_dir() {
             collect_scope_files(root, &entry.path(), label, files)?;
             continue;
         }
         if !metadata.is_file() {
-            return Err(assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Only regular files may enter the BYOK send scope."));
+            return Err(assistance_error(
+                "IMPORT_BYOK_SCOPE_INVALID",
+                "Only regular files may enter the BYOK send scope.",
+            ));
         }
         let bytes = super::agent_workspace::read_isolated_regular_file(
             root,
@@ -1128,7 +1395,17 @@ fn collect_scope_files(
             8 * 1024 * 1024,
         )?;
         let (encoded, redactions) = canonical_send_text(&bytes)?;
-        let relative = entry.path().strip_prefix(root).map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send file escaped its scope."))?.to_string_lossy().replace('\\', "/");
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|_| {
+                assistance_error(
+                    "IMPORT_BYOK_SCOPE_INVALID",
+                    "Approved send file escaped its scope.",
+                )
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
         files.push(SendScopeFile {
             relative_path: format!("{label}/{relative}"),
             sha256: format!("{:x}", Sha256::digest(encoded.as_bytes())),
@@ -1147,9 +1424,13 @@ fn hash_scope(
     public_metadata: &[String],
     files: &[SendScopeFile],
 ) -> Result<String, BackendError> {
-    let bytes = serde_json::to_vec(&(provider, model, destination, public_metadata, files)).map_err(|_| {
-        assistance_error("IMPORT_BYOK_SCOPE_INVALID", "The BYOK send scope could not be encoded.")
-    })?;
+    let bytes = serde_json::to_vec(&(provider, model, destination, public_metadata, files))
+        .map_err(|_| {
+            assistance_error(
+                "IMPORT_BYOK_SCOPE_INVALID",
+                "The BYOK send scope could not be encoded.",
+            )
+        })?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -1171,10 +1452,18 @@ fn build_byok_prompt(
         let relative = Path::new(&file.relative_path);
         if relative.is_absolute()
             || relative.components().any(|part| {
-                matches!(part, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))
+                matches!(
+                    part,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
             })
         {
-            return Err(assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Approved send path is invalid."));
+            return Err(assistance_error(
+                "IMPORT_BYOK_SCOPE_INVALID",
+                "Approved send path is invalid.",
+            ));
         }
         let path = workspace.root.join(relative);
         let bytes = super::agent_workspace::read_isolated_regular_file(
@@ -1182,16 +1471,27 @@ fn build_byok_prompt(
             &path,
             8 * 1024 * 1024,
         )
-        .map_err(|_| assistance_error("IMPORT_BYOK_SCOPE_CHANGED", "An approved send file changed or escaped its scope."))?;
+        .map_err(|_| {
+            assistance_error(
+                "IMPORT_BYOK_SCOPE_CHANGED",
+                "An approved send file changed or escaped its scope.",
+            )
+        })?;
         let (encoded, redactions) = canonical_send_text(&bytes)?;
         if format!("{:x}", Sha256::digest(encoded.as_bytes())) != file.sha256
             || redactions != file.redactions
         {
-            return Err(assistance_error("IMPORT_BYOK_SCOPE_CHANGED", "An approved send file changed."));
+            return Err(assistance_error(
+                "IMPORT_BYOK_SCOPE_CHANGED",
+                "An approved send file changed.",
+            ));
         }
         total = total.saturating_add(encoded.len());
         if total > 8 * 1024 * 1024 {
-            return Err(assistance_error("IMPORT_BYOK_SCOPE_TOO_LARGE", "The BYOK send scope exceeds the item limit."));
+            return Err(assistance_error(
+                "IMPORT_BYOK_SCOPE_TOO_LARGE",
+                "The BYOK send scope exceeds the item limit.",
+            ));
         }
         prompt.push_str(&format!(
             "\n<untrusted-item-file-json path={:?}>\n{}\n</untrusted-item-file-json>\n",
@@ -1212,9 +1512,17 @@ fn canonical_send_text(bytes: &[u8]) -> Result<(String, Vec<String>), BackendErr
     let mut sanitized = String::new();
     for line in text.lines() {
         let lower = line.to_ascii_lowercase();
-        let sensitive = ["authorization", "cookie", "api_key", "apikey", "access_token", "password", "secret"]
-            .into_iter()
-            .find(|marker| lower.contains(marker));
+        let sensitive = [
+            "authorization",
+            "cookie",
+            "api_key",
+            "apikey",
+            "access_token",
+            "password",
+            "secret",
+        ]
+        .into_iter()
+        .find(|marker| lower.contains(marker));
         if let Some(marker) = sensitive {
             if let Some(index) = line.find([':', '=']) {
                 sanitized.push_str(&line[..=index]);
@@ -1224,7 +1532,10 @@ fn canonical_send_text(bytes: &[u8]) -> Result<(String, Vec<String>), BackendErr
                 continue;
             }
         }
-        if line.split_whitespace().any(|word| word.starts_with("sk-") && word.len() > 8) {
+        if line
+            .split_whitespace()
+            .any(|word| word.starts_with("sk-") && word.len() > 8)
+        {
             let mut first = true;
             for word in line.split_whitespace() {
                 if !first {
@@ -1246,7 +1557,10 @@ fn canonical_send_text(bytes: &[u8]) -> Result<(String, Vec<String>), BackendErr
     redactions.sort();
     redactions.dedup();
     let encoded = serde_json::to_string(&sanitized).map_err(|_| {
-        assistance_error("IMPORT_BYOK_SCOPE_INVALID", "Canonical BYOK text could not be encoded.")
+        assistance_error(
+            "IMPORT_BYOK_SCOPE_INVALID",
+            "Canonical BYOK text could not be encoded.",
+        )
     })?;
     Ok((encoded, redactions))
 }
@@ -1296,9 +1610,7 @@ fn write_candidate_manifest(
 }
 
 fn validate_agent_output(output: &str) -> Result<(), BackendError> {
-    if output.trim().is_empty()
-        || output.len() > 16 * 1024 * 1024
-        || output.as_bytes().contains(&0)
+    if output.trim().is_empty() || output.len() > 16 * 1024 * 1024 || output.as_bytes().contains(&0)
     {
         return Err(assistance_error(
             "IMPORT_AGENT_OUTPUT_INVALID",

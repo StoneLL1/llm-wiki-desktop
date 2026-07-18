@@ -50,9 +50,19 @@ describe("ImportCandidateDiffDialog", () => {
 
     expect(screen.getByText("# Deterministic")).toBeInTheDocument();
     expect(screen.getByText("# Current Wiki")).toBeInTheDocument();
-    expect(screen.getByText("# Agent")).toBeInTheDocument();
+    expect(screen.getAllByText("# Agent").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /apply merged candidate/i }));
-    expect(onAction).toHaveBeenCalledWith({ kind: "apply_merged", candidateId: "candidate-1" });
+    expect(onAction).toHaveBeenCalledWith({ kind: "apply_merged", candidateId: "candidate-1", mergedMarkdown: "# Agent" });
+  });
+
+  it("lets the user edit the merged buffer before applying it", () => {
+    const onAction = vi.fn();
+    render(<ImportCandidateDiffDialog open view={view} onClose={vi.fn()} onAction={onAction} />);
+
+    const editor = screen.getByRole("textbox", { name: /merged markdown/i });
+    fireEvent.change(editor, { target: { value: "# Human merged" } });
+    fireEvent.click(screen.getByRole("button", { name: /apply merged candidate/i }));
+    expect(onAction).toHaveBeenCalledWith({ kind: "apply_merged", candidateId: "candidate-1", mergedMarkdown: "# Human merged" });
   });
 
   it("supports deterministic, agent, keep-current, create-new, and discard intents", () => {

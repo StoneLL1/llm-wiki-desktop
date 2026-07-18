@@ -2,19 +2,42 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct NormalizedWebUrl { pub public_url: String, pub host: String, pub scheme: String }
+pub struct NormalizedWebUrl {
+    pub public_url: String,
+    pub host: String,
+    pub scheme: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum WebRouteKind { GenericHttp, GenericBrowser, Wechat, Zhihu, Bilibili, Xiaohongshu, X }
+pub enum WebRouteKind {
+    GenericHttp,
+    GenericBrowser,
+    Wechat,
+    Zhihu,
+    Bilibili,
+    Xiaohongshu,
+    X,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RedirectDecision { Allowed, PrivateAuthorizationRequired, Rejected }
+pub enum RedirectDecision {
+    Allowed,
+    PrivateAuthorizationRequired,
+    Rejected,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum WebContentKind { Article, Video, Note, Post, Challenge, Login }
+pub enum WebContentKind {
+    Article,
+    Video,
+    Note,
+    Post,
+    Challenge,
+    Login,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -24,16 +47,34 @@ pub struct WebMetadata {
     pub published_at: Option<String>,
     pub public_url: String,
     pub fetched_at: String,
-    #[serde(default)] pub images: Vec<String>,
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum WebAuthState { Public, WaitingLogin, Authenticated, CaptchaRequired, Revoked }
+pub enum WebAuthState {
+    Public,
+    WaitingLogin,
+    Authenticated,
+    CaptchaRequired,
+    Revoked,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum WebRecoveryAction { RetryRoute, SwitchRoute, BeginLogin, AuthorizePrivateTarget, InstallBrowserCapability, InstallMediaCapability, AuthorizeLocalAsr, InvokeAgent, Skip, ViewLog }
+pub enum WebRecoveryAction {
+    RetryRoute,
+    SwitchRoute,
+    BeginLogin,
+    AuthorizePrivateTarget,
+    InstallBrowserCapability,
+    InstallMediaCapability,
+    AuthorizeLocalAsr,
+    InvokeAgent,
+    Skip,
+    ViewLog,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -55,4 +96,16 @@ pub struct AuthorizeBilibiliAsrV2Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum WebImportErrorCode { UrlRejected, PrivateTargetBlocked, RedirectRejected, TlsFailed, ResponseTooLarge, ChallengeDetected, LoginRequired, CaptchaRequired, StructureChanged, SubtitleUnavailable, ConnectorRateLimited }
+pub enum WebImportErrorCode {
+    UrlRejected,
+    PrivateTargetBlocked,
+    RedirectRejected,
+    TlsFailed,
+    ResponseTooLarge,
+    ChallengeDetected,
+    LoginRequired,
+    CaptchaRequired,
+    StructureChanged,
+    SubtitleUnavailable,
+    ConnectorRateLimited,
+}

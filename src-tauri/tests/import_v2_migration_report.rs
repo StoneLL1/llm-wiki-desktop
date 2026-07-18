@@ -1,6 +1,6 @@
 use llm_wiki_desktop_lib::models::import_v2_migration::{
     LegacyInventory, LegacyRecord, MigrationCandidate, MigrationDecision, MigrationPlan,
-    MigrationReport, MigrationSummary, MigrationStatus, IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+    MigrationReport, MigrationStatus, MigrationSummary, IMPORT_V2_MIGRATION_SCHEMA_VERSION,
 };
 
 fn candidate(id: &str, decision: MigrationDecision) -> MigrationCandidate {
@@ -68,13 +68,19 @@ fn dry_run_report_is_inspectable_and_lists_immutable_boundaries() {
         schema_version: IMPORT_V2_MIGRATION_SCHEMA_VERSION,
         project_identity: "project-test".into(),
         fingerprint: "inventory-fingerprint".into(),
-        records: plan.candidates.iter().map(|candidate| candidate.record.clone()).collect(),
-        warnings: vec![llm_wiki_desktop_lib::models::import_v2_migration::MigrationWarning {
-            code: "MIGRATION_LEGACY_METADATA_CORRUPT".into(),
-            message: "Sensitive fields omitted.".into(),
-            relative_path: Some(".app/import-history/bad.json".into()),
-            redacted: true,
-        }],
+        records: plan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.record.clone())
+            .collect(),
+        warnings: vec![
+            llm_wiki_desktop_lib::models::import_v2_migration::MigrationWarning {
+                code: "MIGRATION_LEGACY_METADATA_CORRUPT".into(),
+                message: "Sensitive fields omitted.".into(),
+                relative_path: Some(".app/import-history/bad.json".into()),
+                redacted: true,
+            },
+        ],
         scanned_files: Vec::new(),
     };
     let report = MigrationReport::from_plan(&plan, &inventory).unwrap();

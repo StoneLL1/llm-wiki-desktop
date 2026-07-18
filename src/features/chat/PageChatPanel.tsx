@@ -1,15 +1,15 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { BookOpenText, Plus } from "lucide-react";
+import { BookOpenText, ChevronDown, Plus } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { fetchTaskActivities, useTaskStore } from "../../stores/taskStore";
 import type { ChatMessage } from "../../types/chat";
 import { isTerminalStatus } from "../../types/task";
 import type { WikiPageContent } from "../../types/wiki";
 import { ChatComposer } from "./ChatComposer";
-import { MessageBubble, StreamingBubble } from "./ChatView";
+import { MessageBubble, StreamingBubble, useTranscriptScroll } from "./ChatView";
 
 interface PageChatPanelProps {
   page: WikiPageContent | null;
@@ -32,6 +32,7 @@ export function PageChatPanel({
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const activeSession = useChatStore((state) => state.activeSession);
   const sendTaskId = useChatStore((state) => state.sendTaskId);
+  const sendSessionId = useChatStore((state) => state.sendSessionId);
   const clearSendTask = useChatStore((state) => state.clearSendTask);
   const error = useChatStore((state) => state.error);
   const streamingText = useChatStore((state) => state.streamingText);
@@ -44,23 +45,36 @@ export function PageChatPanel({
   const reloadActive = useChatStore((state) => state.reloadActive);
 
   const tasks = useTaskStore((state) => state.tasks);
+  const activities = useTaskStore((state) => state.activities);
   const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;
-  const generating =
-    sendTask?.status === "running" ||
-    sendTask?.status === "queued" ||
-    sendTask?.status === "cancelling";
   const activeSessionMatchesPage =
     Boolean(page) &&
     Boolean(activeSession) &&
     normalizePagePath(activeSession?.contextPagePath ?? "") === normalizePagePath(page?.meta.path ?? "");
   const pageSession = activeSessionMatchesPage ? activeSession : null;
   const pageSessionId = activeSessionMatchesPage ? activeSessionId : null;
+  const generating =
+    sendSessionId === pageSessionId &&
+    (sendTask?.status === "running" ||
+      sendTask?.status === "queued" ||
+      sendTask?.status === "cancelling");
   const latestAssistant = latestAssistantMessage(pageSession);
   const pinnedCitation = latestAssistant?.citations?.find(
     (citation) => citation.isPinned && citation.pagePath === page?.meta.path,
+  );
+  const streamActivities = sendTaskId ? activities[sendTaskId] ?? [] : [];
+  const activityTaskIds = pageSession?.messages
+    .map((message) => message.taskId)
+    .filter((taskId): taskId is string => Boolean(taskId))
+    .join("|") ?? "";
+  const transcriptScroll = useTranscriptScroll(
+    pageSessionId,
+    pageSession?.messages.length ?? 0,
+    streamingText,
+    streamActivities.length,
   );
 
   useEffect(() => {
@@ -75,6 +89,11 @@ export function PageChatPanel({
       cancelled = true;
     };
   }, [sendTask, projectId, rootPath, reloadActive, clearSendTask]);
+
+  useEffect(() => {
+    const taskIds = activityTaskIds ? activityTaskIds.split("|") : [];
+    taskIds.forEach((taskId) => void fetchTaskActivities(taskId));
+  }, [activityTaskIds]);
 
   // Bind a chat session to the current wiki page: reuse an existing
   // page-scoped session if one exists, otherwise create one. This is what
@@ -171,7 +190,15 @@ export function PageChatPanel({
           {error}
         </div>
       ) : null}
-      <div className="page-chat__body app-pane-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3" role="log" aria-live="polite">
+      <div
+        ref={transcriptScroll.ref}
+        onScroll={transcriptScroll.onScroll}
+        className="page-chat__body app-pane-scrollbar relative min-h-0 flex-1 overflow-y-auto px-3 py-3"
+        role="log"
+        aria-label={t("chat.thread.transcriptLabel")}
+        aria-live="polite"
+        aria-busy={generating}
+      >
         {!pageSession ? (
           <div className="flex h-full items-center justify-center text-center text-[12px] text-[var(--text-muted)]">
             {t("wiki.askAi.currentPage")}
@@ -182,6 +209,8 @@ export function PageChatPanel({
               <MessageBubble
                 key={message.id}
                 message={message}
+                activities={message.taskId ? activities[message.taskId] ?? [] : []}
+                taskStatus={message.taskId ? tasks.find((task) => task.id === message.taskId)?.status : undefined}
                 t={t}
                 generating={generating}
                 saveStatus={saveStatus[message.id] ?? "idle"}
@@ -201,7 +230,10 @@ export function PageChatPanel({
             {generating ? (
               <StreamingBubble
                 text={streamingText}
+                activities={streamActivities}
+                taskStatus={sendTask?.status}
                 routeLabel={streamingRoute ? t(`chat.composer.route.${streamingRoute}`) : null}
+                agentLabel={t("chat.thread.agent")}
                 placeholder={t("chat.thread.generating")}
                 onOpenLogs={() => openTaskDrawer(sendTaskId ?? undefined)}
                 openLogsLabel={t("chat.thread.openLogs")}
@@ -209,6 +241,12 @@ export function PageChatPanel({
             ) : null}
           </div>
         )}
+        {transcriptScroll.showBackToLatest ? (
+          <button type="button" className="chat-back-latest" onClick={transcriptScroll.backToLatest}>
+            <ChevronDown size={14} aria-hidden="true" />
+            {t("chat.thread.backToLatest")}
+          </button>
+        ) : null}
       </div>
       <ChatComposer
         routePreference="auto"

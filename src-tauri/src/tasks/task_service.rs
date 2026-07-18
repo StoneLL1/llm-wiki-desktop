@@ -6,7 +6,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::models::task::{
-    BackendTask, StreamDelta, TaskProgress, TaskResult, TaskStatus, TaskType,
+    BackendTask, StreamDelta, TaskActivity, TaskProgress, TaskResult, TaskStatus, TaskType,
 };
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
@@ -21,6 +21,8 @@ struct PersistedTaskEntry {
     task: BackendTask,
     #[serde(default)]
     log_lines: Vec<LogLine>,
+    #[serde(default)]
+    activities: Vec<TaskActivity>,
 }
 
 pub struct TaskService {
@@ -105,6 +107,7 @@ impl TaskService {
             self.current_project_root(),
             title,
             cancellable,
+            None,
             false,
         )
         .expect("non-project task creation cannot require persistence")
@@ -124,6 +127,30 @@ impl TaskService {
             Some(project_root),
             title,
             cancellable,
+            None,
+            true,
+        )
+    }
+
+    /// Create a project task associated with one user-level operation. The
+    /// identity is persisted with the task so the UI can restore and control
+    /// parallel import batches after navigation or application restart.
+    pub fn create_project_task_with_batch(
+        &self,
+        task_type: TaskType,
+        project_id: String,
+        project_root: PathBuf,
+        title: String,
+        cancellable: bool,
+        batch_id: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            task_type,
+            Some(project_id),
+            Some(project_root),
+            title,
+            cancellable,
+            Some(batch_id),
             true,
         )
     }
@@ -135,6 +162,7 @@ impl TaskService {
         project_root: Option<PathBuf>,
         title: String,
         cancellable: bool,
+        batch_id: Option<String>,
         require_persistence: bool,
     ) -> Result<BackendTask, String> {
         let id = Uuid::new_v4().to_string();
@@ -145,6 +173,7 @@ impl TaskService {
             id: id.clone(),
             task_type: task_type.clone(),
             project_id: project_id.clone(),
+            batch_id,
             title,
             status: TaskStatus::Queued,
             progress: None,
@@ -161,6 +190,7 @@ impl TaskService {
             task: task.clone(),
             cancellation: token,
             log_lines: Vec::new(),
+            activities: Vec::new(),
             persisted_path: None,
         };
 
@@ -314,6 +344,36 @@ impl TaskService {
             .get(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
         Ok(entry.log_lines.clone())
+    }
+
+    pub fn get_activities(&self, id: &str) -> Result<Vec<TaskActivity>, String> {
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let entry = tasks
+            .get(id)
+            .ok_or_else(|| format!("Task not found: {}", id))?;
+        Ok(entry.activities.clone())
+    }
+
+    /// Emit a safe structured Agent activity and persist it with the task
+    /// snapshot. Activity payloads are intentionally bounded and never carry
+    /// raw model reasoning, tool arguments, file contents, or command output.
+    pub fn emit_activity(&self, id: &str, activity: TaskActivity) {
+        let (pid, tid) = {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            let Some(entry) = tasks.get_mut(id) else {
+                return;
+            };
+            entry.activities.push(activity.clone());
+            entry.task.updated_at = Utc::now().to_rfc3339();
+            (entry.task.project_id.clone(), entry.task.id.clone())
+        };
+        self.emit(
+            crate::models::task::BackendEventType::TaskActivity,
+            pid,
+            Some(tid),
+            activity,
+        );
+        let _ = self.persist_current_task(id);
     }
 
     /// Emit an ephemeral streaming delta for a generative task (chat answer
@@ -552,6 +612,7 @@ impl TaskService {
         let persisted = PersistedTaskEntry {
             task: entry.task.clone(),
             log_lines: entry.log_lines.clone(),
+            activities: entry.activities.clone(),
         };
         FileStore
             .write_json_atomic_absolute(&path, &persisted)
@@ -596,14 +657,14 @@ impl TaskService {
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 match std::fs::read_to_string(&path) {
                     Ok(json) => {
-                        let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
-                            .map(|entry| (entry.task, entry.log_lines))
+                                let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
+                            .map(|entry| (entry.task, entry.log_lines, entry.activities))
                             .or_else(|_| {
                                 serde_json::from_str::<BackendTask>(&json)
-                                    .map(|task| (task, Vec::new()))
+                                    .map(|task| (task, Vec::new(), Vec::new()))
                             });
                         match parsed {
-                            Ok((mut task, log_lines)) => {
+                            Ok((mut task, log_lines, activities)) => {
                                 if let Some(existing) = self.get_task(&task.id) {
                                     recovered.push(existing);
                                     continue;
@@ -631,6 +692,7 @@ impl TaskService {
                                     task: task.clone(),
                                     cancellation: token,
                                     log_lines,
+                                    activities,
                                     persisted_path: Some(path),
                                 };
 
@@ -1489,6 +1551,27 @@ mod tests {
             },
         );
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn emit_activity_is_structured_and_recoverable_from_task_state() {
+        let (service, events) = make_service();
+        let task = service.create_task(TaskType::AgentRun, None, "Agent run".to_string(), true);
+        events.lock().unwrap().clear();
+
+        service.emit_activity(
+            &task.id,
+            TaskActivity::ToolCall {
+                call_id: "tool-1".into(),
+                name: "Read".into(),
+                detail: Some("wiki/page.md".into()),
+            },
+        );
+
+        assert_eq!(service.get_activities(&task.id).unwrap().len(), 1);
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].event_type, BackendEventType::TaskActivity);
     }
 
     #[test]

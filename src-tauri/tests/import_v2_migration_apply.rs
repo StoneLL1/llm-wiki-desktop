@@ -1,9 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use llm_wiki_desktop_lib::models::import_v2_migration::{
-    MigrationConfirmation, MigrationStatus,
-};
+use llm_wiki_desktop_lib::models::import_v2_migration::{MigrationConfirmation, MigrationStatus};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::services::import_v2::migration::MigrationService;
 use llm_wiki_desktop_lib::services::import_v2::ImportV2Service;
@@ -22,7 +20,11 @@ fn project() -> tempfile::TempDir {
         r#"{"schemaVersion":1,"records":[{"recordId":"legacy-1","rawPath":"raw/a.md","wikiPath":"wiki/a.md","sha256":"hash-1"}]}"#,
     )
     .unwrap();
-    fs::write(root.join(".app/import-history/old.json"), r#"{"recordId":"old"}"#).unwrap();
+    fs::write(
+        root.join(".app/import-history/old.json"),
+        r#"{"recordId":"old"}"#,
+    )
+    .unwrap();
     fs::write(root.join("raw/a.md"), "legacy raw").unwrap();
     fs::write(root.join("wiki/a.md"), "legacy wiki").unwrap();
     directory
@@ -55,8 +57,14 @@ fn apply_requires_confirmation_and_preserves_legacy_bytes_and_timestamps() {
     let legacy_index = fs::read(root.join(".app/source-index.json")).unwrap();
     let raw = fs::read(root.join("raw/a.md")).unwrap();
     let wiki = fs::read(root.join("wiki/a.md")).unwrap();
-    let raw_time = fs::symlink_metadata(root.join("raw/a.md")).unwrap().modified().unwrap();
-    let wiki_time = fs::symlink_metadata(root.join("wiki/a.md")).unwrap().modified().unwrap();
+    let raw_time = fs::symlink_metadata(root.join("raw/a.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let wiki_time = fs::symlink_metadata(root.join("wiki/a.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
     let (service, plan, mut confirmation, context) = prepare(root);
     let core = ImportV2Service::default();
     let git = GitService::default();
@@ -86,11 +94,26 @@ fn apply_requires_confirmation_and_preserves_legacy_bytes_and_timestamps() {
         )
         .unwrap();
     assert_eq!(result.status, MigrationStatus::Applied);
-    assert_eq!(fs::read(root.join(".app/source-index.json")).unwrap(), legacy_index);
+    assert_eq!(
+        fs::read(root.join(".app/source-index.json")).unwrap(),
+        legacy_index
+    );
     assert_eq!(fs::read(root.join("raw/a.md")).unwrap(), raw);
     assert_eq!(fs::read(root.join("wiki/a.md")).unwrap(), wiki);
-    assert_eq!(fs::symlink_metadata(root.join("raw/a.md")).unwrap().modified().unwrap(), raw_time);
-    assert_eq!(fs::symlink_metadata(root.join("wiki/a.md")).unwrap().modified().unwrap(), wiki_time);
+    assert_eq!(
+        fs::symlink_metadata(root.join("raw/a.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        raw_time
+    );
+    assert_eq!(
+        fs::symlink_metadata(root.join("wiki/a.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        wiki_time
+    );
     assert!(root.join(".app/source-index-v2.json").exists());
     assert!(root.join(".app/import-v2-migration/report.json").exists());
 }

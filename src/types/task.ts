@@ -28,7 +28,8 @@ export type BackendEventType =
   | "project_refreshed"
   | "wiki_changed"
   | "graph_updated"
-  | "agent_output";
+  | "agent_output"
+  | "task_activity";
 
 export type LogLevel = "info" | "warn" | "error" | "debug";
 
@@ -52,6 +53,7 @@ export type TaskResultReference = {
 } | {
   type: "import_v2_session_preview";
   sessionId: string;
+  batchId?: string | null;
 };
 
 export interface BackendError {
@@ -66,6 +68,8 @@ export interface BackendTask {
   id: string;
   taskType: TaskType;
   projectId: string | null;
+  /** Stable identity shared by tasks created from one import operation. */
+  batchId?: string | null;
   title: string;
   status: TaskStatus;
   progress: TaskProgress | null;
@@ -84,6 +88,11 @@ export interface LogLine {
   message: string;
 }
 
+export interface StreamDelta {
+  delta: string;
+  route?: string | null;
+}
+
 export interface BackendEvent<T = unknown> {
   eventId: string;
   eventType: BackendEventType;
@@ -92,6 +101,37 @@ export interface BackendEvent<T = unknown> {
   timestamp: string;
   payload: T;
 }
+
+export type TaskActivityStatus = "started" | "completed" | "failed";
+
+/** Safe structured activity emitted by an Agent/LLM task. It intentionally
+ * excludes hidden reasoning, raw tool arguments, file contents, and command
+ * output. */
+export type TaskActivity =
+  | {
+      kind: "phase";
+      name: string;
+      status: TaskActivityStatus;
+      label?: string;
+    }
+  | {
+      kind: "thinking";
+      status: TaskActivityStatus;
+      summary?: string;
+      durationMs?: number;
+    }
+  | {
+      kind: "tool_call";
+      callId: string;
+      name: string;
+      detail?: string;
+    }
+  | {
+      kind: "tool_result";
+      callId: string;
+      success: boolean;
+      summary?: string;
+    };
 
 export interface CreateTaskRequest {
   taskType: TaskType;

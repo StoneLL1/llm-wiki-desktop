@@ -85,6 +85,7 @@ fn event_type_to_tauri_name(event_type: &BackendEventType) -> String {
         GraphUpdated => "graph://updated",
         AgentOutput => "agent://output",
         TaskStreamOutput => "task://stream-output",
+        TaskActivity => "task://activity",
     }
     .to_string()
 }

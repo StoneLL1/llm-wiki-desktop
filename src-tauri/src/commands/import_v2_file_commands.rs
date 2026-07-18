@@ -54,6 +54,17 @@ pub fn start_add_import_paths_v2(
         )
         .map_err(task_error)?;
     let task_id = task.id.clone();
+    if let Err(error) = state.import_v2_service.set_discovery_task_id(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        Some(task_id.clone()),
+    ) {
+        let _ = state
+            .task_service
+            .discard_unstarted_tasks(std::slice::from_ref(&task_id));
+        return Err(error);
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let run = || -> Result<(), BackendError> {

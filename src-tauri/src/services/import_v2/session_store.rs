@@ -26,6 +26,8 @@ struct SessionRecord {
     resource_mode: ImportResourceMode,
     created_at: String,
     updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    discovery_task_id: Option<String>,
     item_ids: Vec<String>,
 }
 
@@ -39,6 +41,7 @@ impl From<&ImportSession> for SessionRecord {
             resource_mode: session.resource_mode.clone(),
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
+            discovery_task_id: session.discovery_task_id.clone(),
             item_ids: session
                 .items
                 .iter()
@@ -160,6 +163,7 @@ impl SessionStore {
             resource_mode: record.resource_mode,
             created_at: record.created_at,
             updated_at: record.updated_at,
+            discovery_task_id: record.discovery_task_id,
             items,
         })
     }
@@ -275,10 +279,9 @@ fn public_import_input(mut input: ImportInput) -> Result<ImportInput, BackendErr
         uuid::Uuid::parse_str(suffix)
             .map_err(|_| invalid_session("Secure import URL reference is invalid."))?;
         let reference = input.locator.clone();
-        input.locator = input
-            .normalized_locator
-            .clone()
-            .ok_or_else(|| invalid_session("Secure import URL reference requires a public locator."))?;
+        input.locator = input.normalized_locator.clone().ok_or_else(|| {
+            invalid_session("Secure import URL reference requires a public locator.")
+        })?;
         let mut sanitized = public_import_input(input)?;
         sanitized.locator = reference;
         return Ok(sanitized);
@@ -407,6 +410,24 @@ mod tests {
             .unwrap();
         assert_eq!(reopened.items.len(), 1);
         assert_eq!(reopened.items[0].input.display_name, "研究报告.pdf");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_round_trip_restores_discovery_task_identity() {
+        let (context, root) = test_context("session-discovery-task");
+        let files = FileStore::default();
+        let store = SessionStore::default();
+        let mut session = store
+            .create(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        session.discovery_task_id = Some("scan-task-1".into());
+        store.save(&context, &files, &session).unwrap();
+
+        let reopened = SessionStore::default()
+            .load(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(reopened.discovery_task_id.as_deref(), Some("scan-task-1"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

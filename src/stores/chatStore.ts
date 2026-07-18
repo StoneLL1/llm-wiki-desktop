@@ -13,6 +13,8 @@ import type {
 import type { AgentKind } from "../types/agent";
 import type { LlmProviderKind } from "../types/llm";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import { fetchTaskActivities, useTaskStore } from "./taskStore";
+import type { BackendTask } from "../types/task";
 
 interface BackendLikeError {
   code?: string;
@@ -75,6 +77,8 @@ interface ChatState {
    *  reloads). Backend channel: `task://stream-output`. */
   streamingText: string;
   streamingRoute: ChatRoute | null;
+  /** Deltas can arrive before the send IPC response binds the task id. */
+  pendingStreamDeltas: Record<string, { text: string; route: ChatRoute | null }>;
 
   /** Monotonic counter bumped each time ensurePageSession starts. An in-flight
    *  ensure bails after any await if a newer page focus has superseded it,
@@ -167,6 +171,7 @@ const initial = {
   loadingSession: false,
   streamingText: "",
   streamingRoute: null as ChatRoute | null,
+  pendingStreamDeltas: {} as ChatState["pendingStreamDeltas"],
   pageSessionEpoch: 0,
 };
 
@@ -351,7 +356,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const scope = captureProjectScope();
     set({ error: null });
     try {
-      const task = await invoke<{ id: string }>("send_chat_message", {
+      const task = await invoke<BackendTask>("send_chat_message", {
         request: {
           projectId,
           projectRootPath: rootPath,
@@ -365,7 +370,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
       });
       if (!isProjectScopeCurrent(scope)) return null;
-      set({ sendTaskId: task.id, sendSessionId: sessionId, streamingText: "", streamingRoute: null });
+      useTaskStore.getState().upsertTask(task);
+      const pending = get().pendingStreamDeltas[task.id];
+      set((state) => {
+        const pendingStreamDeltas = { ...state.pendingStreamDeltas };
+        delete pendingStreamDeltas[task.id];
+        return {
+          sendTaskId: task.id,
+          sendSessionId: sessionId,
+          streamingText: pending?.text ?? "",
+          streamingRoute: pending?.route ?? null,
+          pendingStreamDeltas,
+        };
+      });
+      void fetchTaskActivities(task.id);
       return task.id;
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return null;
@@ -375,19 +393,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearSendTask: (error = null) =>
-    set({
-      sendTaskId: null,
-      sendSessionId: null,
-      streamingText: "",
-      streamingRoute: null,
-      error,
+    set((state) => {
+      const pendingStreamDeltas = { ...state.pendingStreamDeltas };
+      if (state.sendTaskId) delete pendingStreamDeltas[state.sendTaskId];
+      return {
+        sendTaskId: null,
+        sendSessionId: null,
+        streamingText: "",
+        streamingRoute: null,
+        pendingStreamDeltas,
+        error,
+      };
     }),
 
   reloadActive: async (projectId, rootPath) => {
     // Only reload the session the send targeted; if the user switched away
-    // mid-send, leave their current view alone rather than yanking it.
+    // mid-send, leave their current view alone rather than yanking it back.
     const sessionId = get().sendSessionId;
     if (!sessionId) return;
+    if (get().activeSessionId !== sessionId) return;
     await get().selectSession(projectId, rootPath, sessionId);
   },
 
@@ -521,9 +545,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   appendStreamDelta: (taskId, delta, route) => {
-    // Only accumulate deltas for the currently in-flight send; stale deltas
-    // from a previous (e.g. cancelled) task must not bleed into the next one.
-    if (taskId !== get().sendTaskId) return;
+    // Most events arrive after send() binds the returned task. Keep a bounded
+    // per-task buffer for the small race where the worker emits before the IPC
+    // response reaches the frontend; task ids prevent stale sends from
+    // bleeding into the next generation.
+    if (taskId !== get().sendTaskId) {
+      set((state) => {
+        const existing = state.pendingStreamDeltas[taskId] ?? { text: "", route: null };
+        const text = `${existing.text}${delta}`.slice(-256 * 1024);
+        return {
+          pendingStreamDeltas: {
+            ...state.pendingStreamDeltas,
+            [taskId]: { text, route: route ?? existing.route },
+          },
+        };
+      });
+      return;
+    }
     set((state) => ({
       streamingText: state.streamingText + delta,
       streamingRoute: route ?? state.streamingRoute,

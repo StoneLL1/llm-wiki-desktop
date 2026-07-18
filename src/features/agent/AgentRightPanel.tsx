@@ -125,7 +125,11 @@ export function AgentRightPanel({ agents, onRunIngest }: AgentRightPanelProps) {
                   >
                     {t("agent.rightPanel.missingTemplate")}
                   </span>
-                ) : null}
+                ) : (
+                  <span className="ml-auto text-[10.5px]" style={{ color: "var(--text-muted)" }}>
+                    {t("agent.rightPanel.skillKnown")}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

@@ -27,6 +27,8 @@ const TASK_EVENT_CHANNELS = [
   "task://completed",
   "task://failed",
   "task://cancelled",
+  "task://activity",
+  "task://stream-output",
   "confirmation://requested",
   "project://refreshed",
   "wiki://changed",
@@ -58,6 +60,7 @@ export function useTaskEvents(): void {
 
   useEffect(() => {
     if (!hasTauri()) return;
+    const activeProjectId = currentProject.projectId;
 
     const unlisteners: Array<() => void> = [];
     let cancelled = false;
@@ -65,7 +68,7 @@ export function useTaskEvents(): void {
     for (const channel of TASK_EVENT_CHANNELS) {
       listen<BackendEvent>(channel, (evt) => {
         const event = evt.payload as BackendEvent;
-        handleTaskEvent(event);
+        handleTaskEvent(event, activeProjectId);
         notifyTaskEventListeners(event);
         void notifyTaskEvent(event);
       })
@@ -98,7 +101,7 @@ export function useTaskEvents(): void {
       cancelled = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, [pushToast]);
+  }, [currentProject.projectId, pushToast]);
 
   // Recover persisted tasks whenever the active project root changes.
   useEffect(() => {

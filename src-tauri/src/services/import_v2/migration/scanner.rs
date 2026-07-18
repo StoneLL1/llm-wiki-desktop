@@ -4,13 +4,13 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use sha2::{Digest, Sha256};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::errors::BackendError;
 use crate::models::import_v2_migration::{
-    validate_project_relative, LegacyFileEvidence, LegacyInventory, LegacyRecord,
-    MigrationWarning, IMPORT_V2_MIGRATION_SCHEMA_VERSION,
+    validate_project_relative, LegacyFileEvidence, LegacyInventory, LegacyRecord, MigrationWarning,
+    IMPORT_V2_MIGRATION_SCHEMA_VERSION,
 };
 
 use super::super::transaction::{is_project_reparse_point, read_project_file_nofollow};
@@ -97,11 +97,21 @@ impl LegacyScanner for DefaultLegacyScanner {
             }
         }
 
-        state.records.sort_by(|left, right| left.record_id.cmp(&right.record_id));
-        state.files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        state
+            .records
+            .sort_by(|left, right| left.record_id.cmp(&right.record_id));
+        state
+            .files
+            .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         state.warnings.sort_by(|left, right| {
-            (left.code.as_str(), left.relative_path.as_deref().unwrap_or_default())
-                .cmp(&(right.code.as_str(), right.relative_path.as_deref().unwrap_or_default()))
+            (
+                left.code.as_str(),
+                left.relative_path.as_deref().unwrap_or_default(),
+            )
+                .cmp(&(
+                    right.code.as_str(),
+                    right.relative_path.as_deref().unwrap_or_default(),
+                ))
         });
         let project_identity = project_identity(project_root, &root_metadata);
         let fingerprint = fingerprint(
@@ -137,7 +147,9 @@ impl<'a> ScanState<'a> {
         if !self.take_file_slot(relative) {
             return None;
         }
-        let path = self.root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let path = self
+            .root
+            .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
         let metadata = match safe_metadata(&path) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => {
@@ -170,7 +182,9 @@ impl<'a> ScanState<'a> {
         if !self.take_file_slot(relative) {
             return;
         }
-        let path = self.root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let path = self
+            .root
+            .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
         let metadata = match safe_metadata(&path) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => {
@@ -197,7 +211,9 @@ impl<'a> ScanState<'a> {
     }
 
     fn walk_tree(&mut self, relative: &str, parse_json: bool) {
-        let path = self.root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let path = self
+            .root
+            .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
         let metadata = match safe_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == ErrorKind::NotFound => return,
@@ -236,7 +252,9 @@ impl<'a> ScanState<'a> {
         };
         entries.sort();
         for entry in entries {
-            let Ok(child) = entry.strip_prefix(self.root) else { continue };
+            let Ok(child) = entry.strip_prefix(self.root) else {
+                continue;
+            };
             let child = child.to_string_lossy().replace('\\', "/");
             self.walk_tree(&child, parse_json);
             if self.file_count >= self.limits.max_files {
@@ -249,7 +267,9 @@ impl<'a> ScanState<'a> {
         if !self.take_file_slot(relative) {
             return None;
         }
-        let path = self.root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let path = self
+            .root
+            .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
         let metadata = match safe_metadata(&path) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => {
@@ -289,9 +309,12 @@ impl<'a> ScanState<'a> {
     }
 
     fn retain_record_paths(&mut self, record: &LegacyRecord) {
-        for path in [record.original_path.as_deref(), record.destination_path.as_deref()]
-            .into_iter()
-            .flatten()
+        for path in [
+            record.original_path.as_deref(),
+            record.destination_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             self.referenced_paths.insert(path.to_string());
         }
@@ -344,7 +367,8 @@ fn parse_index(state: &mut ScanState<'_>, bytes: &[u8]) {
     };
     if let Some(records) = value.get("records").and_then(Value::as_array) {
         for record_value in records {
-            if let Some(record) = record_from_value(record_value, LEGACY_INDEX, &mut state.warnings) {
+            if let Some(record) = record_from_value(record_value, LEGACY_INDEX, &mut state.warnings)
+            {
                 state.retain_record_paths(&record);
                 state.records.push(record);
             } else {
@@ -363,9 +387,8 @@ fn parse_index(state: &mut ScanState<'_>, bytes: &[u8]) {
                 record_id: stable_record_id(LEGACY_INDEX, source_path),
                 stable_source_id: None,
                 original_path: sanitize_path(source_path, LEGACY_INDEX, &mut state.warnings),
-                destination_path: destination_path.and_then(|path| {
-                    sanitize_path(&path, LEGACY_INDEX, &mut state.warnings)
-                }),
+                destination_path: destination_path
+                    .and_then(|path| sanitize_path(&path, LEGACY_INDEX, &mut state.warnings)),
                 original_sha256: None,
                 normalized_url: None,
                 recorded_content_sha256: None,
@@ -388,16 +411,28 @@ fn record_from_value(
     let record_id = string_field(object, &["recordId", "id", "batchId"])
         .map(str::to_string)
         .unwrap_or_else(|| stable_record_id(metadata_path, "record"));
-    let original_path = path_field(object, &["originalPath", "rawPath", "sourcePath"], metadata_path, warnings);
-    let destination_path = path_field(object, &["destinationPath", "wikiPath", "outputPath"], metadata_path, warnings);
+    let original_path = path_field(
+        object,
+        &["originalPath", "rawPath", "sourcePath"],
+        metadata_path,
+        warnings,
+    );
+    let destination_path = path_field(
+        object,
+        &["destinationPath", "wikiPath", "outputPath"],
+        metadata_path,
+        warnings,
+    );
     Some(LegacyRecord {
         record_id,
         stable_source_id: string_field(object, &["sourceId", "stableSourceId"]).map(str::to_string),
         original_path,
         destination_path,
-        original_sha256: string_field(object, &["originalSha256", "sha256", "hash"]).map(str::to_string),
+        original_sha256: string_field(object, &["originalSha256", "sha256", "hash"])
+            .map(str::to_string),
         normalized_url: string_field(object, &["normalizedUrl", "url"]).map(str::to_string),
-        recorded_content_sha256: string_field(object, &["recordedContentSha256", "contentSha256"]).map(str::to_string),
+        recorded_content_sha256: string_field(object, &["recordedContentSha256", "contentSha256"])
+            .map(str::to_string),
         metadata_path: metadata_path.into(),
     })
 }
@@ -412,10 +447,16 @@ fn path_field(
 }
 
 fn string_field<'a>(object: &'a serde_json::Map<String, Value>, names: &[&str]) -> Option<&'a str> {
-    names.iter().find_map(|name| object.get(*name).and_then(Value::as_str))
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str))
 }
 
-fn sanitize_path(value: &str, metadata_path: &str, warnings: &mut Vec<MigrationWarning>) -> Option<String> {
+fn sanitize_path(
+    value: &str,
+    metadata_path: &str,
+    warnings: &mut Vec<MigrationWarning>,
+) -> Option<String> {
     let normalized = value.replace('\\', "/");
     if validate_project_relative(&normalized).is_err() {
         warnings.push(MigrationWarning {
@@ -433,14 +474,20 @@ fn sanitize_path(value: &str, metadata_path: &str, warnings: &mut Vec<MigrationW
 fn safe_metadata(path: &Path) -> Result<fs::Metadata, std::io::Error> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || is_project_reparse_point(&metadata) {
-        Err(std::io::Error::new(ErrorKind::PermissionDenied, "link is not a file"))
+        Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "link is not a file",
+        ))
     } else {
         Ok(metadata)
     }
 }
 
 fn stable_record_id(metadata_path: &str, key: &str) -> String {
-    format!("legacy-{}", &sha256(format!("{metadata_path}\n{key}").as_bytes())[..24])
+    format!(
+        "legacy-{}",
+        &sha256(format!("{metadata_path}\n{key}").as_bytes())[..24]
+    )
 }
 
 fn fingerprint(
@@ -449,7 +496,8 @@ fn fingerprint(
     files: &[LegacyFileEvidence],
     warnings: &[MigrationWarning],
 ) -> String {
-    let bytes = serde_json::to_vec(&(project_identity, records, files, warnings)).unwrap_or_default();
+    let bytes =
+        serde_json::to_vec(&(project_identity, records, files, warnings)).unwrap_or_default();
     sha256(&bytes)
 }
 
@@ -471,5 +519,9 @@ fn project_identity(root: &Path, metadata: &fs::Metadata) -> String {
 fn sha256(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
-    digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

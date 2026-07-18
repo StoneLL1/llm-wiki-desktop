@@ -16,7 +16,14 @@ fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            out.push((relative, if metadata.is_file() { fs::read(&path).unwrap() } else { Vec::new() }));
+            out.push((
+                relative,
+                if metadata.is_file() {
+                    fs::read(&path).unwrap()
+                } else {
+                    Vec::new()
+                },
+            ));
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
                 visit(root, &path, out);
             }
@@ -39,7 +46,11 @@ fn legacy_history_is_a_read_only_projection_without_destructive_actions() {
         r#"{"id":"task-1","title":"Legacy import","status":"succeeded","startedAt":"2026-07-01T00:00:00Z","updatedAt":"2026-07-01T00:01:00Z","logPath":".app/tasks/task-1.log","secret":"do-not-project"}"#,
     )
     .unwrap();
-    fs::write(root.join(".app/tasks/task-1.log"), "secret browser cookie output").unwrap();
+    fs::write(
+        root.join(".app/tasks/task-1.log"),
+        "secret browser cookie output",
+    )
+    .unwrap();
     fs::write(
         root.join(".app/import-history/batch-1.json"),
         r#"{"batchId":"batch-1","status":"completed","createdAt":"2026-07-02T00:00:00Z"}"#,
@@ -50,12 +61,24 @@ fn legacy_history_is_a_read_only_projection_without_destructive_actions() {
     let before = snapshot(root);
     let view = LegacyHistoryAdapter::default().list(root).unwrap();
     assert!(view.entries.iter().all(|entry| entry.legacy_read_only));
-    assert!(view.entries.iter().all(|entry| entry.available_actions.is_empty()));
-    assert!(view.entries.iter().all(|entry| !entry.can_retry && !entry.can_delete && !entry.can_replace_source));
+    assert!(view
+        .entries
+        .iter()
+        .all(|entry| entry.available_actions.is_empty()));
+    assert!(view
+        .entries
+        .iter()
+        .all(|entry| !entry.can_retry && !entry.can_delete && !entry.can_replace_source));
     assert!(view.entries.iter().any(|entry| entry.id == "task-1"));
     assert!(view.entries.iter().any(|entry| entry.id == "batch-1"));
-    assert!(view.warnings.iter().any(|warning| warning.code == "LEGACY_HISTORY_CORRUPT"));
-    assert!(view.entries.iter().all(|entry| !entry.title.contains("secret")));
+    assert!(view
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "LEGACY_HISTORY_CORRUPT"));
+    assert!(view
+        .entries
+        .iter()
+        .all(|entry| !entry.title.contains("secret")));
     assert_eq!(before, snapshot(root));
 }
 
@@ -64,7 +87,11 @@ fn legacy_history_reads_are_bounded_and_corrupt_entries_do_not_hide_valid_entrie
     let directory = tempdir().unwrap();
     let root = directory.path();
     fs::create_dir_all(root.join(".app/tasks")).unwrap();
-    fs::write(root.join(".app/tasks/valid.json"), r#"{"id":"valid","title":"Valid"}"#).unwrap();
+    fs::write(
+        root.join(".app/tasks/valid.json"),
+        r#"{"id":"valid","title":"Valid"}"#,
+    )
+    .unwrap();
     fs::write(root.join(".app/tasks/large.json"), "x".repeat(100)).unwrap();
     let view = LegacyHistoryAdapter::new(LegacyHistoryLimits {
         max_files: 1,
@@ -72,5 +99,8 @@ fn legacy_history_reads_are_bounded_and_corrupt_entries_do_not_hide_valid_entrie
     })
     .list(root)
     .unwrap();
-    assert!(view.warnings.iter().any(|warning| warning.code == "LEGACY_HISTORY_LIMIT"));
+    assert!(view
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "LEGACY_HISTORY_LIMIT"));
 }

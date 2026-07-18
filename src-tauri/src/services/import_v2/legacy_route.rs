@@ -2,8 +2,7 @@ use std::path::Path;
 
 use crate::errors::BackendError;
 use crate::models::import::{
-    ExtractionStatus, ImportConflict, ImportFileEntry, ImportPreview, ImportSummary,
-    SourceFileType,
+    ExtractionStatus, ImportConflict, ImportFileEntry, ImportPreview, ImportSummary, SourceFileType,
 };
 use crate::models::import_v2::{ImportInputKind, ImportItemStatus, ImportSession};
 
@@ -35,7 +34,10 @@ impl LegacyPreviewAdapter {
                     ExtractionStatus::Extracted
                 }
             } else if item.issue.is_some()
-                || matches!(item.status, ImportItemStatus::Failed | ImportItemStatus::Cancelled)
+                || matches!(
+                    item.status,
+                    ImportItemStatus::Failed | ImportItemStatus::Cancelled
+                )
             {
                 ExtractionStatus::Failed
             } else {
