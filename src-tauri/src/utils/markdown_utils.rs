@@ -478,11 +478,22 @@ pub fn snippet_for_query(body: &str, query_lower: &str, radius: usize) -> Option
         .find('\n')
         .map(|p| line_start + p)
         .unwrap_or(body.len());
+    // `str` ranges are byte offsets, while the requested radius is a visual
+    // window. A byte offset may land in the middle of a UTF-8 code point (for
+    // example, when the surrounding line contains CJK text), which would
+    // panic when slicing below. Round the start down to the previous character
+    // boundary and the end up to the next one, staying within this line.
     let mut snippet_start = start.saturating_sub(radius);
     if snippet_start < line_start {
         snippet_start = line_start;
     }
-    let snippet_end = (char_end).min(start + radius.max(query.len()));
+    while snippet_start > line_start && !body.is_char_boundary(snippet_start) {
+        snippet_start -= 1;
+    }
+    let mut snippet_end = char_end.min(start.saturating_add(radius.max(query.len())));
+    while snippet_end < char_end && !body.is_char_boundary(snippet_end) {
+        snippet_end += 1;
+    }
     let prefix = if snippet_start > line_start {
         "…"
     } else {
@@ -656,6 +667,13 @@ mod tests {
         let body = "intro line\nthis mentions AgentMemory here\ntail";
         let snip = snippet_for_query(body, "agentmemory", 10).unwrap();
         assert!(snip.to_ascii_lowercase().contains("agentmemory"));
+    }
+
+    #[test]
+    fn snippet_preserves_utf8_boundaries_for_cjk_text() {
+        let body = "这是中文前缀，命令后面还有中文内容";
+        let snip = snippet_for_query(body, "命令", 5).unwrap();
+        assert!(snip.contains("命令"));
     }
 
     #[test]

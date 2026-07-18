@@ -78,7 +78,9 @@ fn truncate_excerpt(body: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::SearchService;
-    use crate::services::search_service::test_support::{seed_chinese_question_page, tmp_context};
+    use crate::services::search_service::test_support::{
+        seed_chinese_question_page, tmp_context, write_file,
+    };
 
     #[test]
     fn retrieve_with_excerpts_handles_chinese_question_suffix() {
@@ -97,6 +99,26 @@ mod tests {
         assert!(hits[0].excerpt.as_deref().unwrap().ends_with('…'));
         assert!(hits[0].excerpt.as_deref().unwrap().chars().count() <= EXCERPT_BODY_CHARS + 1);
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieve_with_excerpts_does_not_slice_inside_cjk_prefix() {
+        let (context, root) = tmp_context("retrieve-cjk-boundary");
+        let prefix = format!("{}🙂{}x", "前".repeat(20), "后".repeat(20));
+        write_file(
+            &context,
+            "wiki/concepts/cjk-boundary.md",
+            &format!("---\ntitle: CJK boundary\n---\n\n{prefix}命令后缀"),
+        );
+
+        let service = SearchService::default();
+        let hits = service
+            .retrieve_with_excerpts(&context, "命令", 3, 1200)
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.as_deref().unwrap().contains("命令"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
