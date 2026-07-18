@@ -5,7 +5,7 @@ mod chat_service;
 mod compile_instructions;
 mod compile_service;
 mod export_service;
-mod extraction_service;
+pub(crate) mod extraction_service;
 mod file_store;
 mod git_service;
 mod graph_service;

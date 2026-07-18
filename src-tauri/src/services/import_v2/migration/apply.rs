@@ -7,8 +7,8 @@ use url::Url;
 use crate::errors::BackendError;
 use crate::models::git::{CheckpointPurpose, GitCheckpoint};
 use crate::models::import_v2_migration::{
-    LegacyInventory, MigrationApplyResult, MigrationConfirmation, MigrationDecision,
-    MigrationPlan, MigrationReport, MigrationStatus, MigrationStatusSnapshot,
+    LegacyInventory, MigrationApplyResult, MigrationConfirmation, MigrationDecision, MigrationPlan,
+    MigrationReport, MigrationStatus, MigrationStatusSnapshot,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::migration::planner::{DefaultMigrationPlanner, MigrationPlanner};
@@ -55,7 +55,9 @@ impl MigrationService {
         digest(
             format!(
                 "import-v2-migration-confirm\n{}\n{}\n{}",
-                plan.fingerprint(), plan.v2_index_fingerprint, project_identity
+                plan.fingerprint(),
+                plan.v2_index_fingerprint,
+                project_identity
             )
             .as_bytes(),
         )
@@ -169,7 +171,9 @@ impl MigrationService {
                 .as_ref()
                 .map(|report| report.status)
                 .unwrap_or(MigrationStatus::NotScanned),
-            plan_fingerprint: report.as_ref().map(|report| report.plan_fingerprint.clone()),
+            plan_fingerprint: report
+                .as_ref()
+                .map(|report| report.plan_fingerprint.clone()),
             report,
         })
     }
@@ -212,7 +216,10 @@ impl MigrationService {
         ))
     }
 
-    fn read_report(&self, context: &ProjectContext) -> Result<Option<MigrationReport>, BackendError> {
+    fn read_report(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<Option<MigrationReport>, BackendError> {
         let path = context.resolve_project_path(REPORT_PATH)?;
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -231,16 +238,14 @@ impl MigrationService {
             ));
         }
         let bytes = read_project_file_nofollow(&context.root, &path)?;
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| {
-                BackendError::new(
-                    "MIGRATION_REPORT_INVALID",
-                    "The migration report is not valid migration metadata.",
-                    false,
-                    true,
-                )
-            })
+        serde_json::from_slice(&bytes).map(Some).map_err(|_| {
+            BackendError::new(
+                "MIGRATION_REPORT_INVALID",
+                "The migration report is not valid migration metadata.",
+                false,
+                true,
+            )
+        })
     }
 }
 
@@ -275,10 +280,7 @@ fn build_next_index(
     plan: &MigrationPlan,
 ) -> Result<SourceIndex, BackendError> {
     for candidate in &plan.candidates {
-        let MigrationDecision::CreateV2Record {
-            proposed_source_id,
-        } = &candidate.decision
-        else {
+        let MigrationDecision::CreateV2Record { proposed_source_id } = &candidate.decision else {
             continue;
         };
         let Some(hash) = candidate
@@ -393,5 +395,9 @@ fn normalize_public_url(value: &str) -> Option<String> {
 fn digest(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
-    digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

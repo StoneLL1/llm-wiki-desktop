@@ -283,6 +283,7 @@ impl CoreIntegrationFixture {
                     project_id: self.context.project_id.clone(),
                     project_root_path: self.root.to_string_lossy().into(),
                     session_id: session.into(),
+                    batch_task_id: None,
                     decisions: vec![CommitItemDecision {
                         item_id: item.into(),
                         conflict_action: action,
@@ -459,7 +460,11 @@ fn import_v2_text_input_is_staged_before_identity_is_recorded() {
     let fixture = CoreIntegrationFixture::new();
     let session = fixture
         .service
-        .create_session(&fixture.context, &fixture.files, ImportResourceMode::Balanced)
+        .create_session(
+            &fixture.context,
+            &fixture.files,
+            ImportResourceMode::Balanced,
+        )
         .unwrap();
     let session = fixture
         .service
@@ -474,7 +479,10 @@ fn import_v2_text_input_is_staged_before_identity_is_recorded() {
 
     let input = &session.items[0].input;
     let staged = fixture.root.join(&input.locator);
-    assert_eq!(std::fs::read_to_string(staged).unwrap(), "# Clipboard note\n");
+    assert_eq!(
+        std::fs::read_to_string(staged).unwrap(),
+        "# Clipboard note\n"
+    );
     assert!(input.source_identity.is_some());
     assert!(!fixture.root.join("raw/sources").exists());
 }

@@ -7,9 +7,8 @@ use crate::{
         AcceptImportAgentCandidateRequest, AgentAssistancePolicy, AgentCandidateActionResult,
         AgentCandidateView, AgentInvocationRequest, AgentSendScope,
         ApproveImportByokAssistanceRequest, DiscardImportAgentCandidateRequest,
-        GetImportAgentPolicyRequest,
-        PreviewImportByokScopeRequest, SelectImportAgentCandidateRequest,
-        SetImportAgentPolicyRequest,
+        GetImportAgentPolicyRequest, PreviewImportByokScopeRequest,
+        SelectImportAgentCandidateRequest, SetImportAgentPolicyRequest,
     },
     models::task::BackendTask,
     services::import_v2::agent_assistance::AgentAssistanceService,
@@ -183,19 +182,17 @@ pub fn approve_import_byok_assistance_v2(
                         &state.file_store,
                         &state.task_service,
                     )
-                    .accept_staged_output(
-                        &context,
-                        &request.session_id,
-                        &request.item_id,
-                        &task_id,
-                    )
+                    .accept_staged_output(&context, &request.session_id, &request.item_id, &task_id)
                     .map(|_| ())
                 })
             }
             Err(error) => Err(error),
         };
         if let Err(error) = result {
-            let status = state.task_service.get_task(&task_id).map(|task| task.status);
+            let status = state
+                .task_service
+                .get_task(&task_id)
+                .map(|task| task.status);
             if status == Some(crate::models::task::TaskStatus::Succeeded) {
                 let _ = state.task_service.append_log(
                     &task_id,
@@ -203,9 +200,26 @@ pub fn approve_import_byok_assistance_v2(
                     "Agent output was staged but candidate validation failed; the deterministic result was preserved.".into(),
                 );
             }
-            if !matches!(status, Some(crate::models::task::TaskStatus::Failed | crate::models::task::TaskStatus::Succeeded | crate::models::task::TaskStatus::Cancelled)) {
-                let _ = state.task_service.set_error(&task_id, BackendError::new(error.code, "BYOK assistance failed before candidate validation.", true, true));
-                let _ = state.task_service.transition_status(&task_id, crate::models::task::TaskStatus::Failed);
+            if !matches!(
+                status,
+                Some(
+                    crate::models::task::TaskStatus::Failed
+                        | crate::models::task::TaskStatus::Succeeded
+                        | crate::models::task::TaskStatus::Cancelled
+                )
+            ) {
+                let _ = state.task_service.set_error(
+                    &task_id,
+                    BackendError::new(
+                        error.code,
+                        "BYOK assistance failed before candidate validation.",
+                        true,
+                        true,
+                    ),
+                );
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, crate::models::task::TaskStatus::Failed);
             }
         }
     });
@@ -284,12 +298,7 @@ pub fn start_import_agent_assistance_v2(
                         &state.file_store,
                         &state.task_service,
                     )
-                    .accept_staged_output(
-                        &context,
-                        &request.session_id,
-                        &request.item_id,
-                        &task_id,
-                    )
+                    .accept_staged_output(&context, &request.session_id, &request.item_id, &task_id)
                     .map(|_| ())
                 })
             });

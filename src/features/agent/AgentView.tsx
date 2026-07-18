@@ -12,14 +12,18 @@ import {
 import type { AgentDetectionState, AgentInfo, AgentKind } from "../../types/agent";
 import type { ProviderStatus } from "../../types/llm";
 import type { BackendTask, TaskStatus } from "../../types/task";
+import type { TaskActivity } from "../../types/task";
 import { useTranslation } from "react-i18next";
 import { isTerminalStatus } from "../../types/task";
+import { AgentActivityTimeline } from "../../components/agent/AgentActivityTimeline";
 import type { AgentSkill } from "./RunAgentDialog";
 
 interface AgentViewProps {
   agents: AgentInfo[];
   providers: ProviderStatus[];
   tasks: BackendTask[];
+  activities?: Record<string, TaskActivity[]>;
+  taskOutputs?: Record<string, string>;
   onDetect: () => void;
   onRunAgent: (presetSkill?: AgentSkill) => void;
   onSetDefault?: (agent: AgentKind) => void;
@@ -71,6 +75,8 @@ export function AgentView({
   agents,
   providers,
   tasks,
+  activities = {},
+  taskOutputs = {},
   onDetect,
   onRunAgent,
   onSetDefault,
@@ -281,6 +287,8 @@ export function AgentView({
               const percent = progressPercent(task);
               const terminal = isTerminalStatus(task.status);
               const cancellable = task.cancellable && !terminal;
+              const taskActivity = activities[task.id] ?? [];
+              const taskOutput = taskOutputs[task.id] ?? "";
               const rowClass = "task-row" + (terminal ? " is-terminal" : "");
               return (
                 <div key={task.id} className={rowClass}>
@@ -307,8 +315,14 @@ export function AgentView({
                   >
                     <div className="task-row__title">{task.title}</div>
                     <div className="task-row__sub">
-                      {task.taskType} · {task.status}
+                      {t(`task.type.${task.taskType}`, { defaultValue: task.taskType })} · {t(`task.status.${task.status}`, { defaultValue: task.status })}
                     </div>
+                    {taskActivity.length > 0 ? (
+                      <AgentActivityTimeline activities={taskActivity} taskStatus={task.status} compact />
+                    ) : null}
+                    {taskOutput ? (
+                      <pre className="agent-task-output mt-1 max-h-[96px]">{taskOutput}</pre>
+                    ) : null}
                     {percent !== null ? (
                       <div className="task-row__progress">
                         <div

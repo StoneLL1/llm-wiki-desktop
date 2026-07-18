@@ -14,6 +14,7 @@ export interface ImportPreviewIdentity {
   sessionId: string;
   itemId: string;
   candidateId: string | null;
+  historyBatchId?: string | null;
 }
 
 export interface ImportMarkdownPreviewDialogProps {
@@ -47,7 +48,7 @@ export function ImportMarkdownPreviewDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const identityKey = identity ? `${identity.sessionId}\0${identity.itemId}\0${identity.candidateId ?? ""}` : null;
+  const identityKey = identity ? `${identity.sessionId}\0${identity.itemId}\0${identity.candidateId ?? ""}\0${identity.historyBatchId ?? ""}` : null;
 
   useEffect(() => {
     if (!open || !identity || !identityKey) {

@@ -2,14 +2,13 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use sha2::{Digest, Sha256};
 use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_STATE_INVALID,
 };
 use crate::models::import_v2::{
     AttemptOutcome, AttemptRecord, ImportInput, ImportInputKind, ImportIssue, ImportItem,
-    ImportItemStatus, ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
-    SourceIdentity,
+    ImportItemStatus, ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionStatus,
+    ImportStage, SourceIdentity,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_agent::AgentCandidate;
@@ -24,16 +23,21 @@ use crate::services::import_v2::engine::{
 use crate::services::import_v2::file_router::{
     AttemptOutcome as RouteOutcome, CapabilitySnapshot, FileRoutePlanner, QualityFloor,
 };
-use crate::services::import_v2::native_file_engine::NativeFileEngine;
+use crate::services::import_v2::generic_web_engine::GenericWebEngine;
+use crate::services::import_v2::native_file_engine::{
+    NativeFileEngine, NativeStructuredFileEngine,
+};
 use crate::services::import_v2::pack_engine::PackProcessEngine;
 use crate::services::import_v2::quality_gate::QualityGate;
 use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::import_v2::web_target_store::WebTargetStore;
+use crate::services::import_v2::wechat_web_engine::WechatWebEngine;
 use crate::services::import_v2::SessionStore;
 use crate::services::FileStore;
 use crate::services::SecretService;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
+use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 pub struct ImportV2Service {
@@ -60,16 +64,35 @@ impl ImportV2Service {
         let metadata = match fs::symlink_metadata(&root) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(BackendError::new("IMPORT_V2_SESSION_SCAN_FAILED", error.to_string(), true, true)),
+            Err(error) => {
+                return Err(BackendError::new(
+                    "IMPORT_V2_SESSION_SCAN_FAILED",
+                    error.to_string(),
+                    true,
+                    true,
+                ))
+            }
         };
         if !metadata.is_dir()
             || metadata.file_type().is_symlink()
             || crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
         {
-            return Err(BackendError::new("IMPORT_V2_SESSION_SCAN_FAILED", "Import session directory is not safe.", false, true));
+            return Err(BackendError::new(
+                "IMPORT_V2_SESSION_SCAN_FAILED",
+                "Import session directory is not safe.",
+                false,
+                true,
+            ));
         }
         let mut ids = fs::read_dir(root)
-            .map_err(|error| BackendError::new("IMPORT_V2_SESSION_SCAN_FAILED", error.to_string(), true, true))?
+            .map_err(|error| {
+                BackendError::new(
+                    "IMPORT_V2_SESSION_SCAN_FAILED",
+                    error.to_string(),
+                    true,
+                    true,
+                )
+            })?
             .flatten()
             .filter_map(|entry| {
                 let metadata = fs::symlink_metadata(entry.path()).ok()?;
@@ -78,7 +101,11 @@ impl ImportV2Service {
                     && !crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
                 {
                     let id = entry.file_name().to_string_lossy().into_owned();
-                    (id.len() <= 64 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')).then_some(id)
+                    (id.len() <= 64
+                        && id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+                    .then_some(id)
                 } else {
                     None
                 }
@@ -98,11 +125,16 @@ impl ImportV2Service {
                             | crate::errors::IMPORT_V2_SESSION_NOT_FOUND
                             | "JSON_PARSE_FAILED"
                             | "FILE_READ_FAILED"
-                    ) => continue,
+                    ) =>
+                {
+                    continue
+                }
                 Err(error) => return Err(error),
             };
-            if !matches!(session.status, ImportSessionStatus::Completed | ImportSessionStatus::Cancelled)
-                && !session.items.is_empty()
+            if !matches!(
+                session.status,
+                ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
+            ) && (!session.items.is_empty() || session.discovery_task_id.is_some())
             {
                 return Ok(Some(id));
             }
@@ -112,15 +144,41 @@ impl ImportV2Service {
 
     pub fn with_secret_service(secrets: SecretService) -> Self {
         let engines = EngineRegistry::default();
+        let web_targets = Arc::new(WebTargetStore::new(secrets));
         engines
             .register(Arc::new(NativeFileEngine::default()))
             .expect("the built-in native file engine identifier is unique");
+        for (engine_id, route) in [
+            ("builtin.pdf-text", "pdf.text"),
+            ("builtin.office-docx", "office.modern.docx"),
+            ("builtin.office-xlsx", "office.modern.xlsx"),
+            ("builtin.office-pptx", "office.modern.pptx"),
+        ] {
+            engines
+                .register(Arc::new(NativeStructuredFileEngine::new(engine_id, route)))
+                .expect("the built-in structured file engine identifier is unique");
+        }
+        for (engine_id, route) in [
+            ("builtin.web-http", "web.generic.readability"),
+            ("builtin.web-http-browser", "web.generic.browser"),
+        ] {
+            engines
+                .register(Arc::new(GenericWebEngine::new(
+                    web_targets.clone(),
+                    engine_id,
+                    route,
+                )))
+                .expect("the built-in generic web engine identifier is unique");
+        }
+        engines
+            .register(Arc::new(WechatWebEngine::new(web_targets.clone())))
+            .expect("the built-in WeChat web engine identifier is unique");
         Self {
             sessions: SessionStore::default(),
             engines,
             quality: QualityGate::default(),
             mutation_lock: Mutex::new(()),
-            web_targets: Arc::new(WebTargetStore::new(secrets)),
+            web_targets,
         }
     }
     pub fn store_web_target(
@@ -157,16 +215,20 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         expected_request_url: &str,
-    ) -> Result<Option<crate::services::import_v2::web_target_store::BilibiliAsrGrant>, BackendError> {
-        self.web_targets.take_bilibili_asr(
-            project_id,
-            session_id,
-            item_id,
-            expected_request_url,
-        )
+    ) -> Result<Option<crate::services::import_v2::web_target_store::BilibiliAsrGrant>, BackendError>
+    {
+        self.web_targets
+            .take_bilibili_asr(project_id, session_id, item_id, expected_request_url)
     }
-    pub fn bind_authenticated_profile(&self, project_id: &str, session_id: &str, item_id: &str, profile: std::path::PathBuf) -> Result<(), BackendError> {
-        self.web_targets.bind_authenticated_profile(project_id, session_id, item_id, profile)
+    pub fn bind_authenticated_profile(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        item_id: &str,
+        profile: std::path::PathBuf,
+    ) -> Result<(), BackendError> {
+        self.web_targets
+            .bind_authenticated_profile(project_id, session_id, item_id, profile)
     }
     pub fn release_item_after_login(
         &self,
@@ -177,13 +239,90 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.status != ImportItemStatus::WaitingLogin {
-                return Err(BackendError::new(crate::errors::IMPORT_V2_STATE_INVALID, "Only a waiting-login item can be released.", false, true));
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_STATE_INVALID,
+                    "Only a waiting-login item can be released.",
+                    false,
+                    true,
+                ));
             }
             transition_item(item, ImportItemStatus::Failed)?;
             item.task_id = None;
             item.issue = None;
             Ok(())
         })
+    }
+
+    pub fn cancel_queued_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if item.status != ImportItemStatus::Queued {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_STATE_INVALID,
+                    "Only queued import items can be cancelled before a task starts.",
+                    false,
+                    true,
+                ));
+            }
+            transition_item(item, ImportItemStatus::Cancelled)?;
+            item.task_id = None;
+            item.progress = None;
+            Ok(())
+        })
+    }
+
+    pub fn skip_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        let item = find_item_mut(&mut session, item_id)?;
+        if !matches!(
+            item.status,
+            ImportItemStatus::Queued
+                | ImportItemStatus::WaitingCapability
+                | ImportItemStatus::WaitingLogin
+                | ImportItemStatus::PreviewReady
+                | ImportItemStatus::NeedsMerge
+                | ImportItemStatus::Failed
+        ) {
+            return Err(BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Only queued, waiting, ready, or failed import items can be skipped.",
+                false,
+                true,
+            ));
+        }
+        if let Some(task_id) = item.task_id.as_deref() {
+            if tasks.get_task(task_id).is_some_and(|task| {
+                !matches!(
+                    task.status,
+                    TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                )
+            }) {
+                task_call(tasks.cancel_task(task_id))?;
+            }
+        }
+        transition_item(item, ImportItemStatus::Skipped)?;
+        item.selected = false;
+        item.task_id = None;
+        item.progress = None;
+        item.preview = None;
+        item.issue = None;
+        let item = item.clone();
+        persist_derived(&self.sessions, context, files, session)?;
+        Ok(item)
     }
     pub fn create_session(
         &self,
@@ -242,10 +381,20 @@ impl ImportV2Service {
         transaction.write_new(&path, bytes)?;
         transaction.commit()?;
         let canonical_path = path.canonicalize().map_err(|error| {
-            BackendError::new("IMPORT_V2_TEXT_STAGE_FAILED", error.to_string(), true, false)
+            BackendError::new(
+                "IMPORT_V2_TEXT_STAGE_FAILED",
+                error.to_string(),
+                true,
+                false,
+            )
         })?;
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            BackendError::new("IMPORT_V2_TEXT_STAGE_FAILED", error.to_string(), true, false)
+            BackendError::new(
+                "IMPORT_V2_TEXT_STAGE_FAILED",
+                error.to_string(),
+                true,
+                false,
+            )
         })?;
         let modified_nanos = metadata.modified().ok().and_then(|value| {
             value
@@ -291,6 +440,68 @@ impl ImportV2Service {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
         self.sessions.load(context, files, session_id)
+    }
+
+    pub fn set_discovery_task_id(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        task_id: Option<String>,
+    ) -> Result<ImportSession, BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        session.discovery_task_id = task_id;
+        session.updated_at = chrono::Utc::now().to_rfc3339();
+        self.sessions.save(context, files, &session)?;
+        Ok(session)
+    }
+
+    /// Persist the task-to-item relationship before the worker is spawned.
+    /// This closes the small restart window in which a task already exists
+    /// but the item still looks unclaimed in the durable session file.
+    pub fn bind_item_task_ids(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        bindings: &[(String, String)],
+    ) -> Result<(), BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+
+        for (item_id, task_id) in bindings {
+            let item = find_item_mut(&mut session, item_id)?;
+            if !matches!(
+                item.status,
+                ImportItemStatus::Queued
+                    | ImportItemStatus::Failed
+                    | ImportItemStatus::Cancelled
+                    | ImportItemStatus::Skipped
+                    | ImportItemStatus::Paused
+            ) {
+                return Err(task_error(
+                    "Import item is already claimed by another task.",
+                ));
+            }
+            if item.status == ImportItemStatus::Queued
+                && item
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|bound| bound != task_id)
+            {
+                return Err(task_error(
+                    "Import item is already claimed by another task.",
+                ));
+            }
+        }
+
+        for (item_id, task_id) in bindings {
+            find_item_mut(&mut session, item_id)?.task_id = Some(task_id.clone());
+        }
+        persist_derived(&self.sessions, context, files, session)
     }
 
     pub fn begin_agent_assistance(
@@ -390,12 +601,21 @@ impl ImportV2Service {
                 })
                 .collect::<Vec<_>>();
             if attempts.len() >= usize::from(max_attempts)
-                || attempts.iter().any(|attempt| attempt.completed_at.is_none())
+                || attempts
+                    .iter()
+                    .any(|attempt| attempt.completed_at.is_none())
             {
-                return Err(task_error("The Agent assistance attempt budget is exhausted or active."));
+                return Err(task_error(
+                    "The Agent assistance attempt budget is exhausted or active.",
+                ));
             }
-            if !matches!(item.status, ImportItemStatus::Failed | ImportItemStatus::PreviewReady) {
-                return Err(task_error("BYOK assistance requires a failed item or preview."));
+            if !matches!(
+                item.status,
+                ImportItemStatus::Failed | ImportItemStatus::PreviewReady
+            ) {
+                return Err(task_error(
+                    "BYOK assistance requires a failed item or preview.",
+                ));
             }
             item.task_id = Some(task_id.to_string());
             item.attempts.push(AttemptRecord {
@@ -453,7 +673,9 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.task_id.as_deref() != Some(task_id) || candidate.task_id != task_id {
-                return Err(task_error("Agent candidate is not bound to this import item task."));
+                return Err(task_error(
+                    "Agent candidate is not bound to this import item task.",
+                ));
             }
             item.status = if needs_three_way_merge {
                 ImportItemStatus::NeedsMerge
@@ -475,7 +697,9 @@ impl ImportV2Service {
         let mut previous = ImportItemStatus::Failed;
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error("Agent candidate validation is not bound to this item task."));
+                return Err(task_error(
+                    "Agent candidate validation is not bound to this item task.",
+                ));
             }
             if !matches!(
                 item.status,
@@ -484,7 +708,9 @@ impl ImportV2Service {
                     | ImportItemStatus::NeedsMerge
                     | ImportItemStatus::Validating
             ) {
-                return Err(task_error("This import item cannot enter Agent candidate validation."));
+                return Err(task_error(
+                    "This import item cannot enter Agent candidate validation.",
+                ));
             }
             previous = item.status.clone();
             item.status = ImportItemStatus::Validating;
@@ -504,7 +730,9 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error("Agent candidate validation failure is not bound to this item task."));
+                return Err(task_error(
+                    "Agent candidate validation failure is not bound to this item task.",
+                ));
             }
             item.status = match previous {
                 ImportItemStatus::PreviewReady | ImportItemStatus::NeedsMerge => previous,
@@ -525,7 +753,9 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error("Rejected Agent candidate is not bound to this item task."));
+                return Err(task_error(
+                    "Rejected Agent candidate is not bound to this item task.",
+                ));
             }
             let local_route = format!("agent_assistance/{task_id}");
             let byok_route = format!("byok_assistance/{task_id}");
@@ -565,7 +795,9 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error("Rejected Agent candidate is not bound to this item task."));
+                return Err(task_error(
+                    "Rejected Agent candidate is not bound to this item task.",
+                ));
             }
             item.status = match previous {
                 ImportItemStatus::PreviewReady | ImportItemStatus::NeedsMerge => previous,
@@ -611,7 +843,9 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error("Agent candidate selection is not bound to this item task."));
+                return Err(task_error(
+                    "Agent candidate selection is not bound to this item task.",
+                ));
             }
             item.preview = Some(preview);
             item.status = if needs_three_way_merge {
@@ -634,7 +868,9 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error("Agent candidate discard is not bound to this item task."));
+                return Err(task_error(
+                    "Agent candidate discard is not bound to this item task.",
+                ));
             }
             item.preview = deterministic_preview;
             item.status = if item.preview.is_some() {
@@ -729,11 +965,69 @@ impl ImportV2Service {
                         attempt.warnings = if charge_unknown {
                             vec!["BYOK_CHARGE_STATUS_UNKNOWN".into()]
                         } else {
-                            vec![
-                                "Interrupted Agent assistance was closed during recovery.".into(),
-                            ]
+                            vec!["Interrupted Agent assistance was closed during recovery.".into()]
                         };
                     }
+                }
+            }
+            if item.status == ImportItemStatus::Queued {
+                let recovered_status = item
+                    .task_id
+                    .as_deref()
+                    .and_then(|id| tasks.get_task(id))
+                    .map(|task| task.status);
+                if matches!(recovered_status, Some(TaskStatus::Failed | TaskStatus::Cancelled) | None)
+                {
+                    // A pre-bound queued task can be persisted before its
+                    // worker claims the item. If that task was interrupted,
+                    // release the stale identity so the normal retry path
+                    // can bind a fresh task after restart.
+                    item.task_id = None;
+                    item.progress = None;
+                }
+            }
+            if matches!(
+                item.status,
+                ImportItemStatus::WaitingCapability | ImportItemStatus::WaitingLogin
+            ) {
+                let recovered_status = item
+                    .task_id
+                    .as_deref()
+                    .and_then(|id| tasks.get_task(id))
+                    .map(|task| task.status);
+                match recovered_status {
+                    Some(TaskStatus::Cancelled) => {
+                        transition_item(item, ImportItemStatus::Cancelled)?;
+                        item.issue = None;
+                        item.task_id = None;
+                        item.progress = None;
+                    }
+                    Some(TaskStatus::Failed) | None => {
+                        transition_item(item, ImportItemStatus::Failed)?;
+                        item.task_id = None;
+                        item.progress = None;
+                        if item.issue.is_none() {
+                            item.issue = Some(ImportIssue {
+                                code: "TASK_RECOVERY".into(),
+                                message: "Import was interrupted and can be retried.".into(),
+                                stage: ImportStage::Route,
+                                retryable: true,
+                                user_action_required: false,
+                                recovery_actions: vec![
+                                    crate::models::import_v2::ImportRecoveryAction::Retry,
+                                    crate::models::import_v2::ImportRecoveryAction::ViewLog,
+                                ],
+                                available_actions: Vec::new(),
+                            });
+                        }
+                    }
+                    Some(
+                        TaskStatus::Queued
+                        | TaskStatus::Running
+                        | TaskStatus::WaitingForConfirmation
+                        | TaskStatus::Cancelling
+                        | TaskStatus::Succeeded,
+                    ) => {}
                 }
             }
             if matches!(
@@ -748,17 +1042,31 @@ impl ImportV2Service {
                     .and_then(|id| tasks.get_task(id))
                     .map(|task| task.status);
                 if recovered_status == Some(TaskStatus::Cancelled) {
-                    let runtime_temp = context.root.join(format!(".app/import-sessions/{session_id}/items/{}/staging/runtime-temp", item.item_id));
-                    crate::services::import_v2::media_router::recover_media_temp_root(&runtime_temp)?;
+                    let runtime_temp = context.root.join(format!(
+                        ".app/import-sessions/{session_id}/items/{}/staging/runtime-temp",
+                        item.item_id
+                    ));
+                    crate::services::import_v2::media_router::recover_media_temp_root(
+                        &runtime_temp,
+                    )?;
                     transition_item(item, ImportItemStatus::Cancelled)?;
+                    item.task_id = None;
+                    item.progress = None;
                     continue;
                 }
                 let interrupted =
                     recovered_status.is_none_or(|status| status == TaskStatus::Failed);
                 if interrupted {
-                    let runtime_temp = context.root.join(format!(".app/import-sessions/{session_id}/items/{}/staging/runtime-temp", item.item_id));
-                    crate::services::import_v2::media_router::recover_media_temp_root(&runtime_temp)?;
+                    let runtime_temp = context.root.join(format!(
+                        ".app/import-sessions/{session_id}/items/{}/staging/runtime-temp",
+                        item.item_id
+                    ));
+                    crate::services::import_v2::media_router::recover_media_temp_root(
+                        &runtime_temp,
+                    )?;
                     transition_item(item, ImportItemStatus::Failed)?;
+                    item.task_id = None;
+                    item.progress = None;
                     item.issue = Some(ImportIssue {
                         code: "TASK_RECOVERY".into(),
                         message: "Import was interrupted and can be retried.".into(),
@@ -829,6 +1137,19 @@ impl ImportV2Service {
         item_id: &str,
         task_id: &str,
     ) -> Result<ImportItem, BackendError> {
+        self.run_item_with_recovery(context, files, tasks, session_id, item_id, task_id, None)
+    }
+
+    pub fn run_item_with_recovery(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        recovery_action: Option<&ImportRecoveryAction>,
+    ) -> Result<ImportItem, BackendError> {
         let task = tasks
             .get_task(task_id)
             .ok_or_else(|| task_error("Import task was not found."))?;
@@ -852,7 +1173,7 @@ impl ImportV2Service {
             .find(|item| item.item_id == item_id)
             .ok_or_else(item_not_found)?
             .input;
-        let planned_routes = self.planned_routes(&input)?;
+        let planned_routes = self.planned_routes(&input, recovery_action)?;
         let engines = planned_routes
             .iter()
             .filter_map(|attempt| {
@@ -893,13 +1214,16 @@ impl ImportV2Service {
             .as_deref()
             .is_some_and(is_bilibili_url)
         {
-            let exact = self.web_targets.resolve(
-                &input.locator,
-                input.normalized_locator.as_deref(),
-            )?;
-            let route_available = self.engines.registered_routes()?.iter().any(|route| route == "media.asr");
-            route_available && self.web_targets
-                .has_bilibili_asr(
+            let exact = self
+                .web_targets
+                .resolve(&input.locator, input.normalized_locator.as_deref())?;
+            let route_available = self
+                .engines
+                .registered_routes()?
+                .iter()
+                .any(|route| route == "media.asr");
+            route_available
+                && self.web_targets.has_bilibili_asr(
                     &context.project_id,
                     session_id,
                     item_id,
@@ -930,7 +1254,10 @@ impl ImportV2Service {
         let mut request = request;
         for ((_, quality_floor), engine) in engines {
             let descriptor = engine.descriptor();
-            if is_capability_route(&descriptor.route) && request.input.source_identity.is_some() {
+            if is_capability_route(&descriptor.route)
+                && !descriptor.engine_id.starts_with("builtin.")
+                && request.input.source_identity.is_some()
+            {
                 request.input =
                     materialize_capability_input(context, &staging_root, &request.input)?;
             }
@@ -1018,8 +1345,11 @@ impl ImportV2Service {
                 ) {
                     Ok(candidate) => candidate,
                     Err(error) => {
-                        if token.is_cancelled() || error.code == crate::errors::IMPORT_V2_CANCELLED {
-                            return self.finish_cancelled(context, files, tasks, session_id, item_id, task_id);
+                        if token.is_cancelled() || error.code == crate::errors::IMPORT_V2_CANCELLED
+                        {
+                            return self.finish_cancelled(
+                                context, files, tasks, session_id, item_id, task_id,
+                            );
                         }
                         return self.finish_failed(
                             context,
@@ -1176,13 +1506,20 @@ impl ImportV2Service {
         mut web_result: EngineResult,
         token: &crate::tasks::task_model::CancellationToken,
     ) -> Result<EngineResult, BackendError> {
-        let Some(EngineContinuation::LocalAsr { temporary_input_path, .. }) = web_result.continuation.take() else {
+        let Some(EngineContinuation::LocalAsr {
+            temporary_input_path,
+            ..
+        }) = web_result.continuation.take()
+        else {
             return Ok(web_result);
         };
         let staging = context.root.join(staging_root);
         let media_path = staging.join(&temporary_input_path);
         let canonical_staging = staging.canonicalize().map_err(|_| asr_unavailable())?;
-        let canonical_runtime_temp = staging.join("runtime-temp").canonicalize().map_err(|_| asr_unavailable())?;
+        let canonical_runtime_temp = staging
+            .join("runtime-temp")
+            .canonicalize()
+            .map_err(|_| asr_unavailable())?;
         let canonical_media = media_path.canonicalize().map_err(|_| asr_unavailable())?;
         let media_workspace = canonical_media.parent().ok_or_else(asr_unavailable)?;
         if !canonical_media.starts_with(&canonical_staging)
@@ -1192,17 +1529,35 @@ impl ImportV2Service {
         {
             return Err(asr_unavailable());
         }
-        let _cleanup = crate::services::import_v2::media_router::TemporaryMediaWorkspace::create(media_workspace)?;
+        let _cleanup = crate::services::import_v2::media_router::TemporaryMediaWorkspace::create(
+            media_workspace,
+        )?;
         let asr_input = ImportInput {
             kind: crate::models::import_v2::ImportInputKind::File,
-            display_name: canonical_media.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            display_name: canonical_media
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
             locator: canonical_media.to_string_lossy().into_owned(),
             normalized_locator: None,
             source_identity: None,
         };
         let engine = self.engines.resolve_route("media.asr", &asr_input)?;
-        let exact = self.web_targets.resolve(&request.input.locator, request.input.normalized_locator.as_deref())?;
-        if self.web_targets.take_bilibili_asr(&request.project_id, &request.session_id, &request.item_id, exact.request_url.as_str())?.is_none() {
+        let exact = self.web_targets.resolve(
+            &request.input.locator,
+            request.input.normalized_locator.as_deref(),
+        )?;
+        if self
+            .web_targets
+            .take_bilibili_asr(
+                &request.project_id,
+                &request.session_id,
+                &request.item_id,
+                exact.request_url.as_str(),
+            )?
+            .is_none()
+        {
             return Err(asr_unavailable());
         }
         let descriptor = engine.descriptor();
@@ -1214,12 +1569,20 @@ impl ImportV2Service {
         let outcome = (|| -> Result<(EngineResult, Vec<String>), BackendError> {
             let asr_result = engine.execute(&asr_request, token)?;
             validate_engine_result(staging_root, &asr_result)?;
-            let output_path = staging.join(&asr_result.markdown_path).canonicalize().map_err(|_| asr_unavailable())?;
+            let output_path = staging
+                .join(&asr_result.markdown_path)
+                .canonicalize()
+                .map_err(|_| asr_unavailable())?;
             let output_workspace = output_path.parent().ok_or_else(asr_unavailable)?;
-            if !output_path.starts_with(&canonical_runtime_temp) || output_workspace == canonical_runtime_temp {
+            if !output_path.starts_with(&canonical_runtime_temp)
+                || output_workspace == canonical_runtime_temp
+            {
                 return Err(asr_unavailable());
             }
-            let _output_cleanup = crate::services::import_v2::media_router::TemporaryMediaWorkspace::create(output_workspace)?;
+            let _output_cleanup =
+                crate::services::import_v2::media_router::TemporaryMediaWorkspace::create(
+                    output_workspace,
+                )?;
             if asr_result.continuation.is_some()
                 || asr_result.markdown_path == web_result.markdown_path
                 || asr_result.source_snapshot_path == web_result.source_snapshot_path
@@ -1229,7 +1592,8 @@ impl ImportV2Service {
             let base_path = staging.join(&web_result.markdown_path);
             let transcript_path = staging.join(&asr_result.markdown_path);
             let mut base = std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
-            let transcript = std::fs::read_to_string(&transcript_path).map_err(|_| asr_unavailable())?;
+            let transcript =
+                std::fs::read_to_string(&transcript_path).map_err(|_| asr_unavailable())?;
             base.push_str("\n\n## Local ASR Transcript\n\n");
             base.push_str(&transcript);
             std::fs::write(&base_path, base).map_err(|_| asr_unavailable())?;
@@ -1240,11 +1604,16 @@ impl ImportV2Service {
             {
                 let _ = std::fs::remove_file(staging.join(relative));
             }
-            web_result.warnings.push("local_asr:whisper.cpp-1.8.3:ggml-small".into());
+            web_result
+                .warnings
+                .push("local_asr:whisper.cpp-1.8.3:ggml-small".into());
             Ok((web_result, asr_result.warnings))
         })();
         let (outcome_kind, warnings) = match &outcome {
-            Ok((_, warnings)) => (crate::models::import_v2::AttemptOutcome::Succeeded, warnings.clone()),
+            Ok((_, warnings)) => (
+                crate::models::import_v2::AttemptOutcome::Succeeded,
+                warnings.clone(),
+            ),
             Err(_) => (crate::models::import_v2::AttemptOutcome::Failed, Vec::new()),
         };
         self.record_attempt(
@@ -1263,6 +1632,7 @@ impl ImportV2Service {
     fn planned_routes(
         &self,
         input: &ImportInput,
+        recovery_action: Option<&ImportRecoveryAction>,
     ) -> Result<Vec<(&'static str, QualityFloor)>, BackendError> {
         let extension = Path::new(&input.locator)
             .extension()
@@ -1279,16 +1649,19 @@ impl ImportV2Service {
             _ => None,
         };
         let Some(format) = format else {
-            return Ok(explicit_routes(input)
-                .into_iter()
-                .map(|route| {
-                    let floor = match route {
-                        "pdf.text" | "pdf.layout" => QualityFloor::DeterministicDocument,
-                        _ => QualityFloor::ComparisonFallback,
-                    };
-                    (route, floor)
-                })
-                .collect());
+            return Ok(reorder_routes(
+                explicit_routes(input)
+                    .into_iter()
+                    .map(|route| {
+                        let floor = match route {
+                            "pdf.text" | "pdf.layout" => QualityFloor::DeterministicDocument,
+                            _ => QualityFloor::ComparisonFallback,
+                        };
+                        (route, floor)
+                    })
+                    .collect(),
+                recovery_action,
+            ));
         };
         let routes = self.engines.registered_routes()?;
         let has = |route: &str| routes.iter().any(|registered| registered == route);
@@ -1299,10 +1672,23 @@ impl ImportV2Service {
             office_oxide_qualified: has("pack.office-oxide"),
             agent_available: has("agent.office"),
         };
-        Ok(FileRoutePlanner::plan(format, capabilities)
-            .into_iter()
-            .map(|attempt| (attempt.route, attempt.quality_floor))
-            .collect())
+        Ok(reorder_routes(
+            FileRoutePlanner::plan(format, capabilities)
+                .into_iter()
+                .map(|attempt| {
+                    let route = attempt.route;
+                    let floor = self
+                        .engines
+                        .resolve_route(route, &route_resolution_input(route, input))
+                        .ok()
+                        .filter(|engine| engine.descriptor().engine_id.starts_with("builtin."))
+                        .map(|_| QualityFloor::DeterministicDocument)
+                        .unwrap_or(attempt.quality_floor);
+                    (route, floor)
+                })
+                .collect(),
+            recovery_action,
+        ))
     }
 
     fn record_attempt(
@@ -1343,18 +1729,32 @@ impl ImportV2Service {
         self.mutate_item(context, files, session_id, item_id, |item| {
             if !matches!(
                 item.status,
-                ImportItemStatus::Queued | ImportItemStatus::Failed
-            ) || item
+                ImportItemStatus::Queued
+                    | ImportItemStatus::Failed
+                    | ImportItemStatus::Cancelled
+                    | ImportItemStatus::Skipped
+                    | ImportItemStatus::Paused
+            ) || item.status != ImportItemStatus::Failed
+                && item
                 .task_id
                 .as_deref()
-                .is_some_and(|bound| bound != task_id && item.status != ImportItemStatus::Failed)
+                .is_some_and(|bound| bound != task_id)
             {
                 return Err(task_error(
                     "Import item is already claimed by another task.",
                 ));
             }
+            if pre_cancelled
+                && matches!(item.status, ImportItemStatus::Cancelled | ImportItemStatus::Skipped)
+            {
+                item.task_id = None;
+                return Ok(());
+            }
             item.task_id = Some(task_id.to_string());
             item.issue = None;
+            if item.status == ImportItemStatus::Skipped {
+                item.selected = true;
+            }
             transition_item(
                 item,
                 if pre_cancelled {
@@ -1362,7 +1762,11 @@ impl ImportV2Service {
                 } else {
                     ImportItemStatus::Inspecting
                 },
-            )
+            )?;
+            if pre_cancelled {
+                item.task_id = None;
+            }
+            Ok(())
         })
     }
 
@@ -1405,7 +1809,15 @@ impl ImportV2Service {
         task_id: &str,
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::Cancelled)
+            if item.status == ImportItemStatus::Skipped {
+                return Ok(());
+            }
+            if item.status != ImportItemStatus::Cancelled {
+                transition_item(item, ImportItemStatus::Cancelled)?;
+            }
+            item.task_id = None;
+            item.progress = None;
+            Ok(())
         })?;
         if tasks
             .get_task(task_id)
@@ -1540,6 +1952,29 @@ fn is_agent_eligible_failure(original_code: &str, issue: &ImportIssue) -> bool {
                 | "IMPORT_ASR_ENGINE_FAILED"
                 | "IMPORT_ASR_OUTPUT_INVALID"
         )
+}
+
+fn reorder_routes(
+    mut routes: Vec<(&'static str, QualityFloor)>,
+    recovery_action: Option<&ImportRecoveryAction>,
+) -> Vec<(&'static str, QualityFloor)> {
+    match recovery_action {
+        Some(ImportRecoveryAction::SwitchRoute) if routes.len() > 1 => routes.rotate_left(1),
+        Some(ImportRecoveryAction::SwitchParser) if routes.len() > 1 => routes.rotate_left(1),
+        Some(ImportRecoveryAction::EnableOcr) => {
+            routes.sort_by_key(|(route, _)| {
+                if route.starts_with("ocr.") {
+                    0
+                } else if *route == "pdf.layout" {
+                    1
+                } else {
+                    2
+                }
+            });
+        }
+        Some(ImportRecoveryAction::RetryRoute) | _ => {}
+    }
+    routes
 }
 
 fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
@@ -2032,6 +2467,30 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[test]
+    fn unfinished_session_includes_empty_discovery_session() {
+        let (context, root) = test_context("unfinished-empty-discovery");
+        let files = FileStore::default();
+        let service = ImportV2Service::default();
+        let session = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        service
+            .set_discovery_task_id(
+                &context,
+                &files,
+                &session.session_id,
+                Some("scan-task-1".into()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            service.find_unfinished_session(&context, &files).unwrap(),
+            Some(session.session_id)
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
     struct FixtureEngine {
         project_root: PathBuf,
         markdown: &'static [u8],
@@ -2305,6 +2764,12 @@ mod tests {
             }
         }
         fn seed_one_item(&self) -> (ImportSession, ImportItem, BackendTask) {
+            self.seed_one_item_named("a.pdf")
+        }
+        fn seed_one_item_named(
+            &self,
+            source_name: &str,
+        ) -> (ImportSession, ImportItem, BackendTask) {
             let session = self
                 .service
                 .create_session(&self.context, &self.files, ImportResourceMode::Balanced)
@@ -2315,7 +2780,7 @@ mod tests {
                     &self.context,
                     &self.files,
                     &session.session_id,
-                    vec![test_file_input("a.pdf")],
+                    vec![test_file_input(source_name)],
                 )
                 .unwrap();
             let item = session.items[0].clone();
@@ -2385,7 +2850,7 @@ mod tests {
     #[test]
     fn run_item_records_engine_unavailable_without_losing_session() {
         let fixture = OrchestratorFixture::new("no-engine");
-        let (session, item, task) = fixture.seed_one_item();
+        let (session, item, task) = fixture.seed_one_item_named("a.doc");
         let error = fixture
             .service
             .run_item(
@@ -2441,6 +2906,28 @@ mod tests {
         item.status = ImportItemStatus::PreviewReady;
         let error = transition_item(&mut item, ImportItemStatus::Completed).unwrap_err();
         assert_eq!(error.code, IMPORT_V2_STATE_INVALID);
+    }
+
+    #[test]
+    fn recovery_actions_change_route_priority_without_losing_fallbacks() {
+        let routes = vec![
+            ("pdf.text", QualityFloor::DeterministicDocument),
+            ("pdf.layout", QualityFloor::DeterministicDocument),
+            ("ocr.cjk-accurate", QualityFloor::ComparisonFallback),
+            ("agent.pdf", QualityFloor::AgentCandidate),
+        ];
+
+        let switched = reorder_routes(routes.clone(), Some(&ImportRecoveryAction::SwitchRoute));
+        assert_eq!(
+            switched.iter().map(|(route, _)| *route).collect::<Vec<_>>(),
+            vec!["pdf.layout", "ocr.cjk-accurate", "agent.pdf", "pdf.text"]
+        );
+
+        let ocr = reorder_routes(routes, Some(&ImportRecoveryAction::EnableOcr));
+        assert_eq!(
+            ocr.iter().map(|(route, _)| *route).collect::<Vec<_>>(),
+            vec!["ocr.cjk-accurate", "pdf.layout", "pdf.text", "agent.pdf"]
+        );
     }
 
     #[test]
@@ -2502,6 +2989,59 @@ mod tests {
             .unwrap();
         assert!(!changed.selected);
         assert!(!fixture.reopen().items[0].selected);
+    }
+
+    #[test]
+    fn prebind_item_task_id_survives_before_worker_claims_item() {
+        let fixture = OrchestratorFixture::new("prebind-task");
+        let (session, item, task) = fixture.seed_one_item();
+
+        fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap();
+
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.items[0].status, ImportItemStatus::Queued);
+        assert_eq!(reopened.items[0].task_id.as_deref(), Some(task.id.as_str()));
+    }
+
+    #[test]
+    fn recovery_releases_interrupted_prebound_queued_item() {
+        let fixture = OrchestratorFixture::new("prebind-recovery");
+        let (session, item, task) = fixture.seed_one_item();
+        fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap();
+
+        let recovered_tasks = TaskService::default();
+        recovered_tasks.recover_tasks(&fixture.root).unwrap();
+        assert_eq!(
+            recovered_tasks.get_task(&task.id).unwrap().status,
+            TaskStatus::Failed
+        );
+
+        let recovered = ImportV2Service::default()
+            .recover_session(
+                &fixture.context,
+                &fixture.files,
+                &recovered_tasks,
+                &session.session_id,
+            )
+            .unwrap();
+        assert_eq!(recovered.items[0].status, ImportItemStatus::Queued);
+        assert!(recovered.items[0].task_id.is_none());
     }
 
     #[test]
@@ -2918,6 +3458,67 @@ mod tests {
             ImportItemStatus::Cancelled
         );
         assert_eq!(fixture.reopen().status, ImportSessionStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancelled_item_can_retry_with_a_new_task_id() {
+        let fixture = OrchestratorFixture::new("cancel-retry");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, first_task) = fixture.seed_one_item();
+        fixture
+            .service
+            .claim_item_for_run(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &first_task.id,
+                false,
+            )
+            .unwrap();
+        fixture.tasks.cancel_task(&first_task.id).unwrap();
+        fixture
+            .service
+            .start_claimed_task(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &first_task.id,
+            )
+            .unwrap_err();
+        assert_eq!(
+            fixture.reopen().items[0].status,
+            ImportItemStatus::Cancelled
+        );
+        assert!(fixture.reopen().items[0].task_id.is_none());
+
+        let retry_task = fixture
+            .tasks
+            .create_project_task(
+                TaskType::Import,
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                "Retry import".into(),
+                true,
+            )
+            .unwrap();
+        let retried = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &retry_task.id,
+            )
+            .unwrap();
+        assert_eq!(retried.status, ImportItemStatus::PreviewReady);
     }
 
     #[test]

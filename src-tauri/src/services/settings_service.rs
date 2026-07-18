@@ -3,8 +3,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::errors::BackendError;
 use crate::models::agent::{AgentConfig, AgentKind};
-use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::import_v2_agent::AgentAssistancePolicy;
+use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::settings::{
     ChatConvenienceAuthorization, CloseBehavior, GlobalSettingsFile, ProjectSettingsFile, Settings,

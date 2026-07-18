@@ -80,7 +80,8 @@ impl LegacyHistoryAdapter {
             if bytes_read.saturating_add(metadata.len()) > self.limits.max_bytes {
                 view.warnings.push(LegacyHistoryWarning {
                     code: "LEGACY_HISTORY_LIMIT".into(),
-                    message: "Legacy history byte limit reached; remaining entries were not read.".into(),
+                    message: "Legacy history byte limit reached; remaining entries were not read."
+                        .into(),
                     evidence_path: relative,
                 });
                 break;
@@ -89,24 +90,41 @@ impl LegacyHistoryAdapter {
             let bytes = match read_project_file_nofollow(project_root, path) {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    view.warnings.push(corrupt_warning(&relative, "read failed"));
+                    view.warnings
+                        .push(corrupt_warning(&relative, "read failed"));
                     continue;
                 }
             };
             let value: Value = match serde_json::from_slice(&bytes) {
                 Ok(value) => value,
                 Err(_) => {
-                    view.warnings.push(corrupt_warning(&relative, "malformed JSON"));
+                    view.warnings
+                        .push(corrupt_warning(&relative, "malformed JSON"));
                     continue;
                 }
             };
             let Some(object) = value.as_object() else {
-                view.warnings.push(corrupt_warning(&relative, "unsupported shape"));
+                view.warnings
+                    .push(corrupt_warning(&relative, "unsupported shape"));
                 continue;
             };
+            // V2 batch records live in the same directory for backward
+            // compatibility, but they must be owned by the typed V2 reader.
+            // Otherwise readiness checks report the same record as legacy
+            // history and show a misleading migration notice.
+            if object.get("sessionId").is_some() && object.get("items").is_some() {
+                continue;
+            }
+            if is_v2_import_task(object) {
+                continue;
+            }
             let id = string_field(object, &["id", "taskId", "batchId"])
                 .map(str::to_string)
-                .or_else(|| path.file_stem().and_then(|value| value.to_str()).map(str::to_string))
+                .or_else(|| {
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| "legacy-entry".into());
             let title = string_field(object, &["title", "name"])
                 .unwrap_or("Legacy import history")
@@ -116,7 +134,9 @@ impl LegacyHistoryAdapter {
             view.entries.push(LegacyHistoryEntry {
                 id,
                 title,
-                status: string_field(object, &["status"]).unwrap_or("unknown").into(),
+                status: string_field(object, &["status"])
+                    .unwrap_or("unknown")
+                    .into(),
                 started_at: string_field(object, &["startedAt", "createdAt"]).map(str::to_string),
                 updated_at: string_field(object, &["updatedAt"]).map(str::to_string),
                 completed_at: string_field(object, &["completedAt"]).map(str::to_string),
@@ -129,14 +149,17 @@ impl LegacyHistoryAdapter {
             });
         }
         view.entries.sort_by(|left, right| left.id.cmp(&right.id));
-        view.warnings.sort_by(|left, right| left.evidence_path.cmp(&right.evidence_path));
+        view.warnings
+            .sort_by(|left, right| left.evidence_path.cmp(&right.evidence_path));
         Ok(view)
     }
 }
 
 fn collect_json_paths(root: &Path, relative: &str, output: &mut Vec<PathBuf>) {
     let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let Ok(metadata) = fs::symlink_metadata(&path) else { return };
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return;
+    };
     if metadata.file_type().is_symlink() || is_project_reparse_point(&metadata) {
         return;
     }
@@ -146,8 +169,12 @@ fn collect_json_paths(root: &Path, relative: &str, output: &mut Vec<PathBuf>) {
         }
         return;
     }
-    if !metadata.is_dir() { return; }
-    let Ok(entries) = fs::read_dir(path) else { return };
+    if !metadata.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
     let mut entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
     entries.sort();
     for entry in entries {
@@ -165,13 +192,25 @@ fn relative_path(root: &Path, path: &Path) -> String {
 }
 
 fn string_field<'a>(object: &'a serde_json::Map<String, Value>, names: &[&str]) -> Option<&'a str> {
-    names.iter().find_map(|name| object.get(*name).and_then(Value::as_str))
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str))
+}
+
+fn is_v2_import_task(object: &serde_json::Map<String, Value>) -> bool {
+    let Some(task) = object.get("task").and_then(Value::as_object) else {
+        return false;
+    };
+    task.get("taskType").and_then(Value::as_str) == Some("import")
+        && task.get("projectId").and_then(Value::as_str).is_some()
 }
 
 fn corrupt_warning(path: &str, reason: &str) -> LegacyHistoryWarning {
     LegacyHistoryWarning {
         code: "LEGACY_HISTORY_CORRUPT".into(),
-        message: format!("Legacy history entry was skipped ({reason}); sensitive fields were omitted."),
+        message: format!(
+            "Legacy history entry was skipped ({reason}); sensitive fields were omitted."
+        ),
         evidence_path: path.into(),
     }
 }
@@ -181,5 +220,26 @@ fn limit_warning(reason: &str) -> LegacyHistoryWarning {
         code: "LEGACY_HISTORY_LIMIT".into(),
         message: format!("Legacy history {reason} limit reached; remaining entries were not read."),
         evidence_path: ".app/".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_v2_import_task;
+    use serde_json::json;
+
+    #[test]
+    fn skips_persisted_v2_import_task_shape() {
+        let value = json!({
+            "task": { "taskType": "import", "projectId": "project-1" },
+            "logLines": []
+        });
+        assert!(is_v2_import_task(value.as_object().unwrap()));
+    }
+
+    #[test]
+    fn keeps_legacy_task_shape() {
+        let value = json!({ "id": "legacy-task", "taskType": "import" });
+        assert!(!is_v2_import_task(value.as_object().unwrap()));
     }
 }

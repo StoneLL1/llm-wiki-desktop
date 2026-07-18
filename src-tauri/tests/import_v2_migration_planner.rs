@@ -65,7 +65,11 @@ fn exact_stable_source_id_and_content_identity_links() {
 fn exact_hash_requires_unique_destination_and_does_not_use_names() {
     let plan = DefaultMigrationPlanner
         .plan(
-            &inventory(vec![record("legacy-1", Some("hash-1"), Some("wiki/one.md"))]),
+            &inventory(vec![record(
+                "legacy-1",
+                Some("hash-1"),
+                Some("wiki/one.md"),
+            )]),
             &index("hash-1", "source-1"),
         )
         .unwrap();
@@ -96,10 +100,10 @@ fn duplicate_hashes_and_case_only_paths_are_conflicts() {
     let plan = DefaultMigrationPlanner
         .plan(&inventory(records), &index("same-hash", "source-1"))
         .unwrap();
-    assert!(plan.candidates.iter().all(|candidate| matches!(
-        candidate.decision,
-        MigrationDecision::Conflict { .. }
-    )));
+    assert!(plan
+        .candidates
+        .iter()
+        .all(|candidate| matches!(candidate.decision, MigrationDecision::Conflict { .. })));
 }
 
 #[test]

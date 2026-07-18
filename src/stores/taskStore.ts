@@ -1,7 +1,10 @@
 import { create } from "zustand";
+import { invoke as invokeCommand } from "@tauri-apps/api/core";
 import type {
   BackendTask,
   BackendEvent,
+  TaskActivity,
+  StreamDelta,
   LogLine,
 } from "../types/task";
 import { isTerminalStatus } from "../types/task";
@@ -9,6 +12,8 @@ import { isTerminalStatus } from "../types/task";
 interface TaskState {
   tasks: BackendTask[];
   logs: Record<string, LogLine[]>;
+  activities: Record<string, TaskActivity[]>;
+  taskOutputs: Record<string, string>;
   drawerOpen: boolean;
   selectedTaskId: string | null;
   runningCount: number;
@@ -18,6 +23,9 @@ interface TaskState {
   upsertTask: (task: BackendTask) => void;
   appendLog: (taskId: string, line: LogLine) => void;
   setLogs: (taskId: string, lines: LogLine[]) => void;
+  appendActivity: (taskId: string, activity: TaskActivity) => void;
+  setActivities: (taskId: string, activities: TaskActivity[]) => void;
+  appendTaskOutput: (taskId: string, delta: string) => void;
   openDrawer: (taskId?: string) => void;
   closeDrawer: () => void;
   selectTask: (taskId: string | null) => void;
@@ -27,6 +35,21 @@ function countRunning(tasks: BackendTask[]): number {
   return tasks.filter(
     (t) => t.status === "running" || t.status === "cancelling" || t.status === "queued"
   ).length;
+}
+
+function activityKey(activity: TaskActivity): string {
+  return JSON.stringify(activity);
+}
+
+function mergeActivities(current: readonly TaskActivity[], incoming: readonly TaskActivity[]): TaskActivity[] {
+  const startsWith = (prefix: readonly TaskActivity[], full: readonly TaskActivity[]) =>
+    prefix.every((activity, index) => activityKey(activity) === activityKey(full[index]));
+  // TaskService persists activities append-only. Prefer whichever snapshot is
+  // the longer prefix-compatible view so two legitimate identical events are
+  // not collapsed merely because their payloads happen to match.
+  if (current.length <= incoming.length && startsWith(current, incoming)) return [...incoming];
+  if (incoming.length <= current.length && startsWith(incoming, current)) return [...current];
+  return [...incoming, ...current];
 }
 
 function applyBackendEvent(state: TaskState, event: BackendEvent): TaskState {
@@ -55,6 +78,27 @@ function applyBackendEvent(state: TaskState, event: BackendEvent): TaskState {
         logs: { ...state.logs, [taskId]: [...existing, line] },
       };
     }
+    case "task_activity": {
+      if (!taskId) return state;
+      const activity = event.payload as TaskActivity;
+      const existing = state.activities[taskId] || [];
+      return {
+        ...state,
+        activities: { ...state.activities, [taskId]: [...existing, activity] },
+      };
+    }
+    case "task_stream_output": {
+      if (!taskId) return state;
+      const delta = event.payload as StreamDelta;
+      if (!delta || typeof delta.delta !== "string") return state;
+      return {
+        ...state,
+        taskOutputs: {
+          ...state.taskOutputs,
+          [taskId]: `${state.taskOutputs[taskId] ?? ""}${delta.delta}`.slice(-512 * 1024),
+        },
+      };
+    }
     case "confirmation_requested": {
       if (!taskId) return state;
       const task = event.payload as BackendTask;
@@ -73,16 +117,21 @@ function applyBackendEvent(state: TaskState, event: BackendEvent): TaskState {
 export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
   logs: {},
+  activities: {},
+  taskOutputs: {},
   drawerOpen: false,
   selectedTaskId: null,
   runningCount: 0,
   tasksHydrated: false,
 
-  setTasks: (tasks) =>
-    set((state) => {
-      const mergedTasks = mergeTaskSnapshots(state.tasks, tasks);
-      return { tasks: mergedTasks, runningCount: countRunning(mergedTasks) };
-    }),
+  // Explicit recovery/project snapshots replace the visible task set while
+  // preserving newer terminal state for task ids present in both snapshots.
+  // fetchTasks applies mergeTaskSnapshots below when it needs race tolerance
+  // for a list request that started before task creation.
+  setTasks: (tasks) => set((state) => {
+    const nextTasks = replaceTaskSnapshot(state.tasks, tasks);
+    return { tasks: nextTasks, runningCount: countRunning(nextTasks) };
+  }),
   upsertTask: (task) =>
     set((state) => {
       const idx = state.tasks.findIndex((t) => t.id === task.id);
@@ -102,6 +151,27 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   setLogs: (taskId, lines) =>
     set((state) => ({
       logs: { ...state.logs, [taskId]: lines },
+    })),
+  appendActivity: (taskId, activity) =>
+    set((state) => {
+      const existing = state.activities[taskId] || [];
+      return {
+        activities: {
+          ...state.activities,
+          [taskId]: [...existing, activity],
+        },
+      };
+    }),
+  setActivities: (taskId, activities) =>
+    set((state) => ({
+      activities: { ...state.activities, [taskId]: mergeActivities(state.activities[taskId] || [], activities) },
+    })),
+  appendTaskOutput: (taskId, delta) =>
+    set((state) => ({
+      taskOutputs: {
+        ...state.taskOutputs,
+        [taskId]: `${state.taskOutputs[taskId] ?? ""}${delta}`.slice(-512 * 1024),
+      },
     })),
   openDrawer: (taskId) =>
     set({ drawerOpen: true, selectedTaskId: taskId || get().selectedTaskId }),
@@ -156,6 +226,17 @@ function mergeTaskSnapshots(current: readonly BackendTask[], incoming: readonly 
   ];
 }
 
+function replaceTaskSnapshot(current: readonly BackendTask[], incoming: readonly BackendTask[]): BackendTask[] {
+  if (incoming.length === 0 && current.some((task) => !isTerminalStatus(task.status))) {
+    return [...current];
+  }
+  const currentById = new Map(current.map((task) => [task.id, task]));
+  return incoming.map((task) => {
+    const existing = currentById.get(task.id);
+    return existing ? preferFreshTask(existing, task) : task;
+  });
+}
+
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -165,13 +246,14 @@ export async function fetchTasks(): Promise<void> {
   const tasks = await invoke<BackendTask[]>("list_tasks", {
     request: { statusFilter: null },
   });
-  useTaskStore.getState().setTasks(tasks);
+  const current = useTaskStore.getState().tasks;
+  const mergedTasks = mergeTaskSnapshots(current, tasks);
+  useTaskStore.setState({ tasks: mergedTasks, runningCount: countRunning(mergedTasks) });
 }
 
 export async function cancelTaskRequest(taskId: string): Promise<void> {
   if (!hasTauri()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  const task = await invoke<BackendTask>("cancel_task", {
+  const task = await invokeCommand<BackendTask>("cancel_task", {
     request: { taskId },
   });
   useTaskStore.getState().upsertTask(task);
@@ -184,6 +266,15 @@ export async function fetchTaskLogs(taskId: string): Promise<void> {
     request: { taskId },
   });
   useTaskStore.getState().setLogs(taskId, lines);
+}
+
+export async function fetchTaskActivities(taskId: string): Promise<void> {
+  if (!hasTauri()) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  const activities = await invoke<TaskActivity[]>("get_task_activities", {
+    request: { taskId },
+  });
+  useTaskStore.getState().setActivities(taskId, Array.isArray(activities) ? activities : []);
 }
 
 export async function removeCompletedTasks(): Promise<void> {

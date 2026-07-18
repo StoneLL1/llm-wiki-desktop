@@ -1,10 +1,9 @@
-pub mod capability_pack;
-pub mod agent_assistance;
 pub mod activation;
-pub mod legacy_route;
+pub mod agent_assistance;
 pub mod agent_candidate;
-pub mod agent_workspace;
 pub mod agent_tools;
+pub mod agent_workspace;
+pub mod capability_pack;
 pub mod capability_runtime;
 mod commit;
 pub mod connector_session;
@@ -15,6 +14,7 @@ pub mod engine;
 pub mod file_discovery;
 pub mod file_router;
 pub mod generic_web_engine;
+pub mod legacy_route;
 pub mod markdown_normalizer;
 pub mod media_router;
 pub mod migration;
@@ -32,6 +32,7 @@ mod transaction;
 pub mod url_policy;
 pub mod web_fetch;
 pub mod web_target_store;
+pub mod wechat_web_engine;
 
 #[cfg(test)]
 mod test_support;

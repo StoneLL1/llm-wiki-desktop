@@ -1,6 +1,4 @@
-use llm_wiki_desktop_lib::models::import_v2_file::{
-    DiscoveredFile, FileFormat, FileIdentity,
-};
+use llm_wiki_desktop_lib::models::import_v2_file::{DiscoveredFile, FileFormat, FileIdentity};
 
 #[test]
 fn file_contract_serializes_stable_wire_names() {

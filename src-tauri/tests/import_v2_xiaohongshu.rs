@@ -1,2 +1,11 @@
 use llm_wiki_desktop_lib::services::import_v2::connectors::xiaohongshu;
-#[test]fn phase_gate_and_signed_url_secrecy_are_enforced(){let json=include_str!("../../tests/fixtures/import-v2/web/xiaohongshu/note.json");let url="https://www.xiaohongshu.com/explore/1?xsec_token=target-secret";assert!(xiaohongshu::extract_json(json,url,false).is_err());let d=xiaohongshu::extract_json(json,url,true).unwrap();assert!(d.authenticated_request_url.contains("target-secret"));let persisted=serde_json::to_string(&d).unwrap();assert!(!persisted.contains("secret")&&!persisted.contains("xsec_token"));}
+#[test]
+fn phase_gate_and_signed_url_secrecy_are_enforced() {
+    let json = include_str!("../../tests/fixtures/import-v2/web/xiaohongshu/note.json");
+    let url = "https://www.xiaohongshu.com/explore/1?xsec_token=target-secret";
+    assert!(xiaohongshu::extract_json(json, url, false).is_err());
+    let d = xiaohongshu::extract_json(json, url, true).unwrap();
+    assert!(d.authenticated_request_url.contains("target-secret"));
+    let persisted = serde_json::to_string(&d).unwrap();
+    assert!(!persisted.contains("secret") && !persisted.contains("xsec_token"));
+}

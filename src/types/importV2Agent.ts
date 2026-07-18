@@ -90,6 +90,7 @@ export interface AgentCandidateDiff {
   candidateId: string;
   baselineMarkdown: string;
   currentMarkdown: string | null;
+  currentMarkdownSha256?: string | null;
   agentMarkdown: string;
   unifiedDiff: string;
   needsThreeWayMerge: boolean;

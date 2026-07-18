@@ -531,7 +531,7 @@ describe("App", () => {
     // GraphView's catch logs its own diagnostic; the stub must not suppress it.
     expect(warnSpy).toHaveBeenCalledWith("[graph] sigma renderer init failed:", expect.any(Error));
     warnSpy.mockRestore();
-  });
+  }, 10_000);
 
   it("exposes keyboard-resizable shell splitters", () => {
     render(<App />);

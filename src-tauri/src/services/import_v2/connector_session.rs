@@ -51,7 +51,11 @@ pub struct ConnectorSessionService {
 }
 impl Drop for ConnectorSessionService {
     fn drop(&mut self) {
-        let entries = self.sessions.lock().map(|mut sessions| sessions.drain().map(|(_, entry)| entry).collect::<Vec<_>>()).unwrap_or_default();
+        let entries = self
+            .sessions
+            .lock()
+            .map(|mut sessions| sessions.drain().map(|(_, entry)| entry).collect::<Vec<_>>())
+            .unwrap_or_default();
         for entry in entries {
             if let Some(child) = entry.child {
                 if let Ok(mut child) = child.lock() {
@@ -239,8 +243,13 @@ impl ConnectorSessionService {
         Ok(entry.reference.clone())
     }
     pub fn authenticated_profile(&self, id: &str) -> Result<PathBuf, BackendError> {
-        let sessions = self.sessions.lock().map_err(|_| e("Connector sessions are unavailable."))?;
-        let entry = sessions.get(id).ok_or_else(|| e("Connector session was not found."))?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| e("Connector sessions are unavailable."))?;
+        let entry = sessions
+            .get(id)
+            .ok_or_else(|| e("Connector session was not found."))?;
         if entry.reference.state != "authenticated" || !entry.path.is_dir() {
             return Err(e("The browser has not proven an authenticated session."));
         }
@@ -260,12 +269,24 @@ impl ConnectorSessionService {
             item_id: item_id.to_string(),
             target_sha256: format!("{:x}", Sha256::digest(target_url.as_bytes())),
         };
-        let mut sessions = self.sessions.lock().map_err(|_| e("Connector sessions are unavailable."))?;
-        let entry = sessions.get(id).ok_or_else(|| e("Connector session was not found."))?;
-        if entry.reference.state != "authenticated" || entry.binding.as_ref() != Some(&expected) || !entry.path.is_dir() {
-            return Err(e("The authenticated connector is not bound to this import item."));
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| e("Connector sessions are unavailable."))?;
+        let entry = sessions
+            .get(id)
+            .ok_or_else(|| e("Connector session was not found."))?;
+        if entry.reference.state != "authenticated"
+            || entry.binding.as_ref() != Some(&expected)
+            || !entry.path.is_dir()
+        {
+            return Err(e(
+                "The authenticated connector is not bound to this import item.",
+            ));
         }
-        let entry = sessions.remove(id).ok_or_else(|| e("Connector session was not found."))?;
+        let entry = sessions
+            .remove(id)
+            .ok_or_else(|| e("Connector session was not found."))?;
         Ok((entry.reference, entry.path))
     }
     pub fn revoke(&self, id: &str) -> Result<(), BackendError> {
@@ -369,16 +390,35 @@ mod binding_tests {
         std::fs::create_dir(&profile).unwrap();
         let id = "connector-a".to_string();
         let target = "https://www.bilibili.com/video/BV1exact?token=secret";
-        service.sessions.lock().unwrap().insert(id.clone(), SessionEntry {
-            reference: ConnectorSessionRef { session_id: id.clone(), platform: "bilibili".into(), profile_ref: "connector-profile:connector-a".into(), state: "authenticated".into() },
-            path: profile.clone(),
-            child: None,
-            binding: Some(ConnectorSessionBinding { project_id: "project-a".into(), import_session_id: "session-a".into(), item_id: "item-a".into(), target_sha256: format!("{:x}", Sha256::digest(target.as_bytes())) }),
-        });
-        assert!(service.take_authenticated_profile_bound(&id, "project-b", "session-a", "item-a", target).is_err());
+        service.sessions.lock().unwrap().insert(
+            id.clone(),
+            SessionEntry {
+                reference: ConnectorSessionRef {
+                    session_id: id.clone(),
+                    platform: "bilibili".into(),
+                    profile_ref: "connector-profile:connector-a".into(),
+                    state: "authenticated".into(),
+                },
+                path: profile.clone(),
+                child: None,
+                binding: Some(ConnectorSessionBinding {
+                    project_id: "project-a".into(),
+                    import_session_id: "session-a".into(),
+                    item_id: "item-a".into(),
+                    target_sha256: format!("{:x}", Sha256::digest(target.as_bytes())),
+                }),
+            },
+        );
+        assert!(service
+            .take_authenticated_profile_bound(&id, "project-b", "session-a", "item-a", target)
+            .is_err());
         assert!(service.resume(&id).is_ok());
-        let (_, taken) = service.take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target).unwrap();
+        let (_, taken) = service
+            .take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target)
+            .unwrap();
         assert_eq!(taken, profile);
-        assert!(service.take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target).is_err());
+        assert!(service
+            .take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target)
+            .is_err());
     }
 }

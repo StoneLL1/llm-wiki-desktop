@@ -12,7 +12,9 @@ use llm_wiki_desktop_lib::{
     services::{
         import_v2::{
             domain_router::{ConnectorAvailability, DomainRouter},
-            engine::{EngineContinuation, EngineDescriptor, EngineRequest, EngineResult, ImportEngine},
+            engine::{
+                EngineContinuation, EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
+            },
             url_policy::UrlPolicy,
             web_target_store::{asr_target_sha256, BilibiliAsrGrant},
             ImportV2Service,
@@ -47,40 +49,101 @@ fn stage_one_routes_and_stable_errors_are_frozen() {
 
 struct AuthorizedBilibiliEngine;
 impl ImportEngine for AuthorizedBilibiliEngine {
-    fn descriptor(&self) -> EngineDescriptor { EngineDescriptor { engine_id: "bili-fixture".into(), engine_version: "1".into(), route: "web.bilibili.metadata".into() } }
-    fn supports(&self, input: &ImportInput) -> bool { input.kind == ImportInputKind::Url }
-    fn execute(&self, request: &EngineRequest, _: &CancellationToken) -> Result<EngineResult, BackendError> {
+    fn descriptor(&self) -> EngineDescriptor {
+        EngineDescriptor {
+            engine_id: "bili-fixture".into(),
+            engine_version: "1".into(),
+            route: "web.bilibili.metadata".into(),
+        }
+    }
+    fn supports(&self, input: &ImportInput) -> bool {
+        input.kind == ImportInputKind::Url
+    }
+    fn execute(
+        &self,
+        request: &EngineRequest,
+        _: &CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
         if !request.local_asr_authorized {
-            return Err(BackendError::new("IMPORT_WEB_SUBTITLE_UNAVAILABLE", "subtitle missing", true, true));
+            return Err(BackendError::new(
+                "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
+                "subtitle missing",
+                true,
+                true,
+            ));
         }
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
         std::fs::create_dir_all(staging.join("runtime-temp/asr-input")).unwrap();
-        std::fs::write(staging.join("runtime-temp/asr-input/input.m4a"), b"authorized audio").unwrap();
+        std::fs::write(
+            staging.join("runtime-temp/asr-input/input.m4a"),
+            b"authorized audio",
+        )
+        .unwrap();
         std::fs::write(staging.join("source.json"), b"{}").unwrap();
         std::fs::write(staging.join("candidate.md"), b"# Video\n\nMetadata\n").unwrap();
         Ok(EngineResult {
-            source_snapshot_path: "source.json".into(), markdown_path: "candidate.md".into(), asset_paths: vec![], metadata_path: None,
-            title: "Video".into(), text_coverage: Some(1.0), table_cell_accuracy: None, sheet_count_exact: None, slide_count_exact: None,
-            non_empty_cell_coverage: None, formula_value_pairs: None, meaningful_image_coverage: None,
-            continuation: Some(EngineContinuation::LocalAsr { temporary_input_path: "runtime-temp/asr-input/input.m4a".into(), media_kind: "audio".into() }), warnings: vec![],
+            source_snapshot_path: "source.json".into(),
+            markdown_path: "candidate.md".into(),
+            asset_paths: vec![],
+            metadata_path: None,
+            title: "Video".into(),
+            text_coverage: Some(1.0),
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: Some(EngineContinuation::LocalAsr {
+                temporary_input_path: "runtime-temp/asr-input/input.m4a".into(),
+                media_kind: "audio".into(),
+            }),
+            warnings: vec![],
         })
     }
 }
 
 struct LocalAsrEngine;
 impl ImportEngine for LocalAsrEngine {
-    fn descriptor(&self) -> EngineDescriptor { EngineDescriptor { engine_id: "asr-fixture".into(), engine_version: "1.8.3".into(), route: "media.asr".into() } }
-    fn supports(&self, input: &ImportInput) -> bool { input.kind == ImportInputKind::File && input.locator.ends_with(".m4a") }
-    fn execute(&self, request: &EngineRequest, _: &CancellationToken) -> Result<EngineResult, BackendError> {
+    fn descriptor(&self) -> EngineDescriptor {
+        EngineDescriptor {
+            engine_id: "asr-fixture".into(),
+            engine_version: "1.8.3".into(),
+            route: "media.asr".into(),
+        }
+    }
+    fn supports(&self, input: &ImportInput) -> bool {
+        input.kind == ImportInputKind::File && input.locator.ends_with(".m4a")
+    }
+    fn execute(
+        &self,
+        request: &EngineRequest,
+        _: &CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
         assert!(request.local_asr_authorized);
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
         std::fs::create_dir_all(staging.join("runtime-temp/asr-output")).unwrap();
         std::fs::write(staging.join("runtime-temp/asr-output/source.json"), b"{}").unwrap();
-        std::fs::write(staging.join("runtime-temp/asr-output/candidate.md"), b"- [00:00:00.000] authorized transcript\n").unwrap();
+        std::fs::write(
+            staging.join("runtime-temp/asr-output/candidate.md"),
+            b"- [00:00:00.000] authorized transcript\n",
+        )
+        .unwrap();
         Ok(EngineResult {
-            source_snapshot_path: "runtime-temp/asr-output/source.json".into(), markdown_path: "runtime-temp/asr-output/candidate.md".into(), asset_paths: vec![], metadata_path: None,
-            title: "Transcript".into(), text_coverage: Some(1.0), table_cell_accuracy: None, sheet_count_exact: None, slide_count_exact: None,
-            non_empty_cell_coverage: None, formula_value_pairs: None, meaningful_image_coverage: None, continuation: None, warnings: vec![],
+            source_snapshot_path: "runtime-temp/asr-output/source.json".into(),
+            markdown_path: "runtime-temp/asr-output/candidate.md".into(),
+            asset_paths: vec![],
+            metadata_path: None,
+            title: "Transcript".into(),
+            text_coverage: Some(1.0),
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: None,
+            warnings: vec![],
         })
     }
 }
@@ -92,48 +155,141 @@ fn bilibili_asr_requires_one_use_authorization_reuses_media_engine_and_cleans_te
     let context = ProjectContext::new("p", root.clone());
     let files = FileStore;
     let service = ImportV2Service::default();
-    service.register_engine(Arc::new(AuthorizedBilibiliEngine)).unwrap();
+    service
+        .register_engine(Arc::new(AuthorizedBilibiliEngine))
+        .unwrap();
     service.register_engine(Arc::new(LocalAsrEngine)).unwrap();
-    let session = service.create_session(&context, &files, ImportResourceMode::Balanced).unwrap();
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
     let exact = "https://www.bilibili.com/video/BV1Ab411c7de?token=ephemeral";
     let target = UrlPolicy.normalize_for_session(exact).unwrap();
     let reference = service.store_web_target(&target).unwrap();
-    let session = service.add_inputs(&context, &files, &session.session_id, vec![ImportInput {
-        kind: ImportInputKind::Url, display_name: "bili".into(), locator: reference,
-        normalized_locator: Some(target.public.public_url.clone()), source_identity: None,
-    }]).unwrap();
+    let session = service
+        .add_inputs(
+            &context,
+            &files,
+            &session.session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "bili".into(),
+                locator: reference,
+                normalized_locator: Some(target.public.public_url.clone()),
+                source_identity: None,
+            }],
+        )
+        .unwrap();
     let item = &session.items[0];
     let tasks = TaskService::default();
-    let first = tasks.create_project_task(TaskType::Import, "p".into(), root.clone(), "first".into(), true).unwrap();
-    assert_eq!(service.run_item(&context, &files, &tasks, &session.session_id, &item.item_id, &first.id).unwrap_err().code, "IMPORT_WEB_SUBTITLE_UNAVAILABLE");
-    service.authorize_bilibili_asr(BilibiliAsrGrant {
-        project_id: "p".into(), session_id: session.session_id.clone(), item_id: item.item_id.clone(),
-        target_sha256: asr_target_sha256(exact), expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-    }).unwrap();
-    let second = tasks.create_project_task(TaskType::Import, "p".into(), root.clone(), "second".into(), true).unwrap();
-    let completed = service.run_item(&context, &files, &tasks, &session.session_id, &item.item_id, &second.id).unwrap();
+    let first = tasks
+        .create_project_task(
+            TaskType::Import,
+            "p".into(),
+            root.clone(),
+            "first".into(),
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .run_item(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &item.item_id,
+                &first.id
+            )
+            .unwrap_err()
+            .code,
+        "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
+    );
+    service
+        .authorize_bilibili_asr(BilibiliAsrGrant {
+            project_id: "p".into(),
+            session_id: session.session_id.clone(),
+            item_id: item.item_id.clone(),
+            target_sha256: asr_target_sha256(exact),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        })
+        .unwrap();
+    let second = tasks
+        .create_project_task(
+            TaskType::Import,
+            "p".into(),
+            root.clone(),
+            "second".into(),
+            true,
+        )
+        .unwrap();
+    let completed = service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item.item_id,
+            &second.id,
+        )
+        .unwrap();
     assert_eq!(completed.status, ImportItemStatus::PreviewReady);
-    assert!(completed.attempts.iter().any(|attempt| attempt.route == "media.asr"));
-    let staging = root.join(format!(".app/import-sessions/{}/items/{}/staging", session.session_id, item.item_id));
-    assert!(std::fs::read_to_string(staging.join("candidate.md")).unwrap().contains("authorized transcript"));
-    assert!(!staging.join("runtime-temp/asr-input").exists() && !staging.join("runtime-temp/asr-output").exists());
+    assert!(completed
+        .attempts
+        .iter()
+        .any(|attempt| attempt.route == "media.asr"));
+    let staging = root.join(format!(
+        ".app/import-sessions/{}/items/{}/staging",
+        session.session_id, item.item_id
+    ));
+    assert!(std::fs::read_to_string(staging.join("candidate.md"))
+        .unwrap()
+        .contains("authorized transcript"));
+    assert!(
+        !staging.join("runtime-temp/asr-input").exists()
+            && !staging.join("runtime-temp/asr-output").exists()
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
 struct TraversalContinuationEngine;
 impl ImportEngine for TraversalContinuationEngine {
-    fn descriptor(&self) -> EngineDescriptor { EngineDescriptor { engine_id: "bili-traversal".into(), engine_version: "1".into(), route: "web.bilibili.metadata".into() } }
-    fn supports(&self, input: &ImportInput) -> bool { input.kind == ImportInputKind::Url }
-    fn execute(&self, request: &EngineRequest, _: &CancellationToken) -> Result<EngineResult, BackendError> {
+    fn descriptor(&self) -> EngineDescriptor {
+        EngineDescriptor {
+            engine_id: "bili-traversal".into(),
+            engine_version: "1".into(),
+            route: "web.bilibili.metadata".into(),
+        }
+    }
+    fn supports(&self, input: &ImportInput) -> bool {
+        input.kind == ImportInputKind::Url
+    }
+    fn execute(
+        &self,
+        request: &EngineRequest,
+        _: &CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
         std::fs::create_dir_all(staging.join("runtime-temp/asr-input")).unwrap();
         std::fs::write(staging.join("runtime-temp/asr-input/input.m4a"), b"audio").unwrap();
         std::fs::write(staging.join("source.json"), b"{}").unwrap();
         Ok(EngineResult {
-            source_snapshot_path: "source.json".into(), markdown_path: "../../sentinel.md".into(), asset_paths: vec![], metadata_path: None,
-            title: "Traversal".into(), text_coverage: Some(1.0), table_cell_accuracy: None, sheet_count_exact: None, slide_count_exact: None,
-            non_empty_cell_coverage: None, formula_value_pairs: None, meaningful_image_coverage: None,
-            continuation: Some(EngineContinuation::LocalAsr { temporary_input_path: "runtime-temp/asr-input/input.m4a".into(), media_kind: "audio".into() }), warnings: vec![],
+            source_snapshot_path: "source.json".into(),
+            markdown_path: "../../sentinel.md".into(),
+            asset_paths: vec![],
+            metadata_path: None,
+            title: "Traversal".into(),
+            text_coverage: Some(1.0),
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: Some(EngineContinuation::LocalAsr {
+                temporary_input_path: "runtime-temp/asr-input/input.m4a".into(),
+                media_kind: "audio".into(),
+            }),
+            warnings: vec![],
         })
     }
 }
@@ -145,26 +301,82 @@ fn traversal_result_is_rejected_before_local_asr_can_read_or_overwrite_it() {
     let context = ProjectContext::new("p", root.clone());
     let files = FileStore;
     let service = ImportV2Service::default();
-    service.register_engine(Arc::new(TraversalContinuationEngine)).unwrap();
+    service
+        .register_engine(Arc::new(TraversalContinuationEngine))
+        .unwrap();
     service.register_engine(Arc::new(LocalAsrEngine)).unwrap();
-    let session = service.create_session(&context, &files, ImportResourceMode::Balanced).unwrap();
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
     let exact = "https://www.bilibili.com/video/BV1Traversal";
     let target = UrlPolicy.normalize_for_session(exact).unwrap();
     let reference = service.store_web_target(&target).unwrap();
-    let session = service.add_inputs(&context, &files, &session.session_id, vec![ImportInput { kind: ImportInputKind::Url, display_name: "bili".into(), locator: reference, normalized_locator: Some(target.public.public_url.clone()), source_identity: None }]).unwrap();
+    let session = service
+        .add_inputs(
+            &context,
+            &files,
+            &session.session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "bili".into(),
+                locator: reference,
+                normalized_locator: Some(target.public.public_url.clone()),
+                source_identity: None,
+            }],
+        )
+        .unwrap();
     let item = &session.items[0];
-    service.authorize_bilibili_asr(BilibiliAsrGrant { project_id: "p".into(), session_id: session.session_id.clone(), item_id: item.item_id.clone(), target_sha256: asr_target_sha256(exact), expires_at: chrono::Utc::now() + chrono::Duration::minutes(5) }).unwrap();
-    let staging = root.join(format!(".app/import-sessions/{}/items/{}/staging", session.session_id, item.item_id));
+    service
+        .authorize_bilibili_asr(BilibiliAsrGrant {
+            project_id: "p".into(),
+            session_id: session.session_id.clone(),
+            item_id: item.item_id.clone(),
+            target_sha256: asr_target_sha256(exact),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        })
+        .unwrap();
+    let staging = root.join(format!(
+        ".app/import-sessions/{}/items/{}/staging",
+        session.session_id, item.item_id
+    ));
     std::fs::create_dir_all(&staging).unwrap();
     let sentinel = staging.join("../../sentinel.md");
     std::fs::write(&sentinel, "do not overwrite").unwrap();
     let tasks = TaskService::default();
-    let task = tasks.create_project_task(TaskType::Import, "p".into(), root.clone(), "traversal".into(), true).unwrap();
-    assert!(service.run_item(&context, &files, &tasks, &session.session_id, &item.item_id, &task.id).is_err());
-    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "do not overwrite");
-    let recovered = service.load_session(&context, &files, &session.session_id).unwrap();
-    assert!(!recovered.items[0].attempts.iter().any(|attempt| attempt.route == "media.asr"));
-    assert!(service.take_bilibili_asr("p", &session.session_id, &item.item_id, exact).unwrap().is_some());
+    let task = tasks
+        .create_project_task(
+            TaskType::Import,
+            "p".into(),
+            root.clone(),
+            "traversal".into(),
+            true,
+        )
+        .unwrap();
+    assert!(service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item.item_id,
+            &task.id
+        )
+        .is_err());
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "do not overwrite"
+    );
+    let recovered = service
+        .load_session(&context, &files, &session.session_id)
+        .unwrap();
+    assert!(!recovered.items[0]
+        .attempts
+        .iter()
+        .any(|attempt| attempt.route == "media.asr"));
+    assert!(service
+        .take_bilibili_asr("p", &session.session_id, &item.item_id, exact)
+        .unwrap()
+        .is_some());
     std::fs::remove_dir_all(root).ok();
 }
 #[test]
@@ -279,10 +491,23 @@ fn login_required_pauses_item_and_task_with_typed_recovery_without_secret_logs()
     assert_eq!(released.status, ImportItemStatus::Failed);
     assert!(released.task_id.is_none());
     let retry = tasks
-        .create_project_task(TaskType::Import, "p".into(), root.clone(), "retry".into(), true)
+        .create_project_task(
+            TaskType::Import,
+            "p".into(),
+            root.clone(),
+            "retry".into(),
+            true,
+        )
         .unwrap();
     let retried = service
-        .run_item(&context, &files, &tasks, &session.session_id, &item.item_id, &retry.id)
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item.item_id,
+            &retry.id,
+        )
         .unwrap();
     assert_eq!(retried.status, ImportItemStatus::WaitingLogin);
     std::fs::remove_dir_all(root).ok();

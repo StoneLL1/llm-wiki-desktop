@@ -74,14 +74,25 @@ fn model_catalog_requires_pinned_hash_and_signed_resumable_download() {
 
 #[test]
 fn asr_runtime_requires_qualified_lgpl_m4a_decoding() {
-    let value: serde_json::Value = serde_json::from_str(include_str!(
-        "../../capabilities/asr-whisper/manifest.json"
-    ))
-    .unwrap();
-    assert_eq!(value["audioDecoding"]["requiredBuildFeature"], "WHISPER_FFMPEG");
-    assert_eq!(value["audioDecoding"]["qualificationFixture"], "bilibili-m4a-to-transcript-v1");
-    assert!(value["licenseExpression"].as_str().unwrap().contains("LGPL-2.1-or-later"));
-    assert!(value["audioDecoding"]["componentInventory"].as_array().unwrap().iter().all(|component| component["gpl"] != true && component["nonfree"] != true));
+    let value: serde_json::Value =
+        serde_json::from_str(include_str!("../../capabilities/asr-whisper/manifest.json")).unwrap();
+    assert_eq!(
+        value["audioDecoding"]["requiredBuildFeature"],
+        "WHISPER_FFMPEG"
+    );
+    assert_eq!(
+        value["audioDecoding"]["qualificationFixture"],
+        "bilibili-m4a-to-transcript-v1"
+    );
+    assert!(value["licenseExpression"]
+        .as_str()
+        .unwrap()
+        .contains("LGPL-2.1-or-later"));
+    assert!(value["audioDecoding"]["componentInventory"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|component| component["gpl"] != true && component["nonfree"] != true));
 }
 
 #[test]

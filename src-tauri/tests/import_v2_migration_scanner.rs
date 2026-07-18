@@ -7,8 +7,14 @@ use llm_wiki_desktop_lib::services::import_v2::migration::{
 use tempfile::tempdir;
 
 fn snapshot(root: &Path) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)> {
-    fn visit(root: &Path, path: &Path, output: &mut Vec<(String, Vec<u8>, Option<std::time::SystemTime>)>) {
-        let Ok(entries) = fs::read_dir(path) else { return };
+    fn visit(
+        root: &Path,
+        path: &Path,
+        output: &mut Vec<(String, Vec<u8>, Option<std::time::SystemTime>)>,
+    ) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let relative = path
@@ -17,7 +23,11 @@ fn snapshot(root: &Path) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)
                 .to_string_lossy()
                 .replace('\\', "/");
             let metadata = fs::symlink_metadata(&path).unwrap();
-            let bytes = if metadata.is_file() { fs::read(&path).unwrap() } else { Vec::new() };
+            let bytes = if metadata.is_file() {
+                fs::read(&path).unwrap()
+            } else {
+                Vec::new()
+            };
             output.push((relative, bytes, metadata.modified().ok()));
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
                 visit(root, &path, output);
@@ -43,7 +53,11 @@ fn scanner_is_read_only_and_fingerprints_metadata_deterministically() {
         r#"{"schemaVersion":1,"sources":{"raw/sources/资料.md":["wiki/资料.md"]}}"#,
     )
     .unwrap();
-    fs::write(root.join(".app/import-history/old.json"), r#"{"recordId":"old"}"#).unwrap();
+    fs::write(
+        root.join(".app/import-history/old.json"),
+        r#"{"recordId":"old"}"#,
+    )
+    .unwrap();
     fs::write(root.join(".app/tasks/old.log"), "legacy task output").unwrap();
     fs::write(root.join("raw/sources/资料.md"), "source").unwrap();
     fs::write(root.join("wiki/资料.md"), "wiki").unwrap();
@@ -54,7 +68,10 @@ fn scanner_is_read_only_and_fingerprints_metadata_deterministically() {
     let second = scanner.scan(root).unwrap();
     assert_eq!(first.fingerprint, second.fingerprint);
     assert!(!first.records.is_empty());
-    assert!(first.scanned_files.iter().any(|file| file.relative_path == "raw/sources/资料.md"));
+    assert!(first
+        .scanned_files
+        .iter()
+        .any(|file| file.relative_path == "raw/sources/资料.md"));
     assert_eq!(before, snapshot(root));
     assert!(!root.join(".app/import-v2-migration").exists());
 }
@@ -65,7 +82,11 @@ fn scanner_warns_on_corrupt_metadata_and_does_not_follow_links() {
     let root = directory.path();
     fs::create_dir_all(root.join(".app/import-history")).unwrap();
     fs::write(root.join(".app/source-index.json"), b"{broken").unwrap();
-    fs::write(root.join(".app/import-history/broken.json"), b"{also-broken").unwrap();
+    fs::write(
+        root.join(".app/import-history/broken.json"),
+        b"{also-broken",
+    )
+    .unwrap();
 
     let outside = tempdir().unwrap();
     fs::write(outside.path().join("secret.md"), "must not be read").unwrap();
@@ -76,8 +97,14 @@ fn scanner_warns_on_corrupt_metadata_and_does_not_follow_links() {
     let link_result = std::os::unix::fs::symlink(outside.path().join("secret.md"), &link);
     if link_result.is_ok() {
         let inventory = DefaultLegacyScanner::default().scan(root).unwrap();
-        assert!(inventory.scanned_files.iter().all(|file| file.relative_path != "raw-link"));
-        assert!(inventory.warnings.iter().any(|warning| warning.code == "MIGRATION_SYMLINK_SKIPPED"));
+        assert!(inventory
+            .scanned_files
+            .iter()
+            .all(|file| file.relative_path != "raw-link"));
+        assert!(inventory
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "MIGRATION_SYMLINK_SKIPPED"));
     }
 }
 
@@ -92,5 +119,8 @@ fn scanner_enforces_file_and_metadata_limits_with_typed_warnings() {
         max_metadata_bytes: 4,
     });
     let inventory = scanner.scan(root).unwrap();
-    assert!(inventory.warnings.iter().any(|warning| warning.code == "MIGRATION_SCAN_LIMIT"));
+    assert!(inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "MIGRATION_SCAN_LIMIT"));
 }

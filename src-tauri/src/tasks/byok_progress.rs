@@ -23,6 +23,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::errors::BackendError;
+use crate::models::task::{TaskActivity, TaskActivityStatus};
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
@@ -72,6 +73,15 @@ where
 {
     let progress_message = format!("{verb}…");
 
+    task_service.emit_activity(
+        task_id,
+        TaskActivity::Phase {
+            name: "generation".into(),
+            status: TaskActivityStatus::Started,
+            label: Some(verb.into()),
+        },
+    );
+
     task_service
         .append_log(task_id, LogLevel::Info, progress_message.clone())
         .ok();
@@ -87,9 +97,31 @@ where
     let mut ticks_since_progress: u32 = 0;
     loop {
         tokio::select! {
-            result = &mut completion => return Ok(result),
+            result = &mut completion => {
+                task_service.emit_activity(
+                    task_id,
+                    TaskActivity::Phase {
+                        name: "generation".into(),
+                        status: if result.is_ok() {
+                            TaskActivityStatus::Completed
+                        } else {
+                            TaskActivityStatus::Failed
+                        },
+                        label: Some(if result.is_ok() { "Provider response ready" } else { "Provider request failed" }.into()),
+                    },
+                );
+                return Ok(result);
+            },
             _ = tokio::time::sleep(POLL_INTERVAL) => {
                 if task_service.is_cancelled(task_id) {
+                    task_service.emit_activity(
+                        task_id,
+                        TaskActivity::Phase {
+                            name: "generation".into(),
+                            status: TaskActivityStatus::Failed,
+                            label: Some("Provider request cancelled".into()),
+                        },
+                    );
                     return Err(ByokCancelled);
                 }
                 ticks_since_progress += 1;

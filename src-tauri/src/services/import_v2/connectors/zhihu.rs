@@ -1,2 +1,31 @@
-use super::{between,ConnectorDocument,ConnectorFailure};use crate::services::import_v2::url_policy::UrlPolicy;
-pub fn extract(html:&str,url:&str)->Result<ConnectorDocument,ConnectorFailure>{let l=html.to_ascii_lowercase();if l.contains("captcha")||l.contains("安全验证"){return Err(ConnectorFailure::Captcha)}if l.contains("signflow")||l.contains("登录后"){return Err(ConnectorFailure::LoginRequired)}if l.contains("内容不存在")||l.contains("已删除"){return Err(ConnectorFailure::Removed)}let title=between(html,"<h1 class=\"Post-Title\">","</h1>").or_else(||between(html,"<h1 class=\"QuestionHeader-title\">","</h1>")).ok_or(ConnectorFailure::StructureChanged)?;let body=between(html,"<div class=\"RichContent-inner\">","</div>").filter(|s|s.trim().len()>8).ok_or(ConnectorFailure::EmptyBody)?;let target=UrlPolicy.normalize_for_session(url).map_err(|_|ConnectorFailure::StructureChanged)?;Ok(ConnectorDocument{title:title.trim().into(),author:between(html,"data-author=\"","\"").map(str::to_string),published_at:between(html,"data-created=\"","\"").map(str::to_string),body_html:body.into(),public_url:target.public.public_url,image_requests:Vec::new()})}
+use super::{between, ConnectorDocument, ConnectorFailure};
+use crate::services::import_v2::url_policy::UrlPolicy;
+pub fn extract(html: &str, url: &str) -> Result<ConnectorDocument, ConnectorFailure> {
+    let l = html.to_ascii_lowercase();
+    if l.contains("captcha") || l.contains("安全验证") {
+        return Err(ConnectorFailure::Captcha);
+    }
+    if l.contains("signflow") || l.contains("登录后") {
+        return Err(ConnectorFailure::LoginRequired);
+    }
+    if l.contains("内容不存在") || l.contains("已删除") {
+        return Err(ConnectorFailure::Removed);
+    }
+    let title = between(html, "<h1 class=\"Post-Title\">", "</h1>")
+        .or_else(|| between(html, "<h1 class=\"QuestionHeader-title\">", "</h1>"))
+        .ok_or(ConnectorFailure::StructureChanged)?;
+    let body = between(html, "<div class=\"RichContent-inner\">", "</div>")
+        .filter(|s| s.trim().len() > 8)
+        .ok_or(ConnectorFailure::EmptyBody)?;
+    let target = UrlPolicy
+        .normalize_for_session(url)
+        .map_err(|_| ConnectorFailure::StructureChanged)?;
+    Ok(ConnectorDocument {
+        title: title.trim().into(),
+        author: between(html, "data-author=\"", "\"").map(str::to_string),
+        published_at: between(html, "data-created=\"", "\"").map(str::to_string),
+        body_html: body.into(),
+        public_url: target.public.public_url,
+        image_requests: Vec::new(),
+    })
+}

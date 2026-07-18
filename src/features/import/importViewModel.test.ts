@@ -56,6 +56,6 @@ describe("Import V2 queue selectors", () => {
       makeItem("done", "completed"),
     ]);
 
-    expect(selectSessionProgress(session)).toEqual({ completed: 1, total: 4, active: 2 });
+    expect(selectSessionProgress(session)).toEqual({ completed: 1, total: 4, active: 2, processed: 2, failed: 0, cancelled: 0, needsAction: 0 });
   });
 });

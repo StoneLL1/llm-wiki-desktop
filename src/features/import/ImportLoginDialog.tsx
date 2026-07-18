@@ -23,14 +23,20 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
   const dialogRef = useModalDialog({ open, onClose: onCancel });
   const [currentSession, setCurrentSession] = useState<ConnectorSessionRef | null>(connectorSession);
   const [busy, setBusy] = useState<"begin" | "check" | "revoke" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [lastAction, setLastAction] = useState<"begin" | "check" | "revoke">("begin");
   useEffect(() => setCurrentSession(connectorSession), [connectorSession]);
   if (!open) return null;
 
   async function begin() {
     setBusy("begin");
+    setLastAction("begin");
+    setError(null);
     try {
       const next = await onBeginLogin();
       if (next) setCurrentSession(next);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t("importV2.login.error"));
     } finally {
       setBusy(null);
     }
@@ -38,9 +44,13 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
   async function check() {
     if (!currentSession) return;
     setBusy("check");
+    setLastAction("check");
+    setError(null);
     try {
       const next = await onCheckAgain(currentSession.sessionId);
       if (next) setCurrentSession(next);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t("importV2.login.error"));
     } finally {
       setBusy(null);
     }
@@ -48,12 +58,22 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
   async function revoke() {
     if (!currentSession) return;
     setBusy("revoke");
+    setLastAction("revoke");
+    setError(null);
     try {
       await onRevoke(currentSession.sessionId);
       setCurrentSession(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t("importV2.login.error"));
     } finally {
       setBusy(null);
     }
+  }
+
+  function retryLastAction() {
+    if (lastAction === "begin") void begin();
+    else if (lastAction === "check") void check();
+    else void revoke();
   }
 
   const state = currentSession?.state ?? authState;
@@ -69,11 +89,12 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
           <dl className="grid grid-cols-[110px_1fr] gap-x-4 gap-y-1.5">
             <dt className="text-[var(--text-muted)]">{t("importV2.login.connector")}</dt><dd className="m-0">{platform}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.login.domain")}</dt><dd className="m-0 font-mono text-[11px]">{publicDomain}</dd>
-            <dt className="text-[var(--text-muted)]">{t("importV2.login.state", { state })}</dt><dd className="m-0">{currentSession ? currentSession.sessionId : "—"}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.login.state", { state: t(`importV2.login.stateValue.${state}`, { defaultValue: state }) })}</dt><dd className="m-0">{currentSession ? currentSession.sessionId : "—"}</dd>
           </dl>
           <p className="m-0 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("importV2.login.profile")}</p>
           {authState === "captcha_required" || state === "captcha_required" ? <p className="m-0 rounded-[var(--radius-md)] border border-[var(--warning)] px-3 py-2 text-[11px] text-[var(--warning-text)]">{t("importV2.login.captcha")}</p> : null}
           {state === "authenticated" ? <p className="m-0 flex items-center gap-1.5 text-[var(--success-text)]" role="status"><CheckCircle2 size={14} aria-hidden="true" />{t("importV2.login.authenticated")}</p> : null}
+          {error ? <div role="alert" className="flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[11px] text-[var(--danger-text)]"><span className="min-w-0 flex-1">{error}</span><button type="button" className="btn btn--sm" onClick={retryLastAction} disabled={busy !== null}>{t("importV2.login.retry")}</button></div> : null}
         </div>
         <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
           <button type="button" className="btn btn--sm" onClick={onCancel} disabled={busy !== null}>{t("importV2.login.cancel")}</button>

@@ -64,8 +64,10 @@ if (rpc.method === "browser.login") {
 const requestUrl = params.input.locator;
 const publicUrl = params.input.normalizedLocator || requestUrl;
 const target = new URL(requestUrl);
-const platform = target.hostname === "b23.tv" || target.hostname === "bilibili.com" || target.hostname.endsWith(".bilibili.com")
-  ? "bilibili" : "generic";
+const platform = target.hostname === "mp.weixin.qq.com"
+  ? "wechat"
+  : target.hostname === "b23.tv" || target.hostname === "bilibili.com" || target.hostname.endsWith(".bilibili.com")
+    ? "bilibili" : "generic";
 const stagingRoot = path.resolve(params.projectRoot, params.stagingRoot);
 const profile = process.env.LLM_WIKI_CONNECTOR_PROFILE
   ? path.resolve(process.env.LLM_WIKI_CONNECTOR_PROFILE)
@@ -78,7 +80,7 @@ try {
   await page.goto(requestUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForTimeout(750);
   const bodyText = await page.locator("body").innerText().catch(() => "");
-  if (/captcha|challenge|login required|sign in/i.test(bodyText)) {
+  if (/captcha|challenge|login required|sign in|环境异常|访问过于频繁|请完成验证|去验证/i.test(bodyText)) {
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "Login or challenge required", data: { code: "IMPORT_WEB_LOGIN_REQUIRED" } } })}\n`);
     process.exitCode = 0;
   } else if (platform === "bilibili") {

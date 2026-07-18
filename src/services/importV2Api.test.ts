@@ -12,11 +12,17 @@ describe("Import V2 presentation API", () => {
     expect(importV2Api.commandNames).toEqual({
       createSession: "create_import_session_v2",
       getSession: "get_import_session_v2",
+      getHistorySession: "get_import_history_session_v2",
       addItems: "add_import_items_v2",
       addPaths: "start_add_import_paths_v2",
+      getScanResult: "get_import_scan_result_v2",
       addUrl: "add_import_url_v2",
       setSelection: "set_import_item_selection_v2",
       startItems: "start_import_items_v2",
+      cancelBatch: "cancel_import_batch_v2",
+      cancelItem: "cancel_import_item_v2",
+      skipItem: "skip_import_item_v2",
+      authorizeBilibiliAsr: "authorize_bilibili_asr_v2",
       confirmSession: "confirm_import_session_v2",
       getPreviewContent: "get_import_preview_content_v2",
       getReadiness: "get_import_frontend_readiness_v2",
@@ -98,5 +104,19 @@ describe("Import V2 presentation API", () => {
     await importV2Api.getScanResult(request);
 
     expect(invoke).toHaveBeenLastCalledWith("get_import_scan_result_v2", { request });
+  });
+
+  it("forwards batch cancellation with the session and backend batch identity", async () => {
+    const request = {
+      projectId: "project-1",
+      projectRootPath: "D:/Wiki/project-1",
+      sessionId: "session-1",
+      batchId: "batch-1",
+    };
+    invoke.mockResolvedValueOnce([]);
+
+    await importV2Api.cancelBatch(request);
+
+    expect(invoke).toHaveBeenLastCalledWith("cancel_import_batch_v2", { request });
   });
 });

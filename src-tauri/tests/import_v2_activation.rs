@@ -10,8 +10,8 @@ use llm_wiki_desktop_lib::models::import_v2_migration::{
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::services::import_v2::activation::ImportV2ActivationService;
 use llm_wiki_desktop_lib::services::import_v2::migration::{
-    ExternalToolLicenseEvidence, MigrationReadinessEvidence,
-    PackageGateEvidence, REQUIRED_IMPORT_V2_CONTRACT,
+    ExternalToolLicenseEvidence, MigrationReadinessEvidence, PackageGateEvidence,
+    REQUIRED_IMPORT_V2_CONTRACT,
 };
 use llm_wiki_desktop_lib::services::import_v2::ImportV2Service;
 use llm_wiki_desktop_lib::services::GitService;
@@ -94,8 +94,13 @@ fn activation_requires_readiness_and_preserves_legacy_state() {
         )
         .unwrap();
     assert_eq!(result.record.active_backend, ImportBackend::V2);
-    assert_eq!(fs::read(root.join(".app/source-index.json")).unwrap(), legacy);
-    assert!(root.join(".app/import-v2-migration/activation.json").exists());
+    assert_eq!(
+        fs::read(root.join(".app/source-index.json")).unwrap(),
+        legacy
+    );
+    assert!(root
+        .join(".app/import-v2-migration/activation.json")
+        .exists());
     assert!(ImportV2ActivationService::legacy_mutation_guard(&context).is_err());
 }
 

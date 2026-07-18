@@ -189,6 +189,11 @@ pub struct AgentCandidateDiff {
     pub candidate_id: String,
     pub baseline_markdown: String,
     pub current_markdown: Option<String>,
+    /// Hash of the current Wiki bytes shown in the diff. Three-way merge
+    /// selection must bind to this exact version so the UI cannot silently
+    /// overwrite an edit made after the diff was opened.
+    #[serde(default)]
+    pub current_markdown_sha256: Option<String>,
     pub agent_markdown: String,
     pub unified_diff: String,
     pub needs_three_way_merge: bool,

@@ -8,21 +8,22 @@ use llm_wiki_desktop_lib::services::import_v2::engine::{
 use llm_wiki_desktop_lib::services::import_v2::native_file_engine::NativeFileEngine;
 use llm_wiki_desktop_lib::services::import_v2::quality_gate::QualityGate;
 use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
-use tempfile::TempDir;
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
 fn request(root: &TempDir, name: &str) -> EngineRequest {
     let path = root.path().join(name);
-    let source_identity = fs::read(&path).ok().map(|bytes| {
-        llm_wiki_desktop_lib::models::import_v2::SourceIdentity {
-            canonical_path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
-            size_bytes: bytes.len() as u64,
-            modified_nanos: None,
-            file_id: None,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
-            magic: format!("{:x}", Sha256::digest(&bytes[..bytes.len().min(8192)])),
-        }
-    });
+    let source_identity =
+        fs::read(&path).ok().map(
+            |bytes| llm_wiki_desktop_lib::models::import_v2::SourceIdentity {
+                canonical_path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
+                size_bytes: bytes.len() as u64,
+                modified_nanos: None,
+                file_id: None,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                magic: format!("{:x}", Sha256::digest(&bytes[..bytes.len().min(8192)])),
+            },
+        );
     EngineRequest {
         protocol_version: "2.0".into(),
         request_id: "request-1".into(),
@@ -226,11 +227,7 @@ fn rejects_markdown_images_that_are_symlinks() {
 
     let error = NativeFileEngine::default()
         .execute(
-            &request_with_bytes(
-                &root,
-                "note.md",
-                b"![secret](images/secret.png)\n",
-            ),
+            &request_with_bytes(&root, "note.md", b"![secret](images/secret.png)\n"),
             &CancellationToken::new(),
         )
         .unwrap_err();

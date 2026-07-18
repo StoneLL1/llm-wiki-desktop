@@ -104,8 +104,11 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     let current = "# User-edited Wiki\n\nKeep this edit.\n";
     let baseline_path = ".app/source-artifacts/source-old/version-old/baseline.md";
     let wiki_path = "wiki/sources/web/example.md";
-    std::fs::create_dir_all(root.path().join(".app/source-artifacts/source-old/version-old"))
-        .unwrap();
+    std::fs::create_dir_all(
+        root.path()
+            .join(".app/source-artifacts/source-old/version-old"),
+    )
+    .unwrap();
     std::fs::create_dir_all(root.path().join("wiki/sources/web")).unwrap();
     std::fs::create_dir_all(root.path().join(".app/sources")).unwrap();
     std::fs::create_dir_all(root.path().join("raw/sources/source-old/version-old")).unwrap();
@@ -166,9 +169,8 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         )
         .unwrap();
 
-    let relative_workspace = format!(
-        ".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a"
-    );
+    let relative_workspace =
+        format!(".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a");
     let workspace = root.path().join(&relative_workspace);
     for directory in ["source", "deterministic", "logs", "output"] {
         std::fs::create_dir_all(workspace.join(directory)).unwrap();
@@ -185,9 +187,12 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         markdown_path: "candidate.md".into(),
         asset_paths: vec!["assets/notes.txt".into()],
         markdown_sha256: format!("{:x}", Sha256::digest(agent.as_bytes())),
-        asset_sha256: [("assets/notes.txt".into(), format!("{:x}", Sha256::digest(asset)))]
-            .into_iter()
-            .collect(),
+        asset_sha256: [(
+            "assets/notes.txt".into(),
+            format!("{:x}", Sha256::digest(asset)),
+        )]
+        .into_iter()
+        .collect(),
         processing_summary: "AI-assisted extraction".into(),
         tools_used: vec!["tool-free-local-agent".into()],
         uncertainties: vec!["Formatting may differ.".into()],
@@ -277,7 +282,10 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     assert_eq!(candidate.audit_id, "audit-a");
     assert_eq!(candidate.agent_kind, Some(AgentKind::Claude));
     assert_eq!(candidate.agent_version, "test-version");
-    assert_eq!(candidate.prompt_template_version, "wiki-ingest-assist/local-v1");
+    assert_eq!(
+        candidate.prompt_template_version,
+        "wiki-ingest-assist/local-v1"
+    );
     let reconciled_audit: AgentAuditRecord = files
         .read_json(
             &context,
@@ -288,12 +296,17 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         )
         .unwrap();
     assert_eq!(reconciled_audit.outcome, "succeeded");
-    assert_eq!(candidate.markdown.sha256, format!("{:x}", Sha256::digest(agent.as_bytes())));
+    assert_eq!(
+        candidate.markdown.sha256,
+        format!("{:x}", Sha256::digest(agent.as_bytes()))
+    );
     let (_, diff) = service
         .load_candidate(&context, "session-a", "item-a", &candidate.candidate_id)
         .unwrap();
     assert_eq!(diff.baseline_markdown, baseline);
     assert_eq!(diff.current_markdown.as_deref(), Some(current));
+    let current_hash = format!("{:x}", Sha256::digest(current.as_bytes()));
+    assert_eq!(diff.current_markdown_sha256.as_deref(), Some(current_hash.as_str()));
     assert!(diff.needs_three_way_merge);
     assert_eq!(diff.agent_markdown, agent);
     assert!(diff.unified_diff.contains("Agent candidate"));
@@ -304,7 +317,11 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         .any(|warning| warning == "AGENT_QUALITY_NOT_MEASURED"));
     assert!(candidate.quality.metrics.is_empty());
     assert_eq!(
-        imports.load_session(&context, &files, "session-a").unwrap().items[0].status,
+        imports
+            .load_session(&context, &files, "session-a")
+            .unwrap()
+            .items[0]
+            .status,
         ImportItemStatus::NeedsMerge
     );
     assert!(!workspace.join("deterministic/candidate.md").exists());
@@ -387,7 +404,10 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
                 ImportItemStatus::NeedsMerge
             );
         }
-        assert_eq!(std::fs::read(candidate_root.join(relative)).unwrap(), expected);
+        assert_eq!(
+            std::fs::read(candidate_root.join(relative)).unwrap(),
+            expected
+        );
         assert!(candidate_record.is_file());
         assert!(!imports
             .load_session(&context, &files, "session-a")
@@ -472,12 +492,12 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
             Some(&current_hash),
         )
         .unwrap();
-    let sibling_workspace = root.path().join(
-        ".app/import-sessions/session-a/items/item-a/staging/agent/new-workspace",
-    );
+    let sibling_workspace = root
+        .path()
+        .join(".app/import-sessions/session-a/items/item-a/staging/agent/new-workspace");
     std::fs::create_dir_all(&sibling_workspace).unwrap();
     std::fs::write(sibling_workspace.join("keep.txt"), b"new task").unwrap();
-    assert_eq!(selected.status, ImportItemStatus::NeedsMerge);
+    assert_eq!(selected.status, ImportItemStatus::PreviewReady);
     assert!(selected
         .preview
         .as_ref()
@@ -485,20 +505,21 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         .markdown
         .relative_path
         .contains("merged-"));
-    assert_eq!(std::fs::read_to_string(root.path().join(wiki_path)).unwrap(), current);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(wiki_path)).unwrap(),
+        current
+    );
     let discarded = service
-        .discard_candidate(
-            &context,
-            "session-a",
-            "item-a",
-            &candidate.candidate_id,
-        )
+        .discard_candidate(&context, "session-a", "item-a", &candidate.candidate_id)
         .unwrap();
     assert_eq!(discarded.status, ImportItemStatus::Failed);
     assert!(discarded.preview.is_none());
     assert!(!workspace.exists());
     assert!(sibling_workspace.join("keep.txt").is_file());
-    assert_eq!(std::fs::read_to_string(root.path().join(wiki_path)).unwrap(), current);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(wiki_path)).unwrap(),
+        current
+    );
 
     for directory in ["source", "deterministic", "logs", "output/assets"] {
         std::fs::create_dir_all(workspace.join(directory)).unwrap();
@@ -542,6 +563,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
                 project_id: "project-a".into(),
                 project_root_path: root.path().to_string_lossy().into(),
                 session_id: "session-a".into(),
+                batch_task_id: None,
                 decisions: vec![CommitItemDecision {
                     item_id: "item-a".into(),
                     conflict_action: Some(CommitConflictAction::ApplyMergedCandidate),

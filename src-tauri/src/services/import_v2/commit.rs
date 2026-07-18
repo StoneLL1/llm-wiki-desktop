@@ -10,7 +10,7 @@ use crate::errors::{
 use crate::models::git::CheckpointPurpose;
 use crate::models::import_v2::{
     CommitConflictAction, CommitImportSessionRequest, CommitItemDecision, ImportBatchResult,
-    ImportItemCommitResult, ImportItemStatus, QualityLevel,
+    ImportIssue, ImportItemCommitResult, ImportItemStatus, QualityLevel,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::orchestrator::derive_session_status;
@@ -84,7 +84,9 @@ fn classify_commit_target(relative: &str) -> CommitPersistenceTarget {
         CommitPersistenceTarget::Manifest
     } else if relative == ".app/source-index-v2.json" {
         CommitPersistenceTarget::Index
-    } else if relative.starts_with(".app/import-history/") {
+    } else if relative.starts_with(".app/import-history/")
+        || relative.starts_with(".app/import-history-previews/")
+    {
         CommitPersistenceTarget::History
     } else if relative.contains("/items/") && relative.ends_with(".json") {
         CommitPersistenceTarget::SessionItem
@@ -182,9 +184,21 @@ impl ImportV2Service {
         request: &CommitImportSessionRequest,
         is_cancelled: impl Fn() -> bool,
     ) -> Result<ImportBatchResult, BackendError> {
-        if request.project_id != context.project_id
-            || Path::new(&request.project_root_path) != context.root
-        {
+        let asserted_root = Path::new(&request.project_root_path)
+            .canonicalize()
+            .map_err(|_| {
+                commit_error(
+                    IMPORT_V2_STATE_INVALID,
+                    "Import commit project root does not exist or cannot be resolved.",
+                )
+            })?;
+        let context_root = context.root.canonicalize().map_err(|_| {
+            commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "The trusted project root does not exist or cannot be resolved.",
+            )
+        })?;
+        if request.project_id != context.project_id || asserted_root != context_root {
             return Err(commit_error(
                 IMPORT_V2_STATE_INVALID,
                 "Import commit project context does not match.",
@@ -201,14 +215,31 @@ impl ImportV2Service {
             .sessions
             .load(context, file_store, &request.session_id)?;
         validate_complete_decision_set(&session, &request.decisions)?;
+        let mut history_snapshot = session.clone();
+        history_snapshot.items = request
+            .decisions
+            .iter()
+            .filter_map(|decision| {
+                session
+                    .items
+                    .iter()
+                    .find(|item| item.item_id == decision.item_id)
+                    .cloned()
+            })
+            .collect();
+        history_snapshot.status = derive_session_status(&history_snapshot.items);
+        history_snapshot.updated_at = chrono::Utc::now().to_rfc3339();
         let batch_id = uuid::Uuid::new_v4().to_string();
         let history_path = format!(".app/import-history/{batch_id}.json");
         let mut batch = ImportBatchResult {
             batch_id,
             session_id: request.session_id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            batch_task_id: request.batch_task_id.clone(),
             committed_count: 0,
             failed_count: 0,
             items: Vec::new(),
+            history_snapshot: Some(history_snapshot),
         };
         let mut initial_history = FileTransaction::new_for_project(&context.root);
         initial_history.write_new(
@@ -220,14 +251,16 @@ impl ImportV2Service {
             let history_hash_before = file_store.file_hash(context, &history_path)?;
             if is_cancelled() {
                 for unprocessed in &request.decisions[position..] {
-                    batch.items.push(ImportItemCommitResult {
+                    let result = ImportItemCommitResult {
                         item_id: unprocessed.item_id.clone(),
                         source_id: None,
                         version_id: None,
                         wiki_path: None,
                         committed: false,
                         error_code: Some(crate::errors::IMPORT_V2_CANCELLED.into()),
-                    });
+                    };
+                    batch.items.push(result.clone());
+                    update_history_snapshot(&mut batch, &result);
                 }
                 batch.failed_count = batch.items.len() as u32 - batch.committed_count;
                 persist_history_checked(context, &history_path, &batch, &history_hash_before)?;
@@ -256,7 +289,8 @@ impl ImportV2Service {
                     error_code: Some(error.code),
                 },
             };
-            batch.items.push(provisional);
+            batch.items.push(provisional.clone());
+            update_history_snapshot(&mut batch, &provisional);
             batch.committed_count = batch.items.iter().filter(|item| item.committed).count() as u32;
             batch.failed_count = batch.items.len() as u32 - batch.committed_count;
             if !batch.items.last().is_some_and(|item| item.committed) {
@@ -470,6 +504,11 @@ impl ImportV2Service {
         };
         let mut history = prior_batch.clone();
         history.items.push(result.clone());
+        update_history_snapshot(&mut history, &result);
+        let history_preview_path = format!(
+            ".app/import-history-previews/{}/{}.md",
+            history.batch_id, item.item_id
+        );
         history.committed_count =
             history.items.iter().filter(|entry| entry.committed).count() as u32;
         history.failed_count = history.items.len() as u32 - history.committed_count;
@@ -499,6 +538,7 @@ impl ImportV2Service {
                 ("Wiki".into(), plan.wiki_path.clone()),
                 ("source manifest".into(), plan.manifest_path.clone()),
                 ("source index".into(), ".app/source-index-v2.json".into()),
+                ("history preview".into(), history_preview_path.clone()),
                 ("batch history".into(), history_path.to_string()),
             ]);
             targets.extend(session.items.iter().map(|session_item| {
@@ -561,6 +601,10 @@ impl ImportV2Service {
             } else {
                 transaction.write_new(&index_path, &json_bytes(&plan.next_index)?)?;
             }
+            transaction.write_new(
+                &context.resolve_project_path(&history_preview_path)?,
+                &markdown,
+            )?;
             transaction.write_if_hash_matches(
                 &context.resolve_project_path(history_path)?,
                 &json_bytes(&history)?,
@@ -590,6 +634,32 @@ impl ImportV2Service {
         transaction.commit()?;
         Ok(result)
     }
+}
+
+fn update_history_snapshot(batch: &mut ImportBatchResult, result: &ImportItemCommitResult) {
+    let Some(snapshot) = batch.history_snapshot.as_mut() else {
+        return;
+    };
+    if let Some(item) = snapshot
+        .items
+        .iter_mut()
+        .find(|item| item.item_id == result.item_id)
+    {
+        item.status = if result.committed {
+            ImportItemStatus::Completed
+        } else if result.error_code.as_deref() == Some(crate::errors::IMPORT_V2_CANCELLED) {
+            ImportItemStatus::Cancelled
+        } else {
+            ImportItemStatus::Failed
+        };
+        item.progress = None;
+        item.issue = result
+            .error_code
+            .as_deref()
+            .map(ImportIssue::for_commit_code);
+    }
+    snapshot.status = derive_session_status(&snapshot.items);
+    snapshot.updated_at = chrono::Utc::now().to_rfc3339();
 }
 
 fn collision_free_wiki_path(
@@ -646,6 +716,12 @@ fn validate_complete_decision_set(
     session: &crate::models::import_v2::ImportSession,
     decisions: &[CommitItemDecision],
 ) -> Result<(), BackendError> {
+    if decisions.is_empty() {
+        return Err(commit_error(
+            IMPORT_V2_STATE_INVALID,
+            "At least one selected import item is required for commit.",
+        ));
+    }
     let mut item_ids = std::collections::HashSet::with_capacity(decisions.len());
     for decision in decisions {
         if !item_ids.insert(decision.item_id.as_str()) {
@@ -904,8 +980,8 @@ mod tests {
 
     use crate::errors::IMPORT_V2_COMMIT_CONFLICT;
     use crate::models::import_v2::{
-        CommitConflictAction, CommitImportSessionRequest, CommitItemDecision, ImportInput,
-        ImportInputKind, ImportItemStatus, ImportResourceMode,
+        CommitConflictAction, CommitImportSessionRequest, CommitItemDecision, ImportBatchResult,
+        ImportInput, ImportInputKind, ImportItemStatus, ImportResourceMode,
     };
     use crate::models::paths::ProjectContext;
     use crate::models::task::TaskType;
@@ -1114,6 +1190,7 @@ mod tests {
                 project_id: self.context.project_id.clone(),
                 project_root_path: self.root.to_string_lossy().into(),
                 session_id: self.session_id.clone(),
+                batch_task_id: None,
                 decisions,
             }
         }
@@ -1205,6 +1282,71 @@ mod tests {
             1,
             "failed item must not leave a raw source directory"
         );
+        let history_path = std::fs::read_dir(fixture.root.join(".app/import-history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let history: ImportBatchResult =
+            serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
+        let snapshot = history.history_snapshot.expect("history snapshot");
+        assert_eq!(snapshot.items.len(), 2);
+        assert!(snapshot
+            .items
+            .iter()
+            .any(|item| item.status == ImportItemStatus::Completed));
+        assert!(snapshot
+            .items
+            .iter()
+            .any(|item| item.status == ImportItemStatus::Failed));
+    }
+
+    #[test]
+    fn successful_batch_history_snapshot_is_terminal_after_last_commit() {
+        let fixture = CommitFixture::two_ready_items();
+        let result = fixture.commit_all();
+        assert_eq!((result.committed_count, result.failed_count), (2, 0));
+        let history_path = std::fs::read_dir(fixture.root.join(".app/import-history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let history: ImportBatchResult =
+            serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
+        let snapshot = history.history_snapshot.expect("history snapshot");
+        assert_eq!(snapshot.status, crate::models::import_v2::ImportSessionStatus::Completed);
+        assert!(snapshot
+            .items
+            .iter()
+            .all(|item| item.status == ImportItemStatus::Completed));
+        assert!(!history.created_at.is_empty());
+        let history_preview_dir = fixture
+            .root
+            .join(".app/import-history-previews")
+            .join(&history.batch_id);
+        assert_eq!(
+            std::fs::read_dir(history_preview_dir).unwrap().count(),
+            2,
+            "completed batches keep immutable Markdown previews"
+        );
+    }
+
+    #[test]
+    fn empty_commit_decisions_are_rejected_before_history_creation() {
+        let fixture = CommitFixture::two_ready_items();
+        let error = fixture
+            .service
+            .commit_items(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &fixture.request(Vec::new()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, crate::errors::IMPORT_V2_STATE_INVALID);
+        assert!(!fixture.root.join(".app/import-history").exists());
     }
 
     #[test]
@@ -1760,7 +1902,7 @@ mod tests {
             CommitPersistenceTarget::Manifest
         } else if label == "source index" {
             CommitPersistenceTarget::Index
-        } else if label == "batch history" {
+        } else if label == "batch history" || label == "history preview" {
             CommitPersistenceTarget::History
         } else if label.starts_with("session item ") {
             CommitPersistenceTarget::SessionItem

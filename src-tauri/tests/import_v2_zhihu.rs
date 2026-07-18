@@ -1,3 +1,23 @@
-use llm_wiki_desktop_lib::services::import_v2::connectors::{zhihu,ConnectorFailure};
-#[test]fn extracts_exact_content_root_without_comments(){let d=zhihu::extract(include_str!("../../tests/fixtures/import-v2/web/zhihu/article.html"),"https://zhuanlan.zhihu.com/p/1?utm_source=x").unwrap();assert_eq!(d.title,"知乎样例");assert!(d.body_html.contains("let x")&&!d.body_html.contains("评论"));assert!(!d.public_url.contains("utm_"));}
-#[test]fn login_and_drift_are_typed(){assert_eq!(zhihu::extract("登录后查看完整内容","https://www.zhihu.com/question/1").unwrap_err(),ConnectorFailure::LoginRequired);assert_eq!(zhihu::extract("<html></html>","https://www.zhihu.com/question/1").unwrap_err(),ConnectorFailure::StructureChanged);}
+use llm_wiki_desktop_lib::services::import_v2::connectors::{zhihu, ConnectorFailure};
+#[test]
+fn extracts_exact_content_root_without_comments() {
+    let d = zhihu::extract(
+        include_str!("../../tests/fixtures/import-v2/web/zhihu/article.html"),
+        "https://zhuanlan.zhihu.com/p/1?utm_source=x",
+    )
+    .unwrap();
+    assert_eq!(d.title, "知乎样例");
+    assert!(d.body_html.contains("let x") && !d.body_html.contains("评论"));
+    assert!(!d.public_url.contains("utm_"));
+}
+#[test]
+fn login_and_drift_are_typed() {
+    assert_eq!(
+        zhihu::extract("登录后查看完整内容", "https://www.zhihu.com/question/1").unwrap_err(),
+        ConnectorFailure::LoginRequired
+    );
+    assert_eq!(
+        zhihu::extract("<html></html>", "https://www.zhihu.com/question/1").unwrap_err(),
+        ConnectorFailure::StructureChanged
+    );
+}

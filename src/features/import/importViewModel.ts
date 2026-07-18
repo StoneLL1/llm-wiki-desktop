@@ -8,12 +8,17 @@ export interface ImportQueueCounts {
   needsAction: number;
   failed: number;
   completed: number;
+  waiting?: number;
 }
 
 export interface ImportSessionProgress {
   completed: number;
   total: number;
   active: number;
+  processed?: number;
+  failed?: number;
+  cancelled?: number;
+  needsAction?: number;
 }
 
 const ACTIVE_STATUSES: ReadonlySet<ImportItemStatus> = new Set([
@@ -66,6 +71,7 @@ export const selectQueueCounts = (session: ImportSession | null): ImportQueueCou
     needsAction: items.filter(isImportItemNeedsAction).length,
     failed: items.filter((item) => item.status === "failed").length,
     completed: items.filter((item) => item.status === "completed").length,
+    waiting: items.filter((item) => item.status === "waiting_capability" || item.status === "waiting_login").length,
   };
 };
 
@@ -74,10 +80,15 @@ export const selectCommittableItems = (session: ImportSession | null): ImportIte
 
 export const selectSessionProgress = (session: ImportSession | null): ImportSessionProgress => {
   const items = session?.items ?? [];
+  const processed = items.filter((item) => item.status === "preview_ready" || item.status === "needs_merge" || item.status === "completed" || item.status === "failed" || item.status === "cancelled" || item.status === "skipped").length;
   return {
     completed: items.filter((item) => item.status === "completed").length,
     total: items.length,
     active: items.filter(isImportItemActive).length,
+    processed,
+    failed: items.filter((item) => item.status === "failed").length,
+    cancelled: items.filter((item) => item.status === "cancelled").length,
+    needsAction: items.filter(isImportItemNeedsAction).length,
   };
 };
 

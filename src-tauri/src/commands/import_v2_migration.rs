@@ -58,7 +58,9 @@ pub fn scan_import_v2_migration(
 ) -> Result<LegacyInventory, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let _guard = state.import_v2_service.acquire_migration_lock()?;
-    state.import_v2_service.preflight_migration_locked(&context)?;
+    state
+        .import_v2_service
+        .preflight_migration_locked(&context)?;
     MigrationService::default().scan(&context.root)
 }
 
@@ -69,7 +71,9 @@ pub fn plan_import_v2_migration(
 ) -> Result<MigrationPlan, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let _guard = state.import_v2_service.acquire_migration_lock()?;
-    state.import_v2_service.preflight_migration_locked(&context)?;
+    state
+        .import_v2_service
+        .preflight_migration_locked(&context)?;
     MigrationService::default().plan(&context.root, &request.inventory)
 }
 
@@ -80,7 +84,9 @@ pub fn get_import_v2_migration_status(
 ) -> Result<MigrationStatusSnapshot, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let _guard = state.import_v2_service.acquire_migration_lock()?;
-    state.import_v2_service.preflight_migration_locked(&context)?;
+    state
+        .import_v2_service
+        .preflight_migration_locked(&context)?;
     MigrationService::default().status(&context)
 }
 
@@ -92,7 +98,9 @@ pub fn apply_import_v2_migration(
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let _guard = state.import_v2_service.acquire_migration_lock()?;
-    state.import_v2_service.preflight_migration_locked(&context)?;
+    state
+        .import_v2_service
+        .preflight_migration_locked(&context)?;
     let task = state
         .task_service
         .create_project_task(
@@ -103,7 +111,15 @@ pub fn apply_import_v2_migration(
             true,
         )
         .map_err(|error| task_error(&error))?;
-    spawn_migration_task(app, task.clone(), request.project_id, request.project_root_path, request.plan, request.confirmation, false);
+    spawn_migration_task(
+        app,
+        task.clone(),
+        request.project_id,
+        request.project_root_path,
+        request.plan,
+        request.confirmation,
+        false,
+    );
     Ok(task)
 }
 
@@ -115,7 +131,9 @@ pub fn resume_import_v2_migration(
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let _guard = state.import_v2_service.acquire_migration_lock()?;
-    state.import_v2_service.preflight_migration_locked(&context)?;
+    state
+        .import_v2_service
+        .preflight_migration_locked(&context)?;
     let task = state
         .task_service
         .create_project_task(
@@ -126,7 +144,15 @@ pub fn resume_import_v2_migration(
             true,
         )
         .map_err(|error| task_error(&error))?;
-    spawn_migration_task(app, task.clone(), request.project_id, request.project_root_path, request.plan, request.confirmation, true);
+    spawn_migration_task(
+        app,
+        task.clone(),
+        request.project_id,
+        request.project_root_path,
+        request.plan,
+        request.confirmation,
+        true,
+    );
     Ok(task)
 }
 
@@ -149,7 +175,11 @@ fn spawn_migration_task(
                 .map_err(|error| task_error(&error))?;
             state
                 .task_service
-                .append_log(&task_id, LogLevel::Info, "Applying Import V2 migration metadata".into())
+                .append_log(
+                    &task_id,
+                    LogLevel::Info,
+                    "Applying Import V2 migration metadata".into(),
+                )
                 .map_err(|error| task_error(&error))?;
             let context = state.resolve_project_context(&project_id, &project_root_path)?;
             let cancellation = state
@@ -179,8 +209,13 @@ fn spawn_migration_task(
         })();
 
         match result {
-            Ok(result) if result.status == crate::models::import_v2_migration::MigrationStatus::Cancelled => {
-                let _ = state.task_service.transition_status(&task_id, TaskStatus::Cancelled);
+            Ok(result)
+                if result.status
+                    == crate::models::import_v2_migration::MigrationStatus::Cancelled =>
+            {
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, TaskStatus::Cancelled);
             }
             Ok(result) => {
                 let checkpoint_summary = result
@@ -203,12 +238,16 @@ fn spawn_migration_task(
                         pending_action: None,
                     },
                 );
-                let _ = state.task_service.transition_status(&task_id, TaskStatus::Succeeded);
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, TaskStatus::Succeeded);
             }
             Err(error) => {
                 let _ = state.task_service.set_error(&task_id, error);
                 if !state.task_service.is_cancelled(&task_id) {
-                    let _ = state.task_service.transition_status(&task_id, TaskStatus::Failed);
+                    let _ = state
+                        .task_service
+                        .transition_status(&task_id, TaskStatus::Failed);
                 }
             }
         }

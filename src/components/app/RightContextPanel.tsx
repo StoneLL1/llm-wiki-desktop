@@ -30,6 +30,7 @@ export function RightContextPanel() {
   const activeView = useNavigationStore((state) => state.activeView);
   const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const requestAgentRun = useNavigationStore((state) => state.requestAgentRun);
   const closeWikiAssistant = useNavigationStore((state) => state.closeWikiAssistant);
   const currentProject = useProjectStore((state) => state.currentProject);
   const pendingAction = useProjectStore((state) => state.pendingAction);
@@ -322,7 +323,7 @@ export function RightContextPanel() {
       <AgentRightPanel
         agents={agentsFromStatus}
         onRunIngest={() => {
-          // Switch into the agent view so the run dialog is reachable there.
+          requestAgentRun("wiki-ingest");
           setActiveView("agent");
         }}
       />

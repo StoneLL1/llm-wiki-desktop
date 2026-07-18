@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use quick_xml::events::Event;
@@ -485,6 +485,86 @@ fn extract_ooxml(
         &text,
         page_count,
     )
+}
+
+/// Parse the deterministic text layer from an already verified source
+/// snapshot. Import V2 must parse the bytes that passed its identity check,
+/// rather than reopening the user file after verification.
+pub(crate) fn extract_pdf_markdown_from_bytes(bytes: &[u8]) -> Result<String, BackendError> {
+    let pages = pdf_extract::extract_text_from_mem_by_pages(bytes).map_err(|error| {
+        BackendError::new(
+            "IMPORT_FILE_PARSE_FAILED",
+            format!("PDF parsing failed: {error}"),
+            true,
+            true,
+        )
+    })?;
+    let text = pages
+        .iter()
+        .map(|page| page.trim())
+        .filter(|page| !page.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.trim().is_empty() {
+        return Err(BackendError::new(
+            "IMPORT_FILE_QUALITY_FAILED",
+            "The PDF has no extractable text layer; OCR or layout assistance is required.",
+            true,
+            true,
+        ));
+    }
+    Ok(normalize_extracted_markdown(&text))
+}
+
+/// Parse DOCX/XLSX/PPTX from an already verified source snapshot. The legacy
+/// ExtractionService and Import V2 now share the same bounded OOXML readers.
+pub(crate) fn extract_ooxml_markdown_from_bytes(
+    extension: &str,
+    bytes: &[u8],
+) -> Result<String, BackendError> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|error| {
+        BackendError::new(
+            "IMPORT_FILE_PARSE_FAILED",
+            format!("Office archive could not be opened: {error}"),
+            true,
+            true,
+        )
+    })?;
+    validate_archive_limits(&mut archive).map_err(|error| {
+        BackendError::new(
+            "IMPORT_FILE_RESOURCE_LIMIT",
+            error.message,
+            error.recoverable,
+            error.user_action_required,
+        )
+    })?;
+    let text = match extension {
+        "docx" => read_docx_text(&mut archive)?,
+        "xlsx" => read_xlsx_text(&mut archive)?,
+        "pptx" => read_pptx_text(&mut archive)?.0,
+        _ => {
+            return Err(BackendError::new(
+                "IMPORT_FILE_PARSE_FAILED",
+                "The built-in Office reader does not support this extension.",
+                false,
+                true,
+            ));
+        }
+    };
+    if text.trim().is_empty() {
+        return Err(BackendError::new(
+            "IMPORT_FILE_QUALITY_FAILED",
+            "The Office file contains no extractable text.",
+            true,
+            true,
+        ));
+    }
+    Ok(normalize_extracted_markdown(&text))
+}
+
+fn normalize_extracted_markdown(value: &str) -> String {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    format!("{}\n", normalized.trim_end_matches('\n'))
 }
 
 /// Collect text runs from `word/document.xml` (DOCX): `<w:t>` element bodies.

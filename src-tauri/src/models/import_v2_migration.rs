@@ -86,7 +86,9 @@ pub enum MigrationDecision {
         #[serde(rename = "proposedSourceId")]
         proposed_source_id: String,
     },
-    LegacyUnmanaged { reason: String },
+    LegacyUnmanaged {
+        reason: String,
+    },
     Conflict {
         candidates: Vec<String>,
         reason: String,
@@ -317,7 +319,11 @@ impl MigrationPlan {
         let bytes = serde_json::to_vec(self).unwrap_or_default();
         let mut digest = Sha256::new();
         digest.update(bytes);
-        digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -425,18 +431,19 @@ impl MigrationReport {
 
 fn redact_candidate(candidate: &MigrationCandidate) -> MigrationCandidate {
     let mut candidate = candidate.clone();
-    candidate.record.normalized_url = candidate
-        .record
-        .normalized_url
-        .as_deref()
-        .and_then(|value| {
-            let mut url = url::Url::parse(value).ok()?;
-            url.set_username("").ok()?;
-            url.set_password(None).ok()?;
-            url.set_query(None);
-            url.set_fragment(None);
-            Some(url.to_string())
-        });
+    candidate.record.normalized_url =
+        candidate
+            .record
+            .normalized_url
+            .as_deref()
+            .and_then(|value| {
+                let mut url = url::Url::parse(value).ok()?;
+                url.set_username("").ok()?;
+                url.set_password(None).ok()?;
+                url.set_query(None);
+                url.set_fragment(None);
+                Some(url.to_string())
+            });
     candidate.decision = match candidate.decision {
         MigrationDecision::LinkExisting {
             source_id,
@@ -454,7 +461,10 @@ fn redact_candidate(candidate: &MigrationCandidate) -> MigrationCandidate {
             reason: "unmanaged legacy evidence requires review".into(),
         },
         MigrationDecision::Conflict { candidates, .. } => MigrationDecision::Conflict {
-            candidates: candidates.iter().map(|value| safe_identifier(value)).collect(),
+            candidates: candidates
+                .iter()
+                .map(|value| safe_identifier(value))
+                .collect(),
             reason: "conflicting identity evidence requires review".into(),
         },
     };
@@ -496,7 +506,9 @@ pub fn validate_project_relative(value: &str) -> Result<(), BackendError> {
             true,
         ));
     }
-    if path.components().any(|component| component == Component::ParentDir)
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
         || normalized.split('/').any(|part| part == "..")
     {
         return Err(BackendError::new(

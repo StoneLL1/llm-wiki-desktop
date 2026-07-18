@@ -29,7 +29,7 @@ function rpcFailure(code, message) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message, data: { code } } })}\n`);
   process.exit(0);
 }
-if (/环境异常|访问过于频繁|安全验证|captcha|challenge/i.test(pageText)) rpcFailure("IMPORT_WEB_CHALLENGE_DETECTED", "The site returned a challenge page.");
+if (/环境异常|访问过于频繁|请完成验证|去验证|安全验证|captcha|challenge/i.test(pageText)) rpcFailure("IMPORT_WEB_CHALLENGE_DETECTED", "The site returned a challenge page.");
 if (/登录后|signflow|login required/i.test(pageText)) rpcFailure("IMPORT_WEB_LOGIN_REQUIRED", "The site requires login.");
 
 let title = "";

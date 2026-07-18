@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use crate::models::agent::AgentConfig;
 use crate::models::agent::{AgentDetectionState, AgentInfo, AgentKind};
 use crate::models::paths::ProjectContext;
 use crate::services::FileStore;
+use crate::models::task::{TaskActivity, TaskActivityStatus};
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
@@ -53,6 +55,19 @@ pub trait ProcessRunner: Send + Sync {
             true,
         ))
     }
+    /// Import assistance is redacted by default, but it can still expose the
+    /// same safe lifecycle events as other Agent runs without persisting raw
+    /// candidate text or tool input.
+    fn run_import_assistance_with_events(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_activity: &(dyn Fn(TaskActivity) + Sync),
+    ) -> Result<String, BackendError> {
+        let _ = on_activity;
+        self.run_import_assistance(invocation, tasks, task_id)
+    }
     /// Same as [`run_task_streaming`](Self::run_task_streaming) but additionally
     /// invokes `on_delta` for each captured stdout line, so callers that render
     /// output live (chat) get an incremental feed. The default impl ignores the
@@ -69,6 +84,21 @@ pub trait ProcessRunner: Send + Sync {
     ) -> Result<String, BackendError> {
         let _ = on_delta;
         self.run_task_streaming(invocation, tasks, task_id)
+    }
+
+    /// Structured streaming hook used by the UI. The default keeps existing
+    /// test runners and third-party implementations source-compatible while
+    /// allowing the system runner to expose safe tool/phase events.
+    fn run_task_streaming_with_events(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_delta: &(dyn Fn(&str) + Sync),
+        on_activity: &(dyn Fn(TaskActivity) + Sync),
+    ) -> Result<String, BackendError> {
+        let _ = on_activity;
+        self.run_task_streaming_with_delta(invocation, tasks, task_id, on_delta)
     }
 }
 
@@ -133,7 +163,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
-                    "text".into(),
+                    "stream-json".into(),
+                    "--verbose".into(),
                     "--permission-mode".into(),
                     "dontAsk".into(),
                     "--safe-mode".into(),
@@ -331,12 +362,9 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         Ok(invocation)
     }
 
-    /// Build a plain-text-oriented Agent invocation for chat Q&A. Unlike
-    /// [`invocation`] (which uses stream-json so compile can diff a workspace),
-    /// chat wants the captured stdout to be the answer text itself, so the
-    /// Claude profile uses `--output-format text`. Other CLIs reuse best-effort
-    /// non-interactive args; the BYOK route is the guaranteed path, so this is
-    /// an enhancement when an Agent is installed.
+    /// Build a structured Agent invocation for chat Q&A. The process runner
+    /// converts CLI JSON into safe text deltas and activity events, so the UI
+    /// can show thinking/tool phases without exposing raw hidden reasoning.
     pub fn chat_invocation(
         kind: AgentKind,
         workspace: &Path,
@@ -355,7 +383,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
-                    "text".into(),
+                    "stream-json".into(),
+                    "--verbose".into(),
                     "--permission-mode".into(),
                     "dontAsk".into(),
                     "--allowedTools=Read Grep Glob".into(),
@@ -367,6 +396,7 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 program: "codex".into(),
                 args: vec![
                     "exec".into(),
+                    "--json".into(),
                     "--ephemeral".into(),
                     "--ignore-rules".into(),
                     "--sandbox".into(),
@@ -399,7 +429,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
-                    "text".into(),
+                    "stream-json".into(),
+                    "--verbose".into(),
                     "--permission-mode".into(),
                     "dontAsk".into(),
                     "--allowedTools=Read Grep Glob Edit Write Bash".into(),
@@ -411,6 +442,7 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 program: "codex".into(),
                 args: vec![
                     "exec".into(),
+                    "--json".into(),
                     "--ephemeral".into(),
                     "--sandbox".into(),
                     "workspace-write".into(),
@@ -437,10 +469,9 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         matches!(kind, AgentKind::Claude | AgentKind::Codex)
     }
 
-    /// Build a plain-text Agent invocation for the `wiki-lint` deep-lint run.
-    /// The captured stdout is the structured lint report (a fenced JSON block),
-    /// so this reuses the chat text-output profile rather than the stream-json
-    /// compile profile. The BYOK route remains the guaranteed fallback.
+    /// Build a structured Agent invocation for the `wiki-lint` deep-lint run.
+    /// The parser still returns only visible text, so the captured stdout keeps
+    /// the fenced JSON report while activity events can be shown live.
     pub fn lint_invocation(
         kind: AgentKind,
         workspace: &Path,
@@ -456,7 +487,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
-                    "text".into(),
+                    "stream-json".into(),
+                    "--verbose".into(),
                     prompt_owned,
                 ],
                 stdin: None,
@@ -464,19 +496,19 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             },
             AgentKind::Codex => AgentInvocation {
                 program: "codex".into(),
-                args: vec!["exec".into(), "-".into()],
+                args: vec!["exec".into(), "--json".into(), "-".into()],
                 stdin: Some(prompt_owned),
                 cwd,
             },
             AgentKind::Openclaw => AgentInvocation {
                 program: "openclaw".into(),
-                args: vec!["agent".into(), "--message".into(), prompt_owned],
+                args: vec!["agent".into(), "--message".into(), prompt_owned, "--json".into()],
                 stdin: None,
                 cwd,
             },
             AgentKind::Hermes => AgentInvocation {
                 program: "hermes".into(),
-                args: vec!["--prompt".into(), prompt_owned],
+                args: vec!["--prompt".into(), prompt_owned, "--json".into()],
                 stdin: None,
                 cwd,
             },
@@ -484,10 +516,9 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         Ok(invocation)
     }
 
-    /// Build a plain-text Agent invocation for the `html-*` export skills. The
-    /// captured stdout is the standalone HTML document, so this reuses the
-    /// chat/lint text-output profile rather than the stream-json compile
-    /// profile. The BYOK route remains the guaranteed fallback.
+    /// Build a structured Agent invocation for the `html-*` export skills. The
+    /// parser still returns only visible text, so the captured stdout keeps
+    /// the standalone HTML document while activity events can be shown live.
     pub fn html_export_invocation(
         kind: AgentKind,
         workspace: &Path,
@@ -503,7 +534,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
-                    "text".into(),
+                    "stream-json".into(),
+                    "--verbose".into(),
                     prompt_owned,
                 ],
                 stdin: None,
@@ -511,19 +543,19 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             },
             AgentKind::Codex => AgentInvocation {
                 program: "codex".into(),
-                args: vec!["exec".into(), "-".into()],
+                args: vec!["exec".into(), "--json".into(), "-".into()],
                 stdin: Some(prompt_owned),
                 cwd,
             },
             AgentKind::Openclaw => AgentInvocation {
                 program: "openclaw".into(),
-                args: vec!["agent".into(), "--message".into(), prompt_owned],
+                args: vec!["agent".into(), "--message".into(), prompt_owned, "--json".into()],
                 stdin: None,
                 cwd,
             },
             AgentKind::Hermes => AgentInvocation {
                 program: "hermes".into(),
-                args: vec!["--prompt".into(), prompt_owned],
+                args: vec!["--prompt".into(), prompt_owned, "--json".into()],
                 stdin: None,
                 cwd,
             },
@@ -555,7 +587,49 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError> {
-        self.runner.run_task_streaming(invocation, tasks, task_id)
+        let on_activity = |activity: TaskActivity| tasks.emit_activity(task_id, activity);
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "agent".into(),
+                status: TaskActivityStatus::Started,
+                label: Some("Agent started".into()),
+            },
+        );
+        let on_delta = |delta: &str| {
+            tasks.emit_stream_delta(
+                task_id,
+                crate::models::task::StreamDelta {
+                    delta: delta.to_string(),
+                    route: Some("task-agent".into()),
+                },
+            );
+        };
+        let result = self.runner.run_task_streaming_with_events(
+            invocation,
+            tasks,
+            task_id,
+            &on_delta,
+            &on_activity,
+        );
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "agent".into(),
+                status: if result.is_ok() {
+                    TaskActivityStatus::Completed
+                } else {
+                    TaskActivityStatus::Failed
+                },
+                label: Some(if result.is_ok() {
+                    "Agent response ready"
+                } else {
+                    "Agent response failed"
+                }
+                .into()),
+            },
+        );
+        result
     }
 
     pub fn run_import_assistance(
@@ -564,8 +638,39 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError> {
-        self.runner
-            .run_import_assistance(invocation, tasks, task_id)
+        let on_activity = |activity: TaskActivity| tasks.emit_activity(task_id, activity);
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "import-agent".into(),
+                status: TaskActivityStatus::Started,
+                label: Some("Running Import assistance".into()),
+            },
+        );
+        let result = self.runner.run_import_assistance_with_events(
+            invocation,
+            tasks,
+            task_id,
+            &on_activity,
+        );
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "import-agent".into(),
+                status: if result.is_ok() {
+                    TaskActivityStatus::Completed
+                } else {
+                    TaskActivityStatus::Failed
+                },
+                label: Some(if result.is_ok() {
+                    "Import candidate ready"
+                } else {
+                    "Import assistance failed"
+                }
+                .into()),
+            },
+        );
+        result
     }
 
     /// Streaming variant of [`run_task_streaming`](Self::run_task_streaming):
@@ -581,6 +686,23 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
     ) -> Result<String, BackendError> {
         self.runner
             .run_task_streaming_with_delta(invocation, tasks, task_id, on_delta)
+    }
+
+    pub fn run_task_streaming_with_events(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_delta: &(dyn Fn(&str) + Sync),
+        on_activity: &(dyn Fn(TaskActivity) + Sync),
+    ) -> Result<String, BackendError> {
+        self.runner.run_task_streaming_with_events(
+            invocation,
+            tasks,
+            task_id,
+            on_delta,
+            on_activity,
+        )
     }
 }
 
@@ -650,7 +772,17 @@ impl ProcessRunner for SystemProcessRunner {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError> {
-        run_streaming_process(invocation, tasks, task_id, &|_| {}, false)
+        self.run_import_assistance_with_events(invocation, tasks, task_id, &|_| {})
+    }
+
+    fn run_import_assistance_with_events(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_activity: &(dyn Fn(TaskActivity) + Sync),
+    ) -> Result<String, BackendError> {
+        run_streaming_process_with_events(invocation, tasks, task_id, &|_| {}, on_activity, false)
     }
 
     fn run_task_streaming_with_delta(
@@ -662,6 +794,17 @@ impl ProcessRunner for SystemProcessRunner {
     ) -> Result<String, BackendError> {
         run_streaming_process(invocation, tasks, task_id, on_delta, true)
     }
+
+    fn run_task_streaming_with_events(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+        on_delta: &(dyn Fn(&str) + Sync),
+        on_activity: &(dyn Fn(TaskActivity) + Sync),
+    ) -> Result<String, BackendError> {
+        run_streaming_process_with_events(invocation, tasks, task_id, on_delta, on_activity, true)
+    }
 }
 
 fn run_streaming_process(
@@ -669,6 +812,24 @@ fn run_streaming_process(
     tasks: &TaskService,
     task_id: &str,
     on_delta: &(dyn Fn(&str) + Sync),
+    persist_output_logs: bool,
+) -> Result<String, BackendError> {
+    run_streaming_process_with_events(
+        invocation,
+        tasks,
+        task_id,
+        on_delta,
+        &|_| {},
+        persist_output_logs,
+    )
+}
+
+fn run_streaming_process_with_events(
+    invocation: &AgentInvocation,
+    tasks: &TaskService,
+    task_id: &str,
+    on_delta: &(dyn Fn(&str) + Sync),
+    on_activity: &(dyn Fn(TaskActivity) + Sync),
     persist_output_logs: bool,
 ) -> Result<String, BackendError> {
     const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
@@ -715,34 +876,27 @@ fn run_streaming_process(
         });
     }
     drop(sender);
-    // Stdout (Info) lines are captured as the answer payload for the chat
-    // route, while still being streamed to the task drawer as logs. Compile
-    // discards this value and reads workspace files instead.
-    let mut stdout_lines: Vec<String> = Vec::new();
+    // Plain stdout is captured as the answer payload for chat/lint/export.
+    // Structured Agent JSON is parsed into safe text deltas and activity
+    // events; the raw JSON never enters the task log or chat stream.
+    let mut stdout = String::new();
+    let mut parser = AgentOutputParser::new(is_structured_invocation(invocation));
     let mut captured_bytes = 0usize;
     loop {
         while let Ok((level, line)) = receiver.try_recv() {
-            if level == LogLevel::Info {
-                captured_bytes = captured_bytes.saturating_add(line.len() + 1);
-                if captured_bytes > MAX_CAPTURE_BYTES {
-                    terminate_agent_tree(&mut child);
-                    let _ = finish_stdin_writer(stdin_writer.take());
-                    return Err(BackendError::new(
-                        "IMPORT_AGENT_OUTPUT_TOO_LARGE",
-                        "Agent output exceeded the candidate capture limit.",
-                        true,
-                        true,
-                    ));
-                }
-                stdout_lines.push(line.clone());
-                // Forward each captured stdout line as a live delta so chat
-                // can render the answer incrementally (uniform with the
-                // BYOK streaming path).
-                on_delta(&line);
-            }
-            if persist_output_logs {
-                let _ = tasks.append_log(task_id, level, line);
-            }
+            process_agent_output_line(
+                &mut parser,
+                level,
+                &line,
+                &mut stdout,
+                &mut captured_bytes,
+                MAX_CAPTURE_BYTES,
+                persist_output_logs,
+                tasks,
+                task_id,
+                on_delta,
+                on_activity,
+            )?;
         }
         if tasks.is_cancelled(task_id) {
             terminate_agent_tree(&mut child);
@@ -768,22 +922,19 @@ fn run_streaming_process(
             Ok(Some(status)) => {
                 let stdin_result = finish_stdin_writer(stdin_writer.take());
                 for (level, line) in receiver.try_iter() {
-                    if level == LogLevel::Info {
-                        captured_bytes = captured_bytes.saturating_add(line.len() + 1);
-                        if captured_bytes > MAX_CAPTURE_BYTES {
-                            return Err(BackendError::new(
-                                "IMPORT_AGENT_OUTPUT_TOO_LARGE",
-                                "Agent output exceeded the candidate capture limit.",
-                                true,
-                                true,
-                            ));
-                        }
-                        stdout_lines.push(line.clone());
-                        on_delta(&line);
-                    }
-                    if persist_output_logs {
-                        let _ = tasks.append_log(task_id, level, line);
-                    }
+                    process_agent_output_line(
+                        &mut parser,
+                        level,
+                        &line,
+                        &mut stdout,
+                        &mut captured_bytes,
+                        MAX_CAPTURE_BYTES,
+                        persist_output_logs,
+                        tasks,
+                        task_id,
+                        on_delta,
+                        on_activity,
+                    )?;
                 }
                 if status.success() {
                     stdin_result?;
@@ -794,7 +945,7 @@ fn run_streaming_process(
                             "Agent output captured for candidate validation.".into(),
                         );
                     }
-                    return Ok(stdout_lines.join("\n"));
+                    return Ok(stdout);
                 }
                 return Err(BackendError::new(
                     "AGENT_EXIT_FAILED",
@@ -816,6 +967,429 @@ fn run_streaming_process(
             }
         }
     }
+}
+
+fn is_structured_invocation(invocation: &AgentInvocation) -> bool {
+    invocation
+        .args
+        .iter()
+        .any(|arg| arg == "stream-json" || arg == "--json")
+}
+
+struct ParsedAgentLine {
+    text: Option<String>,
+    activities: Vec<TaskActivity>,
+}
+
+struct AgentOutputParser {
+    structured: bool,
+    saw_text: bool,
+    thinking_active: bool,
+    thinking_started_at: Option<Instant>,
+    seen_tool_calls: HashSet<String>,
+}
+
+impl AgentOutputParser {
+    fn new(structured: bool) -> Self {
+        Self {
+            structured,
+            saw_text: false,
+            thinking_active: false,
+            thinking_started_at: None,
+            seen_tool_calls: HashSet::new(),
+        }
+    }
+
+    fn parse(&mut self, line: &str) -> ParsedAgentLine {
+        if !self.structured {
+            return ParsedAgentLine {
+                text: Some(line.to_string()),
+                activities: Vec::new(),
+            };
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return ParsedAgentLine {
+                text: None,
+                activities: Vec::new(),
+            };
+        };
+        let mut parsed = ParsedAgentLine {
+            text: None,
+            activities: Vec::new(),
+        };
+        let event_type = value.get("type").and_then(|value| value.as_str()).unwrap_or("");
+
+        if event_type == "stream_event" {
+            if let Some(event) = value.get("event") {
+                self.parse_claude_event(event, &mut parsed);
+            }
+        } else if event_type == "assistant" || event_type == "message" {
+            self.parse_content_blocks(value.get("message").unwrap_or(&value), &mut parsed);
+        } else if event_type == "user" {
+            self.parse_content_blocks(value.get("message").unwrap_or(&value), &mut parsed);
+        } else if event_type == "result" {
+            self.finish_thinking(&mut parsed);
+            if !self.saw_text {
+                parsed.text = value.get("result").and_then(|value| value.as_str()).map(str::to_string);
+            }
+        }
+
+        // Codex/OpenClaw/Hermes JSON event families use `item.*` and
+        // `response.output_text.delta`. Keep this parser intentionally
+        // conservative: only extract visible text and safe tool metadata.
+        if event_type.contains("reasoning") || event_type.contains("thinking") {
+            self.start_thinking(&mut parsed, "正在分析任务");
+        }
+        if event_type.contains("output_text.delta") || event_type == "text_delta" {
+            let text = value
+                .get("delta")
+                .and_then(|value| value.as_str())
+                .or_else(|| value.get("text").and_then(|value| value.as_str()));
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
+                self.finish_thinking(&mut parsed);
+                self.saw_text = true;
+                parsed.text = Some(text.to_string());
+            }
+        }
+        if event_type.starts_with("item.") {
+            if let Some(item) = value.get("item") {
+                self.parse_item(item, event_type.ends_with("completed"), &mut parsed);
+            }
+        }
+        self.parse_generic_event(&value, event_type, &mut parsed);
+        if parsed.text.is_none() && !parsed.activities.is_empty() {
+            return parsed;
+        }
+        if parsed.text.is_none() && event_type == "response.completed" && !self.saw_text {
+            parsed.text = value
+                .pointer("/response/output_text")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+        }
+        parsed
+    }
+
+    fn parse_claude_event(&mut self, event: &serde_json::Value, parsed: &mut ParsedAgentLine) {
+        let event_type = event.get("type").and_then(|value| value.as_str()).unwrap_or("");
+        match event_type {
+            "content_block_delta" => {
+                let delta = event.get("delta").unwrap_or(&serde_json::Value::Null);
+                match delta.get("type").and_then(|value| value.as_str()).unwrap_or("") {
+                    "thinking_delta" => self.start_thinking(parsed, "正在分析任务"),
+                    "text_delta" => {
+                        self.finish_thinking(parsed);
+                        if let Some(text) = delta.get("text").and_then(|value| value.as_str()) {
+                            if !text.is_empty() {
+                                self.saw_text = true;
+                                parsed.text = Some(text.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_start" => {
+                if let Some(block) = event.get("content_block") {
+                    self.parse_content_block(block, parsed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn parse_content_blocks(&mut self, message: &serde_json::Value, parsed: &mut ParsedAgentLine) {
+        let Some(blocks) = message.get("content").and_then(|value| value.as_array()) else {
+            return;
+        };
+        for block in blocks {
+            self.parse_content_block(block, parsed);
+        }
+    }
+
+    fn parse_content_block(&mut self, block: &serde_json::Value, parsed: &mut ParsedAgentLine) {
+        match block.get("type").and_then(|value| value.as_str()).unwrap_or("") {
+            "thinking" => self.start_thinking(parsed, "正在分析任务"),
+            "tool_use" => {
+                let call_id = block
+                    .get("id")
+                    .or_else(|| block.get("call_id"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Tool")
+                    .to_string();
+                self.push_tool_call(&call_id, &name, block.get("input"), parsed);
+            }
+            "tool_result" => {
+                let call_id = block
+                    .get("tool_use_id")
+                    .or_else(|| block.get("call_id"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let success = !block.get("is_error").and_then(|value| value.as_bool()).unwrap_or(false);
+                parsed.activities.push(TaskActivity::ToolResult {
+                    call_id,
+                    success,
+                    summary: Some(if success { "工具执行完成" } else { "工具执行失败" }.into()),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn parse_item(&mut self, item: &serde_json::Value, completed: bool, parsed: &mut ParsedAgentLine) {
+        let item_type = item.get("type").and_then(|value| value.as_str()).unwrap_or("");
+        if matches!(item_type, "reasoning" | "thinking") {
+            self.start_thinking(parsed, "正在分析任务");
+            return;
+        }
+        if matches!(item_type, "agent_message" | "message" | "output_text") {
+            if let Some(text) = item
+                .get("text")
+                .and_then(|value| value.as_str())
+                .or_else(|| item.get("content").and_then(|value| value.as_str()))
+                .filter(|text| !text.is_empty())
+            {
+                // Some Codex-compatible CLIs only attach the final visible
+                // text to item.completed. If output_text.delta already
+                // streamed it, the completed item is the same text and must
+                // not be appended a second time.
+                if !self.saw_text {
+                    self.finish_thinking(parsed);
+                    self.saw_text = true;
+                    parsed.text = Some(text.to_string());
+                }
+            }
+            return;
+        }
+        if matches!(
+            item_type,
+            "command_execution" | "shell" | "file_search" | "mcp_tool_call" | "tool_call"
+        ) {
+            let call_id = item
+                .get("id")
+                .or_else(|| item.get("call_id"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("tool")
+                .to_string();
+            let name = item
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or(item_type)
+                .to_string();
+            if completed {
+                let success = item
+                    .get("exit_code")
+                    .and_then(|value| value.as_i64())
+                    .map(|code| code == 0)
+                    .unwrap_or(true);
+                parsed.activities.push(TaskActivity::ToolResult {
+                    call_id,
+                    success,
+                    summary: Some(if success { "工具执行完成" } else { "工具执行失败" }.into()),
+                });
+            } else {
+                self.push_tool_call(&call_id, &name, Some(item), parsed);
+            }
+        }
+    }
+
+    fn parse_generic_event(
+        &mut self,
+        value: &serde_json::Value,
+        event_type: &str,
+        parsed: &mut ParsedAgentLine,
+    ) {
+        // OpenClaw/Hermes versions expose slightly different JSON envelopes.
+        // Accept only obvious visible-text fields and never treat a
+        // reasoning/thinking field as answer text.
+        if !event_type.contains("reasoning") && !event_type.contains("thinking") && parsed.text.is_none() {
+            let text = ["text", "output", "content", "message"]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(|candidate| candidate.as_str()))
+                .filter(|text| !text.is_empty());
+            if let Some(text) = text {
+                self.finish_thinking(parsed);
+                self.saw_text = true;
+                parsed.text = Some(text.to_string());
+            }
+        }
+        if !event_type.contains("tool") {
+            return;
+        }
+        let call_id = value
+            .get("id")
+            .or_else(|| value.get("call_id"))
+            .and_then(|candidate| candidate.as_str())
+            .unwrap_or("tool");
+        let name = value
+            .get("name")
+            .or_else(|| value.get("tool"))
+            .and_then(|candidate| candidate.as_str())
+            .unwrap_or("Tool");
+        let completed = event_type.contains("result")
+            || event_type.contains("complete")
+            || event_type.contains("finish");
+        if completed {
+            let success = value
+                .get("success")
+                .and_then(|candidate| candidate.as_bool())
+                .or_else(|| value.get("is_error").and_then(|candidate| candidate.as_bool()).map(|error| !error))
+                .unwrap_or(true);
+            parsed.activities.push(TaskActivity::ToolResult {
+                call_id: call_id.into(),
+                success,
+                summary: None,
+            });
+        } else {
+            let input = value.get("input").or_else(|| value.get("arguments"));
+            self.push_tool_call(call_id, name, input, parsed);
+        }
+    }
+
+    fn start_thinking(&mut self, parsed: &mut ParsedAgentLine, summary: &str) {
+        if self.thinking_active {
+            return;
+        }
+        self.thinking_active = true;
+        self.thinking_started_at = Some(Instant::now());
+        parsed.activities.push(TaskActivity::Thinking {
+            status: TaskActivityStatus::Started,
+            summary: Some(summary.into()),
+            duration_ms: None,
+        });
+    }
+
+    fn finish_thinking(&mut self, parsed: &mut ParsedAgentLine) {
+        if !self.thinking_active {
+            return;
+        }
+        self.thinking_active = false;
+        let duration_ms = self
+            .thinking_started_at
+            .take()
+            .map(|started| started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        parsed.activities.push(TaskActivity::Thinking {
+            status: TaskActivityStatus::Completed,
+            summary: Some("已完成分析".into()),
+            duration_ms,
+        });
+    }
+
+    fn push_tool_call(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        input: Option<&serde_json::Value>,
+        parsed: &mut ParsedAgentLine,
+    ) {
+        if !self.seen_tool_calls.insert(call_id.to_string()) {
+            return;
+        }
+        parsed.activities.push(TaskActivity::ToolCall {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            detail: input.and_then(|value| safe_tool_detail(name, value)),
+        });
+    }
+}
+
+fn process_agent_output_line(
+    parser: &mut AgentOutputParser,
+    level: LogLevel,
+    line: &str,
+    stdout: &mut String,
+    captured_bytes: &mut usize,
+    max_capture_bytes: usize,
+    persist_output_logs: bool,
+    tasks: &TaskService,
+    task_id: &str,
+    on_delta: &(dyn Fn(&str) + Sync),
+    on_activity: &(dyn Fn(TaskActivity) + Sync),
+) -> Result<(), BackendError> {
+    if level != LogLevel::Info {
+        if persist_output_logs {
+            // Structured Agent stderr is diagnostic transport, not a trusted
+            // user-facing transcript. Keep it out of persisted logs because
+            // CLIs may print tool arguments, environment details, or JSON
+            // diagnostics there.
+            let message = if parser.structured {
+                "Agent diagnostic output received."
+            } else {
+                line
+            };
+            let _ = tasks.append_log(task_id, level, message.to_string());
+        }
+        return Ok(());
+    }
+
+    let parsed = parser.parse(line);
+    if let Some(text) = parsed.text {
+        *captured_bytes = captured_bytes.saturating_add(text.len() + 1);
+        if *captured_bytes > max_capture_bytes {
+            return Err(BackendError::new(
+                "IMPORT_AGENT_OUTPUT_TOO_LARGE",
+                "Agent output exceeded the candidate capture limit.",
+                true,
+                true,
+            ));
+        }
+        stdout.push_str(&text);
+        if !parser.structured {
+            stdout.push('\n');
+        }
+        on_delta(&text);
+    }
+    for activity in parsed.activities {
+        on_activity(activity.clone());
+        if persist_output_logs {
+            let _ = tasks.append_log(task_id, LogLevel::Info, activity_log_text(&activity));
+        }
+    }
+    if persist_output_logs && !parser.structured {
+        let _ = tasks.append_log(task_id, LogLevel::Info, line.to_string());
+    }
+    Ok(())
+}
+
+fn activity_log_text(activity: &TaskActivity) -> String {
+    match activity {
+        TaskActivity::Phase { name, status, .. } => format!("Phase {name}: {status:?}"),
+        TaskActivity::Thinking { status, .. } => format!("Thinking: {status:?}"),
+        TaskActivity::ToolCall { name, detail, .. } => {
+            detail.as_ref().map(|detail| format!("{name}: {detail}"))
+                .unwrap_or_else(|| format!("Tool: {name}"))
+        }
+        TaskActivity::ToolResult { success, summary, .. } => summary
+            .clone()
+            .unwrap_or_else(|| if *success { "Tool completed".into() } else { "Tool failed".into() }),
+    }
+}
+
+fn safe_tool_detail(name: &str, input: &serde_json::Value) -> Option<String> {
+    let normalized = name.to_ascii_lowercase();
+    if normalized.contains("bash") || normalized.contains("command") || normalized == "shell" {
+        return Some("controlled-command".into());
+    }
+    let keys = if normalized.contains("grep") || normalized.contains("glob") || normalized.contains("search") {
+        ["pattern", "query", "path", "file_path", "description"]
+    } else {
+        ["file_path", "path", "pattern", "query", "description"]
+    };
+    for key in keys {
+        if let Some(value) = input.get(key).and_then(|value| value.as_str()) {
+            let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !value.is_empty() {
+                return Some(value.chars().take(240).collect());
+            }
+        }
+    }
+    None
 }
 
 fn finish_stdin_writer(
@@ -860,15 +1434,10 @@ fn harden_import_environment(command: &mut Command, workspace: &Path) -> Result<
             true,
         )
     })?;
-    let inherited = [
-        "PATH",
-        "SystemRoot",
-        "WINDIR",
-        "COMSPEC",
-    ]
-    .into_iter()
-    .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
-    .collect::<Vec<_>>();
+    let inherited = ["PATH", "SystemRoot", "WINDIR", "COMSPEC"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+        .collect::<Vec<_>>();
     command.env_clear();
     for (name, value) in inherited {
         command.env(name, value);
@@ -1321,9 +1890,7 @@ impl ProcessLifetimeGuard {
             )
         } != 0;
         let assigned = configured
-            && unsafe {
-                AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE)
-            } != 0;
+            && unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) } != 0;
         if !assigned {
             unsafe { CloseHandle(job) };
             terminate_agent_tree(child);
@@ -1349,8 +1916,8 @@ fn resume_suspended_child(process_id: u32) -> Result<(), BackendError> {
         Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
         System::{
             Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
-                TH32CS_SNAPTHREAD,
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
             },
             Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
         },
@@ -1725,7 +2292,7 @@ mod tests {
     }
 
     #[test]
-    fn html_export_invocation_uses_text_profile() {
+    fn html_export_invocation_uses_structured_profile() {
         let workspace = std::env::temp_dir().join("llm-wiki-desktop/export-invocation-test");
         std::fs::create_dir_all(&workspace).unwrap();
         let claude =
@@ -1734,14 +2301,15 @@ mod tests {
         assert_eq!(claude.program, "claude");
         assert!(claude.args.contains(&"--bare".to_string()));
         assert!(claude.args.contains(&"--output-format".to_string()));
-        assert!(claude.args.contains(&"text".to_string()));
-        assert!(!claude.args.contains(&"stream-json".to_string()));
+        assert!(claude.args.contains(&"stream-json".to_string()));
+        assert!(claude.args.contains(&"--verbose".to_string()));
         assert!(claude.stdin.is_none());
 
         let codex =
             AgentService::html_export_invocation(AgentKind::Codex, &workspace, "build html")
                 .unwrap();
         assert_eq!(codex.stdin.as_deref(), Some("build html"));
+        assert!(codex.args.contains(&"--json".to_string()));
     }
 
     #[test]
@@ -1758,6 +2326,7 @@ mod tests {
         assert!(claude.args.contains(&"--bare".to_string()));
         assert!(claude.args.contains(&"--permission-mode".to_string()));
         assert!(claude.args.contains(&"dontAsk".to_string()));
+        assert!(claude.args.contains(&"stream-json".to_string()));
         assert_eq!(claude.stdin.as_deref(), Some("answer"));
         assert!(!claude.args.contains(&"answer".to_string()));
         assert!(
@@ -1791,6 +2360,7 @@ mod tests {
         assert_eq!(codex.stdin.as_deref(), Some("answer"));
         assert!(codex.args.contains(&"--ephemeral".to_string()));
         assert!(codex.args.contains(&"--ignore-rules".to_string()));
+        assert!(codex.args.contains(&"--json".to_string()));
         assert!(codex
             .args
             .windows(2)
@@ -1889,6 +2459,85 @@ mod tests {
                 invocation.args
             );
         }
+    }
+
+    #[test]
+    fn structured_parser_emits_safe_activity_without_hidden_reasoning() {
+        let mut parser = AgentOutputParser::new(true);
+        let thinking = parser.parse(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"secret chain of thought"}}}"#,
+        );
+        assert!(thinking.text.is_none());
+        assert!(thinking.activities.iter().any(|activity| matches!(
+            activity,
+            TaskActivity::Thinking {
+                status: TaskActivityStatus::Started,
+                ..
+            }
+        )));
+
+        let text = parser.parse(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"可见回答"}}}"#,
+        );
+        assert_eq!(text.text.as_deref(), Some("可见回答"));
+        assert!(text.activities.iter().any(|activity| matches!(
+            activity,
+            TaskActivity::Thinking {
+                status: TaskActivityStatus::Completed,
+                ..
+            }
+        )));
+
+        let tool = parser.parse(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"C:\\wiki\\page.md","content":"must not be shown"}}]}}"#,
+        );
+        assert!(tool.activities.iter().any(|activity| matches!(
+            activity,
+            TaskActivity::ToolCall {
+                name,
+                detail: Some(detail),
+                ..
+            } if name == "Read" && detail.contains("wiki\\page.md") && !detail.contains("must not")
+        )));
+    }
+
+    #[test]
+    fn structured_parser_supports_codex_text_and_tool_lifecycle() {
+        let mut parser = AgentOutputParser::new(true);
+        let started = parser.parse(
+            r#"{"type":"item.started","item":{"id":"cmd-1","type":"command_execution","command":"cat secrets"}}"#,
+        );
+        assert!(started.activities.iter().any(|activity| matches!(
+            activity,
+            TaskActivity::ToolCall {
+                name,
+                detail: Some(detail),
+                ..
+            } if name == "command_execution" && detail == "controlled-command"
+        )));
+        let completed = parser.parse(
+            r#"{"type":"item.completed","item":{"id":"cmd-1","type":"command_execution","exit_code":0}}"#,
+        );
+        assert!(completed.activities.iter().any(|activity| matches!(
+            activity,
+            TaskActivity::ToolResult { success: true, .. }
+        )));
+        let delta = parser.parse(r#"{"type":"response.output_text.delta","delta":"done"}"#);
+        assert_eq!(delta.text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn structured_parser_accepts_codex_completed_agent_message_without_duplicate_delta() {
+        let mut parser = AgentOutputParser::new(true);
+        let completed = parser.parse(
+            r#"{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"final answer"}}"#,
+        );
+        assert_eq!(completed.text.as_deref(), Some("final answer"));
+
+        let duplicate = parser.parse(
+            r#"{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"final answer"}}"#,
+        );
+        assert!(duplicate.text.is_none());
     }
 
     #[cfg(windows)]

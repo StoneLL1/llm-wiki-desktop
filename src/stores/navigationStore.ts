@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { AgentSkill } from "../features/agent/RunAgentDialog";
 import {
   type ResizablePaneId,
   PANE_WIDTH_LIMITS,
@@ -32,6 +33,7 @@ export interface NavigationState {
   sidebarCollapsed: boolean;
   paneSizes: Record<ResizablePaneId, number>;
   settingsOpen: boolean;
+  agentRunPreset: AgentSkill | null;
   setActiveView: (view: AppView) => void;
   setRightPanelOpen: (open: boolean) => void;
   openWikiAssistant: (path: string) => void;
@@ -46,6 +48,8 @@ export interface NavigationState {
   openSettings: () => void;
   closeSettings: () => void;
   toggleSettings: () => void;
+  requestAgentRun: (preset?: AgentSkill) => void;
+  clearAgentRunRequest: () => void;
 }
 
 const initialLayoutPreferences = readLayoutPreferenceSnapshot();
@@ -60,6 +64,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   sidebarCollapsed: initialLayoutPreferences.sidebarCollapsed,
   paneSizes: initialLayoutPreferences.paneSizes,
   settingsOpen: false,
+  agentRunPreset: null,
   setActiveView: (activeView) =>
     set((state) => {
       if (activeView === "wiki") {
@@ -195,4 +200,6 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   openSettings: () => set({ settingsOpen: true }),
   closeSettings: () => set({ settingsOpen: false }),
   toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
+  requestAgentRun: (agentRunPreset = "wiki-ingest") => set({ agentRunPreset }),
+  clearAgentRunRequest: () => set({ agentRunPreset: null }),
 }));

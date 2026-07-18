@@ -231,7 +231,7 @@ export function RunAgentDialog({
                 <input
                   type="checkbox"
                   checked={checkpoint}
-                  onChange={(event) => setCheckpoint(event.target.checked)}
+                  disabled
                 />
                 <span>{t("agent.run.gitCheckpointLabel")}</span>
               </label>
@@ -248,7 +248,7 @@ export function RunAgentDialog({
                 <input
                   type="checkbox"
                   checked={background}
-                  onChange={(event) => setBackground(event.target.checked)}
+                  disabled
                   aria-label={t("agent.run.background")}
                 />
                 <span className="toggle__slider" aria-hidden />

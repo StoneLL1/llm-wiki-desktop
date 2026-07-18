@@ -105,6 +105,23 @@ describe("chatStore", () => {
     expect(call[1].request.convenienceEnabled).toBe(false);
   });
 
+  it("replays stream deltas that arrive before the send response binds the task", async () => {
+    useChatStore.getState().appendStreamDelta("task-early", "你好", "byok");
+    invokeMock.mockResolvedValueOnce({ id: "task-early" });
+
+    await useChatStore.getState().send(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "s1",
+      "Hello",
+      "auto",
+    );
+
+    expect(useChatStore.getState().streamingText).toBe("你好");
+    expect(useChatStore.getState().streamingRoute).toBe("byok");
+    expect(useChatStore.getState().pendingStreamDeltas).toEqual({});
+  });
+
   it("send includes pinnedPagePath when provided", async () => {
     invokeMock.mockResolvedValueOnce({ id: "task-pinned" });
     const taskId = await useChatStore.getState().send(

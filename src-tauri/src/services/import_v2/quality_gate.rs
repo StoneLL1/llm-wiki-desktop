@@ -56,15 +56,18 @@ impl QualityGate {
             "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Ok(()),
             "jpg" | "jpeg" if bytes.starts_with(&[0xff, 0xd8, 0xff]) => Ok(()),
             "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Ok(()),
-            "webp" if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => Ok(()),
+            "webp" if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => {
+                Ok(())
+            }
             "json" => {
                 let text = std::str::from_utf8(bytes).map_err(|_| quality_error())?;
-                let _: serde_json::Value = serde_json::from_str(text).map_err(|_| quality_error())?;
+                let _: serde_json::Value =
+                    serde_json::from_str(text).map_err(|_| quality_error())?;
                 validate_agent_secret_text(text)
             }
-            "txt" | "csv" => validate_agent_secret_text(
-                std::str::from_utf8(bytes).map_err(|_| quality_error())?,
-            ),
+            "txt" | "csv" => {
+                validate_agent_secret_text(std::str::from_utf8(bytes).map_err(|_| quality_error())?)
+            }
             _ => Err(quality_error()),
         }
     }
@@ -266,10 +269,9 @@ fn read_artifact(
     run_before_artifact_open(&canonical);
     let file = std::fs::File::open(&canonical).map_err(|_| quality_error())?;
     let opened = file.metadata().map_err(|_| quality_error())?;
-    let opened_handle = same_file::Handle::from_file(
-        file.try_clone().map_err(|_| quality_error())?,
-    )
-    .map_err(|_| quality_error())?;
+    let opened_handle =
+        same_file::Handle::from_file(file.try_clone().map_err(|_| quality_error())?)
+            .map_err(|_| quality_error())?;
     if validated_handle != opened_handle || !same_file(&before, &opened) {
         return Err(quality_error());
     }
@@ -1188,21 +1190,15 @@ mod tests {
 
     #[test]
     fn agent_candidate_assets_reject_secrets_active_svg_and_renamed_executables() {
-        assert!(QualityGate::validate_agent_asset(
-            "notes.txt",
-            b"api_key=do-not-persist"
-        )
-        .is_err());
+        assert!(QualityGate::validate_agent_asset("notes.txt", b"api_key=do-not-persist").is_err());
         assert!(QualityGate::validate_agent_asset(
             "image.svg",
             b"<svg><script>alert(1)</script></svg>"
         )
         .is_err());
         assert!(QualityGate::validate_agent_asset("image.png", b"MZ executable").is_err());
-        assert!(QualityGate::validate_agent_asset(
-            "image.png",
-            b"\x89PNG\r\n\x1a\nminimal"
-        )
-        .is_ok());
+        assert!(
+            QualityGate::validate_agent_asset("image.png", b"\x89PNG\r\n\x1a\nminimal").is_ok()
+        );
     }
 }

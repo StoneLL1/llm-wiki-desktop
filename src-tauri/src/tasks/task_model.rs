@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::models::task::{BackendTask, TaskStatus};
+use crate::models::task::{BackendTask, TaskActivity, TaskStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +26,7 @@ pub struct TaskEntry {
     pub task: BackendTask,
     pub cancellation: CancellationToken,
     pub log_lines: Vec<LogLine>,
+    pub activities: Vec<TaskActivity>,
     pub persisted_path: Option<PathBuf>,
 }
 

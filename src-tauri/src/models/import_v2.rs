@@ -60,14 +60,15 @@ impl ImportItemStatus {
                     Inspecting,
                     WaitingCapability | WaitingLogin | Extracting | Failed | Cancelled
                 )
-                | (WaitingCapability, Extracting | Cancelled | Failed)
-                | (WaitingLogin, Extracting | Cancelled | Failed)
+                | (WaitingCapability, Extracting | Cancelled | Skipped | Failed)
+                | (WaitingLogin, Extracting | Cancelled | Skipped | Failed)
                 | (Extracting, WaitingLogin | Validating | Failed | Cancelled)
                 | (Validating, PreviewReady | Failed | Cancelled)
                 | (PreviewReady, NeedsMerge | Committing | Skipped | Cancelled)
                 | (NeedsMerge, PreviewReady | Committing | Skipped | Cancelled)
                 | (Committing, Completed | Failed)
                 | (Paused, Inspecting | Extracting | Cancelled)
+                | (Cancelled | Skipped, Inspecting)
                 | (Failed, Inspecting | Skipped | Cancelled)
         )
     }
@@ -230,16 +231,20 @@ impl ImportIssue {
             "IMPORT_V2_RESPONSE_TOO_LARGE" => (false, true, vec![SwitchRoute]),
             "IMPORT_V2_CONNECTOR_RATE_LIMITED" => (true, false, vec![RetryRoute, SwitchRoute]),
             "IMPORT_WEB_STRUCTURE_CHANGED" => (true, true, vec![SwitchRoute, InvokeAgent]),
-            "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => {
-                (true, true, vec![AuthorizeLocalAsr, InstallMediaCapability, InvokeAgent])
-            }
+            "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => (
+                true,
+                true,
+                vec![AuthorizeLocalAsr, InstallMediaCapability, InvokeAgent],
+            ),
             "IMPORT_ASR_ENGINE_UNAVAILABLE" | "IMPORT_ASR_ENGINE_INTEGRITY_FAILED" => {
                 (true, true, vec![InstallMediaCapability, RetryRoute])
             }
             "IMPORT_ASR_TIMEOUT" | "IMPORT_ASR_ENGINE_FAILED" | "IMPORT_ASR_OUTPUT_INVALID" => {
                 (true, true, vec![RetryRoute, InstallMediaCapability])
             }
-            code if code.starts_with("IMPORT_ASR_") => (false, true, vec![InstallMediaCapability, InvokeAgent]),
+            code if code.starts_with("IMPORT_ASR_") => {
+                (false, true, vec![InstallMediaCapability, InvokeAgent])
+            }
             "IMPORT_V2_ENGINE_UNAVAILABLE" => (true, true, vec![InstallBrowserCapability]),
             _ => (true, false, vec![RetryRoute, SwitchRoute]),
         };
@@ -278,6 +283,19 @@ impl ImportIssue {
             retryable,
             user_action_required,
             recovery_actions,
+            available_actions: Vec::new(),
+        }
+    }
+
+    pub fn for_commit_code(code: &str) -> Self {
+        use ImportRecoveryAction::*;
+        Self {
+            code: code.into(),
+            message: "Import result could not be committed.".into(),
+            stage: ImportStage::Commit,
+            retryable: false,
+            user_action_required: true,
+            recovery_actions: vec![ViewLog],
             available_actions: Vec::new(),
         }
     }
@@ -333,6 +351,8 @@ pub struct ImportSession {
     pub resource_mode: ImportResourceMode,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_task_id: Option<String>,
     pub items: Vec<ImportItem>,
 }
 
@@ -347,6 +367,7 @@ impl ImportSession {
             resource_mode,
             created_at: now.clone(),
             updated_at: now,
+            discovery_task_id: None,
             items: Vec::new(),
         }
     }
@@ -374,6 +395,8 @@ pub struct CommitImportSessionRequest {
     pub project_id: String,
     pub project_root_path: String,
     pub session_id: String,
+    #[serde(default)]
+    pub batch_task_id: Option<String>,
     pub decisions: Vec<CommitItemDecision>,
 }
 
@@ -388,14 +411,25 @@ pub struct ImportItemCommitResult {
     pub error_code: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportBatchResult {
     pub batch_id: String,
     pub session_id: String,
+    /// Stable creation time for pagination; unlike file mtime it does not
+    /// change when the batch record is updated after each item.
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_task_id: Option<String>,
     pub committed_count: u32,
     pub failed_count: u32,
     pub items: Vec<ImportItemCommitResult>,
+    /// Immutable presentation snapshot captured when the commit batch runs.
+    /// Older history files omit this field and are served through the legacy
+    /// session fallback until they are naturally replaced by a new batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_snapshot: Option<ImportSession>,
 }
 
 #[cfg(test)]
@@ -423,10 +457,8 @@ mod tests {
 
     #[test]
     fn missing_web_subtitles_require_explicit_local_asr_authorization() {
-        let issue = ImportIssue::for_web_code(
-            "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
-            ImportStage::Extract,
-        );
+        let issue =
+            ImportIssue::for_web_code("IMPORT_WEB_SUBTITLE_UNAVAILABLE", ImportStage::Extract);
         assert!(issue.user_action_required);
         assert!(issue
             .recovery_actions
@@ -435,12 +467,17 @@ mod tests {
 
     #[test]
     fn asr_failures_preserve_actionable_recovery_codes() {
-        let unavailable = ImportIssue::for_web_code("IMPORT_ASR_ENGINE_UNAVAILABLE", ImportStage::Extract);
+        let unavailable =
+            ImportIssue::for_web_code("IMPORT_ASR_ENGINE_UNAVAILABLE", ImportStage::Extract);
         assert_eq!(unavailable.code, "IMPORT_ASR_ENGINE_UNAVAILABLE");
         assert!(unavailable.user_action_required);
-        assert!(unavailable.recovery_actions.contains(&ImportRecoveryAction::InstallMediaCapability));
+        assert!(unavailable
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InstallMediaCapability));
         let timeout = ImportIssue::for_web_code("IMPORT_ASR_TIMEOUT", ImportStage::Extract);
         assert_eq!(timeout.code, "IMPORT_ASR_TIMEOUT");
-        assert!(timeout.recovery_actions.contains(&ImportRecoveryAction::RetryRoute));
+        assert!(timeout
+            .recovery_actions
+            .contains(&ImportRecoveryAction::RetryRoute));
     }
 }

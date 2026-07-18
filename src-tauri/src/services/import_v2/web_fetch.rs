@@ -112,6 +112,16 @@ impl WebFetchService {
             let response = client
                 .get(target.request_url.clone())
                 .header(
+                    header::USER_AGENT,
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                )
+                .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+                .header("Sec-Fetch-Dest", "document")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "none")
+                .header("Sec-Fetch-User", "?1")
+                .header("Upgrade-Insecure-Requests", "1")
+                .header(
                     header::ACCEPT,
                     "text/html,application/xhtml+xml,application/json;q=0.8,text/plain;q=0.5",
                 )

@@ -1,7 +1,7 @@
 import { CheckCircle2, CircleAlert, CircleDashed, CircleSlash2, FileCheck2, GitMerge, KeyRound, LoaderCircle, LogIn, PauseCircle, ScanLine, ShieldCheck, SkipForward, Timer } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ImportItem } from "../../types/importV2";
-import { presentImportItem, type ImportItemIcon, type ImportItemPresentation } from "./importStatusPresentation";
+import { IMPORT_PROGRESS_LABEL_KEYS, presentImportItem, type ImportItemIcon, type ImportItemPresentation } from "./importStatusPresentation";
 
 const ICONS: Record<ImportItemIcon, typeof CircleDashed> = {
   queue: Timer,
@@ -44,7 +44,7 @@ export function ImportItemStatus({ item, presentation = presentImportItem(item) 
           {presentation.progressValue !== null ? <span className="font-mono text-[10.5px]">{presentation.progressValue}%</span> : null}
         </div>
       ) : null}
-      {presentation.progressLabel ? <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">{presentation.progressLabel}</span> : null}
+      {presentation.progressLabel ? <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">{t(IMPORT_PROGRESS_LABEL_KEYS[presentation.progressLabel] ?? presentation.progressLabel)}</span> : null}
     </div>
   );
 }

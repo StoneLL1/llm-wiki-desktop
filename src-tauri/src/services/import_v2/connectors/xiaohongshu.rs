@@ -1,3 +1,52 @@
-use serde::Serialize;use super::ConnectorFailure;use crate::services::import_v2::url_policy::UrlPolicy;
-#[derive(Debug,Serialize)]#[serde(rename_all="camelCase")]pub struct XiaohongshuDocument{pub title:String,pub author:String,pub body:String,pub public_url:String,pub images:Vec<String>,#[serde(skip)]pub authenticated_request_url:String}
-pub fn extract_json(json:&str,request_url:&str,release_enabled:bool)->Result<XiaohongshuDocument,ConnectorFailure>{if !release_enabled{return Err(ConnectorFailure::StructureChanged)}let v:serde_json::Value=serde_json::from_str(json).map_err(|_|ConnectorFailure::StructureChanged)?;if v["captcha"].as_bool()==Some(true){return Err(ConnectorFailure::Captcha)}if v["loginRequired"].as_bool()==Some(true){return Err(ConnectorFailure::LoginRequired)}let t=UrlPolicy.normalize_for_session(request_url).map_err(|_|ConnectorFailure::StructureChanged)?;Ok(XiaohongshuDocument{title:v["title"].as_str().ok_or(ConnectorFailure::StructureChanged)?.into(),author:v["author"].as_str().unwrap_or("Unknown").into(),body:v["body"].as_str().unwrap_or("").into(),public_url:t.public.public_url,images:v["images"].as_array().into_iter().flatten().filter_map(|x|x.as_str()).filter_map(|u|UrlPolicy.normalize_for_session(u).ok()).map(|x|x.public.public_url).collect(),authenticated_request_url:t.request_url.to_string()})}
+use super::ConnectorFailure;
+use crate::services::import_v2::url_policy::UrlPolicy;
+use serde::Serialize;
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XiaohongshuDocument {
+    pub title: String,
+    pub author: String,
+    pub body: String,
+    pub public_url: String,
+    pub images: Vec<String>,
+    #[serde(skip)]
+    pub authenticated_request_url: String,
+}
+pub fn extract_json(
+    json: &str,
+    request_url: &str,
+    release_enabled: bool,
+) -> Result<XiaohongshuDocument, ConnectorFailure> {
+    if !release_enabled {
+        return Err(ConnectorFailure::StructureChanged);
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| ConnectorFailure::StructureChanged)?;
+    if v["captcha"].as_bool() == Some(true) {
+        return Err(ConnectorFailure::Captcha);
+    }
+    if v["loginRequired"].as_bool() == Some(true) {
+        return Err(ConnectorFailure::LoginRequired);
+    }
+    let t = UrlPolicy
+        .normalize_for_session(request_url)
+        .map_err(|_| ConnectorFailure::StructureChanged)?;
+    Ok(XiaohongshuDocument {
+        title: v["title"]
+            .as_str()
+            .ok_or(ConnectorFailure::StructureChanged)?
+            .into(),
+        author: v["author"].as_str().unwrap_or("Unknown").into(),
+        body: v["body"].as_str().unwrap_or("").into(),
+        public_url: t.public.public_url,
+        images: v["images"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str())
+            .filter_map(|u| UrlPolicy.normalize_for_session(u).ok())
+            .map(|x| x.public.public_url)
+            .collect(),
+        authenticated_request_url: t.request_url.to_string(),
+    })
+}

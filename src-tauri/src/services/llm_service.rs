@@ -321,7 +321,8 @@ impl LlmService {
                     }
                 }
             }
-        }.map_err(|error| {
+        }
+        .map_err(|error| {
             let (code, message) = if error.is_timeout() {
                 ("LLM_REQUEST_TIMEOUT", "Provider request timed out.")
             } else {
@@ -348,6 +349,7 @@ impl LlmService {
         let provider = config.provider;
         let mut full = String::new();
         let mut buf = String::new();
+        let mut utf8_pending = Vec::new();
         loop {
             let next = stream.next();
             tokio::pin!(next);
@@ -361,7 +363,9 @@ impl LlmService {
                     }
                 }
             };
-            let Some(chunk_result) = chunk_result else { break; };
+            let Some(chunk_result) = chunk_result else {
+                break;
+            };
             let chunk = chunk_result.map_err(|_| {
                 BackendError::new(
                     "LLM_RESPONSE_INVALID",
@@ -370,7 +374,7 @@ impl LlmService {
                     false,
                 )
             })?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            append_utf8_chunk(&mut utf8_pending, &chunk, &mut buf);
             // Process every complete line now in the buffer; keep any trailing
             // partial line for the next chunk.
             while let Some(pos) = buf.find('\n') {
@@ -382,6 +386,9 @@ impl LlmService {
                     }
                 }
             }
+        }
+        if !utf8_pending.is_empty() {
+            buf.push_str(&String::from_utf8_lossy(&utf8_pending));
         }
         // Flush a trailing frame that lacked a final newline.
         if let Some(delta) = parse_stream_line(provider, buf.trim_end()) {
@@ -403,12 +410,40 @@ impl LlmService {
 }
 
 fn llm_cancelled_error() -> BackendError {
-    BackendError::new(
-        "LLM_CANCELLED",
-        "Generation was cancelled.",
-        true,
-        false,
-    )
+    BackendError::new("LLM_CANCELLED", "Generation was cancelled.", true, false)
+}
+
+/// Append a byte-stream chunk without replacing a multibyte UTF-8 character
+/// that happens to cross an HTTP chunk boundary. Invalid bytes are replaced
+/// deliberately, but only after the decoder has established they are invalid.
+fn append_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], output: &mut String) {
+    pending.extend_from_slice(chunk);
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                output.push_str(text);
+                pending.clear();
+                return;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                if valid_up_to > 0 {
+                    // `valid_up_to` bytes are guaranteed valid UTF-8.
+                    output.push_str(std::str::from_utf8(&pending[..valid_up_to]).unwrap());
+                    pending.drain(..valid_up_to);
+                }
+                if let Some(error_len) = error.error_len() {
+                    let invalid_end = error_len.min(pending.len());
+                    output.push_str(&String::from_utf8_lossy(&pending[..invalid_end]));
+                    pending.drain(..invalid_end);
+                    continue;
+                }
+                // An incomplete trailing code point stays buffered for the
+                // next network chunk.
+                return;
+            }
+        }
+    }
 }
 
 fn extract_text(provider: LlmProviderKind, value: &serde_json::Value) -> Option<String> {
@@ -504,6 +539,17 @@ mod tests {
             context_window: 8_000,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn utf8_decoder_preserves_characters_split_across_chunks() {
+        let mut pending = Vec::new();
+        let mut output = String::new();
+        append_utf8_chunk(&mut pending, &[0xE4], &mut output);
+        append_utf8_chunk(&mut pending, &[0xBD, 0xA0, 0xE5, 0xA5], &mut output);
+        append_utf8_chunk(&mut pending, &[0xBD], &mut output);
+        assert_eq!(output, "你好");
+        assert!(pending.is_empty());
     }
 
     #[test]

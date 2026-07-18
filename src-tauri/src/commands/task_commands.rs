@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::task::{BackendTask, TaskStatus, TaskType};
+use crate::models::task::{BackendTask, TaskActivity, TaskStatus, TaskType};
 use crate::tasks::task_model::LogLine;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +84,17 @@ pub fn get_task_logs(
         .task_service
         .get_logs(&request.task_id)
         .map_err(|msg| BackendError::new("TASK_LOGS_FAILED", &msg, true, false))
+}
+
+#[tauri::command]
+pub fn get_task_activities(
+    state: State<'_, AppState>,
+    request: TaskByIdRequest,
+) -> Result<Vec<TaskActivity>, BackendError> {
+    state
+        .task_service
+        .get_activities(&request.task_id)
+        .map_err(|msg| BackendError::new("TASK_ACTIVITIES_FAILED", &msg, true, false))
 }
 
 #[tauri::command]

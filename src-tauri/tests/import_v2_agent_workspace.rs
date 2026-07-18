@@ -118,14 +118,13 @@ fn workspace_contains_only_sanitized_current_item_copies() {
     std::fs::write(&completed, &lease_bytes).unwrap();
     let mut lease: serde_json::Value = serde_json::from_slice(&lease_bytes).unwrap();
     lease["processInstanceId"] = "previous-process".into();
-    std::fs::write(&workspace.lease_path, serde_json::to_vec_pretty(&lease).unwrap()).unwrap();
-    AgentWorkspaceBuilder::cleanup_abandoned_leases(
-        &context,
-        "session-a",
-        "item-a",
-        |_| true,
+    std::fs::write(
+        &workspace.lease_path,
+        serde_json::to_vec_pretty(&lease).unwrap(),
     )
     .unwrap();
+    AgentWorkspaceBuilder::cleanup_abandoned_leases(&context, "session-a", "item-a", |_| true)
+        .unwrap();
     assert!(!workspace.root.exists());
     assert!(!workspace.lease_path.exists());
     assert!(!partial.exists());

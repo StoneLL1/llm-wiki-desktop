@@ -151,10 +151,13 @@ impl EngineRegistry {
             .read()
             .map_err(|_| registry_error())?
             .iter()
-            .find(|engine| {
+            .filter(|engine| {
                 let descriptor = engine.descriptor();
                 descriptor.route == route && engine.supports(input)
             })
+            // Built-ins are safe fallbacks. Prefer an installed capability pack
+            // when it provides the same planned route (notably browser/web).
+            .min_by_key(|engine| engine.descriptor().engine_id.starts_with("builtin."))
             .cloned()
             .ok_or_else(|| {
                 BackendError::new(
@@ -176,7 +179,12 @@ pub fn validate_engine_result(
     for asset_path in &result.asset_paths {
         validate_staging_relative_path(staging_root, asset_path)?;
     }
-    if let Some(EngineContinuation::LocalAsr { temporary_input_path, media_kind, .. }) = &result.continuation {
+    if let Some(EngineContinuation::LocalAsr {
+        temporary_input_path,
+        media_kind,
+        ..
+    }) = &result.continuation
+    {
         validate_staging_relative_path(staging_root, temporary_input_path)?;
         if media_kind != "audio" && media_kind != "video" {
             return Err(output_error());
@@ -249,11 +257,15 @@ mod tests {
 
     impl FixtureEngine {
         fn new(engine_id: &str, supported: bool) -> Self {
+            Self::with_route(engine_id, "fixture", supported)
+        }
+
+        fn with_route(engine_id: &str, route: &str, supported: bool) -> Self {
             Self {
                 descriptor: EngineDescriptor {
                     engine_id: engine_id.to_string(),
                     engine_version: "1.0.0".into(),
-                    route: "fixture".into(),
+                    route: route.into(),
                 },
                 supported,
             }
@@ -332,6 +344,41 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn planned_route_prefers_installed_pack_over_builtin_fallback() {
+        let registry = EngineRegistry::default();
+        registry
+            .register(Arc::new(FixtureEngine::with_route(
+                "builtin.web-http-browser",
+                "web.generic.browser",
+                true,
+            )))
+            .unwrap();
+        registry
+            .register(Arc::new(FixtureEngine::with_route(
+                "pack.browser",
+                "web.generic.browser",
+                true,
+            )))
+            .unwrap();
+        let input = ImportInput {
+            source_identity: None,
+            kind: ImportInputKind::Url,
+            display_name: "page".into(),
+            locator: "https://example.com".into(),
+            normalized_locator: Some("https://example.com".into()),
+        };
+
+        assert_eq!(
+            registry
+                .resolve_route("web.generic.browser", &input)
+                .unwrap()
+                .descriptor()
+                .engine_id,
+            "pack.browser"
+        );
     }
 
     #[test]

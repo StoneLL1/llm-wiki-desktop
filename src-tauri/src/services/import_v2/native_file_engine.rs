@@ -121,6 +121,141 @@ impl ImportEngine for NativeFileEngine {
         })
     }
 }
+
+/// Built-in deterministic readers for formats that used to be routed only to
+/// optional capability packs. They intentionally consume the verified source
+/// snapshot and write only item staging artifacts.
+pub struct NativeStructuredFileEngine {
+    engine_id: &'static str,
+    route: &'static str,
+}
+
+impl NativeStructuredFileEngine {
+    pub const fn new(engine_id: &'static str, route: &'static str) -> Self {
+        Self { engine_id, route }
+    }
+
+    fn extension(&self) -> &'static str {
+        match self.route {
+            "pdf.text" => "pdf",
+            "office.modern.docx" => "docx",
+            "office.modern.xlsx" => "xlsx",
+            "office.modern.pptx" => "pptx",
+            _ => "",
+        }
+    }
+}
+
+impl ImportEngine for NativeStructuredFileEngine {
+    fn descriptor(&self) -> EngineDescriptor {
+        EngineDescriptor {
+            engine_id: self.engine_id.into(),
+            engine_version: env!("CARGO_PKG_VERSION").into(),
+            route: self.route.into(),
+        }
+    }
+
+    fn supports(&self, input: &ImportInput) -> bool {
+        input.kind == ImportInputKind::File
+            && extension(&input.locator).as_deref() == Some(self.extension())
+    }
+
+    fn execute(
+        &self,
+        request: &EngineRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
+        if !self.supports(&request.input) {
+            return Err(invalid(
+                "The built-in structured file engine does not support this input.",
+            ));
+        }
+        let root = PathBuf::from(&request.project_root);
+        let source = resolve_source(&root, &request.input.locator)?;
+        let staging = resolve_inside(&root, &request.staging_root)?;
+        let identity = request
+            .input
+            .source_identity
+            .as_ref()
+            .ok_or_else(source_changed)?;
+        let bytes = safe_read_source(&source, identity)?;
+        let markdown = match self.extension() {
+            "pdf" => crate::services::extraction_service::extract_pdf_markdown_from_bytes(&bytes)?,
+            extension => crate::services::extraction_service::extract_ooxml_markdown_from_bytes(
+                extension, &bytes,
+            )?,
+        };
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
+        std::fs::create_dir_all(&staging)
+            .map_err(|_| invalid("The item staging directory could not be created."))?;
+        let descriptor = self.descriptor();
+        let warnings = match self.extension() {
+            "pdf" => vec!["PDF_LAYOUT_NOT_EXTRACTED".to_string()],
+            "docx" | "xlsx" | "pptx" => {
+                vec!["OFFICE_STRUCTURED_CONTENT_NOT_EXTRACTED".to_string()]
+            }
+            _ => Vec::new(),
+        };
+        let metadata = Metadata {
+            engine_id: &descriptor.engine_id,
+            engine_version: &descriptor.engine_version,
+            route: &descriptor.route,
+            source_name: &request.input.display_name,
+            warnings: &warnings,
+        };
+        let written = std::fs::write(staging.join("source.bin"), &bytes)
+            .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
+            .and_then(|_| {
+                serde_json::to_vec_pretty(&metadata)
+                    .map_err(std::io::Error::other)
+                    .and_then(|bytes| std::fs::write(staging.join("metadata.json"), bytes))
+            });
+        if written.is_err() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(invalid(
+                "The built-in structured file engine could not write staging.",
+            ));
+        }
+        if cancellation.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(cancelled());
+        }
+        let extension = self.extension();
+        Ok(EngineResult {
+            source_snapshot_path: "source.bin".into(),
+            markdown_path: "document.md".into(),
+            asset_paths: Vec::new(),
+            metadata_path: Some("metadata.json".into()),
+            title: Path::new(&request.input.display_name)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            text_coverage: Some(1.0),
+            // The fallback reader extracts cell text but does not verify table
+            // structure, formulas, or displayed values.
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: (extension == "pptx").then_some(
+                markdown
+                    .lines()
+                    .filter(|line| line.starts_with("## Slide "))
+                    .count() as f64,
+            ),
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: None,
+            warnings,
+        })
+    }
+}
+
 fn resolve_inside(root: &Path, locator: &str) -> Result<PathBuf, BackendError> {
     let candidate = Path::new(locator);
     let path = if candidate.is_absolute() {

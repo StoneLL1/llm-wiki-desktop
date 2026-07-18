@@ -159,23 +159,56 @@ pub fn complete_import_login_v2(
     request: CompleteLoginRequest,
 ) -> Result<ConnectorSessionRef, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session = state.import_v2_service.load_session(&context, &state.file_store, &request.import_session_id)?;
-    let item = session.items.iter().find(|item| item.item_id == request.item_id).ok_or_else(|| {
-        BackendError::new("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.", false, true)
-    })?;
-    let target = state.import_v2_service.resolve_web_target(&item.input.locator, item.input.normalized_locator.as_deref())?;
-    let (reference, profile) = state.connector_session_service.take_authenticated_profile_bound(
-        &request.connector_session_id,
+    let session = state.import_v2_service.load_session(
+        &context,
+        &state.file_store,
+        &request.import_session_id,
+    )?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "IMPORT_V2_ITEM_NOT_FOUND",
+                "Import item was not found.",
+                false,
+                true,
+            )
+        })?;
+    let target = state.import_v2_service.resolve_web_target(
+        &item.input.locator,
+        item.input.normalized_locator.as_deref(),
+    )?;
+    let (reference, profile) = state
+        .connector_session_service
+        .take_authenticated_profile_bound(
+            &request.connector_session_id,
+            &request.project_id,
+            &request.import_session_id,
+            &request.item_id,
+            target.request_url.as_str(),
+        )?;
+    if !platform_matches_host(&reference.platform, &target.public.host) {
+        return Err(BackendError::new(
+            "IMPORT_V2_BROWSER_SESSION_FAILED",
+            "The authenticated connector does not match this item.",
+            false,
+            true,
+        ));
+    }
+    state.import_v2_service.bind_authenticated_profile(
         &request.project_id,
         &request.import_session_id,
         &request.item_id,
-        target.request_url.as_str(),
+        profile,
     )?;
-    if !platform_matches_host(&reference.platform, &target.public.host) {
-        return Err(BackendError::new("IMPORT_V2_BROWSER_SESSION_FAILED", "The authenticated connector does not match this item.", false, true));
-    }
-    state.import_v2_service.bind_authenticated_profile(&request.project_id, &request.import_session_id, &request.item_id, profile)?;
-    state.import_v2_service.release_item_after_login(&context, &state.file_store, &request.import_session_id, &request.item_id)?;
+    state.import_v2_service.release_item_after_login(
+        &context,
+        &state.file_store,
+        &request.import_session_id,
+        &request.item_id,
+    )?;
     Ok(reference)
 }
 #[tauri::command]
@@ -184,17 +217,42 @@ pub async fn authorize_import_private_target_v2(
     request: AuthorizePrivateTargetRequest,
 ) -> Result<String, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session = state.import_v2_service.load_session(&context, &state.file_store, &request.session_id)?;
-    let item = session.items.iter().find(|item| item.item_id == request.item_id).ok_or_else(|| {
-        BackendError::new("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.", false, true)
-    })?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "IMPORT_V2_ITEM_NOT_FOUND",
+                "Import item was not found.",
+                false,
+                true,
+            )
+        })?;
     if item.input.kind != ImportInputKind::Url {
-        return Err(BackendError::new("IMPORT_V2_URL_REJECTED", "Private authorization is available only for URL imports.", false, true));
+        return Err(BackendError::new(
+            "IMPORT_V2_URL_REJECTED",
+            "Private authorization is available only for URL imports.",
+            false,
+            true,
+        ));
     }
-    let target = state.import_v2_service.resolve_web_target(&item.input.locator, item.input.normalized_locator.as_deref())?;
+    let target = state.import_v2_service.resolve_web_target(
+        &item.input.locator,
+        item.input.normalized_locator.as_deref(),
+    )?;
     let confirmed = UrlPolicy.normalize_for_session(&request.url)?;
     if confirmed.public != target.public {
-        return Err(BackendError::new("IMPORT_V2_URL_REFERENCE_MISMATCH", "The confirmed private target does not match this import item.", false, true));
+        return Err(BackendError::new(
+            "IMPORT_V2_URL_REFERENCE_MISMATCH",
+            "The confirmed private target does not match this import item.",
+            false,
+            true,
+        ));
     }
     let port = target.request_url.port_or_known_default().ok_or_else(|| {
         BackendError::new(
@@ -228,9 +286,10 @@ pub fn authorize_bilibili_asr_v2(
     request: AuthorizeBilibiliAsrV2Request,
 ) -> Result<(), BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session = state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
     let item = session
         .items
         .iter()
@@ -294,7 +353,12 @@ fn platform_matches_host(platform: &str, host: &str) -> bool {
         "zhihu" => host == "zhihu.com" || host.ends_with(".zhihu.com"),
         "bilibili" => host == "b23.tv" || host == "bilibili.com" || host.ends_with(".bilibili.com"),
         "xiaohongshu" => host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com"),
-        "x" => host == "x.com" || host.ends_with(".x.com") || host == "twitter.com" || host.ends_with(".twitter.com"),
+        "x" => {
+            host == "x.com"
+                || host.ends_with(".x.com")
+                || host == "twitter.com"
+                || host.ends_with(".twitter.com")
+        }
         _ => false,
     }
 }
@@ -326,16 +390,12 @@ mod tests {
         assert!(validate_bilibili_asr_item(&item).is_ok());
         assert!(validate_bilibili_asr_host("www.bilibili.com").is_ok());
         assert_eq!(
-            validate_bilibili_asr_host("example.com")
-                .unwrap_err()
-                .code,
+            validate_bilibili_asr_host("example.com").unwrap_err().code,
             "IMPORT_V2_URL_REJECTED"
         );
         let wrong_issue = failed_url_item("IMPORT_WEB_STRUCTURE_CHANGED");
         assert_eq!(
-            validate_bilibili_asr_item(&wrong_issue)
-                .unwrap_err()
-                .code,
+            validate_bilibili_asr_item(&wrong_issue).unwrap_err().code,
             "IMPORT_V2_STATE_INVALID"
         );
     }
