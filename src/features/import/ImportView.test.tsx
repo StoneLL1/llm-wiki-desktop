@@ -166,7 +166,7 @@ describe("ImportView V2 composition", () => {
   it("shows migration review without blocking V2 and never offers a V1 switch", () => {
     const readiness: ImportFrontendReadiness = { backendVersion: "2.0.0", active: false, migrationStatus: "awaiting_confirmation", unfinishedSessionId: null, legacyHistoryAvailable: true };
     render(<ImportView workflow={workflow({ readiness, bootstrapState: "blocked", session: null })} />);
-    expect(screen.getAllByRole("alert")[0]).toHaveTextContent(/migration/i);
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/migration/i);
     expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /switch to v1|legacy write/i })).not.toBeInTheDocument();
   });

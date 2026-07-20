@@ -486,6 +486,8 @@ export function WikiView() {
               page={page}
               pages={tree?.pages ?? []}
               onOpenPage={handleOpen}
+              projectId={projectId}
+              projectRootPath={rootPath}
             />
           )}
         </div>
@@ -533,10 +535,14 @@ function ReadingPane({
   page,
   pages,
   onOpenPage,
+  projectId,
+  projectRootPath,
 }: {
   page: WikiPageContent;
   pages: WikiPageMeta[];
   onOpenPage: (path: string) => void;
+  projectId: string;
+  projectRootPath: string;
 }) {
   return (
     <div className="flex justify-center px-8 py-6">
@@ -546,6 +552,9 @@ function ReadingPane({
           frontmatterYaml={page.frontmatterYaml}
           pages={pages}
           onOpenPage={onOpenPage}
+          projectId={projectId}
+          projectRootPath={projectRootPath}
+          pagePath={page.meta.path}
         />
       </div>
     </div>

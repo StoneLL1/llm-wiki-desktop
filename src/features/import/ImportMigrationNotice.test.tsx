@@ -21,7 +21,7 @@ describe("ImportMigrationNotice", () => {
     const onOpenMigration = vi.fn();
     render(<ImportMigrationNotice readiness={readiness} onOpenMigration={onOpenMigration} />);
 
-    expect(screen.getByRole("alert")).toHaveTextContent(/migration status/i);
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/migration status/i);
     fireEvent.click(screen.getByRole("button", { name: /review migration/i }));
     expect(onOpenMigration).toHaveBeenCalledTimes(1);
   });
@@ -29,7 +29,7 @@ describe("ImportMigrationNotice", () => {
   it("explains when migration metadata is unavailable without hiding V2", () => {
     render(<ImportMigrationNotice readiness={null} unavailable onOpenMigration={vi.fn()} />);
 
-    expect(screen.getByRole("alert")).toHaveTextContent(/migration status is unavailable/i);
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/migration status is unavailable/i);
     expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
   });
 

@@ -212,6 +212,7 @@ pub fn run() {
             commands::task_commands::set_active_project,
             commands::wiki_commands::scan_wiki,
             commands::wiki_commands::read_wiki_page,
+            commands::wiki_commands::read_wiki_asset,
             commands::wiki_commands::save_wiki_page,
             commands::wiki_commands::create_wiki_page,
             commands::wiki_commands::rename_wiki_page,
