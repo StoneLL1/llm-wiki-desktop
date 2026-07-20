@@ -25,6 +25,7 @@ export function LintHistoryList({
   onOpen,
 }: LintHistoryListProps) {
   const { t } = useTranslation();
+  const displayError = error === "lint.history.waitForFix" ? t(error) : error;
 
   return (
     <section className="lint-history" aria-label={t("lint.history.title")}>
@@ -36,10 +37,10 @@ export function LintHistoryList({
           </span>
         ) : null}
       </header>
-      {error ? (
+      {displayError ? (
         <div className="lint-history__error" role="status">
           <TriangleAlert size={13} aria-hidden />
-          <span>{error}</span>
+          <span>{displayError}</span>
         </div>
       ) : null}
       {entries.length === 0 && !loading ? (

@@ -1,5 +1,52 @@
 # 踩坑清单 (gotchas.txt)
 
+HTML import normalizers can silently drop `<img>` tags when they have no explicit renderer branch — the downloader may still write assets, but Wiki Markdown has no reference to replace — add an image conversion test and verify the reader’s local-asset IPC path together.
+
+Pending batch confirmations must block ordinary reruns, second batches, ignore/restore, and issue fixes — clearing or replacing only the frontend array leaves backend action IDs orphaned; preserve them for the review/cancel flow and allow only the protected post-batch rescan.
+
+Batch or local-scan buttons must be disabled in both the view and store — stale operation guards alone can leave loading flags stuck when a response is ignored; enforce the same busy-state invariant at every mutation entry point.
+
+Browser-runtime-lite integration tests fail before exercising the runner when `capabilities/browser-runtime-lite/runner/index.mjs` imports unavailable `turndown` — the dependency is not present in this worktree; keep the unified check fail-closed and report the missing package instead of masking it with a stub.
+
+Confirmation claims can leak when cross-type or malformed action IDs fail validation after claim — claim state must be released around execution/context resolution, and UI ignore/restore actions must be disabled while a batch is active to avoid superseding its operation epoch.
+
+
+App-global confirmation IDs must not be derived only from wiki path/target, and `expires_at: None` turns hidden pending actions into permanent registry entries. Use a nonce plus finite TTL, reject duplicate registration, and treat expired/not-found cancellation as terminal UI cleanup.
+
+Confirmation state can outlive the visible lint card when a rescan or history switch clears UI state first; cancel backend action IDs before navigation and preserve remaining batch confirmations after each applied item. Shared-checkpoint writes also need post-write hashes attached to late side-effect errors so rollback does not mistake a written page for an untouched path.
+
+Missing wiki/index.md must be an explicit lint error, while stale links inside the index should be reported only as index_drift; otherwise the summary either falsely passes or double-counts one broken entry. Keep unknown wiki folders manual-only for missing-frontmatter fixes because inferring `other` creates a type value the schema rule rejects.
+
+Deep Lint CLI profiles may appear installed while their credential/no-tools contract is unverified — exposing CODEX_HOME/CLAUDE_CONFIG_DIR leaks provider state, and Codex has no stable cross-version no-tools guarantee — Keep CLI deep lint disabled until a credential broker supplies isolated credentials and an audited no-tools profile; use BYOK meanwhile.
+
+Hashing only the initial page list misses Markdown files created/deleted during a scan, and prompt guidance files can change independently of page hashes — refresh the scan tree and compare the union of path/hash maps, including purpose.md, schema.md, and skills/wiki-lint/SKILL.md.
+
+Nested role=button cards containing a real button create duplicate keyboard/assistive-technology interaction — keep selection and action controls as sibling buttons inside a non-interactive shell.
+
+An optimistic hash check followed by atomic rename is still not a cross-process compare-and-swap — serialize app mutations, verify the post-write hash, and return FILE_CHANGED_DURING_WRITE without rollback when an external editor wins the race; do not promise perfect protection against a last-microsecond edit.
+
+The final local scan tree must be re-enumerated after rules, not just re-hash the original page slice — compare the union of baseline and final paths so additions/deletions cannot be silently accepted.
+
+Project-local LLM settings can point a global secret at an arbitrary HTTP(S) host — Auto deep lint only selects canonical provider hosts/local Ollama; custom or proxy endpoints require explicit provider selection and should eventually use a user-approved host registry.
+
+Deep findings are persisted separately from local findings, so applying ignores only during local lint leaves dismissed Agent issues visible — filter both report sources by the same (path, issue type) ignore key before rendering or persisting.
+
+Lint batch rollback must include every affected path, including generated log and graph-cache files — partial writes can otherwise leave the wiki changed while the command reports failure — Build one checkpoint path set before mutation and restore it on write, verification, or final-commit failure.
+
+Vitest and ESLint explicit `exclude`/`ignores` replace their default discovery rules — adding only `.worktrees/**` caused node_modules tests to run, while leaving generated Cargo targets caused thousands of lint errors — Preserve node_modules/.git/dist defaults and add workspace-specific worktree/target globs together.
+
+The required Rust no-default-features suite reaches browser-runtime-lite tests that import `turndown` — the package is absent in the current workspace, so two tests fail before exercising application code — Treat this as an environment/dependency setup blocker; do not claim the unified check passed or silently install packages.
+
+Local Lint findings must not receive hashes captured after rule evaluation — an external edit during the pass can otherwise make an old index-drift finding look current and permit an overwrite — Capture a baseline snapshot before rules, compare a final snapshot, and reject the report with `LINT_SCAN_CHANGED` on divergence.
+
+Deep Lint needs CLI authentication but must not grant untrusted wiki content file tools — exposing the full auth directory to a tool-capable Agent lets prompt injection read secrets — Use explicit no-tools profiles (`--tools ""` / `tools=[]`) and expose only CLI-owned auth directories with HOME/USERPROFILE still isolated.
+
+Lint splitter width state must match the grid column it controls — keeping a `lintList` id while the visual splitter resizes the details column makes keyboard/pointer resizing misleading — Name the persisted pane `lintDetails`, use a 320px default, and update the CSS contract/test labels together.
+
+Vitest can collect `.worktrees/**` copies together with the main workspace and produce duplicate DOM/RPC failures — the repository-wide check does not currently exclude those worktree test roots — Run focused tests with `--exclude=.worktrees/**` while preserving the exact unified-check failure in release evidence, then fix test-root configuration separately.
+
+Lint fix tests that assert only a pre-fix checkpoint become stale once the safety contract adds a verified final-result commit — the intended flow has two commits when dirty files exist — Assert both checkpoint and final commit, and use the final commit in user-facing result text.
+
 Migration readiness can fail on an old or partially written optional record and hide a valid new import session — the UI treated release activation evidence as a V2 write prerequisite — Treat migration readiness as advisory, preserve the evidence, and let project/session safety checks decide whether V2 can start.
 
 Legacy import command names can accidentally become a second writer when retained for protocol compatibility — the old facade selected V1 whenever activation was absent — Route every current preview/text/confirm entry point to V2 and make no-session legacy confirmation fail closed.
@@ -69,6 +116,12 @@ Capability pack fallback rejected ordinary project-external imports or bypassed 
 Same-length source or staging replacement passed length-only race checks — Path canonicalization and byte count do not establish that the opened handle is the object validated at discovery — Persist SHA-256/magic/canonical identity for sources, compare opened-vs-path file identity around staging reads, and keep deterministic validate/open swap hooks in tests.
 
 > 记录反复出现的错误、隐蔽陷阱和"踩过一次就别再踩"的坑。
+
+Symptom — A long folder scan opens only the global task drawer while the Import queue remains unchanged until terminal success. — Root cause — The backend emits discovery progress, but the frontend adds discovered inputs to the session only after the scan task completes and does not render a batch-level discovery placeholder. — How to avoid — Show inline discovery state with discovered/skipped counts, cancellation, and partial-result recovery; stream batches when practical and keep the main Import flow as the source of truth.
+
+Symptom — Import source controls appear idle while a path-add request is already scanning, so repeated clicks or drops can start duplicate batches. — Root cause — `ImportSourceMethods` defines `addingPaths` and `onError`, but `ImportView` does not wire them to workflow mutation state and picker errors can be swallowed. — How to avoid — Propagate source-level pending/error state, disable duplicate entry points, deduplicate batch inputs, and test delayed IPC plus repeated actions.
+
+Symptom — A signed Import capability pack receives the full project root and can run as a normal user process. — Root cause — Artifact-path validation only validates declared outputs; it does not restrict undeclared filesystem side effects made before the JSON-RPC result. — How to avoid — Treat signing as provenance, not sandboxing: pass only minimal staging scopes and enforce OS-level read/write restrictions; add an adversarial pack test for raw/wiki/.app/Git writes on every supported platform.
 
 Symptom — Chat history 按 newest-first 选取后再反转为 chronological order 时，较旧消息若恰好被字符预算截断，会与下一条较新消息的 `User:` / `Assistant:` 标签粘成一行。— Root cause — 每条原始 line 自带尾随换行，但 `take_chars` 截断时会把该换行裁掉；最终直接 `push_str` selected chunks，没有额外分隔符。— How to avoid — truncated chunk 必须在原预算内保留分隔：用最后一个已预算字符替换为 `\n`，不要额外追加导致超预算；测试要让 newest 完整、older partial，并同时断言 chronological order、角色前换行和总 history chars 不超 budget。
 

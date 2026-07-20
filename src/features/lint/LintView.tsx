@@ -8,9 +8,8 @@ import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
-import { isTerminalStatus } from "../../types/task";
+import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import type { LintIssue, LintIssueType, LintRoutePreference } from "../../types/lint";
-import type { WikiPageContent } from "../../types/wiki";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
 import { LintHistoryList } from "./LintHistoryList";
 import { LintIssueDetails } from "./LintIssueDetails";
@@ -47,8 +46,13 @@ export function LintView() {
   const error = useLintStore((state) => state.error);
   const mode = useLintStore((state) => state.mode);
   const batchRunning = useLintStore((state) => state.batchRunning);
+  const fixApplying = useLintStore((state) =>
+    Object.values(state.fixStatus).some((status) => status === "applying"),
+  );
   const batchConfirmations = useLintStore((state) => state.batchConfirmations);
+  const hasPendingBatchConfirmations = batchConfirmations.length > 0;
   const safetyPrefs = useLintStore((state) => state.safetyPrefs);
+  const ignores = useLintStore((state) => state.ignores);
   const history = useLintStore((state) => state.history);
   const historyLoading = useLintStore((state) => state.historyLoading);
   const historyError = useLintStore((state) => state.historyError);
@@ -65,6 +69,7 @@ export function LintView() {
   const openHistoryReport = useLintStore((state) => state.openHistoryReport);
   const loadIgnores = useLintStore((state) => state.loadIgnores);
   const addIgnore = useLintStore((state) => state.addIgnore);
+  const removeIgnore = useLintStore((state) => state.removeIgnore);
   const applyFix = useLintStore((state) => state.applyFix);
   const applyFixesBatch = useLintStore((state) => state.applyFixesBatch);
   const openBatchConfirmation = useLintStore((state) => state.openBatchConfirmation);
@@ -77,7 +82,7 @@ export function LintView() {
 
   const { projectId, rootPath } = currentProject;
   const layoutStyle = {
-    "--lint-list-w-current": `${paneSizes.lintList}px`,
+    "--lint-details-w-current": `${paneSizes.lintDetails}px`,
   } as CSSProperties;
   const localIssues = localReport?.issues ?? [];
   const deepIssues = deepReport?.issues ?? [];
@@ -96,10 +101,11 @@ export function LintView() {
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [ignoringId, setIgnoringId] = useState<string | null>(null);
+  const [removingIgnoreKey, setRemovingIgnoreKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const autoFixable = useMemo(
-    () => modeIssues.filter((issue) => issue.fixability !== "none"),
+    () => modeIssues.filter((issue) => issue.fixability !== "none" && issue.scanHash),
     [modeIssues],
   );
 
@@ -137,8 +143,13 @@ export function LintView() {
   }, [projectId, rootPath, loadHistory, openHistoryReport]);
 
   useEffect(() => {
-    if (deepTask && isTerminalStatus(deepTask.status)) {
+    if (deepTask?.status === "succeeded") {
       void loadDeepReport({ projectId, projectRootPath: rootPath, taskId: deepTask.id });
+      clearDeepTask();
+    } else if (deepTask && (deepTask.status === "failed" || deepTask.status === "cancelled")) {
+      // The task drawer owns the original failure/cancellation details. Do
+      // not issue a second report-read request that would mask them with
+      // LINT_DEEP_REPORT_MISSING.
       clearDeepTask();
     }
   }, [deepTask, projectId, rootPath, loadDeepReport, clearDeepTask]);
@@ -167,7 +178,9 @@ export function LintView() {
   };
 
   const refreshAfterFix = (applied: boolean) => {
-    void runLocalLint(projectId, rootPath);
+    void runLocalLint(projectId, rootPath, {
+      preserveBatchConfirmations: useLintStore.getState().batchConfirmations.length > 0,
+    });
     if (applied && safetyPrefs.recompile) triggerRecompile();
   };
 
@@ -200,20 +213,9 @@ export function LintView() {
   };
 
   const handleApplyFix = async (issue: LintIssue) => {
-    // Safe fixes require the page's current hash as an optimistic-lock
-    // baseline (the backend rejects safe fixes without it). High-risk fixes
-    // route through the confirm flow, which resolves the hash separately.
-    let expectedHash: string | null = null;
-    if (issue.fixability === "safe") {
-      try {
-        const page = await invoke<WikiPageContent>("read_wiki_page", {
-          request: { projectId, projectRootPath: rootPath, relativePath: issue.path },
-        });
-        expectedHash = page.meta.hash;
-      } catch {
-        expectedHash = null; // backend will reject with LINT_FIX_HASH_REQUIRED
-      }
-    }
+    // Fixes must use the immutable scan snapshot. Reading the live page here
+    // would silently replace the report baseline after an external edit.
+    const expectedHash = issue.fixability === "safe" ? issue.scanHash ?? null : null;
     const outcome = await applyFix(projectId, rootPath, issue, expectedHash);
     if (outcome?.kind === "applied") refreshAfterFix(true);
   };
@@ -225,6 +227,7 @@ export function LintView() {
   };
 
   const handleIgnore = (issue: LintIssue) => {
+    if (fixConfirm || batchRunning || fixApplying || hasPendingBatchConfirmations) return;
     setNotice(null);
     setIgnoringId(issue.id);
     void addIgnore({
@@ -242,42 +245,49 @@ export function LintView() {
     });
   };
 
-  // Resolve page hashes for safe-fixable issues (optimistic-lock baseline),
-  // then run the batch under one shared Git checkpoint.
+  const handleRemoveIgnore = (path: string, rule: LintIssueType) => {
+    if (fixConfirm || batchRunning || fixApplying || hasPendingBatchConfirmations) return;
+    const key = `${path}:${rule}`;
+    setNotice(null);
+    setRemovingIgnoreKey(key);
+    void removeIgnore({
+      projectId,
+      projectRootPath: rootPath,
+      path,
+      rule,
+    }).then((ok) => {
+      setRemovingIgnoreKey(null);
+      if (ok) {
+        setNotice(t("lint.ignores.restored"));
+        void runLocalLint(projectId, rootPath);
+      }
+    });
+  };
+
+  // Use scan-time hashes for safe-fixable issues, then run the batch under one
+  // shared Git checkpoint. Do not reread live pages between report and fix.
   const handleBatchConfirm = () => {
     setConfirmOpen(false);
-    const safePaths = new Set(
-      autoFixable.filter((issue) => issue.fixability === "safe").map((issue) => issue.path),
+    const scope = captureProjectScope();
+    const expectedHashes = Object.fromEntries(
+      autoFixable
+        .filter((issue) => issue.fixability === "safe" && issue.scanHash)
+        .map((issue) => [issue.path, issue.scanHash as string]),
     );
-    void Promise.all(
-      [...safePaths].map(async (path) => {
-        try {
-          const page = await invoke<WikiPageContent>("read_wiki_page", {
-            request: { projectId, projectRootPath: rootPath, relativePath: path },
-          });
-          return [path, page.meta.hash] as const;
-        } catch {
-          return [path, ""] as const;
-        }
-      }),
-    )
-      .then((entries) => Object.fromEntries(entries.filter(([, hash]) => hash)))
-      .then((expectedHashes) =>
-        applyFixesBatch({
-          projectId,
-          projectRootPath: rootPath,
-          issues: autoFixable,
-          expectedHashes,
-        }),
-      )
+    void applyFixesBatch({
+      projectId,
+      projectRootPath: rootPath,
+      issues: autoFixable,
+      expectedHashes,
+    })
       .then((outcome) => {
-        if (!outcome) return;
+        if (!outcome || !isProjectScopeCurrent(scope)) return;
         const parts: string[] = [];
         if (outcome.applied.length > 0) {
           parts.push(
             t("lint.batch.applied", {
               count: outcome.applied.length,
-              hash: outcome.checkpoint ?? "—",
+              hash: outcome.finalCommit ?? outcome.checkpoint ?? "—",
             }),
           );
         }
@@ -289,7 +299,9 @@ export function LintView() {
           parts.push(t("lint.batch.pending", { count: outcome.needsConfirmation.length }));
         }
         setNotice(parts.join(" · ") || null);
-        void runLocalLint(projectId, rootPath);
+        void runLocalLint(projectId, rootPath, {
+          preserveBatchConfirmations: outcome.needsConfirmation.length > 0,
+        });
         if (outcome.applied.length > 0 && safetyPrefs.recompile) triggerRecompile();
       });
   };
@@ -320,7 +332,13 @@ export function LintView() {
           <button
             type="button"
             onClick={handleRunLocal}
-            disabled={loadingLocal}
+            disabled={
+              loadingLocal ||
+              batchRunning ||
+              fixApplying ||
+              hasPendingBatchConfirmations ||
+              Boolean(fixConfirm)
+            }
             className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
           >
             {loadingLocal ? "…" : t("lint.actions.runLocal")}
@@ -345,7 +363,14 @@ export function LintView() {
           <button
             type="button"
             onClick={() => setConfirmOpen(true)}
-            disabled={autoFixable.length === 0 || batchRunning}
+            disabled={
+              autoFixable.length === 0 ||
+              loadingLocal ||
+              batchRunning ||
+              fixApplying ||
+              hasPendingBatchConfirmations ||
+              Boolean(fixConfirm)
+            }
             className="ml-auto h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
           >
             {batchRunning ? "…" : t("lint.actions.autoFix", { count: autoFixable.length })}
@@ -373,6 +398,46 @@ export function LintView() {
           }
         />
 
+        {ignores.length > 0 ? (
+          <section className="border-b border-[var(--border)] px-4 py-3" aria-label={t("lint.ignores.title")}>
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                {t("lint.ignores.title")}
+              </span>
+              <span className="font-mono text-[11px] text-[var(--text-muted)]">{ignores.length}</span>
+            </div>
+            <div className="space-y-1">
+              {ignores.map((entry) => {
+                const key = `${entry.path}:${entry.rule}`;
+                return (
+                  <div key={key} className="flex items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-2 py-1.5">
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-secondary)]" title={entry.path}>
+                      {entry.path}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-[var(--text-muted)]">
+                      {t(`lint.issueType.${entry.rule}`)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveIgnore(entry.path, entry.rule)}
+                      disabled={
+                        removingIgnoreKey === key ||
+                        Boolean(fixConfirm) ||
+                        batchRunning ||
+                        fixApplying ||
+                        hasPendingBatchConfirmations
+                      }
+                      className="shrink-0 rounded-[var(--radius-sm)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+                    >
+                      {removingIgnoreKey === key ? t("lint.ignores.restoring") : t("lint.ignores.restore")}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
+
         {localReport ? (
           <LintSummaryCards issues={modeIssues} passedCount={passedRules.length} />
         ) : null}
@@ -380,6 +445,9 @@ export function LintView() {
         <LintIssueList
           issues={modeIssues}
           selectedIssueId={selectedIssueId}
+          actionsDisabled={
+            loadingLocal || batchRunning || fixApplying || hasPendingBatchConfirmations
+          }
           onSelect={selectIssue}
           onApplyFix={handleApplyFix}
         />
@@ -406,22 +474,26 @@ export function LintView() {
       </div>
 
       <ResizableSplitter
-        paneId="lintList"
-        label={t("shell.splitter.lintList")}
-        min={PANE_WIDTH_LIMITS.lintList.min}
-        max={PANE_WIDTH_LIMITS.lintList.max}
-        value={paneSizes.lintList}
-        onChange={(value) => setPaneSize("lintList", value)}
-        onReset={() => resetPaneSize("lintList")}
+        paneId="lintDetails"
+        label={t("shell.splitter.lintDetails")}
+        min={PANE_WIDTH_LIMITS.lintDetails.min}
+        max={PANE_WIDTH_LIMITS.lintDetails.max}
+        value={paneSizes.lintDetails}
+        onChange={(value) => setPaneSize("lintDetails", value)}
+        onReset={() => resetPaneSize("lintDetails")}
       />
 
       <LintIssueDetails
         issue={selectedIssue}
         fixStatus={selectedIssue ? fixStatus[selectedIssue.id] ?? "idle" : "idle"}
         fixConfirm={fixConfirm}
-        projectId={projectId}
-        rootPath={rootPath}
         ignoring={selectedIssue ? ignoringId === selectedIssue.id : false}
+        actionsDisabled={
+          loadingLocal ||
+          batchRunning ||
+          fixApplying ||
+          (hasPendingBatchConfirmations && !fixConfirm)
+        }
         safetyPrefs={safetyPrefs}
         onSafetyPrefsChange={setSafetyPrefs}
         onApplyFix={handleApplyFix}

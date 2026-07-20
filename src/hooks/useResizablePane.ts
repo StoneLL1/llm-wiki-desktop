@@ -9,7 +9,7 @@ export type ResizablePaneId =
   | "rightPanel"
   | "wikiTree"
   | "exportsList"
-  | "lintList";
+  | "lintDetails";
 
 export interface PaneWidthLimit {
   min: number;
@@ -25,7 +25,7 @@ export const PANE_WIDTH_LIMITS: Record<ResizablePaneId, PaneWidthLimit> = {
   rightPanel: { min: 280, max: 520, defaultValue: 320 },
   wikiTree: { min: 220, max: 480, defaultValue: 260 },
   exportsList: { min: 220, max: 480, defaultValue: 360 },
-  lintList: { min: 220, max: 480, defaultValue: 360 },
+  lintDetails: { min: 280, max: 520, defaultValue: 320 },
 };
 
 export interface LayoutPreferences {
@@ -40,7 +40,7 @@ export const DEFAULT_LAYOUT_PREFERENCES: LayoutPreferences = {
     rightPanel: PANE_WIDTH_LIMITS.rightPanel.defaultValue,
     wikiTree: PANE_WIDTH_LIMITS.wikiTree.defaultValue,
     exportsList: PANE_WIDTH_LIMITS.exportsList.defaultValue,
-    lintList: PANE_WIDTH_LIMITS.lintList.defaultValue,
+    lintDetails: PANE_WIDTH_LIMITS.lintDetails.defaultValue,
   },
 };
 

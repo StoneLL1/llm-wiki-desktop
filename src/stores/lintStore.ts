@@ -23,6 +23,7 @@ import type {
   PersistedLintReport,
   ReadLintHistoryReportRequest,
   ListLintIgnoresRequest,
+  RemoveLintIgnoreRequest,
   StartDeepLintRequest,
 } from "../types/lint";
 import type { AgentKind } from "../types/agent";
@@ -40,6 +41,43 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function errorCode(error: unknown): string | null {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return null;
+}
+
+function isTerminalConfirmationError(error: unknown): boolean {
+  return [
+    "CONFIRMATION_EXPIRED",
+    "CONFIRMATION_EXPIRY_INVALID",
+    "CONFIRMATION_NOT_FOUND",
+    "CONFIRMATION_REQUIRED",
+    "CONFIRMATION_EXECUTION_MISSING",
+    "CONFIRMATION_TYPE_MISMATCH",
+    "LINT_FIX_HASH_REQUIRED",
+    "LINT_FIX_SCAN_BASELINE_REQUIRED",
+    "LINT_FIX_SCAN_BASELINE_MISMATCH",
+    "LINT_FIX_STALE",
+    "LINT_FIX_TYPE_REQUIRED",
+  ].includes(
+    errorCode(error) ?? "",
+  );
+}
+
+async function cancelBackendActionBestEffort(actionId: string): Promise<void> {
+  try {
+    await invoke("confirm_pending_action", {
+      request: { actionId, status: "cancelled" },
+    });
+  } catch {
+    // The action may already be expired/cancelled; stale UI must never surface
+    // a late confirmation as if it belonged to the current report.
+  }
+}
+
 const SAFETY_PREFS_KEY = "llm-wiki-desktop.lintSafetyPrefs";
 
 const DEFAULT_SAFETY_PREFS: LintSafetyPrefs = {
@@ -47,6 +85,8 @@ const DEFAULT_SAFETY_PREFS: LintSafetyPrefs = {
   commitAfter: true,
   recompile: false,
 };
+
+let lintOperationEpoch = 0;
 
 function loadSafetyPrefs(): LintSafetyPrefs {
   try {
@@ -99,7 +139,11 @@ export interface LintState {
   historyError: string | null;
   activeHistoryId: string | null;
 
-  runLocalLint: (projectId: string, rootPath: string) => Promise<void>;
+  runLocalLint: (
+    projectId: string,
+    rootPath: string,
+    options?: { preserveBatchConfirmations?: boolean },
+  ) => Promise<void>;
   startDeepLint: (
     projectId: string,
     rootPath: string,
@@ -118,6 +162,7 @@ export interface LintState {
   ) => Promise<PersistedLintReport | null>;
   loadIgnores: (request: ListLintIgnoresRequest) => Promise<void>;
   addIgnore: (request: AddLintIgnoreRequest) => Promise<boolean>;
+  removeIgnore: (request: RemoveLintIgnoreRequest) => Promise<boolean>;
   applyFix: (
     projectId: string,
     rootPath: string,
@@ -135,6 +180,8 @@ export interface LintState {
     expectedHash: string,
   ) => Promise<LintFixOutcome | null>;
   cancelHighRisk: () => Promise<void>;
+  /** Best-effort cancellation used before project-scoped state is discarded. */
+  cancelPendingActions: () => Promise<void>;
   reset: () => void;
 }
 
@@ -162,32 +209,58 @@ const initial = {
 export const useLintStore = create<LintState>((set, get) => ({
   ...initial,
 
-  runLocalLint: async (projectId, rootPath) => {
+  runLocalLint: async (projectId, rootPath, options) => {
     if (!hasTauri()) return;
+    const current = get();
+    const preserveBatchConfirmations = options?.preserveBatchConfirmations === true;
+    if (
+      current.batchRunning ||
+      current.fixConfirm ||
+      (!preserveBatchConfirmations && current.batchConfirmations.length > 0) ||
+      Object.values(current.fixStatus).some((status) => status === "applying")
+    ) {
+      return;
+    }
+    const operationEpoch = ++lintOperationEpoch;
     const scope = captureProjectScope();
-    set({ loadingLocal: true, error: null, fixStatus: {} });
+    set({
+      loadingLocal: true,
+      error: null,
+      localReport: null,
+      selectedIssueId: null,
+      activeHistoryId: null,
+      fixStatus: {},
+      // Never discard an in-flight batch or confirmations explicitly preserved
+      // by the batch completion rescan. Ordinary new scans invalidate old
+      // confirmations so their scan hashes cannot outlive the report.
+      ...(preserveBatchConfirmations
+        ? {}
+        : { fixConfirm: null, batchConfirmations: [], batchRunning: false }),
+    });
     try {
       const report = await invoke<LintReport>("run_local_lint", {
         request: { projectId, projectRootPath: rootPath },
       });
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return;
       set({
         localReport: report,
-        deepReport: null,
         activeHistoryId: null,
         loadingLocal: false,
       });
       void get().loadHistory({ projectId, projectRootPath: rootPath });
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return;
       set({ loadingLocal: false, error: errorMessage(error) });
     }
   },
 
   startDeepLint: async (projectId, rootPath, route, agent, provider) => {
     if (!hasTauri()) return null;
+    if (get().runningDeep) return null;
     const scope = captureProjectScope();
-    set({ error: null });
+    // Claim the running slot before the IPC round-trip so a double click
+    // cannot enqueue two deep scans.
+    set({ error: null, runningDeep: true });
     try {
       const request: StartDeepLintRequest = {
         projectId,
@@ -198,11 +271,11 @@ export const useLintStore = create<LintState>((set, get) => ({
       };
       const task = await invoke<{ id: string }>("start_deep_lint", { request });
       if (!isProjectScopeCurrent(scope)) return null;
-      set({ deepTaskId: task.id, runningDeep: true, deepReport: null });
+      set({ deepTaskId: task.id, deepReport: null });
       return task.id;
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return null;
-      set({ error: errorMessage(error) });
+      set({ runningDeep: false, error: errorMessage(error) });
       return null;
     }
   },
@@ -217,7 +290,6 @@ export const useLintStore = create<LintState>((set, get) => ({
       if (!isProjectScopeCurrent(scope)) return;
       set({
         deepReport: report,
-        localReport: null,
         activeHistoryId: request.taskId,
         runningDeep: false,
       });
@@ -231,7 +303,11 @@ export const useLintStore = create<LintState>((set, get) => ({
     }
   },
 
-  selectIssue: (issueId) => set({ selectedIssueId: issueId }),
+  selectIssue: (issueId) => {
+    const activeConfirmation = get().fixConfirm;
+    if (activeConfirmation && issueId !== activeConfirmation.issue.id) return;
+    set({ selectedIssueId: issueId });
+  },
 
   setMode: (mode) => set({ mode }),
 
@@ -267,24 +343,73 @@ export const useLintStore = create<LintState>((set, get) => ({
 
   openHistoryReport: async (request) => {
     if (!hasTauri()) return null;
+    const current = get();
+    if (
+      current.loadingLocal ||
+      current.batchRunning ||
+      Object.values(current.fixStatus).some((status) => status === "applying")
+    ) {
+      set({ historyError: "lint.history.waitForFix" });
+      return null;
+    }
+    const operationEpoch = ++lintOperationEpoch;
     const scope = captureProjectScope();
+    const pendingActionIds = [
+      ...(get().fixConfirm ? [get().fixConfirm!.pendingAction.id] : []),
+      ...get().batchConfirmations.map((entry) => entry.pendingAction.id),
+    ].filter((id, index, ids) => ids.indexOf(id) === index);
+    if (pendingActionIds.length > 0) {
+      const cancelledActionIds: string[] = [];
+      try {
+        for (const actionId of pendingActionIds) {
+          try {
+            await invoke("confirm_pending_action", {
+              request: { actionId, status: "cancelled" },
+            });
+          } catch (error) {
+            if (!isTerminalConfirmationError(error)) throw error;
+          }
+          cancelledActionIds.push(actionId);
+        }
+      } catch (error) {
+        if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+        set((state) => ({
+          fixConfirm:
+            state.fixConfirm && cancelledActionIds.includes(state.fixConfirm.pendingAction.id)
+              ? null
+              : state.fixConfirm,
+          batchConfirmations: state.batchConfirmations.filter(
+            (entry) => !cancelledActionIds.includes(entry.pendingAction.id),
+          ),
+        }));
+        set({ historyError: errorMessage(error) });
+        return null;
+      }
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+      set({ fixConfirm: null, batchConfirmations: [] });
+    }
     set({ historyError: null });
     try {
       const persisted = await invoke<PersistedLintReport>(
         "read_lint_history_report",
         { request },
       );
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
       set({
         localReport: persisted.localReport ?? null,
         deepReport: persisted.deepReport ?? null,
+        loadingLocal: false,
         selectedIssueId: null,
+        fixStatus: {},
+        fixConfirm: null,
+        batchConfirmations: [],
+        batchRunning: false,
         activeHistoryId: persisted.entry.id,
         mode: persisted.entry.kind === "local" ? "local" : "agent",
       });
       return persisted;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
       set({ historyError: errorMessage(error) });
       return null;
     }
@@ -324,8 +449,37 @@ export const useLintStore = create<LintState>((set, get) => ({
     }
   },
 
+  removeIgnore: async (request) => {
+    if (!hasTauri()) return false;
+    const scope = captureProjectScope();
+    try {
+      const file = await invoke<{ ignored: LintIgnoreEntry[] }>(
+        "remove_lint_ignore",
+        { request },
+      );
+      if (!isProjectScopeCurrent(scope)) return false;
+      set({ ignores: file.ignored ?? [] });
+      return true;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope)) return false;
+      set({ error: errorMessage(error) });
+      return false;
+    }
+  },
+
   applyFix: async (projectId, rootPath, issue, expectedHash = null) => {
     if (!hasTauri()) return null;
+    const current = get();
+    if (
+      current.fixConfirm ||
+      current.loadingLocal ||
+      current.batchRunning ||
+      current.batchConfirmations.length > 0 ||
+      Object.values(current.fixStatus).some((status) => status === "applying")
+    ) {
+      return null;
+    }
+    const operationEpoch = ++lintOperationEpoch;
     const scope = captureProjectScope();
     set((state) => ({
       fixStatus: { ...state.fixStatus, [issue.id]: "applying" },
@@ -345,22 +499,44 @@ export const useLintStore = create<LintState>((set, get) => ({
     };
     try {
       const outcome = await invoke<LintFixOutcome>("apply_lint_fix", { request });
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) {
+        if (outcome.pendingAction?.id) {
+          void cancelBackendActionBestEffort(outcome.pendingAction.id);
+        }
+        return null;
+      }
       if (outcome.kind === "applied") {
         set((state) => ({
           fixStatus: { ...state.fixStatus, [issue.id]: "applied" },
           fixConfirm: null,
         }));
       } else if (outcome.pendingAction) {
-        // High-risk fix needs an inline confirm. The expected hash is resolved
-        // by the view from the live page before the user confirms.
-        set({
-          fixConfirm: { issue, pendingAction: outcome.pendingAction, expectedHash: "" },
-        });
+        // High-risk fix needs an inline confirm. The expected hash comes from
+        // the immutable scan snapshot carried by the finding.
+        const pendingAction = outcome.pendingAction;
+        set((state) => ({
+          fixStatus: { ...state.fixStatus, [issue.id]: "idle" },
+          fixConfirm: {
+            issue,
+            pendingAction,
+            expectedHash: issue.scanHash ?? "",
+          },
+        }));
       }
       return outcome;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+      if (isTerminalConfirmationError(error)) {
+        set((state) => ({
+          fixConfirm: null,
+          batchConfirmations: state.batchConfirmations.filter(
+            (entry) => entry.issue.id !== issue.id,
+          ),
+          fixStatus: { ...state.fixStatus, [issue.id]: "error" },
+          error: errorMessage(error),
+        }));
+        return null;
+      }
       set((state) => ({
         fixStatus: { ...state.fixStatus, [issue.id]: "error" },
         error: errorMessage(error),
@@ -371,26 +547,42 @@ export const useLintStore = create<LintState>((set, get) => ({
 
   applyFixesBatch: async (request) => {
     if (!hasTauri()) return null;
+    const current = get();
+    if (
+      current.loadingLocal ||
+      current.batchRunning ||
+      current.fixConfirm ||
+      current.batchConfirmations.length > 0 ||
+      Object.values(current.fixStatus).some((status) => status === "applying")
+    ) return null;
+    const operationEpoch = ++lintOperationEpoch;
     const scope = captureProjectScope();
     set({ batchRunning: true, error: null });
     try {
       const outcome = await invoke<LintBatchOutcome>("apply_lint_fixes", {
         request,
       });
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) {
+        for (const confirmation of outcome.needsConfirmation ?? []) {
+          void cancelBackendActionBestEffort(confirmation.pendingAction.id);
+        }
+        return null;
+      }
       set({
         batchRunning: false,
         batchConfirmations: outcome.needsConfirmation ?? [],
       });
       return outcome;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
       set({ batchRunning: false, error: errorMessage(error) });
       return null;
     }
   },
 
   openBatchConfirmation: (issueId) => {
+    const activeConfirmation = get().fixConfirm;
+    if (activeConfirmation && activeConfirmation.issue.id !== issueId) return;
     const confirmation = get().batchConfirmations.find(
       (entry) => entry.issue.id === issueId,
     );
@@ -400,16 +592,20 @@ export const useLintStore = create<LintState>((set, get) => ({
       fixConfirm: {
         issue: confirmation.issue,
         pendingAction: confirmation.pendingAction,
-        expectedHash: "",
+        expectedHash: confirmation.issue.scanHash ?? "",
       },
     });
   },
 
   confirmHighRisk: async (projectId, rootPath, expectedHash) => {
     if (!hasTauri()) return null;
+    const current = get();
+    const activeConfirmation = current.fixConfirm;
+    if (!activeConfirmation) return null;
+    if (current.fixStatus[activeConfirmation.issue.id] === "applying") return null;
+    const operationEpoch = ++lintOperationEpoch;
     const scope = captureProjectScope();
-    const confirm = get().fixConfirm;
-    if (!confirm) return null;
+    const confirm = activeConfirmation;
     const { issue } = confirm;
     set((state) => ({ fixStatus: { ...state.fixStatus, [issue.id]: "applying" } }));
     const request: ApplyLintFixRequest = {
@@ -422,7 +618,7 @@ export const useLintStore = create<LintState>((set, get) => ({
     };
     try {
       const outcome = await invoke<LintFixOutcome>("apply_lint_fix", { request });
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
       if (outcome.kind === "applied") {
         set((state) => ({
           fixStatus: { ...state.fixStatus, [issue.id]: "applied" },
@@ -436,10 +632,21 @@ export const useLintStore = create<LintState>((set, get) => ({
       }
       return outcome;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+      if (isTerminalConfirmationError(error)) {
+        void cancelBackendActionBestEffort(confirm.pendingAction.id);
+        set((state) => ({
+          fixConfirm: null,
+          batchConfirmations: state.batchConfirmations.filter(
+            (entry) => entry.issue.id !== issue.id,
+          ),
+          fixStatus: { ...state.fixStatus, [issue.id]: "error" },
+          error: errorMessage(error),
+        }));
+        return null;
+      }
       set((state) => ({
         fixStatus: { ...state.fixStatus, [issue.id]: "error" },
-        fixConfirm: null,
         error: errorMessage(error),
       }));
       return null;
@@ -450,21 +657,64 @@ export const useLintStore = create<LintState>((set, get) => ({
     const confirm = get().fixConfirm;
     const actionId = confirm?.pendingAction.id;
     const issueId = confirm?.issue.id;
-    set({ fixConfirm: null });
+    if (!confirm) return;
+    if (issueId && get().fixStatus[issueId] === "applying") return;
     if (issueId) {
       set((state) => ({
-        batchConfirmations: state.batchConfirmations.filter(
-          (entry) => entry.issue.id !== issueId,
-        ),
+        fixStatus: { ...state.fixStatus, [issueId]: "applying" },
       }));
     }
-    if (!actionId || !hasTauri()) return;
+    const clearConfirmation = () => {
+      set((state) => ({
+        fixConfirm: null,
+        fixStatus: issueId
+          ? { ...state.fixStatus, [issueId]: "idle" }
+          : state.fixStatus,
+        batchConfirmations: issueId
+          ? state.batchConfirmations.filter((entry) => entry.issue.id !== issueId)
+          : state.batchConfirmations,
+      }));
+    };
+    if (!actionId || !hasTauri()) {
+      clearConfirmation();
+      return;
+    }
     try {
       await invoke("confirm_pending_action", {
         request: { actionId, status: "cancelled" },
       });
+      clearConfirmation();
     } catch (error) {
+      // Keep the confirmation visible so a transient IPC failure can be retried;
+      // the backend action must not become an orphaned, unreviewable request.
+      if (isTerminalConfirmationError(error)) {
+        clearConfirmation();
+      } else if (issueId) {
+        set((state) => ({
+          fixStatus: { ...state.fixStatus, [issueId]: "idle" },
+        }));
+      }
       set({ error: errorMessage(error) });
+    }
+  },
+
+  cancelPendingActions: async () => {
+    if (!hasTauri()) return;
+    const state = get();
+    const actionIds = [
+      ...(state.fixConfirm ? [state.fixConfirm.pendingAction.id] : []),
+      ...state.batchConfirmations.map((entry) => entry.pendingAction.id),
+    ].filter((id, index, ids) => ids.indexOf(id) === index);
+    for (const actionId of actionIds) {
+      try {
+        await invoke("confirm_pending_action", {
+          request: { actionId, status: "cancelled" },
+        });
+      } catch {
+        // Teardown is best-effort. The registry also enforces expiry, and a
+        // cancellation failure must not leak an old project's error into the
+        // newly selected project after the synchronous store reset.
+      }
     }
   },
 

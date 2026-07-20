@@ -107,10 +107,10 @@ describe("responsive UI CSS contracts", () => {
   it("wires internal view splitters to pane width variables", () => {
     expect(styles).toContain("--wiki-tree-w-current");
     expect(styles).toContain("--exports-list-w-current");
-    expect(styles).toContain("--lint-list-w-current");
+    expect(styles).toContain("--lint-details-w-current");
     expect(styles).toMatch(/\.exports-view-layout\s*\{[^}]*grid-template-columns:\s*var\(--exports-list-w-current, 360px\) 6px minmax\(320px, 1fr\)/s);
-    expect(styles).toMatch(/\.lint-view-layout\s*\{[^}]*grid-template-columns:\s*var\(--lint-list-w-current, 360px\) 6px minmax\(320px, 1fr\)/s);
-    expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*\.resize-handle\[data-pane-id="exportsList"\][\s\S]*\.resize-handle\[data-pane-id="lintList"\]/s);
+    expect(styles).toMatch(/\.lint-view-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 6px var\(--lint-details-w-current, 320px\)/s);
+    expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*\.resize-handle\[data-pane-id="exportsList"\][\s\S]*\.resize-handle\[data-pane-id="lintDetails"\]/s);
   });
 
   it("defines focused export preview and source-mode affordances", () => {

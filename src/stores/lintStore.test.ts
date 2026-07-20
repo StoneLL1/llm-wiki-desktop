@@ -55,6 +55,140 @@ describe("lintStore", () => {
     expect(call[0]).toBe("run_local_lint");
   });
 
+  it("clears stale selection and confirmations before a local rerun", async () => {
+    const issue = localIssue();
+    useLintStore.setState({
+      selectedIssueId: issue.id,
+      batchConfirmations: [],
+    });
+    invokeMock.mockResolvedValueOnce(report({ issues: [] }));
+    await useLintStore.getState().runLocalLint(PROJECT.projectId, PROJECT.rootPath);
+    expect(useLintStore.getState().selectedIssueId).toBeNull();
+    expect(useLintStore.getState().fixConfirm).toBeNull();
+    expect(useLintStore.getState().batchConfirmations).toHaveLength(0);
+  });
+
+  it("blocks an ordinary local rerun while batch confirmations remain pending", async () => {
+    const issue = localIssue();
+    useLintStore.setState({
+      batchConfirmations: [
+        {
+          issue,
+          pendingAction: {
+            id: "pending-batch-guard",
+            actionType: "agent_auto_fix",
+            title: "fix",
+            message: "fix",
+            riskLevel: "high",
+            affectedPaths: [issue.path],
+            preview: null,
+            expiresAt: null,
+          },
+        },
+      ],
+    });
+
+    await useLintStore.getState().runLocalLint(PROJECT.projectId, PROJECT.rootPath);
+
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(useLintStore.getState().batchConfirmations).toHaveLength(1);
+  });
+
+  it("preserves pending high-risk state during a protected batch rescan", async () => {
+    const issue = localIssue();
+    useLintStore.setState({
+      fixConfirm: {
+        issue,
+        pendingAction: {
+          id: "pending-batch",
+          actionType: "agent_auto_fix",
+          title: "fix",
+          message: "fix",
+          riskLevel: "high",
+          affectedPaths: [issue.path],
+          preview: null,
+          expiresAt: null,
+        },
+        expectedHash: "hash",
+      },
+      batchConfirmations: [
+        {
+          issue,
+          pendingAction: {
+            id: "pending-batch",
+            actionType: "agent_auto_fix",
+            title: "fix",
+            message: "fix",
+            riskLevel: "high",
+            affectedPaths: [issue.path],
+            preview: null,
+            expiresAt: null,
+          },
+        },
+      ],
+    });
+    invokeMock.mockResolvedValueOnce(report({ issues: [] }));
+
+    await useLintStore.getState().runLocalLint(PROJECT.projectId, PROJECT.rootPath, {
+      preserveBatchConfirmations: true,
+    });
+
+    expect(useLintStore.getState().fixConfirm?.pendingAction.id).toBe("pending-batch");
+    expect(useLintStore.getState().batchConfirmations).toHaveLength(1);
+  });
+
+  it("keeps a high-risk confirmation visible when cancellation IPC fails", async () => {
+    const issue = localIssue();
+    useLintStore.setState({
+      fixConfirm: {
+        issue,
+        pendingAction: {
+          id: "pending-cancel",
+          actionType: "agent_auto_fix",
+          title: "fix",
+          message: "fix",
+          riskLevel: "high",
+          affectedPaths: [issue.path],
+          preview: null,
+          expiresAt: null,
+        },
+        expectedHash: "hash",
+      },
+    });
+    invokeMock.mockRejectedValueOnce(new Error("temporary IPC failure"));
+
+    await useLintStore.getState().cancelHighRisk();
+
+    expect(useLintStore.getState().fixConfirm?.pendingAction.id).toBe("pending-cancel");
+    expect(useLintStore.getState().error).toContain("temporary IPC failure");
+  });
+
+  it("clears a high-risk confirmation only after cancellation succeeds", async () => {
+    const issue = localIssue();
+    useLintStore.setState({
+      fixConfirm: {
+        issue,
+        pendingAction: {
+          id: "pending-cancel-success",
+          actionType: "agent_auto_fix",
+          title: "fix",
+          message: "fix",
+          riskLevel: "high",
+          affectedPaths: [issue.path],
+          preview: null,
+          expiresAt: null,
+        },
+        expectedHash: "hash",
+      },
+    });
+    invokeMock.mockResolvedValueOnce({});
+
+    await useLintStore.getState().cancelHighRisk();
+
+    expect(useLintStore.getState().fixConfirm).toBeNull();
+    expect(invokeMock.mock.calls[0][0]).toBe("confirm_pending_action");
+  });
+
   it("startDeepLint stores the returned task id", async () => {
     invokeMock.mockResolvedValueOnce({ id: "task-1" });
     const taskId = await useLintStore.getState().startDeepLint(
@@ -227,6 +361,19 @@ describe("lintStore", () => {
     expect(invokeMock.mock.calls[0][0]).toBe("add_lint_ignore");
   });
 
+  it("removeIgnore restores a rule from the backend response", async () => {
+    invokeMock.mockResolvedValueOnce({ ignored: [] } satisfies LintIgnoreFile);
+    const ok = await useLintStore.getState().removeIgnore({
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+      path: "wiki/a.md",
+      rule: "dead_link",
+    });
+    expect(ok).toBe(true);
+    expect(useLintStore.getState().ignores).toHaveLength(0);
+    expect(invokeMock.mock.calls[0][0]).toBe("remove_lint_ignore");
+  });
+
   it("loadHistory stores entries and sends the typed request payload", async () => {
     const file: LintHistoryFile = {
       version: 1,
@@ -292,5 +439,71 @@ describe("lintStore", () => {
     expect(useLintStore.getState().mode).toBe("agent");
     expect(invokeMock.mock.calls[0][0]).toBe("read_lint_history_report");
     expect(invokeMock.mock.calls[0][1].request.id).toBe("task-1");
+  });
+
+  it("cancels every pending action before opening history", async () => {
+    const issue = localIssue();
+    useLintStore.setState({
+      fixConfirm: {
+        issue,
+        pendingAction: {
+          id: "history-single",
+          actionType: "agent_auto_fix",
+          title: "fix",
+          message: "fix",
+          riskLevel: "high",
+          affectedPaths: [issue.path],
+          preview: null,
+          expiresAt: null,
+        },
+        expectedHash: "hash",
+      },
+      batchConfirmations: [
+        {
+          issue,
+          pendingAction: {
+            id: "history-batch",
+            actionType: "agent_auto_fix",
+            title: "fix",
+            message: "fix",
+            riskLevel: "high",
+            affectedPaths: [issue.path],
+            preview: null,
+            expiresAt: null,
+          },
+        },
+      ],
+    });
+    const persisted = {
+      entry: {
+        id: "history-1",
+        kind: "local",
+        createdAt: "2026-07-04T00:00:00Z",
+        issueCount: 0,
+        errorCount: 0,
+        warningCount: 0,
+        infoCount: 0,
+        scannedPages: 0,
+      },
+      localReport: report({ issues: [] }),
+      deepReport: null,
+    } satisfies PersistedLintReport;
+    invokeMock.mockResolvedValueOnce({}).mockResolvedValueOnce({}).mockResolvedValueOnce(persisted);
+
+    await useLintStore.getState().openHistoryReport({
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+      id: "history-1",
+    });
+
+    expect(invokeMock.mock.calls.slice(0, 2).map((call) => call[0])).toEqual([
+      "confirm_pending_action",
+      "confirm_pending_action",
+    ]);
+    expect(invokeMock.mock.calls[0][1].request.actionId).toBe("history-single");
+    expect(invokeMock.mock.calls[1][1].request.actionId).toBe("history-batch");
+    expect(invokeMock.mock.calls[2][0]).toBe("read_lint_history_report");
+    expect(useLintStore.getState().fixConfirm).toBeNull();
+    expect(useLintStore.getState().batchConfirmations).toHaveLength(0);
   });
 });

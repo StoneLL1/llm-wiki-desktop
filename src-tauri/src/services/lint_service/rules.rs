@@ -25,6 +25,17 @@ impl LintService {
         context: &ProjectContext,
         search_service: &SearchService,
     ) -> Result<LintReport, BackendError> {
+        let initial_tree = search_service.scan_wiki(context, &HashSet::new())?;
+        let initial_pages = initial_tree.pages;
+        // Establish the optimistic-lock baseline before reading page bodies.
+        // A second snapshot is taken after all rules run; if any scanned path
+        // changed during the pass, the report is rejected instead of attaching
+        // a post-edit hash to findings produced from older content.
+        let baseline_hashes = self.capture_scan_snapshot(context, &initial_pages)?;
+        // Refresh the tree after taking the baseline so page metadata (links,
+        // word counts, frontmatter) is from the same generation as the rules.
+        // The final path-set comparison below rejects additions/deletions that
+        // occur while the pass is running.
         let tree = search_service.scan_wiki(context, &HashSet::new())?;
         let pages = tree.pages;
         let scanned = pages.len();
@@ -38,7 +49,10 @@ impl LintService {
             let raw = self
                 .file_store
                 .read_markdown(context, &page.path)
-                .unwrap_or_default();
+                .map_err(|error| {
+                    BackendError::new("LINT_PAGE_READ_FAILED", error.message, true, false)
+                        .with_details(serde_json::json!({ "path": page.path }))
+                })?;
             let split = split_frontmatter(&raw);
             let frontmatter_present = split.frontmatter.is_some();
             let frontmatter = split
@@ -54,8 +68,13 @@ impl LintService {
                 &frontmatter,
             ));
 
-            // Dead links.
+            // Dead links. The index has its own rule below so a stale index
+            // entry is reported once as `index_drift`, not twice as both a
+            // generic dead link and an index issue.
             for target in &page.wikilinks {
+                if page.path == "wiki/index.md" {
+                    continue;
+                }
                 if is_external(target) {
                     continue;
                 }
@@ -72,6 +91,7 @@ impl LintService {
                     severity: LintSeverity::Error,
                     issue_type: LintIssueType::DeadLink,
                     path: page.path.clone(),
+                    scan_hash: None,
                     range: line.map(|l| LintRange {
                         line: l,
                         column: None,
@@ -88,18 +108,31 @@ impl LintService {
 
             // Missing frontmatter (structural files are exempt).
             if !frontmatter_present && !STRUCTURAL_FILES.contains(&page.path.as_str()) {
+                let wiki_relative = page.path.strip_prefix("wiki/").unwrap_or(&page.path);
+                let inferred_type = WikiPageType::infer(None, wiki_relative);
+                let fixability = if inferred_type == WikiPageType::Other {
+                    Fixability::None
+                } else {
+                    Fixability::Safe
+                };
                 issues.push(LintIssue {
                     id: format!("missing_frontmatter:{}", page.path),
                     source: LintIssueSource::Local,
                     severity: LintSeverity::Warning,
                     issue_type: LintIssueType::MissingFrontmatter,
                     path: page.path.clone(),
+                    scan_hash: None,
                     range: None,
                     message: "Page has no YAML frontmatter.".into(),
                     evidence: None,
                     target: None,
-                    fixability: Fixability::Safe,
-                    suggested_action: Some("Add a minimal frontmatter block.".into()),
+                    fixability,
+                    suggested_action: Some(if fixability == Fixability::Safe {
+                        "Add a minimal frontmatter block inferred from the page folder.".into()
+                    } else {
+                        "Choose a recognized page folder/type, then add frontmatter manually."
+                            .into()
+                    }),
                 });
             }
 
@@ -111,6 +144,7 @@ impl LintService {
                     severity: LintSeverity::Warning,
                     issue_type: LintIssueType::EmptyPage,
                     path: page.path.clone(),
+                    scan_hash: None,
                     range: None,
                     message: "Page body has no readable words.".into(),
                     evidence: None,
@@ -120,18 +154,26 @@ impl LintService {
                 });
             }
 
-            // Missing resources referenced by `sources:`.
-            for source in &page.sources {
+            // Missing resources referenced by `sources:` and by local
+            // Markdown links/images. Frontmatter alone misses the common
+            // `![scan](../raw/scan.png)` path, while treating remote URLs as
+            // local files creates noisy false positives.
+            let mut resource_refs = page.sources.clone();
+            resource_refs.extend(extract_local_resource_refs(&split.body));
+            resource_refs.sort();
+            resource_refs.dedup();
+            for source in &resource_refs {
                 if is_external(source) {
                     continue;
                 }
-                if !resource_exists(context, source) {
+                if !resource_exists(context, &page.path, source) {
                     issues.push(LintIssue {
                         id: format!("missing_resource:{}:{source}", page.path),
                         source: LintIssueSource::Local,
                         severity: LintSeverity::Warning,
                         issue_type: LintIssueType::MissingResource,
                         path: page.path.clone(),
+                        scan_hash: None,
                         range: None,
                         message: format!("Source reference `{source}` does not exist."),
                         evidence: None,
@@ -155,6 +197,7 @@ impl LintService {
                     severity: LintSeverity::Info,
                     issue_type: LintIssueType::OrphanPage,
                     path: page.path.clone(),
+                    scan_hash: None,
                     range: None,
                     message: "No other page links to this page.".into(),
                     evidence: None,
@@ -187,6 +230,7 @@ impl LintService {
                     severity: LintSeverity::Warning,
                     issue_type: LintIssueType::DuplicateFilename,
                     path: page.path.clone(),
+                    scan_hash: None,
                     range: None,
                     message: format!(
                         "Filename stem collides with {} other page(s).",
@@ -219,6 +263,7 @@ impl LintService {
                     severity: LintSeverity::Warning,
                     issue_type: LintIssueType::PathCase,
                     path: page.path.clone(),
+                    scan_hash: None,
                     range: None,
                     message: "Path differs from another page only by letter case.".into(),
                     evidence: Some(
@@ -239,14 +284,46 @@ impl LintService {
         }
 
         // Index drift (only when wiki/index.md exists).
-        issues.extend(self.check_index_drift(context, &lookup));
-        issues.extend(check_structural_page_basics(context, &pages));
+        issues.extend(self.check_index_drift(context, &lookup)?);
+        issues.extend(check_structural_page_basics(context, &pages, &lookup));
+
+        // Re-enumerate immediately before validating the result so files
+        // created/deleted after the rules' tree was read are included in the
+        // freshness decision rather than silently omitted.
+        let final_tree = search_service.scan_wiki(context, &HashSet::new())?;
+        let final_pages = final_tree.pages;
+        let final_hashes = self.capture_scan_snapshot(context, &final_pages)?;
+        if baseline_hashes != final_hashes {
+            let all_paths = baseline_hashes
+                .keys()
+                .chain(final_hashes.keys())
+                .cloned()
+                .collect::<HashSet<_>>();
+            let changed_paths = all_paths
+                .into_iter()
+                .filter(|path| baseline_hashes.get(path) != final_hashes.get(path))
+                .collect::<Vec<_>>();
+            return Err(BackendError::new(
+                "LINT_SCAN_CHANGED",
+                "Wiki content changed while the local Lint scan was running. Please rescan before applying fixes.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "paths": changed_paths })));
+        }
+
+        // Freeze the content version used by the report. The frontend must
+        // pass this baseline back when applying a fix; it must never promote a
+        // hash read after the user has opened the fix UI into a scan baseline.
+        for issue in &mut issues {
+            issue.scan_hash = baseline_hashes.get(&issue.path).cloned().flatten();
+        }
 
         // Drop issues the user has dismissed via `.app/lint-ignore.json`. The
         // match key is (path, rule): ignoring a rule on a page suppresses every
         // occurrence of that rule on that page.
         let ignored_keys: HashSet<(String, LintIssueType)> = self
-            .load_ignores(context)
+            .load_ignores(context)?
             .ignored
             .into_iter()
             .map(|entry| (entry.path, entry.rule))
@@ -269,15 +346,55 @@ impl LintService {
         })
     }
 
+    fn capture_scan_snapshot(
+        &self,
+        context: &ProjectContext,
+        pages: &[WikiPageMeta],
+    ) -> Result<HashMap<String, Option<String>>, BackendError> {
+        let mut paths = pages
+            .iter()
+            .map(|page| page.path.clone())
+            .collect::<HashSet<_>>();
+        paths.insert("wiki/index.md".into());
+        paths
+            .into_iter()
+            .map(|path| {
+                let hash = self.file_store.file_hash_if_exists(context, &path)?;
+                Ok((path, hash))
+            })
+            .collect()
+    }
+
     fn check_index_drift(
         &self,
         context: &ProjectContext,
         lookup: &std::collections::HashMap<String, String>,
-    ) -> Vec<LintIssue> {
+    ) -> Result<Vec<LintIssue>, BackendError> {
         let mut issues = Vec::new();
-        let Ok(raw) = self.file_store.read_markdown(context, "wiki/index.md") else {
-            return issues;
-        };
+        if self
+            .file_store
+            .file_hash_if_exists(context, "wiki/index.md")?
+            .is_none()
+        {
+            issues.push(LintIssue {
+                id: "index_drift:wiki/index.md:missing".into(),
+                source: LintIssueSource::Local,
+                severity: LintSeverity::Error,
+                issue_type: LintIssueType::IndexDrift,
+                path: "wiki/index.md".into(),
+                scan_hash: None,
+                range: None,
+                message: "The wiki index file is missing.".into(),
+                evidence: None,
+                target: None,
+                fixability: Fixability::None,
+                suggested_action: Some(
+                    "Create wiki/index.md or run a Wiki compile to regenerate it.".into(),
+                ),
+            });
+            return Ok(issues);
+        }
+        let raw = self.file_store.read_markdown(context, "wiki/index.md")?;
         let split = split_frontmatter(&raw);
         let linked: Vec<String> = extract_wikilinks(&split.body);
 
@@ -295,6 +412,7 @@ impl LintService {
                 severity: LintSeverity::Error,
                 issue_type: LintIssueType::IndexDrift,
                 path: "wiki/index.md".into(),
+                scan_hash: None,
                 range: None,
                 message: format!("Index links to `{target}`, which does not exist."),
                 evidence: Some(format!("[[{target}]]")),
@@ -303,7 +421,7 @@ impl LintService {
                 suggested_action: Some("Remove the stale link or create the page.".into()),
             });
         }
-        issues
+        Ok(issues)
     }
 }
 
@@ -322,6 +440,20 @@ fn build_target_lookup(pages: &[WikiPageMeta]) -> HashMap<String, String> {
 
 fn resolution_keys(page: &WikiPageMeta) -> Vec<String> {
     let mut keys = Vec::new();
+    let normalized_path = page.path.replace('\\', "/").to_ascii_lowercase();
+    // Wikilinks may use a project-relative path (`concepts/x`) or the
+    // canonical `wiki/concepts/x.md` path. Register both forms, with and
+    // without the Markdown suffix, in addition to title/alias lookup.
+    keys.push(normalized_path.clone());
+    if let Some(without_root) = normalized_path.strip_prefix("wiki/") {
+        keys.push(without_root.to_string());
+    }
+    if let Some(without_ext) = normalized_path.strip_suffix(".md") {
+        keys.push(without_ext.to_string());
+        if let Some(without_root) = without_ext.strip_prefix("wiki/") {
+            keys.push(without_root.to_string());
+        }
+    }
     if let Some(stem) = file_stem(&page.path) {
         keys.push(stem.to_ascii_lowercase());
     }
@@ -367,15 +499,16 @@ fn is_external(value: &str) -> bool {
     trimmed.contains("://") || trimmed.starts_with("mailto:")
 }
 
-fn resource_exists(context: &ProjectContext, source: &str) -> bool {
+fn resource_exists(context: &ProjectContext, page_path: &str, source: &str) -> bool {
     let normalized = source.replace('\\', "/");
     // Absolute paths and URLs are out of project scope; treat as present to
     // avoid false positives on references we cannot verify.
-    if normalized.contains("://") || normalized.starts_with('/') {
+    if normalized.contains("://") || is_absolute_resource_ref(&normalized) {
         return true;
     }
-    source_path_candidates(&normalized)
+    source_path_candidates(page_path, &normalized)
         .into_iter()
+        .filter_map(|candidate| normalize_resource_path(&candidate))
         .any(|candidate| {
             context
                 .resolve_project_path(&candidate)
@@ -384,15 +517,87 @@ fn resource_exists(context: &ProjectContext, source: &str) -> bool {
         })
 }
 
-fn source_path_candidates(source: &str) -> Vec<String> {
-    let normalized = source.trim().replace('\\', "/");
-    let mut candidates = vec![normalized.clone()];
+fn source_path_candidates(page_path: &str, source: &str) -> Vec<String> {
+    let normalized = source
+        .trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .split(['#', '?'])
+        .next()
+        .unwrap_or_default()
+        .replace('\\', "/");
+    let mut candidates = Vec::new();
+    if let Some(folder) = page_path.rsplit_once('/').map(|(folder, _)| folder) {
+        candidates.push(format!("{folder}/{normalized}"));
+    }
+    candidates.push(normalized.clone());
     if normalized.starts_with("sources/") {
         candidates.push(format!("wiki/{normalized}"));
     } else if !normalized.contains('/') {
         candidates.push(format!("wiki/sources/{normalized}"));
     }
     candidates
+}
+
+fn is_absolute_resource_ref(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with('/')
+        || trimmed.starts_with("//")
+        || (trimmed.len() >= 3
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.as_bytes()[1] == b':'
+            && (trimmed.as_bytes()[2] == b'/' || trimmed.as_bytes()[2] == b'\\'))
+}
+
+fn normalize_resource_path(path: &str) -> Option<String> {
+    let normalized_path = path.replace('\\', "/");
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in normalized_path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            value => segments.push(value),
+        }
+    }
+    (!segments.is_empty()).then(|| segments.join("/"))
+}
+
+fn extract_local_resource_refs(body: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(relative_start) = body[cursor..].find("](") {
+        let start = cursor + relative_start + 2;
+        let Some(relative_end) = body[start..].find(')') else {
+            break;
+        };
+        let end = start + relative_end;
+        let mut destination = body[start..end].trim();
+        if let Some(rest) = destination.strip_prefix('<') {
+            if let Some(close) = rest.find('>') {
+                destination = &rest[..close];
+            }
+        } else if let Some(path) = destination.split_whitespace().next() {
+            destination = path;
+        }
+        let cleaned = destination
+            .trim()
+            .split(['#', '?'])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if !cleaned.is_empty()
+            && !cleaned.starts_with('#')
+            && !cleaned.starts_with('/')
+            && !is_external(cleaned)
+            && !cleaned.starts_with("data:")
+        {
+            refs.push(cleaned.to_string());
+        }
+        cursor = end + 1;
+    }
+    refs
 }
 
 fn schema_source_issues(
@@ -493,6 +698,7 @@ fn local_issue(
         severity,
         issue_type,
         path: path.to_string(),
+        scan_hash: None,
         range: None,
         message: message.to_string(),
         evidence,
@@ -525,7 +731,10 @@ pub(super) fn lint_issue_type_id(issue_type: LintIssueType) -> &'static str {
 
 fn is_derived_page(page: &WikiPageMeta) -> bool {
     !is_structural_path(&page.path)
-        && !matches!(page.page_type, WikiPageType::Source | WikiPageType::Query)
+        && !matches!(
+            page.page_type,
+            WikiPageType::Source | WikiPageType::Query | WikiPageType::Other
+        )
         && !page.path.starts_with("wiki/sources/")
         && !page.path.starts_with("wiki/queries/")
 }
@@ -549,6 +758,7 @@ fn recognized_page_type(normalized: &str) -> Option<WikiPageType> {
         "index" => Some(WikiPageType::Index),
         "overview" => Some(WikiPageType::Overview),
         "log" | "changelog" => Some(WikiPageType::Log),
+        "other" => Some(WikiPageType::Other),
         _ => None,
     }
 }
@@ -585,6 +795,7 @@ fn has_human_readable_sources_section(body: &str) -> bool {
 fn check_structural_page_basics(
     context: &ProjectContext,
     pages: &[WikiPageMeta],
+    lookup: &HashMap<String, String>,
 ) -> Vec<LintIssue> {
     let mut issues = Vec::new();
     let overview_path = context.resolve_project_path("wiki/overview.md").ok();
@@ -608,15 +819,20 @@ fn check_structural_page_basics(
         .filter(|path| path.exists())
         .and_then(|path| std::fs::read_to_string(path).ok());
     if let Some(index) = index_raw {
+        let index_targets: HashSet<String> = extract_wikilinks(&split_frontmatter(&index).body)
+            .into_iter()
+            .filter_map(|target| lookup.get(&target.to_ascii_lowercase()).cloned())
+            .collect();
         for page in pages.iter().filter(|page| is_derived_page(page)) {
-            if let Some(stem) = file_stem(&page.path) {
-                if !index.contains(&format!("[[{stem}]]")) && !index.contains(&page.path) {
+            if !index_targets.contains(&page.path) {
+                if let Some(stem) = file_stem(&page.path) {
                     issues.push(LintIssue {
                         id: format!("index_drift:wiki/index.md:{stem}"),
                         source: LintIssueSource::Local,
                         severity: LintSeverity::Error,
                         issue_type: LintIssueType::IndexDrift,
                         path: "wiki/index.md".into(),
+                        scan_hash: None,
                         range: None,
                         message: format!("Index does not reference `{}`.", page.path),
                         evidence: None,
@@ -634,11 +850,26 @@ fn check_structural_page_basics(
 
 /// Find the 1-based body line of the first `[[target]]` occurrence.
 fn find_wikilink_line(body: &str, target: &str) -> Option<usize> {
-    let needle_plain = format!("[[{target}]]");
-    let needle_alias = format!("[[{target}|");
-    for (i, line) in body.lines().enumerate() {
-        if line.contains(&needle_plain) || line.contains(&needle_alias) {
-            return Some(i + 1);
+    let wanted = target.trim().replace('\\', "/").to_ascii_lowercase();
+    for (line_number, line) in body.lines().enumerate() {
+        let mut cursor = 0usize;
+        while let Some(relative_start) = line[cursor..].find("[[") {
+            let start = cursor + relative_start + 2;
+            let Some(relative_end) = line[start..].find("]]") else {
+                break;
+            };
+            let inner = &line[start..start + relative_end];
+            let destination = inner.split_once('|').map_or(inner, |(value, _)| value);
+            let destination = destination
+                .split_once('#')
+                .map_or(destination, |(value, _)| value)
+                .trim()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+            if destination == wanted {
+                return Some(line_number + 1);
+            }
+            cursor = start + relative_end + 2;
         }
     }
     None
@@ -685,7 +916,7 @@ mod tests {
         write_file(
             &context,
             "wiki/concepts/agent.md",
-            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nSee [[ghost]] and [[react]].",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nSee [[ghost]], [[concepts/react]], and [[wiki/concepts/react.md]].",
         );
         write_file(
             &context,
@@ -706,6 +937,9 @@ mod tests {
         assert_eq!(dead.target.as_deref(), Some("ghost"));
         assert_eq!(dead.range.as_ref().unwrap().line, 3);
         assert_eq!(dead.fixability, Fixability::HighRisk);
+        assert!(report.issues.iter().all(|issue| {
+            issue.issue_type != LintIssueType::DeadLink || issue.target.as_deref() == Some("ghost")
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -799,6 +1033,110 @@ mod tests {
         assert!(report.issues.iter().any(|i| {
             i.issue_type == LintIssueType::IndexDrift && i.target.as_deref() == Some("ghost")
         }));
+        assert!(!report
+            .issues
+            .iter()
+            .any(|i| { i.issue_type == LintIssueType::DeadLink && i.path == "wiki/index.md" }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_page_folder_is_not_marked_safe_for_frontmatter_autofix() {
+        let (context, root) = tmp_context("frontmatter-unknown-folder");
+        write_file(&context, "wiki/notes/bare.md", "# Bare\n\nContent.");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| {
+                issue.issue_type == LintIssueType::MissingFrontmatter
+                    && issue.path == "wiki/notes/bare.md"
+            })
+            .expect("missing frontmatter expected");
+        assert_eq!(issue.fixability, Fixability::None);
+        assert!(!report.issues.iter().any(|issue| {
+            matches!(
+                issue.issue_type,
+                LintIssueType::MissingSource | LintIssueType::MissingSourceSection
+            ) && issue.path == "wiki/notes/bare.md"
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn index_membership_resolves_page_titles_and_aliases() {
+        let (context, root) = tmp_context("index-alias");
+        write_file(
+            &context,
+            "wiki/concepts/agent-loop.md",
+            "---\ntitle: Agent Loop\ntype: concept\naliases: [Looping Agents]\n---\n\n# Agent Loop\n\nContent.",
+        );
+        write_file(
+            &context,
+            "wiki/index.md",
+            "# Index\n\n- [[Looping Agents]]\n",
+        );
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        assert!(!report.issues.iter().any(|issue| {
+            issue.issue_type == LintIssueType::IndexDrift
+                && issue.target.as_deref() == Some("agent-loop")
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dead_link_anchor_keeps_a_precise_body_line() {
+        let (context, root) = tmp_context("deadlink-anchor");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nSee [[ghost#intro|the missing section]].",
+        );
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.issue_type == LintIssueType::DeadLink)
+            .expect("anchor dead link expected");
+        assert_eq!(issue.target.as_deref(), Some("ghost"));
+        assert_eq!(issue.range.as_ref().map(|range| range.line), Some(3));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reports_missing_index_as_an_error_instead_of_silently_passing() {
+        let (context, root) = tmp_context("missing-index");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\nContent.",
+        );
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let index_issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.id == "index_drift:wiki/index.md:missing")
+            .expect("missing index should be reported");
+        assert_eq!(index_issue.severity, LintSeverity::Error);
+        assert_eq!(index_issue.fixability, Fixability::None);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -926,6 +1264,39 @@ mod tests {
         assert!(report.issues.iter().any(|i| {
             i.issue_type == LintIssueType::MissingResource
                 && i.target.as_deref() == Some("raw/sources/missing.md")
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn detects_missing_inline_image_and_accepts_relative_resource() {
+        let (context, root) = tmp_context("inline-resource");
+        write_file(
+            &context,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent\ntype: concept\n---\n\n# Agent\n\n![missing](../../raw/missing.png)\n![present](../../raw/present.png)\n![windows](C:/outside.png)\n![unc](//server/share/file.png)",
+        );
+        write_file(&context, "raw/present.png", "bytes");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        assert!(report.issues.iter().any(|issue| {
+            issue.issue_type == LintIssueType::MissingResource
+                && issue.target.as_deref() == Some("../../raw/missing.png")
+        }));
+        assert!(!report.issues.iter().any(|issue| {
+            issue.issue_type == LintIssueType::MissingResource
+                && issue.target.as_deref() == Some("../../raw/present.png")
+        }));
+        assert!(!report.issues.iter().any(|issue| {
+            issue.issue_type == LintIssueType::MissingResource
+                && matches!(
+                    issue.target.as_deref(),
+                    Some("C:/outside.png") | Some("//server/share/file.png")
+                )
         }));
         std::fs::remove_dir_all(root).unwrap();
     }

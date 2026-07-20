@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use crate::errors::BackendError;
@@ -64,6 +64,8 @@ pub struct ActionPreview {
 #[derive(Default)]
 pub struct ConfirmationRegistry {
     actions: Mutex<HashMap<String, StoredPendingAction>>,
+    executing: Mutex<HashSet<String>>,
+    cancel_requested: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +162,15 @@ impl ConfirmationRegistry {
                 false,
             )
         })?;
+        if actions.contains_key(&action.id) {
+            return Err(BackendError::new(
+                "CONFIRMATION_ID_CONFLICT",
+                "A confirmation with this action id is already pending.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "actionId": action.id })));
+        }
         actions.insert(action.id.clone(), StoredPendingAction { action, execution });
         Ok(())
     }
@@ -177,6 +188,16 @@ impl ConfirmationRegistry {
                 false,
             )
         })?;
+        let executing = self.executing.lock().map_err(|_| registry_locked())?;
+        if executing.contains(action_id) {
+            if status == ConfirmationStatus::Cancelled {
+                self.cancel_requested
+                    .lock()
+                    .map_err(|_| registry_locked())?
+                    .insert(action_id.to_string());
+            }
+            return Err(confirmation_in_use(action_id));
+        }
         let stored = actions.remove(action_id).ok_or_else(|| {
             BackendError::new(
                 "CONFIRMATION_NOT_FOUND",
@@ -197,7 +218,7 @@ impl ConfirmationRegistry {
     }
 
     pub fn peek(&self, action_id: &str) -> Result<StoredPendingAction, BackendError> {
-        let actions = self.actions.lock().map_err(|_| {
+        let mut actions = self.actions.lock().map_err(|_| {
             BackendError::new(
                 "CONFIRMATION_REGISTRY_LOCKED",
                 "Confirmation registry is unavailable.",
@@ -213,9 +234,108 @@ impl ConfirmationRegistry {
                 true,
             )
         })?;
-        reject_if_expired(&stored.action)?;
+        if let Err(error) = reject_if_expired(&stored.action) {
+            if error.code.starts_with("CONFIRMATION_EXPIRY") {
+                actions.remove(action_id);
+            }
+            return Err(error);
+        }
         Ok(stored)
     }
+
+    /// Claim an action for execution while keeping it in the registry. A
+    /// concurrent cancellation then fails closed instead of removing the
+    /// approval halfway through a destructive write.
+    pub fn claim(&self, action_id: &str) -> Result<StoredPendingAction, BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        let stored = actions.get(action_id).cloned().ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_NOT_FOUND",
+                "The pending action was not found or has already been handled.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "actionId": action_id }))
+        })?;
+        if let Err(error) = reject_if_expired(&stored.action) {
+            if error.code.starts_with("CONFIRMATION_EXPIRY") {
+                actions.remove(action_id);
+            }
+            return Err(error);
+        }
+        let mut executing = self.executing.lock().map_err(|_| registry_locked())?;
+        if !executing.insert(action_id.to_string()) {
+            return Err(confirmation_in_use(action_id));
+        }
+        Ok(stored)
+    }
+
+    /// Release a claimed action after execution. Keep it for retryable fix
+    /// failures; remove it only after the mutation commits successfully.
+    pub fn finish_claim(&self, action_id: &str, consume: bool) -> Result<(), BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        let mut executing = self.executing.lock().map_err(|_| registry_locked())?;
+        let mut cancel_requested = self
+            .cancel_requested
+            .lock()
+            .map_err(|_| registry_locked())?;
+        executing.remove(action_id);
+        let was_cancel_requested = cancel_requested.remove(action_id);
+        if consume || was_cancel_requested {
+            actions.remove(action_id).ok_or_else(|| {
+                BackendError::new(
+                    "CONFIRMATION_NOT_FOUND",
+                    "The pending action was not found or has already been handled.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "actionId": action_id }))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Consume an action only after its side effect has completed. Keeping
+    /// confirmation entries until then lets callers retry after validation,
+    /// Git, or filesystem failures without losing the user's approval.
+    pub fn consume(&self, action_id: &str) -> Result<StoredPendingAction, BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| {
+            BackendError::new(
+                "CONFIRMATION_REGISTRY_LOCKED",
+                "Confirmation registry is unavailable.",
+                true,
+                false,
+            )
+        })?;
+        actions.remove(action_id).ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_NOT_FOUND",
+                "The pending action was not found or has already been handled.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "actionId": action_id }))
+        })
+    }
+}
+
+fn registry_locked() -> BackendError {
+    BackendError::new(
+        "CONFIRMATION_REGISTRY_LOCKED",
+        "Confirmation registry is unavailable.",
+        true,
+        false,
+    )
+}
+
+fn confirmation_in_use(action_id: &str) -> BackendError {
+    BackendError::new(
+        "CONFIRMATION_IN_USE",
+        "This confirmation is already being executed.",
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({ "actionId": action_id }))
 }
 
 fn reject_if_expired(action: &PendingAction) -> Result<(), BackendError> {
@@ -365,5 +485,36 @@ mod tests {
             .confirm("expired-action", ConfirmationStatus::Confirmed)
             .expect_err("expired actions must fail safely");
         assert_eq!(err.code, "CONFIRMATION_EXPIRED");
+    }
+
+    #[test]
+    fn cancellation_during_claim_is_replayed_after_execution_releases() {
+        let registry = ConfirmationRegistry::default();
+        let action = PendingAction {
+            id: "claimed-action".to_string(),
+            action_type: PendingActionType::AgentAutoFix,
+            title: "Run fix".to_string(),
+            message: "Apply the approved fix".to_string(),
+            risk_level: RiskLevel::High,
+            affected_paths: Vec::new(),
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: None,
+        };
+        registry.register(action).unwrap();
+        registry.claim("claimed-action").unwrap();
+
+        let err = registry
+            .confirm("claimed-action", ConfirmationStatus::Cancelled)
+            .expect_err("cancellation should wait for the active claim");
+        assert_eq!(err.code, "CONFIRMATION_IN_USE");
+
+        // The cancellation request is remembered, so a failed execution
+        // cannot leave an orphaned confirmation after the project is reset.
+        registry.finish_claim("claimed-action", false).unwrap();
+        let err = registry
+            .confirm("claimed-action", ConfirmationStatus::Confirmed)
+            .expect_err("deferred cancellation should consume the action");
+        assert_eq!(err.code, "CONFIRMATION_NOT_FOUND");
     }
 }

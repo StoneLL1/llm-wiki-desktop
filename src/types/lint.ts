@@ -16,6 +16,8 @@ export type LintIssueType =
   | "duplicate_filename"
   | "path_case"
   | "missing_resource"
+  | "missing_source_section"
+  | "invalid_page_type"
   // Agent deep-lint rules.
   | "duplicate_topic"
   | "weak_cross_reference"
@@ -37,6 +39,8 @@ export interface LintIssue {
   severity: LintSeverity;
   issueType: LintIssueType;
   path: string;
+  /** Hash captured by the backend at scan time. */
+  scanHash?: string | null;
   range?: LintRange;
   message: string;
   evidence?: string;
@@ -116,6 +120,7 @@ export interface LintFixOutcome {
   kind: LintFixOutcomeKind;
   affectedPaths: string[];
   checkpoint?: string;
+  finalCommit?: string;
   pendingAction?: PendingAction;
 }
 
@@ -166,6 +171,7 @@ export interface LintBatchSkip {
 export interface LintBatchOutcome {
   /** Single Git checkpoint hash covering every applied safe fix. */
   checkpoint?: string;
+  finalCommit?: string;
   applied: LintFixOutcome[];
   needsConfirmation: LintBatchConfirmation[];
   skipped: LintBatchSkip[];

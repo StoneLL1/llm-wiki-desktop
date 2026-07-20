@@ -753,6 +753,7 @@ fn safety_loop_lint_fix_rejects_paths_outside_wiki() {
         target: None,
         fixability: Fixability::Safe,
         suggested_action: None,
+        scan_hash: None,
     };
     let err = LintService::default()
         .apply_fix(&context, &GitService, &issue, false, None)
@@ -795,6 +796,7 @@ fn safety_loop_lint_fix_applies_safe_fix_under_checkpoint() {
         target: None,
         fixability: Fixability::Safe,
         suggested_action: None,
+        scan_hash: None,
     };
     let outcome = LintService::default()
         .apply_fix(&context, &GitService, &issue, false, Some(&hash))

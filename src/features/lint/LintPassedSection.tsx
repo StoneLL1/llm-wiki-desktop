@@ -10,6 +10,8 @@ const PASSED_RULE_LABEL: Record<LintIssueType, string> = {
   duplicate_filename: "lint.passed.duplicateFilename",
   missing_resource: "lint.passed.missingResource",
   path_case: "lint.passed.pathCase",
+  missing_source_section: "",
+  invalid_page_type: "",
   // Rules without a "passed" badge (informational / Agent-side) are not listed.
   dead_link: "",
   orphan_page: "",
