@@ -68,8 +68,9 @@ pub struct LintRange {
 }
 
 /// A single lint finding. `id` is deterministic
-/// (`{issue_type}:{path}[:{target}]`) so the frontend can pass the issue back
-/// to `apply_lint_fix` statelessly without a server-side issue registry.
+/// (`{issue_type}:{path}[:{target}]`); the backend also carries a scan-time
+/// hash and validates the deterministic fix shape before accepting it back
+/// from the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LintIssue {
@@ -79,6 +80,10 @@ pub struct LintIssue {
     pub issue_type: LintIssueType,
     /// Project-relative path of the affected page.
     pub path: String,
+    /// Content hash captured when this finding was produced. Fix execution
+    /// must use this baseline instead of obtaining a fresh hash from the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<LintRange>,
     pub message: String,
@@ -102,10 +107,34 @@ pub struct LintReport {
 
 /// The shape the `wiki-lint` Skill emits inside its fenced JSON block. The
 /// backend maps each of these onto a [`LintIssue`] with `source = Agent`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepLintIssueType {
+    DuplicateTopic,
+    WeakCrossReference,
+    MissingSource,
+    SchemaMismatch,
+    OutdatedContent,
+    Contradiction,
+}
+
+impl From<DeepLintIssueType> for LintIssueType {
+    fn from(value: DeepLintIssueType) -> Self {
+        match value {
+            DeepLintIssueType::DuplicateTopic => Self::DuplicateTopic,
+            DeepLintIssueType::WeakCrossReference => Self::WeakCrossReference,
+            DeepLintIssueType::MissingSource => Self::MissingSource,
+            DeepLintIssueType::SchemaMismatch => Self::SchemaMismatch,
+            DeepLintIssueType::OutdatedContent => Self::OutdatedContent,
+            DeepLintIssueType::Contradiction => Self::Contradiction,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LintAgentIssue {
-    pub issue_type: LintIssueType,
+    pub issue_type: DeepLintIssueType,
     pub severity: LintSeverity,
     pub path: String,
     pub message: String,
@@ -225,8 +254,9 @@ pub struct GetDeepLintReportRequest {
     pub task_id: String,
 }
 
-/// The issue is passed back from the frontend so the fix path stays stateless
-/// (no server-side issue registry to keep in sync with the live wiki).
+/// The report issue is passed back from the frontend together with its
+/// server-generated scan hash; deterministic fix handlers validate both before
+/// writing.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyLintFixRequest {
@@ -268,6 +298,9 @@ pub struct LintBatchOutcome {
     /// point). `None` when no safe fixes ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
+    /// Commit created after all applied safe changes were verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_commit: Option<String>,
     /// Safe fixes that were written under the shared checkpoint.
     pub applied: Vec<LintFixOutcome>,
     /// High-risk fixes awaiting user confirmation. Each carries its source
@@ -348,6 +381,9 @@ pub struct LintFixOutcome {
     pub affected_paths: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
+    /// Commit created after the applied change was verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_action: Option<crate::models::confirmation::PendingAction>,
 }
@@ -373,6 +409,7 @@ mod tests {
             severity: LintSeverity::Warning,
             issue_type: LintIssueType::DeadLink,
             path: "wiki/a.md".into(),
+            scan_hash: Some("hash-a".into()),
             range: Some(LintRange {
                 line: 3,
                 column: None,
@@ -399,6 +436,7 @@ mod tests {
             kind: LintFixOutcomeKind::Applied,
             affected_paths: vec!["wiki/a.md".into()],
             checkpoint: Some("abc123".into()),
+            final_commit: Some("def456".into()),
             pending_action: None,
         };
         let value = serde_json::to_value(&applied).unwrap();
@@ -409,6 +447,7 @@ mod tests {
             kind: LintFixOutcomeKind::NeedsConfirmation,
             affected_paths: Vec::new(),
             checkpoint: None,
+            final_commit: None,
             pending_action: Some(PendingAction {
                 id: "pa-1".into(),
                 action_type: PendingActionType::AgentAutoFix,
@@ -441,7 +480,7 @@ mod tests {
             "suggestion": "Merge the two pages"
         }"#;
         let issue: LintAgentIssue = serde_json::from_str(raw).unwrap();
-        assert_eq!(issue.issue_type, LintIssueType::DuplicateTopic);
+        assert_eq!(issue.issue_type, DeepLintIssueType::DuplicateTopic);
         assert_eq!(issue.severity, LintSeverity::Warning);
         assert_eq!(issue.suggestion.as_deref(), Some("Merge the two pages"));
     }

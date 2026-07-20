@@ -46,7 +46,7 @@ describe("layout preference storage", () => {
         rightPanel: 100,
         wikiTree: Number.NaN,
         exportsList: 360,
-        lintList: -4,
+        lintDetails: -4,
       },
     });
 
@@ -55,7 +55,7 @@ describe("layout preference storage", () => {
     expect(snapshot.paneSizes.rightPanel).toBe(280);
     expect(snapshot.paneSizes.wikiTree).toBe(260);
     expect(snapshot.paneSizes.exportsList).toBe(360);
-    expect(snapshot.paneSizes.lintList).toBe(220);
+    expect(snapshot.paneSizes.lintDetails).toBe(280);
   });
 
   it("derives sidebar collapse from the sanitized width", () => {
@@ -78,7 +78,7 @@ describe("layout preference storage", () => {
         rightPanel: 420,
         wikiTree: 320,
         exportsList: 400,
-        lintList: 280,
+        lintDetails: 300,
       },
     });
 

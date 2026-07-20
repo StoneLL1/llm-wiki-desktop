@@ -7,24 +7,44 @@ use super::LintService;
 
 const LINT_IGNORE_PATH: &str = ".app/lint-ignore.json";
 
+fn valid_ignore_path(path: &str) -> bool {
+    path.starts_with("wiki/")
+        && path.ends_with(".md")
+        && !path.contains("..")
+        && !path.contains(char::from(92))
+}
+
 impl LintService {
     /// Read `.app/lint-ignore.json`. A missing file is the first-run default
-    /// (empty); an unreadable/corrupt file is logged and treated as empty so a
-    /// bad ignore list never blocks linting (mirrors the bookmarks reader).
-    pub(super) fn load_ignores(&self, context: &ProjectContext) -> LintIgnoreFile {
+    /// (empty). A corrupt file is surfaced explicitly because silently
+    /// disabling every ignore can make a clean-looking report misleading.
+    pub(super) fn load_ignores(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<LintIgnoreFile, BackendError> {
         match self
             .file_store
             .read_json::<LintIgnoreFile>(context, LINT_IGNORE_PATH)
         {
-            Ok(file) => file,
-            Err(err) if err.code == "FILE_READ_FAILED" => LintIgnoreFile::default(),
-            Err(err) => {
-                eprintln!(
-                    "[lint] ignoring unreadable {LINT_IGNORE_PATH} (treating as empty): {}",
-                    err.message
-                );
-                LintIgnoreFile::default()
+            Ok(file) => Ok(file),
+            Err(err) if err.code == "FILE_READ_FAILED" => {
+                if context.root.join(LINT_IGNORE_PATH).exists() {
+                    Err(BackendError::new(
+                        "LINT_IGNORE_READ_FAILED",
+                        format!("Could not read {LINT_IGNORE_PATH}: {}", err.message),
+                        true,
+                        true,
+                    ))
+                } else {
+                    Ok(LintIgnoreFile::default())
+                }
             }
+            Err(err) => Err(BackendError::new(
+                "LINT_IGNORE_READ_FAILED",
+                format!("Could not read {LINT_IGNORE_PATH}: {}", err.message),
+                true,
+                true,
+            )),
         }
     }
 
@@ -50,7 +70,7 @@ impl LintService {
         // issue paths (always `wiki/...`), so it has no file sink. Reject `..`
         // anyway at the boundary so crafted UI input can't persist traversal
         // strings into a project file.
-        if path.contains("..") {
+        if !valid_ignore_path(path) {
             return Err(BackendError::new(
                 "LINT_IGNORE_PATH_OUT_OF_SCOPE",
                 "Ignored paths must not escape the project folder.",
@@ -59,7 +79,15 @@ impl LintService {
             )
             .with_details(serde_json::json!({ "path": path })));
         }
-        let mut file = self.load_ignores(context);
+        let _guard = self.metadata_write_lock.lock().map_err(|_| {
+            BackendError::new(
+                "LINT_METADATA_LOCKED",
+                "Lint metadata is currently being updated by another operation.",
+                true,
+                true,
+            )
+        })?;
+        let mut file = self.load_ignores(context)?;
         if let Some(existing) = file
             .ignored
             .iter_mut()
@@ -84,7 +112,24 @@ impl LintService {
         path: &str,
         rule: LintIssueType,
     ) -> Result<LintIgnoreFile, BackendError> {
-        let mut file = self.load_ignores(context);
+        if !valid_ignore_path(path) {
+            return Err(BackendError::new(
+                "LINT_IGNORE_PATH_OUT_OF_SCOPE",
+                "Ignored paths must be wiki-relative Markdown paths.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": path })));
+        }
+        let _guard = self.metadata_write_lock.lock().map_err(|_| {
+            BackendError::new(
+                "LINT_METADATA_LOCKED",
+                "Lint metadata is currently being updated by another operation.",
+                true,
+                true,
+            )
+        })?;
+        let mut file = self.load_ignores(context)?;
         file.ignored
             .retain(|entry| !(entry.path == path && entry.rule == rule));
         self.save_ignores(context, &file)?;
@@ -93,7 +138,7 @@ impl LintService {
 
     /// Return the current ignore list (empty when none persisted).
     pub fn list_ignores(&self, context: &ProjectContext) -> Result<LintIgnoreFile, BackendError> {
-        Ok(self.load_ignores(context))
+        self.load_ignores(context)
     }
 }
 
@@ -195,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn run_local_lint_tolerates_corrupt_ignore_file() {
+    fn run_local_lint_reports_corrupt_ignore_file() {
         let (context, root) = tmp_context("ignore-corrupt");
         write_file(
             &context,
@@ -209,14 +254,11 @@ mod tests {
             ".app/lint-ignore.json",
             "{ this is not valid json",
         );
-        // A corrupt ignore file must not crash linting; it is treated as empty.
-        let report = LintService::default()
+        // A corrupt ignore file must not silently disable the user's ignores.
+        let err = LintService::default()
             .run_local_lint(&context, &SearchService::default())
-            .unwrap();
-        assert!(report
-            .issues
-            .iter()
-            .any(|i| i.issue_type == LintIssueType::DeadLink));
+            .expect_err("corrupt ignore config must be surfaced");
+        assert_eq!(err.code, "LINT_IGNORE_READ_FAILED");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

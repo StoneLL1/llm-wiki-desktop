@@ -1,5 +1,5 @@
-use std::io::{BufRead, BufReader, Read, Write};
 use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -10,8 +10,8 @@ use crate::errors::BackendError;
 use crate::models::agent::AgentConfig;
 use crate::models::agent::{AgentDetectionState, AgentInfo, AgentKind};
 use crate::models::paths::ProjectContext;
-use crate::services::FileStore;
 use crate::models::task::{TaskActivity, TaskActivityStatus};
+use crate::services::FileStore;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
@@ -38,6 +38,18 @@ pub trait ProcessRunner: Send + Sync {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError>;
+    /// Lint/deep analysis runs with a scrubbed runtime environment and an
+    /// explicit no-tools profile so wiki content cannot read host files,
+    /// inherit GUI provider configuration, or invoke project commands. Test
+    /// runners may safely fall back to their normal implementation.
+    fn run_task_streaming_isolated(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<String, BackendError> {
+        self.run_task_streaming(invocation, tasks, task_id)
+    }
     /// Import assistance captures stdout as an untrusted artifact and never
     /// persists raw stdout/stderr in the task log. Implementations may reuse
     /// their cancellable process runner, but must preserve that redaction.
@@ -203,8 +215,15 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
     pub fn detect_agents(&self, default_agent: Option<AgentKind>) -> Vec<AgentInfo> {
         AgentKind::ALL
             .into_iter()
-            .map(|kind| self.detect(kind, default_agent == Some(kind)))
+            .map(|kind| self.detect_agent(kind, default_agent == Some(kind)))
             .collect()
+    }
+
+    /// Probe one explicitly selected Agent. Route resolution should use this
+    /// narrow form so a lint request never executes every installed CLI just
+    /// to validate one candidate.
+    pub fn detect_agent(&self, kind: AgentKind, is_default: bool) -> AgentInfo {
+        self.detect(kind, is_default)
     }
 
     fn detect(&self, kind: AgentKind, is_default: bool) -> AgentInfo {
@@ -454,15 +473,19 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 stdin: Some(prompt_owned),
                 cwd,
             },
-            AgentKind::Openclaw | AgentKind::Hermes => {
-                return Err(unsupported_convenience_agent(kind))
-            }
+            AgentKind::Openclaw | AgentKind::Hermes => return Err(unsupported_chat_agent(kind)),
         };
         Ok(invocation)
     }
 
     pub fn supports_read_only_project_chat(kind: AgentKind) -> bool {
         matches!(kind, AgentKind::Claude | AgentKind::Codex)
+    }
+
+    /// Deep Lint is intentionally limited to BYOK until a credential broker
+    /// can guarantee both isolated credentials and a verified no-tools CLI.
+    pub fn supports_lint_agent(_kind: AgentKind) -> bool {
+        false
     }
 
     pub fn supports_convenience_project_chat(kind: AgentKind) -> bool {
@@ -489,29 +512,33 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     "--output-format".into(),
                     "stream-json".into(),
                     "--verbose".into(),
-                    prompt_owned,
+                    "--permission-mode".into(),
+                    "dontAsk".into(),
+                    "--tools".into(),
+                    "".into(),
                 ],
-                stdin: None,
+                stdin: Some(prompt_owned),
                 cwd,
             },
             AgentKind::Codex => AgentInvocation {
                 program: "codex".into(),
-                args: vec!["exec".into(), "--json".into(), "-".into()],
+                args: vec![
+                    "exec".into(),
+                    "--json".into(),
+                    "--ephemeral".into(),
+                    "--ignore-rules".into(),
+                    "--ignore-user-config".into(),
+                    "--sandbox".into(),
+                    "read-only".into(),
+                    "--skip-git-repo-check".into(),
+                    "-C".into(),
+                    workspace.to_string_lossy().into_owned(),
+                    "-".into(),
+                ],
                 stdin: Some(prompt_owned),
                 cwd,
             },
-            AgentKind::Openclaw => AgentInvocation {
-                program: "openclaw".into(),
-                args: vec!["agent".into(), "--message".into(), prompt_owned, "--json".into()],
-                stdin: None,
-                cwd,
-            },
-            AgentKind::Hermes => AgentInvocation {
-                program: "hermes".into(),
-                args: vec!["--prompt".into(), prompt_owned, "--json".into()],
-                stdin: None,
-                cwd,
-            },
+            AgentKind::Openclaw | AgentKind::Hermes => return Err(unsupported_lint_agent(kind)),
         };
         Ok(invocation)
     }
@@ -549,7 +576,12 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             },
             AgentKind::Openclaw => AgentInvocation {
                 program: "openclaw".into(),
-                args: vec!["agent".into(), "--message".into(), prompt_owned, "--json".into()],
+                args: vec![
+                    "agent".into(),
+                    "--message".into(),
+                    prompt_owned,
+                    "--json".into(),
+                ],
                 stdin: None,
                 cwd,
             },
@@ -621,15 +653,32 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 } else {
                     TaskActivityStatus::Failed
                 },
-                label: Some(if result.is_ok() {
-                    "Agent response ready"
-                } else {
-                    "Agent response failed"
-                }
-                .into()),
+                label: Some(
+                    if result.is_ok() {
+                        "Agent response ready"
+                    } else {
+                        "Agent response failed"
+                    }
+                    .into(),
+                ),
             },
         );
         result
+    }
+
+    pub fn run_lint_streaming(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<String, BackendError> {
+        let _ = (invocation, tasks, task_id);
+        Err(BackendError::new(
+            "LINT_AGENT_UNAVAILABLE",
+            "CLI Agent deep lint is disabled until a verified credential/no-tools broker is available. Switch to BYOK.",
+            true,
+            true,
+        ))
     }
 
     pub fn run_import_assistance(
@@ -647,12 +696,9 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 label: Some("Running Import assistance".into()),
             },
         );
-        let result = self.runner.run_import_assistance_with_events(
-            invocation,
-            tasks,
-            task_id,
-            &on_activity,
-        );
+        let result =
+            self.runner
+                .run_import_assistance_with_events(invocation, tasks, task_id, &on_activity);
         tasks.emit_activity(
             task_id,
             TaskActivity::Phase {
@@ -662,12 +708,14 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 } else {
                     TaskActivityStatus::Failed
                 },
-                label: Some(if result.is_ok() {
-                    "Import candidate ready"
-                } else {
-                    "Import assistance failed"
-                }
-                .into()),
+                label: Some(
+                    if result.is_ok() {
+                        "Import candidate ready"
+                    } else {
+                        "Import assistance failed"
+                    }
+                    .into(),
+                ),
             },
         );
         result
@@ -764,6 +812,15 @@ impl ProcessRunner for SystemProcessRunner {
         task_id: &str,
     ) -> Result<String, BackendError> {
         self.run_task_streaming_with_delta(invocation, tasks, task_id, &|_| {})
+    }
+
+    fn run_task_streaming_isolated(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<String, BackendError> {
+        run_streaming_process_with_events(invocation, tasks, task_id, &|_| {}, &|_| {}, false)
     }
 
     fn run_import_assistance(
@@ -1018,7 +1075,10 @@ impl AgentOutputParser {
             text: None,
             activities: Vec::new(),
         };
-        let event_type = value.get("type").and_then(|value| value.as_str()).unwrap_or("");
+        let event_type = value
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
 
         if event_type == "stream_event" {
             if let Some(event) = value.get("event") {
@@ -1031,7 +1091,10 @@ impl AgentOutputParser {
         } else if event_type == "result" {
             self.finish_thinking(&mut parsed);
             if !self.saw_text {
-                parsed.text = value.get("result").and_then(|value| value.as_str()).map(str::to_string);
+                parsed.text = value
+                    .get("result")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
             }
         }
 
@@ -1071,11 +1134,18 @@ impl AgentOutputParser {
     }
 
     fn parse_claude_event(&mut self, event: &serde_json::Value, parsed: &mut ParsedAgentLine) {
-        let event_type = event.get("type").and_then(|value| value.as_str()).unwrap_or("");
+        let event_type = event
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         match event_type {
             "content_block_delta" => {
                 let delta = event.get("delta").unwrap_or(&serde_json::Value::Null);
-                match delta.get("type").and_then(|value| value.as_str()).unwrap_or("") {
+                match delta
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                {
                     "thinking_delta" => self.start_thinking(parsed, "正在分析任务"),
                     "text_delta" => {
                         self.finish_thinking(parsed);
@@ -1108,7 +1178,11 @@ impl AgentOutputParser {
     }
 
     fn parse_content_block(&mut self, block: &serde_json::Value, parsed: &mut ParsedAgentLine) {
-        match block.get("type").and_then(|value| value.as_str()).unwrap_or("") {
+        match block
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+        {
             "thinking" => self.start_thinking(parsed, "正在分析任务"),
             "tool_use" => {
                 let call_id = block
@@ -1131,19 +1205,37 @@ impl AgentOutputParser {
                     .and_then(|value| value.as_str())
                     .unwrap_or("tool")
                     .to_string();
-                let success = !block.get("is_error").and_then(|value| value.as_bool()).unwrap_or(false);
+                let success = !block
+                    .get("is_error")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
                 parsed.activities.push(TaskActivity::ToolResult {
                     call_id,
                     success,
-                    summary: Some(if success { "工具执行完成" } else { "工具执行失败" }.into()),
+                    summary: Some(
+                        if success {
+                            "工具执行完成"
+                        } else {
+                            "工具执行失败"
+                        }
+                        .into(),
+                    ),
                 });
             }
             _ => {}
         }
     }
 
-    fn parse_item(&mut self, item: &serde_json::Value, completed: bool, parsed: &mut ParsedAgentLine) {
-        let item_type = item.get("type").and_then(|value| value.as_str()).unwrap_or("");
+    fn parse_item(
+        &mut self,
+        item: &serde_json::Value,
+        completed: bool,
+        parsed: &mut ParsedAgentLine,
+    ) {
+        let item_type = item
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         if matches!(item_type, "reasoning" | "thinking") {
             self.start_thinking(parsed, "正在分析任务");
             return;
@@ -1191,7 +1283,14 @@ impl AgentOutputParser {
                 parsed.activities.push(TaskActivity::ToolResult {
                     call_id,
                     success,
-                    summary: Some(if success { "工具执行完成" } else { "工具执行失败" }.into()),
+                    summary: Some(
+                        if success {
+                            "工具执行完成"
+                        } else {
+                            "工具执行失败"
+                        }
+                        .into(),
+                    ),
                 });
             } else {
                 self.push_tool_call(&call_id, &name, Some(item), parsed);
@@ -1208,7 +1307,10 @@ impl AgentOutputParser {
         // OpenClaw/Hermes versions expose slightly different JSON envelopes.
         // Accept only obvious visible-text fields and never treat a
         // reasoning/thinking field as answer text.
-        if !event_type.contains("reasoning") && !event_type.contains("thinking") && parsed.text.is_none() {
+        if !event_type.contains("reasoning")
+            && !event_type.contains("thinking")
+            && parsed.text.is_none()
+        {
             let text = ["text", "output", "content", "message"]
                 .iter()
                 .find_map(|key| value.get(*key).and_then(|candidate| candidate.as_str()))
@@ -1239,7 +1341,12 @@ impl AgentOutputParser {
             let success = value
                 .get("success")
                 .and_then(|candidate| candidate.as_bool())
-                .or_else(|| value.get("is_error").and_then(|candidate| candidate.as_bool()).map(|error| !error))
+                .or_else(|| {
+                    value
+                        .get("is_error")
+                        .and_then(|candidate| candidate.as_bool())
+                        .map(|error| !error)
+                })
                 .unwrap_or(true);
             parsed.activities.push(TaskActivity::ToolResult {
                 call_id: call_id.into(),
@@ -1361,13 +1468,19 @@ fn activity_log_text(activity: &TaskActivity) -> String {
     match activity {
         TaskActivity::Phase { name, status, .. } => format!("Phase {name}: {status:?}"),
         TaskActivity::Thinking { status, .. } => format!("Thinking: {status:?}"),
-        TaskActivity::ToolCall { name, detail, .. } => {
-            detail.as_ref().map(|detail| format!("{name}: {detail}"))
-                .unwrap_or_else(|| format!("Tool: {name}"))
-        }
-        TaskActivity::ToolResult { success, summary, .. } => summary
-            .clone()
-            .unwrap_or_else(|| if *success { "Tool completed".into() } else { "Tool failed".into() }),
+        TaskActivity::ToolCall { name, detail, .. } => detail
+            .as_ref()
+            .map(|detail| format!("{name}: {detail}"))
+            .unwrap_or_else(|| format!("Tool: {name}")),
+        TaskActivity::ToolResult {
+            success, summary, ..
+        } => summary.clone().unwrap_or_else(|| {
+            if *success {
+                "Tool completed".into()
+            } else {
+                "Tool failed".into()
+            }
+        }),
     }
 }
 
@@ -1376,7 +1489,10 @@ fn safe_tool_detail(name: &str, input: &serde_json::Value) -> Option<String> {
     if normalized.contains("bash") || normalized.contains("command") || normalized == "shell" {
         return Some("controlled-command".into());
     }
-    let keys = if normalized.contains("grep") || normalized.contains("glob") || normalized.contains("search") {
+    let keys = if normalized.contains("grep")
+        || normalized.contains("glob")
+        || normalized.contains("search")
+    {
         ["pattern", "query", "path", "file_path", "description"]
     } else {
         ["file_path", "path", "pattern", "query", "description"]
@@ -1438,6 +1554,21 @@ fn harden_import_environment(command: &mut Command, workspace: &Path) -> Result<
         .into_iter()
         .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
         .collect::<Vec<_>>();
+    // Import assistance needs the selected provider's own login state, but
+    // still receives an isolated HOME/USERPROFILE and a scrubbed environment.
+    // Deep Lint never reaches this runner: run_lint_streaming fails closed
+    // until a broker can provide an explicit no-tools credential contract.
+    let user_home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from);
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| user_home.as_ref().map(|home| home.join(".codex")))
+        .filter(|path| path.is_dir());
+    let claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| user_home.as_ref().map(|home| home.join(".claude")))
+        .filter(|path| path.is_dir());
     command.env_clear();
     for (name, value) in inherited {
         command.env(name, value);
@@ -1445,10 +1576,15 @@ fn harden_import_environment(command: &mut Command, workspace: &Path) -> Result<
     command
         .env("HOME", &runtime_home)
         .env("USERPROFILE", &runtime_home)
-        .env("CLAUDE_CONFIG_DIR", &runtime_home)
         .env("TEMP", &runtime_temp)
         .env("TMP", &runtime_temp)
         .env("NO_COLOR", "1");
+    if let Some(path) = codex_home {
+        command.env("CODEX_HOME", path);
+    }
+    if let Some(path) = claude_config_dir {
+        command.env("CLAUDE_CONFIG_DIR", path);
+    }
     Ok(())
 }
 
@@ -2232,11 +2368,11 @@ fn unsupported_chat_agent(kind: AgentKind) -> BackendError {
     )
 }
 
-fn unsupported_convenience_agent(kind: AgentKind) -> BackendError {
+fn unsupported_lint_agent(kind: AgentKind) -> BackendError {
     BackendError::new(
-        "CHAT_AGENT_UNSUPPORTED",
+        "LINT_AGENT_PROFILE_UNSUPPORTED",
         format!(
-            "{} does not expose a supported Chat convenience profile without long prompt argv. Use Claude or Codex.",
+            "{} does not expose a verified read-only, no-tools Lint profile. Use Claude, Codex, or BYOK.",
             kind.command()
         ),
         true,
@@ -2459,6 +2595,29 @@ mod tests {
                 invocation.args
             );
         }
+        let lint_claude =
+            AgentService::lint_invocation(AgentKind::Claude, &workspace, "lint").unwrap();
+        assert!(
+            lint_claude
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--tools", ""]),
+            "Lint Claude profile must disable file tools: {:?}",
+            lint_claude.args
+        );
+        let lint_codex =
+            AgentService::lint_invocation(AgentKind::Codex, &workspace, "lint").unwrap();
+        assert!(lint_codex
+            .args
+            .contains(&"--ignore-user-config".to_string()));
+        assert!(
+            !lint_codex
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--config", "tools=[]"]),
+            "Lint Codex profile must not claim an unsupported tools=[] setting: {:?}",
+            lint_codex.args
+        );
     }
 
     #[test]
@@ -2518,10 +2677,10 @@ mod tests {
         let completed = parser.parse(
             r#"{"type":"item.completed","item":{"id":"cmd-1","type":"command_execution","exit_code":0}}"#,
         );
-        assert!(completed.activities.iter().any(|activity| matches!(
-            activity,
-            TaskActivity::ToolResult { success: true, .. }
-        )));
+        assert!(completed
+            .activities
+            .iter()
+            .any(|activity| matches!(activity, TaskActivity::ToolResult { success: true, .. })));
         let delta = parser.parse(r#"{"type":"response.output_text.delta","delta":"done"}"#);
         assert_eq!(delta.text.as_deref(), Some("done"));
     }

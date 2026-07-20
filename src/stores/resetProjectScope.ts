@@ -8,6 +8,11 @@ import { useNavigationStore } from "./navigationStore";
 import { useSettingsStore } from "./settingsStore";
 
 export function resetProjectScopedStores(): void {
+  // Project switching is synchronous for the shell, but do not discard lint
+  // confirmations before giving the app-global backend registry a chance to
+  // cancel them. The store reset still proceeds immediately; cancellation is
+  // best-effort and expired actions are rejected server-side.
+  void useLintStore.getState().cancelPendingActions();
   useImportStore.getState().resetProjectPresentation("");
   useWikiStore.getState().reset();
   useChatStore.getState().reset();

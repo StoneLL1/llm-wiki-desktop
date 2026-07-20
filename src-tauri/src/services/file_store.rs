@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
@@ -10,6 +11,8 @@ use crate::utils::path_utils::normalize_project_path;
 
 #[derive(Default)]
 pub struct FileStore;
+
+static GUARDED_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "hash")]
@@ -65,9 +68,43 @@ impl FileStore {
         contents: &str,
         mode: WriteMode,
     ) -> Result<(), BackendError> {
+        let _guard = GUARDED_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| {
+                BackendError::new(
+                    "FILE_WRITE_LOCK_FAILED",
+                    "Another guarded file write is currently running.",
+                    true,
+                    false,
+                )
+            })?;
         let path = context.resolve_project_path(relative_path)?;
-        self.verify_write_mode(&path, relative_path, mode)?;
-        write_text(&path, contents)
+        self.verify_write_mode(&path, relative_path, mode.clone())?;
+        write_text(&path, contents)?;
+        // The hash check and atomic rename cannot form an OS-level compare-and
+        // swap for edits made by an external editor. Verify the postcondition
+        // immediately so a racing replacement is reported and never enters
+        // the Lint verification/rollback path as if our content were present.
+        if let WriteMode::OverwriteIfHashMatches(expected_hash) = mode {
+            let expected_new_hash = hash_bytes(contents.as_bytes());
+            let actual_hash = hash_file(&path)?;
+            if actual_hash != expected_new_hash {
+                return Err(BackendError::new(
+                    "FILE_CHANGED_DURING_WRITE",
+                    "The file changed while the guarded write was completing; no rollback was attempted.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "path": relative_path,
+                    "expectedHash": expected_hash,
+                    "writtenHash": expected_new_hash,
+                    "actualHash": actual_hash,
+                })));
+            }
+        }
+        Ok(())
     }
 
     pub fn write_text_absolute(&self, path: &Path, contents: &str) -> Result<(), BackendError> {
@@ -104,6 +141,17 @@ impl FileStore {
         relative_path: &str,
         value: &T,
     ) -> Result<(), BackendError> {
+        let _guard = GUARDED_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| {
+                BackendError::new(
+                    "FILE_WRITE_LOCK_FAILED",
+                    "Another guarded file write is currently running.",
+                    true,
+                    false,
+                )
+            })?;
         let path = context.resolve_project_path(relative_path)?;
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
@@ -118,6 +166,17 @@ impl FileStore {
         value: &T,
         mode: WriteMode,
     ) -> Result<(), BackendError> {
+        let _guard = GUARDED_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| {
+                BackendError::new(
+                    "FILE_WRITE_LOCK_FAILED",
+                    "Another guarded file write is currently running.",
+                    true,
+                    false,
+                )
+            })?;
         let path = context.resolve_project_path(relative_path)?;
         self.verify_write_mode(&path, relative_path, mode)?;
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
@@ -249,9 +308,13 @@ impl FileStore {
 
 fn hash_file(path: &Path) -> Result<String, BackendError> {
     let bytes = fs::read(path).map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
+    Ok(hash_bytes(&bytes))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+    format!("{:x}", hasher.finalize())
 }
 
 fn write_text(path: &Path, contents: &str) -> Result<(), BackendError> {

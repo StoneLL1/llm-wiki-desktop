@@ -8,6 +8,7 @@ import type { LintIssue, LintSeverity } from "../../types/lint";
 interface LintIssueListProps {
   issues: LintIssue[];
   selectedIssueId: string | null;
+  actionsDisabled?: boolean;
   onSelect: (issueId: string) => void;
   onApplyFix: (issue: LintIssue) => void;
 }
@@ -44,6 +45,7 @@ function subLine(issue: LintIssue): string {
 export function LintIssueList({
   issues,
   selectedIssueId,
+  actionsDisabled = false,
   onSelect,
   onApplyFix,
 }: LintIssueListProps) {
@@ -67,14 +69,14 @@ export function LintIssueList({
 
   if (issues.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center px-6 py-8 text-center text-[12px] text-[var(--text-muted)]">
+      <div className="flex min-h-0 flex-1 items-center justify-center px-6 py-8 text-center text-[12px] text-[var(--text-muted)]">
         {t("lint.list.empty")}
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       {grouped.map(([key, group]) => {
         const first = group[0]!;
         return (
@@ -85,53 +87,55 @@ export function LintIssueList({
             {group.map((issue) => {
               const Icon = SEVERITY_ICON[issue.severity];
               const active = issue.id === selectedIssueId;
-              const fixable = issue.fixability !== "none";
+              // A persisted finding without its scan baseline is stale. Keep
+              // it selectable for details/rescan, but never expose a Fix
+              // action that the backend must reject with a hash error.
+              const fixable = issue.fixability !== "none" && Boolean(issue.scanHash);
               return (
                 <div
                   key={issue.id}
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={active}
-                  onClick={() => onSelect(issue.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      onSelect(issue.id);
-                    }
-                  }}
-                  className={`issue-card ${active ? "is-selected" : ""}`}
+                  className={`issue-card-shell ${active ? "is-selected" : ""}`}
                 >
-                  <span className={`issue-card__icon ${SEVERITY_ICON_COLOR[issue.severity]}`}>
-                    <Icon size={16} aria-hidden="true" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="issue-card__title">
-                      {t(`lint.issueType.${issue.issueType}`)}
+                  <button
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => onSelect(issue.id)}
+                    className="issue-card"
+                  >
+                    <span className={`issue-card__icon ${SEVERITY_ICON_COLOR[issue.severity]}`}>
+                      <Icon size={16} aria-hidden="true" />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="issue-card__title">
+                        {t(`lint.issueType.${issue.issueType}`)}
+                      </div>
+                      <div className="issue-card__sub">{subLine(issue)}</div>
+                      <div className="issue-card__tags">
+                        <span className={SEVERITY_BADGE[issue.severity]}>
+                          {t(`lint.severity.${issue.severity}`)}
+                        </span>
+                        <span className="badge">{t(`lint.issueType.${issue.issueType}`)}</span>
+                        <span className="badge">{t(`lint.source.${issue.source}`)}</span>
+                        {fixable && issue.fixability === "safe" ? (
+                          <span className="badge badge--outline">{t("lint.tag.autoFixable")}</span>
+                        ) : null}
+                        {fixable && issue.fixability === "high_risk" ? (
+                          <span className="badge badge--warn">{t("lint.tag.highRisk")}</span>
+                        ) : null}
+                      </div>
                     </div>
-                    <div className="issue-card__sub">{subLine(issue)}</div>
-                    <div className="issue-card__tags">
-                      <span className={SEVERITY_BADGE[issue.severity]}>
-                        {t(`lint.severity.${issue.severity}`)}
-                      </span>
-                      <span className="badge">{t(`lint.issueType.${issue.issueType}`)}</span>
-                      <span className="badge">{t(`lint.source.${issue.source}`)}</span>
-                      {issue.fixability === "safe" ? (
-                        <span className="badge badge--outline">{t("lint.tag.autoFixable")}</span>
-                      ) : null}
-                      {issue.fixability === "high_risk" ? (
-                        <span className="badge badge--warn">{t("lint.tag.highRisk")}</span>
-                      ) : null}
-                    </div>
-                  </div>
+                  </button>
                   <div className="issue-card__actions">
                     {fixable ? (
                       <button
                         type="button"
                         onClick={(event) => {
                           event.stopPropagation();
+                          if (actionsDisabled) return;
                           onSelect(issue.id);
-                          onApplyFix(issue);
+                          if (issue.fixability === "safe") onApplyFix(issue);
                         }}
+                        disabled={actionsDisabled}
                         className="h-[26px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-2.5 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)]"
                       >
                         {issue.fixability === "high_risk"

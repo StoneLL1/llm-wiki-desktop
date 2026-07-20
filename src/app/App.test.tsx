@@ -79,7 +79,7 @@ beforeEach(() => {
   useNavigationStore.getState().resetPaneSize("rightPanel");
   useNavigationStore.getState().resetPaneSize("wikiTree");
   useNavigationStore.getState().resetPaneSize("exportsList");
-  useNavigationStore.getState().resetPaneSize("lintList");
+  useNavigationStore.getState().resetPaneSize("lintDetails");
   useProjectStore.getState().setCurrentProject(
     sampleProject({
       rootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",

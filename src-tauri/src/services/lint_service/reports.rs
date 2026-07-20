@@ -24,13 +24,21 @@ impl LintService {
             local_report: Some(report.clone()),
             deep_report: None,
         };
+        let _guard = self.metadata_write_lock.lock().map_err(|_| {
+            BackendError::new(
+                "LINT_METADATA_LOCKED",
+                "Lint metadata is currently being updated by another operation.",
+                true,
+                true,
+            )
+        })?;
         self.file_store.ensure_dir(context, LINT_REPORTS_DIR)?;
         self.file_store.write_json_atomic(
             context,
             &format!("{LINT_REPORTS_DIR}/{id}.json"),
             &persisted,
         )?;
-        self.record_history_entry(context, entry.clone())?;
+        self.record_history_entry_locked(context, entry.clone())?;
         Ok(entry)
     }
 
@@ -47,13 +55,21 @@ impl LintService {
             local_report: None,
             deep_report: Some(report.clone()),
         };
+        let _guard = self.metadata_write_lock.lock().map_err(|_| {
+            BackendError::new(
+                "LINT_METADATA_LOCKED",
+                "Lint metadata is currently being updated by another operation.",
+                true,
+                true,
+            )
+        })?;
         self.file_store.ensure_dir(context, LINT_REPORTS_DIR)?;
         self.file_store.write_json_atomic(
             context,
             &format!("{LINT_REPORTS_DIR}/{task_id}.json"),
             &persisted,
         )?;
-        self.record_history_entry(context, entry.clone())?;
+        self.record_history_entry_locked(context, entry.clone())?;
         Ok(entry)
     }
 
@@ -61,7 +77,7 @@ impl LintService {
         &self,
         context: &ProjectContext,
     ) -> Result<LintHistoryFile, BackendError> {
-        Ok(self.load_history(context))
+        self.load_history(context)
     }
 
     pub fn read_lint_history_report(
@@ -93,7 +109,7 @@ impl LintService {
         }
     }
 
-    fn load_history(&self, context: &ProjectContext) -> LintHistoryFile {
+    fn load_history(&self, context: &ProjectContext) -> Result<LintHistoryFile, BackendError> {
         match self
             .file_store
             .read_json::<LintHistoryFile>(context, LINT_HISTORY_PATH)
@@ -102,37 +118,86 @@ impl LintService {
                 file.version = 1;
                 file.entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                 file.entries.truncate(LINT_HISTORY_LIMIT);
-                file
+                Ok(file)
             }
-            Err(err) if err.code == "FILE_READ_FAILED" => LintHistoryFile {
-                version: 1,
-                entries: Vec::new(),
-            },
-            Err(err) => {
-                eprintln!(
-                    "[lint] ignoring unreadable {LINT_HISTORY_PATH}: {}",
-                    err.message
-                );
-                LintHistoryFile {
-                    version: 1,
-                    entries: Vec::new(),
+            Err(err) if err.code == "FILE_READ_FAILED" => {
+                if context.root.join(LINT_HISTORY_PATH).exists() {
+                    Err(BackendError::new(
+                        "LINT_HISTORY_READ_FAILED",
+                        format!("Could not read {LINT_HISTORY_PATH}: {}", err.message),
+                        true,
+                        true,
+                    ))
+                } else {
+                    Ok(LintHistoryFile {
+                        version: 1,
+                        entries: Vec::new(),
+                    })
                 }
             }
+            Err(err) => Err(BackendError::new(
+                "LINT_HISTORY_READ_FAILED",
+                format!("Could not read {LINT_HISTORY_PATH}: {}", err.message),
+                true,
+                true,
+            )),
         }
     }
 
-    fn record_history_entry(
+    fn record_history_entry_locked(
         &self,
         context: &ProjectContext,
         entry: LintHistoryEntry,
     ) -> Result<(), BackendError> {
-        let mut file = self.load_history(context);
+        let mut file = self.load_history(context)?;
+        let previous_ids: std::collections::HashSet<String> = file
+            .entries
+            .iter()
+            .map(|existing| existing.id.clone())
+            .collect();
         file.entries.retain(|existing| existing.id != entry.id);
         file.entries.insert(0, entry);
         file.entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         file.entries.truncate(LINT_HISTORY_LIMIT);
         self.file_store
-            .write_json_atomic(context, LINT_HISTORY_PATH, &file)
+            .write_json_atomic(context, LINT_HISTORY_PATH, &file)?;
+        let retained_ids: std::collections::HashSet<&str> = file
+            .entries
+            .iter()
+            .map(|existing| existing.id.as_str())
+            .collect();
+        let removed_ids: Vec<String> = previous_ids
+            .into_iter()
+            .filter(|id| !retained_ids.contains(id.as_str()))
+            .collect();
+        self.prune_report_bodies(context, &removed_ids)?;
+        Ok(())
+    }
+
+    fn prune_report_bodies(
+        &self,
+        context: &ProjectContext,
+        removed_ids: &[String],
+    ) -> Result<(), BackendError> {
+        let report_dir = context.app_dir.join("lint-reports");
+        if !report_dir.exists() {
+            return Ok(());
+        }
+        for id in removed_ids {
+            reject_report_id(id)?;
+            let path = report_dir.join(format!("{id}.json"));
+            if path.exists() {
+                std::fs::remove_file(&path).map_err(|err| {
+                    BackendError::new(
+                        "LINT_HISTORY_PRUNE_FAILED",
+                        format!("Could not remove stale lint report {id}: {err}"),
+                        true,
+                        true,
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 

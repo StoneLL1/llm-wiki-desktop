@@ -17,7 +17,7 @@ describe("navigationStore layout preferences", () => {
         rightPanel: 320,
         wikiTree: 260,
         exportsList: 360,
-        lintList: 360,
+        lintDetails: 320,
       },
     });
   });

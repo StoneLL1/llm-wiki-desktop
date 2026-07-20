@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../../i18n";
 import { useLintStore } from "../../stores/lintStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { LintIssueDetails } from "./LintIssueDetails";
 import { LintView } from "./LintView";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -38,10 +39,10 @@ describe("LintView", () => {
     expect(screen.getByText(/Run a lint pass to see findings/i)).toBeInTheDocument();
   });
 
-  it("exposes a resizable lint issue list splitter", () => {
+  it("exposes a resizable lint details splitter", () => {
     useProjectStore.setState({ currentProject: PROJECT } as never);
     render(<LintView />);
-    expect(screen.getByRole("separator", { name: "Resize lint issue list" })).toHaveAttribute("aria-valuenow", "360");
+    expect(screen.getByRole("separator", { name: "Resize lint issue details" })).toHaveAttribute("aria-valuenow", "320");
   });
 
   it("renders grouped local findings with their type label and tags", () => {
@@ -57,6 +58,7 @@ describe("LintView", () => {
             message: "Unresolved",
             target: "ghost",
             fixability: "high_risk",
+            scanHash: "hash-a",
           },
         ],
         generatedAt: "2026-06-20T00:00:00Z",
@@ -85,6 +87,7 @@ describe("LintView", () => {
             path: "wiki/a.md",
             message: "No frontmatter",
             fixability: "safe",
+            scanHash: "hash-a",
           },
         ],
         generatedAt: "2026-06-20T00:00:00Z",
@@ -208,5 +211,57 @@ describe("LintView", () => {
     const row = await screen.findByRole("button", { name: /Local lint/i });
     fireEvent.click(row);
     expect(await screen.findByRole("status")).toHaveTextContent("bad json");
+  });
+
+  it("offers a restore action for persisted ignores and refreshes local lint", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_lint_ignores") {
+        return Promise.resolve({
+          ignored: [{ path: "wiki/a.md", rule: "dead_link", createdAt: "2026-07-04T00:00:00Z" }],
+        });
+      }
+      if (command === "list_lint_history") return Promise.resolve({ version: 1, entries: [] });
+      if (command === "remove_lint_ignore") return Promise.resolve({ ignored: [] });
+      if (command === "run_local_lint") {
+        return Promise.resolve({ issues: [], generatedAt: "2026-07-04T00:00:00Z", scannedPages: 1 });
+      }
+      return Promise.resolve({ ignored: [] });
+    });
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+
+    render(<LintView />);
+
+    const restore = await screen.findByRole("button", { name: "Restore" });
+    fireEvent.click(restore);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("remove_lint_ignore", expect.anything()));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("run_local_lint", expect.anything()));
+  });
+
+  it("defaults a historical fixable issue without a scan hash to ignore", () => {
+    render(
+      <LintIssueDetails
+        issue={{
+          id: "missing_frontmatter:wiki/a.md",
+          source: "local",
+          severity: "warning",
+          issueType: "missing_frontmatter",
+          path: "wiki/a.md",
+          message: "No frontmatter",
+          fixability: "safe",
+          scanHash: null,
+        }}
+        fixStatus="idle"
+        fixConfirm={null}
+        ignoring={false}
+        safetyPrefs={{ checkpoint: true, commitAfter: true, recompile: false }}
+        onSafetyPrefsChange={vi.fn()}
+        onApplyFix={vi.fn()}
+        onConfirmHighRisk={vi.fn()}
+        onCancelHighRisk={vi.fn()}
+        onIgnore={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("radio", { name: /Apply fix/i })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /Ignore this time/i })).toBeChecked();
   });
 });
