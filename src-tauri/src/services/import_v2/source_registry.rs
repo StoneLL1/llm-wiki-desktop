@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -7,6 +8,7 @@ use crate::errors::{BackendError, IMPORT_V2_SOURCE_INDEX_INVALID};
 use crate::models::import_v2::{ImportInputKind, QualityReport, IMPORT_V2_SCHEMA_VERSION};
 use crate::models::paths::ProjectContext;
 use crate::services::FileStore;
+use crate::utils::path_utils::normalize_project_path;
 
 const SOURCE_INDEX_PATH: &str = ".app/source-index-v2.json";
 
@@ -215,6 +217,83 @@ impl SourceRegistry {
         Ok(index)
     }
 
+    /// Resolve an imported source asset for a Wiki page without exposing the
+    /// raw filesystem layout to the renderer. Markdown keeps the portable
+    /// `assets/...` reference; the source manifest supplies the immutable
+    /// source/version directory that owns that asset.
+    pub fn resolve_wiki_asset_path(
+        context: &ProjectContext,
+        files: &FileStore,
+        wiki_path: &str,
+        asset_path: &str,
+    ) -> Result<PathBuf, BackendError> {
+        let wiki_path = normalize_project_path(wiki_path.trim());
+        let wiki_absolute = context.resolve_project_path(&wiki_path)?;
+        if !wiki_path.starts_with("wiki/")
+            || !wiki_path.ends_with(".md")
+            || wiki_absolute.strip_prefix(&context.wiki_dir).is_err()
+            || !wiki_absolute.is_file()
+        {
+            return Err(wiki_asset_not_found(wiki_path, asset_path));
+        }
+
+        let asset_path = asset_path
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .replace('\\', "/");
+        let asset_path = asset_path.trim_start_matches("./");
+        let asset_parts: Vec<&str> = asset_path.split('/').collect();
+        if asset_parts.len() < 2
+            || asset_parts[0] != "assets"
+            || asset_parts
+                .iter()
+                .any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains(':'))
+        {
+            return Err(wiki_asset_not_found(wiki_path, asset_path));
+        }
+        let asset_relative = asset_parts[1..].join("/");
+
+        let index = Self::read_index(context, files)?;
+        let mut source_ids = std::collections::BTreeSet::new();
+        source_ids.extend(
+            index
+                .by_content_hash
+                .values()
+                .map(|pointer| pointer.source_id.clone()),
+        );
+        source_ids.extend(
+            index
+                .by_locator
+                .values()
+                .map(|pointer| pointer.source_id.clone()),
+        );
+
+        for source_id in source_ids {
+            let manifest_path = format!(".app/sources/{source_id}.json");
+            let manifest: SourceManifest = files
+                .read_json(context, &manifest_path)
+                .map_err(|_| invalid_index())?;
+            validate_manifest(&manifest)?;
+            if manifest.wiki_path != wiki_path {
+                continue;
+            }
+
+            let raw_asset_path = format!(
+                "raw/sources/{}/{}/assets/{asset_relative}",
+                manifest.source_id, manifest.current_version_id
+            );
+            let resolved = context.resolve_project_path(&raw_asset_path)?;
+            if resolved.is_file() {
+                return Ok(resolved);
+            }
+            return Err(wiki_asset_not_found(wiki_path, asset_path));
+        }
+
+        Err(wiki_asset_not_found(wiki_path, asset_path))
+    }
+
     pub fn resolve(
         index: &SourceIndex,
         normalized_locator: &str,
@@ -374,6 +453,19 @@ impl SourceRegistry {
         validate_commit_plan(&plan)?;
         Ok(plan)
     }
+}
+
+fn wiki_asset_not_found(wiki_path: String, asset_path: &str) -> BackendError {
+    BackendError::new(
+        "WIKI_ASSET_NOT_FOUND",
+        "The Wiki image asset could not be resolved for this page.",
+        true,
+        false,
+    )
+    .with_details(serde_json::json!({
+        "wikiPath": wiki_path,
+        "assetPath": asset_path,
+    }))
 }
 
 fn validate_index(index: &SourceIndex) -> Result<(), BackendError> {
@@ -1068,5 +1160,60 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, IMPORT_V2_SOURCE_INDEX_INVALID);
         }
+    }
+
+    #[test]
+    fn resolves_a_wiki_asset_through_the_current_source_version() {
+        let (context, root) = super::super::test_support::test_context("wiki-asset");
+        let files = FileStore;
+        let manifest = SourceManifest {
+            schema_version: 2,
+            source_id: "source-1".into(),
+            origins: vec!["https://example.com/article".into()],
+            versions: vec![fixture_version("version-1", "hash-a")],
+            current_version_id: "version-1".into(),
+            wiki_path: "wiki/sources/web/article.md".into(),
+        };
+        let pointer = SourcePointer {
+            source_id: "source-1".into(),
+            version_id: "version-1".into(),
+        };
+        let index = SourceIndex {
+            schema_version: 2,
+            by_content_hash: BTreeMap::from([("hash-a".into(), pointer.clone())]),
+            by_locator: BTreeMap::from([("https://example.com/article".into(), pointer)]),
+        };
+        files
+            .write_json_atomic(&context, ".app/source-index-v2.json", &index)
+            .unwrap();
+        files
+            .write_json_atomic(&context, ".app/sources/source-1.json", &manifest)
+            .unwrap();
+        files
+            .write_markdown(&context, &manifest.wiki_path, "![cover](assets/cover.jpg)")
+            .unwrap();
+        let asset = root.join("raw/sources/source-1/version-1/assets/cover.jpg");
+        std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        std::fs::write(&asset, b"image").unwrap();
+
+        let resolved = SourceRegistry::resolve_wiki_asset_path(
+            &context,
+            &files,
+            &manifest.wiki_path,
+            "assets/cover.jpg",
+        )
+        .unwrap();
+        assert_eq!(resolved, asset);
+
+        let traversal = SourceRegistry::resolve_wiki_asset_path(
+            &context,
+            &files,
+            &manifest.wiki_path,
+            "assets/../secret.jpg",
+        )
+        .unwrap_err();
+        assert_eq!(traversal.code, "WIKI_ASSET_NOT_FOUND");
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

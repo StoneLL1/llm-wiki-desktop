@@ -155,6 +155,18 @@ fn render_tag(tag: &str, output: &mut String) {
         (false, "h6") => output.push_str("\n###### "),
         (false, "li") => output.push_str("\n- "),
         (false, "br") => output.push('\n'),
+        (false, "img") => {
+            let uri = attribute(body, "data-src")
+                .or_else(|| attribute(body, "src"))
+                .filter(|uri| safe_uri(uri));
+            if let Some(uri) = uri {
+                let alt = attribute(body, "alt")
+                    .unwrap_or_default()
+                    .replace(']', "\\]")
+                    .replace(['\r', '\n'], " ");
+                output.push_str(&format!("![{alt}]({uri})"));
+            }
+        }
         (false, "a") => {
             if let Some(uri) = attribute(body, "href").filter(|uri| safe_uri(uri)) {
                 output.push_str(&format!("[link]({uri})"));
@@ -210,7 +222,7 @@ fn collapse_blank_lines(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_text;
+    use super::{decode_text, html_to_markdown};
     use encoding_rs::GB18030;
 
     #[test]
@@ -237,5 +249,27 @@ mod tests {
     #[test]
     fn rejects_unrecognized_binary_bytes() {
         assert!(decode_text(&[0xff, 0xfe, 0x00]).is_err());
+    }
+
+    #[test]
+    fn converts_images_to_markdown_and_prefers_lazy_data_source() {
+        let (markdown, warnings) = html_to_markdown(
+            r#"<p>Before</p><img data-src="https://cdn.example/image.jpg" src="placeholder.gif" alt="封面图"><p>After</p>"#,
+        );
+
+        assert!(warnings.is_empty());
+        assert!(markdown.contains("![封面图](https://cdn.example/image.jpg)"));
+        assert!(!markdown.contains("placeholder.gif"));
+    }
+
+    #[test]
+    fn drops_unsafe_image_urls() {
+        let (markdown, warnings) = html_to_markdown(
+            r#"<img src="data:image/png;base64,not-for-wiki" alt="unsafe"><p>text</p>"#,
+        );
+
+        assert!(warnings.contains(&"HTML_UNSAFE_URI_REMOVED".to_string()));
+        assert!(!markdown.contains("![unsafe]"));
+        assert!(markdown.contains("text"));
     }
 }

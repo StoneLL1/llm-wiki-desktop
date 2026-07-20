@@ -11,9 +11,12 @@ use crate::services::import_v2::engine::{
 };
 use crate::services::import_v2::markdown_normalizer::{decode_text, html_to_markdown};
 use crate::services::import_v2::url_policy::UrlPolicy;
-use crate::services::import_v2::web_fetch::{WebFetchPolicy, WebFetchService};
+use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
 use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
+
+const MAX_WECHAT_IMAGES: usize = 32;
+const MAX_WECHAT_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct WechatWebEngine {
@@ -126,7 +129,6 @@ impl ImportEngine for WechatWebEngine {
             .iter()
             .map(|image| image.public_url.as_str())
             .collect::<Vec<_>>();
-        let has_images = !image_urls.is_empty();
         let metadata = WechatMetadata {
             engine_id: &descriptor.engine_id,
             engine_version: &descriptor.engine_version,
@@ -151,10 +153,44 @@ impl ImportEngine for WechatWebEngine {
                 "The WeChat engine could not write item staging.",
             ));
         }
+        let image_count = document.image_requests.len();
+        let image_requests = document.image_requests.clone();
+        let image_staging = staging.clone();
+        let item_id = request.item_id.clone();
+        let image_token = cancellation.clone();
+        let localized = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match runtime {
+                Ok(runtime) => localize_wechat_images(
+                    &runtime,
+                    &image_staging,
+                    &item_id,
+                    &image_requests,
+                    &image_token,
+                ),
+                Err(_) => Ok(ImageLocalizationSummary {
+                    failed: image_requests.len(),
+                    ..ImageLocalizationSummary::default()
+                }),
+            }
+        })
+        .join()
+        .map_err(|_| unavailable("The WeChat image worker stopped unexpectedly."))??;
+        if localized.failed > 0 || localized.skipped > 0 {
+            warnings.push("WECHAT_IMAGE_DOWNLOAD_PARTIAL".into());
+        }
+        let meaningful_image_coverage = if image_count > 0 {
+            Some(localized.downloaded as f64 / image_count as f64)
+        } else {
+            None
+        };
+        let asset_paths = localized.asset_paths;
         Ok(EngineResult {
             source_snapshot_path: "source.html".into(),
             markdown_path: "document.md".into(),
-            asset_paths: Vec::new(),
+            asset_paths,
             metadata_path: Some("metadata.json".into()),
             title: document.title,
             text_coverage: Some(1.0),
@@ -163,10 +199,109 @@ impl ImportEngine for WechatWebEngine {
             slide_count_exact: None,
             non_empty_cell_coverage: None,
             formula_value_pairs: None,
-            meaningful_image_coverage: has_images.then_some(1.0),
+            meaningful_image_coverage,
             continuation: None,
             warnings,
         })
+    }
+}
+
+#[derive(Default)]
+struct ImageLocalizationSummary {
+    asset_paths: Vec<String>,
+    downloaded: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+fn localize_wechat_images(
+    runtime: &tokio::runtime::Runtime,
+    staging: &Path,
+    item_id: &str,
+    requests: &[connectors::ImageRequest],
+    cancellation: &CancellationToken,
+) -> Result<ImageLocalizationSummary, BackendError> {
+    if requests.is_empty() {
+        return Ok(ImageLocalizationSummary::default());
+    }
+    let markdown_path = staging.join("document.md");
+    let source_path = staging.join("source.html");
+    let mut markdown = std::fs::read_to_string(&markdown_path)
+        .map_err(|_| unavailable("The WeChat candidate could not be reopened."))?;
+    let mut source = std::fs::read_to_string(&source_path)
+        .map_err(|_| unavailable("The WeChat snapshot could not be reopened."))?;
+    let mut summary = ImageLocalizationSummary {
+        skipped: requests.len().saturating_sub(MAX_WECHAT_IMAGES),
+        ..ImageLocalizationSummary::default()
+    };
+
+    for (index, image) in requests.iter().take(MAX_WECHAT_IMAGES).enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
+        let target = match UrlPolicy.normalize_for_session(&image.request_url) {
+            Ok(target) => target,
+            Err(_) => {
+                summary.failed += 1;
+                continue;
+            }
+        };
+        let mut policy = WebFetchPolicy::default();
+        policy.content = WebFetchContent::Image;
+        policy.max_response_bytes = MAX_WECHAT_IMAGE_BYTES;
+        let fetched = runtime.block_on(WebFetchService::default().fetch(
+            target,
+            &UrlPolicy::default(),
+            &policy,
+            None,
+            item_id,
+            |_| {},
+            || cancellation.is_cancelled(),
+        ));
+        let fetched = match fetched {
+            Ok(fetched) => fetched,
+            Err(_) if cancellation.is_cancelled() => return Err(cancelled()),
+            Err(_) => {
+                summary.failed += 1;
+                continue;
+            }
+        };
+        let Some(extension) = image_extension(&fetched.content_type) else {
+            summary.failed += 1;
+            continue;
+        };
+        let relative = format!("assets/wechat-{index}.{extension}");
+        let destination = staging.join(&relative);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|_| unavailable("The WeChat asset directory could not be created."))?;
+        }
+        std::fs::write(&destination, fetched.bytes)
+            .map_err(|_| unavailable("A WeChat image could not be written."))?;
+        markdown = replace_image_reference(&markdown, &image.public_url, &relative);
+        source = replace_image_reference(&source, &image.public_url, &relative);
+        summary.asset_paths.push(relative);
+        summary.downloaded += 1;
+    }
+
+    std::fs::write(markdown_path, markdown)
+        .map_err(|_| unavailable("The localized WeChat candidate could not be written."))?;
+    std::fs::write(source_path, source)
+        .map_err(|_| unavailable("The localized WeChat snapshot could not be written."))?;
+    Ok(summary)
+}
+
+fn replace_image_reference(content: &str, public_url: &str, relative: &str) -> String {
+    content.replace(public_url, relative)
+}
+
+fn image_extension(content_type: &str) -> Option<&'static str> {
+    match content_type.split(';').next().unwrap_or("").trim() {
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
     }
 }
 
@@ -241,4 +376,25 @@ fn cancelled() -> BackendError {
 
 fn unavailable(message: &'static str) -> BackendError {
     BackendError::new("IMPORT_V2_ENGINE_UNAVAILABLE", message, true, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{image_extension, replace_image_reference};
+
+    #[test]
+    fn image_extension_accepts_common_types_and_parameters() {
+        assert_eq!(image_extension("image/jpeg; charset=binary"), Some("jpg"));
+        assert_eq!(image_extension("image/webp"), Some("webp"));
+        assert_eq!(image_extension("image/svg+xml"), None);
+    }
+
+    #[test]
+    fn image_reference_replacement_updates_markdown_and_snapshot_content() {
+        let url = "https://mmbiz.qpic.cn/image.jpg?signature=redacted";
+        let content = format!("![cover]({url})\n<img src=\"{url}\">");
+        let localized = replace_image_reference(&content, url, "assets/wechat-0.jpg");
+        assert!(!localized.contains(url));
+        assert_eq!(localized.matches("assets/wechat-0.jpg").count(), 2);
+    }
 }

@@ -165,6 +165,24 @@ pub struct ReadWikiPageRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReadWikiAssetRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub page_path: String,
+    pub asset_path: String,
+}
+
+/// Binary asset bytes are returned through the backend so the React renderer
+/// never receives or resolves arbitrary filesystem paths.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiAssetContent {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SaveWikiPageRequest {
     pub project_id: String,
     pub project_root_path: String,

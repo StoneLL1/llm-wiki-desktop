@@ -1,3 +1,5 @@
+use std::fs;
+
 use tauri::State;
 
 use crate::app_state::AppState;
@@ -7,10 +9,13 @@ use crate::models::confirmation::{
 };
 use crate::models::git::CheckpointPurpose;
 use crate::models::wiki::{
-    CreateWikiPageRequest, DeleteWikiPageRequest, ReadWikiPageRequest, RenameWikiPageRequest,
-    RenameWikiPageResponse, SaveWikiPageRequest, SaveWikiPageResponse, ToggleBookmarkRequest,
-    ToggleBookmarkResponse, WikiPageContent, WikiTree,
+    CreateWikiPageRequest, DeleteWikiPageRequest, ReadWikiAssetRequest, ReadWikiPageRequest,
+    RenameWikiPageRequest, RenameWikiPageResponse, SaveWikiPageRequest, SaveWikiPageResponse,
+    ToggleBookmarkRequest, ToggleBookmarkResponse, WikiAssetContent, WikiPageContent, WikiTree,
 };
+use crate::services::import_v2::source_registry::SourceRegistry;
+
+const MAX_WIKI_ASSET_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +44,65 @@ pub fn read_wiki_page(
     state
         .search_service
         .read_page(&context, &request.relative_path, &bookmark_paths)
+}
+
+/// Read an imported Wiki image through a project-scoped backend command.
+///
+/// Markdown stores the portable `assets/...` reference, while the source
+/// registry maps that reference to the current immutable raw source version.
+/// Returning bytes keeps arbitrary filesystem paths out of the renderer and
+/// gives the command one place to enforce the asset size and path boundary.
+#[tauri::command]
+pub fn read_wiki_asset(
+    state: State<'_, AppState>,
+    request: ReadWikiAssetRequest,
+) -> Result<WikiAssetContent, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let path = SourceRegistry::resolve_wiki_asset_path(
+        &context,
+        &state.file_store,
+        &request.page_path,
+        &request.asset_path,
+    )?;
+    let bytes = fs::read(&path).map_err(|error| {
+        BackendError::new("WIKI_ASSET_READ_FAILED", error.to_string(), true, false)
+            .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
+    })?;
+    if bytes.len() > MAX_WIKI_ASSET_BYTES {
+        return Err(BackendError::new(
+            "WIKI_ASSET_TOO_LARGE",
+            "The Wiki image asset is larger than the reader limit.",
+            false,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "size": bytes.len(),
+            "limit": MAX_WIKI_ASSET_BYTES,
+        })));
+    }
+
+    Ok(WikiAssetContent {
+        content_type: wiki_asset_content_type(&path),
+        bytes,
+    })
+}
+
+fn wiki_asset_content_type(path: &std::path::Path) -> String {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 #[tauri::command]

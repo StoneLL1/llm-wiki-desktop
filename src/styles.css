@@ -789,6 +789,15 @@ select:focus-visible {
   border-top: 1px solid var(--border-subtle);
 }
 
+.wiki-prose img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: var(--sp-4) auto;
+  border: 1px solid var(--reading-border);
+  border-radius: var(--radius-md);
+}
+
 .wiki-prose table {
   width: 100%;
   margin: 0 0 var(--sp-4);
@@ -3504,6 +3513,53 @@ select:focus-visible {
   background: var(--warning-soft);
   color: var(--warning-text);
 }
+.import-migration-notice {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 var(--sp-4) var(--sp-2);
+}
+.import-migration-notice__trigger {
+  height: 26px;
+  width: 26px;
+  color: var(--warning-text);
+}
+.import-migration-notice__trigger:hover {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+.import-migration-notice__tooltip {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  width: min(360px, calc(100vw - 32px));
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), visibility var(--dur-fast) var(--ease);
+  visibility: hidden;
+}
+.import-migration-notice:hover .import-migration-notice__tooltip,
+.import-migration-notice:focus-within .import-migration-notice__tooltip {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+.import-migration-notice__title { color: var(--text-primary); font-size: 12px; }
+.import-migration-notice__body { color: var(--text-secondary); }
+.import-migration-notice__action { color: var(--accent-hover); font-weight: 500; }
 .import-v2-commit-bar {
   display: flex;
   min-height: 52px;

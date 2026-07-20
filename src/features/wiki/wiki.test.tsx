@@ -610,6 +610,36 @@ describe("MarkdownReader", () => {
     expect(rows[1]?.textContent).toContain("malformed line");
   });
 
+  it("resolves imported local images through the project-scoped backend command", async () => {
+    invokeMock.mockResolvedValueOnce({
+      contentType: "image/jpeg",
+      bytes: [255, 216, 255],
+    });
+
+    render(
+      <MarkdownReader
+        bodyMarkdown="![cover](assets/cover.jpg)"
+        frontmatterYaml={null}
+        pages={[]}
+        onOpenPage={vi.fn()}
+        projectId="proj-1"
+        projectRootPath="D:/wiki"
+        pagePath="wiki/sources/web/article.md"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("read_wiki_asset", {
+        request: {
+          projectId: "proj-1",
+          projectRootPath: "D:/wiki",
+          pagePath: "wiki/sources/web/article.md",
+          assetPath: "assets/cover.jpg",
+        },
+      }),
+    );
+  });
+
   it("renders an existing wikilink as clickable and invokes onOpenPage", async () => {
     const onOpenPage = vi.fn();
     const pages = [

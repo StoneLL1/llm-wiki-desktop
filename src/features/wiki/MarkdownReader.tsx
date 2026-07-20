@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState, type ImgHTMLAttributes } from "react";
 import { useTranslation } from "react-i18next";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { invoke } from "@tauri-apps/api/core";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -13,6 +14,14 @@ interface MarkdownReaderProps {
   frontmatterYaml: string | null;
   pages: WikiPageMeta[];
   onOpenPage: (path: string) => void;
+  projectId?: string;
+  projectRootPath?: string;
+  pagePath?: string;
+}
+
+interface WikiAssetContent {
+  contentType: string;
+  bytes: number[];
 }
 
 const WIKILINK_SCHEME = "wikilink://";
@@ -91,11 +100,87 @@ function preprocessCitations(body: string): string {
     });
 }
 
+function isLocalWikiAsset(src: string): boolean {
+  const path = src.split(/[?#]/, 1)[0].replace(/^\.\//, "");
+  return path.startsWith("assets/");
+}
+
+function WikiImage({
+  src,
+  alt,
+  projectId,
+  projectRootPath,
+  pagePath,
+  ...props
+}: ImgHTMLAttributes<HTMLImageElement> & {
+  projectId?: string;
+  projectRootPath?: string;
+  pagePath?: string;
+}) {
+  const [resolvedSrc, setResolvedSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let objectUrl: string | null = null;
+    setResolvedSrc(null);
+
+    if (
+      !src ||
+      !isLocalWikiAsset(src) ||
+      !projectId ||
+      !projectRootPath ||
+      !pagePath
+    ) {
+      setResolvedSrc(src ?? null);
+      return () => {
+        disposed = true;
+      };
+    }
+
+    void invoke<WikiAssetContent>("read_wiki_asset", {
+      request: {
+        projectId,
+        projectRootPath,
+        pagePath,
+        assetPath: src,
+      },
+    })
+      .then((asset) => {
+        if (disposed) return;
+        const blob = new Blob([new Uint8Array(asset.bytes)], {
+          type: asset.contentType,
+        });
+        objectUrl = URL.createObjectURL(blob);
+        setResolvedSrc(objectUrl);
+      })
+      .catch(() => {
+        if (!disposed) setResolvedSrc(null);
+      });
+
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [pagePath, projectId, projectRootPath, src]);
+
+  return (
+    <img
+      {...props}
+      src={resolvedSrc ?? undefined}
+      alt={alt ?? ""}
+      data-wiki-asset-state={resolvedSrc ? "ready" : "loading"}
+    />
+  );
+}
+
 export function MarkdownReader({
   bodyMarkdown,
   frontmatterYaml,
   pages,
   onOpenPage,
+  projectId,
+  projectRootPath,
+  pagePath,
 }: MarkdownReaderProps) {
   const { t } = useTranslation();
   const resolver = useMemo(() => buildResolver(pages), [pages]);
@@ -170,6 +255,18 @@ export function MarkdownReader({
               <a href={href} target="_blank" rel="noreferrer" {...props}>
                 {children}
               </a>
+            );
+          },
+          img({ src, alt, ...props }) {
+            return (
+              <WikiImage
+                {...props}
+                src={src}
+                alt={alt}
+                projectId={projectId}
+                projectRootPath={projectRootPath}
+                pagePath={pagePath}
+              />
             );
           },
         }}
