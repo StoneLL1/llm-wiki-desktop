@@ -145,6 +145,7 @@ fn session_poll_does_not_close_a_live_agent_attempt_but_restart_failure_does() {
             locator: "broken.txt".into(),
             normalized_locator: Some("broken.txt".into()),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.status = ImportItemStatus::Failed;
@@ -196,6 +197,7 @@ fn validation_is_explicit_and_failed_optimization_restores_deterministic_preview
             locator: "source.txt".into(),
             normalized_locator: Some("source.txt".into()),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.status = ImportItemStatus::PreviewReady;
@@ -208,6 +210,7 @@ fn validation_is_explicit_and_failed_optimization_restores_deterministic_preview
             locator: "broken.txt".into(),
             normalized_locator: Some("broken.txt".into()),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     failed.status = ImportItemStatus::Failed;

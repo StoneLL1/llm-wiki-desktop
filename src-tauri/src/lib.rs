@@ -35,9 +35,13 @@ pub fn run() {
                 );
             }
             if let Ok(app_data) = app.path().app_data_dir() {
+                let connector_profiles = app_data.join("connector-profiles");
+                state
+                    .import_v2_service
+                    .set_connector_profiles_root(connector_profiles.clone());
                 let _ = state
                     .connector_session_service
-                    .recover_orphans(&app_data.join("connector-profiles"));
+                    .recover_orphans(&connector_profiles);
             }
 
             // Build tray menu: Show / Hide / Quit. Labels + tooltip are
@@ -189,6 +193,7 @@ pub fn run() {
             commands::import_v2_web_commands::complete_import_login_v2,
             commands::import_v2_web_commands::revoke_import_login_v2,
             commands::import_v2_web_commands::authorize_import_private_target_v2,
+            commands::import_v2_web_commands::authorize_local_asr_v2,
             commands::import_v2_web_commands::authorize_bilibili_asr_v2,
             commands::import_v2_migration::scan_import_v2_migration,
             commands::import_v2_migration::plan_import_v2_migration,

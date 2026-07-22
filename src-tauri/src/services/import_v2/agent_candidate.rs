@@ -1406,6 +1406,7 @@ mod tests {
                 locator: "https://example.com".into(),
                 normalized_locator: Some("https://example.com/".into()),
                 source_identity: None,
+                media_save_mode: Default::default(),
             },
         );
         let artifact = ImportArtifact {

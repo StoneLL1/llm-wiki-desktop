@@ -76,7 +76,10 @@ pub struct TaskResult {
     rename_all_fields = "camelCase"
 )]
 pub enum TaskResultReference {
-    ImportPreview { session_id: String, item_id: String },
+    ImportPreview {
+        session_id: String,
+        item_id: String,
+    },
     ImportV2SessionPreview {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,7 +138,11 @@ pub struct StreamDelta {
 /// A safe presentation event for an Agent run. Raw hidden reasoning, tool
 /// arguments, file contents, and command output never cross this boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum TaskActivity {
     Phase {
         name: String,

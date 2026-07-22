@@ -81,6 +81,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
             locator: "https://example.com".into(),
             normalized_locator: Some("https://example.com/".into()),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.status = ImportItemStatus::Failed;
@@ -156,6 +157,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
                     version_id: "version-old".into(),
                     content_hash: "old-content-hash".into(),
                     raw_path: "raw/sources/source-old/version-old/original.bin".into(),
+                    extracted_path: String::new(),
                     baseline_path: baseline_path.into(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     route: "generic_web".into(),
@@ -306,7 +308,10 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     assert_eq!(diff.baseline_markdown, baseline);
     assert_eq!(diff.current_markdown.as_deref(), Some(current));
     let current_hash = format!("{:x}", Sha256::digest(current.as_bytes()));
-    assert_eq!(diff.current_markdown_sha256.as_deref(), Some(current_hash.as_str()));
+    assert_eq!(
+        diff.current_markdown_sha256.as_deref(),
+        Some(current_hash.as_str())
+    );
     assert!(diff.needs_three_way_merge);
     assert_eq!(diff.agent_markdown, agent);
     assert!(diff.unified_diff.contains("Agent candidate"));
@@ -573,9 +578,10 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         )
         .unwrap();
     assert_eq!(committed.committed_count, 1, "{committed:?}");
+    assert!(committed.items[0].wiki_path.is_none());
     assert_eq!(
         std::fs::read_to_string(root.path().join(wiki_path)).unwrap(),
-        "# Explicit merge\n"
+        current
     );
 }
 

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 
@@ -12,7 +13,7 @@ use crate::errors::{BackendError, IMPORT_V2_CAPABILITY_INVALID, IMPORT_V2_CAPABI
 use crate::models::import_v2_file::CapabilityRequirement;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CapabilityPackManifest {
     pub schema_version: u32,
     pub pack_id: String,
@@ -22,6 +23,10 @@ pub struct CapabilityPackManifest {
     pub archive_sha256: String,
     pub license_expression: String,
     pub entrypoint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entrypoint_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executable_files: Vec<String>,
     pub compressed_bytes: u64,
     pub installed_bytes: u64,
     pub signing_key_id: String,
@@ -31,7 +36,7 @@ pub struct CapabilityPackManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CapabilityPackFile {
     pub path: String,
     pub sha256: String,
@@ -128,13 +133,39 @@ impl CapabilityPackManager {
             .unwrap_or_else(|| unavailable("No healthy compatible capability pack is installed.")))
     }
 
+    /// Resolve one catalog-selected version without allowing a newer side-by-side
+    /// installation to satisfy the check. Install verification must bind to the
+    /// exact artifact named by the catalog entry.
+    pub fn resolve_version(
+        &self,
+        requirement: &CapabilityRequirement,
+        version: &str,
+    ) -> Result<ResolvedCapabilityPack, BackendError> {
+        Version::parse(version)
+            .map_err(|_| invalid("The capability manifest version is invalid."))?;
+        let root = self
+            .install_root
+            .join(&requirement.capability_id)
+            .join(version);
+        let bytes = fs::read(root.join("manifest.json"))
+            .map_err(|_| unavailable("The requested capability pack is not installed."))?;
+        let manifest: CapabilityPackManifest = serde_json::from_slice(&bytes)
+            .map_err(|_| invalid("The capability manifest is invalid."))?;
+        if manifest.pack_id != requirement.capability_id || manifest.version != version {
+            return Err(invalid(
+                "The capability manifest does not match the requested version.",
+            ));
+        }
+        self.validate_candidate(root, manifest, requirement)
+    }
+
     fn validate_candidate(
         &self,
         root: PathBuf,
         manifest: CapabilityPackManifest,
         requirement: &CapabilityRequirement,
     ) -> Result<ResolvedCapabilityPack, BackendError> {
-        if manifest.schema_version != 1
+        if !matches!(manifest.schema_version, 1 | 2)
             || manifest.protocol_version != requirement.protocol_version
             || !manifest
                 .target_triples
@@ -149,6 +180,15 @@ impl CapabilityPackManager {
                 "The capability manifest is incompatible with this request.",
             ));
         }
+        if manifest.entrypoint_args.len() > 32
+            || manifest
+                .entrypoint_args
+                .iter()
+                .any(|argument| argument.len() > 4_096 || argument.contains('\0'))
+        {
+            return Err(invalid("The capability entrypoint arguments are invalid."));
+        }
+        validate_executable_files(&manifest)?;
         let key = self
             .trusted_keys
             .get(&manifest.signing_key_id)
@@ -181,34 +221,36 @@ impl CapabilityPackManager {
                 "The capability entrypoint escapes its immutable install directory.",
             ));
         }
-        let archive = root.join("pack.archive");
-        let archive_or_entrypoint = if archive.is_file() {
-            archive
-        } else {
-            entrypoint.clone()
-        };
-        let canonical_payload = fs::canonicalize(archive_or_entrypoint)
-            .map_err(|_| invalid("The capability archive cannot be resolved."))?;
-        if !canonical_payload.starts_with(&canonical_root) {
+        if manifest.schema_version == 1 {
+            let archive = root.join("pack.archive");
+            let archive_or_entrypoint = if archive.is_file() {
+                archive
+            } else {
+                entrypoint.clone()
+            };
+            let canonical_payload = fs::canonicalize(archive_or_entrypoint)
+                .map_err(|_| invalid("The capability archive cannot be resolved."))?;
+            if !canonical_payload.starts_with(&canonical_root) {
+                return Err(invalid(
+                    "The capability archive escapes its immutable install directory.",
+                ));
+            }
+            let actual = hash_file(&canonical_payload)?;
+            if !actual.eq_ignore_ascii_case(&manifest.archive_sha256) {
+                return Err(invalid(
+                    "The capability archive hash does not match its signed manifest.",
+                ));
+            }
+        } else if !manifest.archive_sha256.is_empty()
+            || manifest.compressed_bytes != 0
+            || manifest.installed_bytes != 0
+            || manifest.files.is_empty()
+        {
             return Err(invalid(
-                "The capability archive escapes its immutable install directory.",
+                "Schema v2 capability manifests must delegate archive measurements to the signed application catalog and include a complete file inventory.",
             ));
         }
-        let bytes = fs::read(canonical_payload)
-            .map_err(|_| invalid("The capability archive cannot be read."))?;
-        let actual = format!("{:x}", Sha256::digest(bytes));
-        if !actual.eq_ignore_ascii_case(&manifest.archive_sha256) {
-            return Err(invalid(
-                "The capability archive hash does not match its signed manifest.",
-            ));
-        }
-        let entrypoint_sha256 = format!(
-            "{:x}",
-            Sha256::digest(
-                fs::read(&entrypoint)
-                    .map_err(|_| invalid("The capability entrypoint cannot be read."))?
-            )
-        );
+        let entrypoint_sha256 = hash_file(&entrypoint)?;
         let pack = ResolvedCapabilityPack {
             manifest,
             root: canonical_root,
@@ -304,6 +346,21 @@ fn validate_inventory_shape(files: &[CapabilityPackFile]) -> Result<(), BackendE
     Ok(())
 }
 
+fn validate_executable_files(manifest: &CapabilityPackManifest) -> Result<(), BackendError> {
+    let mut previous: Option<&str> = None;
+    for path in &manifest.executable_files {
+        if previous.is_some_and(|prior| prior >= path.as_str())
+            || !manifest.files.iter().any(|file| file.path == *path)
+        {
+            return Err(invalid(
+                "The signed capability executable inventory is invalid.",
+            ));
+        }
+        previous = Some(path);
+    }
+    Ok(())
+}
+
 fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendError> {
     fn visit(
         root: &Path,
@@ -362,9 +419,21 @@ fn portable_relative_path(path: &Path) -> Result<String, BackendError> {
     Ok(parts.join("/"))
 }
 
-fn hash_file(path: &Path) -> Result<String, BackendError> {
-    let bytes = fs::read(path).map_err(|_| invalid("A capability runtime file cannot be read."))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+pub(super) fn hash_file(path: &Path) -> Result<String, BackendError> {
+    let mut file =
+        fs::File::open(path).map_err(|_| invalid("A capability runtime file cannot be read."))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| invalid("A capability runtime file cannot be read."))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 impl CapabilityPackManifest {

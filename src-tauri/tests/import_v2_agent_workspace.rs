@@ -48,6 +48,7 @@ fn workspace_contains_only_sanitized_current_item_copies() {
             locator: "https://user:pass@example.com/post?token=secret&cookie=bad#fragment".into(),
             normalized_locator: Some("https://example.com/post".into()),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.preview = Some(ImportPreviewArtifact {
@@ -170,6 +171,7 @@ fn workspace_rejects_symlinked_source_snapshot() {
             locator: "opaque".into(),
             normalized_locator: None,
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.preview = Some(ImportPreviewArtifact {
@@ -214,6 +216,7 @@ fn terminal_cleanup_preserves_output_hashes_but_removes_workspace() {
             locator: "opaque".into(),
             normalized_locator: None,
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.preview = Some(ImportPreviewArtifact {

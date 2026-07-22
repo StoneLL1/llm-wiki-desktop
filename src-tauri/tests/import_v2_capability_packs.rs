@@ -61,8 +61,44 @@ impl Fixture {
             archive_sha256: format!("{:x}", Sha256::digest(b"immutable pack")),
             license_expression: "MIT".into(),
             entrypoint: "runner.exe".into(),
+            entrypoint_args: Vec::new(),
+            executable_files: Vec::new(),
             compressed_bytes: 14,
             installed_bytes: 14,
+            signing_key_id: "release-2026".into(),
+            signature: String::new(),
+            files: vec![CapabilityPackFile {
+                path: "runner.exe".into(),
+                sha256: format!("{:x}", Sha256::digest(b"immutable pack")),
+                bytes: 14,
+            }],
+        };
+        manifest.signature = hex(self.key.sign(&manifest.signing_payload().unwrap()).as_ref());
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        root
+    }
+
+    fn install_schema_v2(&self, version: &str) -> PathBuf {
+        let root = self.root.join("document-standard").join(version);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("runner.exe"), b"immutable pack").unwrap();
+        let mut manifest = CapabilityPackManifest {
+            schema_version: 2,
+            pack_id: "document-standard".into(),
+            version: version.into(),
+            protocol_version: "2".into(),
+            target_triples: vec!["x86_64-pc-windows-msvc".into()],
+            archive_sha256: String::new(),
+            license_expression: "MIT".into(),
+            entrypoint: "runner.exe".into(),
+            entrypoint_args: vec!["runner/main.mjs".into()],
+            executable_files: vec!["runner.exe".into()],
+            compressed_bytes: 0,
+            installed_bytes: 0,
             signing_key_id: "release-2026".into(),
             signature: String::new(),
             files: vec![CapabilityPackFile {
@@ -117,6 +153,53 @@ fn resolves_signed_hash_verified_compatible_pack() {
     let pack = fixture.manager().resolve(&fixture.requirement()).unwrap();
     assert_eq!(pack.manifest.version, "1.2.0");
     assert!(pack.entrypoint.ends_with("runner.exe"));
+}
+
+#[test]
+fn schema_v2_delegates_zip_digest_and_sizes_to_catalog_without_a_hash_cycle() {
+    let fixture = Fixture::new("schema-v2");
+    fixture.install_schema_v2("1.2.0");
+    let pack = fixture.manager().resolve(&fixture.requirement()).unwrap();
+    assert_eq!(pack.manifest.schema_version, 2);
+    assert_eq!(pack.manifest.entrypoint_args, ["runner/main.mjs"]);
+
+    let root = fixture.root.join("document-standard/1.2.0");
+    resign(&fixture, &root, |manifest| {
+        manifest.archive_sha256 = "ab".repeat(32)
+    });
+    assert_eq!(
+        fixture
+            .manager()
+            .resolve(&fixture.requirement())
+            .unwrap_err()
+            .code,
+        IMPORT_V2_CAPABILITY_INVALID
+    );
+
+    resign(&fixture, &root, |manifest| {
+        manifest.archive_sha256.clear();
+        manifest.executable_files = vec!["missing-helper".into()];
+    });
+    assert_eq!(
+        fixture
+            .manager()
+            .resolve(&fixture.requirement())
+            .unwrap_err()
+            .code,
+        IMPORT_V2_CAPABILITY_INVALID
+    );
+}
+
+#[test]
+fn exact_version_resolution_does_not_select_a_newer_side_by_side_pack() {
+    let fixture = Fixture::new("exact-version");
+    fixture.install_schema_v2("1.0.0");
+    fixture.install_schema_v2("2.0.0");
+    let pack = fixture
+        .manager()
+        .resolve_version(&fixture.requirement(), "1.0.0")
+        .unwrap();
+    assert_eq!(pack.manifest.version, "1.0.0");
 }
 
 #[test]

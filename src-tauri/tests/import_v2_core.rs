@@ -391,6 +391,7 @@ fn input(name: &str, locator: &str) -> ImportInput {
         display_name: name.into(),
         locator: locator.into(),
         normalized_locator: Some(locator.replace('\\', "/")),
+        media_save_mode: Default::default(),
     }
 }
 fn walk(root: &Path) -> Vec<PathBuf> {

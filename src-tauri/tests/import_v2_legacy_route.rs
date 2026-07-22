@@ -18,6 +18,7 @@ fn projects_v2_session_into_the_existing_preview_shape() {
                 "c:/project/.app/import-sessions/session-cjk/inputs/资料.md".into(),
             ),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
         status: ImportItemStatus::PreviewReady,
         selected: true,

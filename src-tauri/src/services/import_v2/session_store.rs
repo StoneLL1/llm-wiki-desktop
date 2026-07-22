@@ -358,6 +358,7 @@ mod tests {
                     display_name: "公开页面".into(),
                     locator: format!("https://user:{secret}@例子.测试/文档?lang=zh&token={secret}&signature={secret}#access_token={secret}"),
                     normalized_locator: None,
+                    media_save_mode: Default::default(),
                 }],
             )
             .unwrap();

@@ -1,11 +1,11 @@
-use std::collections::HashSet;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
@@ -18,12 +18,13 @@ use crate::models::import_v2_presentation::{
     GetImportCapabilityRequirementV2Request, GetImportFrontendReadinessV2Request,
     GetImportPreviewContentV2Request, ImportCapabilityRequirement, ImportFrontendReadiness,
     ImportHistoryAction, ImportHistoryEntry, ImportHistoryPage, ImportPlatformReadiness,
-    ImportPreviewContent,
-    InstallImportCapabilityV2Request, ListImportHistoryV2Request, IMPORT_V2_PREVIEW_MAX_BYTES,
+    ImportPreviewContent, InstallImportCapabilityV2Request, ListImportHistoryV2Request,
+    IMPORT_V2_PREVIEW_MAX_BYTES,
 };
 use crate::models::paths::ProjectContext;
-use crate::models::task::BackendTask;
+use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::import_v2::activation::ImportV2ActivationService;
+use crate::services::import_v2::capability_installer::{catalog_entry, install_catalog_entry};
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
@@ -43,9 +44,11 @@ pub fn get_import_preview_content_v2(
         )? {
             snapshot
         } else {
-            state
-                .import_v2_service
-                .load_session(&context, &state.file_store, &request.session_id)?
+            state.import_v2_service.load_session(
+                &context,
+                &state.file_store,
+                &request.session_id,
+            )?
         }
     } else {
         state
@@ -119,10 +122,7 @@ pub fn get_import_preview_content_v2(
                     item_id: request.item_id,
                     candidate_id: request.candidate_id,
                     title,
-                    markdown: read_history_markdown(
-                        &history_path,
-                        &expected_hash,
-                    )?,
+                    markdown: read_history_markdown(&history_path, &expected_hash)?,
                     truncated: fs::metadata(&history_path)
                         .map(|metadata| metadata.len() > IMPORT_V2_PREVIEW_MAX_BYTES)
                         .unwrap_or(false),
@@ -219,7 +219,9 @@ fn platform_readiness(
             };
         }
         let available = routes.iter().any(|route| {
-            registered_routes.iter().any(|registered| registered == route)
+            registered_routes
+                .iter()
+                .any(|registered| registered == route)
                 || capability_statuses
                     .iter()
                     .any(|status| status.route == *route && status.available)
@@ -248,9 +250,10 @@ fn platform_readiness(
         &["web.bilibili.metadata", "web.bilibili.video"],
         false,
     );
-    let xiaohongshu = route_status("xiaohongshu", &[], true);
+    let xiaohongshu = route_status("xiaohongshu", &["web.xiaohongshu.note"], false);
+    let douyin = route_status("douyin", &["web.douyin.video"], false);
     let x = route_status("x", &[], true);
-    vec![http, wechat, zhihu, bilibili, xiaohongshu, x]
+    vec![http, wechat, zhihu, bilibili, xiaohongshu, douyin, x]
 }
 
 #[tauri::command]
@@ -265,18 +268,18 @@ pub fn list_import_history_v2(
     let mut records = v2_entries;
     records.extend(
         entries
-        .into_iter()
-        .filter(|entry| !v2_paths.contains(&entry.evidence_path))
-        .map(|entry| {
-            let path = context.resolve_project_path(&entry.evidence_path).ok();
-            HistoryRecord::Legacy {
-                modified_millis: path
-                    .as_deref()
-                    .map(file_modified_millis)
-                    .unwrap_or_default(),
-                entry,
-            }
-        }),
+            .into_iter()
+            .filter(|entry| !v2_paths.contains(&entry.evidence_path))
+            .map(|entry| {
+                let path = context.resolve_project_path(&entry.evidence_path).ok();
+                HistoryRecord::Legacy {
+                    modified_millis: path
+                        .as_deref()
+                        .map(file_modified_millis)
+                        .unwrap_or_default(),
+                    entry,
+                }
+            }),
     );
     records.sort_by(history_record_cmp);
     let cursor = parse_history_cursor(request.cursor.as_deref())?;
@@ -290,11 +293,9 @@ pub fn list_import_history_v2(
         .into_iter()
         .filter(|record| {
             record.modified_millis() <= snapshot_millis
-                && after
-                    .as_ref()
-                    .map_or(true, |key| {
-                        history_key_cmp(&record.key(), key) == Ordering::Greater
-                    })
+                && after.as_ref().map_or(true, |key| {
+                    history_key_cmp(&record.key(), key) == Ordering::Greater
+                })
         })
         .collect::<Vec<_>>();
     let has_more = filtered_records.len() > limit;
@@ -361,9 +362,12 @@ enum HistoryRecord {
 impl HistoryRecord {
     fn modified_millis(&self) -> u64 {
         match self {
-            Self::V2 { modified_millis, .. } | Self::Legacy { modified_millis, .. } => {
-                *modified_millis
+            Self::V2 {
+                modified_millis, ..
             }
+            | Self::Legacy {
+                modified_millis, ..
+            } => *modified_millis,
         }
     }
 
@@ -689,47 +693,240 @@ pub fn get_import_capability_requirement_v2(
         .statuses()
         .into_iter()
         .any(|status| status.capability_id == capability_id && status.available);
+    let catalog = catalog_entry(capability_id, &requirement.target_triple);
     Ok(ImportCapabilityRequirement {
         requirement,
         route: route.into(),
         available,
-        // The current runtime only resolves signed installed packs. It does not
-        // own downloads, so the UI must present a fallback instead of a dead
-        // install button until the pack manager exposes an install task.
-        installable: false,
-        compressed_bytes: None,
-        installed_bytes: None,
-        model_bytes: None,
+        installable: !available && catalog.is_some(),
+        compressed_bytes: catalog.as_ref().map(|entry| entry.compressed_bytes),
+        installed_bytes: catalog.as_ref().map(|entry| entry.installed_bytes),
+        model_bytes: catalog.as_ref().and_then(|entry| entry.model_bytes),
         license: Some(license.into()),
-        fallback: (!available).then_some("Install the signed capability pack from a release that includes it, then retry this item.".into()),
+        fallback: (!available && catalog.is_none()).then_some("This source build has no signed capability artifact for the current target. Release CI must publish the target pack and catalog entry before installation can be enabled.".into()),
     })
 }
 
 #[tauri::command]
 pub fn install_import_capability_v2(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: InstallImportCapabilityV2Request,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _ = state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)?
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
         .items
         .iter()
         .find(|item| item.item_id == request.item_id)
         .ok_or_else(|| {
             presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
         })?;
+    let (expected_capability_id, _, _) = capability_for_item(item).ok_or_else(|| {
+        presentation_error(
+            "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
+            "This import item does not currently require a capability pack.",
+        )
+    })?;
+    if request.capability_id != expected_capability_id {
+        return Err(presentation_error(
+            "IMPORT_V2_CAPABILITY_MISMATCH",
+            "The requested capability does not match this import item.",
+        ));
+    }
     if !request.acknowledge_install {
         return Err(presentation_error(
             "IMPORT_V2_CAPABILITY_CONFIRMATION_REQUIRED",
             "Capability installation requires explicit confirmation.",
         ));
     }
-    Err(presentation_error(
-        "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
-        "The installed runtime does not expose a signed capability installation task.",
-    ))
+    let target = target_triple();
+    let entry = catalog_entry(expected_capability_id, &target).ok_or_else(|| {
+        presentation_error(
+            "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
+            "No signed capability release is available for this target.",
+        )
+    })?;
+    let install_root = state.import_capability_runtime.install_root().ok_or_else(|| {
+        presentation_error(
+            "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
+            "Capability installation is unavailable before the application data directory is initialized.",
+        )
+    })?;
+    let task = state
+        .task_service
+        .create_project_task(
+            TaskType::Import,
+            request.project_id.clone(),
+            context.root.clone(),
+            format!("Install {}", request.capability_id),
+            true,
+        )
+        .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
+    let task_id = task.id.clone();
+    let project_id = request.project_id;
+    let project_root_path = request.project_root_path;
+    let session_id = request.session_id;
+    let item_id = request.item_id;
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let _ = state
+            .task_service
+            .transition_status(&task_id, TaskStatus::Running);
+        let Some(token) = state.task_service.get_cancellation_token(&task_id) else {
+            return;
+        };
+        let install = install_catalog_entry(&install_root, &entry, &token, |current, total| {
+            let _ = state.task_service.update_progress(
+                &task_id,
+                current,
+                Some(total),
+                Some("Downloading and verifying capability".into()),
+            );
+        })
+        .await;
+        if let Err(error) = install {
+            finish_capability_install_error(&state, &task_id, error);
+            return;
+        }
+        if token.is_cancelled() {
+            let _ = state
+                .task_service
+                .transition_status(&task_id, TaskStatus::Cancelled);
+            return;
+        }
+        state
+            .import_capability_runtime
+            .load_installed(&install_root, &state.import_v2_service);
+        let available = state
+            .import_capability_runtime
+            .statuses()
+            .into_iter()
+            .any(|status| status.capability_id == entry.capability_id && status.available);
+        if !available {
+            finish_capability_install_error(
+                &state,
+                &task_id,
+                presentation_error(
+                    "IMPORT_V2_CAPABILITY_INSTALL_FAILED",
+                    "The installed capability did not pass runtime verification.",
+                ),
+            );
+            return;
+        }
+        let context = match state.resolve_project_context(&project_id, &project_root_path) {
+            Ok(context) => context,
+            Err(error) => {
+                finish_capability_install_error(&state, &task_id, error);
+                return;
+            }
+        };
+        let resume_task = match state.task_service.create_project_task(
+            TaskType::Import,
+            project_id.clone(),
+            context.root.clone(),
+            "Resume import after capability install".into(),
+            true,
+        ) {
+            Ok(task) => task,
+            Err(error) => {
+                finish_capability_install_error(
+                    &state,
+                    &task_id,
+                    presentation_error("IMPORT_V2_TASK_FAILED", &error),
+                );
+                return;
+            }
+        };
+        if state
+            .import_v2_service
+            .bind_item_task_ids(
+                &context,
+                &state.file_store,
+                &session_id,
+                &[(item_id.clone(), resume_task.id.clone())],
+            )
+            .is_err()
+        {
+            let _ = state
+                .task_service
+                .discard_unstarted_tasks(std::slice::from_ref(&resume_task.id));
+            finish_capability_install_error(
+                &state,
+                &task_id,
+                presentation_error(
+                    "IMPORT_V2_CAPABILITY_RESUME_FAILED",
+                    "The capability was installed, but the import item could not be bound to its automatic resume task.",
+                ),
+            );
+            return;
+        }
+        if state
+            .task_service
+            .complete_running_with_result(
+                &task_id,
+                TaskResult {
+                    summary: format!(
+                        "Installed {} and created the automatic resume task.",
+                        entry.capability_id
+                    ),
+                    affected_paths: Vec::new(),
+                    reference: None,
+                    pending_action: None,
+                },
+            )
+            .is_err()
+        {
+            let _ = state.import_v2_service.bind_item_task_ids(
+                &context,
+                &state.file_store,
+                &session_id,
+                &[(item_id.clone(), task_id.clone())],
+            );
+            let _ = state
+                .task_service
+                .discard_unstarted_tasks(std::slice::from_ref(&resume_task.id));
+            finish_capability_install_error(
+                &state,
+                &task_id,
+                presentation_error(
+                    "IMPORT_V2_CAPABILITY_RESUME_FAILED",
+                    "The capability was installed, but its completion state could not be persisted.",
+                ),
+            );
+            return;
+        }
+        let resume_action =
+            (entry.capability_id == "ocr-cjk-accurate").then_some(ImportRecoveryAction::EnableOcr);
+        if let Err(error) = state.import_v2_service.run_item_with_recovery(
+            &context,
+            &state.file_store,
+            &state.task_service,
+            &session_id,
+            &item_id,
+            &resume_task.id,
+            resume_action.as_ref(),
+        ) {
+            finish_capability_install_error(&state, &resume_task.id, error);
+        }
+    });
+    Ok(task)
+}
+
+fn finish_capability_install_error(state: &AppState, task_id: &str, error: BackendError) {
+    if state.task_service.is_cancelled(task_id) {
+        let _ = state
+            .task_service
+            .transition_status(task_id, TaskStatus::Cancelled);
+    } else {
+        let _ = state.task_service.set_error(task_id, error);
+        let _ = state
+            .task_service
+            .transition_status(task_id, TaskStatus::Failed);
+    }
 }
 
 fn read_staging_markdown(
@@ -862,11 +1059,26 @@ fn validate_identifier(value: &str) -> Result<(), BackendError> {
 }
 
 fn capability_for_item(item: &ImportItem) -> Option<(&'static str, &'static str, &'static str)> {
+    const BROWSER_BUNDLE_LICENSE: &str = "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices";
     let actions = item.issue.as_ref()?.recovery_actions.as_slice();
     if actions.contains(&ImportRecoveryAction::InstallBrowserCapability) {
-        Some(("browser-runtime", "web.generic.browser", "Apache-2.0"))
+        Some((
+            "browser-runtime",
+            "web.generic.browser",
+            BROWSER_BUNDLE_LICENSE,
+        ))
     } else if actions.contains(&ImportRecoveryAction::InstallMediaCapability) {
-        Some(("media-runtime", "media.subtitle", "LGPL-2.1-or-later"))
+        Some((
+            "asr-sensevoice-small",
+            "media.asr",
+            "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+        ))
+    } else if actions.contains(&ImportRecoveryAction::InstallOcrCapability) {
+        Some((
+            "ocr-cjk-accurate",
+            "ocr.cjk-accurate",
+            "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only",
+        ))
     } else if actions.contains(&ImportRecoveryAction::InstallCapability) {
         Some(("document-standard", "pack.markitdown", "MIT"))
     } else {
@@ -999,7 +1211,10 @@ mod tests {
 
     #[test]
     fn platform_readiness_uses_registered_routes_and_capability_statuses() {
-        let routes = vec!["web.generic.readability".into(), "web.wechat.article".into()];
+        let routes = vec![
+            "web.generic.readability".into(),
+            "web.wechat.article".into(),
+        ];
         let capabilities = vec![CapabilityRuntimeStatus {
             capability_id: "browser-runtime-lite".into(),
             route: "web.zhihu.content".into(),

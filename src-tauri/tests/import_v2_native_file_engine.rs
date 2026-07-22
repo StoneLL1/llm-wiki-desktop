@@ -38,11 +38,14 @@ fn request(root: &TempDir, name: &str) -> EngineRequest {
             locator: name.into(),
             normalized_locator: None,
             source_identity,
+            media_save_mode: Default::default(),
         },
         project_root: root.path().to_string_lossy().into_owned(),
         staging_root: "staging".into(),
         chained_input: None,
         local_asr_authorized: false,
+        local_ocr_authorized: false,
+        media_save_mode: Default::default(),
     }
 }
 
@@ -69,7 +72,14 @@ fn descriptor_and_supported_extensions_are_stable() {
     assert_eq!(descriptor.engine_id, "builtin.native-file");
     assert_eq!(descriptor.route, "file.native");
     for name in [
-        "a.md", "a.markdown", "a.mdx", "a.mkd", "a.txt", "a.csv", "a.html", "a.htm",
+        "a.md",
+        "a.markdown",
+        "a.mdx",
+        "a.mkd",
+        "a.txt",
+        "a.csv",
+        "a.html",
+        "a.htm",
     ] {
         assert!(engine.supports(&request(&TempDir::new().unwrap(), name).input));
     }
@@ -126,11 +136,7 @@ fn markdown_accepts_gb18030_and_utf16_sources() {
     let (_, markdown) = run(&root, "legacy.md", &gb18030);
     assert_eq!(markdown, "# 标题\n");
 
-    let (_, markdown) = run(
-        &root,
-        "utf16.md",
-        b"\xff\xfe#\0 \0t\0i\0t\0l\0e\0\n\0",
-    );
+    let (_, markdown) = run(&root, "utf16.md", b"\xff\xfe#\0 \0t\0i\0t\0l\0e\0\n\0");
     assert_eq!(markdown, "# title\n");
 }
 

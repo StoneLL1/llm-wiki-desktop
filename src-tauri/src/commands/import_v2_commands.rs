@@ -10,8 +10,8 @@ use crate::models::import_v2::{
     ImportSession,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
-use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::models::paths::ProjectContext;
+use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::agent_assistance::AgentAssistanceService;
 use crate::services::import_v2::agent_candidate::AgentCandidateService;
 
@@ -192,14 +192,15 @@ pub(crate) fn load_history_snapshot(
             true,
         )
     })?;
-    let batch: crate::models::import_v2::ImportBatchResult = serde_json::from_slice(&bytes).map_err(|_| {
-        BackendError::new(
-            "IMPORT_V2_HISTORY_CORRUPT",
-            "The historical import record is incomplete.",
-            true,
-            true,
-        )
-    })?;
+    let batch: crate::models::import_v2::ImportBatchResult = serde_json::from_slice(&bytes)
+        .map_err(|_| {
+            BackendError::new(
+                "IMPORT_V2_HISTORY_CORRUPT",
+                "The historical import record is incomplete.",
+                true,
+                true,
+            )
+        })?;
     if batch.session_id != session_id {
         return Err(BackendError::new(
             "IMPORT_V2_HISTORY_SCOPE_MISMATCH",
@@ -378,9 +379,10 @@ pub fn cancel_import_batch_v2(
         return Err(task_error("Import batch id must not be empty."));
     }
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _session = state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)?;
+    let _session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
     // Do not depend on the orchestrator having claimed the session item yet.
     // The task is created and returned before `claim_item_for_run` persists
     // `item.task_id`, so an immediate user cancellation must discover the
@@ -579,6 +581,7 @@ mod tests {
                 locator: "fixture/in/a.pdf".into(),
                 normalized_locator: None,
                 source_identity: None,
+                media_save_mode: Default::default(),
             }],
         };
         let value = serde_json::to_value(request).unwrap();

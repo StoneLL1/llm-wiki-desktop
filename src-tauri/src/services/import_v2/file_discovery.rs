@@ -276,10 +276,8 @@ pub fn identify_file(path: &Path, prefix: &[u8]) -> Result<FileIdentity, Backend
         .to_ascii_lowercase();
     let (magic, mime) =
         match extension.as_str() {
-            "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn" | "rmd"
-            | "txt" | "csv" | "html" | "htm" => {
-                ("utf-8", text_mime(&extension))
-            }
+            "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn" | "rmd" | "txt"
+            | "csv" | "html" | "htm" => ("utf-8", text_mime(&extension)),
             "pdf" if prefix.starts_with(b"%PDF-") => ("pdf", "application/pdf"),
             "doc" | "xls" | "ppt"
                 if prefix.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) =>
@@ -327,6 +325,7 @@ pub fn new_import_inputs(
                 locator: file.source_path,
                 normalized_locator: Some(normalized),
                 source_identity: Some(file.source_identity),
+                media_save_mode: Default::default(),
             })
         })
         .collect()
@@ -455,8 +454,8 @@ fn validate_ooxml(path: &Path, extension: &str) -> Result<(), BackendError> {
 
 fn format_from_identity(identity: &FileIdentity) -> Option<FileFormat> {
     Some(match identity.extension.as_str() {
-        "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn" | "rmd" | "txt"
-        | "csv" | "html" | "htm" => FileFormat::Markdown,
+        "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn" | "rmd" | "txt" | "csv"
+        | "html" | "htm" => FileFormat::Markdown,
         "pdf" => FileFormat::Pdf,
         "doc" => FileFormat::Doc,
         "docx" => FileFormat::Docx,

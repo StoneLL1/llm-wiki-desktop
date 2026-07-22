@@ -78,8 +78,7 @@ pub fn cancel_task(
     } else {
         state.task_service.cancel_task(&request.task_id)
     };
-    result
-        .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
+    result.map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
 }
 
 #[tauri::command]

@@ -246,6 +246,7 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
             locator: "https://example.com/article".into(),
             normalized_locator: Some("https://example.com/article".into()),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.status = ImportItemStatus::Failed;

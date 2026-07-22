@@ -164,8 +164,13 @@ fn source_manifests_never_claim_unbuilt_payloads() {
     assert_eq!(basic["engine"]["name"], "Tesseract");
     assert_eq!(basic["licenseExpression"], "Apache-2.0 AND BSD-2-Clause");
     assert_eq!(basic["payloadStatus"], "release_ci_required");
-    assert_eq!(accurate["engine"]["name"], "PaddleOCR");
-    assert_eq!(accurate["licenseExpression"], "Apache-2.0");
+    assert_eq!(accurate["engine"]["name"], "RapidOCR with ONNX Runtime");
+    assert_eq!(accurate["engine"]["version"], "3.8.1");
+    assert_eq!(
+        accurate["licenseExpression"],
+        "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only"
+    );
     assert_eq!(accurate["targetTriples"].as_array().unwrap().len(), 0);
-    assert_eq!(accurate["payloadStatus"], "waiting_for_ci_qualification");
+    assert_eq!(accurate["signature"], "");
+    assert_eq!(accurate["payloadStatus"], "release_ci_required");
 }
