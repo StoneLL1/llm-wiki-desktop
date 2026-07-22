@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "node": {
+    "version": "22.17.0",
+    "license": "MIT",
+    "source": "https://nodejs.org/dist/v22.17.0/",
+    "distributions": {
+      "x86_64-pc-windows-msvc": {
+        "file": "node-v22.17.0-win-x64.zip",
+        "sha256": "721ab118a3aac8584348b132767eadf51379e0616f0db802cc1e66d7f0d98f85",
+        "root": "node-v22.17.0-win-x64"
+      },
+      "aarch64-apple-darwin": {
+        "file": "node-v22.17.0-darwin-arm64.tar.xz",
+        "sha256": "cc9cc294eaf782dd93c8c51f460da610cc35753c6a9947411731524d16e97914",
+        "root": "node-v22.17.0-darwin-arm64"
+      },
+      "x86_64-apple-darwin": {
+        "file": "node-v22.17.0-darwin-x64.tar.xz",
+        "sha256": "f79de1f64df4ac68493a344bb5ab7d289d0275271e87b543d1278392c9de778a",
+        "root": "node-v22.17.0-darwin-x64"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "file": "node-v22.17.0-linux-x64.tar.xz",
+        "sha256": "325c0f1261e0c61bcae369a1274028e9cfb7ab7949c05512c5b1e630f7e80e12",
+        "root": "node-v22.17.0-linux-x64"
+      }
+    }
+  },
+  "pythonStandalone": {
+    "version": "3.12.13+20260718",
+    "license": "PSF-2.0 AND MPL-2.0",
+    "source": "https://github.com/astral-sh/python-build-standalone/releases/download/20260718/",
+    "distributions": {
+      "x86_64-pc-windows-msvc": {
+        "file": "cpython-3.12.13+20260718-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "sha256": "0d422a1439ec308e03f47df551bc30f5994727c456e414b026d202bcda9b7c1c",
+        "bytes": 21932298,
+        "root": "python"
+      },
+      "aarch64-apple-darwin": {
+        "file": "cpython-3.12.13+20260718-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "9a1e9e06175c10efd8378b904b07fa21bd791ab3345d7cdffeb4a76c9ff55903",
+        "bytes": 25000146,
+        "root": "python"
+      },
+      "x86_64-apple-darwin": {
+        "file": "cpython-3.12.13+20260718-x86_64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "8e6b7e6533bdf746287008edf91102e7bee0a6ca1d24f16c4514237cafd706c5",
+        "bytes": 24685843,
+        "root": "python"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "file": "cpython-3.12.13+20260718-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "sha256": "5854aa6ec71cad00334d5065633c210b2e7feb40956767a59a91791cadcf0b79",
+        "bytes": 34199823,
+        "root": "python"
+      }
+    }
+  },
+  "rapidOcr": {
+    "version": "3.8.1",
+    "license": "Apache-2.0",
+    "wheel": {
+      "file": "rapidocr-3.8.1-py3-none-any.whl",
+      "sha256": "650044b1fbce9e6bae5cae462dcf8be754cde11e2f23fc51f65dcc08deae2c46",
+      "bytes": 15080319,
+      "source": "https://files.pythonhosted.org/packages/ea/4a/fa521d947f0fc7bb304bf11bec4cb66266bd81494588b4cb48dc01001719/rapidocr-3.8.1-py3-none-any.whl"
+    },
+    "models": {
+      "detector": {
+        "file": "ch_PP-OCRv5_det_mobile.onnx",
+        "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
+        "bytes": 4819576,
+        "source": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_mobile.onnx"
+      },
+      "recognizer": {
+        "file": "ch_PP-OCRv5_rec_mobile.onnx",
+        "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
+        "bytes": 16631306,
+        "source": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx"
+      },
+      "classifier": {
+        "file": "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
+        "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
+        "bytes": 1018508,
+        "source": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+      }
+    },
+    "dictionary": {
+      "file": "ppocrv5_dict.txt",
+      "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
+      "bytes": 74012,
+      "source": "rapidocr-3.8.1-py3-none-any.whl"
+    },
+    "qualificationFixture": {
+      "file": "ch_en_num.jpg",
+      "sha256": "b94c1bf68af9ceb3c550b86931d7b48d4181c26c9f5ace2492e64042f36a02ca",
+      "bytes": 70680,
+      "source": "https://github.com/RapidAI/RapidOCR/releases/download/v1.1.0/ch_en_num.jpg"
+    }
+  },
+  "senseVoice": {
+    "version": "1.13.4",
+    "license": "Apache-2.0",
+    "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/",
+    "distributions": {
+      "x86_64-pc-windows-msvc": {
+        "file": "sherpa-onnx-v1.13.4-win-x64-cuda.tar.bz2",
+        "sha256": "9cc16169fb073ab0acd304ae144ccad21af03e8360921a12285105599f0f692a",
+        "bytes": 221905418,
+        "root": "sherpa-onnx-v1.13.4-win-x64-cuda",
+        "accelerator": "cuda",
+        "cpuFallback": true
+      },
+      "aarch64-apple-darwin": {
+        "file": "sherpa-onnx-v1.13.4-osx-arm64-shared-no-tts.tar.bz2",
+        "sha256": "b4e5d0971ef1bee29fa63ed4060009067d2cde60ca6ad7bb99033e98c7271614",
+        "bytes": 25046327,
+        "root": "sherpa-onnx-v1.13.4-osx-arm64-shared-no-tts",
+        "accelerator": "coreml",
+        "cpuFallback": true
+      },
+      "x86_64-apple-darwin": {
+        "file": "sherpa-onnx-v1.13.4-osx-x64-shared-no-tts.tar.bz2",
+        "sha256": "e528037d1049a9a12df850d261ebf0e9483589af8a6664030a477844cc6eb250",
+        "bytes": 27866411,
+        "root": "sherpa-onnx-v1.13.4-osx-x64-shared-no-tts",
+        "accelerator": "coreml",
+        "cpuFallback": true
+      },
+      "x86_64-unknown-linux-gnu": {
+        "file": "sherpa-onnx-v1.13.4-cuda-12.x-cudnn-9.x-linux-x64-gpu.tar.bz2",
+        "sha256": "2ba80dd4df761b8de58d578190846f6f2349523685e33bcb24f65ba586c43563",
+        "bytes": 201655924,
+        "root": "sherpa-onnx-v1.13.4-cuda-12.x-cudnn-9.x-linux-x64-gpu",
+        "accelerator": "cuda",
+        "cpuFallback": true
+      }
+    },
+    "model": {
+      "version": "2024-07-17-int8",
+      "file": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+      "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+      "bytes": 163002883,
+      "root": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/",
+      "license": "Apache-2.0"
+    }
+  },
+  "ffmpeg": {
+    "version": "8.1.2",
+    "license": "LGPL-3.0-or-later",
+    "distributions": {
+      "x86_64-pc-windows-msvc": {
+        "kind": "prebuilt",
+        "file": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip",
+        "sha256": "27bcaf58b5140171dfe838a0b365d12c60607d71fc168424456410bad6a834da",
+        "bytes": 70103338,
+        "root": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1",
+        "source": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "kind": "prebuilt",
+        "file": "ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-shared-8.1.tar.xz",
+        "sha256": "bc60572d89533c7987e7cfbb654eba4d35122a77885c6938483dd7ef8219cde9",
+        "bytes": 56235740,
+        "root": "ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-shared-8.1",
+        "source": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/"
+      },
+      "aarch64-apple-darwin": {
+        "kind": "source",
+        "file": "ffmpeg-8.1.2.tar.xz",
+        "sha256": "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
+        "bytes": 11710924,
+        "root": "ffmpeg-8.1.2",
+        "source": "https://ffmpeg.org/releases/"
+      },
+      "x86_64-apple-darwin": {
+        "kind": "source",
+        "file": "ffmpeg-8.1.2.tar.xz",
+        "sha256": "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
+        "bytes": 11710924,
+        "root": "ffmpeg-8.1.2",
+        "source": "https://ffmpeg.org/releases/"
+      }
+    }
+  }
+}

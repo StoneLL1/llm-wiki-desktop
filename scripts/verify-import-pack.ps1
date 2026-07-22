@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$PackRoot,
   [string]$ReleaseArchive,
+  [string]$CatalogEntry,
   [string]$QualificationFile
 )
 $ErrorActionPreference = 'Stop'
@@ -35,9 +36,32 @@ if ($manifest.packId -eq 'office-oxide') {
 if ($ReleaseArchive) {
   if (-not (Test-Path -LiteralPath $ReleaseArchive -PathType Leaf)) { throw 'release archive is missing' }
   $digest = (Get-FileHash -LiteralPath $ReleaseArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($digest -ne $manifest.archiveSha256) { throw 'release archive hash mismatch' }
-  if ([uint64]$manifest.compressedBytes -ne (Get-Item -LiteralPath $ReleaseArchive).Length) { throw 'compressed size mismatch' }
-  if ([uint64]$manifest.installedBytes -eq 0) { throw 'installed size is not measured' }
+  if ([uint32]$manifest.schemaVersion -eq 2) {
+    if ([string]::IsNullOrWhiteSpace($CatalogEntry) -or -not (Test-Path -LiteralPath $CatalogEntry -PathType Leaf)) {
+      throw 'schema v2 release verification requires a catalog fragment'
+    }
+    if (-not [string]::IsNullOrEmpty($manifest.archiveSha256) -or [uint64]$manifest.compressedBytes -ne 0 -or [uint64]$manifest.installedBytes -ne 0) {
+      throw 'schema v2 manifest contains self-referential archive measurements'
+    }
+    if (@($manifest.files).Count -eq 0) { throw 'schema v2 manifest is missing its signed file inventory' }
+    $catalog = Get-Content -LiteralPath $CatalogEntry -Raw | ConvertFrom-Json
+    $entry = @($catalog.entries) | Where-Object {
+      $_.capabilityId -eq $manifest.packId -and $_.version -eq $manifest.version -and @($manifest.targetTriples) -contains $_.targetTriple
+    } | Select-Object -First 1
+    if ($null -eq $entry) { throw 'catalog fragment does not bind this pack, version, and target' }
+    if ($digest -ne $entry.archiveSha256) { throw 'release archive hash does not match the catalog' }
+    $manifestDigest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($manifestDigest -ne $entry.manifestSha256) { throw 'release manifest hash does not match the catalog' }
+    if ([uint64]$entry.compressedBytes -ne (Get-Item -LiteralPath $ReleaseArchive).Length) { throw 'catalog compressed size mismatch' }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $ReleaseArchive))
+    try { $installedBytes = ($archive.Entries | Measure-Object -Property Length -Sum).Sum } finally { $archive.Dispose() }
+    if ([uint64]$entry.installedBytes -ne [uint64]$installedBytes) { throw 'catalog installed size mismatch' }
+  } else {
+    if ($digest -ne $manifest.archiveSha256) { throw 'legacy release archive hash mismatch' }
+    if ([uint64]$manifest.compressedBytes -ne (Get-Item -LiteralPath $ReleaseArchive).Length) { throw 'legacy compressed size mismatch' }
+    if ([uint64]$manifest.installedBytes -eq 0) { throw 'legacy installed size is not measured' }
+  }
   if ([string]::IsNullOrWhiteSpace($manifest.signature)) { throw 'release manifest is unsigned' }
 }
 Write-Output "$($manifest.packId): declaration verified; release evidence required before publication"

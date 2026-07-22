@@ -1,18 +1,57 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "packId": "ocr-cjk-accurate",
-  "version": "3.0.0",
+  "version": "3.8.1+ppocrv5",
   "protocolVersion": "2",
   "targetTriples": [],
-  "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "licenseExpression": "Apache-2.0",
-  "entrypoint": "runner/ocr-cjk-accurate-pack",
+  "archiveSha256": "",
+  "licenseExpression": "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only",
+  "entrypoint": "runtime/python",
+  "entrypointArgs": [],
+  "executableFiles": [],
   "compressedBytes": 0,
   "installedBytes": 0,
   "signingKeyId": "release-build-placeholder",
-  "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-  "payloadStatus": "waiting_for_ci_qualification",
-  "engine": { "name": "PaddleOCR", "version": "3.0.0", "license": "Apache-2.0" },
-  "models": [],
-  "distributionNote": "No target triple is advertised until its CPU runtime and exact model set pass reproducible CI, security, accuracy, size, and license gates. Never use cloud OCR as fallback."
+  "signature": "",
+  "payloadStatus": "release_ci_required",
+  "engine": {
+    "name": "RapidOCR with ONNX Runtime",
+    "version": "3.8.1",
+    "runtimeVersion": "1.23.2",
+    "license": "Apache-2.0 AND MIT AND LGPL-2.1-only AND LGPL-3.0-only",
+    "source": "https://github.com/RapidAI/RapidOCR"
+  },
+  "models": [
+    {
+      "id": "ch_PP-OCRv5_det_mobile",
+      "version": "v3.8.0",
+      "file": "models/ch_PP-OCRv5_det_mobile.onnx",
+      "bytes": 4819576,
+      "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae"
+    },
+    {
+      "id": "ch_PP-OCRv5_rec_mobile",
+      "version": "v3.8.0",
+      "file": "models/ch_PP-OCRv5_rec_mobile.onnx",
+      "bytes": 16631306,
+      "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5"
+    },
+    {
+      "id": "ch_PP-LCNet_x0_25_textline_ori_cls_mobile",
+      "version": "v3.8.0",
+      "file": "models/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
+      "bytes": 1018508,
+      "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7"
+    }
+  ],
+  "execution": {
+    "process": "independent",
+    "shell": false,
+    "protocol": "json-rpc-2.0-stdio",
+    "provider": "cpu",
+    "stagingOnly": true,
+    "network": false,
+    "cloudFallback": false
+  },
+  "distributionNote": "Release CI must fetch the pinned relocatable CPython runtime, install only hash-locked wheels for the target, bundle the three exact PP-OCRv5 mobile ONNX models, pass the official Chinese image qualification, write notices and an SPDX SBOM, sign the complete file inventory, and publish the ZIP through the capability catalog. Source placeholders are intentionally not installable."
 }

@@ -3,7 +3,22 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "node_modules", "src-tauri/target", "UI-Frontend-design"] },
+  {
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "src-tauri/target/**",
+      "src-tauri/target-*/**",
+      "UI-Frontend-design/**",
+      ".worktrees/**",
+      "worktrees/**",
+      ".cargo-target-*/**",
+      ".tmp-*/**",
+      ".target-*/**",
+      ".task*-target/**",
+      "target-*/**",
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

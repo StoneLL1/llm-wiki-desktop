@@ -1,0 +1,6 @@
+{
+  "name": "llm-wiki-capability-asr-sensevoice-small",
+  "version": "1.13.4",
+  "private": true,
+  "type": "module"
+}
