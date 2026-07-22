@@ -19,6 +19,7 @@ const taskLauncher: TaskLauncher = {
   cancel: vi.fn(),
 };
 const importWorkflow: ImportWorkflow = {
+  projectKey: "project-a\0D:/wiki/project-a",
   session: null,
   readiness: null,
   bootstrapState: "loading",
@@ -40,15 +41,9 @@ const importWorkflow: ImportWorkflow = {
   setFilter: vi.fn(),
   loadPreview: vi.fn(),
   loadSession: vi.fn(),
-  importedSources: [],
   isConfirming: false,
-  requestPreview: vi.fn(),
   requestClipboard: vi.fn(),
-  requestUrl: vi.fn(),
-  requestDeleteSource: vi.fn(),
-  requestReplaceSource: vi.fn(),
   confirm: vi.fn(),
-  confirmLegacy: vi.fn(),
   getAgentPolicy: vi.fn(),
   setAgentPolicy: vi.fn(),
   invokeLocalAgent: vi.fn(),

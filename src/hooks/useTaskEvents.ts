@@ -60,15 +60,13 @@ export function useTaskEvents(): void {
 
   useEffect(() => {
     if (!hasTauri()) return;
-    const activeProjectId = currentProject.projectId;
-
     const unlisteners: Array<() => void> = [];
     let cancelled = false;
 
     for (const channel of TASK_EVENT_CHANNELS) {
       listen<BackendEvent>(channel, (evt) => {
         const event = evt.payload as BackendEvent;
-        handleTaskEvent(event, activeProjectId);
+        handleTaskEvent(event);
         notifyTaskEventListeners(event);
         void notifyTaskEvent(event);
       })

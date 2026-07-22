@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FolderOpen, Link, LoaderCircle, Plus, Upload } from "lucide-react";
 
 import { pickDirectory, selectImportFiles } from "./nativeFilePicker";
 import { subscribeToDragDrop } from "./dragDrop";
+import type { MediaSaveMode } from "../../types/importV2";
+import {
+  isMediaCandidateUrl,
+  isUnsupportedImportUrl,
+  isValidPublicHttpImportUrl,
+} from "./importLocator";
 
 export interface ImportSourceMethodsProps {
   onAddPaths: (paths: string[]) => void | Promise<unknown>;
-  onAddUrl: (url: string) => void | Promise<unknown>;
+  onAddUrl: (url: string, mediaSaveMode?: MediaSaveMode) => void | Promise<unknown>;
   addingPaths?: boolean;
   addingUrl?: boolean;
   sessionSyncing?: boolean;
@@ -17,25 +23,6 @@ export interface ImportSourceMethodsProps {
 
 function hasTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-function isUnsupportedLocalUrl(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  return (
-    normalized.startsWith("file:") ||
-    normalized.startsWith("data:") ||
-    normalized.startsWith("javascript:") ||
-    /^https?:\/\/(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(?:[:/]|$)/.test(normalized)
-  );
-}
-
-function isValidPublicHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && !isUnsupportedLocalUrl(value);
-  } catch {
-    return false;
-  }
 }
 
 export function ImportSourceMethods({
@@ -51,6 +38,7 @@ export function ImportSourceMethods({
     { label: "Zhihu", available: false },
     { label: "Bilibili", available: false },
     { label: "Xiaohongshu", available: false },
+    { label: "Douyin", available: false },
     { label: "X", available: false },
   ],
 }: ImportSourceMethodsProps) {
@@ -60,17 +48,18 @@ export function ImportSourceMethods({
   const [submittingUrl, setSubmittingUrl] = useState(false);
   const [pickingPaths, setPickingPaths] = useState(false);
   const [inputError, setInputError] = useState<"files" | "url" | "invalid_url" | null>(null);
-  const urlInputRef = useRef<HTMLInputElement>(null);
-  const unsupportedLocalUrl = useMemo(() => isUnsupportedLocalUrl(url), [url]);
-  const invalidUrl = useMemo(() => Boolean(url.trim()) && !unsupportedLocalUrl && !isValidPublicHttpUrl(url.trim()), [unsupportedLocalUrl, url]);
+  const [pendingUrl, setPendingUrl] = useState<string | null>(null);
+  const unsupportedLocalUrl = useMemo(() => isUnsupportedImportUrl(url), [url]);
+  const invalidUrl = useMemo(() => Boolean(url.trim()) && !unsupportedLocalUrl && !isValidPublicHttpImportUrl(url.trim()), [unsupportedLocalUrl, url]);
   const pathBusy = sessionSyncing || addingPaths || pickingPaths;
 
-  const submitPaths = useCallback(async (paths: string[]) => {
-    if (paths.length === 0 || pathBusy) return;
+  const importPathsFrom = useCallback(async (selectPaths: () => Promise<string[]>) => {
+    if (pathBusy) return;
     setInputError(null);
     setPickingPaths(true);
     try {
-      await onAddPaths(paths);
+      const paths = await selectPaths();
+      if (paths.length > 0) await onAddPaths(paths);
     } catch (error) {
       setInputError("files");
       onError?.(error);
@@ -78,6 +67,11 @@ export function ImportSourceMethods({
       setPickingPaths(false);
     }
   }, [onAddPaths, onError, pathBusy]);
+
+  const submitPaths = useCallback(
+    (paths: string[]) => importPathsFrom(() => Promise.resolve(paths)),
+    [importPathsFrom],
+  );
 
   useEffect(() => {
     if (!hasTauri()) return;
@@ -89,8 +83,8 @@ export function ImportSourceMethods({
         unlisten = await subscribeToDragDrop({
           listen: (handler) => getCurrentWebview().onDragDropEvent(handler),
           isCancelled: () => cancelled,
-           onActive: setDropActive,
-           onPaths: (paths) => {
+          onActive: setDropActive,
+          onPaths: (paths) => {
             void submitPaths(paths);
           },
         });
@@ -107,44 +101,38 @@ export function ImportSourceMethods({
     };
   }, [onError, submitPaths]);
 
-  const addFiles = async () => {
-    if (pathBusy) return;
-    setInputError(null);
-    setPickingPaths(true);
-    try {
-      const paths = await selectImportFiles();
-      await onAddPaths(paths);
-    } catch (error) {
-      setInputError("files");
-      onError?.(error);
-    } finally {
-      setPickingPaths(false);
-    }
-  };
+  const addFiles = () => importPathsFrom(selectImportFiles);
 
-  const addFolder = async () => {
-    if (pathBusy) return;
-    setInputError(null);
-    setPickingPaths(true);
-    try {
+  const addFolder = () => importPathsFrom(async () => {
       const path = await pickDirectory();
-      if (path) await onAddPaths([path]);
-    } catch (error) {
-      setInputError("files");
-      onError?.(error);
-    } finally {
-      setPickingPaths(false);
-    }
-  };
+      return path ? [path] : [];
+    });
 
-  const submitUrl = async () => {
+  const submitUrl = () => {
     const value = url.trim();
     if (!value || unsupportedLocalUrl || invalidUrl || submittingUrl || addingUrl || sessionSyncing) return;
     setInputError(null);
+    if (isMediaCandidateUrl(value)) {
+      setPendingUrl(value);
+      return;
+    }
+    setSubmittingUrl(true);
+    void Promise.resolve(onAddUrl(value))
+      .then(() => setUrl(""))
+      .catch((error) => {
+        setInputError("url");
+        onError?.(error);
+      })
+      .finally(() => setSubmittingUrl(false));
+  };
+
+  const confirmUrl = async (mediaSaveMode: MediaSaveMode) => {
+    if (!pendingUrl || submittingUrl) return;
     setSubmittingUrl(true);
     try {
-      await onAddUrl(value);
+      await onAddUrl(pendingUrl, mediaSaveMode);
       setUrl("");
+      setPendingUrl(null);
     } catch (error) {
       setInputError("url");
       onError?.(error);
@@ -179,17 +167,17 @@ export function ImportSourceMethods({
           {pathBusy ? <LoaderCircle className="animate-spin" size={18} /> : <Upload size={18} />}
           <span>{pathBusy ? t("importV2.status.adding") : t("importV2.files.drop")}</span>
         </div>
-         <div className="flex flex-wrap gap-2">
-           <button type="button" className="btn btn--sm btn--primary" aria-label={t("importV2.files.choose")} onClick={() => void addFiles()} disabled={pathBusy}>
-             {pathBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Upload size={14} />}
-             {pathBusy ? t("importV2.status.adding") : t("importV2.files.choose")}
-           </button>
-           <button type="button" className="btn btn--sm" onClick={() => void addFolder()} disabled={pathBusy}>
-             {pathBusy ? <LoaderCircle className="animate-spin" size={14} /> : <FolderOpen size={14} />}
-             {t("importV2.files.chooseFolder")}
-           </button>
-         </div>
-         {inputError === "files" ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.files.error")}</p> : null}
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="btn btn--sm btn--primary" aria-label={t("importV2.files.choose")} onClick={() => void addFiles()} disabled={pathBusy}>
+            {pathBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Upload size={14} />}
+            {pathBusy ? t("importV2.status.adding") : t("importV2.files.choose")}
+          </button>
+          <button type="button" className="btn btn--sm" onClick={() => void addFolder()} disabled={pathBusy}>
+            {pathBusy ? <LoaderCircle className="animate-spin" size={14} /> : <FolderOpen size={14} />}
+            {t("importV2.files.chooseFolder")}
+          </button>
+        </div>
+        {inputError === "files" ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.files.error")}</p> : null}
       </article>
 
       <article className="import-v2-method-pane">
@@ -198,7 +186,7 @@ export function ImportSourceMethods({
           className="space-y-2"
           onSubmit={(event) => {
             event.preventDefault();
-            void submitUrl();
+            submitUrl();
           }}
         >
           <label className="sr-only" htmlFor="import-v2-url">{t("importV2.url.label")}</label>
@@ -206,19 +194,18 @@ export function ImportSourceMethods({
             <span className="input-group__lead"><Link size={14} /></span>
             <input
               id="import-v2-url"
-              ref={urlInputRef}
               type="url"
               className="input input--mono"
               aria-label={t("importV2.url.label")}
               aria-invalid={unsupportedLocalUrl || invalidUrl || inputError === "url" ? "true" : undefined}
               disabled={sessionSyncing || addingUrl || submittingUrl || pathBusy}
               placeholder={t("importV2.url.placeholder")}
-               value={url}
-               onChange={(event) => { setUrl(event.target.value); setInputError(null); }}
+              value={url}
+              onChange={(event) => { setUrl(event.target.value); setInputError(null); }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  void submitUrl();
+                  submitUrl();
                 }
               }}
             />
@@ -226,11 +213,11 @@ export function ImportSourceMethods({
               {submittingUrl || addingUrl ? <LoaderCircle className="animate-spin" size={14} /> : <Plus size={14} />}
               {t("importV2.url.submit")}
             </button>
-           </div>
-           {unsupportedLocalUrl ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.localUnsupported")}</p> : null}
-           {invalidUrl ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.invalid")}</p> : null}
-           {inputError === "url" ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.error")}</p> : null}
-         </form>
+          </div>
+          {unsupportedLocalUrl ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.localUnsupported")}</p> : null}
+          {invalidUrl ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.invalid")}</p> : null}
+          {inputError === "url" ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.error")}</p> : null}
+        </form>
         <div className="flex flex-wrap gap-1" aria-label={t("importV2.url.platforms")}>
           {platforms.map((platform) => (
             <span
@@ -244,6 +231,29 @@ export function ImportSourceMethods({
           ))}
         </div>
       </article>
+
+      {pendingUrl ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4" role="dialog" aria-modal="true" aria-labelledby="import-url-media-choice-title">
+          <div className="w-full max-w-[480px] border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xl">
+            <div className="mb-4">
+              <h2 id="import-url-media-choice-title" className="m-0 text-[16px] font-semibold">{t("importV2.url.mediaChoice.title")}</h2>
+              <p className="mt-2 mb-0 break-all text-[12px] text-[var(--text-secondary)]">{pendingUrl}</p>
+              <p className="mt-2 mb-0 text-[12px] text-[var(--text-secondary)]">{t("importV2.url.mediaChoice.description")}</p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button type="button" className="btn btn--sm btn--primary h-auto min-h-[64px] justify-start whitespace-normal text-left" disabled={submittingUrl} onClick={() => void confirmUrl("preserve_original")}>
+                <span><strong className="block">{t("importV2.url.mediaChoice.preserve")}</strong><small className="text-[11px] text-[var(--text-secondary)]">{t("importV2.url.mediaChoice.preserveHint")}</small></span>
+              </button>
+              <button type="button" className="btn btn--sm h-auto min-h-[64px] justify-start whitespace-normal text-left" disabled={submittingUrl} onClick={() => void confirmUrl("extract_only")}>
+                <span><strong className="block">{t("importV2.url.mediaChoice.extractOnly")}</strong><small className="text-[11px] text-[var(--text-secondary)]">{t("importV2.url.mediaChoice.extractOnlyHint")}</small></span>
+              </button>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button type="button" className="btn btn--sm" disabled={submittingUrl} onClick={() => setPendingUrl(null)}>{t("confirmation.cancel")}</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

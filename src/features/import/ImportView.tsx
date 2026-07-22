@@ -69,6 +69,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   const historyLoadLock = useRef(false);
   const historyRequestRef = useRef(0);
   const confirmingRef = useRef(false);
+  const confirmingProjectKeyRef = useRef(workflow.projectKey);
+  const activeProjectKeyRef = useRef(workflow.projectKey);
+  activeProjectKeyRef.current = workflow.projectKey;
   const [conflictAction, setConflictAction] = useState<Exclude<CommitConflictAction, "apply_merged_candidate">>("create_new");
   const [itemConflictActions, setItemConflictActions] = useState<Record<string, { action: CommitConflictAction; expectedWikiHash: string | null }>>({});
   const sourcePlatforms = useMemo(() => {
@@ -78,6 +81,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
       zhihu: t("importV2.platform.zhihu"),
       bilibili: t("importV2.platform.bilibili"),
       xiaohongshu: t("importV2.platform.xiaohongshu"),
+      douyin: t("importV2.platform.douyin"),
       x: t("importV2.platform.x"),
     };
     if (workflow.readiness?.platforms) {
@@ -96,17 +100,18 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
 
   const loadHistory = useCallback(async () => {
     const requestId = ++historyRequestRef.current;
+    const requestProjectKey = workflow.projectKey;
     setHistoryError(false);
     try {
       const page = await workflow.listHistory();
-      if (historyRequestRef.current === requestId) setHistory(page);
+      if (activeProjectKeyRef.current === requestProjectKey && historyRequestRef.current === requestId) setHistory(page);
     } catch {
-      if (historyRequestRef.current === requestId) {
+      if (activeProjectKeyRef.current === requestProjectKey && historyRequestRef.current === requestId) {
         setHistory(null);
         setHistoryError(true);
       }
     }
-  }, [workflow.listHistory]);
+  }, [workflow.listHistory, workflow.projectKey]);
 
   useEffect(() => {
     if (workflow.bootstrapState !== "ready") {
@@ -118,25 +123,34 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     setHistory(null);
     void loadHistory();
     return () => { historyRequestRef.current += 1; };
-  }, [loadHistory, workflow.bootstrapState, session?.sessionId]);
+  }, [loadHistory, workflow.bootstrapState, workflow.projectKey, session?.sessionId]);
 
   useEffect(() => {
-    if (confirmingRef.current && !workflow.isConfirming) {
+    if (confirmingProjectKeyRef.current === workflow.projectKey && confirmingRef.current && !workflow.isConfirming) {
       void loadHistory();
     }
+    confirmingProjectKeyRef.current = workflow.projectKey;
     confirmingRef.current = workflow.isConfirming;
-  }, [loadHistory, workflow.isConfirming]);
+  }, [loadHistory, workflow.isConfirming, workflow.projectKey]);
 
   useEffect(() => {
+    setMigrationOpen(false);
+    setPrivateItemId(null);
+    setCandidateView(null);
     setHistoryDetail(null);
     setHistoryPreviewIdentity(null);
+    setHistoryResultUnavailable(false);
+    historyLoadLock.current = false;
+    setHistoryLoadingMore(false);
     historyEntryBusyRef.current = null;
     setOpeningHistoryEntryId(null);
-  }, [session?.projectId]);
+    pendingActionItemIdsRef.current = new Set();
+    setPendingActionItemIds(new Set());
+  }, [workflow.projectKey]);
 
   useEffect(() => {
     setItemConflictActions({});
-  }, [session?.sessionId]);
+  }, [workflow.projectKey, session?.sessionId]);
 
   useEffect(() => {
     const status = workflow.discoveryTask?.status;
@@ -158,30 +172,36 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     }), [conflictAction, itemConflictActions, session]);
 
   async function compareCandidate(itemId: string) {
+    const requestProjectKey = workflow.projectKey;
     const item = itemById(session?.items ?? [], itemId);
     if (!item?.taskId) return;
     const view = await workflow.acceptAgentCandidate(itemId, item.taskId);
-    if (view) setCandidateView(view);
+    if (view && activeProjectKeyRef.current === requestProjectKey) setCandidateView(view);
   }
 
   async function discardCandidate(itemId: string) {
+    const requestProjectKey = workflow.projectKey;
     const view = candidateView?.itemId === itemId
       ? candidateView
       : await (async () => {
         const item = itemById(session?.items ?? [], itemId);
         return item?.taskId ? workflow.acceptAgentCandidate(itemId, item.taskId) : null;
       })();
-    if (!view) return;
+    if (!view || activeProjectKeyRef.current !== requestProjectKey) return;
     await workflow.discardAgentCandidate(itemId, view.candidate.candidateId);
+    if (activeProjectKeyRef.current !== requestProjectKey) return;
     setCandidateView(null);
     await workflow.refreshSession();
   }
 
   async function handleCandidateIntent(intent: ImportCandidateDiffIntent) {
-    if (!candidateView) return;
-    const itemId = candidateView.itemId;
+    const requestProjectKey = workflow.projectKey;
+    const view = candidateView;
+    if (!view) return;
+    const itemId = view.itemId;
     if (intent.kind === "discard" || intent.kind === "choose_deterministic" || intent.kind === "keep_current" || intent.kind === "create_new") {
       await workflow.discardAgentCandidate(itemId, intent.candidateId);
+      if (activeProjectKeyRef.current !== requestProjectKey) return;
       if (intent.kind === "keep_current" || intent.kind === "create_new") {
         setItemConflictActions((current) => ({
           ...current,
@@ -198,13 +218,14 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         });
       }
     } else {
-      await workflow.selectAgentCandidate(buildCandidateSelectionRequest(candidateView, intent));
+      await workflow.selectAgentCandidate(buildCandidateSelectionRequest(view, intent));
+      if (activeProjectKeyRef.current !== requestProjectKey) return;
       if (intent.kind === "apply_merged") {
         setItemConflictActions((current) => ({
           ...current,
           [itemId]: {
             action: "apply_merged_candidate",
-            expectedWikiHash: candidateView.diff.currentMarkdownSha256 ?? null,
+            expectedWikiHash: view.diff.currentMarkdownSha256 ?? null,
           },
         }));
       } else {
@@ -285,24 +306,28 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
 
   async function handleActionRequest(action: ImportItemAction, itemId: string) {
     if (pendingActionItemIdsRef.current.has(itemId)) return;
+    const requestProjectKey = workflow.projectKey;
     pendingActionItemIdsRef.current.add(itemId);
     setPendingActionItemIds(new Set(pendingActionItemIdsRef.current));
     try {
       await handleAction(action, itemId);
     } finally {
-      pendingActionItemIdsRef.current.delete(itemId);
-      setPendingActionItemIds(new Set(pendingActionItemIdsRef.current));
+      if (activeProjectKeyRef.current === requestProjectKey) {
+        pendingActionItemIdsRef.current.delete(itemId);
+        setPendingActionItemIds(new Set(pendingActionItemIdsRef.current));
+      }
     }
   }
 
   async function loadMoreHistory(cursor: string) {
     if (historyLoadLock.current) return;
+    const requestProjectKey = workflow.projectKey;
     const requestId = historyRequestRef.current;
     historyLoadLock.current = true;
     setHistoryLoadingMore(true);
     try {
       const next = await workflow.listHistory(cursor);
-      if (!next || requestId !== historyRequestRef.current) return;
+      if (!next || activeProjectKeyRef.current !== requestProjectKey || requestId !== historyRequestRef.current) return;
       setHistory((current) => {
         if (!current) return next;
         const entries = new Map(current.entries.map((entry) => [entry.id, entry]));
@@ -313,15 +338,18 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         return { ...next, entries: [...entries.values()], legacyReadOnly: [...legacyReadOnly.values()], warnings: [...warnings.values()] };
       });
     } catch {
-      pushToast("error", t("importV2.history.error"));
+      if (activeProjectKeyRef.current === requestProjectKey) pushToast("error", t("importV2.history.error"));
     } finally {
-      historyLoadLock.current = false;
-      setHistoryLoadingMore(false);
+      if (activeProjectKeyRef.current === requestProjectKey) {
+        historyLoadLock.current = false;
+        setHistoryLoadingMore(false);
+      }
     }
   }
 
   async function openHistoryEntry(entryId: string, action: ImportHistoryAction) {
     if (historyEntryBusyRef.current) return;
+    const requestProjectKey = workflow.projectKey;
     const entry = history?.entries.find((candidate) => candidate.id === entryId);
     if (!entry?.sessionId) return;
     historyEntryBusyRef.current = entryId;
@@ -329,6 +357,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     setHistoryResultUnavailable(false);
     try {
       const historicalSession = await workflow.loadSession(entry.sessionId, entry.batchId);
+      if (activeProjectKeyRef.current !== requestProjectKey) return;
       if (!historicalSession) {
         pushToast("info", t("importV2.history.resultUnavailable"));
         return;
@@ -358,8 +387,10 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
       }
       setHistoryDetail({ entry, session: historicalSession });
     } finally {
-      historyEntryBusyRef.current = null;
-      setOpeningHistoryEntryId(null);
+      if (activeProjectKeyRef.current === requestProjectKey) {
+        historyEntryBusyRef.current = null;
+        setOpeningHistoryEntryId(null);
+      }
     }
   }
 

@@ -103,6 +103,19 @@ describe("recoverTasksForProject", () => {
     expect(useTaskStore.getState().tasks).toEqual(tasks);
   });
 
+  it("keeps task events from background projects in the global task list", () => {
+    handleTaskEvent({
+      eventId: "event-project-a",
+      eventType: "task_updated",
+      projectId: "project-a",
+      taskId: "task-a",
+      timestamp: "2026-06-21T00:00:30Z",
+      payload: task("task-a", "project-a"),
+    });
+
+    expect(useTaskStore.getState().tasks).toContainEqual(task("task-a", "project-a"));
+  });
+
   it("propagates task list and recovery failures so the UI can report them", async () => {
     invokeMock.mockRejectedValueOnce(new Error("task registry unavailable"));
     await expect(fetchTasks()).rejects.toThrow("task registry unavailable");

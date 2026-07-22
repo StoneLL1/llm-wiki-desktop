@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   useImportWorkflow: vi.fn(),
   useProviderWorkflow: vi.fn(),
   useAgentWorkflow: vi.fn(),
-  requestPreview: vi.fn(),
+  addPaths: vi.fn(),
   runAgent: vi.fn(),
   saveProvider: vi.fn(),
 }));
@@ -36,12 +36,12 @@ vi.mock("../../features/agent/useAgentWorkflow", () => ({
 vi.mock("./WorkspaceRouter", () => ({
   WorkspaceRouter: ({ activeView, importWorkflow }: {
     activeView: string;
-    importWorkflow: { requestPreview: (paths: string[]) => void };
+    importWorkflow: { addPaths: (paths: string[]) => void };
   }) => (
     <div data-testid="workspace-router">
       router:{activeView}
-      <button onClick={() => importWorkflow.requestPreview(["C:/source.pdf"])}>
-        Preview through router
+      <button onClick={() => importWorkflow.addPaths(["C:/source.pdf"])}>
+        Import through router
       </button>
     </div>
   ),
@@ -124,13 +124,9 @@ const taskLauncher = {
   cancel: vi.fn(),
 };
 const importWorkflow = {
-  importedSources: [],
   isConfirming: false,
-  requestPreview: mocks.requestPreview,
+  addPaths: mocks.addPaths,
   requestClipboard: vi.fn(),
-  requestUrl: vi.fn(),
-  requestDeleteSource: vi.fn(),
-  requestReplaceSource: vi.fn(),
   confirm: vi.fn(),
 };
 const providerWorkflow = {
@@ -186,8 +182,8 @@ describe("WorkspaceController", () => {
       taskLauncher,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Preview through router" }));
-    expect(mocks.requestPreview).toHaveBeenCalledWith(["C:/source.pdf"]);
+    fireEvent.click(screen.getByRole("button", { name: "Import through router" }));
+    expect(mocks.addPaths).toHaveBeenCalledWith(["C:/source.pdf"]);
     fireEvent.click(screen.getByRole("button", { name: "Run through dialog" }));
     expect(mocks.runAgent).toHaveBeenCalledWith(
       expect.objectContaining({ skill: "wiki-ingest" }),

@@ -42,7 +42,7 @@ describe("ImportSourceMethods", () => {
     expect(onAddPaths).not.toHaveBeenCalledWith([]);
   });
 
-  it("submits a URL on Enter, clears only after acceptance, and rejects local targets visibly", async () => {
+  it("submits a normal URL without a media choice and rejects local targets visibly", async () => {
     const onAddUrl = vi.fn().mockResolvedValue(undefined);
     render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={onAddUrl} />);
     const input = screen.getByRole("textbox", { name: "URL" });
@@ -55,6 +55,33 @@ describe("ImportSourceMethods", () => {
     fireEvent.change(input, { target: { value: "file:///private/note.md" } });
     expect(screen.getByText(/local URLs are not supported/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add URL" })).toBeDisabled();
+  });
+
+  it.each([
+    ["Douyin", "https://www.douyin.com/video/123", "extract_only", /save extraction only/i],
+    ["Xiaohongshu", "https://www.xiaohongshu.com/explore/abc", "extract_only", /save extraction only/i],
+    ["Bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", "preserve_original", /save original media/i],
+  ] as const)("asks for a media save mode for %s URLs", async (_platform, value, mode, choiceName) => {
+    const onAddUrl = vi.fn().mockResolvedValue(undefined);
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={onAddUrl} />);
+    const input = screen.getByRole("textbox", { name: "URL" });
+
+    fireEvent.change(input, { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Add URL" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(onAddUrl).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: choiceName }));
+    await waitFor(() => expect(onAddUrl).toHaveBeenCalledWith(value, mode));
+  });
+
+  it("recognizes XHS short links as media platform URLs", () => {
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} />);
+    const input = screen.getByRole("textbox", { name: "URL" });
+
+    fireEvent.change(input, { target: { value: "https://xhslink.com/a/abc" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add URL" }));
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("keeps a rejected URL for retry", async () => {

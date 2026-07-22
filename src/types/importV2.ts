@@ -13,19 +13,20 @@ export type {
 
 export type ImportResourceMode = "balanced" | "performance" | "saver";
 export type ImportInputKind = "file" | "folder" | "url";
+export type MediaSaveMode = "preserve_original" | "extract_only";
 export type ImportStage = "inspect" | "route" | "extract" | "validate" | "commit";
 export type QualityLevel = "pass" | "warning" | "fail";
-export type ArtifactKind = "source_snapshot" | "markdown" | "image" | "attachment" | "subtitle" | "metadata";
+export type ArtifactKind = "source_snapshot" | "source_evidence" | "markdown" | "image" | "attachment" | "subtitle" | "transcript" | "metadata";
 export type AttemptOutcome = "succeeded" | "failed" | "cancelled";
 export type ImportItemStatus = "queued" | "inspecting" | "waiting_capability" | "waiting_login" | "extracting" | "validating" | "preview_ready" | "needs_merge" | "committing" | "completed" | "paused" | "cancelled" | "skipped" | "failed";
 export type ImportSessionStatus = "draft" | "processing" | "waiting_for_confirmation" | "partially_committed" | "completed" | "cancelled";
 
-export interface ImportInput { kind: ImportInputKind; displayName: string; locator: string; normalizedLocator: string | null; }
+export interface ImportInput { kind: ImportInputKind; displayName: string; locator: string; normalizedLocator: string | null; mediaSaveMode?: MediaSaveMode; }
 export interface QualityMetric { code: string; actual: number; minimum: number; passed: boolean; }
 export interface QualityReport { level: QualityLevel; metrics: QualityMetric[]; warnings: string[]; sheetCountExact?: number; slideCountExact?: number; nonEmptyCellCoverage?: number; formulaValuePairs?: number; meaningfulImageCoverage?: number; }
 export interface ImportArtifact { kind: ArtifactKind; relativePath: string; sha256: string; sizeBytes: number; }
 export interface AttemptRecord { route: string; engineId: string; engineVersion: string; stage: ImportStage; startedAt: string; completedAt: string | null; outcome: AttemptOutcome; warnings: string[]; }
-export type ImportRecoveryAction = "install_capability" | "retry" | "switch_parser" | "enable_ocr" | "invoke_agent" | "skip" | "view_log" | "retry_route" | "switch_route" | "begin_login" | "authorize_private_target" | "install_browser_capability" | "install_media_capability" | "authorize_local_asr";
+export type ImportRecoveryAction = "install_capability" | "retry" | "switch_parser" | "enable_ocr" | "invoke_agent" | "skip" | "view_log" | "retry_route" | "switch_route" | "begin_login" | "authorize_private_target" | "install_browser_capability" | "install_media_capability" | "install_ocr_capability" | "authorize_local_asr";
 export interface ImportIssue { code: string; message: string; stage: ImportStage; retryable: boolean; userActionRequired: boolean; recoveryActions: ImportRecoveryAction[]; availableActions: AgentRecoveryAction[]; }
 export interface ImportPreviewArtifact { markdown: ImportArtifact; assets: ImportArtifact[]; sourceSnapshot: ImportArtifact; quality: QualityReport; title: string; }
 export interface ImportItem { itemId: string; input: ImportInput; status: ImportItemStatus; selected: boolean; taskId: string | null; progress: TaskProgress | null; attempts: AttemptRecord[]; preview: ImportPreviewArtifact | null; issue: ImportIssue | null; }

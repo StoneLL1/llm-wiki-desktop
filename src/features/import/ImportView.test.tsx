@@ -1,10 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
 import type { ImportItem, ImportSession } from "../../types/importV2";
 import type { AgentCandidateView } from "../../types/importV2Agent";
-import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
+import type { ImportFrontendReadiness, ImportHistoryPage } from "../../types/importV2Presentation";
 import type { ImportWorkflow } from "./useImportWorkflow";
 import { buildCandidateSelectionRequest, ImportView } from "./ImportView";
 import type { ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
@@ -30,6 +30,7 @@ function session(items: ImportItem[]): ImportSession {
 function workflow(overrides: Partial<ImportWorkflow> = {}): ImportWorkflow {
   const current = session([]);
   return {
+    projectKey: "project-a\0D:/wiki/project-a",
     session: current,
     readiness: { backendVersion: "2.0.0", active: true, migrationStatus: "applied", unfinishedSessionId: current.sessionId, legacyHistoryAvailable: false },
     bootstrapState: "ready",
@@ -47,7 +48,6 @@ function workflow(overrides: Partial<ImportWorkflow> = {}): ImportWorkflow {
     skipItem: vi.fn(),
     authorizeLocalAsr: vi.fn(),
     confirm: vi.fn(),
-    confirmLegacy: vi.fn(),
     refreshSession: vi.fn(),
     selectItem: vi.fn(),
     setFilter: vi.fn(),
@@ -73,13 +73,8 @@ function workflow(overrides: Partial<ImportWorkflow> = {}): ImportWorkflow {
     getMigrationStatus: vi.fn(),
     resumeMigration: vi.fn(),
     listHistory: vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] }),
-    importedSources: [],
     isConfirming: false,
-    requestPreview: vi.fn(),
     requestClipboard: vi.fn(),
-    requestUrl: vi.fn(),
-    requestDeleteSource: vi.fn(),
-    requestReplaceSource: vi.fn(),
     ...overrides,
   };
 }
@@ -184,6 +179,45 @@ describe("ImportView V2 composition", () => {
     render(<ImportView workflow={currentWorkflow} />);
 
     expect(screen.getByRole("button", { name: /confirm import/i })).toBeEnabled();
+  });
+
+  it("ignores a history response from the previous project scope", async () => {
+    let resolvePrevious!: (page: ImportHistoryPage) => void;
+    const previousHistory = vi.fn(() => new Promise<ImportHistoryPage>((resolve) => {
+      resolvePrevious = resolve;
+    }));
+    const currentHistory = vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] });
+    const previousWorkflow = workflow({ projectKey: "project-a\0D:/wiki/a", listHistory: previousHistory });
+    const currentWorkflow = workflow({ projectKey: "project-a\0D:/wiki/b", listHistory: currentHistory });
+    const { rerender } = render(<ImportView workflow={previousWorkflow} />);
+
+    await waitFor(() => expect(previousHistory).toHaveBeenCalled());
+    rerender(<ImportView workflow={currentWorkflow} />);
+    await waitFor(() => expect(currentHistory).toHaveBeenCalled());
+
+    await act(async () => {
+      resolvePrevious({
+        entries: [{
+          id: "old-entry",
+          title: "Old project history",
+          status: "completed",
+          sessionId: "old-session",
+          batchId: "old-batch",
+          taskId: null,
+          startedAt: null,
+          updatedAt: null,
+          completedAt: null,
+          legacyReadOnly: false,
+          itemIds: [],
+          availableActions: [],
+        }],
+        legacyReadOnly: [],
+        nextCursor: null,
+        warnings: [],
+      });
+    });
+
+    expect(screen.queryByText("Old project history")).not.toBeInTheDocument();
   });
 
   it("renders the same shell with Chinese copy", async () => {

@@ -22,7 +22,7 @@ describe("Import V2 presentation API", () => {
       cancelBatch: "cancel_import_batch_v2",
       cancelItem: "cancel_import_item_v2",
       skipItem: "skip_import_item_v2",
-      authorizeBilibiliAsr: "authorize_bilibili_asr_v2",
+      authorizeLocalAsr: "authorize_local_asr_v2",
       confirmSession: "confirm_import_session_v2",
       getPreviewContent: "get_import_preview_content_v2",
       getReadiness: "get_import_frontend_readiness_v2",

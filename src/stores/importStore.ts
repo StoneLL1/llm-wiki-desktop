@@ -1,6 +1,5 @@
 import { create } from "zustand";
 
-import type { ImportedSource, ImportPreview } from "../types/import";
 import type { ImportItem, ImportSession } from "../types/importV2";
 
 export type ImportQueueFilter =
@@ -19,7 +18,6 @@ interface ImportState {
   session: ImportSession | null;
   selectedItemId: string | null;
   filter: ImportQueueFilter;
-  isBootstrapping: boolean;
   mutationKeys: ReadonlySet<string>;
   sessionEpoch: number;
   previewItemId: string | null;
@@ -27,31 +25,15 @@ interface ImportState {
   capabilityItemId: string | null;
   loginItemId: string | null;
   migrationDialogOpen: boolean;
-  preview: ImportPreview | null;
-  importedSources: ImportedSource[];
   isConfirming: boolean;
-  selectedSourcePath: string | null;
-  urlDialogOpen: boolean;
-  folderDialogOpen: boolean;
-  createCheckpoint: boolean;
-  compileAfterImport: boolean;
-  setPreview: (preview: ImportPreview | null) => void;
-  setImportedSources: (sources: ImportedSource[]) => void;
   setIsConfirming: (confirming: boolean) => void;
-  setSelectedSourcePath: (path: string | null) => void;
-  setUrlDialogOpen: (open: boolean) => void;
-  setFolderDialogOpen: (open: boolean) => void;
-  setCreateCheckpoint: (create: boolean) => void;
-  setCompileAfterImport: (compile: boolean) => void;
   attachSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
   replaceSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
-  appendItems: (projectKey: string, items: ImportItem[], epoch?: number) => boolean;
   replaceItem: (projectKey: string, item: ImportItem, epoch?: number) => boolean;
   resetProjectPresentation: (projectKey: string) => void;
   beginSessionEpoch: (projectKey: string) => number;
   selectItem: (itemId: string | null) => void;
   setFilter: (filter: ImportQueueFilter) => void;
-  setBootstrapping: (value: boolean) => void;
   beginMutation: (key: string) => void;
   endMutation: (key: string) => void;
   openPreview: (itemId: string) => void;
@@ -95,7 +77,6 @@ export const useImportStore = create<ImportState>((set, get) => ({
   session: null,
   selectedItemId: null,
   filter: "all",
-  isBootstrapping: false,
   mutationKeys: new Set<string>(),
   sessionEpoch: 0,
   previewItemId: null,
@@ -103,30 +84,8 @@ export const useImportStore = create<ImportState>((set, get) => ({
   capabilityItemId: null,
   loginItemId: null,
   migrationDialogOpen: false,
-  preview: null,
-  importedSources: [],
   isConfirming: false,
-  selectedSourcePath: null,
-  urlDialogOpen: false,
-  folderDialogOpen: false,
-  createCheckpoint: true,
-  compileAfterImport: true,
-  setPreview: (preview) =>
-    set((current) => ({
-      preview,
-      selectedSourcePath:
-        preview && current.selectedSourcePath
-          ? (preview.files.find((f) => f.sourcePath === current.selectedSourcePath)
-              ?.sourcePath ?? preview.files[0]?.sourcePath ?? null)
-          : (preview?.files[0]?.sourcePath ?? null),
-    })),
-  setImportedSources: (importedSources) => set({ importedSources }),
   setIsConfirming: (isConfirming) => set({ isConfirming }),
-  setSelectedSourcePath: (selectedSourcePath) => set({ selectedSourcePath }),
-  setUrlDialogOpen: (urlDialogOpen) => set({ urlDialogOpen }),
-  setFolderDialogOpen: (folderDialogOpen) => set({ folderDialogOpen }),
-  setCreateCheckpoint: (createCheckpoint) => set({ createCheckpoint }),
-  setCompileAfterImport: (compileAfterImport) => set({ compileAfterImport }),
   attachSession: (projectKey, session, epoch) => {
     const state = get();
     if (!scopeAccepts(state, projectKey, epoch)) return false;
@@ -137,16 +96,6 @@ export const useImportStore = create<ImportState>((set, get) => ({
     const state = get();
     if (!scopeAccepts(state, projectKey, epoch)) return false;
     set({ projectKey, session, selectedItemId: selectedItemIdFor(session, state.selectedItemId) });
-    return true;
-  },
-  appendItems: (projectKey, items, epoch) => {
-    const state = get();
-    if (!scopeAccepts(state, projectKey, epoch) || !state.session) return false;
-    const existing = new Set(state.session.items.map((item) => item.itemId));
-    const nextItems = items.filter((item) => !existing.has(item.itemId));
-    if (nextItems.length === 0) return true;
-    const session = { ...state.session, items: [...state.session.items, ...nextItems] };
-    set({ session, selectedItemId: selectedItemIdFor(session, state.selectedItemId) });
     return true;
   },
   replaceItem: (projectKey, item, epoch) => {
@@ -168,7 +117,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
       session: null,
       selectedItemId: null,
       filter: "all",
-      isBootstrapping: false,
+      isConfirming: false,
       mutationKeys: new Set<string>(),
       sessionEpoch: state.sessionEpoch + 1,
       ...clearDialogs(),
@@ -183,7 +132,6 @@ export const useImportStore = create<ImportState>((set, get) => ({
   selectItem: (selectedItemId) =>
     set((state) => ({ selectedItemId: selectedItemIdFor(state.session, selectedItemId) })),
   setFilter: (filter) => set({ filter }),
-  setBootstrapping: (isBootstrapping) => set({ isBootstrapping }),
   beginMutation: (key) =>
     set((state) => {
       const mutationKeys = new Set(state.mutationKeys);
@@ -211,14 +159,9 @@ export const useImportStore = create<ImportState>((set, get) => ({
       session: null,
       selectedItemId: null,
       filter: "all",
-      isBootstrapping: false,
       mutationKeys: new Set<string>(),
       sessionEpoch: 0,
       ...clearDialogs(),
-      preview: null,
-      selectedSourcePath: null,
       isConfirming: false,
-      urlDialogOpen: false,
-      folderDialogOpen: false,
     }),
 }));

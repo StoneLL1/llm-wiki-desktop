@@ -46,12 +46,11 @@ beforeEach(() => {
 });
 
 describe("Import V2 session store", () => {
-  it("recovers a session and appends new items without replacing existing items", () => {
+  it("attaches a recovered session for the current project", () => {
     const first = session([item("one")]);
     useImportStore.getState().attachSession(projectA, first);
-    useImportStore.getState().appendItems(projectA, [item("two")]);
 
-    expect(useImportStore.getState().session?.items.map(({ itemId }) => itemId)).toEqual(["one", "two"]);
+    expect(useImportStore.getState().session?.items.map(({ itemId }) => itemId)).toEqual(["one"]);
   });
 
   it("replaces a refreshed item by identity and clears a disappeared selection", () => {
@@ -67,12 +66,14 @@ describe("Import V2 session store", () => {
   it("resets presentation on project change without owning or erasing task facts", () => {
     useImportStore.getState().attachSession(projectA, session([item("one")]));
     useImportStore.getState().openPreview("one");
+    useImportStore.getState().setIsConfirming(true);
     useImportStore.getState().resetProjectPresentation(projectB);
 
     expect(useImportStore.getState()).toMatchObject({
       projectKey: projectB,
       session: null,
       selectedItemId: null,
+      isConfirming: false,
       previewItemId: null,
       byokItemId: null,
       capabilityItemId: null,

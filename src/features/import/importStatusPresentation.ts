@@ -1,5 +1,6 @@
 import type { AgentRecoveryAction } from "../../types/importV2Agent";
 import type { ImportItem, ImportItemStatus, ImportRecoveryAction } from "../../types/importV2";
+import { isSupportedMediaPlatformUrl } from "./importLocator";
 
 export type ImportItemTone = "neutral" | "accent" | "warning" | "danger";
 export type ImportItemProgressMode = "none" | "indeterminate" | "measured";
@@ -84,7 +85,10 @@ const RECOVERY_ACTION_TO_ITEM_ACTION: readonly [ImportRecoveryAction, ImportItem
 
 function isRecoveryActionApplicable(item: ImportItem, action: ImportRecoveryAction): boolean {
   if (action === "skip" || action === "retry_route") return true;
-  if (item.input.kind === "url") return action === "switch_route";
+  if (item.input.kind === "url") {
+    return action === "switch_route"
+      || (action === "enable_ocr" && isSupportedMediaPlatformUrl(item.input.normalizedLocator ?? item.input.locator));
+  }
   const extension = item.input.locator.split(/[\\/.]/).pop()?.toLowerCase() ?? "";
   if (action === "enable_ocr") return extension === "pdf";
   if (action === "switch_parser") return ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf"].includes(extension);
@@ -126,12 +130,19 @@ export function presentImportItem(item: ImportItem): ImportItemPresentation {
     if (
       (item.issue.recoveryActions.includes("install_capability")
         || item.issue.recoveryActions.includes("install_browser_capability")
-        || item.issue.recoveryActions.includes("install_media_capability"))
+          || item.issue.recoveryActions.includes("install_media_capability")
+          || item.issue.recoveryActions.includes("install_ocr_capability"))
       && !actions.includes("view_capability")
     ) {
       actions.push("view_capability");
     }
     if (item.issue.recoveryActions.includes("begin_login") && !actions.includes("begin_login")) actions.push("begin_login");
+  }
+  if (item.input.kind === "url"
+    && isSupportedMediaPlatformUrl(item.input.normalizedLocator ?? item.input.locator)
+    && (item.status === "preview_ready" || item.status === "failed")
+    && !actions.includes("enable_ocr")) {
+    actions.push("enable_ocr");
   }
   if (item.taskId && item.issue?.recoveryActions.includes("view_log") && !actions.includes("view_log")) {
     actions.push("view_log");

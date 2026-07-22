@@ -12,7 +12,7 @@ import type {
   CancelImportBatchV2Request,
 } from "../types/importV2";
 import type { AddImportPathsV2Request, FileScanResult, GetImportScanResultV2Request } from "../types/importV2File";
-import type { AddImportUrlV2Request, AuthorizeBilibiliAsrV2Request } from "../types/importV2Web";
+import type { AddImportUrlV2Request, AuthorizeLocalAsrV2Request } from "../types/importV2Web";
 import type { AgentCandidateActionResult, AgentCandidateView, AgentAssistancePolicy, AgentSendScope } from "../types/importV2Agent";
 import type {
   ActivateImportV2Request,
@@ -32,9 +32,8 @@ import type {
   ScanImportV2MigrationRequest,
 } from "../types/importV2Migration";
 import type { BackendTask } from "../types/task";
+import type { ImportV2Api, ImportV2CommandNames } from "../types/importV2Api";
 import type {
-  ImportV2Api,
-  ImportV2CommandNames,
   ImportFrontendReadiness,
   ImportHistoryPage,
   ImportPreviewContent,
@@ -70,7 +69,7 @@ const commandNames: ImportV2CommandNames = {
   cancelBatch: "cancel_import_batch_v2",
   cancelItem: "cancel_import_item_v2",
   skipItem: "skip_import_item_v2",
-  authorizeBilibiliAsr: "authorize_bilibili_asr_v2",
+  authorizeLocalAsr: "authorize_local_asr_v2",
   confirmSession: "confirm_import_session_v2",
   getPreviewContent: "get_import_preview_content_v2",
   getReadiness: "get_import_frontend_readiness_v2",
@@ -105,7 +104,7 @@ export const importV2Api: ImportV2Api = {
   commandNames,
   createSession: (value: CreateImportSessionV2Request) => request<ImportSession>(commandNames.createSession, value),
   getSession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getSession, value),
-  getHistorySession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getHistorySession ?? commandNames.getSession, value),
+  getHistorySession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getHistorySession, value),
   addItems: (value: AddImportItemsV2Request) => request<ImportSession>(commandNames.addItems, value),
   addPaths: (value: AddImportPathsV2Request) => request<BackendTask>(commandNames.addPaths, value),
   getScanResult: (value: GetImportScanResultV2Request) => request<FileScanResult>(commandNames.getScanResult, value),
@@ -115,7 +114,7 @@ export const importV2Api: ImportV2Api = {
   cancelBatch: (value: CancelImportBatchV2Request) => request<BackendTask[]>(commandNames.cancelBatch, value),
   cancelItem: (value: CancelImportItemV2Request) => request<ImportSession>(commandNames.cancelItem, value),
   skipItem: (value: CancelImportItemV2Request) => request<ImportSession>(commandNames.skipItem, value),
-  authorizeBilibiliAsr: (value: AuthorizeBilibiliAsrV2Request) => request<void>(commandNames.authorizeBilibiliAsr, value),
+  authorizeLocalAsr: (value: AuthorizeLocalAsrV2Request) => request<void>(commandNames.authorizeLocalAsr, value),
   confirmSession: (value: CommitImportSessionRequest) => request<BackendTask>(commandNames.confirmSession, value),
   getPreviewContent: (value: GetImportPreviewContentV2Request) => request<ImportPreviewContent>(commandNames.getPreviewContent, value),
   getReadiness: (value: GetImportFrontendReadinessV2Request) => request<ImportFrontendReadiness>(commandNames.getReadiness, value),

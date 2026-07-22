@@ -49,10 +49,10 @@ describe("ImportCapabilityDialog", () => {
     await waitFor(() => expect(onInstall).toHaveBeenCalledWith("browser-runtime"));
   });
 
-  it("offers fallback instead of a dead install button when the platform is unsupported", () => {
+  it("keeps the install entry visible but disabled when no trusted installer is available", () => {
     render(<ImportCapabilityDialog open requirement={{ ...requirement, installable: false }} onInstall={vi.fn()} onCancel={vi.fn()} />);
 
-    expect(screen.queryByRole("button", { name: /install capability/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /install capability/i })).toBeDisabled();
     expect(screen.getByText(/signed pack from a release/i)).toBeInTheDocument();
   });
 });
