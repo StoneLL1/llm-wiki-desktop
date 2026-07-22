@@ -380,16 +380,15 @@ impl GitService {
 
         for path in paths {
             validate_relative_git_path(path)?;
-            if preserved_ignored_paths.iter().any(|preserved| preserved == path) {
+            if preserved_ignored_paths
+                .iter()
+                .any(|preserved| preserved == path)
+            {
                 continue;
             }
 
             let head_spec = format!("HEAD:{path}");
-            let exists_in_head = run_git(
-                context,
-                &["cat-file", "-e", head_spec.as_str()],
-            )
-            .is_ok();
+            let exists_in_head = run_git(context, &["cat-file", "-e", head_spec.as_str()]).is_ok();
             if exists_in_head {
                 run_git(
                     context,
@@ -1010,10 +1009,7 @@ mod tests {
         service
             .rollback_paths_to_head_preserving_ignored(
                 &context,
-                &[
-                    "wiki/page.md".to_string(),
-                    "wiki/agent-new.md".to_string(),
-                ],
+                &["wiki/page.md".to_string(), "wiki/agent-new.md".to_string()],
                 &[],
             )
             .unwrap();

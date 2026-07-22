@@ -421,7 +421,11 @@ mod tests {
         });
 
         let loaded = service.load_session(&context, &session.id).unwrap();
-        let contents: Vec<_> = loaded.messages.iter().map(|message| message.content.as_str()).collect();
+        let contents: Vec<_> = loaded
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
         assert_eq!(contents.len(), 2);
         assert!(contents.contains(&"first concurrent turn"));
         assert!(contents.contains(&"second concurrent turn"));
