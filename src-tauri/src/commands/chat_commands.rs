@@ -4,8 +4,8 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::chat::{
-    ChatAffectedPathHash, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute, ChatSession,
-    ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest, ListChatsRequest,
+    ChatAffectedPathHash, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatMessage, ChatRoute,
+    ChatSession, ChatSessionSummary, CreateChatSessionRequest, DeleteChatRequest, ListChatsRequest,
     LoadChatRequest, RenameChatRequest, ResolveChatConvenienceEditRequest,
     RollbackLastChatConvenienceEditRequest, SaveAnswerResult, SaveAnswerToWikiRequest,
     SendChatMessageRequest,
@@ -425,12 +425,12 @@ async fn run_chat_send(
     let assistant_message_id = assistant_message.id.clone();
     // Check cancellation again while holding the session mutation lock so a
     // cancel that races with another writer cannot persist an abandoned answer.
-    if !state.chat_service.append_message_if(
-        context,
-        &mut session,
-        assistant_message,
-        || state.task_service.is_cancelled(task_id),
-    )? {
+    if !state
+        .chat_service
+        .append_message_if(context, &mut session, assistant_message, || {
+            state.task_service.is_cancelled(task_id)
+        })?
+    {
         return Err(chat_cancelled_error());
     }
 
@@ -440,7 +440,10 @@ async fn run_chat_send(
         reference: None,
         pending_action: None,
     };
-    if let Err(error) = state.task_service.complete_running_with_result(task_id, result) {
+    if let Err(error) = state
+        .task_service
+        .complete_running_with_result(task_id, result)
+    {
         let _ = state.chat_service.remove_message_if(
             context,
             &session.id,
@@ -529,7 +532,10 @@ async fn run_chat_convenience_send(
         TaskActivity::Phase {
             name: "agent".into(),
             status: TaskActivityStatus::Started,
-            label: Some(format!("Running {} in Chat convenience mode", kind.command())),
+            label: Some(format!(
+                "Running {} in Chat convenience mode",
+                kind.command()
+            )),
         },
     );
     let answer = match state.agent_service.run_task_streaming_with_events(
@@ -662,12 +668,12 @@ async fn run_chat_convenience_send(
         saved_path: None,
     };
     let assistant_message_id = assistant_message.id.clone();
-    if !state.chat_service.append_message_if(
-        context,
-        session,
-        assistant_message,
-        || state.task_service.is_cancelled(task_id),
-    )? {
+    if !state
+        .chat_service
+        .append_message_if(context, session, assistant_message, || {
+            state.task_service.is_cancelled(task_id)
+        })?
+    {
         return Err(cleanup_convenience_failure(
             state,
             context,
@@ -685,7 +691,10 @@ async fn run_chat_convenience_send(
         reference: None,
         pending_action: None,
     };
-    if let Err(error) = state.task_service.complete_running_with_result(task_id, result) {
+    if let Err(error) = state
+        .task_service
+        .complete_running_with_result(task_id, result)
+    {
         let cancelled = state.task_service.is_cancelled(task_id);
         let _ = state.chat_service.remove_message_if(
             context,
@@ -730,11 +739,12 @@ fn cleanup_convenience_failure(
     {
         Ok(changes) => changes,
         Err(error) => {
-            return convenience_cleanup_error(task_id, &[], &original.message, error)
-                .with_details(serde_json::json!({
+            return convenience_cleanup_error(task_id, &[], &original.message, error).with_details(
+                serde_json::json!({
                     "original": original,
                     "cleanup": "audit_failed",
-                }));
+                }),
+            );
         }
     };
     changes.retain(|change| !is_current_task_runtime_path(task_id, change));
@@ -1264,19 +1274,15 @@ fn rollback_convenience_message(
             "currentHead": current_head,
         })));
     }
-    let rollback_result = ensure_convenience_paths_unchanged(
-        state,
-        context,
-        &affected_paths,
-        &affected_path_hashes,
-    )
-    .and_then(|()| {
-        state.git_service.rollback_paths_to_head_preserving_ignored(
-            context,
-            &affected_paths,
-            &ignored_baseline,
-        )
-    });
+    let rollback_result =
+        ensure_convenience_paths_unchanged(state, context, &affected_paths, &affected_path_hashes)
+            .and_then(|()| {
+                state.git_service.rollback_paths_to_head_preserving_ignored(
+                    context,
+                    &affected_paths,
+                    &ignored_baseline,
+                )
+            });
     match rollback_result {
         Ok(()) => {
             if let Some(edit) = session.messages[index].convenience_edit.as_mut() {
@@ -1414,7 +1420,10 @@ mod tests {
     #[test]
     fn validate_chat_content_trims_and_rejects_empty_or_oversized_input() {
         assert_eq!(validate_chat_content("  hello\n").unwrap(), "hello");
-        assert_eq!(validate_chat_content("  \n\t").unwrap_err().code, "CHAT_CONTENT_EMPTY");
+        assert_eq!(
+            validate_chat_content("  \n\t").unwrap_err().code,
+            "CHAT_CONTENT_EMPTY"
+        );
         let err = validate_chat_content(&"x".repeat(MAX_CHAT_CONTENT_CHARS + 1)).unwrap_err();
         assert_eq!(err.code, "CHAT_CONTENT_TOO_LONG");
     }

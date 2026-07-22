@@ -956,8 +956,15 @@ mod tests {
             .iter()
             .find(|source| source.page_path == "wiki/concepts/huge-pinned.md")
             .expect("pinned page remains represented even under a tight budget");
-        assert!(pinned.excerpt.as_deref().is_some_and(|excerpt| !excerpt.is_empty()));
-        assert!(ctx.diagnostics.omitted_pages.iter().any(|path| path == "wiki/index.md"));
+        assert!(pinned
+            .excerpt
+            .as_deref()
+            .is_some_and(|excerpt| !excerpt.is_empty()));
+        assert!(ctx
+            .diagnostics
+            .omitted_pages
+            .iter()
+            .any(|path| path == "wiki/index.md"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
