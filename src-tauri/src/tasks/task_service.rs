@@ -697,7 +697,7 @@ impl TaskService {
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 match std::fs::read_to_string(&path) {
                     Ok(json) => {
-                                let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
+                        let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
                             .map(|entry| (entry.task, entry.log_lines, entry.activities))
                             .or_else(|_| {
                                 serde_json::from_str::<BackendTask>(&json)

@@ -192,6 +192,7 @@ fn repeated_append_drops_existing_and_in_batch_duplicates() {
             locator: "C:/Input/A.md".into(),
             normalized_locator: Some("c:/input/a.md".into()),
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     ));
     let file = llm_wiki_desktop_lib::models::import_v2_file::DiscoveredFile {

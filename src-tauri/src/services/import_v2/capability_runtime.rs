@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::Path, sync::RwLock, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::RwLock,
+    time::Duration,
+};
 
 use serde::Serialize;
 
@@ -23,10 +28,14 @@ pub struct CapabilityRuntimeStatus {
 pub struct ImportCapabilityRuntime {
     statuses: RwLock<Vec<CapabilityRuntimeStatus>>,
     browser_pack: RwLock<Option<ResolvedCapabilityPack>>,
+    install_root: RwLock<Option<PathBuf>>,
 }
 
 impl ImportCapabilityRuntime {
     pub fn load_installed(&self, install_root: &Path, service: &ImportV2Service) {
+        if let Ok(mut root) = self.install_root.write() {
+            *root = Some(install_root.to_path_buf());
+        }
         self.load_installed_with_keys(install_root, service, embedded_trusted_keys());
     }
 
@@ -69,7 +78,7 @@ impl ImportCapabilityRuntime {
                     pack,
                     spec.route.into(),
                     spec.extensions.iter().map(|v| (*v).into()).collect(),
-                    Duration::from_secs(180),
+                    Duration::from_secs(spec.timeout_seconds),
                 )?;
                 if let Some(pack) = browser_pack {
                     *self.browser_pack.write().map_err(|_| {
@@ -104,6 +113,9 @@ impl ImportCapabilityRuntime {
             .ok()
             .and_then(|value| value.clone())
     }
+    pub fn install_root(&self) -> Option<PathBuf> {
+        self.install_root.read().ok().and_then(|root| root.clone())
+    }
 }
 
 struct PackSpec {
@@ -111,97 +123,113 @@ struct PackSpec {
     route: &'static str,
     extensions: &'static [&'static str],
     licenses: &'static [&'static str],
+    timeout_seconds: u64,
 }
+const DEFAULT_PACK_TIMEOUT_SECONDS: u64 = 180;
+const OCR_PACK_TIMEOUT_SECONDS: u64 = 15 * 60;
+const ASR_PACK_TIMEOUT_SECONDS: u64 = (30 * 60) + (2 * 60 * 60) + (5 * 60);
+const BROWSER_BUNDLE_LICENSE: &str = "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices";
 const PACK_SPECS: &[PackSpec] = &[
     PackSpec {
         id: "browser-runtime-lite",
         route: "web.generic.readability",
         extensions: &[],
-        licenses: &["Apache-2.0 AND MIT"],
+        licenses: &[BROWSER_BUNDLE_LICENSE],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "browser-runtime",
         route: "web.generic.browser",
         extensions: &[],
-        licenses: &["Apache-2.0"],
+        licenses: &[BROWSER_BUNDLE_LICENSE],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "browser-runtime-lite",
         route: "web.wechat.article",
         extensions: &[],
-        licenses: &["Apache-2.0 AND MIT"],
+        licenses: &[BROWSER_BUNDLE_LICENSE],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "browser-runtime",
         route: "web.wechat.article",
         extensions: &[],
-        licenses: &["Apache-2.0"],
+        licenses: &[BROWSER_BUNDLE_LICENSE],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "browser-runtime-lite",
         route: "web.zhihu.content",
         extensions: &[],
-        licenses: &["Apache-2.0 AND MIT"],
-    },
-    PackSpec {
-        id: "browser-runtime-lite",
-        route: "web.bilibili.video",
-        extensions: &[],
-        licenses: &["Apache-2.0 AND MIT"],
+        licenses: &[BROWSER_BUNDLE_LICENSE],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "media-metadata",
         route: "web.bilibili.metadata",
         extensions: &[],
         licenses: &["MIT"],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "document-standard",
         route: "pack.markitdown",
         extensions: &["docx", "xlsx", "pptx", "pdf"],
         licenses: &["MIT"],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "document-layout",
         route: "pdf.layout",
         extensions: &["pdf"],
         licenses: &["MIT"],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "office-legacy",
         route: "pack.office-legacy",
         extensions: &["doc", "xls", "ppt"],
         licenses: &["MPL-2.0 OR LGPL-3.0-or-later"],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "office-oxide",
         route: "pack.office-oxide",
         extensions: &["doc", "docx", "xls", "xlsx", "ppt", "pptx"],
         licenses: &["MIT OR Apache-2.0"],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "ocr-basic",
         route: "ocr.basic",
-        extensions: &["pdf"],
+        extensions: &["pdf", "avif", "gif", "jpeg", "jpg", "png", "tiff", "webp"],
         licenses: &["Apache-2.0 AND BSD-2-Clause"],
+        timeout_seconds: OCR_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "ocr-cjk-accurate",
         route: "ocr.cjk-accurate",
-        extensions: &["pdf"],
-        licenses: &["Apache-2.0"],
+        extensions: &["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"],
+        licenses: &["Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only"],
+        timeout_seconds: OCR_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "media-runtime",
         route: "media.subtitle",
         extensions: &["srt", "vtt", "lrc", "ass", "ssa"],
         licenses: &["LGPL-2.1-or-later"],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
-        id: "asr-whisper",
+        id: "asr-sensevoice-small",
         route: "media.asr",
-        extensions: &["mp3", "wav", "m4a", "mp4", "mov", "mkv"],
-        licenses: &["MIT AND LGPL-2.1-or-later"],
+        extensions: &[
+            "aac", "flac", "m4a", "mka", "mp3", "ogg", "opus", "wav", "avi", "m4v",
+            "mkv", "mov", "mp4", "mpeg", "mpg", "webm",
+        ],
+        licenses: &["Apache-2.0 AND LGPL-3.0-or-later AND MIT"],
+        timeout_seconds: ASR_PACK_TIMEOUT_SECONDS,
     },
 ];
 
@@ -223,7 +251,7 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         .map(|i| u8::from_str_radix(&value[i..i + 2], 16).ok())
         .collect()
 }
-fn target_triple() -> String {
+pub fn target_triple() -> String {
     match (std::env::consts::ARCH, std::env::consts::OS) {
         ("x86_64", "windows") => "x86_64-pc-windows-msvc",
         ("aarch64", "macos") => "aarch64-apple-darwin",
@@ -256,6 +284,27 @@ mod tests {
     }
 
     #[test]
+    fn production_pack_timeouts_and_formats_match_long_running_runners() {
+        let asr = PACK_SPECS
+            .iter()
+            .find(|spec| spec.id == "asr-sensevoice-small")
+            .unwrap();
+        assert!(asr.timeout_seconds > (30 * 60) + (2 * 60 * 60));
+        assert!(asr.extensions.contains(&"webm"));
+        assert!(asr.extensions.contains(&"opus"));
+
+        let ocr = PACK_SPECS
+            .iter()
+            .find(|spec| spec.id == "ocr-cjk-accurate")
+            .unwrap();
+        assert_eq!(
+            ocr.extensions,
+            &["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"]
+        );
+        assert!(ocr.timeout_seconds >= 15 * 60);
+    }
+
+    #[test]
     fn signed_installed_pack_is_registered_but_untrusted_placeholder_is_not() {
         let root =
             std::env::temp_dir().join(format!("cap-runtime-signed-{}", uuid::Uuid::new_v4()));
@@ -272,6 +321,8 @@ mod tests {
             archive_sha256: format!("{:x}", Sha256::digest(b"verified runtime")),
             license_expression: "MIT".into(),
             entrypoint: "runner.bin".into(),
+            entrypoint_args: Vec::new(),
+            executable_files: Vec::new(),
             compressed_bytes: 16,
             installed_bytes: 16,
             signing_key_id: "release-test".into(),

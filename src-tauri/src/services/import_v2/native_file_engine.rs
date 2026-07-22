@@ -36,8 +36,17 @@ impl ImportEngine for NativeFileEngine {
             && extension(&input.locator).is_some_and(|ext| {
                 matches!(
                     ext.as_str(),
-                    "md" | "markdown" | "mdx" | "mkd" | "mkdn" | "mdown" | "mdwn"
-                        | "rmd" | "txt" | "csv" | "html" | "htm"
+                    "md" | "markdown"
+                        | "mdx"
+                        | "mkd"
+                        | "mkdn"
+                        | "mdown"
+                        | "mdwn"
+                        | "rmd"
+                        | "txt"
+                        | "csv"
+                        | "html"
+                        | "htm"
                 )
             })
     }

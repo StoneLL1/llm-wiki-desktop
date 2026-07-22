@@ -7,13 +7,16 @@ use reqwest::{header, redirect::Policy, Client, StatusCode};
 use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr},
+    path::Path,
     time::{Duration, Instant},
 };
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebFetchContent {
     Page,
     Image,
+    Media,
     Subtitle,
     TemporaryMedia,
 }
@@ -25,6 +28,9 @@ pub struct WebFetchPolicy {
     pub connect_timeout_ms: u64,
     pub total_timeout_ms: u64,
     pub content: WebFetchContent,
+    /// Optional page origin used by platform APIs/CDN requests. It is never
+    /// persisted and is only sent as the HTTP Referer header.
+    pub referer: Option<String>,
 }
 impl Default for WebFetchPolicy {
     fn default() -> Self {
@@ -35,6 +41,7 @@ impl Default for WebFetchPolicy {
             connect_timeout_ms: 10_000,
             total_timeout_ms: 60_000,
             content: WebFetchContent::Page,
+            referer: None,
         }
     }
 }
@@ -47,6 +54,7 @@ pub struct RedirectLedgerEntry {
 #[derive(Debug, Clone)]
 pub struct WebFetchArtifact {
     pub bytes: Vec<u8>,
+    pub byte_len: u64,
     pub final_public_url: String,
     pub final_session_target: SessionWebTarget,
     pub content_type: String,
@@ -60,11 +68,60 @@ pub struct WebFetchService;
 impl WebFetchService {
     pub async fn fetch<F, C>(
         &self,
+        target: SessionWebTarget,
+        policy: &UrlPolicy,
+        limits: &WebFetchPolicy,
+        grant: Option<&PrivateTargetGrant>,
+        item_id: &str,
+        progress: F,
+        cancelled: C,
+    ) -> Result<WebFetchArtifact, BackendError>
+    where
+        F: FnMut(u64),
+        C: Fn() -> bool,
+    {
+        self.fetch_inner(
+            target, policy, limits, grant, item_id, None, progress, cancelled,
+        )
+        .await
+    }
+
+    pub async fn fetch_to_file<F, C>(
+        &self,
+        target: SessionWebTarget,
+        policy: &UrlPolicy,
+        limits: &WebFetchPolicy,
+        grant: Option<&PrivateTargetGrant>,
+        item_id: &str,
+        destination: &Path,
+        progress: F,
+        cancelled: C,
+    ) -> Result<WebFetchArtifact, BackendError>
+    where
+        F: FnMut(u64),
+        C: Fn() -> bool,
+    {
+        self.fetch_inner(
+            target,
+            policy,
+            limits,
+            grant,
+            item_id,
+            Some(destination),
+            progress,
+            cancelled,
+        )
+        .await
+    }
+
+    async fn fetch_inner<F, C>(
+        &self,
         mut target: SessionWebTarget,
         policy: &UrlPolicy,
         limits: &WebFetchPolicy,
         grant: Option<&PrivateTargetGrant>,
         item_id: &str,
+        destination: Option<&Path>,
         mut progress: F,
         cancelled: C,
     ) -> Result<WebFetchArtifact, BackendError>
@@ -109,7 +166,7 @@ impl WebFetchService {
                         true,
                     )
                 })?;
-            let response = client
+            let mut request = client
                 .get(target.request_url.clone())
                 .header(
                     header::USER_AGENT,
@@ -124,16 +181,17 @@ impl WebFetchService {
                 .header(
                     header::ACCEPT,
                     "text/html,application/xhtml+xml,application/json;q=0.8,text/plain;q=0.5",
+                );
+            if let Some(referer) = limits.referer.as_deref() {
+                request = request.header(header::REFERER, referer);
+            }
+            let response = request.send().await.map_err(|_| {
+                err(
+                    "IMPORT_V2_TLS_OR_FETCH_FAILED",
+                    "TLS or HTTP connection failed.",
+                    true,
                 )
-                .send()
-                .await
-                .map_err(|_| {
-                    err(
-                        "IMPORT_V2_TLS_OR_FETCH_FAILED",
-                        "TLS or HTTP connection failed.",
-                        true,
-                    )
-                })?;
+            })?;
             if response.status().is_redirection() {
                 let status = response.status().as_u16();
                 let loc = response
@@ -184,19 +242,29 @@ impl WebFetchService {
                     content_type.contains("text/")
                         || content_type.contains("html")
                         || content_type.contains("json")
+                        || (content_type.starts_with("image/") && !content_type.contains("svg"))
                 }
                 WebFetchContent::Image => {
                     content_type.starts_with("image/") && !content_type.contains("svg")
                 }
                 WebFetchContent::Subtitle => {
-                    content_type.contains("text/")
-                        || content_type.contains("json")
-                        || content_type.contains("vtt")
-                        || content_type.contains("subrip")
+                    matches!(
+                        content_type.split(';').next().unwrap_or("").trim(),
+                        "text/vtt"
+                            | "application/x-subrip"
+                            | "text/plain"
+                            | "text/ass"
+                            | "text/x-ass"
+                            | "application/x-ass"
+                            | "text/ssa"
+                            | "text/x-ssa"
+                            | "application/x-ssa"
+                            | "application/json"
+                    )
                 }
-                WebFetchContent::TemporaryMedia => {
+                WebFetchContent::Media | WebFetchContent::TemporaryMedia => {
                     content_type.starts_with("audio/")
-                        || content_type == "video/mp4"
+                        || content_type.starts_with("video/")
                         || content_type == "application/octet-stream"
                 }
             };
@@ -204,6 +272,16 @@ impl WebFetchService {
                 return Err(err(
                     "IMPORT_V2_CONTENT_REJECTED",
                     "Executable or unsupported response type was blocked.",
+                    false,
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > limits.max_response_bytes)
+            {
+                return Err(err(
+                    "IMPORT_V2_RESPONSE_TOO_LARGE",
+                    "Response exceeded the configured byte limit.",
                     false,
                 ));
             }
@@ -218,6 +296,17 @@ impl WebFetchService {
                 }
             }
             let mut bytes = Vec::new();
+            let mut destination_file = match destination {
+                Some(path) => Some(tokio::fs::File::create(path).await.map_err(|_| {
+                    err(
+                        "IMPORT_V2_FETCH_FAILED",
+                        "The response destination could not be created.",
+                        true,
+                    )
+                })?),
+                None => None,
+            };
+            let mut downloaded = 0u64;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 if cancelled() {
@@ -229,18 +318,39 @@ impl WebFetchService {
                 }
                 let chunk = chunk
                     .map_err(|_| err("IMPORT_V2_FETCH_FAILED", "Response stream failed.", true))?;
-                if bytes.len() as u64 + chunk.len() as u64 > limits.max_response_bytes {
+                if downloaded + chunk.len() as u64 > limits.max_response_bytes {
                     return Err(err(
                         "IMPORT_V2_RESPONSE_TOO_LARGE",
                         "Response exceeded the configured byte limit.",
                         false,
                     ));
                 }
-                bytes.extend_from_slice(&chunk);
-                progress(bytes.len() as u64);
+                downloaded += chunk.len() as u64;
+                if let Some(file) = destination_file.as_mut() {
+                    file.write_all(&chunk).await.map_err(|_| {
+                        err(
+                            "IMPORT_V2_FETCH_FAILED",
+                            "The response destination could not be written.",
+                            true,
+                        )
+                    })?;
+                } else {
+                    bytes.extend_from_slice(&chunk);
+                }
+                progress(downloaded);
+            }
+            if let Some(file) = destination_file.as_mut() {
+                file.flush().await.map_err(|_| {
+                    err(
+                        "IMPORT_V2_FETCH_FAILED",
+                        "The response destination could not be finalized.",
+                        true,
+                    )
+                })?;
             }
             return Ok(WebFetchArtifact {
                 bytes,
+                byte_len: downloaded,
                 final_public_url: target.public.public_url.clone(),
                 final_session_target: target,
                 content_type,

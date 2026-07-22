@@ -748,17 +748,30 @@ fn is_remote(destination: &str) -> bool {
 }
 
 fn classify_asset(path: &str) -> ArtifactKind {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
     let extension = PathBuf::from(path)
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if matches!(
+    if normalized.starts_with("source-evidence/") {
+        ArtifactKind::SourceEvidence
+    } else if normalized.starts_with("ocr/") && extension == "md" {
+        ArtifactKind::Transcript
+    } else if normalized.starts_with("ocr/") && extension == "json" {
+        ArtifactKind::Metadata
+    } else if normalized.starts_with("transcripts/") && extension == "md" {
+        ArtifactKind::Transcript
+    } else if normalized.starts_with("transcripts/") && extension == "json" {
+        ArtifactKind::Metadata
+    } else if normalized.starts_with("subtitles/") && extension == "json" {
+        ArtifactKind::Subtitle
+    } else if matches!(
         extension.as_str(),
         "avif" | "gif" | "jpeg" | "jpg" | "png" | "svg" | "webp"
     ) {
         ArtifactKind::Image
-    } else if matches!(extension.as_str(), "srt" | "vtt") {
+    } else if matches!(extension.as_str(), "srt" | "vtt" | "lrc" | "ass" | "ssa") {
         ArtifactKind::Subtitle
     } else {
         ArtifactKind::Attachment
@@ -813,6 +826,31 @@ mod tests {
     use crate::errors::IMPORT_V2_QUALITY_FAILED;
     use crate::models::import_v2::{ArtifactKind, QualityLevel};
     use crate::services::import_v2::engine::EngineResult;
+
+    #[test]
+    fn classifies_platform_json_subtitles_as_extracted_subtitles() {
+        assert_eq!(
+            classify_asset("subtitles/platform-subtitle-0.json"),
+            ArtifactKind::Subtitle
+        );
+    }
+
+    #[test]
+    fn classifies_supplemental_api_payloads_as_source_evidence() {
+        assert_eq!(
+            classify_asset("source-evidence/bilibili-api.json"),
+            ArtifactKind::SourceEvidence
+        );
+    }
+
+    #[test]
+    fn classifies_local_ocr_outputs_as_extracted_artifacts() {
+        assert_eq!(classify_asset("ocr/image-0.md"), ArtifactKind::Transcript);
+        assert_eq!(
+            classify_asset("ocr/image-0.metadata.json"),
+            ArtifactKind::Metadata
+        );
+    }
 
     struct QualityFixture {
         root: PathBuf,

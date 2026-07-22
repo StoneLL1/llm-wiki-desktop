@@ -23,5 +23,6 @@ pub(super) fn test_file_input(name: &str) -> ImportInput {
         display_name: name.to_string(),
         locator: format!("D:/fixtures/{name}"),
         normalized_locator: Some(format!("file:d:/fixtures/{}", name.to_lowercase())),
+        media_save_mode: Default::default(),
     }
 }

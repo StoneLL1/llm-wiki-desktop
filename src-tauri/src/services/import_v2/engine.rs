@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{BackendError, IMPORT_V2_ENGINE_OUTPUT_INVALID, IMPORT_V2_ENGINE_UNAVAILABLE};
-use crate::models::import_v2::ImportInput;
+use crate::models::import_v2::{ImportInput, MediaSaveMode};
 use crate::models::paths::ProjectContext;
 use crate::tasks::task_model::CancellationToken;
 
@@ -36,6 +36,10 @@ pub struct EngineRequest {
     pub chained_input: Option<String>,
     #[serde(default)]
     pub local_asr_authorized: bool,
+    #[serde(default)]
+    pub local_ocr_authorized: bool,
+    #[serde(default)]
+    pub media_save_mode: MediaSaveMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,6 +74,9 @@ pub enum EngineContinuation {
     LocalAsr {
         temporary_input_path: String,
         media_kind: String,
+    },
+    LocalOcr {
+        temporary_input_paths: Vec<String>,
     },
 }
 
@@ -107,8 +114,30 @@ impl EngineRegistry {
             .collect())
     }
     pub fn register(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
+        self.register_inner(engine, false)
+    }
+
+    pub(crate) fn ensure_registered(
+        &self,
+        engine: Arc<dyn ImportEngine>,
+    ) -> Result<(), BackendError> {
+        self.register_inner(engine, true)
+    }
+
+    fn register_inner(
+        &self,
+        engine: Arc<dyn ImportEngine>,
+        allow_exact_match: bool,
+    ) -> Result<(), BackendError> {
         let descriptor = engine.descriptor();
         let mut engines = self.engines.write().map_err(|_| registry_error())?;
+        if allow_exact_match
+            && engines
+                .iter()
+                .any(|existing| existing.descriptor() == descriptor)
+        {
+            return Ok(());
+        }
         if engines
             .iter()
             .any(|existing| existing.descriptor().engine_id == descriptor.engine_id)
@@ -324,6 +353,7 @@ mod tests {
             display_name: "a.pdf".into(),
             locator: "D:/a.pdf".into(),
             normalized_locator: None,
+            media_save_mode: Default::default(),
         };
 
         assert_eq!(
@@ -369,6 +399,7 @@ mod tests {
             display_name: "page".into(),
             locator: "https://example.com".into(),
             normalized_locator: Some("https://example.com".into()),
+            media_save_mode: Default::default(),
         };
 
         assert_eq!(
@@ -432,11 +463,14 @@ mod tests {
                 display_name: "legacy.doc".into(),
                 locator: "legacy.doc".into(),
                 normalized_locator: None,
+                media_save_mode: Default::default(),
             },
             project_root: "root".into(),
             staging_root: "staging".into(),
             chained_input: Some("converted/legacy.docx".into()),
             local_asr_authorized: false,
+            local_ocr_authorized: false,
+            media_save_mode: Default::default(),
         })
         .unwrap();
         assert_eq!(value["chainedInput"], "converted/legacy.docx");

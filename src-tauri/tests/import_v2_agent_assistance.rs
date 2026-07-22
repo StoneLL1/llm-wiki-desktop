@@ -224,6 +224,7 @@ fn uncertain_byok_charge_requires_new_explicit_acknowledgement_before_task_creat
             locator: "notes.txt".into(),
             normalized_locator: None,
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.status = ImportItemStatus::Failed;

@@ -521,6 +521,7 @@ fn preview_text_import_v2(
                     locator: locator.to_string(),
                     normalized_locator: None,
                     source_identity: None,
+                    media_save_mode: Default::default(),
                 }],
             )?
         } else {

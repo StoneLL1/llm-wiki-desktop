@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::import_v2::MediaSaveMode;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedWebUrl {
@@ -17,6 +19,7 @@ pub enum WebRouteKind {
     Zhihu,
     Bilibili,
     Xiaohongshu,
+    Douyin,
     X,
 }
 
@@ -83,16 +86,22 @@ pub struct AddImportUrlV2Request {
     pub project_root_path: String,
     pub session_id: String,
     pub url: String,
+    #[serde(default)]
+    pub media_save_mode: MediaSaveMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct AuthorizeBilibiliAsrV2Request {
+pub struct AuthorizeLocalAsrV2Request {
     pub project_id: String,
     pub project_root_path: String,
     pub session_id: String,
     pub item_id: String,
 }
+
+/// Compatibility alias for sessions created before local ASR was generalized
+/// from Bilibili to every supported media platform.
+pub type AuthorizeBilibiliAsrV2Request = AuthorizeLocalAsrV2Request;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

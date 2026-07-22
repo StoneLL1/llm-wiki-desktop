@@ -768,9 +768,7 @@ fn safety_loop_lint_fix_applies_safe_fix_under_checkpoint() {
     // safe deterministic fix inside wiki/ creates a Git checkpoint, mutates
     // the page, and reports Applied. MissingFrontmatter is the canonical safe
     // fix — frontmatter is prepended without judgment.
-    use llm_wiki_desktop_lib::models::lint::{
-        Fixability, LintFixOutcomeKind, LintIssue, LintIssueSource, LintIssueType, LintSeverity,
-    };
+    use llm_wiki_desktop_lib::models::lint::{LintFixOutcomeKind, LintIssueType};
     let (_ps, context, root) = create_project("safety-lint-fix");
     // Page with no frontmatter → MissingFrontmatter fires.
     write_page(
@@ -781,25 +779,21 @@ fn safety_loop_lint_fix_applies_safe_fix_under_checkpoint() {
     GitService
         .initialize_repository(&context, "before lint fix")
         .unwrap();
-    let hash = FileStore
-        .file_hash(&context, "wiki/concepts/bare.md")
+    let service = LintService::default();
+    let report = service
+        .run_local_lint(&context, &SearchService::default())
         .unwrap();
-    let issue = LintIssue {
-        id: "missing_frontmatter:wiki/concepts/bare.md".into(),
-        source: LintIssueSource::Local,
-        severity: LintSeverity::Warning,
-        issue_type: LintIssueType::MissingFrontmatter,
-        path: "wiki/concepts/bare.md".into(),
-        range: None,
-        message: "page has no frontmatter".into(),
-        evidence: None,
-        target: None,
-        fixability: Fixability::Safe,
-        suggested_action: None,
-        scan_hash: None,
-    };
-    let outcome = LintService::default()
-        .apply_fix(&context, &GitService, &issue, false, Some(&hash))
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| {
+            issue.path == "wiki/concepts/bare.md"
+                && issue.issue_type == LintIssueType::MissingFrontmatter
+        })
+        .expect("versioned lint report must include the bare page");
+    let hash = issue.scan_hash.clone().expect("lint report hash");
+    let outcome = service
+        .apply_fix(&context, &GitService, issue, false, Some(&hash))
         .unwrap();
     assert_eq!(outcome.kind, LintFixOutcomeKind::Applied);
     assert!(

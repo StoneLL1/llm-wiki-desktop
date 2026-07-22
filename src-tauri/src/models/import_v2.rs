@@ -20,6 +20,22 @@ pub enum ImportInputKind {
     Url,
 }
 
+/// Controls whether URL media is retained under `raw/assets` after import.
+/// The source page/API snapshot and extracted Markdown are retained in both
+/// modes; only the original media payload is optional.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaSaveMode {
+    PreserveOriginal,
+    ExtractOnly,
+}
+
+impl Default for MediaSaveMode {
+    fn default() -> Self {
+        Self::PreserveOriginal
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportSessionStatus {
@@ -64,7 +80,7 @@ impl ImportItemStatus {
                 | (WaitingLogin, Extracting | Cancelled | Skipped | Failed)
                 | (Extracting, WaitingLogin | Validating | Failed | Cancelled)
                 | (Validating, PreviewReady | Failed | Cancelled)
-                | (PreviewReady, NeedsMerge | Committing | Skipped | Cancelled)
+                | (PreviewReady, Inspecting | NeedsMerge | Committing | Skipped | Cancelled)
                 | (NeedsMerge, PreviewReady | Committing | Skipped | Cancelled)
                 | (Committing, Completed | Failed)
                 | (Paused, Inspecting | Extracting | Cancelled)
@@ -96,10 +112,12 @@ pub enum QualityLevel {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     SourceSnapshot,
+    SourceEvidence,
     Markdown,
     Image,
     Attachment,
     Subtitle,
+    Transcript,
     Metadata,
 }
 
@@ -114,6 +132,8 @@ pub struct ImportInput {
     /// but file ingestion requires it before reading user-controlled content.
     #[serde(default)]
     pub source_identity: Option<SourceIdentity>,
+    #[serde(default)]
+    pub media_save_mode: MediaSaveMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,6 +236,7 @@ pub enum ImportRecoveryAction {
     AuthorizePrivateTarget,
     InstallBrowserCapability,
     InstallMediaCapability,
+    InstallOcrCapability,
     AuthorizeLocalAsr,
 }
 
@@ -230,12 +251,17 @@ impl ImportIssue {
             "IMPORT_V2_PRIVATE_TARGET_BLOCKED" => (false, true, vec![AuthorizePrivateTarget]),
             "IMPORT_V2_RESPONSE_TOO_LARGE" => (false, true, vec![SwitchRoute]),
             "IMPORT_V2_CONNECTOR_RATE_LIMITED" => (true, false, vec![RetryRoute, SwitchRoute]),
+            "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED" => {
+                (true, true, vec![SwitchRoute, InstallMediaCapability])
+            }
+            "IMPORT_WEB_MEDIA_UNAVAILABLE" => {
+                (true, true, vec![InstallBrowserCapability, SwitchRoute])
+            }
             "IMPORT_WEB_STRUCTURE_CHANGED" => (true, true, vec![SwitchRoute, InvokeAgent]),
-            "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => (
-                true,
-                true,
-                vec![AuthorizeLocalAsr, InstallMediaCapability, InvokeAgent],
-            ),
+            "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => {
+                (true, true, vec![InstallMediaCapability, InvokeAgent])
+            }
+            "IMPORT_WEB_OCR_UNAVAILABLE" => (true, true, vec![InstallOcrCapability, InvokeAgent]),
             "IMPORT_ASR_ENGINE_UNAVAILABLE" | "IMPORT_ASR_ENGINE_INTEGRITY_FAILED" => {
                 (true, true, vec![InstallMediaCapability, RetryRoute])
             }
@@ -269,9 +295,11 @@ impl ImportIssue {
             "IMPORT_FILE_CONVERSION_FAILED" | "IMPORT_FILE_PARSE_FAILED" => {
                 (true, true, vec![Retry, SwitchParser, InvokeAgent])
             }
-            "IMPORT_FILE_QUALITY_FAILED" => {
-                (true, true, vec![EnableOcr, SwitchParser, InvokeAgent])
-            }
+            "IMPORT_FILE_QUALITY_FAILED" => (
+                true,
+                true,
+                vec![InstallOcrCapability, EnableOcr, SwitchParser, InvokeAgent],
+            ),
             "IMPORT_FILE_CANCELLED" => (true, false, vec![Retry]),
             _ => (true, false, vec![Retry, InvokeAgent]),
         };
@@ -438,6 +466,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn image_url_ocr_failure_offers_the_ocr_capability_installer() {
+        let issue = ImportIssue::for_web_code("IMPORT_WEB_OCR_UNAVAILABLE", ImportStage::Extract);
+        assert!(issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InstallOcrCapability));
+    }
+
+    #[test]
     fn import_v2_contract_is_versioned_and_camel_case() {
         let session = ImportSession::new("session-1", "project-1", ImportResourceMode::Balanced);
         let value = serde_json::to_value(session).unwrap();
@@ -453,14 +489,18 @@ mod tests {
         assert!(ImportItemStatus::Validating.can_transition_to(&ImportItemStatus::PreviewReady));
         assert!(!ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Completed));
         assert!(ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Committing));
+        assert!(ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Inspecting));
     }
 
     #[test]
-    fn missing_web_subtitles_require_explicit_local_asr_authorization() {
+    fn missing_web_subtitles_offer_asr_capability_recovery() {
         let issue =
             ImportIssue::for_web_code("IMPORT_WEB_SUBTITLE_UNAVAILABLE", ImportStage::Extract);
         assert!(issue.user_action_required);
         assert!(issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InstallMediaCapability));
+        assert!(!issue
             .recovery_actions
             .contains(&ImportRecoveryAction::AuthorizeLocalAsr));
     }

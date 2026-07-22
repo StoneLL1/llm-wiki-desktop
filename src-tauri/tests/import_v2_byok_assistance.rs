@@ -57,6 +57,7 @@ fn byok_scope_is_exact_expiring_and_one_shot() {
             locator: "notes.txt".into(),
             normalized_locator: None,
             source_identity: None,
+            media_save_mode: Default::default(),
         },
     );
     item.status = ImportItemStatus::Failed;

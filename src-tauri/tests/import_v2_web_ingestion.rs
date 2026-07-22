@@ -19,7 +19,7 @@ use llm_wiki_desktop_lib::{
             web_target_store::{asr_target_sha256, BilibiliAsrGrant},
             ImportV2Service,
         },
-        FileStore,
+        FileStore, SecretService,
     },
     tasks::{task_model::CancellationToken, TaskService},
 };
@@ -31,6 +31,8 @@ fn stage_one_routes_and_stable_errors_are_frozen() {
         wechat: true,
         zhihu: true,
         bilibili: true,
+        xiaohongshu: true,
+        douyin: true,
         phase_two: false,
     };
     for host in ["mp.weixin.qq.com", "www.zhihu.com", "www.bilibili.com"] {
@@ -47,13 +49,15 @@ fn stage_one_routes_and_stable_errors_are_frozen() {
     );
 }
 
-struct AuthorizedBilibiliEngine;
-impl ImportEngine for AuthorizedBilibiliEngine {
+struct AuthorizedMediaPlatformEngine {
+    route: &'static str,
+}
+impl ImportEngine for AuthorizedMediaPlatformEngine {
     fn descriptor(&self) -> EngineDescriptor {
         EngineDescriptor {
             engine_id: "bili-fixture".into(),
             engine_version: "1".into(),
-            route: "web.bilibili.metadata".into(),
+            route: self.route.into(),
         }
     }
     fn supports(&self, input: &ImportInput) -> bool {
@@ -73,9 +77,9 @@ impl ImportEngine for AuthorizedBilibiliEngine {
             ));
         }
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
-        std::fs::create_dir_all(staging.join("runtime-temp/asr-input")).unwrap();
+        std::fs::create_dir_all(staging.join(".asr-input-fixture")).unwrap();
         std::fs::write(
-            staging.join("runtime-temp/asr-input/input.m4a"),
+            staging.join(".asr-input-fixture/input.m4a"),
             b"authorized audio",
         )
         .unwrap();
@@ -95,7 +99,7 @@ impl ImportEngine for AuthorizedBilibiliEngine {
             formula_value_pairs: None,
             meaningful_image_coverage: None,
             continuation: Some(EngineContinuation::LocalAsr {
-                temporary_input_path: "runtime-temp/asr-input/input.m4a".into(),
+                temporary_input_path: ".asr-input-fixture/input.m4a".into(),
                 media_kind: "audio".into(),
             }),
             warnings: vec![],
@@ -122,16 +126,16 @@ impl ImportEngine for LocalAsrEngine {
     ) -> Result<EngineResult, BackendError> {
         assert!(request.local_asr_authorized);
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
-        std::fs::create_dir_all(staging.join("runtime-temp/asr-output")).unwrap();
-        std::fs::write(staging.join("runtime-temp/asr-output/source.json"), b"{}").unwrap();
+        std::fs::create_dir_all(staging.join(".sensevoice-output-fixture")).unwrap();
+        std::fs::write(staging.join(".sensevoice-output-fixture/source.json"), b"{}").unwrap();
         std::fs::write(
-            staging.join("runtime-temp/asr-output/candidate.md"),
+            staging.join(".sensevoice-output-fixture/candidate.md"),
             b"- [00:00:00.000] authorized transcript\n",
         )
         .unwrap();
         Ok(EngineResult {
-            source_snapshot_path: "runtime-temp/asr-output/source.json".into(),
-            markdown_path: "runtime-temp/asr-output/candidate.md".into(),
+            source_snapshot_path: ".sensevoice-output-fixture/source.json".into(),
+            markdown_path: ".sensevoice-output-fixture/candidate.md".into(),
             asset_paths: vec![],
             metadata_path: None,
             title: "Transcript".into(),
@@ -149,20 +153,42 @@ impl ImportEngine for LocalAsrEngine {
 }
 
 #[test]
-fn bilibili_asr_requires_one_use_authorization_reuses_media_engine_and_cleans_temp() {
+fn bilibili_without_subtitles_runs_local_asr_automatically_and_cleans_temp() {
+    assert_platform_auto_asr(
+        "web.bilibili.metadata",
+        "https://www.bilibili.com/video/BV1Ab411c7de?token=ephemeral",
+    );
+}
+
+#[test]
+fn xiaohongshu_and_douyin_without_subtitles_run_local_asr_automatically() {
+    for (route, url) in [
+        (
+            "web.xiaohongshu.note",
+            "https://www.xiaohongshu.com/explore/note-1?xsec_token=ephemeral",
+        ),
+        (
+            "web.douyin.video",
+            "https://www.douyin.com/video/1234567890?token=ephemeral",
+        ),
+    ] {
+        assert_platform_auto_asr(route, url);
+    }
+}
+
+fn assert_platform_auto_asr(route: &'static str, exact: &str) {
     let root = std::env::temp_dir().join(format!("web-asr-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".app")).unwrap();
     let context = ProjectContext::new("p", root.clone());
     let files = FileStore;
-    let service = ImportV2Service::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
     service
-        .register_engine(Arc::new(AuthorizedBilibiliEngine))
+        .register_engine(Arc::new(AuthorizedMediaPlatformEngine { route }))
         .unwrap();
     service.register_engine(Arc::new(LocalAsrEngine)).unwrap();
     let session = service
         .create_session(&context, &files, ImportResourceMode::Balanced)
         .unwrap();
-    let exact = "https://www.bilibili.com/video/BV1Ab411c7de?token=ephemeral";
     let target = UrlPolicy.normalize_for_session(exact).unwrap();
     let reference = service.store_web_target(&target).unwrap();
     let session = service
@@ -176,6 +202,7 @@ fn bilibili_asr_requires_one_use_authorization_reuses_media_engine_and_cleans_te
                 locator: reference,
                 normalized_locator: Some(target.public.public_url.clone()),
                 source_identity: None,
+                media_save_mode: Default::default(),
             }],
         )
         .unwrap();
@@ -190,38 +217,6 @@ fn bilibili_asr_requires_one_use_authorization_reuses_media_engine_and_cleans_te
             true,
         )
         .unwrap();
-    assert_eq!(
-        service
-            .run_item(
-                &context,
-                &files,
-                &tasks,
-                &session.session_id,
-                &item.item_id,
-                &first.id
-            )
-            .unwrap_err()
-            .code,
-        "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
-    );
-    service
-        .authorize_bilibili_asr(BilibiliAsrGrant {
-            project_id: "p".into(),
-            session_id: session.session_id.clone(),
-            item_id: item.item_id.clone(),
-            target_sha256: asr_target_sha256(exact),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-        })
-        .unwrap();
-    let second = tasks
-        .create_project_task(
-            TaskType::Import,
-            "p".into(),
-            root.clone(),
-            "second".into(),
-            true,
-        )
-        .unwrap();
     let completed = service
         .run_item(
             &context,
@@ -229,7 +224,7 @@ fn bilibili_asr_requires_one_use_authorization_reuses_media_engine_and_cleans_te
             &tasks,
             &session.session_id,
             &item.item_id,
-            &second.id,
+            &first.id,
         )
         .unwrap();
     assert_eq!(completed.status, ImportItemStatus::PreviewReady);
@@ -244,10 +239,8 @@ fn bilibili_asr_requires_one_use_authorization_reuses_media_engine_and_cleans_te
     assert!(std::fs::read_to_string(staging.join("candidate.md"))
         .unwrap()
         .contains("authorized transcript"));
-    assert!(
-        !staging.join("runtime-temp/asr-input").exists()
-            && !staging.join("runtime-temp/asr-output").exists()
-    );
+    assert!(!staging.join(".asr-input-fixture").exists());
+    assert!(!staging.join(".sensevoice-output-fixture").exists());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -269,8 +262,8 @@ impl ImportEngine for TraversalContinuationEngine {
         _: &CancellationToken,
     ) -> Result<EngineResult, BackendError> {
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
-        std::fs::create_dir_all(staging.join("runtime-temp/asr-input")).unwrap();
-        std::fs::write(staging.join("runtime-temp/asr-input/input.m4a"), b"audio").unwrap();
+        std::fs::create_dir_all(staging.join(".asr-input-traversal")).unwrap();
+        std::fs::write(staging.join(".asr-input-traversal/input.m4a"), b"audio").unwrap();
         std::fs::write(staging.join("source.json"), b"{}").unwrap();
         Ok(EngineResult {
             source_snapshot_path: "source.json".into(),
@@ -286,7 +279,7 @@ impl ImportEngine for TraversalContinuationEngine {
             formula_value_pairs: None,
             meaningful_image_coverage: None,
             continuation: Some(EngineContinuation::LocalAsr {
-                temporary_input_path: "runtime-temp/asr-input/input.m4a".into(),
+                temporary_input_path: ".asr-input-traversal/input.m4a".into(),
                 media_kind: "audio".into(),
             }),
             warnings: vec![],
@@ -300,7 +293,7 @@ fn traversal_result_is_rejected_before_local_asr_can_read_or_overwrite_it() {
     std::fs::create_dir_all(root.join(".app")).unwrap();
     let context = ProjectContext::new("p", root.clone());
     let files = FileStore;
-    let service = ImportV2Service::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
     service
         .register_engine(Arc::new(TraversalContinuationEngine))
         .unwrap();
@@ -322,6 +315,7 @@ fn traversal_result_is_rejected_before_local_asr_can_read_or_overwrite_it() {
                 locator: reference,
                 normalized_locator: Some(target.public.public_url.clone()),
                 source_identity: None,
+                media_save_mode: Default::default(),
             }],
         )
         .unwrap();
@@ -380,20 +374,24 @@ fn traversal_result_is_rejected_before_local_asr_can_read_or_overwrite_it() {
     std::fs::remove_dir_all(root).ok();
 }
 #[test]
-fn phase_two_stays_closed_without_gate() {
+fn media_platforms_are_released_while_unapproved_platforms_stay_closed() {
     let a = ConnectorAvailability {
         browser: true,
         wechat: true,
         zhihu: true,
         bilibili: true,
+        xiaohongshu: false,
+        douyin: false,
         phase_two: false,
     };
-    for host in ["www.xiaohongshu.com", "x.com"] {
-        let t = UrlPolicy
-            .normalize_for_session(&format!("https://{host}/one"))
-            .unwrap();
-        assert!(!DomainRouter::plan(&t.public, &a).release_enabled);
-    }
+    let xhs = UrlPolicy
+        .normalize_for_session("https://www.xiaohongshu.com/one")
+        .unwrap();
+    assert!(DomainRouter::plan(&xhs.public, &a).release_enabled);
+    let x = UrlPolicy
+        .normalize_for_session("https://x.com/one")
+        .unwrap();
+    assert!(!DomainRouter::plan(&x.public, &a).release_enabled);
 }
 
 struct LoginEngine;
@@ -428,7 +426,7 @@ fn login_required_pauses_item_and_task_with_typed_recovery_without_secret_logs()
     std::fs::create_dir_all(root.join(".app")).unwrap();
     let context = ProjectContext::new("p", root.clone());
     let files = FileStore;
-    let service = ImportV2Service::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
     service.register_engine(Arc::new(LoginEngine)).unwrap();
     let session = service
         .create_session(&context, &files, ImportResourceMode::Balanced)
@@ -444,6 +442,7 @@ fn login_required_pauses_item_and_task_with_typed_recovery_without_secret_logs()
                 locator: "https://mp.weixin.qq.com/s/id".into(),
                 normalized_locator: Some("https://mp.weixin.qq.com/s/id".into()),
                 source_identity: None,
+                media_save_mode: Default::default(),
             }],
         )
         .unwrap();

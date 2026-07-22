@@ -1,6 +1,6 @@
 use std::fs;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_STATE_INVALID,
@@ -46,6 +46,7 @@ pub struct ImportV2Service {
     quality: QualityGate,
     pub(super) mutation_lock: Mutex<()>,
     web_targets: Arc<WebTargetStore>,
+    connector_profiles_root: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl Default for ImportV2Service {
@@ -145,6 +146,7 @@ impl ImportV2Service {
     pub fn with_secret_service(secrets: SecretService) -> Self {
         let engines = EngineRegistry::default();
         let web_targets = Arc::new(WebTargetStore::new(secrets));
+        let connector_profiles_root = Arc::new(RwLock::new(None));
         engines
             .register(Arc::new(NativeFileEngine::default()))
             .expect("the built-in native file engine identifier is unique");
@@ -160,7 +162,9 @@ impl ImportV2Service {
         }
         for (engine_id, route) in [
             ("builtin.web-http", "web.generic.readability"),
-            ("builtin.web-http-browser", "web.generic.browser"),
+            ("builtin.web-xiaohongshu", "web.xiaohongshu.note"),
+            ("builtin.web-douyin", "web.douyin.video"),
+            ("builtin.web-bilibili", "web.bilibili.video"),
         ] {
             engines
                 .register(Arc::new(GenericWebEngine::new(
@@ -179,6 +183,17 @@ impl ImportV2Service {
             quality: QualityGate::default(),
             mutation_lock: Mutex::new(()),
             web_targets,
+            connector_profiles_root,
+        }
+    }
+
+    /// Configure the app-owned persistent connector profile root once the
+    /// Tauri app data directory is available. Capability engines receive the
+    /// same handle, so installed browser packs can reuse a profile across
+    /// imports and app restarts without putting cookies in project files.
+    pub fn set_connector_profiles_root(&self, root: PathBuf) {
+        if let Ok(mut current) = self.connector_profiles_root.write() {
+            *current = Some(root);
         }
     }
     pub fn store_web_target(
@@ -428,6 +443,7 @@ impl ImportV2Service {
                     sha256: format!("{digest:x}"),
                     magic: format!("{magic:x}"),
                 }),
+                media_save_mode: Default::default(),
             }],
         )
     }
@@ -481,6 +497,7 @@ impl ImportV2Service {
                     | ImportItemStatus::Cancelled
                     | ImportItemStatus::Skipped
                     | ImportItemStatus::Paused
+                    | ImportItemStatus::PreviewReady
             ) {
                 return Err(task_error(
                     "Import item is already claimed by another task.",
@@ -976,8 +993,10 @@ impl ImportV2Service {
                     .as_deref()
                     .and_then(|id| tasks.get_task(id))
                     .map(|task| task.status);
-                if matches!(recovered_status, Some(TaskStatus::Failed | TaskStatus::Cancelled) | None)
-                {
+                if matches!(
+                    recovered_status,
+                    Some(TaskStatus::Failed | TaskStatus::Cancelled) | None
+                ) {
                     // A pre-bound queued task can be persisted before its
                     // worker claims the item. If that task was interrupted,
                     // release the stale identity so the normal retry path
@@ -1042,12 +1061,12 @@ impl ImportV2Service {
                     .and_then(|id| tasks.get_task(id))
                     .map(|task| task.status);
                 if recovered_status == Some(TaskStatus::Cancelled) {
-                    let runtime_temp = context.root.join(format!(
-                        ".app/import-sessions/{session_id}/items/{}/staging/runtime-temp",
+                    let staging = context.root.join(format!(
+                        ".app/import-sessions/{session_id}/items/{}/staging",
                         item.item_id
                     ));
-                    crate::services::import_v2::media_router::recover_media_temp_root(
-                        &runtime_temp,
+                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
+                        &staging,
                     )?;
                     transition_item(item, ImportItemStatus::Cancelled)?;
                     item.task_id = None;
@@ -1057,12 +1076,12 @@ impl ImportV2Service {
                 let interrupted =
                     recovered_status.is_none_or(|status| status == TaskStatus::Failed);
                 if interrupted {
-                    let runtime_temp = context.root.join(format!(
-                        ".app/import-sessions/{session_id}/items/{}/staging/runtime-temp",
+                    let staging = context.root.join(format!(
+                        ".app/import-sessions/{session_id}/items/{}/staging",
                         item.item_id
                     ));
-                    crate::services::import_v2::media_router::recover_media_temp_root(
-                        &runtime_temp,
+                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
+                        &staging,
                     )?;
                     transition_item(item, ImportItemStatus::Failed)?;
                     item.task_id = None;
@@ -1102,13 +1121,15 @@ impl ImportV2Service {
         supported_extensions: Vec<String>,
         timeout: std::time::Duration,
     ) -> Result<(), BackendError> {
-        self.register_engine(Arc::new(PackProcessEngine::new(
-            pack,
-            route,
-            supported_extensions,
-            timeout,
-            self.web_targets.clone(),
-        )))
+        self.engines
+            .ensure_registered(Arc::new(PackProcessEngine::new(
+                pack,
+                route,
+                supported_extensions,
+                timeout,
+                self.web_targets.clone(),
+                self.connector_profiles_root.clone(),
+            )))
     }
     pub fn set_item_selected(
         &self,
@@ -1173,6 +1194,23 @@ impl ImportV2Service {
             .find(|item| item.item_id == item_id)
             .ok_or_else(item_not_found)?
             .input;
+        if matches!(recovery_action, Some(ImportRecoveryAction::EnableOcr))
+            && input.kind == crate::models::import_v2::ImportInputKind::Url
+            && !self.engines.registered_routes()?.iter().any(|route| {
+                route == "ocr.cjk-accurate" || route == "ocr.basic"
+            })
+        {
+            return self.finish_failed(
+                context,
+                files,
+                tasks,
+                session_id,
+                item_id,
+                task_id,
+                ocr_unavailable(),
+                ImportStage::Extract,
+            );
+        }
         let planned_routes = self.planned_routes(&input, recovery_action)?;
         let engines = planned_routes
             .iter()
@@ -1212,18 +1250,23 @@ impl ImportV2Service {
         let local_asr_authorized = if input
             .normalized_locator
             .as_deref()
-            .is_some_and(is_bilibili_url)
+            .is_some_and(is_supported_media_platform_url)
         {
-            let exact = self
-                .web_targets
-                .resolve(&input.locator, input.normalized_locator.as_deref())?;
+            // Local ASR is part of the URL import policy: when the verified
+            // ASR capability is installed, a missing platform subtitle is
+            // continued automatically. The user already chose the URL media
+            // import mode, so a second per-item authorization prompt would be
+            // redundant. The legacy Bilibili grant remains accepted below.
             let route_available = self
                 .engines
                 .registered_routes()?
                 .iter()
                 .any(|route| route == "media.asr");
+            let exact = self
+                .web_targets
+                .resolve(&input.locator, input.normalized_locator.as_deref())?;
             route_available
-                && self.web_targets.has_bilibili_asr(
+                || self.web_targets.has_bilibili_asr(
                     &context.project_id,
                     session_id,
                     item_id,
@@ -1232,6 +1275,9 @@ impl ImportV2Service {
         } else {
             false
         };
+        let local_ocr_authorized =
+            should_authorize_local_ocr(&input, recovery_action, &self.engines.registered_routes()?);
+        let media_save_mode = input.media_save_mode.clone();
         let request = EngineRequest {
             protocol_version: "2".into(),
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -1245,6 +1291,8 @@ impl ImportV2Service {
             staging_root: staging_root.clone(),
             chained_input: None,
             local_asr_authorized,
+            local_ocr_authorized,
+            media_save_mode,
         };
         let token = tasks
             .get_cancellation_token(task_id)
@@ -1333,7 +1381,7 @@ impl ImportV2Service {
                 continue;
             }
             if candidate.continuation.is_some() {
-                candidate = match self.execute_local_asr_continuation(
+                candidate = match self.execute_local_continuation(
                     context,
                     files,
                     session_id,
@@ -1495,6 +1543,42 @@ impl ImportV2Service {
         Ok(item)
     }
 
+    fn execute_local_continuation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        staging_root: &str,
+        request: &EngineRequest,
+        web_result: EngineResult,
+        token: &crate::tasks::task_model::CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
+        match web_result.continuation.as_ref() {
+            Some(EngineContinuation::LocalAsr { .. }) => self.execute_local_asr_continuation(
+                context,
+                files,
+                session_id,
+                item_id,
+                staging_root,
+                request,
+                web_result,
+                token,
+            ),
+            Some(EngineContinuation::LocalOcr { .. }) => self.execute_local_ocr_continuation(
+                context,
+                files,
+                session_id,
+                item_id,
+                staging_root,
+                request,
+                web_result,
+                token,
+            ),
+            None => Ok(web_result),
+        }
+    }
+
     fn execute_local_asr_continuation(
         &self,
         context: &ProjectContext,
@@ -1516,22 +1600,25 @@ impl ImportV2Service {
         let staging = context.root.join(staging_root);
         let media_path = staging.join(&temporary_input_path);
         let canonical_staging = staging.canonicalize().map_err(|_| asr_unavailable())?;
-        let canonical_runtime_temp = staging
-            .join("runtime-temp")
-            .canonicalize()
-            .map_err(|_| asr_unavailable())?;
+        let media_metadata =
+            std::fs::symlink_metadata(&media_path).map_err(|_| asr_unavailable())?;
+        if media_metadata.file_type().is_symlink() || !media_metadata.is_file() {
+            return Err(asr_unavailable());
+        }
         let canonical_media = media_path.canonicalize().map_err(|_| asr_unavailable())?;
         let media_workspace = canonical_media.parent().ok_or_else(asr_unavailable)?;
         if !canonical_media.starts_with(&canonical_staging)
-            || !canonical_media.starts_with(&canonical_runtime_temp)
-            || media_workspace == canonical_runtime_temp
-            || !canonical_media.is_file()
+            || media_workspace.parent() != Some(canonical_staging.as_path())
+            || !media_workspace
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".asr-input-"))
         {
             return Err(asr_unavailable());
         }
-        let _cleanup = crate::services::import_v2::media_router::TemporaryMediaWorkspace::create(
-            media_workspace,
-        )?;
+        let _cleanup =
+            crate::services::import_v2::media_router::TemporaryMediaWorkspace::adopt_existing(
+                media_workspace,
+            )?;
         let asr_input = ImportInput {
             kind: crate::models::import_v2::ImportInputKind::File,
             display_name: canonical_media
@@ -1542,23 +1629,26 @@ impl ImportV2Service {
             locator: canonical_media.to_string_lossy().into_owned(),
             normalized_locator: None,
             source_identity: None,
+            media_save_mode: Default::default(),
         };
         let engine = self.engines.resolve_route("media.asr", &asr_input)?;
-        let exact = self.web_targets.resolve(
-            &request.input.locator,
-            request.input.normalized_locator.as_deref(),
-        )?;
-        if self
-            .web_targets
-            .take_bilibili_asr(
-                &request.project_id,
-                &request.session_id,
-                &request.item_id,
-                exact.request_url.as_str(),
-            )?
-            .is_none()
-        {
-            return Err(asr_unavailable());
+        if !request.local_asr_authorized {
+            let exact = self.web_targets.resolve(
+                &request.input.locator,
+                request.input.normalized_locator.as_deref(),
+            )?;
+            if self
+                .web_targets
+                .take_bilibili_asr(
+                    &request.project_id,
+                    &request.session_id,
+                    &request.item_id,
+                    exact.request_url.as_str(),
+                )?
+                .is_none()
+            {
+                return Err(asr_unavailable());
+            }
         }
         let descriptor = engine.descriptor();
         let started_at = chrono::Utc::now().to_rfc3339();
@@ -1574,13 +1664,21 @@ impl ImportV2Service {
                 .canonicalize()
                 .map_err(|_| asr_unavailable())?;
             let output_workspace = output_path.parent().ok_or_else(asr_unavailable)?;
-            if !output_path.starts_with(&canonical_runtime_temp)
-                || output_workspace == canonical_runtime_temp
+            let output_metadata =
+                std::fs::symlink_metadata(staging.join(&asr_result.markdown_path))
+                    .map_err(|_| asr_unavailable())?;
+            if output_metadata.file_type().is_symlink()
+                || !output_metadata.is_file()
+                || !output_path.starts_with(&canonical_staging)
+                || output_workspace.parent() != Some(canonical_staging.as_path())
+                || !output_workspace.file_name().is_some_and(|name| {
+                    name.to_string_lossy().starts_with(".sensevoice-output-")
+                })
             {
                 return Err(asr_unavailable());
             }
             let _output_cleanup =
-                crate::services::import_v2::media_router::TemporaryMediaWorkspace::create(
+                crate::services::import_v2::media_router::TemporaryMediaWorkspace::adopt_existing(
                     output_workspace,
                 )?;
             if asr_result.continuation.is_some()
@@ -1594,6 +1692,23 @@ impl ImportV2Service {
             let mut base = std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
             let transcript =
                 std::fs::read_to_string(&transcript_path).map_err(|_| asr_unavailable())?;
+            let transcript_root = staging.join("transcripts");
+            std::fs::create_dir_all(&transcript_root).map_err(|_| asr_unavailable())?;
+            let durable_transcript = transcript_root.join("local-asr.md");
+            std::fs::write(&durable_transcript, transcript.as_bytes())
+                .map_err(|_| asr_unavailable())?;
+            web_result
+                .asset_paths
+                .push("transcripts/local-asr.md".into());
+            if let Some(metadata_path) = &asr_result.metadata_path {
+                let metadata =
+                    std::fs::read(staging.join(metadata_path)).map_err(|_| asr_unavailable())?;
+                std::fs::write(transcript_root.join("local-asr.metadata.json"), metadata)
+                    .map_err(|_| asr_unavailable())?;
+                web_result
+                    .asset_paths
+                    .push("transcripts/local-asr.metadata.json".into());
+            }
             base.push_str("\n\n## Local ASR Transcript\n\n");
             base.push_str(&transcript);
             std::fs::write(&base_path, base).map_err(|_| asr_unavailable())?;
@@ -1604,9 +1719,10 @@ impl ImportV2Service {
             {
                 let _ = std::fs::remove_file(staging.join(relative));
             }
-            web_result
-                .warnings
-                .push("local_asr:whisper.cpp-1.8.3:ggml-small".into());
+            web_result.warnings.push(format!(
+                "local_asr:{}:{}",
+                descriptor.engine_id, descriptor.engine_version
+            ));
             Ok((web_result, asr_result.warnings))
         })();
         let (outcome_kind, warnings) = match &outcome {
@@ -1627,6 +1743,158 @@ impl ImportV2Service {
             warnings,
         )?;
         outcome.map(|(result, _)| result)
+    }
+
+    fn execute_local_ocr_continuation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        staging_root: &str,
+        request: &EngineRequest,
+        mut web_result: EngineResult,
+        token: &crate::tasks::task_model::CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
+        let Some(EngineContinuation::LocalOcr {
+            temporary_input_paths,
+        }) = web_result.continuation.take()
+        else {
+            return Ok(web_result);
+        };
+        if temporary_input_paths.is_empty() || !request.local_ocr_authorized {
+            return Err(ocr_unavailable());
+        }
+        let staging = context.root.join(staging_root);
+        let canonical_staging = staging.canonicalize().map_err(|_| ocr_unavailable())?;
+        let base_path = staging.join(&web_result.markdown_path);
+        let mut base = std::fs::read_to_string(&base_path).map_err(|_| ocr_unavailable())?;
+        let durable_root = staging.join("ocr");
+        std::fs::create_dir_all(&durable_root).map_err(|_| ocr_unavailable())?;
+
+        for (index, temporary_input_path) in temporary_input_paths.iter().enumerate() {
+            if token.is_cancelled() {
+                return Err(cancelled_error());
+            }
+            let input_path = staging.join(temporary_input_path);
+            let input_metadata =
+                std::fs::symlink_metadata(&input_path).map_err(|_| ocr_unavailable())?;
+            if input_metadata.file_type().is_symlink() || !input_metadata.is_file() {
+                return Err(ocr_unavailable());
+            }
+            let canonical_input = input_path.canonicalize().map_err(|_| ocr_unavailable())?;
+            let workspace = canonical_input.parent().ok_or_else(ocr_unavailable)?;
+            if !canonical_input.starts_with(&canonical_staging)
+                || workspace.parent() != Some(canonical_staging.as_path())
+                || !workspace
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".ocr-input-"))
+            {
+                return Err(ocr_unavailable());
+            }
+            let _cleanup =
+                crate::services::import_v2::media_router::TemporaryMediaWorkspace::adopt_existing(
+                    workspace,
+                )?;
+            let ocr_input = ImportInput {
+                kind: crate::models::import_v2::ImportInputKind::File,
+                display_name: canonical_input
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                locator: canonical_input.to_string_lossy().into_owned(),
+                normalized_locator: None,
+                source_identity: None,
+                media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
+            };
+            let engine = self
+                .engines
+                .resolve_route("ocr.cjk-accurate", &ocr_input)
+                .or_else(|_| self.engines.resolve_route("ocr.basic", &ocr_input))?;
+            let descriptor = engine.descriptor();
+            let started_at = chrono::Utc::now().to_rfc3339();
+            let workspace_relative = workspace
+                .strip_prefix(&context.root)
+                .map_err(|_| ocr_unavailable())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let mut ocr_request = request.clone();
+            ocr_request.request_id = uuid::Uuid::new_v4().to_string();
+            ocr_request.input = ocr_input;
+            ocr_request.staging_root = workspace_relative.clone();
+            ocr_request.chained_input = None;
+            ocr_request.local_ocr_authorized = false;
+            let outcome = (|| -> Result<(String, EngineResult), BackendError> {
+                let result = engine.execute(&ocr_request, token)?;
+                validate_engine_result(&workspace_relative, &result)?;
+                if result.continuation.is_some() {
+                    return Err(ocr_unavailable());
+                }
+                let output_path = workspace
+                    .join(&result.markdown_path)
+                    .canonicalize()
+                    .map_err(|_| ocr_unavailable())?;
+                if !output_path.starts_with(workspace) || !output_path.is_file() {
+                    return Err(ocr_unavailable());
+                }
+                let markdown =
+                    std::fs::read_to_string(output_path).map_err(|_| ocr_unavailable())?;
+                if markdown.trim().is_empty() {
+                    return Err(ocr_unavailable());
+                }
+                Ok((markdown, result))
+            })();
+            let (ocr_markdown, ocr_result) = match outcome {
+                Ok(value) => {
+                    self.record_attempt(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        &descriptor,
+                        started_at,
+                        crate::models::import_v2::AttemptOutcome::Succeeded,
+                        value.1.warnings.clone(),
+                    )?;
+                    value
+                }
+                Err(error) => {
+                    self.record_attempt(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        &descriptor,
+                        started_at,
+                        crate::models::import_v2::AttemptOutcome::Failed,
+                        Vec::new(),
+                    )?;
+                    return Err(error);
+                }
+            };
+            let durable_markdown = format!("ocr/image-{index}.md");
+            std::fs::write(staging.join(&durable_markdown), ocr_markdown.as_bytes())
+                .map_err(|_| ocr_unavailable())?;
+            web_result.asset_paths.push(durable_markdown);
+            if let Some(metadata_path) = &ocr_result.metadata_path {
+                let metadata =
+                    std::fs::read(workspace.join(metadata_path)).map_err(|_| ocr_unavailable())?;
+                let durable_metadata = format!("ocr/image-{index}.metadata.json");
+                std::fs::write(staging.join(&durable_metadata), metadata)
+                    .map_err(|_| ocr_unavailable())?;
+                web_result.asset_paths.push(durable_metadata);
+            }
+            base.push_str(&format!("\n\n## Local OCR — Image {}\n\n", index + 1));
+            base.push_str(&ocr_markdown);
+            web_result.warnings.push(format!(
+                "local_ocr:{}:{}",
+                descriptor.engine_id, descriptor.engine_version
+            ));
+        }
+        std::fs::write(base_path, base).map_err(|_| ocr_unavailable())?;
+        web_result.text_coverage = Some(1.0);
+        Ok(web_result)
     }
 
     fn planned_routes(
@@ -1734,18 +2002,22 @@ impl ImportV2Service {
                     | ImportItemStatus::Cancelled
                     | ImportItemStatus::Skipped
                     | ImportItemStatus::Paused
+                    | ImportItemStatus::PreviewReady
             ) || item.status != ImportItemStatus::Failed
                 && item
-                .task_id
-                .as_deref()
-                .is_some_and(|bound| bound != task_id)
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|bound| bound != task_id)
             {
                 return Err(task_error(
                     "Import item is already claimed by another task.",
                 ));
             }
             if pre_cancelled
-                && matches!(item.status, ImportItemStatus::Cancelled | ImportItemStatus::Skipped)
+                && matches!(
+                    item.status,
+                    ImportItemStatus::Cancelled | ImportItemStatus::Skipped
+                )
             {
                 item.task_id = None;
                 return Ok(());
@@ -1808,6 +2080,12 @@ impl ImportV2Service {
         item_id: &str,
         task_id: &str,
     ) -> Result<ImportItem, BackendError> {
+        let staging = context.root.join(format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/staging"
+        ));
+        let _ = crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
+            &staging,
+        );
         self.mutate_item(context, files, session_id, item_id, |item| {
             if item.status == ImportItemStatus::Skipped {
                 return Ok(());
@@ -1838,6 +2116,12 @@ impl ImportV2Service {
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
+        let staging = context.root.join(format!(
+            ".app/import-sessions/{session_id}/items/{item_id}/staging"
+        ));
+        let _ = crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
+            &staging,
+        );
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Failed)?;
             let mut issue = issue_from_engine_error(&error, stage);
@@ -1954,6 +2238,18 @@ fn is_agent_eligible_failure(original_code: &str, issue: &ImportIssue) -> bool {
         )
 }
 
+fn should_authorize_local_ocr(
+    input: &ImportInput,
+    recovery_action: Option<&ImportRecoveryAction>,
+    registered_routes: &[String],
+) -> bool {
+    input.kind == crate::models::import_v2::ImportInputKind::Url
+        && matches!(recovery_action, Some(ImportRecoveryAction::EnableOcr))
+        && registered_routes
+            .iter()
+            .any(|route| route == "ocr.cjk-accurate" || route == "ocr.basic")
+}
+
 fn reorder_routes(
     mut routes: Vec<(&'static str, QualityFloor)>,
     recovery_action: Option<&ImportRecoveryAction>,
@@ -1990,7 +2286,27 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
         .unwrap_or_default();
         if host == "xiaohongshu.com"
             || host.ends_with(".xiaohongshu.com")
-            || host == "x.com"
+            || host == "xhslink.com"
+            || host.ends_with(".xhslink.com")
+        {
+            return vec![
+                "web.generic.browser",
+                "web.xiaohongshu.note",
+                "web.generic.readability",
+            ];
+        }
+        if host == "douyin.com"
+            || host.ends_with(".douyin.com")
+            || host == "iesdouyin.com"
+            || host.ends_with(".iesdouyin.com")
+        {
+            return vec![
+                "web.generic.browser",
+                "web.douyin.video",
+                "web.generic.readability",
+            ];
+        }
+        if host == "x.com"
             || host.ends_with(".x.com")
             || host == "twitter.com"
             || host.ends_with(".twitter.com")
@@ -1999,9 +2315,9 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
         }
         if host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv" {
             return vec![
+                "web.generic.browser",
                 "web.bilibili.metadata",
                 "web.bilibili.video",
-                "web.generic.browser",
             ];
         }
         let platform = if host == "mp.weixin.qq.com" {
@@ -2054,12 +2370,22 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
     }
 }
 
-fn is_bilibili_url(value: &str) -> bool {
+fn is_supported_media_platform_url(value: &str) -> bool {
     url::Url::parse(value)
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
         .is_some_and(|host| {
-            host == "b23.tv" || host == "bilibili.com" || host.ends_with(".bilibili.com")
+            host == "b23.tv"
+                || host == "bilibili.com"
+                || host.ends_with(".bilibili.com")
+                || host == "xiaohongshu.com"
+                || host.ends_with(".xiaohongshu.com")
+                || host == "xhslink.com"
+                || host.ends_with(".xhslink.com")
+                || host == "douyin.com"
+                || host.ends_with(".douyin.com")
+                || host == "iesdouyin.com"
+                || host.ends_with(".iesdouyin.com")
         })
 }
 
@@ -2067,6 +2393,15 @@ fn asr_unavailable() -> BackendError {
     BackendError::new(
         "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
         "A verified subtitle is unavailable and local ASR could not complete.",
+        true,
+        true,
+    )
+}
+
+fn ocr_unavailable() -> BackendError {
+    BackendError::new(
+        "IMPORT_WEB_OCR_UNAVAILABLE",
+        "Verified local OCR could not complete for the imported image.",
         true,
         true,
     )
@@ -2427,6 +2762,50 @@ mod tests {
 
     use super::*;
 
+    fn url_input(url: &str) -> ImportInput {
+        ImportInput {
+            kind: crate::models::import_v2::ImportInputKind::Url,
+            display_name: url.into(),
+            locator: url.into(),
+            normalized_locator: Some(url.into()),
+            source_identity: None,
+            media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
+        }
+    }
+
+    #[test]
+    fn supported_media_platforms_have_explicit_browser_first_routes() {
+        for (url, expected) in [
+            (
+                "https://www.xiaohongshu.com/explore/abc",
+                vec![
+                    "web.generic.browser",
+                    "web.xiaohongshu.note",
+                    "web.generic.readability",
+                ],
+            ),
+            (
+                "https://www.douyin.com/video/123",
+                vec![
+                    "web.generic.browser",
+                    "web.douyin.video",
+                    "web.generic.readability",
+                ],
+            ),
+            (
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                vec![
+                    "web.generic.browser",
+                    "web.bilibili.metadata",
+                    "web.bilibili.video",
+                ],
+            ),
+        ] {
+            assert_eq!(explicit_routes(&url_input(url)), expected, "{url}");
+            assert!(is_supported_media_platform_url(url), "{url}");
+        }
+    }
+
     #[test]
     fn agent_eligibility_uses_stable_issue_codes_and_excludes_access_failures() {
         let invalid = BackendError::new(
@@ -2684,6 +3063,7 @@ mod tests {
             locator: "book.xlsx".into(),
             normalized_locator: None,
             source_identity: None,
+            media_save_mode: Default::default(),
         };
         let mut result = EngineResult {
             source_snapshot_path: "source.bin".into(),
@@ -2928,6 +3308,23 @@ mod tests {
             ocr.iter().map(|(route, _)| *route).collect::<Vec<_>>(),
             vec!["ocr.cjk-accurate", "pdf.layout", "pdf.text", "agent.pdf"]
         );
+    }
+
+    #[test]
+    fn url_ocr_requires_an_explicit_recovery_action_even_when_installed() {
+        let input = url_input("https://www.xiaohongshu.com/explore/note-1");
+        let routes = vec!["ocr.cjk-accurate".to_string()];
+        assert!(!should_authorize_local_ocr(&input, None, &routes));
+        assert!(should_authorize_local_ocr(
+            &input,
+            Some(&ImportRecoveryAction::EnableOcr),
+            &routes,
+        ));
+        assert!(!should_authorize_local_ocr(
+            &input,
+            Some(&ImportRecoveryAction::EnableOcr),
+            &[],
+        ));
     }
 
     #[test]

@@ -16,6 +16,8 @@ fn platform_routes_precede_generic_and_matching_is_boundary_safe() {
         wechat: true,
         zhihu: true,
         bilibili: true,
+        xiaohongshu: true,
+        douyin: true,
         phase_two: false,
     };
     let p = DomainRouter::plan(&u("mp.weixin.qq.com"), &a);
@@ -28,5 +30,18 @@ fn platform_routes_precede_generic_and_matching_is_boundary_safe() {
         DomainRouter::plan(&u("mp.weixin.qq.com.example"), &a).primary,
         WebRouteKind::GenericHttp
     );
-    assert!(!DomainRouter::plan(&u("www.xiaohongshu.com"), &a).release_enabled);
+    for (host, route) in [
+        ("www.xiaohongshu.com", WebRouteKind::Xiaohongshu),
+        ("www.douyin.com", WebRouteKind::Douyin),
+        ("www.bilibili.com", WebRouteKind::Bilibili),
+    ] {
+        let plan = DomainRouter::plan(&u(host), &a);
+        assert_eq!(plan.primary, route, "{host}");
+        assert!(plan.release_enabled, "{host}");
+        assert_eq!(
+            plan.fallbacks,
+            vec![WebRouteKind::GenericHttp, WebRouteKind::GenericBrowser],
+            "{host}"
+        );
+    }
 }

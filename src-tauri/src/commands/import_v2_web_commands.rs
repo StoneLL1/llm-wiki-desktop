@@ -3,7 +3,9 @@ use crate::{
     errors::BackendError,
     models::{
         import_v2::{ImportInput, ImportInputKind, ImportItem, ImportItemStatus, ImportSession},
-        import_v2_web::{AddImportUrlV2Request, AuthorizeBilibiliAsrV2Request},
+        import_v2_web::{
+            AddImportUrlV2Request, AuthorizeBilibiliAsrV2Request, AuthorizeLocalAsrV2Request,
+        },
     },
     services::import_v2::{
         connector_session::ConnectorSessionRef,
@@ -26,6 +28,7 @@ pub struct LoginRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RevokeRequest {
     pub session_id: String,
+    pub platform: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +66,7 @@ pub fn add_import_url_v2(
             locator: reference.clone(),
             normalized_locator: Some(target.public.public_url),
             source_identity: None,
+            media_save_mode: request.media_save_mode,
         }],
     );
     if result.is_err() {
@@ -148,10 +152,25 @@ pub fn begin_import_login_v2(
 }
 #[tauri::command]
 pub fn revoke_import_login_v2(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: RevokeRequest,
 ) -> Result<(), BackendError> {
-    state.connector_session_service.revoke(&request.session_id)
+    if let Some(platform) = request.platform.as_deref() {
+        let root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| BackendError::new(
+                "IMPORT_V2_BROWSER_SESSION_FAILED",
+                "App data path is unavailable.",
+                true,
+                true,
+            ))?
+            .join("connector-profiles");
+        state.connector_session_service.revoke_platform(platform, &root)
+    } else {
+        state.connector_session_service.revoke(&request.session_id)
+    }
 }
 #[tauri::command]
 pub fn complete_import_login_v2(
@@ -281,9 +300,24 @@ pub async fn authorize_import_private_target_v2(
 }
 
 #[tauri::command]
+pub fn authorize_local_asr_v2(
+    state: State<'_, AppState>,
+    request: AuthorizeLocalAsrV2Request,
+) -> Result<(), BackendError> {
+    authorize_local_asr(&state, request)
+}
+
+#[tauri::command]
 pub fn authorize_bilibili_asr_v2(
     state: State<'_, AppState>,
     request: AuthorizeBilibiliAsrV2Request,
+) -> Result<(), BackendError> {
+    authorize_local_asr(&state, request)
+}
+
+fn authorize_local_asr(
+    state: &State<'_, AppState>,
+    request: AuthorizeLocalAsrV2Request,
 ) -> Result<(), BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let session =
@@ -302,12 +336,12 @@ pub fn authorize_bilibili_asr_v2(
                 true,
             )
         })?;
-    validate_bilibili_asr_item(item)?;
+    validate_local_asr_item(item)?;
     let target = state.import_v2_service.resolve_web_target(
         &item.input.locator,
         item.input.normalized_locator.as_deref(),
     )?;
-    validate_bilibili_asr_host(&target.public.host)?;
+    validate_local_asr_host(&target.public.host)?;
     state
         .import_v2_service
         .authorize_bilibili_asr(BilibiliAsrGrant {
@@ -319,7 +353,7 @@ pub fn authorize_bilibili_asr_v2(
         })
 }
 
-fn validate_bilibili_asr_item(item: &ImportItem) -> Result<(), BackendError> {
+fn validate_local_asr_item(item: &ImportItem) -> Result<(), BackendError> {
     if item.input.kind != ImportInputKind::Url
         || item.status != ImportItemStatus::Failed
         || item.issue.as_ref().map(|issue| issue.code.as_str())
@@ -327,7 +361,7 @@ fn validate_bilibili_asr_item(item: &ImportItem) -> Result<(), BackendError> {
     {
         return Err(BackendError::new(
             "IMPORT_V2_STATE_INVALID",
-            "Local ASR can be authorized only for a failed Bilibili item currently missing subtitles.",
+            "Local ASR can be authorized only for a failed supported-media item currently missing subtitles.",
             false,
             true,
         ));
@@ -335,11 +369,14 @@ fn validate_bilibili_asr_item(item: &ImportItem) -> Result<(), BackendError> {
     Ok(())
 }
 
-fn validate_bilibili_asr_host(host: &str) -> Result<(), BackendError> {
-    if !platform_matches_host("bilibili", host) {
+fn validate_local_asr_host(host: &str) -> Result<(), BackendError> {
+    if !["bilibili", "xiaohongshu", "douyin"]
+        .into_iter()
+        .any(|platform| platform_matches_host(platform, host))
+    {
         return Err(BackendError::new(
             "IMPORT_V2_URL_REJECTED",
-            "Local ASR authorization is limited to the exact Bilibili import target.",
+            "Local ASR authorization is limited to an exact supported-media import target.",
             false,
             true,
         ));
@@ -352,7 +389,18 @@ fn platform_matches_host(platform: &str, host: &str) -> bool {
         "wechat" => host == "mp.weixin.qq.com",
         "zhihu" => host == "zhihu.com" || host.ends_with(".zhihu.com"),
         "bilibili" => host == "b23.tv" || host == "bilibili.com" || host.ends_with(".bilibili.com"),
-        "xiaohongshu" => host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com"),
+        "xiaohongshu" => {
+            host == "xiaohongshu.com"
+                || host.ends_with(".xiaohongshu.com")
+                || host == "xhslink.com"
+                || host.ends_with(".xhslink.com")
+        }
+        "douyin" => {
+            host == "douyin.com"
+                || host.ends_with(".douyin.com")
+                || host == "iesdouyin.com"
+                || host.ends_with(".iesdouyin.com")
+        }
         "x" => {
             host == "x.com"
                 || host.ends_with(".x.com")
@@ -368,15 +416,16 @@ mod tests {
     use super::*;
     use crate::models::import_v2::{ImportIssue, ImportStage};
 
-    fn failed_url_item(code: &str) -> ImportItem {
+    fn failed_url_item(code: &str, url: &str) -> ImportItem {
         let mut item = ImportItem::queued(
             "item-a",
             ImportInput {
                 kind: ImportInputKind::Url,
-                display_name: "Bilibili".into(),
+                display_name: url.into(),
                 locator: "import-web-target:opaque".into(),
-                normalized_locator: Some("https://www.bilibili.com/video/BV1exact".into()),
+                normalized_locator: Some(url.into()),
                 source_identity: None,
+                media_save_mode: Default::default(),
             },
         );
         item.status = ImportItemStatus::Failed;
@@ -385,17 +434,32 @@ mod tests {
     }
 
     #[test]
-    fn local_asr_authorization_requires_exact_issue_and_bilibili_host() {
-        let item = failed_url_item("IMPORT_WEB_SUBTITLE_UNAVAILABLE");
-        assert!(validate_bilibili_asr_item(&item).is_ok());
-        assert!(validate_bilibili_asr_host("www.bilibili.com").is_ok());
+    fn local_asr_authorization_requires_exact_issue_and_supported_platform_host() {
+        for (url, host) in [
+            (
+                "https://www.xiaohongshu.com/explore/abc",
+                "www.xiaohongshu.com",
+            ),
+            ("https://www.douyin.com/video/123", "www.douyin.com"),
+            (
+                "https://www.bilibili.com/video/BV1exact",
+                "www.bilibili.com",
+            ),
+        ] {
+            let item = failed_url_item("IMPORT_WEB_SUBTITLE_UNAVAILABLE", url);
+            assert!(validate_local_asr_item(&item).is_ok(), "{url}");
+            assert!(validate_local_asr_host(host).is_ok(), "{host}");
+        }
         assert_eq!(
-            validate_bilibili_asr_host("example.com").unwrap_err().code,
+            validate_local_asr_host("example.com").unwrap_err().code,
             "IMPORT_V2_URL_REJECTED"
         );
-        let wrong_issue = failed_url_item("IMPORT_WEB_STRUCTURE_CHANGED");
+        let wrong_issue = failed_url_item(
+            "IMPORT_WEB_STRUCTURE_CHANGED",
+            "https://www.bilibili.com/video/BV1exact",
+        );
         assert_eq!(
-            validate_bilibili_asr_item(&wrong_issue).unwrap_err().code,
+            validate_local_asr_item(&wrong_issue).unwrap_err().code,
             "IMPORT_V2_STATE_INVALID"
         );
     }

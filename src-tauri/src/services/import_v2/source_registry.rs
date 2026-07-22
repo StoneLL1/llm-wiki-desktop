@@ -147,6 +147,8 @@ pub struct SourceVersion {
     pub version_id: String,
     pub content_hash: String,
     pub raw_path: String,
+    #[serde(default)]
+    pub extracted_path: String,
     pub baseline_path: String,
     pub created_at: String,
     pub route: String,
@@ -178,6 +180,7 @@ pub struct SourceCommitPlan {
     pub version_id: String,
     pub raw_path: String,
     pub asset_root_path: String,
+    pub extracted_root_path: String,
     pub baseline_path: String,
     pub wiki_path: String,
     pub manifest_path: String,
@@ -281,12 +284,23 @@ impl SourceRegistry {
             }
 
             let raw_asset_path = format!(
-                "raw/sources/{}/{}/assets/{asset_relative}",
+                "raw/assets/{}/{}/{asset_relative}",
                 manifest.source_id, manifest.current_version_id
             );
             let resolved = context.resolve_project_path(&raw_asset_path)?;
             if resolved.is_file() {
                 return Ok(resolved);
+            }
+            // Import V2 originally nested assets below raw/sources. Keep this
+            // read-only fallback so existing projects remain renderable after
+            // new imports move to the canonical raw/assets tree.
+            let legacy_asset_path = format!(
+                "raw/sources/{}/{}/assets/{asset_relative}",
+                manifest.source_id, manifest.current_version_id
+            );
+            let legacy_resolved = context.resolve_project_path(&legacy_asset_path)?;
+            if legacy_resolved.is_file() {
+                return Ok(legacy_resolved);
             }
             return Err(wiki_asset_not_found(wiki_path, asset_path));
         }
@@ -406,6 +420,7 @@ impl SourceRegistry {
                 version_id: version_id.clone(),
                 content_hash: input.content_hash.clone(),
                 raw_path: raw_path.clone(),
+                extracted_path: format!("raw/extracted/{source_id}/{version_id}"),
                 baseline_path: baseline_path.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 route: input.route.clone(),
@@ -416,6 +431,17 @@ impl SourceRegistry {
             next_manifest.current_version_id = version_id.clone();
         }
 
+        let extracted_path = format!("raw/extracted/{source_id}/{version_id}");
+        if reused_version_id.is_some() {
+            let version = next_manifest
+                .versions
+                .iter_mut()
+                .find(|version| version.version_id == version_id)
+                .ok_or_else(invalid_index)?;
+            if version.extracted_path.is_empty() {
+                version.extracted_path = extracted_path.clone();
+            }
+        }
         let (raw_path, baseline_path) = if reused_version_id.is_some() {
             let version = next_manifest
                 .versions
@@ -438,12 +464,14 @@ impl SourceRegistry {
             .insert(input.content_hash.clone(), pointer.clone());
         next_index.by_locator.insert(locator, pointer);
 
-        let asset_root_path = format!("raw/sources/{source_id}/{version_id}/assets");
+        let asset_root_path = format!("raw/assets/{source_id}/{version_id}");
+        let extracted_root_path = format!("raw/extracted/{source_id}/{version_id}");
         let plan = SourceCommitPlan {
             source_id: source_id.clone(),
             version_id,
             raw_path,
             asset_root_path,
+            extracted_root_path,
             baseline_path,
             wiki_path,
             manifest_path: format!(".app/sources/{source_id}.json"),
@@ -519,12 +547,20 @@ fn validate_manifest(manifest: &SourceManifest) -> Result<(), BackendError> {
         !is_safe_id(&version.version_id)
             || !version_ids.insert(&version.version_id)
             || !valid_raw_path(&version.raw_path, &manifest.source_id, &version.version_id)
+            || (!version.extracted_path.is_empty()
+                && version.extracted_path
+                    != format!(
+                        "raw/extracted/{}/{}",
+                        manifest.source_id, version.version_id
+                    ))
             || version.baseline_path
                 != format!(
                     ".app/source-artifacts/{}/{}/baseline.md",
                     manifest.source_id, version.version_id
                 )
             || paths.resolve_project_path(&version.raw_path).is_err()
+            || (!version.extracted_path.is_empty()
+                && paths.resolve_project_path(&version.extracted_path).is_err())
             || paths.resolve_project_path(&version.baseline_path).is_err()
     });
     if manifest.schema_version != IMPORT_V2_SCHEMA_VERSION
@@ -545,8 +581,9 @@ fn validate_commit_plan(plan: &SourceCommitPlan) -> Result<(), BackendError> {
     if !is_safe_id(&plan.source_id)
         || !is_safe_id(&plan.version_id)
         || !valid_raw_path(&plan.raw_path, &plan.source_id, &plan.version_id)
-        || plan.asset_root_path
-            != format!("raw/sources/{}/{}/assets", plan.source_id, plan.version_id)
+        || plan.asset_root_path != format!("raw/assets/{}/{}", plan.source_id, plan.version_id)
+        || plan.extracted_root_path
+            != format!("raw/extracted/{}/{}", plan.source_id, plan.version_id)
         || plan.baseline_path
             != format!(
                 ".app/source-artifacts/{}/{}/baseline.md",
@@ -557,6 +594,7 @@ fn validate_commit_plan(plan: &SourceCommitPlan) -> Result<(), BackendError> {
         || [
             &plan.raw_path,
             &plan.asset_root_path,
+            &plan.extracted_root_path,
             &plan.baseline_path,
             &plan.wiki_path,
             &plan.manifest_path,
@@ -605,7 +643,9 @@ fn safe_extension(extension: &str) -> String {
     let extension = extension.trim().trim_start_matches('.').to_lowercase();
     if !extension.is_empty()
         && extension.len() <= 16
-        && extension.chars().all(|ch| ch.is_ascii_alphanumeric())
+        && extension
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric()))
     {
         extension
     } else {
@@ -695,6 +735,7 @@ mod tests {
             version_id: version_id.into(),
             content_hash: content_hash.into(),
             raw_path: format!("raw/sources/source-1/{version_id}/original.docx"),
+            extracted_path: format!("raw/extracted/source-1/{version_id}"),
             baseline_path: format!(".app/source-artifacts/source-1/{version_id}/baseline.md"),
             created_at: "2026-07-11T00:00:00Z".into(),
             route: "fixture".into(),
@@ -991,6 +1032,7 @@ mod tests {
                 version_id: "version-1".into(),
                 content_hash: "hash-a".into(),
                 raw_path: "raw/sources/nested/source/version-1/original.docx".into(),
+                extracted_path: "raw/extracted/nested/source/version-1".into(),
                 baseline_path: ".app/source-artifacts/nested/source/version-1/baseline.md".into(),
                 created_at: "2026-07-11T00:00:00Z".into(),
                 route: "fixture".into(),
@@ -1030,6 +1072,7 @@ mod tests {
                 version_id: "../escape".into(),
                 content_hash: "hash-a".into(),
                 raw_path: "raw/sources/source-1/safe-version/original.docx".into(),
+                extracted_path: "raw/extracted/source-1/safe-version".into(),
                 baseline_path: ".app/source-artifacts/source-1/safe-version/baseline.md".into(),
                 created_at: "2026-07-11T00:00:00Z".into(),
                 route: "fixture".into(),
@@ -1063,6 +1106,10 @@ mod tests {
         );
         let (context, root) = super::super::test_support::test_context("source-registry-paths");
         assert!(context.resolve_project_path(&plan.raw_path).is_ok());
+        assert_eq!(
+            plan.next_manifest.versions.last().unwrap().extracted_path,
+            format!("raw/extracted/{}/{}", plan.source_id, plan.version_id)
+        );
         assert!(context.resolve_project_path(&plan.baseline_path).is_ok());
         assert!(context.resolve_project_path(&plan.wiki_path).is_ok());
         std::fs::remove_dir_all(root).unwrap();

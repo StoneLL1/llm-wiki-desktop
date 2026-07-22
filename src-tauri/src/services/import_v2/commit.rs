@@ -1,6 +1,7 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path};
 
+use flate2::{write::GzEncoder, Compression};
 use sha2::{Digest, Sha256};
 
 use crate::errors::{
@@ -34,6 +35,7 @@ enum CommitPersistenceBoundary {
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum CommitPersistenceTarget {
     RawSnapshot,
+    RawExtracted,
     Baseline,
     Asset(String),
     Wiki,
@@ -76,6 +78,8 @@ fn classify_commit_target(relative: &str) -> CommitPersistenceTarget {
         CommitPersistenceTarget::Asset(relative.rsplit('/').next().unwrap_or(relative).into())
     } else if relative.starts_with("raw/sources/") {
         CommitPersistenceTarget::RawSnapshot
+    } else if relative.starts_with("raw/extracted/") {
+        CommitPersistenceTarget::RawExtracted
     } else if relative.starts_with(".app/source-artifacts/") {
         CommitPersistenceTarget::Baseline
     } else if relative.starts_with("wiki/") {
@@ -359,25 +363,13 @@ impl ImportV2Service {
             &preview.markdown.relative_path,
             &preview.markdown.sha256,
         )?;
-        let mut assets = Vec::new();
-        let mut asset_targets = std::collections::HashSet::new();
-        for asset in &preview.assets {
-            let relative = asset
-                .relative_path
-                .strip_prefix("assets/")
-                .unwrap_or(&asset.relative_path);
-            let target = format!("{}/{}", plan_asset_placeholder(), relative);
-            if !asset_targets.insert(asset_collision_key(&target)) {
-                return Err(commit_error(
-                    IMPORT_V2_COMMIT_FAILED,
-                    "Preview assets resolve to the same target.",
-                ));
-            }
-            assets.push((
-                relative.to_string(),
-                verified_artifact(&staging, &asset.relative_path, &asset.sha256)?,
-            ));
-        }
+        let content_hash = content_identity_hash(
+            &item.input.kind,
+            &item.input.media_save_mode,
+            &preview.source_snapshot.sha256,
+            &preview.markdown.sha256,
+            &preview.assets,
+        );
         let index_existed = files.exists(context, ".app/source-index-v2.json");
         let index_hash = index_existed
             .then(|| files.file_hash(context, ".app/source-index-v2.json"))
@@ -389,11 +381,11 @@ impl ImportV2Service {
                 "Normalized source locator is missing.",
             )
         })?;
-        let resolution = SourceRegistry::resolve(&index, locator, &preview.source_snapshot.sha256);
+        let resolution = SourceRegistry::resolve(&index, locator, &content_hash);
         let pointer = index
             .by_locator
             .get(locator)
-            .or_else(|| index.by_content_hash.get(&preview.source_snapshot.sha256));
+            .or_else(|| index.by_content_hash.get(&content_hash));
         let existing_manifest_path =
             pointer.map(|pointer| format!(".app/sources/{}.json", pointer.source_id));
         let existing_manifest_hash = existing_manifest_path
@@ -410,15 +402,16 @@ impl ImportV2Service {
             .and_then(|value| value.to_str())
             .unwrap_or("bin")
             .to_string();
+        let prepared_source = prepare_source_snapshot(&item.input.kind, &extension, source)?;
         let mut plan = SourceRegistry.build_commit_plan(
             &index,
             existing_manifest.as_ref(),
             &SourceCommitInput {
                 normalized_locator: locator.into(),
-                content_hash: preview.source_snapshot.sha256.clone(),
+                content_hash: content_hash.clone(),
                 display_name: item.input.display_name.clone(),
                 input_kind: item.input.kind.clone(),
-                source_extension: extension,
+                source_extension: prepared_source.extension.clone(),
                 route: attempt
                     .map(|value| value.route.clone())
                     .unwrap_or_else(|| "unknown".into()),
@@ -431,19 +424,152 @@ impl ImportV2Service {
                 quality: preview.quality.clone(),
             },
         )?;
+        let source_root = plan
+            .raw_path
+            .rsplit_once('/')
+            .map(|(root, _)| root)
+            .ok_or_else(|| commit_error(IMPORT_V2_COMMIT_FAILED, "Raw source path is invalid."))?;
+        let mut source_evidence = Vec::new();
+        let mut assets = Vec::new();
+        let mut extracted = Vec::new();
+        let mut source_evidence_targets = std::collections::HashSet::new();
+        let mut asset_targets = std::collections::HashSet::new();
+        let mut extracted_targets = std::collections::HashSet::new();
+        for asset in &preview.assets {
+            let asset_relative = asset
+                .relative_path
+                .strip_prefix("assets/")
+                .unwrap_or(&asset.relative_path);
+            let source_evidence_artifact = matches!(
+                &asset.kind,
+                crate::models::import_v2::ArtifactKind::SourceEvidence
+            );
+            let relative = if source_evidence_artifact {
+                asset_relative
+                    .strip_prefix("source-evidence/")
+                    .unwrap_or(asset_relative)
+            } else {
+                asset_relative
+            };
+            let bytes =
+                verified_artifact(&staging, &asset.relative_path, &asset.sha256)?;
+            let (relative, bytes) = if source_evidence_artifact
+                && item.input.kind == crate::models::import_v2::ImportInputKind::Url
+            {
+                prepare_url_source_evidence(relative, bytes)?
+            } else {
+                (relative.to_string(), bytes)
+            };
+            let extracted_artifact = matches!(
+                &asset.kind,
+                crate::models::import_v2::ArtifactKind::Metadata
+                    | crate::models::import_v2::ArtifactKind::Subtitle
+                    | crate::models::import_v2::ArtifactKind::Transcript
+            );
+            let target_root: &str = if source_evidence_artifact {
+                source_root
+            } else if extracted_artifact {
+                plan.extracted_root_path.as_str()
+            } else {
+                plan.asset_root_path.as_str()
+            };
+            let target = if source_evidence_artifact {
+                format!("{target_root}/evidence/{relative}")
+            } else {
+                format!("{target_root}/{relative}")
+            };
+            let targets = if source_evidence_artifact {
+                &mut source_evidence_targets
+            } else if extracted_artifact {
+                &mut extracted_targets
+            } else {
+                &mut asset_targets
+            };
+            if !targets.insert(asset_collision_key(&target)) {
+                return Err(commit_error(
+                    IMPORT_V2_COMMIT_FAILED,
+                    "Preview assets resolve to the same target.",
+                ));
+            }
+            let artifact = (relative, bytes);
+            if source_evidence_artifact {
+                source_evidence.push(artifact);
+            } else if extracted_artifact {
+                extracted.push(artifact);
+            } else {
+                assets.push(artifact);
+            }
+        }
+        // Keep the derived Markdown/transcript evidence alongside metadata
+        // under raw/extracted. The baseline remains in .app for conflict and
+        // preview bookkeeping, while this copy is the durable source-derived
+        // artifact promised by the import contract.
+        let extracted_markdown_target = format!("{}/extracted.md", plan.extracted_root_path);
+        if !extracted_targets.insert(asset_collision_key(&extracted_markdown_target)) {
+            return Err(commit_error(
+                IMPORT_V2_COMMIT_FAILED,
+                "Preview extracted Markdown resolves to an existing target.",
+            ));
+        }
+        extracted.push((
+            "extracted.md".into(),
+            verified_artifact(
+                &staging,
+                &preview.markdown.relative_path,
+                &preview.markdown.sha256,
+            )?,
+        ));
+        let quality_target = format!("{}/quality.json", plan.extracted_root_path);
+        if !extracted_targets.insert(asset_collision_key(&quality_target)) {
+            return Err(commit_error(
+                IMPORT_V2_COMMIT_FAILED,
+                "Preview quality report resolves to an existing target.",
+            ));
+        }
+        extracted.push(("quality.json".into(), json_bytes(&preview.quality)?));
+        let source_record_path = format!("{source_root}/source.json");
+        let source_record = SourceEvidenceRecord {
+            schema_version: 1,
+            title: preview.title.clone(),
+            author: metadata_author(&extracted),
+            url: matches!(
+                item.input.kind,
+                crate::models::import_v2::ImportInputKind::Url
+            )
+            .then(|| {
+                crate::services::import_v2::redaction::redact_sensitive_text(
+                    item.input
+                        .normalized_locator
+                        .as_deref()
+                        .unwrap_or(&item.input.locator),
+                )
+            }),
+            source_locator: crate::services::import_v2::redaction::redact_sensitive_text(locator),
+            media_save_mode: item.input.media_save_mode.clone(),
+            snapshot_path: plan.raw_path.clone(),
+            snapshot_sha256: preview.source_snapshot.sha256.clone(),
+            content_sha256: content_hash,
+            stored_sha256: format!("{:x}", Sha256::digest(&prepared_source.bytes)),
+            content_encoding: prepared_source.content_encoding.clone(),
+            original_bytes: preview.source_snapshot.size_bytes,
+            stored_bytes: prepared_source.bytes.len() as u64,
+            saved_at: chrono::Utc::now().to_rfc3339(),
+        };
         let duplicate = matches!(
             resolution,
             SourceResolution::ExactDuplicate { .. } | SourceResolution::SameContentNewOrigin { .. }
         );
-        let wiki_exists = files.exists(context, &plan.wiki_path);
-        if wiki_exists
+        let writes_wiki = item.input.kind != crate::models::import_v2::ImportInputKind::Url;
+        let wiki_exists = writes_wiki && files.exists(context, &plan.wiki_path);
+        if writes_wiki
+            && wiki_exists
             && !duplicate
             && decision.conflict_action == Some(CommitConflictAction::CreateNew)
         {
             plan.wiki_path = collision_free_wiki_path(context, &plan.wiki_path)?;
             plan.next_manifest.wiki_path = plan.wiki_path.clone();
         }
-        let wiki_exists = files.exists(context, &plan.wiki_path);
+        let wiki_exists = writes_wiki && files.exists(context, &plan.wiki_path);
         let overwrite_wiki = wiki_exists
             && decision.conflict_action == Some(CommitConflictAction::ApplyMergedCandidate);
         if wiki_exists
@@ -467,9 +593,13 @@ impl ImportV2Service {
                 ));
             }
         }
+        let wiki_markdown = writes_wiki
+            .then(|| rewrite_wiki_asset_links(&markdown, &plan.wiki_path, &plan.asset_root_path));
         for path in [
             &plan.raw_path,
+            &source_record_path,
             &plan.asset_root_path,
+            &plan.extracted_root_path,
             &plan.baseline_path,
             &plan.wiki_path,
             &plan.manifest_path,
@@ -479,7 +609,9 @@ impl ImportV2Service {
             context.resolve_project_path(path)?;
         }
         if !duplicate
-            && (files.exists(context, &plan.raw_path) || files.exists(context, &plan.baseline_path))
+            && (files.exists(context, &plan.raw_path)
+                || files.exists(context, &plan.extracted_root_path)
+                || files.exists(context, &plan.baseline_path))
         {
             return Err(commit_error(
                 IMPORT_V2_COMMIT_CONFLICT,
@@ -498,7 +630,7 @@ impl ImportV2Service {
             item_id: item.item_id.clone(),
             source_id: Some(plan.source_id.clone()),
             version_id: Some(plan.version_id.clone()),
-            wiki_path: Some(plan.wiki_path.clone()),
+            wiki_path: writes_wiki.then(|| plan.wiki_path.clone()),
             committed: true,
             error_code: None,
         };
@@ -522,20 +654,51 @@ impl ImportV2Service {
         {
             let mut targets = vec![
                 ("raw snapshot".into(), plan.raw_path.clone()),
+                ("source evidence".into(), source_record_path.clone()),
                 ("baseline".into(), plan.baseline_path.clone()),
             ];
-            targets.extend(preview.assets.iter().map(|asset| {
+            targets.extend(source_evidence.iter().map(|(relative, _)| {
+                (
+                    format!("source evidence {relative}"),
+                    format!("{source_root}/evidence/{relative}"),
+                )
+            }));
+            targets.extend(preview.assets.iter().filter_map(|asset| {
+                if matches!(
+                    &asset.kind,
+                    crate::models::import_v2::ArtifactKind::SourceEvidence
+                ) {
+                    return None;
+                }
                 let relative = asset
                     .relative_path
                     .strip_prefix("assets/")
                     .unwrap_or(&asset.relative_path);
-                (
-                    format!("asset {relative}"),
-                    format!("{}/{relative}", plan.asset_root_path),
-                )
+                let root: &str = if matches!(
+                    &asset.kind,
+                    crate::models::import_v2::ArtifactKind::Metadata
+                        | crate::models::import_v2::ArtifactKind::Subtitle
+                        | crate::models::import_v2::ArtifactKind::Transcript
+                ) {
+                    plan.extracted_root_path.as_str()
+                } else {
+                    plan.asset_root_path.as_str()
+                };
+                let target = format!("{root}/{relative}");
+                Some((format!("asset {relative}"), target))
             }));
+            targets.push((
+                "extracted Markdown".into(),
+                format!("{}/extracted.md", plan.extracted_root_path),
+            ));
+            targets.push((
+                "quality report".into(),
+                format!("{}/quality.json", plan.extracted_root_path),
+            ));
+            if writes_wiki {
+                targets.push(("Wiki".into(), plan.wiki_path.clone()));
+            }
             targets.extend([
-                ("Wiki".into(), plan.wiki_path.clone()),
                 ("source manifest".into(), plan.manifest_path.clone()),
                 ("source index".into(), ".app/source-index-v2.json".into()),
                 ("history preview".into(), history_preview_path.clone()),
@@ -559,26 +722,41 @@ impl ImportV2Service {
         let mut transaction = FileTransaction::new_for_project(&context.root);
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
-                transaction.write_new(&context.resolve_project_path(&plan.raw_path)?, &source)?;
+                transaction.write_new(
+                    &context.resolve_project_path(&plan.raw_path)?,
+                    &prepared_source.bytes,
+                )?;
+                transaction.write_new(
+                    &context.resolve_project_path(&source_record_path)?,
+                    &json_bytes(&source_record)?,
+                )?;
                 transaction.write_new(
                     &context.resolve_project_path(&plan.baseline_path)?,
                     &markdown,
                 )?;
+                for (relative, bytes) in source_evidence {
+                    let target = format!("{source_root}/evidence/{relative}");
+                    transaction.write_new(&context.resolve_project_path(&target)?, &bytes)?;
+                }
                 for (relative, bytes) in assets {
                     let target = format!("{}/{}", plan.asset_root_path, relative);
                     transaction.write_new(&context.resolve_project_path(&target)?, &bytes)?;
                 }
+                for (relative, bytes) in extracted {
+                    let target = format!("{}/{}", plan.extracted_root_path, relative);
+                    transaction.write_new(&context.resolve_project_path(&target)?, &bytes)?;
+                }
             }
-            if !wiki_exists || overwrite_wiki {
+            if writes_wiki && (!wiki_exists || overwrite_wiki) {
                 let wiki = context.resolve_project_path(&plan.wiki_path)?;
                 if overwrite_wiki {
                     transaction.write_if_hash_matches(
                         &wiki,
-                        &markdown,
+                        wiki_markdown.as_deref().unwrap(),
                         decision.expected_wiki_hash.as_deref().unwrap(),
                     )?;
                 } else {
-                    transaction.write_new(&wiki, &markdown)?;
+                    transaction.write_new(&wiki, wiki_markdown.as_deref().unwrap())?;
                 }
             }
             let manifest_path = context.resolve_project_path(&plan.manifest_path)?;
@@ -636,6 +814,218 @@ impl ImportV2Service {
     }
 }
 
+const MAX_URL_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+
+struct PreparedSourceSnapshot {
+    bytes: Vec<u8>,
+    extension: String,
+    content_encoding: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceEvidenceRecord {
+    schema_version: u32,
+    title: String,
+    author: Option<String>,
+    url: Option<String>,
+    source_locator: String,
+    media_save_mode: crate::models::import_v2::MediaSaveMode,
+    snapshot_path: String,
+    snapshot_sha256: String,
+    content_sha256: String,
+    stored_sha256: String,
+    content_encoding: Option<String>,
+    original_bytes: u64,
+    stored_bytes: u64,
+    saved_at: String,
+}
+
+fn content_identity_hash(
+    kind: &crate::models::import_v2::ImportInputKind,
+    media_save_mode: &crate::models::import_v2::MediaSaveMode,
+    snapshot_sha256: &str,
+    markdown_sha256: &str,
+    assets: &[crate::models::import_v2::ImportArtifact],
+) -> String {
+    if kind != &crate::models::import_v2::ImportInputKind::Url {
+        return snapshot_sha256.to_string();
+    }
+    let mut evidence = assets
+        .iter()
+        .filter_map(|artifact| {
+            let tag = match artifact.kind {
+                crate::models::import_v2::ArtifactKind::Image => "image",
+                crate::models::import_v2::ArtifactKind::Attachment => "attachment",
+                crate::models::import_v2::ArtifactKind::Subtitle => "subtitle",
+                crate::models::import_v2::ArtifactKind::Transcript => "transcript",
+                _ => return None,
+            };
+            Some(format!("{tag}:{}", artifact.sha256))
+        })
+        .collect::<Vec<_>>();
+    evidence.sort();
+    let mut digest = Sha256::new();
+    digest.update(b"url-content-v1\0");
+    digest.update(match media_save_mode {
+        crate::models::import_v2::MediaSaveMode::PreserveOriginal => {
+            b"preserve-original".as_slice()
+        }
+        crate::models::import_v2::MediaSaveMode::ExtractOnly => b"extract-only".as_slice(),
+    });
+    digest.update(b"\0");
+    digest.update(markdown_sha256.as_bytes());
+    for artifact in evidence {
+        digest.update(b"\0");
+        digest.update(artifact.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn prepare_source_snapshot(
+    kind: &crate::models::import_v2::ImportInputKind,
+    fallback_extension: &str,
+    bytes: Vec<u8>,
+) -> Result<PreparedSourceSnapshot, BackendError> {
+    if *kind != crate::models::import_v2::ImportInputKind::Url {
+        return Ok(PreparedSourceSnapshot {
+            bytes,
+            extension: fallback_extension.into(),
+            content_encoding: None,
+        });
+    }
+    if bytes.len() > MAX_URL_SNAPSHOT_BYTES {
+        return Err(commit_error(
+            IMPORT_V2_COMMIT_FAILED,
+            "URL source snapshot exceeds the 16 MiB evidence limit.",
+        ));
+    }
+    let text = std::str::from_utf8(&bytes).ok();
+    let trimmed = text
+        .map(|value| value.trim_start_matches('\u{feff}').trim_start())
+        .unwrap_or_default();
+    let fallback_extension = fallback_extension.to_ascii_lowercase();
+    let json = serde_json::from_str::<serde_json::Value>(trimmed).is_ok();
+    let format = if json
+        && (trimmed.starts_with('{')
+            || trimmed.starts_with('[')
+            || fallback_extension == "json")
+    {
+        Some("json")
+    } else if text.is_some()
+        && (trimmed.starts_with('<')
+            || fallback_extension == "html"
+            || fallback_extension == "htm")
+    {
+        Some("html")
+    } else {
+        None
+    };
+    let Some(format) = format else {
+        return Ok(PreparedSourceSnapshot {
+            bytes,
+            extension: "bin".into(),
+            content_encoding: None,
+        });
+    };
+    let bytes = if format == "json" {
+        crate::services::import_v2::redaction::redact_json_snapshot(
+            trimmed,
+        )
+        .ok_or_else(|| {
+            commit_error(
+                IMPORT_V2_COMMIT_FAILED,
+                "URL JSON snapshot could not be redacted.",
+            )
+        })?
+    } else {
+        crate::services::import_v2::redaction::redact_sensitive_text(
+            text.expect("recognized HTML snapshots are UTF-8"),
+        )
+        .into_bytes()
+    };
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&bytes).map_err(|_| {
+        commit_error(
+            IMPORT_V2_COMMIT_FAILED,
+            "URL source snapshot could not be compressed.",
+        )
+    })?;
+    let compressed = encoder.finish().map_err(|_| {
+        commit_error(
+            IMPORT_V2_COMMIT_FAILED,
+            "URL source snapshot could not be compressed.",
+        )
+    })?;
+    Ok(PreparedSourceSnapshot {
+        bytes: compressed,
+        extension: format!("{format}.gz"),
+        content_encoding: Some("gzip".into()),
+    })
+}
+
+fn prepare_url_source_evidence(
+    relative: &str,
+    bytes: Vec<u8>,
+) -> Result<(String, Vec<u8>), BackendError> {
+    let fallback_extension = relative
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .unwrap_or("bin");
+    let prepared = prepare_source_snapshot(
+        &crate::models::import_v2::ImportInputKind::Url,
+        fallback_extension,
+        bytes,
+    )?;
+    if prepared.content_encoding.is_none() {
+        return Ok((relative.to_string(), prepared.bytes));
+    }
+    let stem = relative
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(relative);
+    Ok((
+        format!("{stem}.{}", prepared.extension),
+        prepared.bytes,
+    ))
+}
+
+fn metadata_author(extracted: &[(String, Vec<u8>)]) -> Option<String> {
+    extracted.iter().find_map(|(path, bytes)| {
+        if !path.ends_with(".json") || path == "quality.json" {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        author_from_value(&value)
+    })
+}
+
+fn author_from_value(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    for key in ["author", "creator", "uploader", "nickname", "ownerName"] {
+        if let Some(value) = object.get(key) {
+            if let Some(author) = value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(author.chars().take(512).collect());
+            }
+            if let Some(author) = value.as_object().and_then(|author| {
+                ["name", "nickname", "displayName", "uname"]
+                    .into_iter()
+                    .find_map(|key| author.get(key)?.as_str())
+            }) {
+                let author = author.trim();
+                if !author.is_empty() {
+                    return Some(author.chars().take(512).collect());
+                }
+            }
+        }
+    }
+    object.values().find_map(author_from_value)
+}
+
 fn update_history_snapshot(batch: &mut ImportBatchResult, result: &ImportItemCommitResult) {
     let Some(snapshot) = batch.history_snapshot.as_mut() else {
         return;
@@ -660,6 +1050,43 @@ fn update_history_snapshot(batch: &mut ImportBatchResult, result: &ImportItemCom
     }
     snapshot.status = derive_session_status(&snapshot.items);
     snapshot.updated_at = chrono::Utc::now().to_rfc3339();
+}
+
+fn rewrite_wiki_asset_links(markdown: &[u8], wiki_path: &str, asset_root: &str) -> Vec<u8> {
+    let from = Path::new(wiki_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let target = Path::new(asset_root)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let common = from
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = vec!["..".to_string(); from.len().saturating_sub(common)];
+    parts.extend(target.into_iter().skip(common));
+    let prefix = parts.join("/");
+    let Ok(markdown) = std::str::from_utf8(markdown) else {
+        return markdown.to_vec();
+    };
+    if prefix.is_empty() {
+        markdown.as_bytes().to_vec()
+    } else {
+        markdown
+            .replace("assets/", &format!("{prefix}/"))
+            .into_bytes()
+    }
 }
 
 fn collision_free_wiki_path(
@@ -964,10 +1391,6 @@ fn persist_history_checked(
     transaction.commit()
 }
 
-fn plan_asset_placeholder() -> &'static str {
-    "asset-root"
-}
-
 fn asset_collision_key(path: &str) -> String {
     path.to_lowercase()
 }
@@ -980,8 +1403,9 @@ mod tests {
 
     use crate::errors::IMPORT_V2_COMMIT_CONFLICT;
     use crate::models::import_v2::{
-        CommitConflictAction, CommitImportSessionRequest, CommitItemDecision, ImportBatchResult,
-        ImportInput, ImportInputKind, ImportItemStatus, ImportResourceMode,
+        ArtifactKind, CommitConflictAction, CommitImportSessionRequest, CommitItemDecision,
+        ImportArtifact, ImportBatchResult, ImportInput, ImportInputKind, ImportItemStatus,
+        ImportResourceMode, MediaSaveMode,
     };
     use crate::models::paths::ProjectContext;
     use crate::models::task::TaskType;
@@ -995,12 +1419,46 @@ mod tests {
 
     use super::super::ImportV2Service;
     use super::{
-        asset_collision_key, set_before_artifact_open_hook, set_before_failed_history_write_hook,
-        set_commit_durable_targets_hook, set_commit_persistence_hook, verified_artifact,
+        asset_collision_key, content_identity_hash, set_before_artifact_open_hook,
+        set_before_failed_history_write_hook, set_commit_durable_targets_hook,
+        set_commit_persistence_hook, verified_artifact, prepare_source_snapshot,
         CommitPersistenceBoundary, CommitPersistenceTarget,
     };
     use crate::services::import_v2::transaction::set_before_checked_displace_hook;
     use crate::services::import_v2::transaction::set_before_new_install_hook;
+
+    #[test]
+    fn url_content_identity_ignores_volatile_snapshots_but_tracks_extracted_evidence() {
+        let subtitle = ImportArtifact {
+            kind: ArtifactKind::Subtitle,
+            relative_path: "subtitles/captions.vtt".into(),
+            sha256: "subtitle-a".into(),
+            size_bytes: 10,
+        };
+        let first = content_identity_hash(
+            &ImportInputKind::Url,
+            &MediaSaveMode::ExtractOnly,
+            "snapshot-a",
+            "markdown-a",
+            std::slice::from_ref(&subtitle),
+        );
+        let same_content = content_identity_hash(
+            &ImportInputKind::Url,
+            &MediaSaveMode::ExtractOnly,
+            "snapshot-b",
+            "markdown-a",
+            std::slice::from_ref(&subtitle),
+        );
+        let changed_content = content_identity_hash(
+            &ImportInputKind::Url,
+            &MediaSaveMode::ExtractOnly,
+            "snapshot-b",
+            "markdown-b",
+            &[subtitle],
+        );
+        assert_eq!(first, same_content);
+        assert_ne!(first, changed_content);
+    }
 
     struct FixtureEngine {
         root: PathBuf,
@@ -1091,6 +1549,7 @@ mod tests {
                 display_name: name.into(),
                 locator: format!("D:/{name}"),
                 normalized_locator: Some(format!("file:d:/{name}")),
+                media_save_mode: Default::default(),
             });
             let session = service
                 .add_inputs(&context, &files, &session.session_id, inputs.into())
@@ -1150,6 +1609,7 @@ mod tests {
                 display_name: "updated.pdf".into(),
                 locator: "D:/first.pdf".into(),
                 normalized_locator: Some("file:d:/first.pdf".into()),
+                media_save_mode: Default::default(),
             };
             let session = fixture
                 .service
@@ -1183,6 +1643,53 @@ mod tests {
                 .unwrap();
             fixture.session_id = session.session_id;
             fixture.first_item_id = session.items[0].item_id.clone();
+            fixture
+        }
+        fn ready_url_item() -> Self {
+            let mut fixture = Self::two_ready_items();
+            fixture.second_item_id = None;
+            let mut session = fixture
+                .service
+                .sessions
+                .load(&fixture.context, &fixture.files, &fixture.session_id)
+                .unwrap();
+            let item = session
+                .items
+                .iter_mut()
+                .find(|item| item.item_id == fixture.first_item_id)
+                .unwrap();
+            item.input.kind = ImportInputKind::Url;
+            item.input.display_name = "https://www.douyin.com/video/123".into();
+            item.input.locator = "https://www.douyin.com/video/123?token=secret&keep=1".into();
+            item.input.normalized_locator = Some(item.input.locator.clone());
+            let html = br#"<!doctype html><html><body>platform evidence<script>window.data={"access_token":"snapshot-secret"}</script><a href="https://cdn.example/video?id=42&future-signature=url-secret">media</a></body></html>"#;
+            let source_path = fixture.root.join(format!(
+                ".app/import-sessions/{}/items/{}/staging/source.bin",
+                fixture.session_id, fixture.first_item_id
+            ));
+            std::fs::write(&source_path, html).unwrap();
+            let preview = item.preview.as_mut().unwrap();
+            preview.title = "Platform title".into();
+            preview.source_snapshot.sha256 = format!("{:x}", Sha256::digest(html));
+            preview.source_snapshot.size_bytes = html.len() as u64;
+            let api = br#"{"data":{"title":"Platform title","authorization":"Bearer api-secret","expires":123}}"#;
+            let evidence_path = source_path
+                .parent()
+                .unwrap()
+                .join("source-evidence/bilibili-api.json");
+            std::fs::create_dir_all(evidence_path.parent().unwrap()).unwrap();
+            std::fs::write(&evidence_path, api).unwrap();
+            preview.assets.push(ImportArtifact {
+                kind: ArtifactKind::SourceEvidence,
+                relative_path: "source-evidence/bilibili-api.json".into(),
+                sha256: format!("{:x}", Sha256::digest(api)),
+                size_bytes: api.len() as u64,
+            });
+            fixture
+                .service
+                .sessions
+                .save(&fixture.context, &fixture.files, &session)
+                .unwrap();
             fixture
         }
         fn request(&self, decisions: Vec<CommitItemDecision>) -> CommitImportSessionRequest {
@@ -1268,7 +1775,11 @@ mod tests {
         fixture.break_second_asset_after_preview();
         let result = fixture.commit_all();
         assert_eq!((result.committed_count, result.failed_count), (1, 1));
-        let manifest = fixture.manifest();
+        let source_id = result.items[0].source_id.as_deref().unwrap();
+        let manifest: SourceManifest = fixture
+            .files
+            .read_json(&fixture.context, &format!(".app/sources/{source_id}.json"))
+            .unwrap();
         assert!(fixture.root.join(manifest.wiki_path).is_file());
         let index: SourceIndex = fixture
             .files
@@ -1316,7 +1827,10 @@ mod tests {
         let history: ImportBatchResult =
             serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
         let snapshot = history.history_snapshot.expect("history snapshot");
-        assert_eq!(snapshot.status, crate::models::import_v2::ImportSessionStatus::Completed);
+        assert_eq!(
+            snapshot.status,
+            crate::models::import_v2::ImportSessionStatus::Completed
+        );
         assert!(snapshot
             .items
             .iter()
@@ -1553,6 +2067,7 @@ mod tests {
             display_name: "first.pdf".into(),
             locator: "D:/alias/first.pdf".into(),
             normalized_locator: Some("file:d:/alias/first.pdf".into()),
+            media_save_mode: Default::default(),
         };
         let session = fixture
             .service
@@ -1650,7 +2165,9 @@ mod tests {
                         normalized.contains("/raw/sources/") && normalized.contains("/original.")
                     }
                     "baseline" => normalized.ends_with("/baseline.md"),
-                    "asset" => normalized.ends_with("/assets/asset.png"),
+                    "asset" => {
+                        normalized.contains("/raw/assets/") && normalized.ends_with("/asset.png")
+                    }
                     "wiki" => normalized.contains("/wiki/") && normalized.ends_with(".md"),
                     "index" => normalized.ends_with("/.app/source-index-v2.json"),
                     _ => false,
@@ -1673,6 +2190,126 @@ mod tests {
                 "{target_kind}"
             );
         }
+    }
+
+    #[test]
+    fn url_snapshot_preparation_handles_html_fragments_and_bom_json() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        for (fallback, input, expected_extension) in [
+            (
+                "bin",
+                br#"<article data-token="html-secret"><p>keep</p></article>"#.as_slice(),
+                "html.gz",
+            ),
+            (
+                "json",
+                b"\xEF\xBB\xBF {\"accessToken\":\"json-secret\",\"title\":\"keep\"}".as_slice(),
+                "json.gz",
+            ),
+        ] {
+            let prepared = prepare_source_snapshot(
+                &crate::models::import_v2::ImportInputKind::Url,
+                fallback,
+                input.to_vec(),
+            )
+            .unwrap();
+            assert_eq!(prepared.extension, expected_extension);
+            assert_eq!(prepared.content_encoding.as_deref(), Some("gzip"));
+            let mut decoded = String::new();
+            GzDecoder::new(prepared.bytes.as_slice())
+                .read_to_string(&mut decoded)
+                .unwrap();
+            assert!(decoded.contains("keep"));
+            assert!(decoded.contains("REDACTED"));
+            assert!(!decoded.contains("html-secret"));
+            assert!(!decoded.contains("json-secret"));
+            if expected_extension == "json.gz" {
+                serde_json::from_str::<serde_json::Value>(&decoded).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn url_commit_writes_compressed_evidence_without_creating_a_wiki_page() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let fixture = CommitFixture::ready_url_item();
+        let result = fixture.commit_all();
+        assert_eq!(result.committed_count, 1);
+        assert!(result.items[0].wiki_path.is_none());
+        let source_id = result.items[0]
+            .source_id
+            .as_deref()
+            .expect("committed URL must have a source id");
+        let manifest: SourceManifest = fixture
+            .files
+            .read_json(&fixture.context, &format!(".app/sources/{source_id}.json"))
+            .unwrap();
+        assert!(!fixture.root.join(&manifest.wiki_path).exists());
+        let version = manifest
+            .versions
+            .iter()
+            .find(|version| version.version_id == manifest.current_version_id)
+            .unwrap();
+        assert!(version.raw_path.ends_with("/original.html.gz"));
+        let mut decoded = String::new();
+        GzDecoder::new(std::fs::File::open(fixture.root.join(&version.raw_path)).unwrap())
+            .read_to_string(&mut decoded)
+            .unwrap();
+        assert!(decoded.contains("platform evidence"));
+        assert!(!decoded.contains("snapshot-secret"));
+        assert!(!decoded.contains("url-secret"));
+        assert!(decoded.contains("REDACTED"));
+        let source_root = std::path::Path::new(&version.raw_path).parent().unwrap();
+        let evidence: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.root.join(source_root).join("source.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(evidence["title"], "Platform title");
+        assert_eq!(evidence["contentEncoding"], "gzip");
+        assert!(!evidence["url"].as_str().unwrap().contains("secret"));
+        assert!(fixture
+            .root
+            .join(source_root)
+            .join("evidence/bilibili-api.json.gz")
+            .is_file());
+        let mut api_decoded = String::new();
+        GzDecoder::new(
+            std::fs::File::open(
+                fixture
+                    .root
+                    .join(source_root)
+                    .join("evidence/bilibili-api.json.gz"),
+            )
+            .unwrap(),
+        )
+        .read_to_string(&mut api_decoded)
+        .unwrap();
+        let api: serde_json::Value = serde_json::from_str(&api_decoded).unwrap();
+        assert_eq!(api["data"]["authorization"], "REDACTED");
+        assert_eq!(api["data"]["expires"], "REDACTED");
+        assert!(!api_decoded.contains("api-secret"));
+        assert!(fixture
+            .root
+            .join(format!(
+                "raw/assets/{}/{}",
+                manifest.source_id, manifest.current_version_id
+            ))
+            .join("asset.png")
+            .is_file());
+        assert!(fixture
+            .root
+            .join(&version.extracted_path)
+            .join("extracted.md")
+            .is_file());
+        assert!(fixture
+            .root
+            .join(&version.extracted_path)
+            .join("quality.json")
+            .is_file());
     }
 
     #[test]
@@ -1896,6 +2533,10 @@ mod tests {
             CommitPersistenceTarget::Baseline
         } else if let Some(name) = label.strip_prefix("asset ") {
             CommitPersistenceTarget::Asset(name.to_string())
+        } else if label == "extracted Markdown" || label == "quality report" {
+            CommitPersistenceTarget::RawExtracted
+        } else if label == "source evidence" {
+            CommitPersistenceTarget::RawSnapshot
         } else if label == "Wiki" {
             CommitPersistenceTarget::Wiki
         } else if label == "source manifest" {

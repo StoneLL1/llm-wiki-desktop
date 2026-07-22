@@ -79,6 +79,37 @@ async fn controlled_server_streams_bounded_public_artifact_with_private_grant() 
 }
 
 #[tokio::test]
+async fn controlled_server_can_stream_a_response_directly_to_disk() {
+    let body = "streamed response body";
+    let response=format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+    let (port, join) = server(response);
+    let target = UrlPolicy
+        .normalize_for_session(&format!("http://127.0.0.1:{port}/stream"))
+        .unwrap();
+    let root = std::env::temp_dir().join(format!("web-fetch-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let destination = root.join("response.bin");
+    let artifact = WebFetchService
+        .fetch_to_file(
+            target,
+            &UrlPolicy,
+            &WebFetchPolicy::default(),
+            Some(&grant(port)),
+            "item",
+            &destination,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap();
+    join.join().unwrap();
+    assert!(artifact.bytes.is_empty());
+    assert_eq!(artifact.byte_len, body.len() as u64);
+    assert_eq!(std::fs::read(&destination).unwrap(), body.as_bytes());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn redirect_to_a_different_private_origin_requires_a_new_grant() {
     let(destination,destination_join)=server("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".into());
     let redirect=format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{destination}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
