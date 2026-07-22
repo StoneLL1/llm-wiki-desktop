@@ -179,10 +179,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   selectTask: (taskId) => set({ selectedTaskId: taskId }),
 }));
 
-export function handleTaskEvent(event: BackendEvent, activeProjectId: string | null = null): void {
-  const payload = typeof event.payload === "object" && event.payload !== null ? event.payload as Partial<BackendTask> : null;
-  const eventProjectId = event.projectId ?? payload?.projectId ?? null;
-  if (activeProjectId && eventProjectId && eventProjectId !== activeProjectId) return;
+export function handleTaskEvent(event: BackendEvent): void {
   useTaskStore.setState((state) => applyBackendEvent(state, event));
 }
 

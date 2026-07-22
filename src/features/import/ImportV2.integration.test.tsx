@@ -46,6 +46,7 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     items,
   };
   return {
+    projectKey: "project-integration\0D:/wiki/project-integration",
     session: current,
     readiness: { backendVersion: "2.0.0", active: true, migrationStatus: "applied", unfinishedSessionId: current.sessionId, legacyHistoryAvailable: false },
     bootstrapState: "ready",
@@ -63,7 +64,6 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     skipItem: vi.fn(),
     authorizeLocalAsr: vi.fn(),
     confirm: vi.fn(),
-    confirmLegacy: vi.fn(),
     refreshSession: vi.fn(),
     selectItem: vi.fn(),
     setFilter: vi.fn(),
@@ -89,13 +89,8 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     getMigrationStatus: vi.fn(),
     resumeMigration: vi.fn(),
     listHistory: vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] }),
-    importedSources: [],
     isConfirming: false,
-    requestPreview: vi.fn(),
     requestClipboard: vi.fn(),
-    requestUrl: vi.fn(),
-    requestDeleteSource: vi.fn(),
-    requestReplaceSource: vi.fn(),
   };
 }
 

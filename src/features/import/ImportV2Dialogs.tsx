@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
@@ -6,7 +6,7 @@ import { useImportStore } from "../../stores/importStore";
 import type { ImportItem } from "../../types/importV2";
 import type { AgentCandidateView as AgentCandidateViewType, AgentSendScope } from "../../types/importV2Agent";
 import type { ConnectorSessionRef, ImportCapabilityRequirement, ImportFrontendReadiness } from "../../types/importV2Presentation";
-import type { MigrationConfirmation, LegacyInventory, MigrationPlan, MigrationReport } from "../../types/importV2Migration";
+import type { LegacyInventory, MigrationPlan, MigrationReport } from "../../types/importV2Migration";
 import type { WebAuthState } from "../../types/importV2Web";
 import type { LlmProviderKind } from "../../types/llm";
 import { ImportByokApprovalDialog } from "./ImportByokApprovalDialog";
@@ -16,6 +16,7 @@ import { ImportLoginDialog } from "./ImportLoginDialog";
 import { ImportMarkdownPreviewDialog } from "./ImportMarkdownPreviewDialog";
 import { ImportMigrationDialog, type ImportMigrationUiStatus } from "./ImportMigrationDialog";
 import { ImportPrivateTargetDialog } from "./ImportPrivateTargetDialog";
+import { displayHostForImportLocator, importPlatformForLocator } from "./importLocator";
 import type { ImportWorkflow } from "./useImportWorkflow";
 
 export interface ImportV2DialogsProps {
@@ -29,14 +30,6 @@ export interface ImportV2DialogsProps {
   onCloseCandidate: () => void;
   onCandidateIntent: (intent: ImportCandidateDiffIntent) => void;
   onClosePrivate: () => void;
-}
-
-function hostFor(locator: string): string {
-  try {
-    return new URL(locator).host || locator;
-  } catch {
-    return locator;
-  }
 }
 
 function migrationStatus(readiness: ImportFrontendReadiness | null): ImportMigrationUiStatus {
@@ -74,9 +67,20 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
   const [inventory, setInventory] = useState<LegacyInventory | null>(null);
   const [plan, setPlan] = useState<MigrationPlan | null>(null);
   const [report, setReport] = useState<MigrationReport | null>(null);
-  const [confirmation] = useState<MigrationConfirmation | null>(null);
+  const activeProjectKeyRef = useRef(workflow.projectKey);
+  activeProjectKeyRef.current = workflow.projectKey;
 
   const provider = useMemo(() => providerFor(capabilities), [capabilities]);
+
+  useEffect(() => {
+    setScope(null);
+    setCapability(null);
+    setConnector(null);
+    setMigrationState(migrationStatus(readiness));
+    setInventory(null);
+    setPlan(null);
+    setReport(null);
+  }, [readiness, workflow.projectKey]);
 
   useEffect(() => {
     if (!byokItemId || !provider) {
@@ -114,17 +118,26 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
 
   useEffect(() => {
     if (!migrationOpen) return;
+    const requestProjectKey = workflow.projectKey;
+    let current = true;
     setMigrationState(migrationStatus(readiness));
     void workflow.getMigrationStatus().then((snapshot) => {
-      if (!snapshot) return;
+      if (!current || activeProjectKeyRef.current !== requestProjectKey || !snapshot) return;
       setMigrationState(snapshot.status);
       setReport(snapshot.report ?? null);
     }).catch(() => undefined);
-  }, [migrationOpen, readiness, workflow.getMigrationStatus]);
+    return () => { current = false; };
+  }, [migrationOpen, readiness, workflow.getMigrationStatus, workflow.projectKey]);
 
   async function scanMigration() {
+    const requestProjectKey = workflow.projectKey;
     setMigrationState("scanning");
     const next = await workflow.scanMigration();
+    if (activeProjectKeyRef.current !== requestProjectKey) return;
+    if (!next) {
+      setMigrationState(migrationStatus(readiness));
+      return;
+    }
     setInventory(next);
     setPlan(null);
     setReport(null);
@@ -132,16 +145,24 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
   }
 
   async function buildPlan(nextInventory: LegacyInventory) {
+    const requestProjectKey = workflow.projectKey;
     setMigrationState("scanning");
     const nextPlan = await workflow.planMigration(nextInventory);
+    if (activeProjectKeyRef.current !== requestProjectKey) return;
+    if (!nextPlan) {
+      setMigrationState(migrationStatus(readiness));
+      return;
+    }
     setPlan(nextPlan);
     const snapshot = await workflow.getMigrationStatus();
+    if (activeProjectKeyRef.current !== requestProjectKey) return;
     setReport(snapshot?.report ?? null);
     setMigrationState(snapshot?.status ?? "awaiting_confirmation");
   }
 
-  const loginDomain = loginItem?.input.kind === "url" ? hostFor(loginItem.input.normalizedLocator ?? loginItem.input.locator) : "connector";
-  const loginPlatform = connectorIdForHost(loginDomain);
+  const loginLocator = loginItem?.input.kind === "url" ? loginItem.input.normalizedLocator ?? loginItem.input.locator : "";
+  const loginDomain = loginLocator ? displayHostForImportLocator(loginLocator) : "connector";
+  const loginPlatform = importPlatformForLocator(loginLocator);
   const loginPlatformLabel = t(`importV2.platform.${loginPlatform}`, { defaultValue: loginPlatform });
   const loginAuthState: WebAuthState = loginItem?.status === "waiting_login" ? "waiting_login" : connector?.state === "authenticated" ? "authenticated" : "public";
 
@@ -172,9 +193,25 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
         publicDomain={loginDomain}
         authState={loginAuthState}
         connectorSession={connector}
-        onBeginLogin={() => workflow.beginLogin(loginItem!.itemId, loginPlatform).then((next) => { setConnector(next); return next ?? undefined; })}
-        onCheckAgain={(connectorSessionId) => workflow.completeLogin(loginItem!.itemId, connectorSessionId).then((next) => { setConnector(next); return next ?? undefined; })}
-        onRevoke={async (connectorSessionId) => { await workflow.revokeLogin(connectorSessionId); setConnector(null); }}
+        onBeginLogin={() => {
+          const requestProjectKey = workflow.projectKey;
+          return workflow.beginLogin(loginItem!.itemId, loginPlatform).then((next) => {
+            if (activeProjectKeyRef.current === requestProjectKey) setConnector(next);
+            return next ?? undefined;
+          });
+        }}
+        onCheckAgain={(connectorSessionId) => {
+          const requestProjectKey = workflow.projectKey;
+          return workflow.completeLogin(loginItem!.itemId, connectorSessionId).then((next) => {
+            if (activeProjectKeyRef.current === requestProjectKey) setConnector(next);
+            return next ?? undefined;
+          });
+        }}
+        onRevoke={async (connectorSessionId) => {
+          const requestProjectKey = workflow.projectKey;
+          await workflow.revokeLogin(connectorSessionId, loginPlatform);
+          if (activeProjectKeyRef.current === requestProjectKey) setConnector(null);
+        }}
         onCancel={closeLogin}
       />
       <ImportPrivateTargetDialog
@@ -193,7 +230,7 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
         inventory={inventory}
         plan={plan}
         report={report}
-        confirmation={confirmation}
+        confirmation={null}
         checkpoint={null}
         resumable={migrationState === "interrupted" || migrationState === "resumable" || migrationState === "applying"}
         onScan={() => void scanMigration()}
@@ -204,14 +241,4 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
       />
     </>
   );
-}
-
-function connectorIdForHost(host: string): string {
-  const normalized = host.toLowerCase();
-  if (normalized === "mp.weixin.qq.com") return "wechat";
-  if (normalized === "zhihu.com" || normalized.endsWith(".zhihu.com")) return "zhihu";
-  if (normalized === "bilibili.com" || normalized.endsWith(".bilibili.com") || normalized === "b23.tv") return "bilibili";
-  if (normalized === "xiaohongshu.com" || normalized.endsWith(".xiaohongshu.com")) return "xiaohongshu";
-  if (normalized === "x.com" || normalized.endsWith(".x.com") || normalized === "twitter.com" || normalized.endsWith(".twitter.com")) return "x";
-  return "connector";
 }

@@ -61,7 +61,6 @@ export const selectVisibleItems = (
       return session.items;
   }
 };
-
 export const selectQueueCounts = (session: ImportSession | null): ImportQueueCounts => {
   const items = session?.items ?? [];
   return {
@@ -74,7 +73,6 @@ export const selectQueueCounts = (session: ImportSession | null): ImportQueueCou
     waiting: items.filter((item) => item.status === "waiting_capability" || item.status === "waiting_login").length,
   };
 };
-
 export const selectCommittableItems = (session: ImportSession | null): ImportItem[] =>
   (session?.items ?? []).filter((item) => item.selected && isImportItemReady(item));
 
@@ -91,6 +89,3 @@ export const selectSessionProgress = (session: ImportSession | null): ImportSess
     needsAction: items.filter(isImportItemNeedsAction).length,
   };
 };
-
-export const importProjectKey = (projectId: string, rootPath: string): string =>
-  `${projectId}\0${rootPath}`;

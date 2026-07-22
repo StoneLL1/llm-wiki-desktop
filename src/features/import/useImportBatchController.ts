@@ -1,0 +1,323 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+
+import type { TaskLauncher } from "../../hooks/useTaskLauncher";
+import { importV2Api } from "../../services/importV2Api";
+import { useImportStore } from "../../stores/importStore";
+import { useTaskStore } from "../../stores/taskStore";
+import { useToastStore } from "../../stores/toastStore";
+import type { ImportItem, ImportSession } from "../../types/importV2";
+import { isTerminalStatus, type BackendTask } from "../../types/task";
+import type { ImportBatchProgress, ImportBatchTask } from "./importWorkflow";
+import { hasImportTauriRuntime } from "./useImportSessionScope";
+
+interface ImportBatchTaskRef {
+  taskId: string;
+  itemId: string;
+  title: string;
+}
+
+interface ImportBatchRecord {
+  id: string;
+  sessionId: string;
+  projectKey: string;
+  epoch: number;
+  tasks: readonly ImportBatchTaskRef[];
+}
+
+interface ImportBatchControllerOptions {
+  projectId: string;
+  rootPath: string;
+  projectKey: string;
+  sessionEpoch: number;
+  session: ImportSession | null;
+  taskList: readonly BackendTask[];
+  tasksHydrated: boolean;
+  taskLauncher: TaskLauncher;
+  isScopeCurrent: (requestKey: string, epoch: number, expectedSessionId?: string) => boolean;
+}
+
+export interface ImportBatchController {
+  batches: readonly ImportBatchProgress[];
+  batch: ImportBatchProgress | null;
+  isCancellingBatch: boolean;
+  isBatchCancelling: (batchId: string) => boolean;
+  recordItemBatch: (
+    tasks: readonly BackendTask[],
+    itemIds: readonly string[],
+    requestKey: string,
+    epoch: number,
+    sessionId: string,
+  ) => void;
+  cancelBatch: (batchId?: string) => Promise<void>;
+  dismissBatch: (batchId?: string) => void;
+}
+
+function isRecoverableImportItemStatus(status: ImportItem["status"]): boolean {
+  return [
+    "queued",
+    "inspecting",
+    "waiting_capability",
+    "waiting_login",
+    "waiting_log",
+    "extracting",
+    "validating",
+    "preview_ready",
+    "committing",
+    "paused",
+  ].includes(status);
+}
+
+export function buildImportBatchProgress(
+  records: readonly ImportBatchRecord[],
+  taskList: readonly BackendTask[],
+  session: ImportSession | null,
+): readonly ImportBatchProgress[] {
+  const taskById = new Map(taskList.map((task) => [task.id, task]));
+  const itemById = new Map((session?.items ?? []).map((item) => [item.itemId, item]));
+  return records.map((record) => {
+    let completed = 0;
+    let waitingForConfirmation = 0;
+    let reviewReady = 0;
+    let failed = 0;
+    let cancelled = 0;
+    let cancelling = 0;
+    let unknown = 0;
+    let nonCancellable = 0;
+    const failedItemIds: string[] = [];
+    const tasks = record.tasks.map((reference) => {
+      const task = taskById.get(reference.taskId);
+      const status = task?.status ?? "unknown";
+      if (status === "succeeded") completed += 1;
+      if (status === "waiting_for_confirmation") {
+        waitingForConfirmation += 1;
+        if (itemById.get(reference.itemId)?.status === "preview_ready") reviewReady += 1;
+      }
+      if (status === "failed") {
+        failed += 1;
+        failedItemIds.push(reference.itemId);
+      }
+      if (status === "cancelled") cancelled += 1;
+      if (status === "cancelling") cancelling += 1;
+      if (status === "unknown") unknown += 1;
+      if (task && !task.cancellable && !isTerminalStatus(task.status) && task.status !== "waiting_for_confirmation") {
+        nonCancellable += 1;
+      }
+      return {
+        id: reference.taskId,
+        itemId: reference.itemId,
+        title: task?.title ?? reference.title,
+        status,
+        cancellable: task?.cancellable ?? false,
+      } satisfies ImportBatchTask;
+    });
+    const processed = completed + waitingForConfirmation + failed + cancelled;
+    return {
+      id: record.id,
+      sessionId: record.sessionId,
+      total: record.tasks.length,
+      taskIds: record.tasks.map((task) => task.taskId),
+      processed,
+      active: Math.max(0, record.tasks.length - processed - unknown),
+      completed,
+      waitingForConfirmation,
+      reviewReady,
+      failed,
+      cancelled,
+      cancelling,
+      unknown,
+      nonCancellable,
+      failedItemIds,
+      tasks,
+    };
+  });
+}
+
+function recoverImportBatchRecords(
+  session: ImportSession,
+  taskList: readonly BackendTask[],
+  projectKey: string,
+  epoch: number,
+): readonly ImportBatchRecord[] {
+  const taskById = new Map(taskList.map((task) => [task.id, task]));
+  const recovered = new Map<string, ImportBatchRecord>();
+  for (const item of session.items) {
+    if (!item.taskId || !isRecoverableImportItemStatus(item.status)) continue;
+    const task = taskById.get(item.taskId);
+    if (task && isTerminalStatus(task.status)) continue;
+    const batchId = task?.batchId ?? `recovered:${session.sessionId}:${item.taskId}`;
+    const current = recovered.get(batchId) ?? {
+      id: batchId,
+      sessionId: session.sessionId,
+      projectKey,
+      epoch,
+      tasks: [],
+    };
+    if (current.tasks.some((reference) => reference.taskId === item.taskId)) continue;
+    recovered.set(batchId, {
+      ...current,
+      tasks: [...current.tasks, {
+        taskId: item.taskId,
+        itemId: item.itemId,
+        title: item.input.displayName,
+      }],
+    });
+  }
+  return [...recovered.values()];
+}
+
+export function useImportBatchController({
+  projectId,
+  rootPath,
+  projectKey,
+  sessionEpoch,
+  session,
+  taskList,
+  tasksHydrated,
+  taskLauncher,
+  isScopeCurrent,
+}: ImportBatchControllerOptions): ImportBatchController {
+  const { t } = useTranslation();
+  const pushToast = useToastStore((state) => state.pushToast);
+  const selectedTaskUpsert = useTaskStore((state) => state.upsertTask);
+  const [batchRecords, setBatchRecords] = useState<readonly ImportBatchRecord[]>([]);
+  const [cancellingBatchIds, setCancellingBatchIds] = useState<ReadonlySet<string>>(new Set());
+  const [dismissedBatchIds, setDismissedBatchIds] = useState<ReadonlySet<string>>(new Set());
+  const localBatchCounter = useRef(0);
+
+  const batches = useMemo(
+    () => buildImportBatchProgress(
+      batchRecords.filter((record) => record.projectKey === projectKey && record.epoch === sessionEpoch),
+      taskList,
+      session,
+    ),
+    [batchRecords, projectKey, session, sessionEpoch, taskList],
+  );
+  const batch = batches[0] ?? null;
+  const isCancellingBatch = batches.some((candidate) => cancellingBatchIds.has(candidate.id));
+  const isBatchCancelling = useCallback(
+    (batchId: string) => cancellingBatchIds.has(batchId),
+    [cancellingBatchIds],
+  );
+
+  const nextLocalBatchId = useCallback(() => {
+    localBatchCounter.current += 1;
+    return `local:${Date.now()}:${localBatchCounter.current}`;
+  }, []);
+
+  const recordItemBatch = useCallback((
+    tasks: readonly BackendTask[],
+    itemIds: readonly string[],
+    requestKey: string,
+    epoch: number,
+    sessionId: string,
+  ) => {
+    if (tasks.length === 0 || !isScopeCurrent(requestKey, epoch, sessionId)) return;
+    const currentSession = useImportStore.getState().session;
+    const itemById = new Map((currentSession?.items ?? []).map((item) => [item.itemId, item]));
+    const batchId = tasks.find((task) => task.batchId)?.batchId ?? nextLocalBatchId();
+    const taskRefs = tasks.map((task, index) => ({
+      taskId: task.id,
+      itemId: itemIds[index] ?? "",
+      title: itemById.get(itemIds[index] ?? "")?.input.displayName ?? task.title,
+    }));
+    setBatchRecords((current) => [
+      ...current.filter((record) => record.id !== batchId),
+      { id: batchId, sessionId, projectKey: requestKey, epoch, tasks: taskRefs },
+    ]);
+    setCancellingBatchIds((current) => {
+      if (!current.has(batchId)) return current;
+      const next = new Set(current);
+      next.delete(batchId);
+      return next;
+    });
+  }, [isScopeCurrent, nextLocalBatchId]);
+
+  const cancelBatch = useCallback(async (requestedBatchId?: string) => {
+    const target = batches.find((candidate) => candidate.id === requestedBatchId) ?? batches[0];
+    if (!target || cancellingBatchIds.has(target.id)) return;
+    const activeTasks = target.tasks.filter((task) =>
+      task.status !== "unknown"
+      && !isTerminalStatus(task.status)
+      && task.status !== "waiting_for_confirmation"
+      && task.cancellable,
+    );
+    if (activeTasks.length === 0) return;
+    setCancellingBatchIds((current) => new Set(current).add(target.id));
+    try {
+      const isBackendBatch = !target.id.startsWith("local:") && !target.id.startsWith("recovered:");
+      if (isBackendBatch) {
+        const cancelled = await importV2Api.cancelBatch({
+          projectId,
+          projectRootPath: rootPath,
+          sessionId: target.sessionId,
+          batchId: target.id,
+        });
+        cancelled.forEach((task) => selectedTaskUpsert(task));
+      } else {
+        const results = await Promise.allSettled(
+          activeTasks.map((task) => taskLauncher.cancel(task.id, { suppressToast: true })),
+        );
+        if (results.some((result) => result.status === "rejected" || (result.status === "fulfilled" && !result.value))) {
+          throw new Error(t("importV2.workflow.batchCancelFailed"));
+        }
+      }
+    } catch (error) {
+      if (isScopeCurrent(projectKey, sessionEpoch, target.sessionId)) {
+        pushToast("error", error instanceof Error ? error.message : t("importV2.workflow.batchCancelFailed"));
+      }
+    } finally {
+      setCancellingBatchIds((current) => {
+        const next = new Set(current);
+        next.delete(target.id);
+        return next;
+      });
+    }
+  }, [batches, cancellingBatchIds, isScopeCurrent, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, sessionEpoch, t, taskLauncher]);
+
+  const dismissBatch = useCallback((requestedBatchId?: string) => {
+    const target = batches.find((candidate) => candidate.id === requestedBatchId) ?? batches[0];
+    if (!target || target.active > 0 || target.cancelling > 0) return;
+    setDismissedBatchIds((current) => new Set(current).add(target.id));
+    setBatchRecords((current) => current.filter((record) => record.id !== target.id));
+    setCancellingBatchIds((current) => {
+      if (!current.has(target.id)) return current;
+      const next = new Set(current);
+      next.delete(target.id);
+      return next;
+    });
+  }, [batches]);
+
+  useEffect(() => {
+    setBatchRecords([]);
+    setCancellingBatchIds(new Set());
+    setDismissedBatchIds(new Set());
+  }, [projectKey]);
+
+  useEffect(() => {
+    if (!session || session.projectId !== projectId) return;
+    const hasReferencedTaskSnapshot = session.items.some(
+      (item) => item.taskId && taskList.some((task) => task.id === item.taskId),
+    );
+    if (hasImportTauriRuntime() && !tasksHydrated && !hasReferencedTaskSnapshot) return;
+    const recovered = recoverImportBatchRecords(session, taskList, projectKey, sessionEpoch);
+    if (recovered.length === 0) return;
+    setBatchRecords((current) => {
+      const existing = new Set(current.map((record) => record.id));
+      const additions = recovered.filter(
+        (record) => !existing.has(record.id) && !dismissedBatchIds.has(record.id),
+      );
+      return additions.length > 0 ? [...current, ...additions] : current;
+    });
+  }, [dismissedBatchIds, projectId, projectKey, session, sessionEpoch, taskList, tasksHydrated]);
+
+  return {
+    batches,
+    batch,
+    isCancellingBatch,
+    isBatchCancelling,
+    recordItemBatch,
+    cancelBatch,
+    dismissBatch,
+  };
+}

@@ -155,4 +155,21 @@ describe("presentImportItem", () => {
     expect(withTask.actions).toContain("view_log");
     expect(withoutTask.actions).not.toContain("view_log");
   });
+
+  it("offers explicit OCR for supported platform URL previews and failures", () => {
+    const input = {
+      kind: "url" as const,
+      displayName: "XHS post",
+      locator: "https://www.xiaohongshu.com/explore/note-1",
+      normalizedLocator: "https://www.xiaohongshu.com/explore/note-1",
+    };
+    expect(presentImportItem(item("preview_ready", { input })).actions).toEqual([
+      "preview_markdown",
+      "enable_ocr",
+    ]);
+    expect(presentImportItem(item("failed", { input })).actions).toEqual(["retry", "enable_ocr"]);
+    expect(presentImportItem(item("preview_ready", {
+      input: { ...input, locator: "https://example.com/article", normalizedLocator: null },
+    })).actions).not.toContain("enable_ocr");
+  });
 });

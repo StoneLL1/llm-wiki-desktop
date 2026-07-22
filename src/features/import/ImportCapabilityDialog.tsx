@@ -1,5 +1,5 @@
 import { Check, Download, LoaderCircle, Package, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
@@ -24,6 +24,10 @@ export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel 
   const dialogRef = useModalDialog({ open, onClose: onCancel });
   const [acknowledged, setAcknowledged] = useState(false);
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setAcknowledged(false);
+    setBusy(false);
+  }, [open, requirement?.requirement.capabilityId, requirement?.requirement.minimumVersion]);
   if (!open || !requirement) return null;
   const canInstall = !requirement.available && requirement.installable && acknowledged && !busy;
   async function install() {
@@ -61,7 +65,7 @@ export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel 
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
           <button type="button" className="btn btn--sm" onClick={onCancel} disabled={busy}>{t("importV2.capability.cancel")}</button>
-          {!requirement.available && requirement.installable ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void install()} disabled={!canInstall}><Download size={13} className="mr-1 inline" aria-hidden="true" />{busy ? <LoaderCircle size={13} className="animate-spin" aria-label={t("importV2.common.loading")} /> : t("importV2.capability.install")}</button> : null}
+          {!requirement.available ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void install()} disabled={!canInstall} title={!requirement.installable ? t("importV2.capability.unavailable") : undefined}><Download size={13} className="mr-1 inline" aria-hidden="true" />{busy ? <LoaderCircle size={13} className="animate-spin" aria-label={t("importV2.common.loading")} /> : t("importV2.capability.install")}</button> : null}
         </footer>
       </section>
     </div>

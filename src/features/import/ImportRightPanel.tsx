@@ -8,28 +8,12 @@ import type { ImportItem } from "../../types/importV2";
 import { presentImportItem } from "./importStatusPresentation";
 import { ImportAttemptTimeline } from "./ImportAttemptTimeline";
 import { ImportItemStatus } from "./ImportItemStatus";
+import { displayHostForImportLocator, routeForImportItem } from "./importLocator";
 import { ImportQualitySummary } from "./ImportQualitySummary";
 
 export interface ImportRightPanelProps {
   selectedItem?: ImportItem | null;
   onPreviewMarkdown: (itemId: string) => void;
-}
-
-function urlHost(locator: string): string {
-  try {
-    return new URL(locator).host || locator;
-  } catch {
-    return locator;
-  }
-}
-
-function routeFor(item: ImportItem): string {
-  if (item.input.kind !== "url") return item.attempts.at(-1)?.route ?? "local_file";
-  const host = urlHost(item.input.normalizedLocator ?? item.input.locator).toLowerCase();
-  if (host.includes("bilibili")) return "bilibili";
-  if (host.includes("wechat") || host.includes("weixin")) return "wechat";
-  if (host.includes("zhihu")) return "zhihu";
-  return "generic_http";
 }
 
 function InspectorHeading({ children }: { children: ReactNode }) {
@@ -55,7 +39,7 @@ export function ImportRightPanel({ selectedItem = null, onPreviewMarkdown }: Imp
 function SelectedSource({ item, onPreviewMarkdown }: ImportRightPanelProps & { item: ImportItem }) {
   const { t } = useTranslation();
   const presentation = presentImportItem(item);
-  const route = routeFor(item);
+  const route = routeForImportItem(item);
   const preview = item.preview;
   const sourceIcon = item.input.kind === "url" ? Globe2 : FileCode2;
   const SourceIcon = sourceIcon;
@@ -71,7 +55,7 @@ function SelectedSource({ item, onPreviewMarkdown }: ImportRightPanelProps & { i
               {item.input.displayName}
             </h3>
             <div className="truncate font-mono text-[11px] text-[var(--text-muted)]" title={item.input.locator}>
-              {item.input.kind === "url" ? urlHost(item.input.normalizedLocator ?? item.input.locator) : compactPath(item.input.locator)}
+              {item.input.kind === "url" ? displayHostForImportLocator(item.input.normalizedLocator ?? item.input.locator) : compactPath(item.input.locator)}
             </div>
           </div>
         </div>
