@@ -14,6 +14,23 @@ const workflowRunCommands = (workflow: string) =>
     .map((line) => line.match(/^\s+run:\s*(.+)$/)?.[1]?.trim())
     .filter((command): command is string => Boolean(command));
 
+const workflowRunBlocks = (workflow: string) => {
+  const lines = workflow.split(/\r?\n/);
+  const blocks: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(\s*)run:\s*(.*)$/);
+    if (!match) continue;
+    const indent = match[1].length;
+    const block = [match[2]];
+    for (const line of lines.slice(index + 1)) {
+      if (line.trim() && (line.match(/^\s*/)?.[0].length ?? 0) <= indent) break;
+      block.push(line);
+    }
+    blocks.push(block.join("\n"));
+  }
+  return blocks;
+};
+
 const workflowMatrixPlatforms = (workflow: string) => {
   const lines = workflow.split(/\r?\n/);
   const osLineIndex = lines.findIndex((line) => /^\s+os:\s*$/.test(line));
@@ -53,13 +70,21 @@ const expectCommandsInOrder = (commands: string[], requiredCommands: string[]) =
 };
 
 describe("CI validation contract", () => {
+  it("keeps the Tauri desktop binary as Cargo's default run target", () => {
+    const cargoManifest = readRootFile("src-tauri/Cargo.toml");
+
+    expect(cargoManifest).toMatch(
+      /^\[package\][\s\S]*?^default-run\s*=\s*"llm-wiki-desktop"\s*$/m,
+    );
+  });
+
   it("exposes one local check command for all required gates", () => {
     const packageJson = JSON.parse(readRootFile("package.json")) as {
       scripts: Record<string, string>;
     };
 
     expect(packageJson.scripts.check).toBe(
-      "npm run test && npm run lint && npm run build && npm run check:console && npm run check:rust:gui && npm run test:rust",
+      "npm run test && npm run test:capability-tools && npm run lint && npm run build && npm run check:console && npm run check:rust:gui && npm run test:rust",
     );
     expect(packageJson.scripts["check:console"]).toBe(
       "node scripts/check-console-log.mjs",
@@ -92,11 +117,29 @@ describe("CI validation contract", () => {
     expectCommandsInOrder(runCommands, [
       "npm ci",
       "npm run test",
+      "npm run test:capability-tools",
       "npm run lint",
       "npm run build",
       "npm run check:console",
       "npm run check:rust:gui",
       "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
     ]);
+  });
+
+  it("keeps capability release inputs out of executable scripts", () => {
+    const workflow = readRootFile(".github/workflows/capability-release.yml");
+    const runBlocks = workflowRunBlocks(workflow);
+
+    expect(runBlocks.every((block) => !block.includes("${{ inputs."))).toBe(true);
+    expect(workflow).toContain("environment: capability-release");
+    expect(workflow).toContain("$PSNativeCommandUseErrorActionPreference = $true");
+    expect(workflow).toContain("invalid catalog matrix");
+    expect(workflow).toContain('const packs=["browser-runtime","browser-runtime-lite","media-metadata","asr-sensevoice-small","ocr-cjk-accurate"]');
+    expect(workflow).toContain("sensevoice-capabilities-${{ matrix.target }}");
+    expect(workflow).toContain("ocr-capabilities-${{ matrix.target }}");
+    expect(workflow).toContain("fetch-rapidocr-sources.mjs");
+    expect(workflow).toContain("runner/qualification.mjs");
+    expect(workflow).not.toContain("--clobber");
+    expect(workflow).not.toMatch(/uses:\s+[^\s#]+@(v\d+|stable)\b/);
   });
 });

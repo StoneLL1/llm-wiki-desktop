@@ -1,34 +1,76 @@
 /* global process */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { URL } from "node:url";
-import { chromium } from "playwright";
+import { Buffer } from "node:buffer";
+import { URL, fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
-import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformTargetHost, resolvePinnedAddress } from "./policy.mjs";
+import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
+import { classifyRemoteImageKind, extractPlatformPayload, selectRelevantApiEvidence } from "./platform-extract.mjs";
+import { isLoginChallengeState, redactJsonValue, redactSensitiveText } from "./snapshot-policy.mjs";
+import { assertLinuxBrowserDependencies } from "./linux-deps.mjs";
+
+const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const bundledBrowsers = path.join(packRoot, "runtime", "ms-playwright");
+if ((await fs.stat(bundledBrowsers).catch(() => null))?.isDirectory()) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = bundledBrowsers;
+}
+const { chromium } = await import("playwright");
 
 const line = await new Promise((resolve) => { let data = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (chunk) => { data += chunk; }); process.stdin.on("end", () => resolve(data.trim())); });
 const rpc = JSON.parse(line);
 const params = rpc.params;
 
-async function launchPinned(profile, target, headless) {
-  const address = await resolvePinnedAddress(target.hostname);
+function escapeHtml(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+async function launchPinned(profile, target, headless, platform = "generic") {
+  assertLinuxBrowserDependencies(chromium.executablePath());
+  const hosts = new Set([target.hostname, ...platformNavigationHosts(platform)]);
+  const mappings = [];
+  for (const host of hosts) {
+    try {
+      mappings.push(`MAP ${host} ${await resolvePinnedAddress(host)}`);
+    } catch (error) {
+      if (host === target.hostname) throw error;
+    }
+  }
   return chromium.launchPersistentContext(profile, {
     headless,
     acceptDownloads: false,
     ignoreHTTPSErrors: false,
-    args: ["--disable-extensions", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-default-apps", `--host-resolver-rules=MAP ${target.hostname} ${address}, EXCLUDE localhost`],
+    args: ["--disable-extensions", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-default-apps", `--host-resolver-rules=${mappings.join(", ")}, EXCLUDE localhost`],
   });
 }
 
-async function confinePage(page, target) {
+async function confinePage(page, target, platform) {
   page.on("popup", (popup) => popup.close());
   await page.route("**/*", async (route) => {
     let requestUrl;
     try { requestUrl = new URL(route.request().url()); } catch { await route.abort("blockedbyclient"); return; }
-    if (!["http:", "https:"].includes(requestUrl.protocol) || !isPinnedTargetHost(target.hostname, requestUrl.hostname)) {
+    let allowed = isPinnedTargetHost(target.hostname, requestUrl.hostname);
+    const navigationHost = platform !== "generic" && isPlatformNavigationHost(platform, requestUrl.hostname);
+    const assetHost = platform !== "generic"
+      && isTrustedPlatformAssetHost(platform, target.hostname, requestUrl.hostname)
+      && !navigationHost;
+    if (assetHost) {
+      // Media/CDN URLs are emitted as remoteAsset notifications and fetched
+      // by Rust's pinned HTTP client. Chromium must not resolve them again.
+      await route.abort("blockedbyclient");
+      return;
+    }
+    if (!allowed && navigationHost) {
+      try {
+        await resolvePinnedAddress(requestUrl.hostname);
+        allowed = true;
+      } catch {
+        allowed = false;
+      }
+    }
+    if (!["http:", "https:"].includes(requestUrl.protocol) || !allowed) {
       await route.abort("blockedbyclient");
       return;
     }
@@ -36,79 +78,250 @@ async function confinePage(page, target) {
   });
 }
 
+async function isAllowedAssetUrl(platform, target, candidate) {
+  if (platform === "generic" && isPinnedTargetHost(target.hostname, candidate.hostname)) {
+    try {
+      await resolvePinnedAddress(candidate.hostname);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (!isTrustedPlatformAssetHost(platform, target.hostname, candidate.hostname)) return false;
+  try {
+    await resolvePinnedAddress(candidate.hostname);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function subtitleCandidates(document, baseUrl) {
+  const candidates = new Set();
+  for (const node of document.querySelectorAll('track[kind="subtitles"][src], track[kind="captions"][src], meta[name="subtitle"], meta[name="subtitleUrl"], meta[property="og:subtitle"]')) {
+    const raw = node.getAttribute("src") || node.getAttribute("content");
+    if (raw) candidates.add(raw);
+  }
+  const scripts = Array.from(document.scripts).map((script) => script.textContent || "").join("\n");
+  const keyed = /["'](?:subtitleUrl|captionUrl|subtitle|captions?|subtitle_src|caption_url)["']\s*:\s*["']([^"']+)["']/gi;
+  for (const match of scripts.matchAll(keyed)) candidates.add(match[1]);
+  const fileUrl = /https?:\/\/[^"'\\\s]+\.(?:vtt|srt|ass|ssa)(?:\?[^"'\\\s]*)?/gi;
+  for (const match of scripts.matchAll(fileUrl)) candidates.add(match[0]);
+  return Array.from(candidates).flatMap((raw) => {
+    try { return [new URL(raw, baseUrl)]; } catch { return []; }
+  });
+}
+
 if (rpc.method === "browser.login") {
   const sourceUrl = params.url;
   const target = new URL(sourceUrl);
   const platform = params.platform;
-  if (!isPlatformTargetHost(platform, target.hostname)) throw new Error("browser platform does not match target host");
+  if (!isPlatformNavigationHost(platform, target.hostname)) throw new Error("browser platform does not match target host");
   const profile = path.resolve(params.profilePath);
   await fs.mkdir(profile, { recursive: true });
-  const context = await launchPinned(profile, target, false);
+  const context = await launchPinned(profile, target, false, platform);
   try {
+    if (params.cookieBackup) {
+  const backup = sanitizeCookieBackup(platform, params.cookieBackup);
+      if (backup.length) await context.addCookies(backup).catch(() => {});
+    }
     const page = context.pages()[0] || await context.newPage();
-    await confinePage(page, target);
+    await confinePage(page, target, platform);
     await page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
     const deadline = Date.now() + Math.min(params.timeoutMs || 600_000, 600_000);
     let authenticated = false;
+    const authUrls = [sourceUrl, ...platformNavigationHosts(platform).map((host) => `https://${host}/`)]
+      .filter((value, index, values) => values.indexOf(value) === index);
+    let clearedStaleCookies = false;
     while (Date.now() < deadline) {
       if (page.isClosed()) break;
-      const cookies = await context.cookies([sourceUrl]);
-      if (hasPlatformAuthentication(platform, target.hostname, cookies)) { authenticated = true; break; }
+      const cookies = await context.cookies(authUrls);
+      const cookieProof = authUrls.some((value) => hasPlatformAuthentication(platform, new URL(value).hostname, cookies));
+      const loginChallenge = isLoginChallengeState(page.url(), await page.locator("body").innerText().catch(() => ""));
+      if (cookieProof && !loginChallenge) {
+        authenticated = true;
+        break;
+      }
+      if (cookieProof && loginChallenge && !clearedStaleCookies) {
+        await context.clearCookies();
+        clearedStaleCookies = true;
+        await page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
+      }
       await page.waitForTimeout(1000);
     }
-    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { authenticated }, error: null })}\n`);
+    const cookies = authenticated ? await context.cookies() : [];
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { authenticated, cookies: sanitizeCookieBackup(platform, cookies) }, error: null })}\n`);
   } finally { await context.close(); }
   process.exit(0);
 }
 
+function platformForHost(hostname) {
+  const host = hostname.toLowerCase();
+  if (host === "mp.weixin.qq.com") return "wechat";
+  if (host === "b23.tv" || host === "bilibili.com" || host.endsWith(".bilibili.com")) return "bilibili";
+  if (host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com") || host === "xhslink.com" || host.endsWith(".xhslink.com")) return "xiaohongshu";
+  if (host === "douyin.com" || host.endsWith(".douyin.com") || host === "iesdouyin.com" || host.endsWith(".iesdouyin.com")) return "douyin";
+  return "generic";
+}
 const requestUrl = params.input.locator;
 const publicUrl = params.input.normalizedLocator || requestUrl;
 const target = new URL(requestUrl);
-const platform = target.hostname === "mp.weixin.qq.com"
-  ? "wechat"
-  : target.hostname === "b23.tv" || target.hostname === "bilibili.com" || target.hostname.endsWith(".bilibili.com")
-    ? "bilibili" : "generic";
+const platform = platformForHost(target.hostname);
 const stagingRoot = path.resolve(params.projectRoot, params.stagingRoot);
 const profile = process.env.LLM_WIKI_CONNECTOR_PROFILE
   ? path.resolve(process.env.LLM_WIKI_CONNECTOR_PROFILE)
   : path.join(stagingRoot, "browser-profile");
 await fs.mkdir(profile, { recursive: true });
-const context = await launchPinned(profile, target, true);
+const context = await launchPinned(profile, target, true, platform);
 try {
   const page = await context.newPage();
-  await confinePage(page, target);
+  await confinePage(page, target, platform);
+  const apiCandidates = [];
+  const pendingApiCaptures = new Set();
+  if (platform !== "generic") {
+    page.on("response", (response) => {
+      const capture = (async () => {
+        const resourceType = response.request().resourceType();
+        if (!['fetch', 'xhr'].includes(resourceType) || response.status() < 200 || response.status() >= 300) return;
+        let responseUrl;
+        try { responseUrl = new URL(response.url()); } catch { return; }
+        if (!isPlatformNavigationHost(platform, responseUrl.hostname)) return;
+        const headers = await response.allHeaders();
+        if (!String(headers['content-type'] || '').toLowerCase().includes('json')) return;
+        const declaredLength = Number(headers['content-length'] || 0);
+        if (!Number.isFinite(declaredLength) || declaredLength <= 0 || declaredLength > 2 * 1024 * 1024) return;
+        const body = await response.text().catch(() => null);
+        if (!body || Buffer.byteLength(body, 'utf8') > 2 * 1024 * 1024) return;
+        let value;
+        try { value = JSON.parse(body); } catch { return; }
+        if (apiCandidates.length < 8) apiCandidates.push({ url: responseUrl.href, value });
+      })().catch(() => {});
+      pendingApiCaptures.add(capture);
+      capture.finally(() => pendingApiCaptures.delete(capture));
+    });
+  }
   await page.goto(requestUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForTimeout(750);
+  await Promise.allSettled([...pendingApiCaptures]);
+  const finalUrl = page.url();
   const bodyText = await page.locator("body").innerText().catch(() => "");
   if (/captcha|challenge|login required|sign in|环境异常|访问过于频繁|请完成验证|去验证/i.test(bodyText)) {
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "Login or challenge required", data: { code: "IMPORT_WEB_LOGIN_REQUIRED" } } })}\n`);
     process.exitCode = 0;
-  } else if (platform === "bilibili") {
-    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "A verified subtitle is required", data: { code: "IMPORT_WEB_SUBTITLE_UNAVAILABLE" } } })}\n`);
-    process.exitCode = 0;
   } else {
     const html = await page.content();
-    const dom = new JSDOM(html, { url: requestUrl, runScripts: "outside-only", resources: undefined });
+    const dom = new JSDOM(html, { url: finalUrl, runScripts: "outside-only", resources: undefined });
+    const platformPayload = extractPlatformPayload(platform, html, finalUrl);
+    let verifiedSubtitle = false;
+    let subtitleIndex = 0;
+    const subtitleUrls = new Map();
+    for (const subtitleUrl of subtitleCandidates(dom.window.document, finalUrl)) subtitleUrls.set(subtitleUrl.href, subtitleUrl);
+    for (const raw of platformPayload?.subtitles || []) {
+      try { const subtitleUrl = new URL(raw, finalUrl); subtitleUrls.set(subtitleUrl.href, subtitleUrl); } catch { /* ignored */ }
+    }
+    for (const subtitleUrl of subtitleUrls.values()) {
+      if (!(await isAllowedAssetUrl(platform, target, subtitleUrl))) continue;
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: `platform-subtitle-${subtitleIndex++}`, url: subtitleUrl.href, kind: "subtitle" } })}\n`);
+      verifiedSubtitle = true;
+      if (subtitleIndex >= 4) break;
+    }
+    const mediaRaw = platformPayload?.mediaUrl
+      || dom.window.document.querySelector('meta[property="og:video"], meta[name="twitter:player:stream"]')?.getAttribute("content")
+      || dom.window.document.querySelector("video[src], video source[src]")?.getAttribute("src");
+    let originalMediaPlaceholder = false;
+    if (mediaRaw) {
+      const mediaUrl = new URL(mediaRaw, finalUrl);
+      if (await isAllowedAssetUrl(platform, target, mediaUrl)) {
+        if (!params.localAsrAuthorized && !verifiedSubtitle) {
+          process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "A verified subtitle or local ASR capability is required", data: { code: "IMPORT_WEB_SUBTITLE_UNAVAILABLE" } } })}\n`);
+          process.exit(0);
+        } else {
+          // Always report the media candidate. Rust drops it in extraction-only
+          // mode, but uses its presence to distinguish a malformed subtitle
+          // track from a normal article with no media.
+          process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: "original-media", url: mediaUrl.href, kind: "media" } })}\n`);
+          originalMediaPlaceholder = params.mediaSaveMode === "preserve_original";
+          // Rust verifies and parses the subtitle bytes. Emit an ASR fallback
+          // whenever the capability is available; the fallback is skipped if
+          // a usable platform transcript is localized first.
+          if (params.localAsrAuthorized) {
+            process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: "temporary-media", url: mediaUrl.href, kind: "temporary_media" } })}\n`);
+          }
+        }
+      } else if (platform !== "generic") {
+        process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The platform media host is not in the verified allowlist", data: { code: "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED" } } })}\n`);
+        process.exit(0);
+      }
+    }
     const article = new Readability(dom.window.document.cloneNode(true)).parse();
-    if (!article?.content || !article.title) throw new Error("dynamic content root missing");
-    const clean = createDOMPurify(dom.window).sanitize(article.content, { FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "template"], FORBID_ATTR: ["style"] });
-    const cleanDom = new JSDOM(clean, { url: requestUrl });
+    const title = platformPayload?.title || article?.title || dom.window.document.querySelector('meta[property="og:title"]')?.getAttribute("content") || target.pathname;
+    const safePublicUrl = redactSensitiveText(publicUrl);
+    const readableContent = platformPayload?.description
+      ? `<p>${escapeHtml(platformPayload.description)}</p>`
+      : article?.content || `<p>Media page imported from <a href="${safePublicUrl}">${safePublicUrl}</a>.</p>`;
+    const clean = createDOMPurify(dom.window).sanitize(readableContent, { FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "template"], FORBID_ATTR: ["style"] });
+    const cleanDom = new JSDOM(clean, { url: finalUrl });
+    for (const imageUrl of platformPayload?.images || []) {
+      const image = cleanDom.window.document.createElement("img");
+      image.setAttribute("src", imageUrl);
+      cleanDom.window.document.body.appendChild(image);
+    }
     let assetIndex = 0;
+    const seenImages = new Set();
     for (const image of cleanDom.window.document.querySelectorAll("img")) {
       const raw = image.getAttribute("src") || image.getAttribute("data-src");
       image.removeAttribute("srcset"); image.removeAttribute("data-src");
       if (!raw) { image.remove(); continue; }
-      const resolved = new URL(raw, requestUrl);
-      if (!isPinnedTargetHost(target.hostname, resolved.hostname)) { image.remove(); continue; }
+      let resolved;
+      try { resolved = new URL(raw, finalUrl); } catch { image.remove(); continue; }
+      if (seenImages.has(resolved.href)) { image.remove(); continue; }
+      seenImages.add(resolved.href);
+      if (!(await isAllowedAssetUrl(platform, target, resolved))) { image.remove(); continue; }
+      const kind = classifyRemoteImageKind(platform, Boolean(mediaRaw), Boolean(params.localOcrAuthorized), params.mediaSaveMode);
+      if (!kind) { image.remove(); continue; }
       const placeholder = `webasset-${assetIndex++}`;
       image.setAttribute("src", `asset://${placeholder}`);
-      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder, url: resolved.href, kind: "image" } })}\n`);
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder, url: resolved.href, kind } })}\n`);
+    }
+    if (platform !== "generic" && !mediaRaw && subtitleIndex === 0 && assetIndex === 0 && !(platformPayload?.images?.length)) {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The platform page did not expose media, subtitles, or usable images", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
+      process.exit(0);
+    }
+    if (originalMediaPlaceholder) {
+      const paragraph = cleanDom.window.document.createElement("p");
+      const link = cleanDom.window.document.createElement("a");
+      link.setAttribute("href", "asset://original-media");
+      link.textContent = "Original media";
+      paragraph.appendChild(link);
+      cleanDom.window.document.body.appendChild(paragraph);
     }
     const persistedHtml = cleanDom.window.document.body.innerHTML;
     const markdown = new TurndownService({ codeBlockStyle: "fenced", headingStyle: "atx" }).turndown(persistedHtml);
-    await fs.writeFile(path.join(stagingRoot, "candidate.md"), `# ${article.title}\n\n${markdown}\n`);
-    await fs.writeFile(path.join(stagingRoot, "source.html"), persistedHtml);
-    await fs.writeFile(path.join(stagingRoot, "metadata.json"), JSON.stringify({ title: article.title, byline: article.byline, publicUrl }));
-    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: [], metadataPath: "metadata.json", title: article.title, textCoverage: 1, warnings: [] }, error: null })}\n`);
+    const extractedText = platform === "generic"
+      ? String(article?.textContent || bodyText || "").trim()
+      : String(platformPayload?.description || "").trim();
+    const warnings = article ? [] : ["READABILITY_FALLBACK"];
+    await fs.writeFile(path.join(stagingRoot, "candidate.md"), `# ${title}\n\n${markdown}\n`);
+    // `source.html` is the immutable raw evidence snapshot. Keep the
+    // sanitized article separately for diagnostics; Markdown is derived from
+    // the sanitized DOM and never replaces the original response.
+    await fs.writeFile(path.join(stagingRoot, "source.html"), redactSensitiveText(html));
+    await fs.writeFile(path.join(stagingRoot, "sanitized.html"), redactSensitiveText(persistedHtml));
+    await fs.writeFile(path.join(stagingRoot, "metadata.json"), JSON.stringify({
+      title,
+      author: platformPayload?.author || article?.byline || null,
+      publishedAt: platformPayload?.publishedAt || null,
+      publicUrl: redactSensitiveText(publicUrl),
+      platform,
+    }));
+    const sourceEvidencePaths = [];
+    for (const candidate of selectRelevantApiEvidence(platform, apiCandidates, finalUrl)) {
+      const evidencePath = `source-evidence/${platform}-api-${sourceEvidencePaths.length + 1}.json`;
+      await fs.mkdir(path.join(stagingRoot, "source-evidence"), { recursive: true });
+      await fs.writeFile(path.join(stagingRoot, evidencePath), JSON.stringify(redactJsonValue(candidate.value)));
+      sourceEvidencePaths.push(evidencePath);
+      if (sourceEvidencePaths.length >= 3) break;
+    }
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: sourceEvidencePaths, metadataPath: "metadata.json", title, textCoverage: extractedText ? 1 : 0, warnings }, error: null })}\n`);
   }
 } finally { await context.close(); }

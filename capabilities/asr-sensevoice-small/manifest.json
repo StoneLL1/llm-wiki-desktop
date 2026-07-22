@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 2,
+  "packId": "asr-sensevoice-small",
+  "version": "1.13.4+2024.07.17",
+  "protocolVersion": "2",
+  "targetTriples": [],
+  "archiveSha256": "",
+  "licenseExpression": "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+  "entrypoint": "runtime/node",
+  "entrypointArgs": [],
+  "executableFiles": [],
+  "compressedBytes": 0,
+  "installedBytes": 0,
+  "signingKeyId": "release-build-placeholder",
+  "signature": "",
+  "payloadStatus": "release_ci_required",
+  "engine": {
+    "name": "sherpa-onnx SenseVoiceSmall",
+    "version": "1.13.4",
+    "modelVersion": "2024-07-17-int8",
+    "license": "Apache-2.0",
+    "source": "https://github.com/k2-fsa/sherpa-onnx"
+  },
+  "executionProviders": {
+    "required": ["cpu"],
+    "optionalByTarget": {
+      "x86_64-pc-windows-msvc": ["cuda"],
+      "x86_64-unknown-linux-gnu": ["cuda"],
+      "x86_64-apple-darwin": ["coreml"],
+      "aarch64-apple-darwin": ["coreml"]
+    },
+    "fallbackToCpu": true
+  },
+  "models": [
+    {
+      "id": "SenseVoiceSmall-int8",
+      "version": "2024-07-17",
+      "files": ["models/model.int8.onnx", "models/tokens.txt"],
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models",
+      "runtimeInstallAllowed": false
+    }
+  ],
+  "audioDecoding": {
+    "acceptedContainers": ["m4a", "mp4", "mp3", "ogg", "opus", "flac", "wav"],
+    "component": "FFmpeg 8.1.2",
+    "license": "LGPL-3.0-or-later",
+    "gpl": false,
+    "nonfree": false
+  },
+  "execution": {
+    "process": "independent",
+    "shell": false,
+    "protocol": "json-rpc-2.0-stdio",
+    "stagingOnly": true,
+    "network": false,
+    "callerFlags": false,
+    "language": "auto",
+    "inverseTextNormalization": true
+  },
+  "distributionNote": "Release CI must build the native JSON-RPC runner for every supported target, bundle a CPU provider plus optional target GPU provider, the pinned int8 model and audited LGPL FFmpeg runtime, write exact file sizes and SHA-256 inventory, then sign the complete manifest and publish the ZIP through the capability catalog. Source placeholders are intentionally not installable."
+}

@@ -51,6 +51,9 @@ jobs:
       - name: Run frontend tests
         run: npm run test
 
+      - name: Run capability tool and platform parser tests
+        run: npm run test:capability-tools
+
       - name: Run lint
         run: npm run lint
 

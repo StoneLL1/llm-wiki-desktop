@@ -1,0 +1,123 @@
+/* global process */
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createReadStream } from "node:fs";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// This file is executed only by release CI against the fully staged payload.
+const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+async function sha256(filePath) {
+  const hash = createHash("sha256");
+  const stream = createReadStream(filePath);
+  for await (const chunk of stream) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function declaration(relativePath) {
+  const status = await fs.stat(path.join(packRoot, relativePath));
+  return { path: relativePath, sha256: await sha256(path.join(packRoot, relativePath)), bytes: status.size };
+}
+
+function runNode(nodePath, request) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodePath, [path.join(packRoot, "runner", "index.mjs")], {
+      cwd: packRoot,
+      shell: false,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve(stdout) : reject(new Error(`runner exited ${code}: ${stderr.slice(0, 500)}`)));
+    child.stdin.end(JSON.stringify(request));
+  });
+}
+
+function runTool(program, arguments_) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(program, arguments_, {
+      cwd: packRoot,
+      shell: false,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0
+      ? resolve()
+      : reject(new Error(`qualification tool exited ${code}: ${stderr.slice(0, 500)}`)));
+  });
+}
+
+const manifestPath = path.join(packRoot, "manifest.json");
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-sensevoice-qualification-"));
+try {
+  const platform = process.platform;
+  const required = [
+    platform === "win32" ? "runtime/ffmpeg/bin/ffmpeg.exe" : "runtime/ffmpeg/bin/ffmpeg",
+    platform === "win32" ? "runtime/sherpa/bin/sherpa-onnx-offline.exe" : "runtime/sherpa/bin/sherpa-onnx-offline",
+    "models/model.int8.onnx",
+    "models/tokens.txt",
+  ];
+  await fs.writeFile(manifestPath, JSON.stringify({
+    schemaVersion: 2,
+    packId: "asr-sensevoice-small",
+    version: "1.13.4+2024.07.17",
+    protocolVersion: "2",
+    files: await Promise.all(required.map(declaration)),
+  }), { encoding: "utf8", flag: "wx" });
+  const staging = path.join(root, "staging");
+  await fs.mkdir(staging);
+  await fs.copyFile(path.join(packRoot, "qualification", "zh.wav"), path.join(staging, "zh.wav"));
+  const ffmpegPath = path.join(packRoot, required[0]);
+  await runTool(ffmpegPath, [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-i", path.join(staging, "zh.wav"), "-c:a", "aac", "-b:a", "64k",
+    path.join(staging, "zh.m4a"),
+  ]);
+  const nodePath = platform === "win32" ? path.join(packRoot, "runtime", "node.exe") : path.join(packRoot, "runtime", "node");
+  let qualifiedProvider;
+  for (const [id, fixture] of [[1, "zh.wav"], [2, "zh.m4a"]]) {
+    const stdout = await runNode(nodePath, {
+      jsonrpc: "2.0",
+      id,
+      params: {
+        operation: "extract",
+        projectRoot: root,
+        stagingRoot: staging,
+        input: { kind: "file", locator: fixture },
+        chainedInput: fixture,
+        localAsrAuthorized: true,
+      },
+    });
+    const response = JSON.parse(stdout.trim());
+    assert.equal(response.error, null);
+    const metadata = JSON.parse(await fs.readFile(path.join(staging, response.result.metadataPath), "utf8"));
+    const markdown = await fs.readFile(path.join(staging, response.result.markdownPath), "utf8");
+    const expectedText = fixture === "zh.wav"
+      ? /开放时间早上\s*9\s*点至下午\s*5\s*点/u
+      : /开[放饭]时间早上\s*9\s*点至下午\s*5\s*点/u;
+    assert.match(markdown, expectedText);
+    assert.match(metadata.provider, /^(cpu|cuda|coreml)$/);
+    assert.equal(metadata.provenance, "authorized-local-asr");
+    assert.match(metadata.modelSha256, /^[0-9a-f]{64}$/);
+    assert.match(metadata.tokensSha256, /^[0-9a-f]{64}$/);
+    qualifiedProvider = metadata.provider;
+  }
+  process.stdout.write(`${JSON.stringify({ qualified: true, provider: qualifiedProvider, fixtures: ["wav", "aac-in-m4a"] })}\n`);
+} finally {
+  await fs.rm(manifestPath, { force: true });
+  await fs.rm(root, { recursive: true, force: true });
+}
