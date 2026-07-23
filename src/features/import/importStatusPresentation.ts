@@ -106,6 +106,12 @@ export const IMPORT_PROGRESS_LABEL_KEYS: Record<string, string> = {
   "Validating preview": "importV2.itemStatus.validating",
   "Preview ready": "importV2.itemStatus.previewReady",
   "Discovering files": "importV2.discovery.stage",
+  "media.downloading": "importV2.itemStatus.mediaDownloading",
+  "asr.preparing": "importV2.itemStatus.asrPreparing",
+  "asr.checking_subtitles": "importV2.itemStatus.asrCheckingSubtitles",
+  "asr.decoding": "importV2.itemStatus.asrDecoding",
+  "asr.recognizing": "importV2.itemStatus.asrRecognizing",
+  "asr.finalizing": "importV2.itemStatus.asrFinalizing",
 };
 
 const STAGE_PROGRESS_LABELS = new Set(["Inspecting input", "Extracting source", "Validating preview", "Preview ready"]);

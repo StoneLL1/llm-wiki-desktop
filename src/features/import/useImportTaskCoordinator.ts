@@ -11,6 +11,7 @@ import type { ImportSession } from "../../types/importV2";
 import type { FileScanResult } from "../../types/importV2File";
 import { isTerminalStatus, type BackendEvent, type BackendTask } from "../../types/task";
 import { importWorkflowErrorMessage } from "./useImportSessionScope";
+import { mergeImportItemTask } from "./importTaskProgress";
 
 interface PendingPathTask {
   projectKey: string;
@@ -82,6 +83,14 @@ function isTerminalTaskEvent(event: BackendEvent): boolean {
   return event.eventType === "task_completed"
     || event.eventType === "task_failed"
     || event.eventType === "task_cancelled";
+}
+
+function isTaskSnapshotEvent(event: BackendEvent): boolean {
+  return event.eventType === "task_updated"
+    || event.eventType === "task_completed"
+    || event.eventType === "task_failed"
+    || event.eventType === "task_cancelled"
+    || event.eventType === "confirmation_requested";
 }
 
 function isWaitingTaskEvent(event: BackendEvent): boolean {
@@ -238,6 +247,21 @@ export function useImportTaskCoordinator({
     return terminalIds;
   }, [endPendingItems]);
 
+  const syncItemTask = useCallback((
+    task: BackendTask,
+    itemId: string,
+    requestKey: string,
+    epoch: number,
+    allowBinding = false,
+  ) => {
+    const current = useImportStore.getState();
+    if (current.projectKey !== requestKey || current.sessionEpoch !== epoch || !current.session) return;
+    const item = current.session.items.find((candidate) => candidate.itemId === itemId);
+    if (!item) return;
+    const next = mergeImportItemTask(item, task, allowBinding);
+    if (next !== item) current.replaceItem(requestKey, next, epoch);
+  }, []);
+
   const settleItemTask = useCallback((task: BackendTask): boolean => {
     const pending = pendingItemTasks.current.get(task.id);
     if (!pending || !isSettledImportTask(task)) return false;
@@ -264,6 +288,10 @@ export function useImportTaskCoordinator({
     const resolvedTasks = tasks.map(
       (task) => useTaskStore.getState().tasks.find((current) => current.id === task.id) ?? task,
     );
+    resolvedTasks.forEach((task, index) => {
+      const itemId = itemIds[index];
+      if (itemId) syncItemTask(task, itemId, requestKey, epoch, true);
+    });
     recordItemBatch(resolvedTasks, itemIds, requestKey, epoch, sessionId);
     const terminalIds = registerItemTasks(resolvedTasks, itemIds, requestKey, epoch);
     if (terminalIds.length > 0 && isScopeCurrent(requestKey, epoch)) {
@@ -271,7 +299,7 @@ export function useImportTaskCoordinator({
     }
     for (const task of resolvedTasks) settleItemTask(task);
     requestTaskReconciliation();
-  }, [endPendingItems, isScopeCurrent, recordItemBatch, refreshForScope, registerItemTasks, requestTaskReconciliation, selectedTaskUpsert, settleItemTask]);
+  }, [endPendingItems, isScopeCurrent, recordItemBatch, refreshForScope, registerItemTasks, requestTaskReconciliation, selectedTaskUpsert, settleItemTask, syncItemTask]);
 
   const startNewQueuedItems = useCallback(async (
     requestKey: string,
@@ -396,8 +424,18 @@ export function useImportTaskCoordinator({
   }, [isScopeCurrent, openTaskDrawer, reconcilePendingTasks, requestTaskReconciliation, selectedTaskUpsert]);
 
   const handleTaskEvent = useCallback((event: BackendEvent) => {
-    if ((!isTerminalTaskEvent(event) && !isWaitingTaskEvent(event)) || !event.taskId) return;
-    const task = event.payload as BackendTask;
+    if (!event.taskId || !isTaskSnapshotEvent(event)) return;
+    const payloadTask = event.payload as BackendTask;
+    selectedTaskUpsert(payloadTask);
+    const task = useTaskStore.getState().tasks.find((candidate) => candidate.id === event.taskId)
+      ?? payloadTask;
+    const pendingItem = pendingItemTasks.current.get(event.taskId);
+    if (pendingItem) {
+      for (const itemId of pendingItem.itemIds) {
+        syncItemTask(task, itemId, pendingItem.projectKey, pendingItem.epoch);
+      }
+    }
+    if (!isTerminalTaskEvent(event) && !isWaitingTaskEvent(event)) return;
     settlePathTask(task);
     const confirmation = pendingConfirmationTasks.current.get(event.taskId);
     if (confirmation) settleConfirmationTask(task, confirmation);
@@ -414,7 +452,7 @@ export function useImportTaskCoordinator({
     if (current.session.items.some((item) => item.taskId === event.taskId)) {
       void refreshForScope(projectKey, current.sessionEpoch).catch(() => undefined);
     }
-  }, [isScopeCurrent, projectId, projectKey, refreshForScope, settleConfirmationTask, settleItemTask, settlePathTask]);
+  }, [isScopeCurrent, projectId, projectKey, refreshForScope, selectedTaskUpsert, settleConfirmationTask, settleItemTask, settlePathTask, syncItemTask]);
 
   const cancelDiscovery = useCallback(async () => {
     if (!discoveryTaskId) return;
@@ -510,6 +548,22 @@ export function useImportTaskCoordinator({
       mutationKey,
     });
   }, [projectId, projectKey, session, sessionEpoch, taskList, trackPathTask]);
+
+  useEffect(() => {
+    if (!session || session.projectId !== projectId) return;
+    const tasksById = new Map(taskList.map((task) => [task.id, task]));
+    for (const item of session.items) {
+      if (!item.taskId) continue;
+      const task = tasksById.get(item.taskId);
+      if (!task || task.projectId !== projectId || isSettledImportTask(task)) continue;
+      pendingItemTasks.current.set(task.id, {
+        projectKey,
+        epoch: sessionEpoch,
+        itemIds: [item.itemId],
+      });
+      syncItemTask(task, item.itemId, projectKey, sessionEpoch);
+    }
+  }, [projectId, projectKey, session, sessionEpoch, syncItemTask, taskList]);
 
   return {
     pendingItemIds,

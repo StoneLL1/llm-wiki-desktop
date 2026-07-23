@@ -7,7 +7,8 @@ use crate::models::import_v2::{ImportInput, ImportInputKind, MediaSaveMode};
 use crate::services::import_v2::bilibili;
 use crate::services::import_v2::connectors::{wechat, xiaohongshu, ConnectorFailure};
 use crate::services::import_v2::engine::{
-    EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
+    EngineDescriptor, EngineProgress, EngineProgressReporter, EngineRequest, EngineResult,
+    ImportEngine,
 };
 use crate::services::import_v2::markdown_normalizer::{
     decode_text, html_to_markdown, normalize_markdown,
@@ -22,7 +23,7 @@ use crate::services::import_v2::subtitle::{
 };
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{
-    WebFetchArtifact, WebFetchContent, WebFetchPolicy, WebFetchService,
+    WebFetchArtifact, WebFetchContent, WebFetchPolicy, WebFetchProgress, WebFetchService,
 };
 use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
@@ -98,6 +99,15 @@ impl ImportEngine for GenericWebEngine {
         &self,
         request: &EngineRequest,
         cancellation: &CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
+        self.execute_with_progress(request, cancellation, &|_| Ok(()))
+    }
+
+    fn execute_with_progress(
+        &self,
+        request: &EngineRequest,
+        cancellation: &CancellationToken,
+        report_progress: &EngineProgressReporter<'_>,
     ) -> Result<EngineResult, BackendError> {
         if cancellation.is_cancelled() {
             return Err(cancelled());
@@ -594,6 +604,7 @@ impl ImportEngine for GenericWebEngine {
                         let download_path = download.path().join("response.bin");
                         match fetch_media_to_file(
                             &media_url,
+                            platform,
                             &item_id,
                             cancellation,
                             request
@@ -602,6 +613,7 @@ impl ImportEngine for GenericWebEngine {
                                 .as_deref()
                                 .unwrap_or(&request.input.locator),
                             &download_path,
+                            report_progress,
                         ) {
                             Ok(media) => Some((media, download)),
                             Err(error) if transcription_ready => {
@@ -1355,28 +1367,34 @@ fn is_bilibili_video_url(value: &str) -> bool {
 }
 
 fn is_trusted_platform_asset_url(platform: Platform, value: &str) -> bool {
-    let Some(host) = url::Url::parse(value)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-    else {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
         return false;
     };
     let matches_suffix = |suffix: &str| host == suffix || host.ends_with(&format!(".{suffix}"));
+    trusted_platform_asset_suffixes(platform)
+        .iter()
+        .any(|suffix| matches_suffix(suffix))
+}
+
+fn trusted_platform_asset_suffixes(platform: Platform) -> &'static [&'static str] {
     match platform {
-        Platform::Bilibili => [
+        Platform::Bilibili => &[
             "bilibili.com",
             "b23.tv",
             "bilivideo.com",
             "bilivideo.cn",
             "hdslb.com",
             "biliimg.com",
-        ]
-        .iter()
-        .any(|suffix| matches_suffix(suffix)),
-        Platform::Xiaohongshu => ["xiaohongshu.com", "xhslink.com", "xhscdn.com", "xhscdn.net"]
-            .iter()
-            .any(|suffix| matches_suffix(suffix)),
-        Platform::Douyin => [
+            "edge.mountaintoys.cn",
+        ],
+        Platform::Xiaohongshu => &["xiaohongshu.com", "xhslink.com", "xhscdn.com", "xhscdn.net"],
+        Platform::Douyin => &[
             "douyin.com",
             "iesdouyin.com",
             "douyinvod.com",
@@ -1387,9 +1405,7 @@ fn is_trusted_platform_asset_url(platform: Platform, value: &str) -> bool {
             "ibytedtos.com",
             "bytecdn.cn",
             "zjcdn.com",
-        ]
-        .iter()
-        .any(|suffix| matches_suffix(suffix)),
+        ],
     }
 }
 
@@ -1532,40 +1548,106 @@ fn attribute_after(fragment: &str, name: &str) -> Option<String> {
 
 fn fetch_media_to_file(
     url: &str,
+    platform: Option<Platform>,
     item_id: &str,
     cancellation: &CancellationToken,
     referer: &str,
     destination: &Path,
+    report_progress: &EngineProgressReporter<'_>,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
+    report_progress(EngineProgress {
+        current: 0,
+        total: None,
+        label: "media.downloading".into(),
+    })?;
     let target = UrlPolicy.normalize_for_session(url)?;
     let item_id = item_id.to_string();
     let referer = referer.to_string();
     let destination = destination.to_path_buf();
     let token = cancellation.clone();
-    std::thread::spawn(move || {
+    let worker_stop = CancellationToken::new();
+    let worker_stop_for_fetch = worker_stop.clone();
+    let (progress_sender, progress_receiver) = std::sync::mpsc::channel::<WebFetchProgress>();
+    let worker = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|_| unavailable("The media fetch runtime could not be started."))?;
-        runtime.block_on(WebFetchService::default().fetch_to_file(
-            target,
-            &UrlPolicy::default(),
-            &WebFetchPolicy {
-                max_response_bytes: 1024 * 1024 * 1024,
-                total_timeout_ms: 30 * 60 * 1000,
-                content: WebFetchContent::TemporaryMedia,
-                referer: Some(referer),
-                ..WebFetchPolicy::default()
-            },
-            None,
-            &item_id,
-            &destination,
-            |_| {},
-            || token.is_cancelled(),
-        ))
+        let mut last_progress_bucket = None;
+        runtime.block_on(
+            WebFetchService::default().fetch_to_file(
+                target,
+                &UrlPolicy::default(),
+                &WebFetchPolicy {
+                    max_response_bytes: 1024 * 1024 * 1024,
+                    total_timeout_ms: 30 * 60 * 1000,
+                    content: WebFetchContent::TemporaryMedia,
+                    referer: Some(referer),
+                    require_https: platform.is_some(),
+                    allowed_host_suffixes: platform
+                        .map(trusted_platform_asset_suffixes)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|suffix| (*suffix).into())
+                        .collect(),
+                    ..WebFetchPolicy::default()
+                },
+                None,
+                &item_id,
+                &destination,
+                move |progress| {
+                    let bucket = progress
+                        .total_bytes
+                        .filter(|total| *total > 0)
+                        .map(|total| {
+                            progress.downloaded_bytes.min(total).saturating_mul(100) / total
+                        })
+                        .unwrap_or(0);
+                    if last_progress_bucket == Some(bucket) {
+                        return;
+                    }
+                    last_progress_bucket = Some(bucket);
+                    let _ = progress_sender.send(progress);
+                },
+                || token.is_cancelled() || worker_stop_for_fetch.is_cancelled(),
+            ),
+        )
+    });
+    let mut progress_error = None;
+    while !worker.is_finished() {
+        while let Ok(progress) = progress_receiver.try_recv() {
+            if let Err(error) = report_media_download_progress(report_progress, progress) {
+                worker_stop.cancel();
+                progress_error = Some(error);
+                break;
+            }
+        }
+        if progress_error.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let fetched = worker
+        .join()
+        .map_err(|_| unavailable("The media fetch worker stopped unexpectedly."))?;
+    if let Some(error) = progress_error {
+        return Err(error);
+    }
+    while let Ok(progress) = progress_receiver.try_recv() {
+        report_media_download_progress(report_progress, progress)?;
+    }
+    fetched
+}
+
+fn report_media_download_progress(
+    report_progress: &EngineProgressReporter<'_>,
+    progress: WebFetchProgress,
+) -> Result<(), BackendError> {
+    report_progress(EngineProgress {
+        current: progress.downloaded_bytes,
+        total: progress.total_bytes,
+        label: "media.downloading".into(),
     })
-    .join()
-    .map_err(|_| unavailable("The media fetch worker stopped unexpectedly."))?
 }
 
 fn fetch_image(
@@ -1693,8 +1775,9 @@ mod tests {
     use super::{
         extract_html_image_urls, extract_html_media_url, extract_html_title, is_bilibili_video_url,
         is_trusted_platform_asset_url, media_extension, platform_image_output_is_meaningful,
-        render_platform_markdown, replace_markdown_asset_reference, select_primary_web_artifact,
-        should_run_platform_image_ocr, xiaohongshu_error, GenericWebEngine,
+        render_platform_markdown, replace_markdown_asset_reference, report_media_download_progress,
+        select_primary_web_artifact, should_run_platform_image_ocr, xiaohongshu_error,
+        GenericWebEngine,
     };
     use crate::models::import_v2::{ImportInput, ImportInputKind, MediaSaveMode};
     use crate::services::import_v2::connectors::ConnectorFailure;
@@ -1704,7 +1787,7 @@ mod tests {
     use crate::services::import_v2::platform_provider::{Platform, PlatformDocument};
     use crate::services::import_v2::redaction::redact_sensitive_text;
     use crate::services::import_v2::url_policy::UrlPolicy;
-    use crate::services::import_v2::web_fetch::WebFetchArtifact;
+    use crate::services::import_v2::web_fetch::{WebFetchArtifact, WebFetchProgress};
     use crate::services::import_v2::web_target_store::WebTargetStore;
     use crate::services::SecretService;
     use crate::tasks::task_model::CancellationToken;
@@ -1723,6 +1806,30 @@ mod tests {
         assert_eq!(
             media_extension("video/webm", "https://cdn.example/a"),
             "webm"
+        );
+    }
+
+    #[test]
+    fn forwards_builtin_media_download_bytes_to_the_engine_reporter() {
+        let reported = std::sync::Mutex::new(Vec::new());
+        report_media_download_progress(
+            &|progress| {
+                reported.lock().unwrap().push(progress);
+                Ok(())
+            },
+            WebFetchProgress {
+                downloaded_bytes: 512,
+                total_bytes: Some(1024),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reported.lock().unwrap().as_slice(),
+            &[crate::services::import_v2::engine::EngineProgress {
+                current: 512,
+                total: Some(1024),
+                label: "media.downloading".into(),
+            }]
         );
     }
 
@@ -1798,6 +1905,18 @@ mod tests {
         assert!(is_trusted_platform_asset_url(
             Platform::Bilibili,
             "https://upos-sz-mirrorali.bilivideo.com/video.mp4"
+        ));
+        assert!(is_trusted_platform_asset_url(
+            Platform::Bilibili,
+            "https://809al93l.edge.mountaintoys.cn:4483/upgcxcode/video.mp4"
+        ));
+        assert!(!is_trusted_platform_asset_url(
+            Platform::Bilibili,
+            "https://edge.mountaintoys.cn.evil.example/video.mp4"
+        ));
+        assert!(!is_trusted_platform_asset_url(
+            Platform::Bilibili,
+            "http://809al93l.edge.mountaintoys.cn:4483/upgcxcode/video.mp4"
         ));
         assert!(is_trusted_platform_asset_url(
             Platform::Xiaohongshu,

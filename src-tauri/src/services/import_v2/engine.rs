@@ -90,6 +90,15 @@ pub struct EngineDescriptor {
     pub route: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineProgress {
+    pub current: u64,
+    pub total: Option<u64>,
+    pub label: String,
+}
+
+pub type EngineProgressReporter<'a> = dyn Fn(EngineProgress) -> Result<(), BackendError> + 'a;
+
 pub trait ImportEngine: Send + Sync {
     fn descriptor(&self) -> EngineDescriptor;
     fn supports(&self, input: &ImportInput) -> bool;
@@ -98,6 +107,15 @@ pub trait ImportEngine: Send + Sync {
         request: &EngineRequest,
         cancellation: &CancellationToken,
     ) -> Result<EngineResult, BackendError>;
+
+    fn execute_with_progress(
+        &self,
+        request: &EngineRequest,
+        cancellation: &CancellationToken,
+        _report_progress: &EngineProgressReporter<'_>,
+    ) -> Result<EngineResult, BackendError> {
+        self.execute(request, cancellation)
+    }
 }
 
 #[derive(Default)]

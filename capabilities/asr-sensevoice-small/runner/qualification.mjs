@@ -118,7 +118,15 @@ try {
         localAsrAuthorized: true,
       },
     });
-    const response = JSON.parse(stdout.trim());
+    const messages = stdout.trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    const progress = messages
+      .filter((message) => message?.method === "import.progress")
+      .map((message) => message.params);
+    const response = messages.find((message) => message?.id === id);
+    assert.ok(response, "the runner must emit a terminal response after progress notifications");
+    assert.ok(progress.length >= 3, "the runner must expose multiple observable recognition stages");
+    assert.ok(progress.every((entry) => entry.total === 100 && entry.current >= 0 && entry.current < 100));
+    assert.ok(progress.every((entry, index) => index === 0 || entry.current >= progress[index - 1].current));
     assert.equal(response.error, null);
     const metadata = JSON.parse(await fs.readFile(path.join(staging, response.result.metadataPath), "utf8"));
     const markdown = await fs.readFile(path.join(staging, response.result.markdownPath), "utf8");
@@ -131,6 +139,7 @@ try {
     assert.match(metadata.modelSha256, /^[0-9a-f]{64}$/);
     assert.match(metadata.tokensSha256, /^[0-9a-f]{64}$/);
     if (fixture === "zh-long.wav") {
+      assert.ok(progress.some((entry) => entry.label === "asr.recognizing" && entry.current > 22));
       assert.ok(metadata.segments.length >= 2, "the long fixture must exercise multiple ASR chunks");
       assert.ok(metadata.segments[1].startMs >= 20_000, "later chunk timestamps must stay on the media timeline");
     }

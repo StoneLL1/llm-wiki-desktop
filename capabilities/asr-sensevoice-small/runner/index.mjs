@@ -54,6 +54,17 @@ function writeFailure(id, code) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result: null, error: { code: -32020, message, data: { code } } })}\n`);
 }
 
+let lastProgress = -1;
+function writeProgress(current, label) {
+  const bounded = Math.max(lastProgress, Math.min(99, Math.max(0, Math.round(current))));
+  lastProgress = bounded;
+  process.stdout.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    method: "import.progress",
+    params: { current: bounded, total: 100, label },
+  })}\n`);
+}
+
 async function runFile(program, arguments_, options, stage) {
   try {
     return await execFileAsync(program, arguments_, {
@@ -107,6 +118,7 @@ try {
   }
   const mediaLocator = params.chainedInput || params.input.locator;
   const { stagingRoot, mediaPath } = await resolveStagingMedia(params.projectRoot, params.stagingRoot, mediaLocator);
+  writeProgress(2, "asr.preparing");
   const manifest = JSON.parse(await fs.readFile(path.join(packRoot, "manifest.json"), "utf8"));
   if (manifest.packId !== "asr-sensevoice-small" || manifest.protocolVersion !== "2") {
     throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
@@ -117,6 +129,7 @@ try {
   const environment = restrictedEnvironment(packRoot, temporaryRoot);
   const embeddedSubtitlePath = path.join(temporaryRoot, "embedded.srt");
   let embeddedTranscript = null;
+  writeProgress(5, "asr.checking_subtitles");
   try {
     await runFile(ffmpeg, buildEmbeddedSubtitleArguments(mediaPath, embeddedSubtitlePath), {
       cwd: temporaryRoot,
@@ -131,6 +144,7 @@ try {
     embeddedTranscript = null;
   }
   await fs.rm(embeddedSubtitlePath, { force: true }).catch(() => {});
+  writeProgress(10, embeddedTranscript ? "asr.finalizing" : "asr.preparing");
 
   let markdown;
   let safeMetadata;
@@ -164,12 +178,14 @@ try {
       throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
     }
     const decodedPattern = path.join(temporaryRoot, "decoded-%04d.wav");
+    writeProgress(15, "asr.decoding");
     await runFile(ffmpeg, buildChunkedFfmpegArguments(mediaPath, decodedPattern), {
       cwd: temporaryRoot,
       env: environment,
       timeout: DECODE_TIMEOUT_MS,
     }, "decode");
     const chunks = await decodedChunks(temporaryRoot);
+    writeProgress(22, "asr.recognizing");
 
     const threads = Math.min(8, Math.max(1, os.availableParallelism?.() || os.cpus().length || 1));
     const execution = await executeWithProviderFallback(preferredProviders(), async (provider) => {
@@ -184,6 +200,8 @@ try {
         );
         assertProviderWasUsed(provider, result.stderr);
         transcripts.push(...parseSenseVoiceBatchStdout(result.stdout, batch.map((chunk) => chunk.startMs)));
+        const recognizedChunks = Math.min(chunks.length, offset + batch.length);
+        writeProgress(22 + Math.round((recognizedChunks / chunks.length) * 70), "asr.recognizing");
       }
       return mergeSenseVoiceTranscripts(transcripts);
     });
@@ -210,6 +228,7 @@ try {
     warnings = execution.provider === "cpu" && execution.attemptedProviders.length > 1
       ? ["IMPORT_ASR_ACCELERATOR_FALLBACK"] : [];
   }
+  writeProgress(96, "asr.finalizing");
   const candidatePath = path.join(temporaryRoot, "candidate.md");
   const sourcePath = path.join(temporaryRoot, "source.json");
   const metadataPath = path.join(temporaryRoot, "metadata.json");
@@ -218,6 +237,7 @@ try {
     fs.writeFile(sourcePath, JSON.stringify(safeMetadata), { encoding: "utf8", flag: "wx" }),
     fs.writeFile(metadataPath, JSON.stringify(safeMetadata), { encoding: "utf8", flag: "wx" }),
   ]);
+  writeProgress(99, "asr.finalizing");
   const relative = (value) => path.relative(stagingRoot, value).split(path.sep).join("/");
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: {
     sourceSnapshotPath: relative(sourcePath),

@@ -32,7 +32,7 @@ const PLATFORM_NAVIGATION_HOSTS = Object.freeze({
 });
 
 const PLATFORM_ASSET_HOSTS = Object.freeze({
-  bilibili: ["bilivideo.com", "bilivideo.cn", "hdslb.com", "biliimg.com"],
+  bilibili: ["bilivideo.com", "bilivideo.cn", "hdslb.com", "biliimg.com", "edge.mountaintoys.cn"],
   xiaohongshu: ["xhscdn.com", "xhscdn.net", "xhslink.com"],
   douyin: ["douyinvod.com", "douyincdn.com", "douyinpic.com", "amemv.com", "byteimg.com", "ibytedtos.com", "bytecdn.cn", "zjcdn.com"],
 });
@@ -57,6 +57,10 @@ export async function resolvePinnedAddress(host, lookup = dns.lookup) {
 
 export function isPinnedTargetHost(targetHost, candidateHost) {
   return candidateHost.toLowerCase() === targetHost.toLowerCase();
+}
+
+export function isSecureAssetProtocol(protocol) {
+  return protocol === "https:";
 }
 
 export function isPlatformTargetHost(platform, targetHost) {

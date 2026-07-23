@@ -14,7 +14,8 @@ use crate::services::import_v2::capability_pack::{
 };
 use crate::services::import_v2::domain_limiter::DomainLimiter;
 use crate::services::import_v2::engine::{
-    validate_engine_result, EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
+    validate_engine_result, EngineDescriptor, EngineProgress, EngineProgressReporter,
+    EngineRequest, EngineResult, ImportEngine,
 };
 use crate::services::import_v2::media_router::{
     link_or_copy, move_staged_file, TemporaryMediaWorkspace,
@@ -25,7 +26,9 @@ use crate::services::import_v2::subtitle::{
     append_missing_transcript_notice, render_subtitle_markdown,
 };
 use crate::services::import_v2::url_policy::UrlPolicy;
-use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
+use crate::services::import_v2::web_fetch::{
+    WebFetchContent, WebFetchPolicy, WebFetchProgress, WebFetchService,
+};
 use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
 
@@ -33,6 +36,7 @@ const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDOUT_LINES: usize = 256;
 const MAX_REMOTE_ASSETS: usize = 128;
 const MAX_STDERR_BYTES: u64 = 1024 * 1024;
+const PROCESS_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct PackProcessEngine {
     pack: ResolvedCapabilityPack,
@@ -91,8 +95,24 @@ impl ImportEngine for PackProcessEngine {
         request: &EngineRequest,
         cancellation: &CancellationToken,
     ) -> Result<EngineResult, BackendError> {
+        self.execute_with_progress(request, cancellation, &|_| Ok(()))
+    }
+
+    fn execute_with_progress(
+        &self,
+        request: &EngineRequest,
+        cancellation: &CancellationToken,
+        report_progress: &EngineProgressReporter<'_>,
+    ) -> Result<EngineResult, BackendError> {
         if cancellation.is_cancelled() {
             return Err(cancelled());
+        }
+        if self.descriptor.route == "media.asr" {
+            report_progress(EngineProgress {
+                current: 0,
+                total: Some(100),
+                label: "asr.preparing".into(),
+            })?;
         }
         let mut request = if request.input.kind == ImportInputKind::Url {
             if self.descriptor.route == "web.generic.browser" {
@@ -246,12 +266,17 @@ impl ImportEngine for PackProcessEngine {
             let _ = stderr.take(MAX_STDERR_BYTES + 1).read_to_end(&mut sink);
         });
         child.2 = Some(stderr_reader);
-        let (sender, receiver) = mpsc::channel::<Result<PackResponse, ()>>();
+        let (sender, receiver) = mpsc::channel::<PackOutputEvent>();
         let stdout_reader = std::thread::spawn(move || {
-            let _ = sender.send(read_response(stdout));
+            let progress_sender = sender.clone();
+            let response = read_response_with_progress(stdout, move |progress| {
+                let _ = progress_sender.send(PackOutputEvent::Progress(progress));
+            });
+            let _ = sender.send(PackOutputEvent::Response(response));
         });
         child.1 = Some(stdout_reader);
         let started = Instant::now();
+        let mut process_exited_at = None;
         loop {
             if cancellation.is_cancelled() {
                 terminate_tree(&mut child.0);
@@ -261,7 +286,43 @@ impl ImportEngine for PackProcessEngine {
                 terminate_tree(&mut child.0);
                 return Err(engine_error("The capability process timed out."));
             }
-            if let Ok(response) = receiver.try_recv() {
+            let event = match receiver.try_recv() {
+                Ok(event) => Some(event),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(engine_error(
+                        "The capability process output reader stopped unexpectedly.",
+                    ))
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    if process_exited_at.is_none()
+                        && child
+                            .0
+                            .try_wait()
+                            .map_err(|_| {
+                                engine_error("The capability process state is unavailable.")
+                            })?
+                            .is_some()
+                    {
+                        process_exited_at = Some(Instant::now());
+                    }
+                    match process_exited_at {
+                        Some(exited_at) => Some(receive_output_after_exit(&receiver, exited_at)?),
+                        None => None,
+                    }
+                }
+            };
+            if let Some(event) = event {
+                let response = match event {
+                    PackOutputEvent::Progress(progress) => {
+                        report_progress(EngineProgress {
+                            current: progress.current,
+                            total: Some(progress.total),
+                            label: progress.label,
+                        })?;
+                        continue;
+                    }
+                    PackOutputEvent::Response(response) => response,
+                };
                 let response = response.map_err(|_| {
                     engine_error(
                         "The capability process output exceeded protocol limits or was invalid.",
@@ -300,24 +361,27 @@ impl ImportEngine for PackProcessEngine {
                     response.remote_assets,
                     cancellation,
                     self.domain_limiter.clone(),
+                    report_progress,
                 )?;
                 validate_engine_result(&request.staging_root, &result)?;
                 terminate_tree(&mut child.0);
                 return Ok(result);
             }
-            if child
-                .0
-                .try_wait()
-                .map_err(|_| engine_error("The capability process state is unavailable."))?
-                .is_some()
-            {
-                return Err(engine_error(
-                    "The capability process exited without a result.",
-                ));
-            }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn receive_output_after_exit(
+    receiver: &mpsc::Receiver<PackOutputEvent>,
+    exited_at: Instant,
+) -> Result<PackOutputEvent, BackendError> {
+    let remaining = PROCESS_OUTPUT_DRAIN_TIMEOUT
+        .checked_sub(exited_at.elapsed())
+        .ok_or_else(|| engine_error("The capability process exited without a result."))?;
+    receiver
+        .recv_timeout(remaining)
+        .map_err(|_| engine_error("The capability process exited without a result."))
 }
 
 fn stable_capability_error_code(code: Option<&str>) -> &str {
@@ -455,20 +519,35 @@ async fn fetch_with_safe_retries(
     item_id: &str,
     token: &CancellationToken,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
-    fetch_with_safe_retries_to_path(target, policy, private_grant, item_id, None, token).await
+    fetch_with_safe_retries_to_path(
+        target,
+        policy,
+        private_grant,
+        item_id,
+        None,
+        token,
+        None,
+        |_| {},
+    )
+    .await
 }
 
-async fn fetch_with_safe_retries_to_path(
+async fn fetch_with_safe_retries_to_path<F>(
     target: crate::services::import_v2::url_policy::SessionWebTarget,
     policy: &WebFetchPolicy,
     private_grant: Option<crate::services::import_v2::url_policy::PrivateTargetGrant>,
     item_id: &str,
     destination: Option<&Path>,
     token: &CancellationToken,
-) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
+    worker_stop: Option<&CancellationToken>,
+    mut progress: F,
+) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError>
+where
+    F: FnMut(WebFetchProgress),
+{
     let mut last = None;
     for _ in 0..policy.max_attempts_per_route.max(1) {
-        if token.is_cancelled() {
+        if token.is_cancelled() || worker_stop.is_some_and(CancellationToken::is_cancelled) {
             return Err(cancelled());
         }
         let fetched = if let Some(destination) = destination {
@@ -480,8 +559,11 @@ async fn fetch_with_safe_retries_to_path(
                     private_grant.as_ref(),
                     item_id,
                     destination,
-                    |_| {},
-                    || token.is_cancelled(),
+                    &mut progress,
+                    || {
+                        token.is_cancelled()
+                            || worker_stop.is_some_and(CancellationToken::is_cancelled)
+                    },
                 )
                 .await
         } else {
@@ -492,8 +574,11 @@ async fn fetch_with_safe_retries_to_path(
                     policy,
                     private_grant.as_ref(),
                     item_id,
-                    |_| {},
-                    || token.is_cancelled(),
+                    &mut progress,
+                    || {
+                        token.is_cancelled()
+                            || worker_stop.is_some_and(CancellationToken::is_cancelled)
+                    },
                 )
                 .await
         };
@@ -565,7 +650,36 @@ struct PackResponse {
     remote_assets: Vec<RemoteAssetRequest>,
 }
 
+enum PackOutputEvent {
+    Progress(CapabilityProgress),
+    Response(Result<PackResponse, ()>),
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CapabilityProgress {
+    current: u64,
+    total: u64,
+    label: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapabilityProgressNotification {
+    jsonrpc: String,
+    method: String,
+    params: CapabilityProgress,
+}
+
+#[cfg(test)]
 fn read_response(reader: impl Read) -> Result<PackResponse, ()> {
+    read_response_with_progress(reader, |_| {})
+}
+
+fn read_response_with_progress(
+    reader: impl Read,
+    mut on_progress: impl FnMut(CapabilityProgress),
+) -> Result<PackResponse, ()> {
     let mut reader = BufReader::new(reader);
     let mut remote_assets: Vec<RemoteAssetRequest> = Vec::new();
     for _ in 0..MAX_STDOUT_LINES {
@@ -616,6 +730,27 @@ fn read_response(reader: impl Read) -> Result<PackResponse, ()> {
                 remote_assets.push(request);
                 continue;
             }
+            if value.get("method").and_then(|v| v.as_str()) == Some("import.progress") {
+                let notification: CapabilityProgressNotification =
+                    serde_json::from_value(value).map_err(|_| ())?;
+                if notification.jsonrpc != "2.0" || notification.method != "import.progress" {
+                    return Err(());
+                }
+                let progress = notification.params;
+                if progress.total == 0
+                    || progress.total > 10_000
+                    || progress.current > progress.total
+                    || progress.label.is_empty()
+                    || progress.label.len() > 64
+                    || !progress.label.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                    })
+                {
+                    return Err(());
+                }
+                on_progress(progress);
+                continue;
+            }
             if let Ok(rpc) = serde_json::from_value::<JsonRpcResponse<EngineResult>>(value) {
                 return Ok(PackResponse { rpc, remote_assets });
             }
@@ -630,6 +765,7 @@ fn localize_remote_assets(
     assets: Vec<RemoteAssetRequest>,
     cancellation: &CancellationToken,
     limiter: Arc<DomainLimiter>,
+    report_progress: &EngineProgressReporter<'_>,
 ) -> Result<(), BackendError> {
     let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
     let markdown_path = root.join(&result.markdown_path);
@@ -711,6 +847,16 @@ fn localize_remote_assets(
             .normalized_locator
             .clone()
             .or_else(|| Some(request.input.locator.clone()));
+        if let Some(suffixes) = bilibili_asset_redirect_suffixes(
+            request
+                .input
+                .normalized_locator
+                .as_deref()
+                .unwrap_or(&request.input.locator),
+        ) {
+            policy.require_https = true;
+            policy.allowed_host_suffixes = suffixes.iter().map(|suffix| (*suffix).into()).collect();
+        }
         policy.max_response_bytes = match content {
             WebFetchContent::Image => 8 * 1024 * 1024,
             WebFetchContent::Media => 1024 * 1024 * 1024,
@@ -735,7 +881,14 @@ fn localize_remote_assets(
             .map(|workspace| workspace.path().join("response.bin"));
         let worker_destination = streamed_path.clone();
         let limiter = limiter.clone();
-        let fetched = std::thread::spawn(move || {
+        let report_download = matches!(
+            content,
+            WebFetchContent::Media | WebFetchContent::TemporaryMedia
+        );
+        let progress_stop = CancellationToken::new();
+        let worker_stop = progress_stop.clone();
+        let (progress_sender, progress_receiver) = mpsc::channel::<WebFetchProgress>();
+        let worker = std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|_| engine_error("The asset runtime could not be started."))?;
             runtime.block_on(async move {
@@ -743,6 +896,7 @@ fn localize_remote_assets(
                     .acquire(&target.public.host, false)
                     .await
                     .map_err(|_| engine_error("The domain limiter is unavailable."))?;
+                let mut last_progress_bucket = None;
                 fetch_with_safe_retries_to_path(
                     target,
                     &policy,
@@ -750,12 +904,59 @@ fn localize_remote_assets(
                     &item_id,
                     worker_destination.as_deref(),
                     &token,
+                    Some(&worker_stop),
+                    move |progress| {
+                        if !report_download {
+                            return;
+                        }
+                        let bucket = progress
+                            .total_bytes
+                            .filter(|total| *total > 0)
+                            .map(|total| {
+                                progress.downloaded_bytes.min(total).saturating_mul(100) / total
+                            })
+                            .unwrap_or(0);
+                        if last_progress_bucket == Some(bucket) {
+                            return;
+                        }
+                        last_progress_bucket = Some(bucket);
+                        let _ = progress_sender.send(progress);
+                    },
                 )
                 .await
             })
-        })
-        .join()
-        .map_err(|_| engine_error("The asset fetch worker failed."))?;
+        });
+        let mut progress_error = None;
+        while !worker.is_finished() {
+            while let Ok(progress) = progress_receiver.try_recv() {
+                if let Err(error) = report_progress(EngineProgress {
+                    current: progress.downloaded_bytes,
+                    total: progress.total_bytes,
+                    label: "media.downloading".into(),
+                }) {
+                    progress_stop.cancel();
+                    progress_error = Some(error);
+                    break;
+                }
+            }
+            if progress_error.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let fetched = worker
+            .join()
+            .map_err(|_| engine_error("The asset fetch worker failed."))?;
+        if let Some(error) = progress_error {
+            return Err(error);
+        }
+        while let Ok(progress) = progress_receiver.try_recv() {
+            report_progress(EngineProgress {
+                current: progress.downloaded_bytes,
+                total: progress.total_bytes,
+                label: "media.downloading".into(),
+            })?;
+        }
         let fetched = match fetched {
             Ok(fetched) => fetched,
             Err(error) if remote_asset_failure_is_partial(content, transcription_ready) => {
@@ -946,6 +1147,24 @@ fn localize_remote_assets(
 fn remote_asset_failure_is_partial(content: WebFetchContent, transcription_ready: bool) -> bool {
     matches!(content, WebFetchContent::Image | WebFetchContent::Subtitle)
         || (content == WebFetchContent::Media && transcription_ready)
+}
+
+fn bilibili_asset_redirect_suffixes(source_url: &str) -> Option<&'static [&'static str]> {
+    const SUFFIXES: &[&str] = &[
+        "bilibili.com",
+        "b23.tv",
+        "bilivideo.com",
+        "bilivideo.cn",
+        "hdslb.com",
+        "biliimg.com",
+        "edge.mountaintoys.cn",
+    ];
+    let host = url::Url::parse(source_url)
+        .ok()?
+        .host_str()?
+        .to_ascii_lowercase();
+    (host == "b23.tv" || host == "bilibili.com" || host.ends_with(".bilibili.com"))
+        .then_some(SUFFIXES)
 }
 
 fn metadata_declares_bilibili_video(root: &Path, result: &EngineResult) -> bool {
@@ -1190,6 +1409,17 @@ mod tests {
     use std::io::{Cursor, Read};
 
     #[test]
+    fn bilibili_pack_assets_share_the_builtin_https_redirect_allowlist() {
+        let suffixes =
+            bilibili_asset_redirect_suffixes("https://www.bilibili.com/video/BV1example")
+                .expect("Bilibili imports should constrain remote asset redirects");
+        assert!(suffixes.contains(&"edge.mountaintoys.cn"));
+        assert!(
+            bilibili_asset_redirect_suffixes("https://bilibili.com.evil.example/video").is_none()
+        );
+    }
+
+    #[test]
     fn rejects_stdout_without_newline_beyond_eight_mib() {
         assert!(read_response(Cursor::new(vec![b'x'; MAX_STDOUT_LINE_BYTES + 1])).is_err());
     }
@@ -1281,6 +1511,61 @@ mod tests {
         let response = read_response(Cursor::new(input)).unwrap();
         assert_eq!(response.remote_assets.len(), 1);
         assert_eq!(response.remote_assets[0].placeholder, "webasset-0");
+    }
+
+    #[test]
+    fn streams_only_bounded_typed_progress_notifications() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"import.progress\",\"params\":{\"current\":48,\"total\":100,\"label\":\"asr.recognizing\"}}\n{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n";
+        let mut reported = Vec::new();
+        let response =
+            read_response_with_progress(Cursor::new(input), |progress| reported.push(progress))
+                .unwrap();
+        assert_eq!(response.rpc.id, "r");
+        assert_eq!(
+            reported,
+            vec![CapabilityProgress {
+                current: 48,
+                total: 100,
+                label: "asr.recognizing".into(),
+            }]
+        );
+
+        let invalid = b"{\"jsonrpc\":\"2.0\",\"method\":\"import.progress\",\"params\":{\"current\":101,\"total\":100,\"label\":\"asr.recognizing\"}}\n{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n";
+        assert!(read_response_with_progress(Cursor::new(invalid), |_| {}).is_err());
+
+        let response_shaped = b"{\"jsonrpc\":\"2.0\",\"id\":\"not-a-notification\",\"method\":\"import.progress\",\"params\":{\"current\":48,\"total\":100,\"label\":\"asr.recognizing\"}}\n";
+        assert!(read_response_with_progress(Cursor::new(response_shaped), |_| {}).is_err());
+        let unknown_param = b"{\"jsonrpc\":\"2.0\",\"method\":\"import.progress\",\"params\":{\"current\":48,\"total\":100,\"label\":\"asr.recognizing\",\"detail\":\"raw\"}}\n";
+        assert!(read_response_with_progress(Cursor::new(unknown_param), |_| {}).is_err());
+    }
+
+    #[test]
+    fn drains_a_terminal_response_queued_just_after_process_exit() {
+        let (sender, receiver) = mpsc::channel();
+        let response = read_response(Cursor::new(
+            b"{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n",
+        ));
+        let writer = std::thread::spawn(move || {
+            sender
+                .send(PackOutputEvent::Progress(CapabilityProgress {
+                    current: 48,
+                    total: 100,
+                    label: "asr.recognizing".into(),
+                }))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            sender.send(PackOutputEvent::Response(response)).unwrap();
+        });
+        let exited_at = Instant::now();
+        assert!(matches!(
+            receive_output_after_exit(&receiver, exited_at).unwrap(),
+            PackOutputEvent::Progress(_)
+        ));
+        assert!(matches!(
+            receive_output_after_exit(&receiver, exited_at).unwrap(),
+            PackOutputEvent::Response(Ok(_))
+        ));
+        writer.join().unwrap();
     }
 
     #[test]
@@ -1401,6 +1686,7 @@ mod tests {
             Vec::new(),
             &CancellationToken::new(),
             Arc::new(DomainLimiter::default()),
+            &|_| Ok(()),
         )
         .unwrap();
 

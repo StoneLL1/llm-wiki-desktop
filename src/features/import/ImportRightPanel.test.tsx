@@ -155,4 +155,23 @@ describe("ImportRightPanel", () => {
     expect(screen.getByText("CHALLENGE")).toBeInTheDocument();
     expect(screen.getAllByText(/failed/i).length).toBeGreaterThan(0);
   });
+
+  it("shows live local recognition percentage and stage in the inspector", () => {
+    render(
+      <ImportRightPanel
+        selectedItem={item({
+          status: "extracting",
+          preview: null,
+          progress: { current: 48, total: 100, label: "asr.recognizing" },
+        })}
+        onPreviewMarkdown={vi.fn()}
+      />,
+    );
+
+    const progressbar = screen.getByRole("progressbar", { name: /recognizing audio segments/i });
+    expect(progressbar).toHaveAttribute("aria-valuenow", "48");
+    expect(progressbar.firstElementChild).toHaveClass("animate-pulse");
+    expect(screen.getByText("48%")).toBeInTheDocument();
+    expect(screen.getByText(/recognizing audio segments/i)).toBeInTheDocument();
+  });
 });
