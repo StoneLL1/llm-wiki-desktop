@@ -64,18 +64,24 @@ function balancedJson(input) {
   return null;
 }
 
-function scriptValues(html) {
-  const values = [];
-  const scripts = String(html).matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi);
+function scriptEntries(html) {
+  const entries = [];
+  const scripts = String(html).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi);
   for (const match of scripts) {
-    if (values.length >= MAX_VALUES) break;
-    const source = match[1].trim();
+    if (entries.length >= MAX_VALUES) break;
+    const source = match[2].trim();
     if (!source || Buffer.byteLength(source, "utf8") > MAX_SCRIPT_BYTES) continue;
     let value;
     try { value = JSON.parse(source); } catch { value = balancedJson(source); }
-    if (value && typeof value === "object") values.push(value);
+    if (value && typeof value === "object") {
+      entries.push({ attributes: match[1], source, value });
+    }
   }
-  return values;
+  return entries;
+}
+
+function scriptValues(html) {
+  return scriptEntries(html).map((entry) => entry.value);
 }
 
 function walk(value, callback) {
@@ -120,6 +126,17 @@ function firstString(value, keys) {
   return found;
 }
 
+function firstDirectString(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  for (const expected of keys) {
+    const actual = Object.keys(value)
+      .find((name) => name.toLowerCase() === expected.toLowerCase());
+    const direct = actual ? stringValue(value[actual]) : null;
+    if (direct) return direct;
+  }
+  return null;
+}
+
 function urlsFrom(value, baseUrl, output, limit) {
   const pending = [value];
   let visited = 0;
@@ -148,6 +165,252 @@ function collectKeyUrls(value, keys, baseUrl, limit) {
     }
   });
   return output.slice(0, limit);
+}
+
+function collectBilibiliSubtitleCandidates(value, baseUrl, directOnly = false) {
+  const output = [];
+  const seen = new Set();
+  const collect = (candidate) => {
+    if (output.length >= 20 || Array.isArray(candidate)) return;
+    for (const [key, child] of Object.entries(candidate)) {
+      if (!["subtitle_url", "subtitleurl", "caption_url", "captionurl"].includes(key.toLowerCase())) continue;
+      const values = Array.isArray(child) ? child : [child];
+      for (const raw of values) {
+        if (typeof raw !== "string") continue;
+        const normalized = normalizedAssetUrl(raw, baseUrl);
+        if (!normalized || seen.has(normalized.identity)) continue;
+        seen.add(normalized.identity);
+        const numericFlag = ["ai_status", "ai_type", "type"]
+          .map((name) => Object.keys(candidate).find((key) => key.toLowerCase() === name))
+          .filter(Boolean)
+          .map((name) => Number(candidate[name]))
+          .find((flag) => Number.isFinite(flag) && flag !== 0);
+        output.push({
+          url: normalized.request,
+          automatic: numericFlag !== undefined,
+          language: firstDirectString(candidate, ["lan", "language", "lang"]),
+          label: firstDirectString(candidate, ["lan_doc", "label", "languageLabel"]),
+        });
+        if (output.length >= 20) return;
+      }
+    }
+  };
+  const directSubtitleContainer = value && typeof value === "object"
+    ? Object.entries(value)
+      .find(([key]) => ["subtitle", "subtitles", "captions"].includes(key.toLowerCase()))?.[1]
+    : null;
+  if (directSubtitleContainer && typeof directSubtitleContainer === "object") {
+    walk(directSubtitleContainer, collect);
+  } else if (directOnly) {
+    collect(value);
+  } else {
+    walk(value, collect);
+  }
+  output.sort((left, right) => {
+    const automatic = Number(left.automatic) - Number(right.automatic);
+    if (automatic !== 0) return automatic;
+    const leftChinese = String(left.language || "").toLowerCase().startsWith("zh");
+    const rightChinese = String(right.language || "").toLowerCase().startsWith("zh");
+    return Number(rightChinese) - Number(leftChinese);
+  });
+  return output;
+}
+
+function firstStreamUrl(streams, baseUrl) {
+  if (!Array.isArray(streams)) return null;
+  for (const stream of streams) {
+    if (!stream || typeof stream !== "object") continue;
+    for (const key of ["url", "baseUrl", "base_url"]) {
+      const normalized = normalizedAssetUrl(stringValue(stream[key]), baseUrl);
+      if (normalized) return normalized.request;
+    }
+  }
+  return null;
+}
+
+function bilibiliMediaUrls(value, baseUrl, directOnly = false) {
+  const find = (candidate) => {
+    if (Array.isArray(candidate)) return;
+    const progressive = firstStreamUrl(candidate.durl, baseUrl);
+    let audio = null;
+    let video = null;
+    if (candidate.dash && typeof candidate.dash === "object") {
+      audio = firstStreamUrl(candidate.dash.audio, baseUrl);
+      video = firstStreamUrl(candidate.dash.video, baseUrl);
+    }
+    return { progressive, audio, video };
+  };
+  let streams = find(value) || { progressive: null, audio: null, video: null };
+  if (!directOnly && !streams.progressive && !streams.audio && !streams.video) {
+    walk(value, (candidate) => {
+      if (streams.progressive || streams.audio || streams.video) return;
+      streams = find(candidate) || streams;
+    });
+  }
+  return {
+    mediaUrl: streams.progressive,
+    asrMediaUrl: streams.audio || streams.progressive || streams.video,
+  };
+}
+
+export function extractBilibiliPlayerEvidence(value, baseUrl, directOnly = false) {
+  if (!value || typeof value !== "object") {
+    return {
+      mediaUrl: null,
+      asrMediaUrl: null,
+      subtitleCandidates: [],
+      subtitles: [],
+    };
+  }
+  const media = bilibiliMediaUrls(value, baseUrl, directOnly);
+  const subtitleCandidates = collectBilibiliSubtitleCandidates(value, baseUrl, directOnly);
+  return {
+    ...media,
+    subtitleCandidates,
+    subtitles: subtitleCandidates.map((subtitle) => subtitle.url),
+  };
+}
+
+export function extractBilibiliPlayerEvidenceFromHtml(html, baseUrl, aliases = {}) {
+  const evidence = [];
+  const identities = bilibiliTargetAliases(baseUrl, aliases);
+  for (const entry of scriptEntries(html)) {
+    const explicitPlayInfo = /(?:window\.)?__playinfo__\s*=/i.test(entry.source)
+      || /\bid\s*=\s*["']__playinfo__["']/i.test(entry.attributes);
+    if (explicitPlayInfo) {
+      const playerValue = entry.value?.data && typeof entry.value.data === "object"
+        ? entry.value.data
+        : entry.value;
+      evidence.push(extractBilibiliPlayerEvidence(playerValue, baseUrl, true));
+      continue;
+    }
+    const scope = matchingBilibiliTarget(entry.value, identities);
+    if (scope) evidence.push(extractBilibiliPlayerEvidence(scope, baseUrl));
+  }
+  return mergeBilibiliPlayerEvidence(
+    {
+      mediaUrl: null,
+      asrMediaUrl: null,
+      subtitleCandidates: [],
+      subtitles: [],
+    },
+    evidence,
+  );
+}
+
+export function extractRelevantBilibiliPlayerEvidence(candidate, baseUrl, aliases = {}) {
+  if (!candidate || typeof candidate !== "object") {
+    return extractBilibiliPlayerEvidence(null, baseUrl);
+  }
+  const identities = bilibiliTargetAliases(baseUrl, aliases);
+  if (!identities.bvid && !identities.aid && !identities.cid) {
+    return extractBilibiliPlayerEvidence(null, baseUrl);
+  }
+  let requestMatches = false;
+  try {
+    const requestUrl = new URL(candidate.url);
+    requestMatches = [
+      ["bvid", identities.bvid],
+      ["aid", identities.aid],
+      ["avid", identities.aid],
+      ["cid", identities.cid],
+    ].some(([key, expected]) => expected
+      && requestUrl.searchParams.get(key)?.toLowerCase() === expected.toLowerCase());
+  } catch {
+    requestMatches = false;
+  }
+  const responseScope = matchingBilibiliTarget(candidate.value, identities);
+  if (responseScope) {
+    return extractBilibiliPlayerEvidence(responseScope, baseUrl);
+  }
+  if (!requestMatches) return extractBilibiliPlayerEvidence(null, baseUrl);
+  const playerValue = candidate.value?.data && typeof candidate.value.data === "object"
+    ? candidate.value.data
+    : candidate.value;
+  return extractBilibiliPlayerEvidence(playerValue, baseUrl, true);
+}
+
+export function mergeBilibiliPlayerEvidence(payload, evidenceValues) {
+  const merged = {
+    ...payload,
+    subtitleCandidates: [...(payload?.subtitleCandidates || [])],
+    subtitles: [...new Set(payload?.subtitles || [])],
+  };
+  for (const evidence of evidenceValues || []) {
+    if (!evidence || typeof evidence !== "object") continue;
+    if (!merged.mediaUrl && evidence.mediaUrl) merged.mediaUrl = evidence.mediaUrl;
+    if (!merged.asrMediaUrl && evidence.asrMediaUrl) {
+      merged.asrMediaUrl = evidence.asrMediaUrl;
+    }
+    for (const subtitle of evidence.subtitleCandidates || []) {
+      if (!merged.subtitleCandidates.some((candidate) => candidate.url === subtitle.url)) {
+        merged.subtitleCandidates.push(subtitle);
+      }
+    }
+  }
+  merged.subtitleCandidates.sort((left, right) => {
+    const automatic = Number(left.automatic) - Number(right.automatic);
+    if (automatic !== 0) return automatic;
+    const leftChinese = String(left.language || "").toLowerCase().startsWith("zh");
+    const rightChinese = String(right.language || "").toLowerCase().startsWith("zh");
+    return Number(rightChinese) - Number(leftChinese);
+  });
+  merged.subtitles = merged.subtitleCandidates.length
+    ? merged.subtitleCandidates.map((subtitle) => subtitle.url)
+    : merged.subtitles;
+  if (merged.mediaUrl || merged.asrMediaUrl || merged.subtitles.length) {
+    merged.contentType = "video";
+  }
+  return merged;
+}
+
+export function bilibiliMediaPolicy(payload, options) {
+  const mediaUrl = payload?.mediaUrl || null;
+  const asrMediaUrl = payload?.asrMediaUrl || mediaUrl;
+  if (options.mediaSaveMode === "preserve_original" && !mediaUrl && asrMediaUrl) {
+    return {
+      errorCode: "IMPORT_WEB_MEDIA_UNAVAILABLE",
+      asrMediaUrl: null,
+    };
+  }
+  if ((mediaUrl || asrMediaUrl)
+    && !options.hasSubtitle
+    && !options.localAsrAuthorized
+    && !options.allowMissingTranscript) {
+    return {
+      errorCode: "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
+      asrMediaUrl: null,
+    };
+  }
+  return {
+    errorCode: null,
+    asrMediaUrl: options.localAsrAuthorized && !options.allowMissingTranscript
+      ? asrMediaUrl
+      : null,
+  };
+}
+
+export function isBilibiliPlayerApiUrl(value) {
+  try {
+    const candidate = new URL(value);
+    return candidate.pathname.startsWith("/x/player/")
+      && ["bvid", "aid", "avid", "cid"].some((key) => candidate.searchParams.has(key));
+  } catch {
+    return false;
+  }
+}
+
+export function resolveSubtitleReference(raw, baseUrl) {
+  const value = String(raw || "").trim();
+  if (!/^(?:https?:)?\/\//i.test(value)
+    && !/\.(?:json|vtt|srt|ass|ssa)(?:[?#]|$)/i.test(value)) {
+    return null;
+  }
+  try {
+    return new URL(value, baseUrl);
+  } catch {
+    return null;
+  }
 }
 
 function normalizedAssetUrl(raw, baseUrl) {
@@ -277,6 +540,19 @@ function targetIdentity(platform, baseUrl) {
   return platform === "bilibili" && /^av\d+$/i.test(raw) ? raw.slice(2) : raw;
 }
 
+function bilibiliTargetAliases(baseUrl, aliases = {}) {
+  const pathIdentity = targetIdentity("bilibili", baseUrl);
+  const bvid = aliases.bvid
+    || (pathIdentity?.toLowerCase().startsWith("bv") ? pathIdentity : null);
+  const aid = aliases.aid
+    || (pathIdentity && !pathIdentity.toLowerCase().startsWith("bv") ? pathIdentity : null);
+  return {
+    bvid: bvid ? String(bvid) : null,
+    aid: aid ? String(aid) : null,
+    cid: aliases.cid ? String(aliases.cid) : null,
+  };
+}
+
 function idKeys(platform) {
   if (platform === "bilibili") return ["bvid", "aid"];
   if (platform === "xiaohongshu") return ["noteId", "note_id", "id"];
@@ -297,6 +573,29 @@ function matchingTarget(value, platform, expectedId) {
     }
   });
   return found;
+}
+
+function matchingBilibiliTarget(value, aliases) {
+  const identities = [
+    [["bvid"], aliases.bvid],
+    [["aid", "avid"], aliases.aid],
+    [["cid"], aliases.cid],
+  ];
+  for (const [keys, expected] of identities) {
+    if (!expected) continue;
+    let found = null;
+    walk(value, (candidate) => {
+      if (found || Array.isArray(candidate)) return;
+      const actual = Object.keys(candidate)
+        .find((name) => keys.includes(name.toLowerCase()));
+      const candidateId = actual ? stringValue(candidate[actual]) : null;
+      if (candidateId?.toLowerCase() === String(expected).toLowerCase()) {
+        found = candidate;
+      }
+    });
+    if (found) return found;
+  }
+  return null;
 }
 
 export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
@@ -324,12 +623,25 @@ export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
     : platform === "xiaohongshu"
       ? ["masterUrl", "master_url", "videoUrl", "video_url", "playUrl", "play_url"]
       : ["playAddr", "play_addr", "playUrl", "play_url"];
+  const bilibiliPlayerEvidence = platform === "bilibili"
+    ? extractBilibiliPlayerEvidence(scope, baseUrl)
+    : null;
+  const targetAliases = platform === "bilibili"
+    ? bilibiliTargetAliases(baseUrl, {
+      bvid: firstDirectString(scope, ["bvid"]),
+      aid: firstDirectString(scope, ["aid", "avid"]),
+      cid: firstDirectString(scope, ["cid"]),
+    })
+    : null;
   const images = platform === "xiaohongshu"
     ? collectXhsImages(scope, baseUrl, 100)
     : collectKeyUrls(scope, imageKeys, baseUrl, 100);
-  const mediaUrl = collectKeyUrls(scope, mediaKeys, baseUrl, 1)[0] || null;
-  const declaredVideo = platform === "xiaohongshu"
-    && String(firstString(scope, ["type", "noteType", "note_type"]) || "").toLowerCase() === "video";
+  const mediaUrl = bilibiliPlayerEvidence?.mediaUrl
+    || collectKeyUrls(scope, mediaKeys, baseUrl, 1)[0]
+    || null;
+  const declaredVideo = (platform === "bilibili" && Boolean(expectedId))
+    || (platform === "xiaohongshu"
+      && String(firstString(scope, ["type", "noteType", "note_type"]) || "").toLowerCase() === "video");
   const hashtags = hashtagsFrom(description);
   if (platform === "xiaohongshu") {
     for (const tag of collectXhsTags(scope)) if (!hashtags.includes(tag)) hashtags.push(tag);
@@ -341,10 +653,18 @@ export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
     author,
     publishedAt,
     platformId: expectedId,
+    targetAliases,
     contentType: declaredVideo || mediaUrl ? "video" : images.length ? "image_post" : "article",
     images,
     mediaUrl,
-    subtitles: collectKeyUrls(scope, ["subtitles", "subtitle", "captions", "captionUrl", "subtitleUrl"], baseUrl, 20),
+    asrMediaUrl: bilibiliPlayerEvidence?.asrMediaUrl || mediaUrl,
+    subtitleCandidates: bilibiliPlayerEvidence?.subtitleCandidates || [],
+    subtitles: bilibiliPlayerEvidence?.subtitles || collectKeyUrls(
+      scope,
+      ["subtitles", "subtitle", "captions", "caption_url", "captionUrl", "subtitle_url", "subtitleUrl"],
+      baseUrl,
+      20,
+    ),
     hashtags,
   };
 }
@@ -431,11 +751,15 @@ export function renderPlatformMarkdown(
   return `${lines.join("\n")}\n`;
 }
 
-export function selectRelevantApiEvidence(platform, candidates, baseUrl, limit = 3) {
+export function selectRelevantApiEvidence(platform, candidates, baseUrl, limit = 3, aliases = {}) {
   if (!Array.isArray(candidates) || !Number.isSafeInteger(limit) || limit <= 0) return [];
   return candidates
     .filter((candidate) => candidate && typeof candidate === "object"
-      && extractPlatformPayloadFromValue(platform, candidate.value, baseUrl))
+      && (extractPlatformPayloadFromValue(platform, candidate.value, baseUrl)
+        || (platform === "bilibili" && (() => {
+          const evidence = extractRelevantBilibiliPlayerEvidence(candidate, baseUrl, aliases);
+          return Boolean(evidence.mediaUrl || evidence.asrMediaUrl || evidence.subtitles.length);
+        })())))
     .slice(0, limit);
 }
 

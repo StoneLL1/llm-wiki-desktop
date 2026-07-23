@@ -17,7 +17,9 @@ use crate::services::import_v2::media_router::{
 };
 use crate::services::import_v2::platform_provider::{extract_platform_document, Platform};
 use crate::services::import_v2::redaction::redact_sensitive_text;
-use crate::services::import_v2::subtitle::{parse_subtitle_segments, render_subtitle_markdown};
+use crate::services::import_v2::subtitle::{
+    append_missing_transcript_notice, parse_subtitle_segments, render_subtitle_markdown,
+};
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{
     WebFetchArtifact, WebFetchContent, WebFetchPolicy, WebFetchService,
@@ -346,7 +348,7 @@ impl ImportEngine for GenericWebEngine {
                         markdown = replace_markdown_asset_reference(
                             &markdown,
                             &image_url,
-                            "锛堝浘鐗囨潵婧愭湭鑾峰厑璁革級",
+                            "（图片来源未获允许）",
                         );
                         warnings.push(
                             "Platform image redirect left the verified host allowlist.".into(),
@@ -700,6 +702,13 @@ impl ImportEngine for GenericWebEngine {
                     }
                 }
             }
+        }
+        if platform == Some(Platform::Bilibili)
+            && request.allow_missing_transcript
+            && !transcription_ready
+            && continuation.is_none()
+        {
+            append_missing_transcript_notice(&mut markdown);
         }
         let descriptor = self.descriptor();
         markdown = redact_sensitive_text(&markdown);
@@ -1928,6 +1937,12 @@ mod tests {
             "Bilibili result violated staging: assets={:?}, continuation={:?}",
             result.asset_paths,
             result.continuation
+        );
+        let markdown = std::fs::read_to_string(root.join(staging_root).join("document.md"))
+            .expect("the Bilibili Markdown candidate should be readable");
+        assert!(
+            markdown.contains("## 字幕 / 转写"),
+            "the candidate must contain either a transcript or an explicit missing-transcript notice"
         );
         std::fs::remove_dir_all(root).ok();
     }

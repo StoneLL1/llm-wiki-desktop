@@ -21,7 +21,9 @@ use crate::services::import_v2::media_router::{
 };
 use crate::services::import_v2::pack_protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::services::import_v2::redaction::redact_sensitive_text;
-use crate::services::import_v2::subtitle::render_subtitle_markdown;
+use crate::services::import_v2::subtitle::{
+    append_missing_transcript_notice, render_subtitle_markdown,
+};
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
 use crate::services::import_v2::web_target_store::WebTargetStore;
@@ -629,13 +631,11 @@ fn localize_remote_assets(
     cancellation: &CancellationToken,
     limiter: Arc<DomainLimiter>,
 ) -> Result<(), BackendError> {
-    if assets.is_empty() {
-        return Ok(());
-    }
     let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
     let markdown_path = root.join(&result.markdown_path);
     let mut markdown = std::fs::read_to_string(&markdown_path)
         .map_err(|_| engine_error("The web candidate could not be reopened."))?;
+    let bilibili_video = metadata_declares_bilibili_video(&root, result);
     let mut transcription_ready = false;
     let mut saw_media = false;
     let mut saw_image = false;
@@ -907,17 +907,28 @@ fn localize_remote_assets(
         }
         result.asset_paths.push(relative);
     }
-    if saw_media
-        && !transcription_ready
-        && !request.local_asr_authorized
-        && !request.allow_missing_transcript
-    {
+    let local_asr_ready = matches!(
+        result.continuation.as_ref(),
+        Some(crate::services::import_v2::engine::EngineContinuation::LocalAsr { .. })
+    );
+    let transcript_missing = transcript_is_missing(saw_media, bilibili_video, transcription_ready);
+    if transcript_failure_required(
+        transcript_missing,
+        local_asr_ready,
+        request.allow_missing_transcript,
+    ) {
         return Err(BackendError::new(
             "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
             "The platform subtitle candidates were unavailable or not parseable.",
             true,
             true,
         ));
+    }
+    if transcript_missing && request.allow_missing_transcript && !local_asr_ready {
+        append_missing_transcript_notice(&mut markdown);
+        result.warnings.push(
+            "The preview contains metadata only because no usable transcript was found.".into(),
+        );
     }
     if remote_image_output_is_empty(saw_image, successful_images, result.text_coverage) {
         return Err(BackendError::new(
@@ -935,6 +946,35 @@ fn localize_remote_assets(
 fn remote_asset_failure_is_partial(content: WebFetchContent, transcription_ready: bool) -> bool {
     matches!(content, WebFetchContent::Image | WebFetchContent::Subtitle)
         || (content == WebFetchContent::Media && transcription_ready)
+}
+
+fn metadata_declares_bilibili_video(root: &Path, result: &EngineResult) -> bool {
+    let Some(relative) = result.metadata_path.as_deref() else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(root.join(relative)) else {
+        return false;
+    };
+    let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    metadata.get("platform").and_then(serde_json::Value::as_str) == Some("bilibili")
+        && metadata
+            .get("contentType")
+            .and_then(serde_json::Value::as_str)
+            == Some("video")
+}
+
+fn transcript_is_missing(saw_media: bool, bilibili_video: bool, transcription_ready: bool) -> bool {
+    (saw_media || bilibili_video) && !transcription_ready
+}
+
+fn transcript_failure_required(
+    unresolved_transcript: bool,
+    local_asr_ready: bool,
+    allow_missing_transcript: bool,
+) -> bool {
+    unresolved_transcript && !local_asr_ready && !allow_missing_transcript
 }
 
 fn remote_image_output_is_empty(
@@ -1281,6 +1321,97 @@ mod tests {
         assert!(remote_image_output_is_empty(true, 0, Some(0.0)));
         assert!(!remote_image_output_is_empty(true, 1, Some(0.0)));
         assert!(!remote_image_output_is_empty(true, 0, Some(1.0)));
+    }
+
+    #[test]
+    fn asr_authorization_without_a_local_asr_continuation_still_fails_closed() {
+        assert!(transcript_failure_required(true, false, false));
+        assert!(!transcript_failure_required(true, true, false));
+        assert!(!transcript_failure_required(true, false, true));
+    }
+
+    #[test]
+    fn bilibili_metadata_only_candidates_still_require_an_explicit_transcript_outcome() {
+        assert!(transcript_is_missing(false, true, false));
+        assert!(!transcript_is_missing(false, true, true));
+        assert!(!transcript_is_missing(false, false, false));
+    }
+
+    #[test]
+    fn bilibili_metadata_only_candidate_is_labeled_instead_of_silently_succeeding() {
+        let project_root =
+            std::env::temp_dir().join(format!("bilibili-metadata-{}", uuid::Uuid::new_v4()));
+        let staging_root = "staging";
+        let staging = project_root.join(staging_root);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("candidate.md"),
+            "# Fixture\n\n## 原始描述\n\nDescription\n",
+        )
+        .unwrap();
+        std::fs::write(
+            staging.join("metadata.json"),
+            br#"{"platform":"bilibili","contentType":"video"}"#,
+        )
+        .unwrap();
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "request-1".into(),
+            project_id: "project-1".into(),
+            session_id: "session-1".into(),
+            item_id: "item-1".into(),
+            task_id: "task-1".into(),
+            operation: crate::services::import_v2::engine::EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "Bilibili fixture".into(),
+                locator: "https://www.bilibili.com/video/BV1fixture".into(),
+                normalized_locator: None,
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+            project_root: project_root.to_string_lossy().into_owned(),
+            staging_root: staging_root.into(),
+            chained_input: None,
+            local_asr_authorized: false,
+            local_ocr_authorized: false,
+            allow_missing_transcript: true,
+            media_save_mode: MediaSaveMode::ExtractOnly,
+        };
+        let mut result = EngineResult {
+            source_snapshot_path: "source.json".into(),
+            markdown_path: "candidate.md".into(),
+            asset_paths: Vec::new(),
+            metadata_path: Some("metadata.json".into()),
+            title: "Fixture".into(),
+            text_coverage: Some(1.0),
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: None,
+            warnings: Vec::new(),
+        };
+
+        localize_remote_assets(
+            &request,
+            &mut result,
+            Vec::new(),
+            &CancellationToken::new(),
+            Arc::new(DomainLimiter::default()),
+        )
+        .unwrap();
+
+        let markdown = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
+        assert!(markdown.contains("## 字幕 / 转写"));
+        assert!(markdown.contains("仅包含视频元数据与简介"));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("metadata only")));
+        std::fs::remove_dir_all(project_root).ok();
     }
 
     #[test]

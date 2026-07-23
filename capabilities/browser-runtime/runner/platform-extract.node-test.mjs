@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL } from "node:url";
-import { classifyPlatformPage, classifyRemoteImageKind, extractPlatformPayload, renderPlatformMarkdown, selectRelevantApiEvidence } from "./platform-extract.mjs";
+import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidence, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence } from "./platform-extract.mjs";
 
 function fixture(name) {
   return readFileSync(new URL(`../../../tests/fixtures/import-v2/web/xiaohongshu/${name}`, import.meta.url), "utf8");
@@ -180,5 +180,285 @@ test("extracts Bilibili title, owner, subtitle, and progressive stream", () => {
   const result = extractPlatformPayload("bilibili", html, "https://www.bilibili.com/video/BV1abc");
   assert.equal(result.author, "UP");
   assert.equal(result.mediaUrl, "https://upos-sz-mirrorali.bilivideo.com/video.mp4");
+  assert.equal(result.asrMediaUrl, "https://upos-sz-mirrorali.bilivideo.com/video.mp4");
+  assert.equal(result.subtitles.length, 1);
   assert.equal(result.subtitles[0], "https://aisubtitle.hdslb.com/subtitle.vtt");
+});
+
+test("merges a target-bound Bilibili player response into separate page metadata", () => {
+  const page = extractPlatformPayload(
+    "bilibili",
+    `<script>{"data":{"bvid":"BV1abc","title":"Video","owner":{"name":"UP"}}}</script>`,
+    "https://www.bilibili.com/video/BV1abc",
+  );
+  const player = {
+    url: "https://api.bilibili.com/x/player/wbi/v2?bvid=BV1abc&cid=123",
+    value: {
+      data: {
+        subtitle: {
+          subtitles: [
+            {
+              lan_doc: "中文（自动生成）",
+              subtitle_url: "//aisubtitle.hdslb.com/bfs/ai_subtitle/subtitle.json?token=one",
+            },
+          ],
+        },
+        dash: {
+          audio: [
+            {
+              baseUrl: "https://upos-sz-mirrorali.bilivideo.com/audio.m4s?deadline=one",
+            },
+          ],
+        },
+      },
+    },
+  };
+  const evidence = extractRelevantBilibiliPlayerEvidence(
+    player,
+    "https://www.bilibili.com/video/BV1abc",
+  );
+  const merged = mergeBilibiliPlayerEvidence(page, [evidence]);
+
+  assert.equal(merged.title, "Video");
+  assert.equal(merged.contentType, "video");
+  assert.equal(merged.mediaUrl, null);
+  assert.equal(
+    merged.asrMediaUrl,
+    "https://upos-sz-mirrorali.bilivideo.com/audio.m4s?deadline=one",
+  );
+  assert.deepEqual(merged.subtitles, [
+    "https://aisubtitle.hdslb.com/bfs/ai_subtitle/subtitle.json?token=one",
+  ]);
+  assert.deepEqual(
+    selectRelevantApiEvidence(
+      "bilibili",
+      [player],
+      "https://www.bilibili.com/video/BV1abc",
+    ),
+    [player],
+  );
+});
+
+test("rejects Bilibili player evidence for a different recommended video", () => {
+  const candidate = {
+    url: "https://api.bilibili.com/x/player/wbi/v2?bvid=BV1wrong&cid=999",
+    value: {
+      data: {
+        subtitle: {
+          subtitles: [
+            {
+              subtitle_url: "https://aisubtitle.hdslb.com/wrong.json",
+            },
+          ],
+        },
+      },
+    },
+  };
+  const evidence = extractRelevantBilibiliPlayerEvidence(
+    candidate,
+    "https://www.bilibili.com/video/BV1abc",
+  );
+  assert.deepEqual(evidence, {
+    mediaUrl: null,
+    asrMediaUrl: null,
+    subtitleCandidates: [],
+    subtitles: [],
+  });
+  assert.deepEqual(
+    selectRelevantApiEvidence(
+      "bilibili",
+      [candidate],
+      "https://www.bilibili.com/video/BV1abc",
+    ),
+    [],
+  );
+});
+
+test("keeps human Chinese Bilibili subtitles ahead of automatic alternatives", () => {
+  const evidence = extractBilibiliPlayerEvidence(
+    {
+      subtitle: {
+        subtitles: [
+          {
+            lan: "en",
+            lan_doc: "English (AI)",
+            subtitle_url: "https://aisubtitle.hdslb.com/en.json",
+            ai_status: 1,
+          },
+          {
+            lan: "zh-CN",
+            lan_doc: "中文",
+            subtitle_url: "https://aisubtitle.hdslb.com/zh.json",
+            ai_status: 0,
+          },
+        ],
+      },
+    },
+    "https://www.bilibili.com/video/BV1abc",
+  );
+  assert.deepEqual(
+    evidence.subtitleCandidates.map((subtitle) => [
+      subtitle.language,
+      subtitle.automatic,
+      subtitle.url,
+    ]),
+    [
+      ["zh-CN", false, "https://aisubtitle.hdslb.com/zh.json"],
+      ["en", true, "https://aisubtitle.hdslb.com/en.json"],
+    ],
+  );
+});
+
+test("does not merge recommendation player data from unrelated HTML scripts", () => {
+  const html = `
+    <script>{"target":{"bvid":"BV1abc","title":"Target"},"recommendation":{"bvid":"BV1wrong","title":"Wrong","durl":[{"url":"https://upos-sz-mirrorali.bilivideo.com/wrong.mp4"}],"subtitle":{"subtitles":[{"subtitle_url":"https://aisubtitle.hdslb.com/wrong.json"}]}}}</script>
+  `;
+  const evidence = extractBilibiliPlayerEvidenceFromHtml(
+    html,
+    "https://www.bilibili.com/video/BV1abc",
+    { bvid: "BV1abc" },
+  );
+  assert.equal(evidence.mediaUrl, null);
+  assert.deepEqual(evidence.subtitles, []);
+});
+
+test("scopes mixed API payload evidence to the target object instead of siblings", () => {
+  const candidate = {
+    url: "https://api.bilibili.com/x/web-interface/view/detail",
+    value: {
+      target: {
+        bvid: "BV1abc",
+        title: "Target",
+        subtitle: {
+          subtitles: [
+            {
+              subtitle_url: "https://aisubtitle.hdslb.com/right.json",
+            },
+          ],
+        },
+      },
+      recommendation: {
+        bvid: "BV1wrong",
+        title: "Wrong",
+        durl: [
+          {
+            url: "https://upos-sz-mirrorali.bilivideo.com/wrong.mp4",
+          },
+        ],
+      },
+    },
+  };
+  const evidence = extractRelevantBilibiliPlayerEvidence(
+    candidate,
+    "https://www.bilibili.com/video/BV1abc",
+  );
+  assert.equal(evidence.mediaUrl, null);
+  assert.deepEqual(evidence.subtitles, [
+    "https://aisubtitle.hdslb.com/right.json",
+  ]);
+});
+
+test("accepts aid-only player requests after BV metadata establishes the alias", () => {
+  const candidate = {
+    url: "https://api.bilibili.com/x/player/wbi/v2?aid=123&cid=456",
+    value: {
+      data: {
+        dash: {
+          audio: [
+            {
+              baseUrl: "https://upos-sz-mirrorali.bilivideo.com/right.m4s",
+            },
+          ],
+        },
+      },
+    },
+  };
+  const evidence = extractRelevantBilibiliPlayerEvidence(
+    candidate,
+    "https://www.bilibili.com/video/BV1abc",
+    { bvid: "BV1abc", aid: "123", cid: "456" },
+  );
+  assert.equal(
+    evidence.asrMediaUrl,
+    "https://upos-sz-mirrorali.bilivideo.com/right.m4s",
+  );
+  assert.deepEqual(
+    selectRelevantApiEvidence(
+      "bilibili",
+      [candidate],
+      "https://www.bilibili.com/video/BV1abc",
+      3,
+      { bvid: "BV1abc", aid: "123", cid: "456" },
+    ),
+    [candidate],
+  );
+});
+
+test("keeps DASH audio ASR-only and fails closed for unsupported policy combinations", () => {
+  const payload = {
+    mediaUrl: null,
+    asrMediaUrl: "https://upos-sz-mirrorali.bilivideo.com/audio.m4s",
+  };
+  assert.deepEqual(
+    bilibiliMediaPolicy(payload, {
+      mediaSaveMode: "extract_only",
+      hasSubtitle: false,
+      localAsrAuthorized: false,
+      allowMissingTranscript: false,
+    }),
+    { errorCode: "IMPORT_WEB_SUBTITLE_UNAVAILABLE", asrMediaUrl: null },
+  );
+  assert.deepEqual(
+    bilibiliMediaPolicy(payload, {
+      mediaSaveMode: "preserve_original",
+      hasSubtitle: false,
+      localAsrAuthorized: true,
+      allowMissingTranscript: false,
+    }),
+    { errorCode: "IMPORT_WEB_MEDIA_UNAVAILABLE", asrMediaUrl: null },
+  );
+  assert.deepEqual(
+    bilibiliMediaPolicy(payload, {
+      mediaSaveMode: "extract_only",
+      hasSubtitle: false,
+      localAsrAuthorized: true,
+      allowMissingTranscript: true,
+    }),
+    { errorCode: null, asrMediaUrl: null },
+  );
+  assert.deepEqual(
+    bilibiliMediaPolicy(payload, {
+      mediaSaveMode: "extract_only",
+      hasSubtitle: false,
+      localAsrAuthorized: true,
+      allowMissingTranscript: false,
+    }),
+    {
+      errorCode: null,
+      asrMediaUrl: "https://upos-sz-mirrorali.bilivideo.com/audio.m4s",
+    },
+  );
+});
+
+test("recognizes bounded player API candidates and rejects text subtitle labels", () => {
+  assert.equal(isBilibiliPlayerApiUrl(
+    "https://api.bilibili.com/x/player/wbi/v2?bvid=BV1abc&cid=123",
+  ), true);
+  assert.equal(isBilibiliPlayerApiUrl(
+    "https://api.bilibili.com/x/web-interface/popular?bvid=BV1abc",
+  ), false);
+  assert.equal(
+    resolveSubtitleReference(
+      "Related story",
+      "https://example.com/article",
+    ),
+    null,
+  );
+  assert.equal(
+    resolveSubtitleReference(
+      "/captions/main.vtt",
+      "https://example.com/article",
+    )?.href,
+    "https://example.com/captions/main.vtt",
+  );
 });

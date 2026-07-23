@@ -10,7 +10,7 @@ import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
 import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
-import { classifyPlatformPage, classifyRemoteImageKind, extractPlatformPayload, extractPlatformPayloadFromValue, renderPlatformMarkdown, selectRelevantApiEvidence } from "./platform-extract.mjs";
+import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractPlatformPayloadFromValue, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence } from "./platform-extract.mjs";
 import { isLoginChallengeState, redactJsonValue, redactSensitiveText, sanitizePublicUrl } from "./snapshot-policy.mjs";
 import { assertLinuxBrowserDependencies } from "./linux-deps.mjs";
 
@@ -107,12 +107,13 @@ function subtitleCandidates(document, baseUrl) {
     if (raw) candidates.add(raw);
   }
   const scripts = Array.from(document.scripts).map((script) => script.textContent || "").join("\n");
-  const keyed = /["'](?:subtitleUrl|captionUrl|subtitle|captions?|subtitle_src|caption_url)["']\s*:\s*["']([^"']+)["']/gi;
+  const keyed = /["'](?:subtitleUrl|subtitle_url|captionUrl|subtitle|captions?|subtitle_src|caption_url)["']\s*:\s*["']([^"']+)["']/gi;
   for (const match of scripts.matchAll(keyed)) candidates.add(match[1]);
   const fileUrl = /https?:\/\/[^"'\\\s]+\.(?:vtt|srt|ass|ssa)(?:\?[^"'\\\s]*)?/gi;
   for (const match of scripts.matchAll(fileUrl)) candidates.add(match[0]);
   return Array.from(candidates).flatMap((raw) => {
-    try { return [new URL(raw, baseUrl)]; } catch { return []; }
+    const resolved = resolveSubtitleReference(raw, baseUrl);
+    return resolved ? [resolved] : [];
   });
 }
 
@@ -187,6 +188,7 @@ try {
   const page = await context.newPage();
   await confinePage(page, target, platform);
   const apiCandidates = [];
+  const bilibiliPlayerCandidates = [];
   const pendingApiCaptures = new Set();
   if (platform !== "generic") {
     page.on("response", (response) => {
@@ -208,6 +210,11 @@ try {
         let value;
         try { value = JSON.parse(body); } catch { return; }
         const candidate = { url: responseUrl.href, value };
+        if (platform === "bilibili" && isBilibiliPlayerApiUrl(responseUrl.href)) {
+          bilibiliPlayerCandidates.push(candidate);
+          if (bilibiliPlayerCandidates.length > 16) bilibiliPlayerCandidates.shift();
+          return;
+        }
         const relevant = extractPlatformPayloadFromValue(platform, value, page.url());
         if (relevant) apiCandidates.unshift(candidate);
         else if (apiCandidates.length < 16) apiCandidates.push(candidate);
@@ -223,11 +230,19 @@ try {
   const finalUrl = page.url();
   const bodyText = await page.locator("body").innerText().catch(() => "");
   const html = await page.content();
+  const capturedApiCandidates = [...bilibiliPlayerCandidates, ...apiCandidates];
   let platformPayload = extractPlatformPayload(platform, html, finalUrl);
   if (!platformPayload && platform !== "generic") {
-    platformPayload = apiCandidates
+    platformPayload = capturedApiCandidates
       .map((candidate) => extractPlatformPayloadFromValue(platform, candidate.value, finalUrl))
       .find(Boolean) || null;
+  }
+  if (platform === "bilibili" && platformPayload) {
+    platformPayload = mergeBilibiliPlayerEvidence(platformPayload, [
+      extractBilibiliPlayerEvidenceFromHtml(html, finalUrl, platformPayload.targetAliases),
+      ...capturedApiCandidates.map((candidate) =>
+        extractRelevantBilibiliPlayerEvidence(candidate, finalUrl, platformPayload.targetAliases)),
+    ]);
   }
   const platformFailure = platformPayload ? null : classifyPlatformPage(platform, bodyText);
   if (platformFailure) {
@@ -242,10 +257,10 @@ try {
     let verifiedSubtitle = false;
     let subtitleIndex = 0;
     const subtitleUrls = new Map();
-    for (const subtitleUrl of subtitleCandidates(dom.window.document, finalUrl)) subtitleUrls.set(subtitleUrl.href, subtitleUrl);
     for (const raw of platformPayload?.subtitles || []) {
       try { const subtitleUrl = new URL(raw, finalUrl); subtitleUrls.set(subtitleUrl.href, subtitleUrl); } catch { /* ignored */ }
     }
+    for (const subtitleUrl of subtitleCandidates(dom.window.document, finalUrl)) subtitleUrls.set(subtitleUrl.href, subtitleUrl);
     for (const subtitleUrl of subtitleUrls.values()) {
       if (!(await isAllowedAssetUrl(platform, target, subtitleUrl))) continue;
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: `platform-subtitle-${subtitleIndex++}`, url: subtitleUrl.href, kind: "subtitle" } })}\n`);
@@ -255,32 +270,61 @@ try {
     const mediaRaw = platformPayload?.mediaUrl
       || dom.window.document.querySelector('meta[property="og:video"], meta[name="twitter:player:stream"]')?.getAttribute("content")
       || dom.window.document.querySelector("video[src], video source[src]")?.getAttribute("src");
+    const asrMediaRaw = platform === "bilibili"
+      ? platformPayload?.asrMediaUrl || mediaRaw
+      : mediaRaw;
     if (platform === "xiaohongshu" && platformPayload?.contentType === "video" && !mediaRaw) {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The Xiaohongshu video did not expose a playable media stream", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
+      throw new RpcHandled();
+    }
+    const bilibiliPolicy = platform === "bilibili"
+      ? bilibiliMediaPolicy(
+        { mediaUrl: mediaRaw, asrMediaUrl: asrMediaRaw },
+        {
+          mediaSaveMode: params.mediaSaveMode,
+          hasSubtitle: verifiedSubtitle,
+          localAsrAuthorized: Boolean(params.localAsrAuthorized),
+          allowMissingTranscript: Boolean(params.allowMissingTranscript),
+        },
+      )
+      : null;
+    if (bilibiliPolicy?.errorCode) {
+      const message = bilibiliPolicy.errorCode === "IMPORT_WEB_MEDIA_UNAVAILABLE"
+        ? "Bilibili exposed only separate DASH tracks, so a complete original video could not be preserved"
+        : "A verified subtitle or local ASR capability is required";
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message, data: { code: bilibiliPolicy.errorCode } } })}\n`);
+      throw new RpcHandled();
+    }
+    if (platform !== "bilibili"
+      && (mediaRaw || asrMediaRaw)
+      && !params.localAsrAuthorized
+      && !verifiedSubtitle
+      && !params.allowMissingTranscript) {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "A verified subtitle or local ASR capability is required", data: { code: "IMPORT_WEB_SUBTITLE_UNAVAILABLE" } } })}\n`);
       throw new RpcHandled();
     }
     let originalMediaPlaceholder = false;
     if (mediaRaw) {
       const mediaUrl = new URL(mediaRaw, finalUrl);
       if (await isAllowedAssetUrl(platform, target, mediaUrl)) {
-        if (!params.localAsrAuthorized && !verifiedSubtitle && !params.allowMissingTranscript) {
-          process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "A verified subtitle or local ASR capability is required", data: { code: "IMPORT_WEB_SUBTITLE_UNAVAILABLE" } } })}\n`);
-          throw new RpcHandled();
-        } else {
-          // Always report the media candidate. Rust drops it in extraction-only
-          // mode, but uses its presence to distinguish a malformed subtitle
-          // track from a normal article with no media.
-          process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: "original-media", url: mediaUrl.href, kind: "media" } })}\n`);
-          originalMediaPlaceholder = params.mediaSaveMode === "preserve_original";
-          // Rust verifies and parses the subtitle bytes. Emit an ASR fallback
-          // whenever the capability is available; the fallback is skipped if
-          // a usable platform transcript is localized first.
-          if (params.localAsrAuthorized) {
-            process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: "temporary-media", url: mediaUrl.href, kind: "temporary_media" } })}\n`);
-          }
-        }
+        // Always report the durable media candidate. Rust drops it in
+        // extraction-only mode and preserves it only when explicitly requested.
+        process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: "original-media", url: mediaUrl.href, kind: "media" } })}\n`);
+        originalMediaPlaceholder = params.mediaSaveMode === "preserve_original";
       } else if (platform !== "generic") {
         process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The platform media host is not in the verified allowlist", data: { code: "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED" } } })}\n`);
+        throw new RpcHandled();
+      }
+    }
+    const authorizedAsrMediaRaw = platform === "bilibili"
+      ? bilibiliPolicy?.asrMediaUrl
+      : params.localAsrAuthorized && !params.allowMissingTranscript ? asrMediaRaw : null;
+    if (authorizedAsrMediaRaw) {
+      const asrMediaUrl = new URL(authorizedAsrMediaRaw, finalUrl);
+      if (await isAllowedAssetUrl(platform, target, asrMediaUrl)) {
+        process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: "temporary-media", url: asrMediaUrl.href, kind: "temporary_media" } })}\n`);
+      } else if (platform !== "generic") {
+        process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The platform ASR media host is not in the verified allowlist", data: { code: "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED" } } })}\n`);
         throw new RpcHandled();
       }
     }
@@ -316,7 +360,7 @@ try {
         }
         continue;
       }
-      const kind = classifyRemoteImageKind(platform, Boolean(mediaRaw), Boolean(params.localOcrAuthorized), params.mediaSaveMode);
+      const kind = classifyRemoteImageKind(platform, Boolean(mediaRaw || asrMediaRaw), Boolean(params.localOcrAuthorized), params.mediaSaveMode);
       if (!kind) { image.remove(); continue; }
       const placeholder = `webasset-${assetIndex++}`;
       image.setAttribute("src", `asset://${placeholder}`);
@@ -331,7 +375,13 @@ try {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The Xiaohongshu image post had no text and no retainable image", data: { code: "IMPORT_WEB_MEDIA_UNAVAILABLE" } } })}\n`);
       throw new RpcHandled();
     }
-    if (platform !== "generic" && !mediaRaw && subtitleIndex === 0 && assetIndex === 0 && !(platformPayload?.images?.length)) {
+    if (platform !== "generic"
+      && !mediaRaw
+      && !asrMediaRaw
+      && subtitleIndex === 0
+      && assetIndex === 0
+      && !(platformPayload?.images?.length)
+      && !(platform === "bilibili" && params.allowMissingTranscript && platformPayload)) {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The platform page did not expose media, subtitles, or usable images", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
       throw new RpcHandled();
     }
@@ -375,10 +425,16 @@ try {
       titleSource: platformPayload?.titleSource || null,
       hashtags: platformPayload?.hashtags || [],
       imageCount: platformPayload?.images?.length || 0,
-      mediaPresent: Boolean(platformPayload?.mediaUrl),
+      mediaPresent: Boolean(platformPayload?.mediaUrl || platformPayload?.asrMediaUrl),
     }));
     const sourceEvidencePaths = [];
-    for (const candidate of selectRelevantApiEvidence(platform, apiCandidates, finalUrl)) {
+    for (const candidate of selectRelevantApiEvidence(
+      platform,
+      capturedApiCandidates,
+      finalUrl,
+      3,
+      platformPayload?.targetAliases,
+    )) {
       const evidencePath = `source-evidence/${platform}-api-${sourceEvidencePaths.length + 1}.json`;
       await fs.mkdir(path.join(stagingRoot, "source-evidence"), { recursive: true });
       await fs.writeFile(path.join(stagingRoot, evidencePath), JSON.stringify(redactJsonValue(candidate.value)));

@@ -9,16 +9,20 @@ import { promisify } from "node:util";
 import {
   ENGINE_VERSION,
   MAX_DECODED_BYTES,
+  MAX_SENSEVOICE_BATCH_CHUNKS,
+  MAX_SENSEVOICE_CHUNKS,
   MODEL_ID,
+  SENSEVOICE_CHUNK_SECONDS,
   assertProviderWasUsed,
+  buildChunkedFfmpegArguments,
   buildEmbeddedSubtitleArguments,
-  buildFfmpegArguments,
-  buildSenseVoiceArguments,
+  buildSenseVoiceBatchArguments,
   classifyExecutionError,
   executeWithProviderFallback,
   ffmpegRelativePath,
+  mergeSenseVoiceTranscripts,
   parseEmbeddedSubtitle,
-  parseSenseVoiceStdout,
+  parseSenseVoiceBatchStdout,
   preferredProviders,
   renderEmbeddedTranscript,
   renderTranscript,
@@ -62,6 +66,33 @@ async function runFile(program, arguments_, options, stage) {
   } catch (error) {
     throw new Error(classifyExecutionError(error, stage), { cause: error });
   }
+}
+
+async function decodedChunks(temporaryRoot) {
+  const entries = (await fs.readdir(temporaryRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && /^decoded-\d{4}\.wav$/u.test(entry.name))
+    .sort((left, right) => left.name.localeCompare(right.name, "en"));
+  if (entries.length === 0 || entries.length > MAX_SENSEVOICE_CHUNKS) {
+    throw new Error("IMPORT_ASR_DECODE_FAILED");
+  }
+  let totalBytes = 0;
+  const chunks = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const expectedName = `decoded-${String(index).padStart(4, "0")}.wav`;
+    if (entries[index].name !== expectedName) throw new Error("IMPORT_ASR_DECODE_FAILED");
+    const chunkPath = path.join(temporaryRoot, entries[index].name);
+    const status = await fs.lstat(chunkPath).catch(() => null);
+    if (!status?.isFile() || status.isSymbolicLink() || status.size <= 44) {
+      throw new Error("IMPORT_ASR_DECODE_FAILED");
+    }
+    totalBytes += status.size;
+    if (totalBytes > MAX_DECODED_BYTES) throw new Error("IMPORT_ASR_DECODE_FAILED");
+    chunks.push({
+      path: chunkPath,
+      startMs: index * SENSEVOICE_CHUNK_SECONDS * 1_000,
+    });
+  }
+  return chunks;
 }
 
 let rpc;
@@ -132,32 +163,33 @@ try {
     if (!/^[0-9a-f]{64}$/.test(modelSha256 || "") || !/^[0-9a-f]{64}$/.test(tokensSha256 || "")) {
       throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
     }
-    const decodedPath = path.join(temporaryRoot, "decoded.wav");
-    await runFile(ffmpeg, buildFfmpegArguments(mediaPath, decodedPath), {
+    const decodedPattern = path.join(temporaryRoot, "decoded-%04d.wav");
+    await runFile(ffmpeg, buildChunkedFfmpegArguments(mediaPath, decodedPattern), {
       cwd: temporaryRoot,
       env: environment,
       timeout: DECODE_TIMEOUT_MS,
     }, "decode");
-    const decodedStatus = await fs.lstat(decodedPath).catch(() => null);
-    if (!decodedStatus?.isFile() || decodedStatus.isSymbolicLink() || decodedStatus.size <= 44 || decodedStatus.size > MAX_DECODED_BYTES) {
-      throw new Error("IMPORT_ASR_DECODE_FAILED");
-    }
+    const chunks = await decodedChunks(temporaryRoot);
 
     const threads = Math.min(8, Math.max(1, os.availableParallelism?.() || os.cpus().length || 1));
     const execution = await executeWithProviderFallback(preferredProviders(), async (provider) => {
-      const result = await runFile(
-        sherpa,
-        buildSenseVoiceArguments(model, tokens, decodedPath, provider, threads),
-        { cwd: temporaryRoot, env: environment, timeout: ASR_TIMEOUT_MS },
-        "asr",
-      );
-      assertProviderWasUsed(provider, result.stderr);
-      return parseSenseVoiceStdout(result.stdout);
+      const transcripts = [];
+      for (let offset = 0; offset < chunks.length; offset += MAX_SENSEVOICE_BATCH_CHUNKS) {
+        const batch = chunks.slice(offset, offset + MAX_SENSEVOICE_BATCH_CHUNKS);
+        const result = await runFile(
+          sherpa,
+          buildSenseVoiceBatchArguments(model, tokens, batch.map((chunk) => chunk.path), provider, threads),
+          { cwd: temporaryRoot, env: environment, timeout: ASR_TIMEOUT_MS },
+          "asr",
+        );
+        assertProviderWasUsed(provider, result.stderr);
+        transcripts.push(...parseSenseVoiceBatchStdout(result.stdout, batch.map((chunk) => chunk.startMs)));
+      }
+      return mergeSenseVoiceTranscripts(transcripts);
     });
-    await fs.rm(decodedPath, { force: true });
+    await Promise.all(chunks.map((chunk) => fs.rm(chunk.path, { force: true })));
     const transcript = execution.value;
     markdown = renderTranscript(transcript, path.basename(mediaPath), execution.provider);
-    const firstTimestamp = transcript.tokenTimings[0]?.startMs ?? null;
     safeMetadata = {
       engine: ENGINE_VERSION,
       model: MODEL_ID,
@@ -171,7 +203,7 @@ try {
       event: transcript.event,
       timingKind: "token_start",
       text: transcript.text,
-      segments: [{ startMs: firstTimestamp, text: transcript.text }],
+      segments: transcript.segments,
       tokenTimings: transcript.tokenTimings,
       provenance: "authorized-local-asr",
     };
