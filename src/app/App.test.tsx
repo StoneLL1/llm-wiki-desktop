@@ -520,18 +520,20 @@ describe("App", () => {
     // (Batch 3 bundle split), so the placeholder only appears after the async
     // chunk resolves AND Sigma's init effect runs and catches. Under the full
     // suite the lazy resolution plus React re-render can exceed findByText's
-    // 1000ms default, so allow a comfortable margin.
+    // 1000ms default. Native capability tests and full parallel CI can also
+    // contend for CPU, so keep this assertion bounded without using the
+    // single-test timing as the suite-wide budget.
     expect(
       await screen.findByText(
         "Graph canvas is unavailable in this environment.",
         {},
-        { timeout: 5000 },
+        { timeout: 15_000 },
       ),
     ).toBeInTheDocument();
     // GraphView's catch logs its own diagnostic; the stub must not suppress it.
     expect(warnSpy).toHaveBeenCalledWith("[graph] sigma renderer init failed:", expect.any(Error));
     warnSpy.mockRestore();
-  }, 10_000);
+  }, 20_000);
 
   it("exposes keyboard-resizable shell splitters", () => {
     render(<App />);

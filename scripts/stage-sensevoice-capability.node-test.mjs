@@ -5,6 +5,13 @@ import path from "node:path";
 import test from "node:test";
 
 import { stageSenseVoiceCapability } from "./stage-sensevoice-capability.mjs";
+import {
+  hasCompleteInstalledPayload,
+  hasCompleteReusablePayload,
+  refreshDevelopmentRunner,
+  runnerSourceFingerprint,
+  validPrepared,
+} from "./prepare-sensevoice-dev.mjs";
 
 async function writeFile(filePath, value = "fixture") {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -111,4 +118,86 @@ test("pins complete four-target SenseVoice, model, and FFmpeg release sources", 
   assert.equal(sources.senseVoice.distributions["x86_64-unknown-linux-gnu"].accelerator, "cuda");
   assert.equal(sources.senseVoice.distributions["aarch64-apple-darwin"].accelerator, "coreml");
   assert.equal(sources.senseVoice.model.sha256, "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e");
+});
+
+test("development preparation refreshes changed runner sources instead of reusing stale code", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-refresh-sensevoice-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourceRunner = path.join(root, "source-runner");
+  const installedRunner = path.join(root, "pack", "runner");
+  await writeFile(path.join(sourceRunner, "index.mjs"), "export const revision = 2;\n");
+  await writeFile(path.join(installedRunner, "index.mjs"), "export const revision = 1;\n");
+  const runnerSha256 = await runnerSourceFingerprint(sourceRunner);
+  await refreshDevelopmentRunner(sourceRunner, installedRunner);
+  assert.equal(await fs.readFile(path.join(installedRunner, "index.mjs"), "utf8"), "export const revision = 2;\n");
+
+  const packRoot = path.join(root, "pack");
+  const publicKeyPath = path.join(root, "public-key.hex");
+  const statePath = path.join(root, "prepared-state.json");
+  const executable = process.platform === "win32" ? ".exe" : "";
+  const requiredFiles = [
+    process.platform === "win32" ? "runtime/node.exe" : "runtime/node",
+    `runtime/ffmpeg/bin/ffmpeg${executable}`,
+    `runtime/sherpa/bin/sherpa-onnx-offline${executable}`,
+    "models/model.int8.onnx",
+    "models/tokens.txt",
+    "qualification/zh.wav",
+    "runner/index.mjs",
+    "runner/qualification.mjs",
+  ];
+  await Promise.all(requiredFiles.map((relativePath) =>
+    writeFile(path.join(packRoot, ...relativePath.split("/")), `payload:${relativePath}`)));
+  const files = await Promise.all(requiredFiles.map(async (relativePath) => ({
+    path: relativePath,
+    sha256: "c".repeat(64),
+    bytes: (await fs.stat(path.join(packRoot, ...relativePath.split("/")))).size,
+  })));
+  await writeFile(path.join(packRoot, "manifest.json"), JSON.stringify({
+    packId: "asr-sensevoice-small",
+    version: "1.13.4+2024.07.17",
+    targetTriples: ["x86_64-pc-windows-msvc"],
+    files,
+  }));
+  await writeFile(publicKeyPath, "a".repeat(64));
+  await writeFile(statePath, JSON.stringify({
+    revision: 5,
+    version: "1.13.4+2024.07.17",
+    target: "x86_64-pc-windows-msvc",
+    runnerSha256,
+  }));
+  assert.equal(await validPrepared(
+    packRoot,
+    publicKeyPath,
+    statePath,
+    "x86_64-pc-windows-msvc",
+    runnerSha256,
+  ), true);
+  assert.equal(await validPrepared(
+    packRoot,
+    publicKeyPath,
+    statePath,
+    "x86_64-pc-windows-msvc",
+    "b".repeat(64),
+  ), false);
+  const manifest = JSON.parse(await fs.readFile(path.join(packRoot, "manifest.json"), "utf8"));
+  assert.equal(await hasCompleteInstalledPayload(packRoot, manifest), true);
+  await fs.rm(path.join(packRoot, "runner", "index.mjs"));
+  assert.equal(await hasCompleteInstalledPayload(packRoot, manifest), false);
+  assert.equal(await hasCompleteReusablePayload(packRoot, manifest), true);
+  await fs.rm(path.join(packRoot, "models", "tokens.txt"));
+  assert.equal(await hasCompleteReusablePayload(packRoot, manifest), false);
+  assert.equal(await hasCompleteInstalledPayload(packRoot, manifest), false);
+  assert.equal(await validPrepared(
+    packRoot,
+    publicKeyPath,
+    statePath,
+    "x86_64-pc-windows-msvc",
+    runnerSha256,
+  ), false);
+  const preparationSource = await fs.readFile(path.join(import.meta.dirname, "prepare-sensevoice-dev.mjs"), "utf8");
+  assert.match(
+    preparationSource,
+    /if \(!stagedPayloadReady\) \{\s+if \(!\(await fs\.stat\(cachedNode\)/u,
+    "an installed native/model payload must refresh the runner without redownloading the large source archive",
+  );
 });

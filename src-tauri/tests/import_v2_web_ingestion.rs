@@ -222,6 +222,11 @@ impl ImportEngine for LocalAsrEngine {
         _: &CancellationToken,
     ) -> Result<EngineResult, BackendError> {
         assert!(request.local_asr_authorized);
+        assert_eq!(
+            request.chained_input.as_deref(),
+            Some(".asr-input-fixture/input.m4a")
+        );
+        assert!(!std::path::Path::new(request.chained_input.as_deref().unwrap()).is_absolute());
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
         std::fs::create_dir_all(staging.join(".sensevoice-output-fixture")).unwrap();
         std::fs::write(

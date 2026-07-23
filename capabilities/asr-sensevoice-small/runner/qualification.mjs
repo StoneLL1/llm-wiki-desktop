@@ -63,6 +63,7 @@ function runTool(program, arguments_) {
 
 const manifestPath = path.join(packRoot, "manifest.json");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-sensevoice-qualification-"));
+let createdQualificationManifest = false;
 try {
   const platform = process.platform;
   const required = [
@@ -71,13 +72,17 @@ try {
     "models/model.int8.onnx",
     "models/tokens.txt",
   ];
-  await fs.writeFile(manifestPath, JSON.stringify({
-    schemaVersion: 2,
-    packId: "asr-sensevoice-small",
-    version: "1.13.4+2024.07.17",
-    protocolVersion: "2",
-    files: await Promise.all(required.map(declaration)),
-  }), { encoding: "utf8", flag: "wx" });
+  const existingManifest = await fs.stat(manifestPath).catch(() => null);
+  if (!existingManifest?.isFile()) {
+    await fs.writeFile(manifestPath, JSON.stringify({
+      schemaVersion: 2,
+      packId: "asr-sensevoice-small",
+      version: "1.13.4+2024.07.17",
+      protocolVersion: "2",
+      files: await Promise.all(required.map(declaration)),
+    }), { encoding: "utf8", flag: "wx" });
+    createdQualificationManifest = true;
+  }
   const staging = path.join(root, "staging");
   await fs.mkdir(staging);
   await fs.copyFile(path.join(packRoot, "qualification", "zh.wav"), path.join(staging, "zh.wav"));
@@ -87,9 +92,20 @@ try {
     "-i", path.join(staging, "zh.wav"), "-c:a", "aac", "-b:a", "64k",
     path.join(staging, "zh.m4a"),
   ]);
+  await runTool(ffmpegPath, [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-stream_loop", "4", "-i", path.join(staging, "zh.wav"), "-t", "27",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+    path.join(staging, "zh-long.wav"),
+  ]);
   const nodePath = platform === "win32" ? path.join(packRoot, "runtime", "node.exe") : path.join(packRoot, "runtime", "node");
   let qualifiedProvider;
-  for (const [id, fixture] of [[1, "zh.wav"], [2, "zh.m4a"]]) {
+  const fixtures = [
+    [1, "zh.wav", "wav"],
+    [2, "zh.m4a", "aac-in-m4a"],
+    [3, "zh-long.wav", "long-wav-multi-chunk"],
+  ];
+  for (const [id, fixture] of fixtures) {
     const stdout = await runNode(nodePath, {
       jsonrpc: "2.0",
       id,
@@ -106,18 +122,26 @@ try {
     assert.equal(response.error, null);
     const metadata = JSON.parse(await fs.readFile(path.join(staging, response.result.metadataPath), "utf8"));
     const markdown = await fs.readFile(path.join(staging, response.result.markdownPath), "utf8");
-    const expectedText = fixture === "zh.wav"
-      ? /开放时间早上\s*9\s*点至下午\s*5\s*点/u
+    const expectedText = fixture.endsWith(".wav")
+      ? /开放时间早上\s*[九9]\s*点至下午\s*[五5]\s*点/u
       : /开[放饭]时间早上\s*9\s*点至下午\s*5\s*点/u;
     assert.match(markdown, expectedText);
     assert.match(metadata.provider, /^(cpu|cuda|coreml)$/);
     assert.equal(metadata.provenance, "authorized-local-asr");
     assert.match(metadata.modelSha256, /^[0-9a-f]{64}$/);
     assert.match(metadata.tokensSha256, /^[0-9a-f]{64}$/);
+    if (fixture === "zh-long.wav") {
+      assert.ok(metadata.segments.length >= 2, "the long fixture must exercise multiple ASR chunks");
+      assert.ok(metadata.segments[1].startMs >= 20_000, "later chunk timestamps must stay on the media timeline");
+    }
     qualifiedProvider = metadata.provider;
   }
-  process.stdout.write(`${JSON.stringify({ qualified: true, provider: qualifiedProvider, fixtures: ["wav", "aac-in-m4a"] })}\n`);
+  process.stdout.write(`${JSON.stringify({
+    qualified: true,
+    provider: qualifiedProvider,
+    fixtures: fixtures.map(([, , label]) => label),
+  })}\n`);
 } finally {
-  await fs.rm(manifestPath, { force: true });
+  if (createdQualificationManifest) await fs.rm(manifestPath, { force: true });
   await fs.rm(root, { recursive: true, force: true });
 }

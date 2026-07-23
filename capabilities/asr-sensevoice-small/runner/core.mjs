@@ -11,6 +11,9 @@ export const MAX_MEDIA_BYTES = 8 * 1024 * 1024 * 1024;
 export const MAX_DECODED_BYTES = 256 * 1024 * 1024;
 export const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
 export const MAX_TOKENS = 250_000;
+export const SENSEVOICE_CHUNK_SECONDS = 20;
+export const MAX_SENSEVOICE_CHUNKS = Math.ceil(7_200 / SENSEVOICE_CHUNK_SECONDS);
+export const MAX_SENSEVOICE_BATCH_CHUNKS = 24;
 
 const MEDIA_EXTENSIONS = new Set([
   ".aac", ".flac", ".m4a", ".mka", ".mp3", ".ogg", ".opus", ".wav",
@@ -106,6 +109,19 @@ export function buildFfmpegArguments(mediaPath, wavPath) {
   ];
 }
 
+export function buildChunkedFfmpegArguments(mediaPath, wavPattern) {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", mediaPath,
+    "-map", "0:a:0", "-vn", "-sn", "-dn",
+    "-t", "7200", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+    "-f", "segment", "-segment_time", String(SENSEVOICE_CHUNK_SECONDS),
+    "-reset_timestamps", "1",
+    wavPattern,
+  ];
+}
+
 export function buildEmbeddedSubtitleArguments(mediaPath, subtitlePath) {
   return [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -117,7 +133,15 @@ export function buildEmbeddedSubtitleArguments(mediaPath, subtitlePath) {
 }
 
 export function buildSenseVoiceArguments(modelPath, tokensPath, wavPath, provider, threads) {
+  return buildSenseVoiceBatchArguments(modelPath, tokensPath, [wavPath], provider, threads);
+}
+
+export function buildSenseVoiceBatchArguments(modelPath, tokensPath, wavPaths, provider, threads) {
   if (!new Set(["cpu", "cuda", "coreml"]).has(provider)) throw asError("IMPORT_ASR_INVALID_REQUEST");
+  if (!Array.isArray(wavPaths) || wavPaths.length === 0 || wavPaths.length > MAX_SENSEVOICE_BATCH_CHUNKS ||
+      wavPaths.some((value) => typeof value !== "string" || value.length === 0)) {
+    throw asError("IMPORT_ASR_INVALID_REQUEST");
+  }
   const safeThreads = Math.min(8, Math.max(1, Number.isSafeInteger(threads) ? threads : 1));
   return [
     `--tokens=${tokensPath}`,
@@ -128,7 +152,7 @@ export function buildSenseVoiceArguments(modelPath, tokensPath, wavPath, provide
     `--num-threads=${safeThreads}`,
     "--debug=false",
     "--print-args=false",
-    wavPath,
+    ...wavPaths,
   ];
 }
 
@@ -146,7 +170,7 @@ function normalizeTag(value, fallback) {
   return /^[a-z][a-z0-9_-]{0,31}$/.test(cleaned) ? cleaned : fallback;
 }
 
-export function parseSenseVoiceStdout(value) {
+function senseVoiceCandidates(value) {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_TRANSCRIPT_BYTES) {
     throw asError("IMPORT_ASR_OUTPUT_INVALID");
   }
@@ -161,15 +185,20 @@ export function parseSenseVoiceStdout(value) {
       // sherpa writes diagnostic lines alongside its single JSON result.
     }
   }
-  if (candidates.length !== 1) throw asError("IMPORT_ASR_OUTPUT_INVALID");
-  const result = candidates[0];
+  return candidates;
+}
+
+function normalizeSenseVoiceCandidate(result, allowEmpty = false) {
   const text = cleanText(result.text);
-  if (!text) throw asError("IMPORT_ASR_OUTPUT_INVALID");
   const timestamps = Array.isArray(result.timestamps) ? result.timestamps.map(Number) : [];
   const tokens = Array.isArray(result.tokens) ? result.tokens.map(cleanText) : [];
   if (timestamps.length > MAX_TOKENS || tokens.length > MAX_TOKENS || timestamps.length > tokens.length ||
       timestamps.some((item, index) => !Number.isFinite(item) || item < 0 || (index > 0 && item < timestamps[index - 1])) ||
       tokens.some((item) => !item)) {
+    throw asError("IMPORT_ASR_OUTPUT_INVALID");
+  }
+  if (!text) {
+    if (allowEmpty && timestamps.length === 0 && tokens.length === 0) return null;
     throw asError("IMPORT_ASR_OUTPUT_INVALID");
   }
   return {
@@ -181,6 +210,66 @@ export function parseSenseVoiceStdout(value) {
       startMs: Math.round(startSeconds * 1_000),
       token: tokens[index],
     })),
+  };
+}
+
+export function parseSenseVoiceStdout(value) {
+  const candidates = senseVoiceCandidates(value);
+  if (candidates.length !== 1) throw asError("IMPORT_ASR_OUTPUT_INVALID");
+  return normalizeSenseVoiceCandidate(candidates[0]);
+}
+
+export function parseSenseVoiceBatchStdout(value, chunkStartsMs) {
+  if (!Array.isArray(chunkStartsMs) || chunkStartsMs.length === 0 ||
+      chunkStartsMs.length > MAX_SENSEVOICE_BATCH_CHUNKS ||
+      chunkStartsMs.some((item, index) => !Number.isSafeInteger(item) || item < 0 ||
+        (index > 0 && item <= chunkStartsMs[index - 1]))) {
+    throw asError("IMPORT_ASR_INVALID_REQUEST");
+  }
+  const candidates = senseVoiceCandidates(value);
+  if (candidates.length !== chunkStartsMs.length) throw asError("IMPORT_ASR_OUTPUT_INVALID");
+  const transcripts = [];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const transcript = normalizeSenseVoiceCandidate(candidates[index], true);
+    if (!transcript) continue;
+    const offsetMs = chunkStartsMs[index];
+    const tokenTimings = transcript.tokenTimings.map((timing) => ({
+      startMs: timing.startMs + offsetMs,
+      token: timing.token,
+    }));
+    transcripts.push({
+      ...transcript,
+      tokenTimings,
+      segments: [{
+        startMs: tokenTimings[0]?.startMs ?? offsetMs,
+        text: transcript.text,
+      }],
+    });
+  }
+  return transcripts;
+}
+
+export function mergeSenseVoiceTranscripts(transcripts) {
+  if (!Array.isArray(transcripts)) throw asError("IMPORT_ASR_INVALID_REQUEST");
+  const segments = transcripts.flatMap((item) => Array.isArray(item?.segments) ? item.segments : []);
+  const tokenTimings = transcripts.flatMap((item) => Array.isArray(item?.tokenTimings) ? item.tokenTimings : []);
+  if (segments.length === 0 || segments.length > MAX_SENSEVOICE_CHUNKS ||
+      tokenTimings.length > MAX_TOKENS ||
+      segments.some((item, index) => !Number.isSafeInteger(item?.startMs) || item.startMs < 0 ||
+        !cleanText(item.text) || (index > 0 && item.startMs <= segments[index - 1].startMs)) ||
+      tokenTimings.some((item, index) => !Number.isSafeInteger(item?.startMs) || item.startMs < 0 ||
+        !cleanText(item.token) || (index > 0 && item.startMs < tokenTimings[index - 1].startMs))) {
+    throw asError("IMPORT_ASR_OUTPUT_INVALID");
+  }
+  const firstKnown = (key, fallback) =>
+    transcripts.map((item) => item?.[key]).find((value) => typeof value === "string" && value !== "unknown") ?? fallback;
+  return {
+    text: segments.map((segment) => cleanText(segment.text)).join(" "),
+    language: firstKnown("language", "unknown"),
+    emotion: firstKnown("emotion", "unknown"),
+    event: firstKnown("event", "speech"),
+    segments: segments.map((segment) => ({ startMs: segment.startMs, text: cleanText(segment.text) })),
+    tokenTimings,
   };
 }
 
@@ -226,10 +315,12 @@ function markdownText(value) {
 
 export function renderTranscript(result, sourceName, provider) {
   const source = cleanText(sourceName).slice(0, 500);
-  const firstTimestamp = result.tokenTimings[0]?.startMs;
-  const transcriptLine = firstTimestamp == null
-    ? markdownText(result.text)
-    : `[${timestamp(firstTimestamp)}] ${markdownText(result.text)}`;
+  const transcriptSegments = Array.isArray(result.segments) && result.segments.length > 0
+    ? result.segments
+    : [{ startMs: result.tokenTimings[0]?.startMs ?? null, text: result.text }];
+  const transcriptLines = transcriptSegments.map((segment) => segment.startMs == null
+    ? markdownText(cleanText(segment.text))
+    : `[${timestamp(segment.startMs)}] ${markdownText(cleanText(segment.text))}`).join("\n\n");
   return `${[
     "---",
     `engine: ${JSON.stringify(ENGINE_VERSION)}`,
@@ -245,7 +336,7 @@ export function renderTranscript(result, sourceName, provider) {
     "",
     "# Transcript",
     "",
-    transcriptLine,
+    transcriptLines,
     "",
   ].join("\n")}`;
 }
@@ -281,6 +372,9 @@ export async function executeWithProviderFallback(providers, execute) {
     } catch (error) {
       lastError = error;
     }
+  }
+  if (typeof lastError?.message === "string" && /^IMPORT_ASR_[A-Z_]+$/.test(lastError.message)) {
+    throw lastError;
   }
   throw new Error("IMPORT_ASR_ENGINE_FAILED", { cause: lastError });
 }

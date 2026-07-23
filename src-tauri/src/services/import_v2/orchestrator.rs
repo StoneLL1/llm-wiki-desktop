@@ -1724,7 +1724,11 @@ impl ImportV2Service {
         let mut asr_request = request.clone();
         asr_request.request_id = uuid::Uuid::new_v4().to_string();
         asr_request.input = asr_input;
-        asr_request.chained_input = None;
+        // Capability runners receive staging artifacts through the dedicated
+        // relative-path field. Passing Rust's canonical Windows path here can
+        // introduce a `\\?\` prefix that Node treats as a different root and
+        // rejects with IMPORT_ASR_POLICY_BLOCKED.
+        asr_request.chained_input = Some(temporary_input_path);
         let outcome = (|| -> Result<(EngineResult, Vec<String>), BackendError> {
             let asr_result = engine.execute(&asr_request, token)?;
             validate_engine_result(staging_root, &asr_result)?;
@@ -1739,10 +1743,7 @@ impl ImportV2Service {
             if output_metadata.file_type().is_symlink()
                 || !output_metadata.is_file()
                 || !output_path.starts_with(&canonical_staging)
-                || output_workspace.parent() != Some(canonical_staging.as_path())
-                || !output_workspace
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with(".sensevoice-output-"))
+                || !is_allowed_local_asr_output_workspace(&canonical_staging, output_workspace)
             {
                 return Err(asr_unavailable());
             }
@@ -2540,6 +2541,15 @@ fn asr_unavailable() -> BackendError {
     )
 }
 
+fn is_allowed_local_asr_output_workspace(staging: &Path, workspace: &Path) -> bool {
+    let Some(name) = workspace.file_name().map(|value| value.to_string_lossy()) else {
+        return false;
+    };
+    let runtime_temp = staging.join("runtime-temp");
+    (workspace.parent() == Some(staging) && name.starts_with(".sensevoice-output-"))
+        || (workspace.parent() == Some(runtime_temp.as_path()) && name.starts_with("asr-output-"))
+}
+
 fn ocr_unavailable() -> BackendError {
     BackendError::new(
         "IMPORT_WEB_OCR_UNAVAILABLE",
@@ -2932,6 +2942,31 @@ mod tests {
             source_identity: None,
             media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
         }
+    }
+
+    #[test]
+    fn local_asr_outputs_accept_only_the_declared_sensevoice_and_whisper_workspaces() {
+        let staging = PathBuf::from("D:/project/staging");
+        assert!(is_allowed_local_asr_output_workspace(
+            &staging,
+            &staging.join(".sensevoice-output-fixture")
+        ));
+        assert!(is_allowed_local_asr_output_workspace(
+            &staging,
+            &staging.join("runtime-temp/asr-output-fixture")
+        ));
+        assert!(!is_allowed_local_asr_output_workspace(
+            &staging,
+            &staging.join("asr-output-fixture")
+        ));
+        assert!(!is_allowed_local_asr_output_workspace(
+            &staging,
+            &staging.join("runtime-temp/other-output-fixture")
+        ));
+        assert!(!is_allowed_local_asr_output_workspace(
+            &staging,
+            &staging.join("runtime-temp/nested/asr-output-fixture")
+        ));
     }
 
     #[test]

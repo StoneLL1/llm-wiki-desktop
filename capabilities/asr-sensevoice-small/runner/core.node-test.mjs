@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
 
 import {
   assertProviderWasUsed,
+  buildChunkedFfmpegArguments,
   buildEmbeddedSubtitleArguments,
   buildFfmpegArguments,
+  buildSenseVoiceBatchArguments,
   buildSenseVoiceArguments,
   executeWithProviderFallback,
+  mergeSenseVoiceTranscripts,
+  parseSenseVoiceBatchStdout,
   parseEmbeddedSubtitle,
   parseSenseVoiceStdout,
   preferredProviders,
@@ -23,13 +28,23 @@ test("production ASR wrapper has no network client", async () => {
   assert.doesNotMatch(source, /node:(?:net|http|https|http2|dns|tls|dgram)|\bfetch\s*\(|\bWebSocket\b/u);
 });
 
-test("accepts only regular media files contained by the staging directory", async (context) => {
+test("accepts the staging-relative chained media handoff and rejects escaping inputs", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-sensevoice-policy-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const staging = path.join(root, "staging");
-  await fs.mkdir(staging);
-  await fs.writeFile(path.join(staging, "输入.m4a"), "media");
-  assert.equal((await resolveStagingMedia(root, "staging", "输入.m4a")).mediaPath, path.join(staging, "输入.m4a"));
+  const relativeMedia = ".asr-input-fixture/输入.m4a";
+  const media = path.join(staging, relativeMedia);
+  await fs.mkdir(path.dirname(media), { recursive: true });
+  await fs.writeFile(media, "media");
+  const source = await fs.readFile(path.join(import.meta.dirname, "index.mjs"), "utf8");
+  assert.match(source, /const mediaLocator = params\.chainedInput \|\| params\.input\.locator;/u);
+  assert.equal((await resolveStagingMedia(root, "staging", relativeMedia)).mediaPath, media);
+  if (process.platform === "win32") {
+    await assert.rejects(
+      resolveStagingMedia(root, "staging", path.toNamespacedPath(media)),
+      /IMPORT_ASR_POLICY_BLOCKED/,
+    );
+  }
   await assert.rejects(resolveStagingMedia(root, "staging", "../outside.m4a"), /IMPORT_ASR_POLICY_BLOCKED/);
   await fs.writeFile(path.join(staging, "input.txt"), "text");
   await assert.rejects(resolveStagingMedia(root, "staging", "input.txt"), /IMPORT_ASR_UNSUPPORTED_MEDIA/);
@@ -47,10 +62,21 @@ test("builds fixed local-only decode and SenseVoice commands", () => {
     "-map", "0:a:0", "-vn", "-sn", "-dn", "-t", "7200",
     "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "decoded.wav",
   ]);
+  assert.deepEqual(buildChunkedFfmpegArguments("input.m4a", "decoded-%04d.wav"), [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe", "-i", "input.m4a",
+    "-map", "0:a:0", "-vn", "-sn", "-dn", "-t", "7200",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+    "-f", "segment", "-segment_time", "20", "-reset_timestamps", "1",
+    "decoded-%04d.wav",
+  ]);
   assert.deepEqual(buildSenseVoiceArguments("model", "tokens", "audio", "cpu", 99), [
     "--tokens=tokens", "--sense-voice-model=model", "--sense-voice-language=auto",
     "--sense-voice-use-itn=true", "--provider=cpu", "--num-threads=8",
     "--debug=false", "--print-args=false", "audio",
+  ]);
+  assert.deepEqual(buildSenseVoiceBatchArguments("model", "tokens", ["a.wav", "b.wav"], "cpu", 2).slice(-2), [
+    "a.wav", "b.wav",
   ]);
 });
 
@@ -95,6 +121,29 @@ test("rejects ambiguous, non-monotonic, or oversized structured output", () => {
   assert.throws(() => parseSenseVoiceStdout('{"text":"x","timestamps":[1,0],"tokens":["x","y"]}'), /IMPORT_ASR_OUTPUT_INVALID/);
 });
 
+test("merges bounded SenseVoice batches onto the original media timeline", () => {
+  const transcripts = parseSenseVoiceBatchStdout([
+    '{"lang":"<|zh|>","emotion":"<|NEUTRAL|>","event":"<|Speech|>","text":"第一段","timestamps":[0.72],"tokens":["第"]}',
+    '{"lang":"","emotion":"","event":"","text":"","timestamps":[],"tokens":[]}',
+    '{"lang":"<|zh|>","emotion":"<|NEUTRAL|>","event":"<|Speech|>","text":"第三段","timestamps":[0.5],"tokens":["第"]}',
+  ].join("\n"), [0, 20_000, 40_000]);
+  const merged = mergeSenseVoiceTranscripts(transcripts);
+  assert.equal(merged.text, "第一段 第三段");
+  assert.deepEqual(merged.segments, [
+    { startMs: 720, text: "第一段" },
+    { startMs: 40_500, text: "第三段" },
+  ]);
+  assert.deepEqual(merged.tokenTimings, [
+    { startMs: 720, token: "第" },
+    { startMs: 40_500, token: "第" },
+  ]);
+  assert.match(renderTranscript(merged, "long.mp4", "cpu"), /\[00:00:40\.500\] 第三段/u);
+  assert.throws(
+    () => parseSenseVoiceBatchStdout('{"text":"only one"}', [0, 20_000]),
+    /IMPORT_ASR_OUTPUT_INVALID/u,
+  );
+});
+
 test("tries the platform accelerator first and falls back to CPU", async () => {
   assert.deepEqual(preferredProviders("win32"), ["cuda", "cpu"]);
   assert.deepEqual(preferredProviders("darwin"), ["coreml", "cpu"]);
@@ -107,6 +156,12 @@ test("tries the platform accelerator first and falls back to CPU", async () => {
   assert.deepEqual(calls, ["cuda", "cpu"]);
   assert.equal(result.provider, "cpu");
   assert.deepEqual(result.attemptedProviders, ["cuda", "cpu"]);
+  await assert.rejects(
+    executeWithProviderFallback(["cuda", "cpu"], async (provider) => {
+      throw new Error(provider === "cpu" ? "IMPORT_ASR_OUTPUT_INVALID" : "IMPORT_ASR_ACCELERATOR_UNAVAILABLE");
+    }),
+    /IMPORT_ASR_OUTPUT_INVALID/u,
+  );
   assert.throws(
     () => assertProviderWasUsed("cuda", "Available providers: CPUExecutionProvider. Fallback to cpu!"),
     /IMPORT_ASR_ACCELERATOR_UNAVAILABLE/,

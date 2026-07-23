@@ -625,7 +625,8 @@ mod tests {
     #[test]
     #[ignore = "requires the public Bilibili API"]
     fn public_bilibili_video_exposes_subtitles_or_an_asr_media_fallback() {
-        let url = "https://www.bilibili.com/video/BV1N7411A7WU/";
+        let url = std::env::var("LLM_WIKI_BILIBILI_TEST_URL")
+            .unwrap_or_else(|_| "https://www.bilibili.com/video/BV1N7411A7WU/".into());
         let request = EngineRequest {
             protocol_version: "2".into(),
             request_id: "network-fixture".into(),
@@ -637,8 +638,8 @@ mod tests {
             input: ImportInput {
                 kind: ImportInputKind::Url,
                 display_name: "Bilibili subtitle fixture".into(),
-                locator: url.into(),
-                normalized_locator: Some(url.into()),
+                locator: url.clone(),
+                normalized_locator: Some(url.clone()),
                 source_identity: None,
                 media_save_mode: MediaSaveMode::ExtractOnly,
             },
@@ -656,7 +657,7 @@ mod tests {
             .expect("the Bilibili URL should resolve to a video");
         if let Some(subtitle) = result.document.subtitles.first() {
             let (body, _) =
-                super::fetch_json(&subtitle.url, url, "network-fixture-subtitle", &token)
+                super::fetch_json(&subtitle.url, &url, "network-fixture-subtitle", &token)
                     .expect("the subtitle evidence should download through the Rust broker");
             let markdown = render_subtitle_markdown(body.as_bytes(), "json")
                 .expect("the Bilibili subtitle JSON should render as Markdown");

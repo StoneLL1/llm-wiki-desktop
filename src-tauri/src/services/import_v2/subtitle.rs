@@ -13,6 +13,19 @@ pub struct TranscriptSegment {
     pub text: String,
 }
 
+pub fn append_missing_transcript_notice(markdown: &mut String) {
+    const NOTICE: &str = "> 未获取到可用的平台字幕；当前结果仅包含视频元数据与简介，不代表完整视频内容。可在本地语音转写能力可用后授权重试。";
+    if markdown.contains(NOTICE) {
+        return;
+    }
+    while markdown.ends_with('\n') {
+        markdown.pop();
+    }
+    markdown.push_str("\n\n## 字幕 / 转写\n\n");
+    markdown.push_str(NOTICE);
+    markdown.push('\n');
+}
+
 /// Render the subtitle formats emitted by the supported platform providers.
 ///
 /// A subtitle URL is not evidence that a usable transcript exists. Callers
@@ -314,7 +327,7 @@ fn format_timestamp(milliseconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_subtitle_markdown;
+    use super::{append_missing_transcript_notice, render_subtitle_markdown};
     use std::io::Write;
 
     #[test]
@@ -379,5 +392,15 @@ mod tests {
     #[test]
     fn rejects_plain_error_text_without_a_valid_timeline() {
         assert!(render_subtitle_markdown(b"login required\ntry again\n", "srt").is_none());
+    }
+
+    #[test]
+    fn metadata_only_video_markdown_states_that_the_transcript_is_missing() {
+        let mut markdown = "# Video\n\n## 原始描述\n\nDescription\n".to_string();
+        append_missing_transcript_notice(&mut markdown);
+        append_missing_transcript_notice(&mut markdown);
+        assert!(markdown.contains("## 字幕 / 转写"));
+        assert!(markdown.contains("仅包含视频元数据与简介"));
+        assert_eq!(markdown.matches("## 字幕 / 转写").count(), 1);
     }
 }
