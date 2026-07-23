@@ -15,7 +15,7 @@
     "check:rust:gui": "cargo check --manifest-path src-tauri/Cargo.toml",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
     "check": "npm run test && npm run test:capability-tools && npm run lint && npm run build && npm run check:console && npm run check:rust:gui && npm run test:rust",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",

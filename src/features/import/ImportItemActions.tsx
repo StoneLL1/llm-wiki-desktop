@@ -13,6 +13,7 @@ const ACTION_ICONS: Record<ImportItemAction, typeof Eye> = {
   enable_ocr: ScanEye,
   skip: SkipForward,
   authorize_local_asr: Upload,
+  preview_without_transcript: Eye,
   cancel: X,
   preview_markdown: Eye,
   begin_login: LogIn,

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::errors::BackendError;
 use crate::models::import_v2::{ImportInput, ImportInputKind, MediaSaveMode};
 use crate::services::import_v2::bilibili;
-use crate::services::import_v2::connectors::wechat;
+use crate::services::import_v2::connectors::{wechat, xiaohongshu, ConnectorFailure};
 use crate::services::import_v2::engine::{
     EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
 };
@@ -17,7 +17,7 @@ use crate::services::import_v2::media_router::{
 };
 use crate::services::import_v2::platform_provider::{extract_platform_document, Platform};
 use crate::services::import_v2::redaction::redact_sensitive_text;
-use crate::services::import_v2::subtitle::render_subtitle_markdown;
+use crate::services::import_v2::subtitle::{parse_subtitle_segments, render_subtitle_markdown};
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{
     WebFetchArtifact, WebFetchContent, WebFetchPolicy, WebFetchService,
@@ -62,11 +62,20 @@ struct WebMetadata<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     platform_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    title_source: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     content_kind: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     published_at: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_source: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_language: Option<&'a str>,
+    image_count: usize,
+    hashtag_count: usize,
+    media_present: bool,
 }
 
 impl ImportEngine for GenericWebEngine {
@@ -140,42 +149,40 @@ impl ImportEngine for GenericWebEngine {
                 .as_deref()
                 .unwrap_or(&request.input.locator),
         );
+        let bilibili_api_request = page_artifact.as_ref().ok().map(|artifact| {
+            let mut resolved = request.clone();
+            resolved.input.normalized_locator = Some(artifact.final_public_url.clone());
+            resolved
+        });
         let bilibili_api =
             if self.route == "web.bilibili.video" && platform == Some(Platform::Bilibili) {
-                match bilibili::fetch(request, cancellation) {
+                match bilibili::fetch(
+                    bilibili_api_request.as_ref().unwrap_or(request),
+                    cancellation,
+                ) {
                     Ok(result) => result,
                     Err(error) if error.code == "IMPORT_V2_CANCELLED" => return Err(error),
+                    Err(error)
+                        if matches!(
+                            error.code.as_str(),
+                            "IMPORT_WEB_LOGIN_REQUIRED"
+                                | "IMPORT_WEB_CHALLENGE_DETECTED"
+                                | "IMPORT_WEB_CONTENT_REMOVED"
+                        ) =>
+                    {
+                        return Err(error)
+                    }
                     Err(_) => None,
                 }
             } else {
                 None
             };
-        let (artifact, api_is_source) = match (page_artifact, bilibili_api.as_ref()) {
-            (Ok(artifact), _) => (artifact, false),
-            (Err(_error), Some(api)) => {
-                let target = UrlPolicy::default().normalize_for_session(
-                    request
-                        .input
-                        .normalized_locator
-                        .as_deref()
-                        .unwrap_or(&request.input.locator),
-                )?;
-                (
-                    WebFetchArtifact {
-                        bytes: api.source_body.as_bytes().to_vec(),
-                        byte_len: api.source_body.len() as u64,
-                        final_public_url: target.public.public_url.clone(),
-                        final_session_target: target,
-                        content_type: "application/json".into(),
-                        sanitized_headers: BTreeMap::new(),
-                        redirects: Vec::new(),
-                        elapsed_ms: 0,
-                    },
-                    true,
-                )
-            }
-            (Err(error), None) => return Err(error),
-        };
+        let (artifact, api_is_source) = select_primary_web_artifact(
+            page_artifact,
+            bilibili_api.as_ref(),
+            bilibili_api_request.as_ref(),
+            request,
+        )?;
         if is_media_content_type(&artifact.content_type)
             || (direct_media_url && artifact.content_type.contains("octet-stream"))
         {
@@ -203,7 +210,11 @@ impl ImportEngine for GenericWebEngine {
         } else {
             decode_text(&artifact.bytes)?
         };
-        if bilibili_api.is_none() && is_platform_auth_challenge(request, &body) {
+        if bilibili_api.is_none() && platform == Some(Platform::Xiaohongshu) {
+            if let Some(failure) = xiaohongshu::classify_page(&body) {
+                return Err(xiaohongshu_error(failure));
+            }
+        } else if bilibili_api.is_none() && is_platform_auth_challenge(request, &body) {
             return Err(BackendError::new(
                 "IMPORT_WEB_LOGIN_REQUIRED",
                 "The platform returned a login or verification page. Complete login and retry.",
@@ -226,17 +237,28 @@ impl ImportEngine for GenericWebEngine {
                 true,
             ));
         }
-        let platform_document = bilibili_api
-            .as_ref()
-            .map(|api| api.document.clone())
-            .or_else(|| {
-                platform.and_then(|platform| {
-                    extract_platform_document(platform, &body, &artifact.final_public_url)
-                })
-            });
+        let platform_document = if let Some(api) = bilibili_api.as_ref() {
+            Some(api.document.clone())
+        } else if platform == Some(Platform::Xiaohongshu) {
+            Some(
+                xiaohongshu::extract_page(&body, &artifact.final_public_url)
+                    .map_err(xiaohongshu_error)?,
+            )
+        } else {
+            platform.and_then(|platform| {
+                extract_platform_document(platform, &body, &artifact.final_public_url)
+            })
+        };
         let (mut markdown, mut warnings) = platform_document
             .as_ref()
-            .map(render_platform_markdown)
+            .map(|document| {
+                render_platform_markdown(
+                    document,
+                    self.route,
+                    self.engine_id,
+                    env!("CARGO_PKG_VERSION"),
+                )
+            })
             .map(|markdown| (markdown, Vec::new()))
             .unwrap_or_else(|| {
                 if artifact.content_type.contains("html") {
@@ -254,6 +276,22 @@ impl ImportEngine for GenericWebEngine {
         std::fs::create_dir_all(&staging)
             .map_err(|_| unavailable("The web item staging directory could not be created."))?;
         let mut asset_paths = Vec::new();
+        if let Some(document) = platform_document.as_ref() {
+            let relative = format!("source-evidence/{}-provider.json", document.platform);
+            let target = staging.join(&relative);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|_| {
+                    unavailable("The platform provider evidence directory could not be created.")
+                })?;
+            }
+            let serialized = serde_json::to_string_pretty(document).map_err(|_| {
+                unavailable("The platform provider evidence could not be serialized.")
+            })?;
+            std::fs::write(&target, redact_sensitive_text(&serialized)).map_err(|_| {
+                unavailable("The platform provider evidence snapshot could not be written.")
+            })?;
+            asset_paths.push(relative);
+        }
         if !api_is_source {
             if let Some(api) = bilibili_api.as_ref() {
                 let relative = "source-evidence/bilibili-api.json";
@@ -277,16 +315,22 @@ impl ImportEngine for GenericWebEngine {
             .as_ref()
             .map(|document| document.images.clone())
             .unwrap_or_else(|| extract_html_image_urls(&body, &artifact.final_public_url));
+        let mut successful_images = 0usize;
         for (index, image_url) in image_urls.into_iter().enumerate() {
             if let Some(platform) = platform {
                 if !is_trusted_platform_asset_url(platform, &image_url) {
-                    markdown = markdown.replace(&image_url, "(platform image host not allowed)");
+                    markdown = replace_markdown_asset_reference(
+                        &markdown,
+                        &image_url,
+                        "（图片来源未获允许）",
+                    );
                     warnings.push("Platform image host was not in the verified allowlist.".into());
                     continue;
                 }
             }
             if request.media_save_mode == MediaSaveMode::ExtractOnly && !image_ocr_enabled {
-                markdown = markdown.replace(&image_url, "(original image not retained)");
+                markdown =
+                    replace_markdown_asset_reference(&markdown, &image_url, "（原图未保留）");
                 continue;
             }
             match fetch_image(
@@ -296,6 +340,20 @@ impl ImportEngine for GenericWebEngine {
                 &artifact.final_public_url,
             ) {
                 Ok(image) => {
+                    if platform.is_some_and(|platform| {
+                        !is_trusted_platform_asset_url(platform, &image.final_public_url)
+                    }) {
+                        markdown = replace_markdown_asset_reference(
+                            &markdown,
+                            &image_url,
+                            "锛堝浘鐗囨潵婧愭湭鑾峰厑璁革級",
+                        );
+                        warnings.push(
+                            "Platform image redirect left the verified host allowlist.".into(),
+                        );
+                        continue;
+                    }
+                    successful_images += 1;
                     let extension = image_extension(&image.content_type);
                     if image_ocr_enabled {
                         temporary_ocr_inputs.push(stage_temporary_ocr_input(
@@ -306,8 +364,8 @@ impl ImportEngine for GenericWebEngine {
                         )?);
                     }
                     if request.media_save_mode == MediaSaveMode::PreserveOriginal {
-                        let relative = format!("assets/image-{index}.{extension}");
-                        std::fs::create_dir_all(staging.join("assets")).map_err(|_| {
+                        let relative = format!("assets/images/{:03}.{extension}", index + 1);
+                        std::fs::create_dir_all(staging.join("assets/images")).map_err(|_| {
                             unavailable("The original image directory could not be created.")
                         })?;
                         std::fs::write(staging.join(&relative), &image.bytes)
@@ -315,17 +373,32 @@ impl ImportEngine for GenericWebEngine {
                         markdown = markdown.replace(&image_url, &relative);
                         asset_paths.push(relative);
                     } else {
-                        markdown = markdown.replace(&image_url, "(original image not retained)");
+                        markdown = replace_markdown_asset_reference(
+                            &markdown,
+                            &image_url,
+                            "（原图未保留）",
+                        );
                     }
                 }
                 Err(error) => {
-                    markdown = markdown.replace(&image_url, "(original image unavailable)");
+                    markdown =
+                        replace_markdown_asset_reference(&markdown, &image_url, "（原图不可用）");
                     warnings.push(format!(
                         "Original image was not localized: {}",
                         error.message
                     ));
                 }
             }
+        }
+        if platform_document.as_ref().is_some_and(|document| {
+            !platform_image_output_is_meaningful(document, successful_images)
+        }) {
+            return Err(BackendError::new(
+                "IMPORT_WEB_MEDIA_UNAVAILABLE",
+                "The Xiaohongshu image post had no text and none of its images could be localized.",
+                true,
+                true,
+            ));
         }
         if image_ocr_enabled {
             if temporary_ocr_inputs.is_empty() {
@@ -341,6 +414,8 @@ impl ImportEngine for GenericWebEngine {
             }
         }
         let mut transcription_ready = false;
+        let mut transcript_source = None::<String>;
+        let mut transcript_language = None::<String>;
         if let Some(document) = platform_document.as_ref() {
             for (subtitle_index, subtitle) in document.subtitles.iter().enumerate() {
                 if !platform
@@ -357,14 +432,46 @@ impl ImportEngine for GenericWebEngine {
                     &artifact.final_public_url,
                 ) {
                     Ok(subtitle_artifact) => {
+                        if platform.is_some_and(|platform| {
+                            !is_trusted_platform_asset_url(
+                                platform,
+                                &subtitle_artifact.final_public_url,
+                            )
+                        }) {
+                            warnings.push(
+                                "Platform subtitle redirect left the verified host allowlist."
+                                    .into(),
+                            );
+                            continue;
+                        }
                         let extension = subtitle_extension(
                             &subtitle_artifact.content_type,
                             &subtitle_artifact.final_public_url,
                         );
-                        if let Some(rendered) =
-                            render_subtitle_markdown(&subtitle_artifact.bytes, extension)
-                        {
+                        if let (Some(segments), Some(rendered)) = (
+                            parse_subtitle_segments(&subtitle_artifact.bytes, extension),
+                            render_subtitle_markdown(&subtitle_artifact.bytes, extension),
+                        ) {
+                            transcript_source = Some(if subtitle.automatic {
+                                "platform_auto_subtitle".into()
+                            } else {
+                                "platform_human_subtitle".into()
+                            });
+                            transcript_language = subtitle.language.clone();
                             markdown.push_str("\n\n## 字幕 / 转写\n\n");
+                            markdown.push_str(&format!(
+                                "> 来源：{}{}\n\n",
+                                if subtitle.automatic {
+                                    "平台自动字幕"
+                                } else {
+                                    "平台人工字幕"
+                                },
+                                subtitle
+                                    .label
+                                    .as_deref()
+                                    .map(|label| format!(" · {label}"))
+                                    .unwrap_or_default()
+                            ));
                             markdown.push_str(&rendered);
                             let relative =
                                 format!("subtitles/platform-subtitle-{subtitle_index}.{extension}");
@@ -376,6 +483,21 @@ impl ImportEngine for GenericWebEngine {
                                     unavailable("The platform subtitle could not be staged.")
                                 })?;
                             asset_paths.push(relative);
+                            let segments_relative = "subtitles/segments.json";
+                            let serialized =
+                                serde_json::to_vec_pretty(&segments).map_err(|_| {
+                                    unavailable(
+                                        "The normalized subtitle segments could not be serialized.",
+                                    )
+                                })?;
+                            std::fs::write(staging.join(segments_relative), serialized).map_err(
+                                |_| {
+                                    unavailable(
+                                        "The normalized subtitle segments could not be staged.",
+                                    )
+                                },
+                            )?;
+                            asset_paths.push(segments_relative.into());
                             transcription_ready = true;
                             break;
                         }
@@ -395,13 +517,24 @@ impl ImportEngine for GenericWebEngine {
                     .and_then(|value| resolve_web_asset_url(&value, &artifact.final_public_url))
             });
         if platform == Some(Platform::Bilibili)
-            && is_bilibili_video_locator(request)
+            && (is_bilibili_video_locator(request)
+                || is_bilibili_video_url(&artifact.final_public_url))
             && media_url.is_none()
         {
             if transcription_ready && request.media_save_mode == MediaSaveMode::ExtractOnly {
                 // A verified transcript satisfies extraction-only imports;
                 // no media download is needed.
-            } else if !transcription_ready && !request.local_asr_authorized {
+            } else if request.allow_missing_transcript
+                && request.media_save_mode == MediaSaveMode::ExtractOnly
+            {
+                warnings.push(
+                    "Bilibili metadata was imported without a transcript or local media stream."
+                        .into(),
+                );
+            } else if !transcription_ready
+                && !request.local_asr_authorized
+                && !request.allow_missing_transcript
+            {
                 return Err(BackendError::new(
                     "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
                     "Bilibili did not expose usable subtitles and no media was available for local ASR.",
@@ -422,7 +555,11 @@ impl ImportEngine for GenericWebEngine {
                 let platform_media_allowed = platform
                     .is_none_or(|platform| is_trusted_platform_asset_url(platform, &media_url));
                 if !platform_media_allowed {
-                    markdown = markdown.replace(&media_url, "(platform media host not allowed)");
+                    markdown = replace_markdown_asset_reference(
+                        &markdown,
+                        &media_url,
+                        "（媒体来源未获允许）",
+                    );
                     warnings.push("Platform media host was not in the verified allowlist.".into());
                     if !transcription_ready {
                         return Err(BackendError::new(
@@ -434,7 +571,10 @@ impl ImportEngine for GenericWebEngine {
                     }
                 }
                 let media = if platform_media_allowed {
-                    if !transcription_ready && !request.local_asr_authorized {
+                    if !transcription_ready
+                        && !request.local_asr_authorized
+                        && !request.allow_missing_transcript
+                    {
                         return Err(BackendError::new(
                             "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
                             "Local ASR is required because the platform did not provide usable subtitles.",
@@ -442,7 +582,8 @@ impl ImportEngine for GenericWebEngine {
                             true,
                         ));
                     }
-                    if request.media_save_mode == MediaSaveMode::ExtractOnly && transcription_ready
+                    if request.media_save_mode == MediaSaveMode::ExtractOnly
+                        && (transcription_ready || request.allow_missing_transcript)
                     {
                         None
                     } else {
@@ -462,8 +603,11 @@ impl ImportEngine for GenericWebEngine {
                         ) {
                             Ok(media) => Some((media, download)),
                             Err(error) if transcription_ready => {
-                                markdown =
-                                    markdown.replace(&media_url, "(original media unavailable)");
+                                markdown = replace_markdown_asset_reference(
+                                    &markdown,
+                                    &media_url,
+                                    "（原始媒体不可用）",
+                                );
                                 warnings.push(format!(
                                     "Original media was not localized: {}",
                                     error.message
@@ -475,6 +619,28 @@ impl ImportEngine for GenericWebEngine {
                     }
                 } else {
                     None
+                };
+                let media = match media {
+                    Some((media, download))
+                        if platform.is_some_and(|platform| {
+                            !is_trusted_platform_asset_url(platform, &media.final_public_url)
+                        }) =>
+                    {
+                        drop(download);
+                        warnings.push(
+                            "Platform media redirect left the verified host allowlist.".into(),
+                        );
+                        if !transcription_ready {
+                            return Err(BackendError::new(
+                                "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED",
+                                "The redirected platform media host is not in the verified allowlist.",
+                                true,
+                                true,
+                            ));
+                        }
+                        None
+                    }
+                    media => media,
                 };
                 if let Some((media, download)) = media {
                     let extension = media_extension(&media.content_type, &media.final_public_url);
@@ -499,7 +665,11 @@ impl ImportEngine for GenericWebEngine {
                         asset_paths.push(relative);
                         Some(durable_path)
                     } else {
-                        markdown = markdown.replace(&media_url, "(original media not retained)");
+                        markdown = replace_markdown_asset_reference(
+                            &markdown,
+                            &media_url,
+                            "（原始媒体未保留）",
+                        );
                         None
                     };
                     if !transcription_ready && request.local_asr_authorized {
@@ -548,6 +718,9 @@ impl ImportEngine for GenericWebEngine {
             platform_id: platform_document
                 .as_ref()
                 .and_then(|document| document.platform_id.as_deref()),
+            title_source: platform_document
+                .as_ref()
+                .map(|document| document.title_source.as_str()),
             content_kind: platform_document
                 .as_ref()
                 .map(|document| document.content_type.as_str()),
@@ -557,6 +730,19 @@ impl ImportEngine for GenericWebEngine {
             published_at: platform_document
                 .as_ref()
                 .and_then(|document| document.published_at.as_deref()),
+            transcript_source: transcript_source.as_deref(),
+            transcript_language: transcript_language.as_deref(),
+            image_count: platform_document
+                .as_ref()
+                .map(|document| document.images.len())
+                .unwrap_or_default(),
+            hashtag_count: platform_document
+                .as_ref()
+                .map(|document| document.hashtags.len())
+                .unwrap_or_default(),
+            media_present: platform_document
+                .as_ref()
+                .is_some_and(|document| document.media_url.is_some()),
         };
         let title = platform_document
             .as_ref()
@@ -598,6 +784,42 @@ impl ImportEngine for GenericWebEngine {
     }
 }
 
+fn select_primary_web_artifact(
+    page_artifact: Result<WebFetchArtifact, BackendError>,
+    bilibili_api: Option<&bilibili::BilibiliApiResult>,
+    bilibili_api_request: Option<&EngineRequest>,
+    request: &EngineRequest,
+) -> Result<(WebFetchArtifact, bool), BackendError> {
+    match (page_artifact, bilibili_api) {
+        (_, Some(api)) => {
+            // Exact Bilibili video URLs have a stable public JSON source.
+            // Prefer it even when the HTML edge returned bytes: that edge
+            // can serve compressed/anti-bot payloads which are not page
+            // text and must not override successfully parsed API evidence.
+            let api_locator = bilibili_api_request
+                .and_then(|resolved| resolved.input.normalized_locator.as_deref())
+                .or(request.input.normalized_locator.as_deref())
+                .unwrap_or(&request.input.locator);
+            let target = UrlPolicy::default().normalize_for_session(api_locator)?;
+            Ok((
+                WebFetchArtifact {
+                    bytes: api.source_body.as_bytes().to_vec(),
+                    byte_len: api.source_body.len() as u64,
+                    final_public_url: target.public.public_url.clone(),
+                    final_session_target: target,
+                    content_type: "application/json".into(),
+                    sanitized_headers: BTreeMap::new(),
+                    redirects: Vec::new(),
+                    elapsed_ms: 0,
+                },
+                true,
+            ))
+        }
+        (Ok(artifact), None) => Ok((artifact, false)),
+        (Err(error), None) => Err(error),
+    }
+}
+
 fn resolve_inside(root: &Path, locator: &str) -> Result<PathBuf, BackendError> {
     let candidate = Path::new(locator);
     let path = if candidate.is_absolute() {
@@ -632,10 +854,42 @@ fn unavailable(message: &'static str) -> BackendError {
 
 fn render_platform_markdown(
     document: &crate::services::import_v2::platform_provider::PlatformDocument,
+    route: &str,
+    engine_id: &str,
+    engine_version: &str,
 ) -> String {
-    let mut markdown = format!("# {}\n\n", document.title);
+    let yaml = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+    let mut markdown = String::from("---\n");
+    markdown.push_str("type: source\n");
+    markdown.push_str(&format!("title: {}\n", yaml(&document.title)));
+    markdown.push_str(&format!("title_source: {}\n", yaml(&document.title_source)));
+    markdown.push_str(&format!("source_url: {}\n", yaml(&document.canonical_url)));
+    markdown.push_str(&format!("source_platform: {}\n", yaml(&document.platform)));
+    markdown.push_str(&format!("content_type: {}\n", yaml(&document.content_type)));
+    markdown.push_str(&format!("route: {}\n", yaml(route)));
+    markdown.push_str(&format!("engine_id: {}\n", yaml(engine_id)));
+    markdown.push_str(&format!("engine_version: {}\n", yaml(engine_version)));
+    if let Some(platform_id) = document.platform_id.as_deref() {
+        markdown.push_str(&format!("source_id: {}\n", yaml(platform_id)));
+    }
+    if let Some(author) = document.author.as_deref() {
+        markdown.push_str(&format!("author: {}\n", yaml(author)));
+    }
+    if let Some(published_at) = document.published_at.as_deref() {
+        markdown.push_str(&format!("published_at: {}\n", yaml(published_at)));
+    }
+    markdown.push_str("---\n\n");
+    markdown.push_str(&format!("# {}\n\n", document.title));
+    markdown.push_str(&format!(
+        "> 来源：[{}]({})\n\n",
+        platform_display_name(&document.platform),
+        document.canonical_url
+    ));
     markdown.push_str("## 来源信息\n\n");
-    markdown.push_str(&format!("- 平台：{}\n", document.platform));
+    markdown.push_str(&format!(
+        "- 平台：{}\n",
+        platform_display_name(&document.platform)
+    ));
     if let Some(platform_id) = document.platform_id.as_deref() {
         markdown.push_str(&format!("- 平台 ID：{platform_id}\n"));
     }
@@ -646,8 +900,16 @@ fn render_platform_markdown(
         markdown.push_str(&format!("- 发布时间：{published_at}\n"));
     }
     markdown.push_str(&format!("- 来源：{}\n", document.canonical_url));
+    markdown.push_str(&format!("- 导入路线：`{route}`\n"));
+    if document.title_source == "inferred" {
+        markdown.push_str("- 标题来源：由原始正文首行推断\n");
+    }
     if !document.description.trim().is_empty() {
-        markdown.push_str("\n## 原始描述\n\n");
+        markdown.push_str(if document.platform == "xiaohongshu" {
+            "\n## 原始正文\n\n"
+        } else {
+            "\n## 原始描述\n\n"
+        });
         markdown.push_str(document.description.trim());
         markdown.push('\n');
     }
@@ -656,10 +918,15 @@ fn render_platform_markdown(
         markdown.push_str(&document.hashtags.join(" "));
         markdown.push('\n');
     }
-    if !document.images.is_empty() {
+    if !document.images.is_empty() && document.content_type != "video" {
         markdown.push_str("\n## 图片\n\n");
         for (index, image) in document.images.iter().enumerate() {
             markdown.push_str(&format!("{}. ![第 {} 张]({image})\n", index + 1, index + 1));
+        }
+    }
+    if document.content_type == "video" {
+        if let Some(cover_url) = document.cover_url.as_deref() {
+            markdown.push_str(&format!("\n## 封面\n\n![视频封面]({cover_url})\n"));
         }
     }
     if let Some(media_url) = document.media_url.as_deref() {
@@ -672,6 +939,67 @@ fn render_platform_markdown(
         }
     }
     markdown
+}
+
+fn platform_display_name(platform: &str) -> &str {
+    match platform {
+        "xiaohongshu" => "小红书",
+        "bilibili" => "Bilibili",
+        "douyin" => "抖音",
+        _ => platform,
+    }
+}
+
+fn replace_markdown_asset_reference(markdown: &str, target: &str, replacement: &str) -> String {
+    let had_trailing_newline = markdown.ends_with('\n');
+    let mut output = markdown
+        .lines()
+        .map(|line| {
+            if !line.contains(target) || !line.contains("](") {
+                return line.replace(target, replacement);
+            }
+            if let Some(image_start) = line.find("![") {
+                format!("{}{replacement}", &line[..image_start])
+            } else {
+                replacement.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if had_trailing_newline {
+        output.push('\n');
+    }
+    output
+}
+
+fn xiaohongshu_error(failure: ConnectorFailure) -> BackendError {
+    let (code, message, retryable, user_action_required) = match failure {
+        ConnectorFailure::Captcha | ConnectorFailure::Challenge => (
+            "IMPORT_WEB_CAPTCHA_REQUIRED",
+            "Xiaohongshu requires an explicit verification session before this note can be imported.",
+            false,
+            true,
+        ),
+        ConnectorFailure::LoginRequired => (
+            "IMPORT_WEB_LOGIN_REQUIRED",
+            "Xiaohongshu requires login before this note can be imported.",
+            false,
+            true,
+        ),
+        ConnectorFailure::Removed => (
+            "IMPORT_WEB_CONTENT_REMOVED",
+            "The Xiaohongshu note is unavailable or has been removed.",
+            false,
+            true,
+        ),
+        ConnectorFailure::EmptyBody | ConnectorFailure::StructureChanged => (
+            "IMPORT_WEB_STRUCTURE_CHANGED",
+            "The Xiaohongshu page did not contain a complete note payload.",
+            true,
+            true,
+        ),
+    };
+    BackendError::new(code, message, retryable, user_action_required)
 }
 
 fn subtitle_extension(content_type: &str, url: &str) -> &'static str {
@@ -775,9 +1103,15 @@ fn direct_media_result(
         warnings: &warnings,
         platform: None,
         platform_id: None,
+        title_source: None,
         content_kind: None,
         author: None,
         published_at: None,
+        transcript_source: None,
+        transcript_language: None,
+        image_count: 0,
+        hashtag_count: 0,
+        media_present: true,
     };
     std::fs::write(staging.join("source.bin"), &artifact.bytes)
         .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
@@ -847,9 +1181,15 @@ fn direct_image_result(
         warnings: &[],
         platform: None,
         platform_id: None,
+        title_source: None,
         content_kind: Some("image"),
         author: None,
         published_at: None,
+        transcript_source: None,
+        transcript_language: None,
+        image_count: 1,
+        hashtag_count: 0,
+        media_present: false,
     };
     std::fs::write(staging.join("source.bin"), &artifact.bytes)
         .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
@@ -911,6 +1251,16 @@ fn should_run_platform_image_ocr(
     authorized
         && document
             .is_some_and(|document| !document.images.is_empty() && document.media_url.is_none())
+}
+
+fn platform_image_output_is_meaningful(
+    document: &crate::services::import_v2::platform_provider::PlatformDocument,
+    successful_images: usize,
+) -> bool {
+    document.platform != "xiaohongshu"
+        || document.content_type != "image_post"
+        || !document.description.trim().is_empty()
+        || successful_images > 0
 }
 
 fn ocr_unavailable(message: &str) -> BackendError {
@@ -976,6 +1326,10 @@ fn is_bilibili_video_locator(request: &EngineRequest) -> bool {
         .normalized_locator
         .as_deref()
         .unwrap_or(&request.input.locator);
+    is_bilibili_video_url(value)
+}
+
+fn is_bilibili_video_url(value: &str) -> bool {
     url::Url::parse(value)
         .ok()
         .and_then(|url| {
@@ -1328,11 +1682,24 @@ fn media_extension(content_type: &str, url: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_html_image_urls, extract_html_media_url, extract_html_title,
-        is_trusted_platform_asset_url, media_extension, should_run_platform_image_ocr,
+        extract_html_image_urls, extract_html_media_url, extract_html_title, is_bilibili_video_url,
+        is_trusted_platform_asset_url, media_extension, platform_image_output_is_meaningful,
+        render_platform_markdown, replace_markdown_asset_reference, select_primary_web_artifact,
+        should_run_platform_image_ocr, xiaohongshu_error, GenericWebEngine,
+    };
+    use crate::models::import_v2::{ImportInput, ImportInputKind, MediaSaveMode};
+    use crate::services::import_v2::connectors::ConnectorFailure;
+    use crate::services::import_v2::engine::{
+        validate_engine_result, EngineOperation, EngineRequest, ImportEngine,
     };
     use crate::services::import_v2::platform_provider::{Platform, PlatformDocument};
     use crate::services::import_v2::redaction::redact_sensitive_text;
+    use crate::services::import_v2::url_policy::UrlPolicy;
+    use crate::services::import_v2::web_fetch::WebFetchArtifact;
+    use crate::services::import_v2::web_target_store::WebTargetStore;
+    use crate::services::SecretService;
+    use crate::tasks::task_model::CancellationToken;
+    use std::sync::Arc;
 
     #[test]
     fn preserves_audio_and_video_container_extensions() {
@@ -1388,6 +1755,36 @@ mod tests {
     }
 
     #[test]
+    fn xiaohongshu_provider_evidence_remains_valid_json_without_signed_values() {
+        let document = PlatformDocument {
+            platform: "xiaohongshu".into(),
+            platform_id: Some("note-1".into()),
+            content_type: "image_post".into(),
+            canonical_url: "https://www.xiaohongshu.com/explore/note-1".into(),
+            title: "笔记".into(),
+            title_source: "platform".into(),
+            author: None,
+            published_at: None,
+            description: "正文".into(),
+            hashtags: Vec::new(),
+            images: vec![
+                "https://sns-img-qc.xhscdn.com/1.jpg?xsec_token=image-secret&sign=signature".into(),
+            ],
+            media_url: None,
+            cover_url: None,
+            subtitles: Vec::new(),
+            chapters: Vec::new(),
+        };
+        let persisted = redact_sensitive_text(&serde_json::to_string_pretty(&document).unwrap());
+        assert!(serde_json::from_str::<serde_json::Value>(&persisted).is_ok());
+        assert!(!persisted.contains("image-secret"));
+        assert!(!persisted.contains("signature"));
+        assert!(!persisted.contains("xsec_token"));
+        assert!(!persisted.contains("sign="));
+        assert!(persisted.contains("/1.jpg"));
+    }
+
+    #[test]
     fn platform_assets_use_a_closed_host_allowlist() {
         assert!(is_trusted_platform_asset_url(
             Platform::Bilibili,
@@ -1412,6 +1809,130 @@ mod tests {
     }
 
     #[test]
+    fn resolved_bilibili_video_urls_are_detected_after_short_link_redirects() {
+        assert!(is_bilibili_video_url(
+            "https://www.bilibili.com/video/BV1N7411A7WU/"
+        ));
+        assert!(!is_bilibili_video_url("https://b23.tv/short-code"));
+    }
+
+    #[test]
+    fn successful_bilibili_api_evidence_precedes_unreadable_page_bytes() {
+        let url = "https://www.bilibili.com/video/BV1N7411A7WU/";
+        let target = UrlPolicy::default().normalize_for_session(url).unwrap();
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "fixture".into(),
+            project_id: "fixture".into(),
+            session_id: "fixture".into(),
+            item_id: "fixture".into(),
+            task_id: "fixture".into(),
+            operation: EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "Bilibili".into(),
+                locator: url.into(),
+                normalized_locator: Some(url.into()),
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+            project_root: String::new(),
+            staging_root: String::new(),
+            chained_input: None,
+            local_asr_authorized: false,
+            local_ocr_authorized: false,
+            allow_missing_transcript: false,
+            media_save_mode: MediaSaveMode::ExtractOnly,
+        };
+        let page = WebFetchArtifact {
+            bytes: vec![0xff, 0xfe, 0xfd],
+            byte_len: 3,
+            final_public_url: url.into(),
+            final_session_target: target,
+            content_type: "text/html".into(),
+            sanitized_headers: Default::default(),
+            redirects: Vec::new(),
+            elapsed_ms: 1,
+        };
+        let api = crate::services::import_v2::bilibili::BilibiliApiResult {
+            source_body: r#"{"view":{"code":0},"player":null}"#.into(),
+            document: PlatformDocument {
+                platform: "bilibili".into(),
+                platform_id: Some("BV1N7411A7WU".into()),
+                content_type: "video".into(),
+                canonical_url: url.into(),
+                title: "Fixture".into(),
+                title_source: "platform".into(),
+                author: None,
+                published_at: None,
+                description: "Fixture".into(),
+                hashtags: Vec::new(),
+                images: Vec::new(),
+                media_url: None,
+                cover_url: None,
+                subtitles: Vec::new(),
+                chapters: Vec::new(),
+            },
+        };
+
+        let (selected, api_is_source) =
+            select_primary_web_artifact(Ok(page), Some(&api), None, &request).unwrap();
+
+        assert!(api_is_source);
+        assert_eq!(selected.bytes, api.source_body.as_bytes());
+        assert_eq!(selected.content_type, "application/json");
+    }
+
+    #[test]
+    #[ignore = "requires the public Bilibili API"]
+    fn public_bilibili_engine_result_obeys_the_staging_contract() {
+        let root = std::env::temp_dir().join(format!("bilibili-engine-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".app")).unwrap();
+        let url = std::env::var("LLM_WIKI_BILIBILI_TEST_URL")
+            .unwrap_or_else(|_| "https://www.bilibili.com/video/BV1N7411A7WU/".into());
+        let target = UrlPolicy::default().normalize_for_session(&url).unwrap();
+        let targets = Arc::new(WebTargetStore::new(SecretService::memory()));
+        let reference = targets.store(&target).unwrap();
+        let engine = GenericWebEngine::new(targets, "builtin.web-bilibili", "web.bilibili.video");
+        let staging_root = ".app/import-sessions/session/items/item/staging";
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "network-fixture".into(),
+            project_id: "network-fixture".into(),
+            session_id: "session".into(),
+            item_id: "item".into(),
+            task_id: "task".into(),
+            operation: EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "www.bilibili.com".into(),
+                locator: reference,
+                normalized_locator: Some(target.public.public_url),
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+            project_root: root.to_string_lossy().into_owned(),
+            staging_root: staging_root.into(),
+            chained_input: None,
+            local_asr_authorized: false,
+            local_ocr_authorized: false,
+            allow_missing_transcript: true,
+            media_save_mode: MediaSaveMode::ExtractOnly,
+        };
+
+        let result = engine
+            .execute(&request, &CancellationToken::new())
+            .expect("metadata-only Bilibili preview should remain available without subtitles");
+        assert!(
+            validate_engine_result(staging_root, &result).is_ok(),
+            "Bilibili result violated staging: assets={:?}, continuation={:?}",
+            result.asset_paths,
+            result.continuation
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn platform_image_posts_do_not_require_ocr_unless_explicitly_enabled() {
         let document = PlatformDocument {
             platform: "xiaohongshu".into(),
@@ -1419,6 +1940,7 @@ mod tests {
             content_type: "image_post".into(),
             canonical_url: "https://www.xiaohongshu.com/explore/note-1".into(),
             title: "Image post".into(),
+            title_source: "platform".into(),
             author: None,
             published_at: None,
             description: "Body".into(),
@@ -1431,5 +1953,84 @@ mod tests {
         };
         assert!(!should_run_platform_image_ocr(Some(&document), false));
         assert!(should_run_platform_image_ocr(Some(&document), true));
+        let mut image_only = document.clone();
+        image_only.description.clear();
+        assert!(!platform_image_output_is_meaningful(&image_only, 0));
+        assert!(platform_image_output_is_meaningful(&image_only, 1));
+    }
+
+    #[test]
+    fn xiaohongshu_markdown_keeps_source_sections_and_marks_inferred_titles() {
+        let document = PlatformDocument {
+            platform: "xiaohongshu".into(),
+            platform_id: Some("note-1".into()),
+            content_type: "image_post".into(),
+            canonical_url: "https://www.xiaohongshu.com/explore/note-1".into(),
+            title: "正文首行".into(),
+            title_source: "inferred".into(),
+            author: Some("作者".into()),
+            published_at: Some("2026-07-20T08:00:00Z".into()),
+            description: "正文首行\n第二行".into(),
+            hashtags: vec!["#知识库".into()],
+            images: vec!["https://sns-webpic-qc.xhscdn.com/1.jpg".into()],
+            media_url: None,
+            cover_url: Some("https://sns-webpic-qc.xhscdn.com/1.jpg".into()),
+            subtitles: Vec::new(),
+            chapters: Vec::new(),
+        };
+        let markdown = render_platform_markdown(
+            &document,
+            "web.xiaohongshu.note",
+            "builtin.web-xiaohongshu",
+            "0.1.0",
+        );
+        for expected in [
+            "type: source",
+            "source_platform: \"xiaohongshu\"",
+            "source_id: \"note-1\"",
+            "title_source: \"inferred\"",
+            "## 原始正文",
+            "## 话题",
+            "## 图片",
+            "标题来源：由原始正文首行推断",
+        ] {
+            assert!(markdown.contains(expected), "missing {expected}");
+        }
+        assert!(!markdown.contains("## 字幕 / 转写"));
+        assert!(!markdown.contains("## 封面"));
+    }
+
+    #[test]
+    fn unavailable_platform_assets_become_readable_text_not_broken_links() {
+        let markdown = "## 图片\n\n1. ![第 1 张](https://cdn.example/1.jpg)\n\n## 视频 / 音频\n\n[平台媒体](https://cdn.example/video.mp4)\n";
+        let markdown = replace_markdown_asset_reference(
+            markdown,
+            "https://cdn.example/1.jpg",
+            "（原图不可用）",
+        );
+        let markdown = replace_markdown_asset_reference(
+            &markdown,
+            "https://cdn.example/video.mp4",
+            "（原始媒体未保留）",
+        );
+        assert!(markdown.contains("1. （原图不可用）"));
+        assert!(markdown.contains("## 视频 / 音频\n\n（原始媒体未保留）"));
+        assert!(!markdown.contains("]()"));
+    }
+
+    #[test]
+    fn xiaohongshu_failures_map_to_stable_actionable_codes() {
+        assert_eq!(
+            xiaohongshu_error(ConnectorFailure::Captcha).code,
+            "IMPORT_WEB_CAPTCHA_REQUIRED"
+        );
+        assert_eq!(
+            xiaohongshu_error(ConnectorFailure::LoginRequired).code,
+            "IMPORT_WEB_LOGIN_REQUIRED"
+        );
+        assert_eq!(
+            xiaohongshu_error(ConnectorFailure::Removed).code,
+            "IMPORT_WEB_CONTENT_REMOVED"
+        );
     }
 }

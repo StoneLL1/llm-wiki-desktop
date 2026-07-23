@@ -15,6 +15,7 @@ export type ImportItemAction =
   | "enable_ocr"
   | "skip"
   | "authorize_local_asr"
+  | "preview_without_transcript"
   | "cancel"
   | "preview_markdown"
   | "begin_login"
@@ -55,6 +56,7 @@ const STATUS_PRESENTATION: Record<ImportItemStatus, StaticPresentation> = {
   inspecting: { tone: "accent", labelKey: "importV2.itemStatus.inspecting", icon: "scan", progressMode: "indeterminate", actions: ["cancel"], selectable: false, committable: false },
   waiting_capability: { tone: "warning", labelKey: "importV2.itemStatus.waitingCapability", icon: "capability", progressMode: "none", actions: ["view_capability", "cancel"], selectable: false, committable: false },
   waiting_login: { tone: "warning", labelKey: "importV2.itemStatus.waitingLogin", icon: "login", progressMode: "none", actions: ["begin_login", "cancel"], selectable: false, committable: false },
+  waiting_authorization: { tone: "warning", labelKey: "importV2.itemStatus.waitingAuthorization", icon: "shield", progressMode: "none", actions: ["authorize_local_asr", "cancel"], selectable: false, committable: false },
   extracting: { tone: "accent", labelKey: "importV2.itemStatus.extracting", icon: "scan", progressMode: "indeterminate", actions: ["cancel"], selectable: false, committable: false },
   validating: { tone: "accent", labelKey: "importV2.itemStatus.validating", icon: "shield", progressMode: "indeterminate", actions: ["cancel"], selectable: false, committable: false },
   preview_ready: { tone: "accent", labelKey: "importV2.itemStatus.previewReady", icon: "ready", progressMode: "none", actions: ["preview_markdown"], selectable: true, committable: true },
@@ -81,12 +83,14 @@ const RECOVERY_ACTION_TO_ITEM_ACTION: readonly [ImportRecoveryAction, ImportItem
   ["enable_ocr", "enable_ocr"],
   ["skip", "skip"],
   ["authorize_local_asr", "authorize_local_asr"],
+  ["preview_without_transcript", "preview_without_transcript"],
 ];
 
 function isRecoveryActionApplicable(item: ImportItem, action: ImportRecoveryAction): boolean {
   if (action === "skip" || action === "retry_route") return true;
   if (item.input.kind === "url") {
-    return action === "switch_route"
+    return action === "preview_without_transcript"
+      || action === "switch_route"
       || (action === "enable_ocr" && isSupportedMediaPlatformUrl(item.input.normalizedLocator ?? item.input.locator));
   }
   const extension = item.input.locator.split(/[\\/.]/).pop()?.toLowerCase() ?? "";

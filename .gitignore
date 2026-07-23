@@ -11,3 +11,4 @@ src-tauri/target/
 __MACOSX/
 ._*
 wiki/wiki/raw/GitHubDaily/
+.dev-capabilities/

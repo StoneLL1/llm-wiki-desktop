@@ -11,13 +11,16 @@ import {
   MAX_DECODED_BYTES,
   MODEL_ID,
   assertProviderWasUsed,
+  buildEmbeddedSubtitleArguments,
   buildFfmpegArguments,
   buildSenseVoiceArguments,
   classifyExecutionError,
   executeWithProviderFallback,
   ffmpegRelativePath,
+  parseEmbeddedSubtitle,
   parseSenseVoiceStdout,
   preferredProviders,
+  renderEmbeddedTranscript,
   renderTranscript,
   resolveStagingMedia,
   restrictedEnvironment,
@@ -78,60 +81,103 @@ try {
     throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   }
 
-  const [ffmpeg, sherpa, model, tokens] = await Promise.all([
-    verifySignedFile(packRoot, manifest, ffmpegRelativePath()),
-    verifySignedFile(packRoot, manifest, sherpaRelativePath()),
-    verifySignedFile(packRoot, manifest, "models/model.int8.onnx"),
-    verifySignedFile(packRoot, manifest, "models/tokens.txt"),
-  ]);
-  const modelSha256 = manifest.files.find((item) => item?.path === "models/model.int8.onnx")?.sha256;
-  const tokensSha256 = manifest.files.find((item) => item?.path === "models/tokens.txt")?.sha256;
-  if (!/^[0-9a-f]{64}$/.test(modelSha256 || "") || !/^[0-9a-f]{64}$/.test(tokensSha256 || "")) {
-    throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
-  }
+  const ffmpeg = await verifySignedFile(packRoot, manifest, ffmpegRelativePath());
   temporaryRoot = await fs.mkdtemp(path.join(stagingRoot, ".sensevoice-output-"));
-  const decodedPath = path.join(temporaryRoot, "decoded.wav");
   const environment = restrictedEnvironment(packRoot, temporaryRoot);
-  await runFile(ffmpeg, buildFfmpegArguments(mediaPath, decodedPath), {
-    cwd: temporaryRoot,
-    env: environment,
-    timeout: DECODE_TIMEOUT_MS,
-  }, "decode");
-  const decodedStatus = await fs.lstat(decodedPath).catch(() => null);
-  if (!decodedStatus?.isFile() || decodedStatus.isSymbolicLink() || decodedStatus.size <= 44 || decodedStatus.size > MAX_DECODED_BYTES) {
-    throw new Error("IMPORT_ASR_DECODE_FAILED");
+  const embeddedSubtitlePath = path.join(temporaryRoot, "embedded.srt");
+  let embeddedTranscript = null;
+  try {
+    await runFile(ffmpeg, buildEmbeddedSubtitleArguments(mediaPath, embeddedSubtitlePath), {
+      cwd: temporaryRoot,
+      env: environment,
+      timeout: DECODE_TIMEOUT_MS,
+    }, "decode");
+    const embeddedStatus = await fs.lstat(embeddedSubtitlePath).catch(() => null);
+    if (embeddedStatus?.isFile() && !embeddedStatus.isSymbolicLink() && embeddedStatus.size > 0 && embeddedStatus.size <= MAX_ENGINE_BUFFER_BYTES) {
+      embeddedTranscript = parseEmbeddedSubtitle(await fs.readFile(embeddedSubtitlePath, "utf8"));
+    }
+  } catch {
+    embeddedTranscript = null;
   }
+  await fs.rm(embeddedSubtitlePath, { force: true }).catch(() => {});
 
-  const threads = Math.min(8, Math.max(1, os.availableParallelism?.() || os.cpus().length || 1));
-  const execution = await executeWithProviderFallback(preferredProviders(), async (provider) => {
-    const result = await runFile(
-      sherpa,
-      buildSenseVoiceArguments(model, tokens, decodedPath, provider, threads),
-      { cwd: temporaryRoot, env: environment, timeout: ASR_TIMEOUT_MS },
-      "asr",
-    );
-    assertProviderWasUsed(provider, result.stderr);
-    return parseSenseVoiceStdout(result.stdout);
-  });
-  await fs.rm(decodedPath, { force: true });
+  let markdown;
+  let safeMetadata;
+  let warnings = [];
+  if (embeddedTranscript) {
+    markdown = renderEmbeddedTranscript(embeddedTranscript, path.basename(mediaPath));
+    safeMetadata = {
+      engine: "ffmpeg",
+      model: null,
+      provider: "embedded_subtitle",
+      attemptedProviders: [],
+      language: "unknown",
+      languageConfidence: null,
+      emotion: "unknown",
+      event: "subtitle",
+      timingKind: "cue_start",
+      text: embeddedTranscript.text,
+      segments: embeddedTranscript.segments,
+      tokenTimings: [],
+      provenance: "authorized-local-embedded-subtitle",
+    };
+  } else {
+    const [sherpa, model, tokens] = await Promise.all([
+      verifySignedFile(packRoot, manifest, sherpaRelativePath()),
+      verifySignedFile(packRoot, manifest, "models/model.int8.onnx"),
+      verifySignedFile(packRoot, manifest, "models/tokens.txt"),
+    ]);
+    const modelSha256 = manifest.files.find((item) => item?.path === "models/model.int8.onnx")?.sha256;
+    const tokensSha256 = manifest.files.find((item) => item?.path === "models/tokens.txt")?.sha256;
+    if (!/^[0-9a-f]{64}$/.test(modelSha256 || "") || !/^[0-9a-f]{64}$/.test(tokensSha256 || "")) {
+      throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
+    }
+    const decodedPath = path.join(temporaryRoot, "decoded.wav");
+    await runFile(ffmpeg, buildFfmpegArguments(mediaPath, decodedPath), {
+      cwd: temporaryRoot,
+      env: environment,
+      timeout: DECODE_TIMEOUT_MS,
+    }, "decode");
+    const decodedStatus = await fs.lstat(decodedPath).catch(() => null);
+    if (!decodedStatus?.isFile() || decodedStatus.isSymbolicLink() || decodedStatus.size <= 44 || decodedStatus.size > MAX_DECODED_BYTES) {
+      throw new Error("IMPORT_ASR_DECODE_FAILED");
+    }
 
-  const transcript = execution.value;
-  const markdown = renderTranscript(transcript, path.basename(mediaPath), execution.provider);
-  const safeMetadata = {
-    engine: ENGINE_VERSION,
-    model: MODEL_ID,
-    modelSha256,
-    tokensSha256,
-    provider: execution.provider,
-    attemptedProviders: execution.attemptedProviders,
-    language: transcript.language,
-    languageConfidence: null,
-    emotion: transcript.emotion,
-    event: transcript.event,
-    timingKind: "token_start",
-    tokenTimings: transcript.tokenTimings,
-    provenance: "authorized-local-asr",
-  };
+    const threads = Math.min(8, Math.max(1, os.availableParallelism?.() || os.cpus().length || 1));
+    const execution = await executeWithProviderFallback(preferredProviders(), async (provider) => {
+      const result = await runFile(
+        sherpa,
+        buildSenseVoiceArguments(model, tokens, decodedPath, provider, threads),
+        { cwd: temporaryRoot, env: environment, timeout: ASR_TIMEOUT_MS },
+        "asr",
+      );
+      assertProviderWasUsed(provider, result.stderr);
+      return parseSenseVoiceStdout(result.stdout);
+    });
+    await fs.rm(decodedPath, { force: true });
+    const transcript = execution.value;
+    markdown = renderTranscript(transcript, path.basename(mediaPath), execution.provider);
+    const firstTimestamp = transcript.tokenTimings[0]?.startMs ?? null;
+    safeMetadata = {
+      engine: ENGINE_VERSION,
+      model: MODEL_ID,
+      modelSha256,
+      tokensSha256,
+      provider: execution.provider,
+      attemptedProviders: execution.attemptedProviders,
+      language: transcript.language,
+      languageConfidence: null,
+      emotion: transcript.emotion,
+      event: transcript.event,
+      timingKind: "token_start",
+      text: transcript.text,
+      segments: [{ startMs: firstTimestamp, text: transcript.text }],
+      tokenTimings: transcript.tokenTimings,
+      provenance: "authorized-local-asr",
+    };
+    warnings = execution.provider === "cpu" && execution.attemptedProviders.length > 1
+      ? ["IMPORT_ASR_ACCELERATOR_FALLBACK"] : [];
+  }
   const candidatePath = path.join(temporaryRoot, "candidate.md");
   const sourcePath = path.join(temporaryRoot, "source.json");
   const metadataPath = path.join(temporaryRoot, "metadata.json");
@@ -141,8 +187,6 @@ try {
     fs.writeFile(metadataPath, JSON.stringify(safeMetadata), { encoding: "utf8", flag: "wx" }),
   ]);
   const relative = (value) => path.relative(stagingRoot, value).split(path.sep).join("/");
-  const warnings = execution.provider === "cpu" && execution.attemptedProviders.length > 1
-    ? ["IMPORT_ASR_ACCELERATOR_FALLBACK"] : [];
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: {
     sourceSnapshotPath: relative(sourcePath),
     markdownPath: relative(candidatePath),

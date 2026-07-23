@@ -16,10 +16,10 @@ use crate::models::import_v2_file::CapabilityRequirement;
 use crate::models::import_v2_migration::{LegacyHistoryView, MigrationStatus};
 use crate::models::import_v2_presentation::{
     GetImportCapabilityRequirementV2Request, GetImportFrontendReadinessV2Request,
-    GetImportPreviewContentV2Request, ImportCapabilityRequirement, ImportFrontendReadiness,
-    ImportHistoryAction, ImportHistoryEntry, ImportHistoryPage, ImportPlatformReadiness,
-    ImportPreviewContent, InstallImportCapabilityV2Request, ListImportHistoryV2Request,
-    IMPORT_V2_PREVIEW_MAX_BYTES,
+    GetImportPreviewContentV2Request, ImportCapabilityReadiness, ImportCapabilityRequirement,
+    ImportFeatureReadiness, ImportFrontendReadiness, ImportHistoryAction, ImportHistoryEntry,
+    ImportHistoryPage, ImportPlatformReadiness, ImportPreviewContent,
+    InstallImportCapabilityV2Request, ListImportHistoryV2Request, IMPORT_V2_PREVIEW_MAX_BYTES,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
@@ -190,10 +190,20 @@ pub fn get_import_frontend_readiness_v2(
     let active = activation.as_ref().is_some_and(|record| {
         record.legacy_mutations_disabled && record.rollback_mode == "release_based"
     }) && migration.status == MigrationStatus::Applied;
-    let platforms = platform_readiness(
-        &state.import_v2_service.registered_engine_routes()?,
-        &state.import_capability_runtime.statuses(),
-    );
+    let registered_routes = state.import_v2_service.registered_engine_routes()?;
+    let capability_statuses = state.import_capability_runtime.statuses();
+    let files = file_readiness(&registered_routes, &capability_statuses);
+    let platforms = platform_readiness(&registered_routes, &capability_statuses);
+    let abilities = ability_readiness(&registered_routes, &capability_statuses);
+    let capabilities = capability_statuses
+        .into_iter()
+        .map(|status| ImportCapabilityReadiness {
+            capability_id: status.capability_id,
+            route: status.route,
+            available: status.available,
+            reason_code: status.reason,
+        })
+        .collect();
     Ok(ImportFrontendReadiness {
         backend_version: REQUIRED_IMPORT_V2_CONTRACT.into(),
         active,
@@ -202,8 +212,85 @@ pub fn get_import_frontend_readiness_v2(
             .import_v2_service
             .find_unfinished_session(&context, &state.file_store)?,
         legacy_history_available: !legacy_history.entries.is_empty(),
+        files,
         platforms,
+        abilities,
+        capabilities,
     })
+}
+
+fn file_readiness(
+    registered_routes: &[String],
+    capability_statuses: &[CapabilityRuntimeStatus],
+) -> Vec<ImportFeatureReadiness> {
+    let route = |id: &str, candidates: &[&str]| {
+        let available = candidates.iter().any(|candidate| {
+            registered_routes.iter().any(|route| route == candidate)
+                || capability_statuses
+                    .iter()
+                    .any(|status| status.route == *candidate && status.available)
+        });
+        ImportFeatureReadiness {
+            id: id.into(),
+            available,
+            reason_code: (!available).then(|| "capability_missing".into()),
+        }
+    };
+    vec![
+        route(
+            "docx",
+            &["office.modern.docx", "pack.markitdown", "pack.office-oxide"],
+        ),
+        route("pdf", &["pdf.text", "pdf.layout", "pack.markitdown"]),
+        route(
+            "xlsx",
+            &["office.modern.xlsx", "pack.markitdown", "pack.office-oxide"],
+        ),
+        route(
+            "ppt",
+            &[
+                "office.modern.pptx",
+                "pack.office-legacy",
+                "pack.markitdown",
+            ],
+        ),
+        route("md", &["file.native"]),
+        route("txt", &["file.native"]),
+        route("csv", &["file.native"]),
+    ]
+}
+
+fn ability_readiness(
+    registered_routes: &[String],
+    capability_statuses: &[CapabilityRuntimeStatus],
+) -> Vec<ImportFeatureReadiness> {
+    let route = |id: &str, candidates: &[&str]| {
+        let available = candidates.iter().any(|candidate| {
+            registered_routes.iter().any(|route| route == candidate)
+                || capability_statuses
+                    .iter()
+                    .any(|status| status.route == *candidate && status.available)
+        });
+        ImportFeatureReadiness {
+            id: id.into(),
+            available,
+            reason_code: (!available).then(|| "capability_missing".into()),
+        }
+    };
+    vec![
+        ImportFeatureReadiness {
+            id: "subtitle".into(),
+            available: true,
+            reason_code: None,
+        },
+        route("local_asr", &["media.asr"]),
+        route("ocr", &["ocr.cjk-accurate", "ocr.basic"]),
+        ImportFeatureReadiness {
+            id: "keyframes".into(),
+            available: false,
+            reason_code: Some("phase_two".into()),
+        },
+    ]
 }
 
 fn platform_readiness(
@@ -841,6 +928,17 @@ pub fn install_import_capability_v2(
                 return;
             }
         };
+        let replaced_waiting_task_id = state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &session_id)
+            .ok()
+            .and_then(|session| {
+                session
+                    .items
+                    .into_iter()
+                    .find(|item| item.item_id == item_id)
+                    .and_then(|item| item.task_id)
+            });
         if state
             .import_v2_service
             .bind_item_task_ids(
@@ -863,6 +961,15 @@ pub fn install_import_capability_v2(
                 ),
             );
             return;
+        }
+        if let Some(replaced_task_id) = replaced_waiting_task_id {
+            if state
+                .task_service
+                .get_task(&replaced_task_id)
+                .is_some_and(|task| task.status == TaskStatus::WaitingForConfirmation)
+            {
+                let _ = state.task_service.cancel_task(&replaced_task_id);
+            }
         }
         if state
             .task_service
@@ -1232,5 +1339,45 @@ mod tests {
         assert!(!zhihu.available);
         assert_eq!(zhihu.reason_code.as_deref(), Some("capability_missing"));
         assert_eq!(x.reason_code.as_deref(), Some("phase_two"));
+    }
+
+    #[test]
+    fn ability_readiness_reports_native_subtitles_and_runtime_routes() {
+        let routes = vec!["ocr.basic".into()];
+        let capabilities = vec![CapabilityRuntimeStatus {
+            capability_id: "asr-sensevoice-small".into(),
+            route: "media.asr".into(),
+            available: true,
+            reason: None,
+        }];
+        let abilities = ability_readiness(&routes, &capabilities);
+
+        assert!(
+            abilities
+                .iter()
+                .find(|item| item.id == "subtitle")
+                .unwrap()
+                .available
+        );
+        assert!(
+            abilities
+                .iter()
+                .find(|item| item.id == "local_asr")
+                .unwrap()
+                .available
+        );
+        assert!(
+            abilities
+                .iter()
+                .find(|item| item.id == "ocr")
+                .unwrap()
+                .available
+        );
+        let keyframes = abilities
+            .iter()
+            .find(|item| item.id == "keyframes")
+            .unwrap();
+        assert!(!keyframes.available);
+        assert_eq!(keyframes.reason_code.as_deref(), Some("phase_two"));
     }
 }

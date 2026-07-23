@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use crate::errors::{BackendError, IMPORT_V2_CAPABILITY_INVALID, IMPORT_V2_CAPABILITY_UNAVAILABLE};
 use crate::models::import_v2_file::CapabilityRequirement;
 
+const MAX_RUNTIME_DIRECTORY_DEPTH: usize = 64;
+const MAX_RUNTIME_ENTRIES: usize = 40_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CapabilityPackManifest {
@@ -362,16 +365,21 @@ fn validate_executable_files(manifest: &CapabilityPackManifest) -> Result<(), Ba
 }
 
 fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendError> {
-    fn visit(
-        root: &Path,
-        directory: &Path,
-        output: &mut Vec<(String, PathBuf)>,
-    ) -> Result<(), BackendError> {
+    let mut output = Vec::new();
+    let mut pending = vec![(root.to_path_buf(), 0_usize)];
+    let mut visited_entries = 0_usize;
+    while let Some((directory, depth)) = pending.pop() {
         let entries = fs::read_dir(directory)
             .map_err(|_| invalid("The capability runtime directory cannot be read."))?;
         for entry in entries {
             let entry =
                 entry.map_err(|_| invalid("The capability runtime directory cannot be read."))?;
+            visited_entries = visited_entries
+                .checked_add(1)
+                .ok_or_else(|| invalid("The capability runtime contains too many entries."))?;
+            if visited_entries > MAX_RUNTIME_ENTRIES {
+                return Err(invalid("The capability runtime contains too many entries."));
+            }
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|_| invalid("A capability runtime file cannot be inspected."))?;
@@ -381,7 +389,12 @@ fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendE
                 ));
             }
             if metadata.is_dir() {
-                visit(root, &path, output)?;
+                if depth >= MAX_RUNTIME_DIRECTORY_DEPTH {
+                    return Err(invalid(
+                        "The capability runtime directory nesting is too deep.",
+                    ));
+                }
+                pending.push((path, depth + 1));
             } else if metadata.is_file() {
                 let relative = path.strip_prefix(root).map_err(|_| {
                     invalid("A capability runtime file escapes its install directory.")
@@ -394,10 +407,7 @@ fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendE
                 return Err(invalid("Capability runtime special files are not allowed."));
             }
         }
-        Ok(())
     }
-    let mut output = Vec::new();
-    visit(root, root, &mut output)?;
     output.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(output)
 }
@@ -463,4 +473,42 @@ fn invalid(message: &str) -> BackendError {
 }
 fn unavailable(message: &str) -> BackendError {
     BackendError::new(IMPORT_V2_CAPABILITY_UNAVAILABLE, message, true, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_inventory_walks_deep_directories_without_recursion() {
+        let root = std::env::temp_dir().join(format!("cap-pack-depth-{}", uuid::Uuid::new_v4()));
+        let mut directory = root.clone();
+        for _ in 0..MAX_RUNTIME_DIRECTORY_DEPTH {
+            directory = directory.join("d");
+        }
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("runner.bin"), b"runtime").unwrap();
+
+        let files = collect_runtime_files(&root).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.ends_with("runner.bin"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_inventory_rejects_excessive_directory_depth() {
+        let root = std::env::temp_dir().join(format!("cap-pack-limit-{}", uuid::Uuid::new_v4()));
+        let mut directory = root.clone();
+        for _ in 0..=MAX_RUNTIME_DIRECTORY_DEPTH {
+            directory = directory.join("d");
+        }
+        fs::create_dir_all(&directory).unwrap();
+
+        let error = collect_runtime_files(&root).unwrap_err();
+
+        assert_eq!(error.code, IMPORT_V2_CAPABILITY_INVALID);
+        assert!(error.message.contains("nesting is too deep"));
+        fs::remove_dir_all(root).ok();
+    }
 }

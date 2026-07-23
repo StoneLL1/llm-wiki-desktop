@@ -684,8 +684,13 @@ mod binding_tests {
         let service = ConnectorSessionService::default();
         let root = tempfile::tempdir().unwrap();
         let reference = service.create("douyin", root.path()).unwrap();
-        let path = service.sessions.lock().unwrap()[&reference.session_id].path.clone();
-        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o077, 0);
+        let path = service.sessions.lock().unwrap()[&reference.session_id]
+            .path
+            .clone();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o077,
+            0
+        );
     }
 
     #[cfg(unix)]

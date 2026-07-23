@@ -15,6 +15,11 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::Manager;
 
 #[cfg(feature = "gui")]
+fn startup_backend_error(error: errors::BackendError) -> String {
+    serde_json::to_string(&error).unwrap_or_else(|_| format!("{}: {}", error.code, error.message))
+}
+
+#[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -29,10 +34,28 @@ pub fn run() {
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
             if let Ok(app_data) = app.path().app_local_data_dir() {
-                state.import_capability_runtime.load_installed(
-                    &app_data.join("installed-capabilities"),
-                    &state.import_v2_service,
-                );
+                let install_root = app_data.join("installed-capabilities");
+                #[cfg(debug_assertions)]
+                {
+                    let development_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../.dev-capabilities");
+                    state
+                        .import_capability_runtime
+                        .load_startup(
+                            &install_root,
+                            Some((
+                                &development_root.join("installed"),
+                                &development_root.join("development-public-key.hex"),
+                            )),
+                            &state.import_v2_service,
+                        )
+                        .map_err(startup_backend_error)?;
+                }
+                #[cfg(not(debug_assertions))]
+                state
+                    .import_capability_runtime
+                    .load_startup(&install_root, None, &state.import_v2_service)
+                    .map_err(startup_backend_error)?;
             }
             if let Ok(app_data) = app.path().app_data_dir() {
                 let connector_profiles = app_data.join("connector-profiles");

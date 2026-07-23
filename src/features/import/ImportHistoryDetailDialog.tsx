@@ -12,6 +12,7 @@ const STATUS_KEYS: Record<string, string> = {
   inspecting: "importV2.itemStatus.inspecting",
   waiting_capability: "importV2.itemStatus.waitingCapability",
   waiting_login: "importV2.itemStatus.waitingLogin",
+  waiting_authorization: "importV2.itemStatus.waitingAuthorization",
   extracting: "importV2.itemStatus.extracting",
   validating: "importV2.itemStatus.validating",
   preview_ready: "importV2.itemStatus.previewReady",

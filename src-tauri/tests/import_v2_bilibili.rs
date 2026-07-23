@@ -18,7 +18,7 @@ fn metadata_uses_file_media_router_and_secrets_stay_in_memory() {
 }
 
 #[test]
-fn no_subtitle_runs_asr_automatically_once_the_capability_is_available() {
+fn no_subtitle_requires_both_the_capability_and_explicit_authorization() {
     let json = r#"{"code":0,"data":{"title":"v","owner":{"name":"u"},"subtitles":[]}}"#;
     let (_, unavailable) = bilibili::extract_json(
         json,
@@ -26,16 +26,31 @@ fn no_subtitle_runs_asr_automatically_once_the_capability_is_available() {
         LocalAsrPolicy::default(),
     )
     .unwrap();
-    let (_, available) = bilibili::extract_json(
+    let (_, waiting_authorization) = bilibili::extract_json(
         json,
         "https://bilibili.com/video/BV1",
         LocalAsrPolicy {
             capability_available: true,
+            user_authorized: false,
+        },
+    )
+    .unwrap();
+    let (_, authorized) = bilibili::extract_json(
+        json,
+        "https://bilibili.com/video/BV1",
+        LocalAsrPolicy {
+            capability_available: true,
+            user_authorized: true,
         },
     )
     .unwrap();
     assert_eq!(unavailable.status, MediaRouteStatus::WaitingCapability);
-    assert_eq!(available.status, MediaRouteStatus::Ready);
+    assert_eq!(
+        waiting_authorization.status,
+        MediaRouteStatus::WaitingAuthorization
+    );
+    assert_eq!(authorized.status, MediaRouteStatus::Ready);
     assert!(!unavailable.requires_asr);
-    assert!(available.requires_asr);
+    assert!(!waiting_authorization.requires_asr);
+    assert!(authorized.requires_asr);
 }

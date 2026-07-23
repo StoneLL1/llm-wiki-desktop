@@ -267,6 +267,17 @@ pub fn start_import_items_v2(
             return Err(task_error("Import item was not found."));
         }
     }
+    let replaced_waiting_task_ids = request
+        .item_ids
+        .iter()
+        .filter_map(|item_id| {
+            session
+                .items
+                .iter()
+                .find(|item| item.item_id == *item_id)
+                .and_then(|item| item.task_id.clone())
+        })
+        .collect::<Vec<_>>();
     // One IPC call is one user-visible import operation. Persist the identity
     // on every child task so parallel operations remain independently
     // observable and cancellable after navigation or app restart.
@@ -315,6 +326,15 @@ pub fn start_import_items_v2(
                 .discard_unstarted_tasks(std::slice::from_ref(&task.id));
         }
         return Err(error);
+    }
+    for replaced_task_id in replaced_waiting_task_ids {
+        if state
+            .task_service
+            .get_task(&replaced_task_id)
+            .is_some_and(|task| task.status == TaskStatus::WaitingForConfirmation)
+        {
+            let _ = state.task_service.cancel_task(&replaced_task_id);
+        }
     }
     let mut tasks = Vec::with_capacity(prepared.len());
     for (item_id, task) in prepared {

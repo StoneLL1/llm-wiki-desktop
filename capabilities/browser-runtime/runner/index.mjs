@@ -1,5 +1,7 @@
 /* global process */
 import fs from "node:fs/promises";
+import { rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Buffer } from "node:buffer";
 import { URL, fileURLToPath } from "node:url";
@@ -8,8 +10,8 @@ import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
 import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
-import { classifyRemoteImageKind, extractPlatformPayload, selectRelevantApiEvidence } from "./platform-extract.mjs";
-import { isLoginChallengeState, redactJsonValue, redactSensitiveText } from "./snapshot-policy.mjs";
+import { classifyPlatformPage, classifyRemoteImageKind, extractPlatformPayload, extractPlatformPayloadFromValue, renderPlatformMarkdown, selectRelevantApiEvidence } from "./platform-extract.mjs";
+import { isLoginChallengeState, redactJsonValue, redactSensitiveText, sanitizePublicUrl } from "./snapshot-policy.mjs";
 import { assertLinuxBrowserDependencies } from "./linux-deps.mjs";
 
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,6 +28,8 @@ const params = rpc.params;
 function escapeHtml(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+
+class RpcHandled extends Error {}
 
 async function launchPinned(profile, target, headless, platform = "generic") {
   assertLinuxBrowserDependencies(chromium.executablePath());
@@ -168,10 +172,16 @@ const publicUrl = params.input.normalizedLocator || requestUrl;
 const target = new URL(requestUrl);
 const platform = platformForHost(target.hostname);
 const stagingRoot = path.resolve(params.projectRoot, params.stagingRoot);
-const profile = process.env.LLM_WIKI_CONNECTOR_PROFILE
+const retainedProfile = Boolean(process.env.LLM_WIKI_CONNECTOR_PROFILE);
+const profile = retainedProfile
   ? path.resolve(process.env.LLM_WIKI_CONNECTOR_PROFILE)
-  : path.join(stagingRoot, "browser-profile");
-await fs.mkdir(profile, { recursive: true });
+  : await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-browser-"));
+if (retainedProfile) await fs.mkdir(profile, { recursive: true });
+if (!retainedProfile) {
+  process.once("exit", () => {
+    try { rmSync(profile, { recursive: true, force: true }); } catch { /* best-effort temp cleanup */ }
+  });
+}
 const context = await launchPinned(profile, target, true, platform);
 try {
   const page = await context.newPage();
@@ -188,13 +198,20 @@ try {
         if (!isPlatformNavigationHost(platform, responseUrl.hostname)) return;
         const headers = await response.allHeaders();
         if (!String(headers['content-type'] || '').toLowerCase().includes('json')) return;
-        const declaredLength = Number(headers['content-length'] || 0);
-        if (!Number.isFinite(declaredLength) || declaredLength <= 0 || declaredLength > 2 * 1024 * 1024) return;
+        const rawLength = headers['content-length'];
+        if (rawLength !== undefined) {
+          const declaredLength = Number(rawLength);
+          if (!Number.isFinite(declaredLength) || declaredLength < 0 || declaredLength > 2 * 1024 * 1024) return;
+        }
         const body = await response.text().catch(() => null);
         if (!body || Buffer.byteLength(body, 'utf8') > 2 * 1024 * 1024) return;
         let value;
         try { value = JSON.parse(body); } catch { return; }
-        if (apiCandidates.length < 8) apiCandidates.push({ url: responseUrl.href, value });
+        const candidate = { url: responseUrl.href, value };
+        const relevant = extractPlatformPayloadFromValue(platform, value, page.url());
+        if (relevant) apiCandidates.unshift(candidate);
+        else if (apiCandidates.length < 16) apiCandidates.push(candidate);
+        if (apiCandidates.length > 16) apiCandidates.length = 16;
       })().catch(() => {});
       pendingApiCaptures.add(capture);
       capture.finally(() => pendingApiCaptures.delete(capture));
@@ -205,13 +222,23 @@ try {
   await Promise.allSettled([...pendingApiCaptures]);
   const finalUrl = page.url();
   const bodyText = await page.locator("body").innerText().catch(() => "");
-  if (/captcha|challenge|login required|sign in|环境异常|访问过于频繁|请完成验证|去验证/i.test(bodyText)) {
-    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "Login or challenge required", data: { code: "IMPORT_WEB_LOGIN_REQUIRED" } } })}\n`);
+  const html = await page.content();
+  let platformPayload = extractPlatformPayload(platform, html, finalUrl);
+  if (!platformPayload && platform !== "generic") {
+    platformPayload = apiCandidates
+      .map((candidate) => extractPlatformPayloadFromValue(platform, candidate.value, finalUrl))
+      .find(Boolean) || null;
+  }
+  const platformFailure = platformPayload ? null : classifyPlatformPage(platform, bodyText);
+  if (platformFailure) {
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "Platform access requires user action", data: { code: platformFailure } } })}\n`);
     process.exitCode = 0;
   } else {
-    const html = await page.content();
     const dom = new JSDOM(html, { url: finalUrl, runScripts: "outside-only", resources: undefined });
-    const platformPayload = extractPlatformPayload(platform, html, finalUrl);
+    if (platform === "xiaohongshu" && !platformPayload) {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The requested Xiaohongshu note payload was not found", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
+      throw new RpcHandled();
+    }
     let verifiedSubtitle = false;
     let subtitleIndex = 0;
     const subtitleUrls = new Map();
@@ -228,13 +255,17 @@ try {
     const mediaRaw = platformPayload?.mediaUrl
       || dom.window.document.querySelector('meta[property="og:video"], meta[name="twitter:player:stream"]')?.getAttribute("content")
       || dom.window.document.querySelector("video[src], video source[src]")?.getAttribute("src");
+    if (platform === "xiaohongshu" && platformPayload?.contentType === "video" && !mediaRaw) {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The Xiaohongshu video did not expose a playable media stream", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
+      throw new RpcHandled();
+    }
     let originalMediaPlaceholder = false;
     if (mediaRaw) {
       const mediaUrl = new URL(mediaRaw, finalUrl);
       if (await isAllowedAssetUrl(platform, target, mediaUrl)) {
-        if (!params.localAsrAuthorized && !verifiedSubtitle) {
+        if (!params.localAsrAuthorized && !verifiedSubtitle && !params.allowMissingTranscript) {
           process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "A verified subtitle or local ASR capability is required", data: { code: "IMPORT_WEB_SUBTITLE_UNAVAILABLE" } } })}\n`);
-          process.exit(0);
+          throw new RpcHandled();
         } else {
           // Always report the media candidate. Rust drops it in extraction-only
           // mode, but uses its presence to distinguish a malformed subtitle
@@ -250,12 +281,13 @@ try {
         }
       } else if (platform !== "generic") {
         process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The platform media host is not in the verified allowlist", data: { code: "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED" } } })}\n`);
-        process.exit(0);
+        throw new RpcHandled();
       }
     }
     const article = new Readability(dom.window.document.cloneNode(true)).parse();
+    const warnings = [];
     const title = platformPayload?.title || article?.title || dom.window.document.querySelector('meta[property="og:title"]')?.getAttribute("content") || target.pathname;
-    const safePublicUrl = redactSensitiveText(publicUrl);
+    const safePublicUrl = sanitizePublicUrl(finalUrl || publicUrl);
     const readableContent = platformPayload?.description
       ? `<p>${escapeHtml(platformPayload.description)}</p>`
       : article?.content || `<p>Media page imported from <a href="${safePublicUrl}">${safePublicUrl}</a>.</p>`;
@@ -268,6 +300,7 @@ try {
     }
     let assetIndex = 0;
     const seenImages = new Set();
+    const platformImageLinks = [];
     for (const image of cleanDom.window.document.querySelectorAll("img")) {
       const raw = image.getAttribute("src") || image.getAttribute("data-src");
       image.removeAttribute("srcset"); image.removeAttribute("data-src");
@@ -276,16 +309,31 @@ try {
       try { resolved = new URL(raw, finalUrl); } catch { image.remove(); continue; }
       if (seenImages.has(resolved.href)) { image.remove(); continue; }
       seenImages.add(resolved.href);
-      if (!(await isAllowedAssetUrl(platform, target, resolved))) { image.remove(); continue; }
+      if (!(await isAllowedAssetUrl(platform, target, resolved))) {
+        image.remove();
+        if (platform !== "generic" && !warnings.includes("PLATFORM_IMAGE_HOST_UNSUPPORTED")) {
+          warnings.push("PLATFORM_IMAGE_HOST_UNSUPPORTED");
+        }
+        continue;
+      }
       const kind = classifyRemoteImageKind(platform, Boolean(mediaRaw), Boolean(params.localOcrAuthorized), params.mediaSaveMode);
       if (!kind) { image.remove(); continue; }
       const placeholder = `webasset-${assetIndex++}`;
       image.setAttribute("src", `asset://${placeholder}`);
+      platformImageLinks.push(`asset://${placeholder}`);
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder, url: resolved.href, kind } })}\n`);
+    }
+    if (platform === "xiaohongshu"
+      && platformPayload?.contentType === "image_post"
+      && !String(platformPayload.description || "").trim()
+      && assetIndex === 0
+      && params.mediaSaveMode !== "extract_only") {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The Xiaohongshu image post had no text and no retainable image", data: { code: "IMPORT_WEB_MEDIA_UNAVAILABLE" } } })}\n`);
+      throw new RpcHandled();
     }
     if (platform !== "generic" && !mediaRaw && subtitleIndex === 0 && assetIndex === 0 && !(platformPayload?.images?.length)) {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The platform page did not expose media, subtitles, or usable images", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
-      process.exit(0);
+      throw new RpcHandled();
     }
     if (originalMediaPlaceholder) {
       const paragraph = cleanDom.window.document.createElement("p");
@@ -296,12 +344,21 @@ try {
       cleanDom.window.document.body.appendChild(paragraph);
     }
     const persistedHtml = cleanDom.window.document.body.innerHTML;
-    const markdown = new TurndownService({ codeBlockStyle: "fenced", headingStyle: "atx" }).turndown(persistedHtml);
+    const markdown = platform !== "generic" && platformPayload
+      ? renderPlatformMarkdown(
+        platform,
+        platformPayload,
+        safePublicUrl,
+        platformImageLinks,
+        originalMediaPlaceholder ? "asset://original-media" : null,
+        params.mediaSaveMode,
+      )
+      : new TurndownService({ codeBlockStyle: "fenced", headingStyle: "atx" }).turndown(persistedHtml);
     const extractedText = platform === "generic"
       ? String(article?.textContent || bodyText || "").trim()
       : String(platformPayload?.description || "").trim();
-    const warnings = article ? [] : ["READABILITY_FALLBACK"];
-    await fs.writeFile(path.join(stagingRoot, "candidate.md"), `# ${title}\n\n${markdown}\n`);
+    if (platform === "generic" && !article) warnings.push("READABILITY_FALLBACK");
+    await fs.writeFile(path.join(stagingRoot, "candidate.md"), platform !== "generic" && platformPayload ? markdown : `# ${title}\n\n${markdown}\n`);
     // `source.html` is the immutable raw evidence snapshot. Keep the
     // sanitized article separately for diagnostics; Markdown is derived from
     // the sanitized DOM and never replaces the original response.
@@ -311,8 +368,14 @@ try {
       title,
       author: platformPayload?.author || article?.byline || null,
       publishedAt: platformPayload?.publishedAt || null,
-      publicUrl: redactSensitiveText(publicUrl),
+      publicUrl: safePublicUrl,
       platform,
+      platformId: platformPayload?.platformId || null,
+      contentType: platformPayload?.contentType || null,
+      titleSource: platformPayload?.titleSource || null,
+      hashtags: platformPayload?.hashtags || [],
+      imageCount: platformPayload?.images?.length || 0,
+      mediaPresent: Boolean(platformPayload?.mediaUrl),
     }));
     const sourceEvidencePaths = [];
     for (const candidate of selectRelevantApiEvidence(platform, apiCandidates, finalUrl)) {
@@ -324,4 +387,9 @@ try {
     }
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: sourceEvidencePaths, metadataPath: "metadata.json", title, textCoverage: extractedText ? 1 : 0, warnings }, error: null })}\n`);
   }
-} finally { await context.close(); }
+} catch (error) {
+  if (!(error instanceof RpcHandled)) throw error;
+} finally {
+  await context.close();
+  if (!retainedProfile) await fs.rm(profile, { recursive: true, force: true }).catch(() => {});
+}

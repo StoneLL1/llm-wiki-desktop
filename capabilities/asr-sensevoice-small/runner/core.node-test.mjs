@@ -6,11 +6,14 @@ import test from "node:test";
 
 import {
   assertProviderWasUsed,
+  buildEmbeddedSubtitleArguments,
   buildFfmpegArguments,
   buildSenseVoiceArguments,
   executeWithProviderFallback,
+  parseEmbeddedSubtitle,
   parseSenseVoiceStdout,
   preferredProviders,
+  renderEmbeddedTranscript,
   renderTranscript,
   resolveStagingMedia,
 } from "./core.mjs";
@@ -33,6 +36,11 @@ test("accepts only regular media files contained by the staging directory", asyn
 });
 
 test("builds fixed local-only decode and SenseVoice commands", () => {
+  assert.deepEqual(buildEmbeddedSubtitleArguments("input.mp4", "embedded.srt"), [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe", "-i", "input.mp4",
+    "-map", "0:s:0", "-vn", "-an", "-dn", "-c:s", "srt", "-f", "srt", "embedded.srt",
+  ]);
   assert.deepEqual(buildFfmpegArguments("input.m4a", "decoded.wav"), [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe", "-i", "input.m4a",
@@ -44,6 +52,27 @@ test("builds fixed local-only decode and SenseVoice commands", () => {
     "--sense-voice-use-itn=true", "--provider=cpu", "--num-threads=8",
     "--debug=false", "--print-args=false", "audio",
   ]);
+});
+
+test("parses and renders embedded subtitle cues before ASR fallback", () => {
+  const transcript = parseEmbeddedSubtitle([
+    "1",
+    "00:00:00,720 --> 00:00:02,000",
+    "<i>第一句</i>",
+    "",
+    "2",
+    "00:00:02,100 --> 00:00:03,000",
+    "第二句",
+  ].join("\n"));
+  assert.equal(transcript.text, "第一句 第二句");
+  assert.deepEqual(transcript.segments, [
+    { startMs: 720, text: "第一句" },
+    { startMs: 2100, text: "第二句" },
+  ]);
+  const markdown = renderEmbeddedTranscript(transcript, "视频.mp4");
+  assert.match(markdown, /provenance: authorized-local-embedded-subtitle/u);
+  assert.match(markdown, /\[00:00:00\.720\] 第一句/u);
+  assert.doesNotMatch(markdown, /SenseVoice/u);
 });
 
 test("parses the single structured sherpa result without inventing end timestamps", () => {

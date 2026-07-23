@@ -24,11 +24,33 @@ function item(status: ImportItemStatus, overrides: Partial<ImportItem> = {}): Im
 }
 
 describe("presentImportItem", () => {
+  it("offers a metadata-only preview when a transcript is unavailable", () => {
+    const presentation = presentImportItem(item("waiting_authorization", {
+      input: {
+        kind: "url",
+        displayName: "video",
+        locator: "https://www.bilibili.com/video/BV1test",
+        normalizedLocator: "https://www.bilibili.com/video/BV1test",
+      },
+      issue: {
+        code: "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
+        message: "subtitle missing",
+        stage: "extract",
+        retryable: true,
+        userActionRequired: true,
+        recoveryActions: ["authorize_local_asr", "preview_without_transcript"],
+        availableActions: [],
+      },
+    }));
+    expect(presentation.actions).toContain("preview_without_transcript");
+  });
+
   it.each([
     ["queued", "importV2.itemStatus.queued", "queue", "none", ["start", "cancel"], false],
     ["inspecting", "importV2.itemStatus.inspecting", "scan", "indeterminate", ["cancel"], false],
     ["waiting_capability", "importV2.itemStatus.waitingCapability", "capability", "none", ["view_capability", "cancel"], false],
     ["waiting_login", "importV2.itemStatus.waitingLogin", "login", "none", ["begin_login", "cancel"], false],
+    ["waiting_authorization", "importV2.itemStatus.waitingAuthorization", "shield", "none", ["authorize_local_asr", "cancel"], false],
     ["extracting", "importV2.itemStatus.extracting", "scan", "indeterminate", ["cancel"], false],
     ["validating", "importV2.itemStatus.validating", "shield", "indeterminate", ["cancel"], false],
     ["preview_ready", "importV2.itemStatus.previewReady", "ready", "none", ["preview_markdown"], true],

@@ -160,14 +160,18 @@ pub fn revoke_import_login_v2(
         let root = app
             .path()
             .app_data_dir()
-            .map_err(|_| BackendError::new(
-                "IMPORT_V2_BROWSER_SESSION_FAILED",
-                "App data path is unavailable.",
-                true,
-                true,
-            ))?
+            .map_err(|_| {
+                BackendError::new(
+                    "IMPORT_V2_BROWSER_SESSION_FAILED",
+                    "App data path is unavailable.",
+                    true,
+                    true,
+                )
+            })?
             .join("connector-profiles");
-        state.connector_session_service.revoke_platform(platform, &root)
+        state
+            .connector_session_service
+            .revoke_platform(platform, &root)
     } else {
         state.connector_session_service.revoke(&request.session_id)
     }
@@ -355,13 +359,16 @@ fn authorize_local_asr(
 
 fn validate_local_asr_item(item: &ImportItem) -> Result<(), BackendError> {
     if item.input.kind != ImportInputKind::Url
-        || item.status != ImportItemStatus::Failed
+        || !matches!(
+            item.status,
+            ImportItemStatus::WaitingAuthorization | ImportItemStatus::Failed
+        )
         || item.issue.as_ref().map(|issue| issue.code.as_str())
             != Some("IMPORT_WEB_SUBTITLE_UNAVAILABLE")
     {
         return Err(BackendError::new(
             "IMPORT_V2_STATE_INVALID",
-            "Local ASR can be authorized only for a failed supported-media item currently missing subtitles.",
+            "Local ASR can be authorized only for a supported-media item currently waiting because subtitles are unavailable.",
             false,
             true,
         ));

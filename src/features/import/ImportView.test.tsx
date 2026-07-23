@@ -146,6 +146,28 @@ describe("ImportView V2 composition", () => {
     expect(screen.getByRole("button", { name: /confirm import/i })).toBeDisabled();
   });
 
+  it("keeps history and capability packs in separate workbench sections", async () => {
+    const listHistory = vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] });
+    const readiness: ImportFrontendReadiness = {
+      backendVersion: "2.0.0",
+      active: true,
+      migrationStatus: "applied",
+      unfinishedSessionId: "session-a",
+      legacyHistoryAvailable: false,
+      capabilities: [{ capabilityId: "asr-sensevoice-small", route: "media.asr", available: true, reasonCode: null }],
+    };
+    render(<ImportView workflow={workflow({ readiness, listHistory })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /history/i }));
+    await waitFor(() => expect(screen.getByText(/no import history/i)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /confirm import/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /capability packs/i }));
+    expect(screen.getByText("asr-sensevoice-small")).toBeInTheDocument();
+    expect(screen.getByText("media.asr")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: /import methods/i })).not.toBeInTheDocument();
+  });
+
   it("keeps mixed queue states actionable and selection keyboard accessible", () => {
     const mixed = [item("研究笔记.md", "preview_ready", true), item("processing.pdf", "extracting"), item("failed.docx", "failed")];
     const currentWorkflow = workflow({ session: session(mixed), visibleItems: mixed, counts: { all: 3, active: 1, ready: 1, needsAction: 1, failed: 1, completed: 0 }, progress: { completed: 0, total: 3, active: 1 } });

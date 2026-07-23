@@ -59,6 +59,7 @@ function isRecoverableImportItemStatus(status: ImportItem["status"]): boolean {
     "inspecting",
     "waiting_capability",
     "waiting_login",
+    "waiting_authorization",
     "waiting_log",
     "extracting",
     "validating",

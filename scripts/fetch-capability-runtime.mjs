@@ -76,7 +76,23 @@ export async function fetchNodeRuntime({ target, output, config }) {
     const sourceRoot = path.join(extraction, distribution.root);
     const status = await fs.stat(sourceRoot).catch(() => null);
     if (!status?.isDirectory()) throw new Error("Node archive did not contain its declared root");
-    await fs.rename(sourceRoot, output);
+    try {
+      await fs.rename(sourceRoot, output);
+    } catch (error) {
+      if (process.platform !== "win32" || !["EPERM", "EACCES"].includes(error?.code)) throw error;
+      try {
+        await fs.cp(sourceRoot, output, {
+          recursive: true,
+          dereference: true,
+          errorOnExist: true,
+          force: false,
+          preserveTimestamps: true,
+        });
+      } catch (copyError) {
+        await fs.rm(output, { recursive: true, force: true });
+        throw copyError;
+      }
+    }
     return { version: declaration.node.version, output };
   } finally {
     await fs.rm(temporary, { recursive: true, force: true });

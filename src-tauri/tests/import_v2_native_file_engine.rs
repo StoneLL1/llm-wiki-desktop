@@ -45,6 +45,7 @@ fn request(root: &TempDir, name: &str) -> EngineRequest {
         chained_input: None,
         local_asr_authorized: false,
         local_ocr_authorized: false,
+        allow_missing_transcript: false,
         media_save_mode: Default::default(),
     }
 }

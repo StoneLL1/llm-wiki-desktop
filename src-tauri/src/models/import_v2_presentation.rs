@@ -46,13 +46,38 @@ pub struct ImportFrontendReadiness {
     pub unfinished_session_id: Option<String>,
     pub legacy_history_available: bool,
     #[serde(default)]
+    pub files: Vec<ImportFeatureReadiness>,
+    #[serde(default)]
     pub platforms: Vec<ImportPlatformReadiness>,
+    #[serde(default)]
+    pub abilities: Vec<ImportFeatureReadiness>,
+    #[serde(default)]
+    pub capabilities: Vec<ImportCapabilityReadiness>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlatformReadiness {
     pub id: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFeatureReadiness {
+    pub id: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCapabilityReadiness {
+    pub capability_id: String,
+    pub route: String,
     pub available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,

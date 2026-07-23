@@ -114,6 +114,7 @@ pub enum WebImportErrorCode {
     ChallengeDetected,
     LoginRequired,
     CaptchaRequired,
+    ContentRemoved,
     StructureChanged,
     SubtitleUnavailable,
     ConnectorRateLimited,
