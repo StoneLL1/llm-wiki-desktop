@@ -38,14 +38,15 @@ function makeSession(items: ImportItem[]): ImportSession {
 describe("Import V2 queue selectors", () => {
   it("keeps required actions distinct from generic failures", () => {
     const action = makeItem("action", "waiting_login");
+    const authorization = makeItem("authorization", "waiting_authorization");
     const failed = makeItem("failed", "failed");
     const ready = makeItem("ready", "preview_ready");
-    const session = makeSession([action, failed, ready]);
+    const session = makeSession([action, authorization, failed, ready]);
 
-    expect(selectVisibleItems(session, "needs_action").map(({ itemId }) => itemId)).toEqual(["action"]);
+    expect(selectVisibleItems(session, "needs_action").map(({ itemId }) => itemId)).toEqual(["action", "authorization"]);
     expect(selectVisibleItems(session, "failed").map(({ itemId }) => itemId)).toEqual(["failed"]);
     expect(selectCommittableItems(session).map(({ itemId }) => itemId)).toEqual(["ready"]);
-    expect(selectQueueCounts(session)).toMatchObject({ all: 3, needsAction: 1, failed: 1, ready: 1 });
+    expect(selectQueueCounts(session)).toMatchObject({ all: 4, needsAction: 2, failed: 1, ready: 1 });
   });
 
   it("reports bounded progress from item statuses", () => {

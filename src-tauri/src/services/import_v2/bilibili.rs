@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    io::Read,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use flate2::read::GzDecoder;
 use md5::{Digest, Md5};
 use serde_json::Value;
 
@@ -9,7 +13,7 @@ use crate::models::import_v2::MediaSaveMode;
 use crate::services::import_v2::engine::EngineRequest;
 use crate::services::import_v2::markdown_normalizer::decode_text;
 use crate::services::import_v2::platform_provider::{
-    extract_platform_document, Platform, PlatformDocument,
+    extract_platform_document, Platform, PlatformDocument, PlatformSubtitle,
 };
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
@@ -46,7 +50,7 @@ pub(crate) fn fetch(
         .normalized_locator
         .as_deref()
         .unwrap_or(&request.input.locator);
-    let Some(video_ref) = extract_video_ref(page_url) else {
+    let Some(mut video_ref) = extract_video_ref(page_url) else {
         return Ok(None);
     };
     if cancellation.is_cancelled() {
@@ -54,26 +58,40 @@ pub(crate) fn fetch(
     }
 
     let view_url = api_url("x/web-interface/view", &video_ref.view_params());
-    let (source_body, view) = fetch_json(&view_url, page_url, &request.item_id, cancellation)?;
-    if view.get("code").and_then(Value::as_i64) != Some(0) {
-        return Err(api_unavailable(
-            "Bilibili did not return public video metadata.",
-        ));
+    let (view_body, view) = fetch_json(&view_url, page_url, &request.item_id, cancellation)?;
+    if let Some(error) = classify_view_api_error(&view) {
+        return Err(error);
     }
-    let mut document = extract_platform_document(Platform::Bilibili, &source_body, page_url)
+    if video_ref.aid.is_none() {
+        video_ref.aid = view
+            .pointer("/data/aid")
+            .and_then(Value::as_u64)
+            .map(|aid| aid.to_string());
+    }
+    let mut document = extract_platform_document(Platform::Bilibili, &view_body, page_url)
         .or_else(|| {
-            let wrapped = format!("<script type=\"application/json\">{source_body}</script>");
+            let wrapped = format!("<script type=\"application/json\">{view_body}</script>");
             extract_platform_document(Platform::Bilibili, &wrapped, page_url)
         })
         .ok_or_else(|| api_unavailable("Bilibili metadata changed or is unavailable."))?;
 
-    if selected_cid(&view, page_url).is_some() {
+    let cid = selected_cid(&view, page_url);
+    let mut player_evidence = None;
+    if let Some(cid) = cid {
         document.content_type = "video".into();
+        match fetch_player_metadata(&video_ref, cid, page_url, &request.item_id, cancellation) {
+            Ok(player) => {
+                document.subtitles = extract_player_subtitles(&player);
+                player_evidence = Some(player);
+            }
+            Err(error) if error.code == "IMPORT_V2_CANCELLED" => return Err(error),
+            Err(_) => {}
+        }
     }
     let need_media =
         request.media_save_mode == MediaSaveMode::PreserveOriginal || request.local_asr_authorized;
     if need_media {
-        if let Some(cid) = selected_cid(&view, page_url) {
+        if let Some(cid) = cid {
             match fetch_play_url(
                 &video_ref,
                 cid,
@@ -90,10 +108,105 @@ pub(crate) fn fetch(
         }
     }
 
+    let source_body = serde_json::to_string_pretty(&serde_json::json!({
+        "view": view,
+        "player": player_evidence,
+    }))
+    .map_err(|_| api_unavailable("Bilibili evidence could not be serialized."))?;
+
     Ok(Some(BilibiliApiResult {
         source_body,
         document,
     }))
+}
+
+fn fetch_player_metadata(
+    video_ref: &VideoRef,
+    cid: u64,
+    page_url: &str,
+    item_id: &str,
+    cancellation: &CancellationToken,
+) -> Result<Value, BackendError> {
+    let nav_url = "https://api.bilibili.com/x/web-interface/nav";
+    let (_, nav) = fetch_json(nav_url, page_url, item_id, cancellation)?;
+    let Some(mixin_key) = wbi_mixin_key(&nav) else {
+        return Err(api_unavailable("Bilibili did not expose a WBI player key."));
+    };
+    let mut params = video_ref.player_params(cid);
+    params.insert(
+        "wts".into(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs().to_string())
+            .unwrap_or_else(|_| "0".into()),
+    );
+    let unsigned_query = encode_params(&params);
+    let digest = Md5::digest(format!("{unsigned_query}{mixin_key}").as_bytes());
+    params.insert("w_rid".into(), hex_lower(&digest));
+    let player_url = api_url("x/player/wbi/v2", &params);
+    let (_, response) = fetch_json(&player_url, page_url, item_id, cancellation)?;
+    if response.get("code").and_then(Value::as_i64) != Some(0) {
+        return Err(api_unavailable(
+            "Bilibili did not return public player metadata.",
+        ));
+    }
+    Ok(response)
+}
+
+fn extract_player_subtitles(value: &Value) -> Vec<PlatformSubtitle> {
+    let mut subtitles = value
+        .pointer("/data/subtitle/subtitles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|subtitle| {
+            let raw_url = ["subtitle_url", "subtitleUrl", "url"]
+                .iter()
+                .find_map(|key| subtitle.get(*key).and_then(Value::as_str))?;
+            let url = if raw_url.starts_with("//") {
+                format!("https:{raw_url}")
+            } else {
+                raw_url.to_owned()
+            };
+            if !url.starts_with("https://") {
+                return None;
+            }
+            let automatic = subtitle
+                .get("ai_status")
+                .and_then(Value::as_i64)
+                .is_some_and(|status| status != 0)
+                || subtitle
+                    .get("ai_type")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|kind| kind != 0)
+                || subtitle
+                    .get("type")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|kind| kind != 0);
+            Some(PlatformSubtitle {
+                url,
+                automatic,
+                language: subtitle
+                    .get("lan")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                label: subtitle
+                    .get("lan_doc")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect::<Vec<_>>();
+    subtitles.sort_by_key(|subtitle| {
+        (
+            subtitle.automatic,
+            !subtitle
+                .language
+                .as_deref()
+                .is_some_and(|language| language.starts_with("zh")),
+        )
+    });
+    subtitles
 }
 
 fn fetch_play_url(
@@ -104,6 +217,19 @@ fn fetch_play_url(
     cancellation: &CancellationToken,
     preserve_original: bool,
 ) -> Result<Option<String>, BackendError> {
+    let mut public_params = video_ref.player_params(cid);
+    public_params.insert("qn".into(), "64".into());
+    public_params.insert("fnval".into(), "0".into());
+    public_params.insert("fnver".into(), "0".into());
+    public_params.insert("fourk".into(), "0".into());
+    let public_url = api_url("x/player/playurl", &public_params);
+    let (_, public_response) = fetch_json(&public_url, page_url, item_id, cancellation)?;
+    if public_response.get("code").and_then(Value::as_i64) == Some(0) {
+        if let Some(media_url) = select_media_url(public_response.get("data"), preserve_original) {
+            return Ok(Some(media_url));
+        }
+    }
+
     let nav_url = "https://api.bilibili.com/x/web-interface/nav";
     let (_, nav) = fetch_json(nav_url, page_url, item_id, cancellation)?;
     let Some(mixin_key) = wbi_mixin_key(&nav) else {
@@ -111,6 +237,7 @@ fn fetch_play_url(
     };
 
     let mut params = video_ref.player_params(cid);
+    params.insert("qn".into(), "64".into());
     params.insert("fnval".into(), "0".into());
     params.insert("fnver".into(), "0".into());
     params.insert("fourk".into(), "1".into());
@@ -161,13 +288,33 @@ fn fetch_json(
             |_| {},
             || token.is_cancelled(),
         ))?;
-        let body = decode_text(&artifact.bytes)?;
+        let decoded = decode_json_transport(&artifact.bytes)?;
+        let body = decode_text(&decoded)?;
         let value = serde_json::from_str(&body)
             .map_err(|_| api_unavailable("Bilibili returned an invalid API response."))?;
         Ok((body, value))
     })
     .join()
     .map_err(|_| api_unavailable("The Bilibili API worker stopped unexpectedly."))?
+}
+
+fn decode_json_transport(bytes: &[u8]) -> Result<Vec<u8>, BackendError> {
+    if !bytes.starts_with(&[0x1f, 0x8b]) {
+        return Ok(bytes.to_vec());
+    }
+    let mut decoder = GzDecoder::new(bytes);
+    let mut output = Vec::new();
+    decoder
+        .by_ref()
+        .take((8 * 1024 * 1024 + 1) as u64)
+        .read_to_end(&mut output)
+        .map_err(|_| api_unavailable("Bilibili returned an invalid compressed API response."))?;
+    if output.len() > 8 * 1024 * 1024 {
+        return Err(api_unavailable(
+            "Bilibili returned an oversized API response.",
+        ));
+    }
+    Ok(output)
 }
 
 fn selected_cid(value: &Value, page_url: &str) -> Option<u64> {
@@ -197,20 +344,28 @@ fn select_media_url(value: Option<&Value>, preserve_original: bool) -> Option<St
         .and_then(|item| item.get("url"))
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .or_else(|| (!preserve_original).then(|| {
-            data.get("dash")
-                .and_then(|dash| dash.get("audio"))
-                .and_then(Value::as_array)
-                .and_then(|items| items.first())
-                .and_then(stream_url)
-        }).flatten())
-        .or_else(|| (!preserve_original).then(|| {
-            data.get("dash")
-                .and_then(|dash| dash.get("video"))
-                .and_then(Value::as_array)
-                .and_then(|items| items.first())
-                .and_then(stream_url)
-        }).flatten())
+        .or_else(|| {
+            (!preserve_original)
+                .then(|| {
+                    data.get("dash")
+                        .and_then(|dash| dash.get("audio"))
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.first())
+                        .and_then(stream_url)
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            (!preserve_original)
+                .then(|| {
+                    data.get("dash")
+                        .and_then(|dash| dash.get("video"))
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.first())
+                        .and_then(stream_url)
+                })
+                .flatten()
+        })
 }
 
 fn stream_url(value: &Value) -> Option<String> {
@@ -302,7 +457,13 @@ impl VideoRef {
     }
 
     fn player_params(&self, cid: u64) -> BTreeMap<String, String> {
-        let mut params = self.view_params();
+        let mut params = BTreeMap::new();
+        if let Some(bvid) = &self.bvid {
+            params.insert("bvid".into(), bvid.clone());
+        }
+        if let Some(aid) = &self.aid {
+            params.insert("aid".into(), aid.clone());
+        }
         params.insert("cid".into(), cid.to_string());
         params
     }
@@ -310,6 +471,33 @@ impl VideoRef {
 
 fn api_unavailable(message: &'static str) -> BackendError {
     BackendError::new("IMPORT_WEB_STRUCTURE_CHANGED", message, true, true)
+}
+
+fn classify_view_api_error(view: &Value) -> Option<BackendError> {
+    match view.get("code").and_then(Value::as_i64) {
+        Some(0) => None,
+        Some(-101) => Some(BackendError::new(
+            "IMPORT_WEB_LOGIN_REQUIRED",
+            "Bilibili requires login before this video can be accessed.",
+            false,
+            true,
+        )),
+        Some(-352 | -412) => Some(BackendError::new(
+            "IMPORT_WEB_CHALLENGE_DETECTED",
+            "Bilibili blocked the request with a verification challenge.",
+            false,
+            true,
+        )),
+        Some(-404 | 62002 | 62004) => Some(BackendError::new(
+            "IMPORT_WEB_CONTENT_REMOVED",
+            "The Bilibili video is unavailable, private, or no longer published.",
+            false,
+            true,
+        )),
+        Some(_) | None => Some(api_unavailable(
+            "Bilibili did not return public video metadata.",
+        )),
+    }
 }
 
 fn cancelled() -> BackendError {
@@ -323,9 +511,32 @@ fn cancelled() -> BackendError {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_platform_document, extract_video_ref, select_media_url, wbi_mixin_key};
+    use super::{
+        classify_view_api_error, decode_json_transport, extract_platform_document,
+        extract_player_subtitles, extract_video_ref, select_media_url, wbi_mixin_key,
+    };
     use crate::services::import_v2::platform_provider::Platform;
+    use crate::services::import_v2::{
+        engine::{EngineOperation, EngineRequest},
+        subtitle::render_subtitle_markdown,
+    };
+    use crate::{
+        models::import_v2::{ImportInput, ImportInputKind, MediaSaveMode},
+        tasks::task_model::CancellationToken,
+    };
     use serde_json::json;
+    use std::io::Write;
+
+    #[test]
+    fn decodes_gzip_transport_used_by_bilibili_json_endpoints() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(br#"{"code":0}"#).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert_eq!(
+            decode_json_transport(&compressed).unwrap(),
+            br#"{"code":0}"#
+        );
+    }
 
     #[test]
     fn extracts_bilibili_video_ids_from_bv_and_av_urls() {
@@ -343,6 +554,29 @@ mod tests {
                 aid: Some("12345".into()),
             })
         );
+    }
+
+    #[test]
+    fn preserves_actionable_view_api_failures() {
+        assert_eq!(
+            classify_view_api_error(&json!({"code": -101}))
+                .unwrap()
+                .code,
+            "IMPORT_WEB_LOGIN_REQUIRED"
+        );
+        assert_eq!(
+            classify_view_api_error(&json!({"code": 62002}))
+                .unwrap()
+                .code,
+            "IMPORT_WEB_CONTENT_REMOVED"
+        );
+        assert_eq!(
+            classify_view_api_error(&json!({"code": -412}))
+                .unwrap()
+                .code,
+            "IMPORT_WEB_CHALLENGE_DETECTED"
+        );
+        assert!(classify_view_api_error(&json!({"code": 0})).is_none());
     }
 
     #[test]
@@ -370,6 +604,71 @@ mod tests {
             select_media_url(Some(&value), false).as_deref(),
             Some("https://upos.example/audio.m4s")
         );
+    }
+
+    #[test]
+    fn extracts_and_prioritizes_human_bilibili_subtitles() {
+        let value = json!({
+            "data": {"subtitle": {"subtitles": [
+                {"lan": "en", "lan_doc": "English (AI)", "subtitle_url": "//aisub.example/en.json", "ai_status": 1},
+                {"lan": "zh-CN", "lan_doc": "中文", "subtitle_url": "https://sub.example/zh.json", "ai_status": 0}
+            ]}}
+        });
+        let subtitles = extract_player_subtitles(&value);
+        assert_eq!(subtitles.len(), 2);
+        assert_eq!(subtitles[0].language.as_deref(), Some("zh-CN"));
+        assert!(!subtitles[0].automatic);
+        assert_eq!(subtitles[1].url, "https://aisub.example/en.json");
+        assert!(subtitles[1].automatic);
+    }
+
+    #[test]
+    #[ignore = "requires the public Bilibili API"]
+    fn public_bilibili_video_exposes_subtitles_or_an_asr_media_fallback() {
+        let url = "https://www.bilibili.com/video/BV1N7411A7WU/";
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "network-fixture".into(),
+            project_id: "network-fixture".into(),
+            session_id: "network-fixture".into(),
+            item_id: "network-fixture".into(),
+            task_id: "network-fixture".into(),
+            operation: EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "Bilibili subtitle fixture".into(),
+                locator: url.into(),
+                normalized_locator: Some(url.into()),
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+            project_root: String::new(),
+            staging_root: String::new(),
+            chained_input: None,
+            local_asr_authorized: true,
+            local_ocr_authorized: false,
+            allow_missing_transcript: false,
+            media_save_mode: MediaSaveMode::ExtractOnly,
+        };
+        let token = CancellationToken::new();
+        let result = super::fetch(&request, &token)
+            .expect("the public Bilibili API request should succeed")
+            .expect("the Bilibili URL should resolve to a video");
+        if let Some(subtitle) = result.document.subtitles.first() {
+            let (body, _) =
+                super::fetch_json(&subtitle.url, url, "network-fixture-subtitle", &token)
+                    .expect("the subtitle evidence should download through the Rust broker");
+            let markdown = render_subtitle_markdown(body.as_bytes(), "json")
+                .expect("the Bilibili subtitle JSON should render as Markdown");
+            assert!(markdown.contains("[00:"));
+            assert!(markdown.lines().count() > 2);
+        } else {
+            assert_eq!(result.document.content_type, "video");
+            assert!(
+                result.document.media_url.is_some(),
+                "a subtitle-free public video must expose media for authorized local ASR"
+            );
+        }
     }
 
     #[test]

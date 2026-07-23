@@ -54,6 +54,7 @@ pub enum ImportItemStatus {
     Inspecting,
     WaitingCapability,
     WaitingLogin,
+    WaitingAuthorization,
     Extracting,
     Validating,
     PreviewReady,
@@ -74,13 +75,36 @@ impl ImportItemStatus {
             (Queued, Inspecting | Cancelled | Skipped)
                 | (
                     Inspecting,
-                    WaitingCapability | WaitingLogin | Extracting | Failed | Cancelled
+                    WaitingCapability
+                        | WaitingLogin
+                        | WaitingAuthorization
+                        | Extracting
+                        | Failed
+                        | Cancelled
                 )
-                | (WaitingCapability, Extracting | Cancelled | Skipped | Failed)
+                | (
+                    WaitingCapability,
+                    Inspecting | Extracting | Cancelled | Skipped | Failed
+                )
                 | (WaitingLogin, Extracting | Cancelled | Skipped | Failed)
-                | (Extracting, WaitingLogin | Validating | Failed | Cancelled)
+                | (
+                    WaitingAuthorization,
+                    Inspecting | Extracting | Cancelled | Skipped | Failed
+                )
+                | (
+                    Extracting,
+                    WaitingCapability
+                        | WaitingLogin
+                        | WaitingAuthorization
+                        | Validating
+                        | Failed
+                        | Cancelled
+                )
                 | (Validating, PreviewReady | Failed | Cancelled)
-                | (PreviewReady, Inspecting | NeedsMerge | Committing | Skipped | Cancelled)
+                | (
+                    PreviewReady,
+                    Inspecting | NeedsMerge | Committing | Skipped | Cancelled
+                )
                 | (NeedsMerge, PreviewReady | Committing | Skipped | Cancelled)
                 | (Committing, Completed | Failed)
                 | (Paused, Inspecting | Extracting | Cancelled)
@@ -238,6 +262,7 @@ pub enum ImportRecoveryAction {
     InstallMediaCapability,
     InstallOcrCapability,
     AuthorizeLocalAsr,
+    PreviewWithoutTranscript,
 }
 
 impl ImportIssue {
@@ -251,6 +276,7 @@ impl ImportIssue {
             "IMPORT_V2_PRIVATE_TARGET_BLOCKED" => (false, true, vec![AuthorizePrivateTarget]),
             "IMPORT_V2_RESPONSE_TOO_LARGE" => (false, true, vec![SwitchRoute]),
             "IMPORT_V2_CONNECTOR_RATE_LIMITED" => (true, false, vec![RetryRoute, SwitchRoute]),
+            "IMPORT_WEB_CONTENT_REMOVED" => (false, true, vec![]),
             "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED" => {
                 (true, true, vec![SwitchRoute, InstallMediaCapability])
             }
@@ -258,9 +284,16 @@ impl ImportIssue {
                 (true, true, vec![InstallBrowserCapability, SwitchRoute])
             }
             "IMPORT_WEB_STRUCTURE_CHANGED" => (true, true, vec![SwitchRoute, InvokeAgent]),
-            "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => {
-                (true, true, vec![InstallMediaCapability, InvokeAgent])
-            }
+            "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => (
+                true,
+                true,
+                vec![
+                    AuthorizeLocalAsr,
+                    PreviewWithoutTranscript,
+                    InstallMediaCapability,
+                    InvokeAgent,
+                ],
+            ),
             "IMPORT_WEB_OCR_UNAVAILABLE" => (true, true, vec![InstallOcrCapability, InvokeAgent]),
             "IMPORT_ASR_ENGINE_UNAVAILABLE" | "IMPORT_ASR_ENGINE_INTEGRITY_FAILED" => {
                 (true, true, vec![InstallMediaCapability, RetryRoute])
@@ -486,6 +519,18 @@ mod tests {
     #[test]
     fn item_state_machine_rejects_preview_to_complete_shortcut() {
         assert!(ImportItemStatus::Queued.can_transition_to(&ImportItemStatus::Inspecting));
+        assert!(
+            ImportItemStatus::Inspecting.can_transition_to(&ImportItemStatus::WaitingAuthorization)
+        );
+        assert!(
+            ImportItemStatus::WaitingAuthorization.can_transition_to(&ImportItemStatus::Inspecting)
+        );
+        assert!(
+            ImportItemStatus::WaitingCapability.can_transition_to(&ImportItemStatus::Inspecting)
+        );
+        assert!(
+            ImportItemStatus::Extracting.can_transition_to(&ImportItemStatus::WaitingCapability)
+        );
         assert!(ImportItemStatus::Validating.can_transition_to(&ImportItemStatus::PreviewReady));
         assert!(!ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Completed));
         assert!(ImportItemStatus::PreviewReady.can_transition_to(&ImportItemStatus::Committing));
@@ -500,9 +545,12 @@ mod tests {
         assert!(issue
             .recovery_actions
             .contains(&ImportRecoveryAction::InstallMediaCapability));
-        assert!(!issue
+        assert!(issue
             .recovery_actions
             .contains(&ImportRecoveryAction::AuthorizeLocalAsr));
+        assert!(issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::PreviewWithoutTranscript));
     }
 
     #[test]
@@ -519,5 +567,15 @@ mod tests {
         assert!(timeout
             .recovery_actions
             .contains(&ImportRecoveryAction::RetryRoute));
+    }
+
+    #[test]
+    fn removed_platform_content_is_not_presented_as_retryable() {
+        let issue = ImportIssue::for_web_code("IMPORT_WEB_CONTENT_REMOVED", ImportStage::Extract);
+        assert!(!issue.retryable);
+        assert_eq!(
+            issue.recovery_actions,
+            vec![ImportRecoveryAction::Skip, ImportRecoveryAction::ViewLog]
+        );
     }
 }

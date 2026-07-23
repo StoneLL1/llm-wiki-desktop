@@ -106,6 +106,16 @@ export function buildFfmpegArguments(mediaPath, wavPath) {
   ];
 }
 
+export function buildEmbeddedSubtitleArguments(mediaPath, subtitlePath) {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", mediaPath,
+    "-map", "0:s:0", "-vn", "-an", "-dn", "-c:s", "srt", "-f", "srt",
+    subtitlePath,
+  ];
+}
+
 export function buildSenseVoiceArguments(modelPath, tokensPath, wavPath, provider, threads) {
   if (!new Set(["cpu", "cuda", "coreml"]).has(provider)) throw asError("IMPORT_ASR_INVALID_REQUEST");
   const safeThreads = Math.min(8, Math.max(1, Number.isSafeInteger(threads) ? threads : 1));
@@ -183,6 +193,33 @@ function timestamp(milliseconds) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
 }
 
+function parseSubtitleTimestamp(value) {
+  const match = /^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})$/u.exec(value.trim());
+  if (!match) return null;
+  return (((Number(match[1]) * 60 + Number(match[2])) * 60 + Number(match[3])) * 1_000) + Number(match[4]);
+}
+
+export function parseEmbeddedSubtitle(value) {
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_TRANSCRIPT_BYTES) {
+    throw asError("IMPORT_ASR_OUTPUT_INVALID");
+  }
+  const segments = [];
+  for (const block of value.replace(/^\uFEFF/u, "").replace(/\r\n?/g, "\n").split(/\n{2,}/u)) {
+    const lines = block.split("\n").map((line) => line.trim());
+    const timingIndex = lines.findIndex((line) => line.includes("-->"));
+    if (timingIndex < 0) continue;
+    const startMs = parseSubtitleTimestamp(lines[timingIndex].split("-->", 1)[0]);
+    const text = cleanText(lines.slice(timingIndex + 1).join(" ").replace(/<[^>]*>/gu, " "));
+    if (startMs == null || !text) continue;
+    if (segments.length >= MAX_TOKENS || (segments.length > 0 && startMs < segments.at(-1).startMs)) {
+      throw asError("IMPORT_ASR_OUTPUT_INVALID");
+    }
+    segments.push({ startMs, text });
+  }
+  if (segments.length === 0) throw asError("IMPORT_ASR_OUTPUT_INVALID");
+  return { text: segments.map((segment) => segment.text).join(" "), segments };
+}
+
 function markdownText(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -209,6 +246,27 @@ export function renderTranscript(result, sourceName, provider) {
     "# Transcript",
     "",
     transcriptLine,
+    "",
+  ].join("\n")}`;
+}
+
+export function renderEmbeddedTranscript(result, sourceName) {
+  const source = cleanText(sourceName).slice(0, 500);
+  const transcriptLines = result.segments
+    .map((segment) => `[${timestamp(segment.startMs)}] ${markdownText(segment.text)}`)
+    .join("\n\n");
+  return `${[
+    "---",
+    'engine: "ffmpeg"',
+    'provider: "embedded_subtitle"',
+    `source: ${JSON.stringify(source)}`,
+    "timing: cue_start",
+    "provenance: authorized-local-embedded-subtitle",
+    "---",
+    "",
+    "# Transcript",
+    "",
+    transcriptLines,
     "",
   ].join("\n")}`;
 }

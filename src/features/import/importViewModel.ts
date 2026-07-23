@@ -36,6 +36,7 @@ export const isImportItemReady = (item: ImportItem): boolean => item.status === 
 export const isImportItemNeedsAction = (item: ImportItem): boolean =>
   item.status === "waiting_capability" ||
   item.status === "waiting_login" ||
+  item.status === "waiting_authorization" ||
   item.status === "needs_merge" ||
   item.status === "paused" ||
   item.issue?.userActionRequired === true;
@@ -70,7 +71,7 @@ export const selectQueueCounts = (session: ImportSession | null): ImportQueueCou
     needsAction: items.filter(isImportItemNeedsAction).length,
     failed: items.filter((item) => item.status === "failed").length,
     completed: items.filter((item) => item.status === "completed").length,
-    waiting: items.filter((item) => item.status === "waiting_capability" || item.status === "waiting_login").length,
+    waiting: items.filter((item) => item.status === "waiting_capability" || item.status === "waiting_login" || item.status === "waiting_authorization").length,
   };
 };
 export const selectCommittableItems = (session: ImportSession | null): ImportItem[] =>

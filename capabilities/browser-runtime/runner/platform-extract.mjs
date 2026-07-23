@@ -5,6 +5,36 @@ const MAX_SCRIPT_BYTES = 4 * 1024 * 1024;
 const MAX_VALUES = 128;
 const MAX_WALK_VALUES = 50_000;
 
+function normalizeUndefinedLiterals(input) {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index];
+    if (inString) {
+      output += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      output += character;
+      continue;
+    }
+    if (input.startsWith("undefined", index)
+      && !/[A-Za-z0-9_$]/.test(input[index - 1] || "")
+      && !/[A-Za-z0-9_$]/.test(input[index + 9] || "")) {
+      output += "null";
+      index += 8;
+      continue;
+    }
+    output += character;
+  }
+  return output;
+}
+
 function balancedJson(input) {
   const start = input.search(/\{|\[/);
   if (start < 0) return null;
@@ -24,7 +54,10 @@ function balancedJson(input) {
     else if (character === "}" || character === "]") {
       depth -= 1;
       if (depth === 0) {
-        try { return JSON.parse(input.slice(start, index + 1)); } catch { return null; }
+        const candidate = input.slice(start, index + 1);
+        try { return JSON.parse(candidate); } catch {
+          try { return JSON.parse(normalizeUndefinedLiterals(candidate)); } catch { return null; }
+        }
       }
     }
   }
@@ -54,7 +87,7 @@ function walk(value, callback) {
     if (!candidate || typeof candidate !== "object") continue;
     visited += 1;
     callback(candidate);
-    for (const child of Object.values(candidate)) {
+    for (const child of Object.values(candidate).reverse()) {
       if (child && typeof child === "object") pending.push(child);
     }
   }
@@ -99,7 +132,7 @@ function urlsFrom(value, baseUrl, output, limit) {
         if (["http:", "https:"].includes(url.protocol) && !output.includes(url.href)) output.push(url.href);
       } catch { /* ignored */ }
     } else if (candidate && typeof candidate === "object") {
-      for (const child of Object.values(candidate)) pending.push(child);
+      for (const child of Object.values(candidate).reverse()) pending.push(child);
     }
   }
 }
@@ -117,6 +150,112 @@ function collectKeyUrls(value, keys, baseUrl, limit) {
   return output.slice(0, limit);
 }
 
+function normalizedAssetUrl(raw, baseUrl) {
+  if (!raw) return null;
+  try {
+    const request = new URL(raw, baseUrl);
+    if (!["http:", "https:"].includes(request.protocol)) return null;
+    const identity = new URL(request);
+    identity.search = "";
+    identity.hash = "";
+    return { request: request.href, identity: identity.href };
+  } catch {
+    return null;
+  }
+}
+
+function preferredXhsImageUrl(image) {
+  if (typeof image === "string") return image;
+  if (!image || typeof image !== "object") return null;
+  for (const key of ["urlDefault", "url_default", "urlPre", "url_pre", "url"]) {
+    const value = stringValue(image[key]);
+    if (value) return value;
+  }
+  const infoList = image.infoList || image.info_list;
+  if (!Array.isArray(infoList)) return null;
+  const preferred = infoList.find((entry) =>
+    String(entry?.imageScene || entry?.image_scene || "").toUpperCase() === "WB_DFT"
+      && stringValue(entry?.url));
+  return stringValue(preferred?.url)
+    || infoList.map((entry) => stringValue(entry?.url)).find(Boolean)
+    || null;
+}
+
+function collectXhsImages(value, baseUrl, limit) {
+  let selected = null;
+  walk(value, (candidate) => {
+    if (selected || Array.isArray(candidate)) return;
+    const key = Object.keys(candidate)
+      .find((name) => ["imagelist", "image_list"].includes(name.toLowerCase()));
+    if (key && Array.isArray(candidate[key])) selected = candidate[key];
+  });
+  if (!selected) {
+    return collectKeyUrls(value, ["urlDefault", "url_default", "images"], baseUrl, limit);
+  }
+  const output = [];
+  const seen = new Set();
+  for (const image of selected) {
+    const normalized = normalizedAssetUrl(preferredXhsImageUrl(image), baseUrl);
+    if (!normalized || seen.has(normalized.identity)) continue;
+    seen.add(normalized.identity);
+    output.push(normalized.request);
+    if (output.length >= limit) break;
+  }
+  return output;
+}
+
+function inferTitle(description) {
+  const line = String(description || "")
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .find(Boolean);
+  return line ? Array.from(line).slice(0, 80).join("") : null;
+}
+
+function hashtagsFrom(description) {
+  return [...new Set(String(description || "").match(/#[\p{L}\p{N}_]+/gu) || [])];
+}
+
+function firstNestedString(value, containerKeys, valueKeys) {
+  let result = null;
+  walk(value, (candidate) => {
+    if (result || Array.isArray(candidate)) return;
+    const container = Object.keys(candidate)
+      .find((name) => containerKeys.some((key) => name.toLowerCase() === key.toLowerCase()));
+    if (container) result = firstString(candidate[container], valueKeys);
+  });
+  return result;
+}
+
+function collectXhsTags(value, limit = 100) {
+  const result = [];
+  walk(value, (candidate) => {
+    if (result.length >= limit || Array.isArray(candidate)) return;
+    const key = Object.keys(candidate)
+      .find((name) => ["taglist", "tag_list", "tags"].includes(name.toLowerCase()));
+    if (!key || !Array.isArray(candidate[key])) return;
+    for (const tag of candidate[key]) {
+      const raw = typeof tag === "string"
+        ? tag.trim()
+        : firstString(tag, ["tagName", "tag_name", "name", "title"]);
+      if (!raw) continue;
+      const normalized = raw.startsWith("#") ? raw : `#${raw}`;
+      if (!result.includes(normalized)) result.push(normalized);
+      if (result.length >= limit) break;
+    }
+  });
+  return result;
+}
+
+function normalizePublishedAt(value) {
+  if (!value || !/^\d+$/.test(value)) return value;
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric)) return value;
+  const millis = numeric >= 100_000_000_000 ? numeric : numeric * 1000;
+  const date = new Date(millis);
+  return Number.isNaN(date.valueOf()) ? value : date.toISOString();
+}
+
 function looksLike(platform, value) {
   if (platform === "bilibili") return Boolean(firstString(value, ["bvid", "aid"]) && firstString(value, ["title"]));
   if (platform === "xiaohongshu") return Boolean(firstString(value, ["noteId", "note_id", "xsecToken", "userId"]) && firstString(value, ["title", "desc", "description"]));
@@ -130,11 +269,11 @@ function targetIdentity(platform, baseUrl) {
   const pattern = platform === "bilibili"
     ? /\/video\/(BV[a-zA-Z0-9]+|av\d+)/i
     : platform === "xiaohongshu"
-      ? /\/(?:explore|discovery\/item)\/([a-zA-Z0-9]+)/i
+      ? /\/(?:explore|discovery\/item)\/([a-zA-Z0-9]+)|\/user\/profile\/[^/]+\/([a-zA-Z0-9]+)/i
       : /\/(?:video|note)\/(\d+)/i;
   const match = pathname.match(pattern);
   if (!match) return null;
-  const raw = match[1];
+  const raw = match[1] || match[2];
   return platform === "bilibili" && /^av\d+$/i.test(raw) ? raw.slice(2) : raw;
 }
 
@@ -163,13 +302,18 @@ function matchingTarget(value, platform, expectedId) {
 export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
   if (!["bilibili", "xiaohongshu", "douyin"].includes(platform) || !value || typeof value !== "object") return null;
   const expectedId = targetIdentity(platform, baseUrl);
+  if (platform === "xiaohongshu" && !expectedId) return null;
   const scope = expectedId ? matchingTarget(value, platform, expectedId) : (looksLike(platform, value) ? value : null);
   if (!scope) return null;
-  const title = firstString(scope, ["title", "noteTitle", "videoTitle", "desc", "description"]);
-  if (!title) return null;
   const description = firstString(scope, ["desc", "description", "content", "text", "caption"]) || "";
-  const author = firstString(scope, ["author", "nickname", "nickName", "uname", "username", "name"]);
-  const publishedAt = firstString(scope, ["publishedAt", "publishTime", "createTime", "create_time", "pubdate"]);
+  const explicitTitle = firstString(scope, ["title", "noteTitle", "videoTitle"]);
+  const title = explicitTitle
+    || (["xiaohongshu", "douyin"].includes(platform) ? inferTitle(description) : null);
+  if (!title) return null;
+  const author = platform === "xiaohongshu"
+    ? firstNestedString(scope, ["user", "author"], ["nickname", "nickName", "username", "name"])
+    : firstString(scope, ["author", "nickname", "nickName", "uname", "username", "name"]);
+  const publishedAt = normalizePublishedAt(firstString(scope, ["publishedAt", "publishTime", "createTime", "create_time", "time", "timestamp", "pubdate"]));
   const imageKeys = platform === "bilibili"
     ? ["pic", "cover", "thumbnail", "coverUrl", "cover_url"]
     : platform === "xiaohongshu"
@@ -180,14 +324,28 @@ export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
     : platform === "xiaohongshu"
       ? ["masterUrl", "master_url", "videoUrl", "video_url", "playUrl", "play_url"]
       : ["playAddr", "play_addr", "playUrl", "play_url"];
+  const images = platform === "xiaohongshu"
+    ? collectXhsImages(scope, baseUrl, 100)
+    : collectKeyUrls(scope, imageKeys, baseUrl, 100);
+  const mediaUrl = collectKeyUrls(scope, mediaKeys, baseUrl, 1)[0] || null;
+  const declaredVideo = platform === "xiaohongshu"
+    && String(firstString(scope, ["type", "noteType", "note_type"]) || "").toLowerCase() === "video";
+  const hashtags = hashtagsFrom(description);
+  if (platform === "xiaohongshu") {
+    for (const tag of collectXhsTags(scope)) if (!hashtags.includes(tag)) hashtags.push(tag);
+  }
   return {
     title,
+    titleSource: explicitTitle ? "platform" : "inferred",
     description,
     author,
     publishedAt,
-    images: collectKeyUrls(scope, imageKeys, baseUrl, 100),
-    mediaUrl: collectKeyUrls(scope, mediaKeys, baseUrl, 1)[0] || null,
+    platformId: expectedId,
+    contentType: declaredVideo || mediaUrl ? "video" : images.length ? "image_post" : "article",
+    images,
+    mediaUrl,
     subtitles: collectKeyUrls(scope, ["subtitles", "subtitle", "captions", "captionUrl", "subtitleUrl"], baseUrl, 20),
+    hashtags,
   };
 }
 
@@ -200,6 +358,79 @@ export function extractPlatformPayload(platform, html, baseUrl) {
   return null;
 }
 
+export function classifyPlatformPage(platform, pageText) {
+  const text = String(pageText || "").toLowerCase();
+  if (/captcha|challenge|滑块验证|请通过验证|请完成验证|安全验证|访问过于频繁/i.test(text)) {
+    return "IMPORT_WEB_CAPTCHA_REQUIRED";
+  }
+  if (/login required|signflow|请先登录|登录后查看|登录后浏览/i.test(text)) {
+    return "IMPORT_WEB_LOGIN_REQUIRED";
+  }
+  if (platform === "xiaohongshu"
+    && /note has been deleted|note not found|笔记已删除|该笔记已被删除|内容不存在|当前内容无法展示/i.test(text)) {
+    return "IMPORT_WEB_CONTENT_REMOVED";
+  }
+  return null;
+}
+
+function yaml(value) {
+  return JSON.stringify(String(value ?? ""));
+}
+
+export function renderPlatformMarkdown(
+  platform,
+  payload,
+  publicUrl,
+  imageLinks = [],
+  mediaLink = null,
+  mediaSaveMode = "preserve_original",
+) {
+  const platformName = platform === "xiaohongshu" ? "小红书" : platform === "douyin" ? "抖音" : "Bilibili";
+  const lines = [
+    "---",
+    "type: source",
+    `title: ${yaml(payload.title)}`,
+    `title_source: ${yaml(payload.titleSource || "platform")}`,
+    `source_url: ${yaml(publicUrl)}`,
+    `source_platform: ${yaml(platform)}`,
+    `content_type: ${yaml(payload.contentType || (payload.mediaUrl ? "video" : payload.images?.length ? "image_post" : "article"))}`,
+    `route: ${yaml("web.generic.browser")}`,
+    `engine_id: ${yaml("browser-runtime")}`,
+    `engine_version: ${yaml("0.1.0")}`,
+  ];
+  if (payload.platformId) lines.push(`source_id: ${yaml(payload.platformId)}`);
+  if (payload.author) lines.push(`author: ${yaml(payload.author)}`);
+  if (payload.publishedAt) lines.push(`published_at: ${yaml(payload.publishedAt)}`);
+  lines.push("---", "", `# ${payload.title}`, "", `> 来源：[${platformName}](${publicUrl})`, "", "## 来源信息", "", `- 平台：${platformName}`);
+  if (payload.platformId) lines.push(`- 平台 ID：${payload.platformId}`);
+  if (payload.author) lines.push(`- 作者：${payload.author}`);
+  if (payload.publishedAt) lines.push(`- 发布时间：${payload.publishedAt}`);
+  lines.push(`- 来源：${publicUrl}`, "- 导入路线：`web.generic.browser`");
+  if (payload.titleSource === "inferred") lines.push("- 标题来源：由原始正文首行推断");
+  if (payload.description) {
+    lines.push("", platform === "xiaohongshu" ? "## 原始正文" : "## 原始描述", "", payload.description.trim());
+  }
+  if (payload.hashtags?.length) {
+    lines.push("", "## 话题", "", payload.hashtags.join(" "));
+  }
+  if (imageLinks.length && payload.contentType !== "video") {
+    lines.push("", "## 图片", "");
+    imageLinks.forEach((link, index) => lines.push(`${index + 1}. ![第 ${index + 1} 张](${link})`));
+  } else if (imageLinks.length) {
+    lines.push("", "## 封面", "", `![视频封面](${imageLinks[0]})`);
+  } else if (mediaSaveMode === "extract_only" && payload.images?.length && payload.contentType !== "video") {
+    lines.push("", "## 图片", "");
+    payload.images.forEach((_, index) => lines.push(`${index + 1}. （原图未保留）`));
+  } else if (mediaSaveMode === "extract_only" && payload.images?.length) {
+    lines.push("", "## 封面", "", "（原图未保留）");
+  }
+  if (mediaLink) lines.push("", "## 视频 / 音频", "", `[平台媒体](${mediaLink})`);
+  else if (mediaSaveMode === "extract_only" && payload.mediaUrl) {
+    lines.push("", "## 视频 / 音频", "", "（原始媒体未保留）");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 export function selectRelevantApiEvidence(platform, candidates, baseUrl, limit = 3) {
   if (!Array.isArray(candidates) || !Number.isSafeInteger(limit) || limit <= 0) return [];
   return candidates
@@ -208,8 +439,9 @@ export function selectRelevantApiEvidence(platform, candidates, baseUrl, limit =
     .slice(0, limit);
 }
 
-export function classifyRemoteImageKind(platform, _hasPlayableMedia, localOcrAuthorized, mediaSaveMode = "preserve_original") {
+export function classifyRemoteImageKind(platform, hasPlayableMedia, localOcrAuthorized, mediaSaveMode = "preserve_original") {
   if (platform === "generic") return "image";
+  if (hasPlayableMedia) return mediaSaveMode === "preserve_original" ? "image" : null;
   if (localOcrAuthorized) return "temporary_image";
   return mediaSaveMode === "preserve_original" ? "image" : null;
 }

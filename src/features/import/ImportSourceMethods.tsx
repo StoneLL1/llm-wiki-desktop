@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { FolderOpen, Link, LoaderCircle, Plus, Upload } from "lucide-react";
+import { Circle, FileText, FolderOpen, Image, Link, LoaderCircle, MessageSquareText, Mic2, Plus, ScanText, Upload } from "lucide-react";
 
 import { pickDirectory, selectImportFiles } from "./nativeFilePicker";
 import { subscribeToDragDrop } from "./dragDrop";
@@ -18,7 +18,9 @@ export interface ImportSourceMethodsProps {
   addingUrl?: boolean;
   sessionSyncing?: boolean;
   onError?: (error: unknown) => void;
-  platforms?: readonly { label: string; available: boolean; reasonCode?: string | null }[];
+  files?: readonly { id: string; label: string; available: boolean; reasonCode?: string | null }[];
+  platforms?: readonly { id: string; label: string; available: boolean; reasonCode?: string | null }[];
+  abilities?: readonly { id: string; label: string; available: boolean; reasonCode?: string | null }[];
 }
 
 function hasTauri(): boolean {
@@ -32,15 +34,17 @@ export function ImportSourceMethods({
   addingUrl = false,
   sessionSyncing = false,
   onError,
+  files = ["DOCX", "PDF", "XLSX", "PPT", "MD", "TXT", "CSV"].map((label) => ({ id: label.toLowerCase(), label, available: true })),
   platforms = [
-    { label: "HTTP", available: true },
-    { label: "WeChat", available: true },
-    { label: "Zhihu", available: false },
-    { label: "Bilibili", available: false },
-    { label: "Xiaohongshu", available: false },
-    { label: "Douyin", available: false },
-    { label: "X", available: false },
+    { id: "http", label: "HTTP", available: true },
+    { id: "wechat", label: "WeChat", available: true },
+    { id: "zhihu", label: "Zhihu", available: false },
+    { id: "bilibili", label: "Bilibili", available: false },
+    { id: "xiaohongshu", label: "Xiaohongshu", available: false },
+    { id: "douyin", label: "Douyin", available: false },
+    { id: "x", label: "X", available: false },
   ],
+  abilities = [],
 }: ImportSourceMethodsProps) {
   const { t } = useTranslation();
   const [url, setUrl] = useState("");
@@ -218,19 +222,35 @@ export function ImportSourceMethods({
           {invalidUrl ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.invalid")}</p> : null}
           {inputError === "url" ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.error")}</p> : null}
         </form>
-        <div className="flex flex-wrap gap-1" aria-label={t("importV2.url.platforms")}>
-          {platforms.map((platform) => (
-            <span
-              key={platform.label}
-              className={`import-v2-platform-chip ${platform.available ? "is-available" : "is-unavailable"}`}
-              aria-label={`${platform.label}: ${t(platform.available ? "importV2.platform.available" : "importV2.platform.unavailable")}${!platform.available && platform.reasonCode ? `, ${t(`importV2.platform.reason.${platform.reasonCode}`, { defaultValue: t("importV2.platform.unavailable") })}` : ""}`}
-              title={!platform.available && platform.reasonCode ? t(`importV2.platform.reason.${platform.reasonCode}`, { defaultValue: t("importV2.platform.unavailable") }) : undefined}
-            >
-              {platform.label}
-            </span>
-          ))}
-        </div>
       </article>
+
+      <div className="import-v2-source-matrix" aria-label={t("importV2.matrix.label")}>
+        <CapabilityRow
+          label={t("importV2.matrix.files")}
+          entries={files.map((file) => ({ ...file, tone: file.available ? "type" as const : "off" as const }))}
+          icon={FileText}
+        />
+        <CapabilityRow
+          label={t("importV2.matrix.platforms")}
+          entries={platforms.map((platform) => ({
+            ...platform,
+            tone: platform.available ? "ok" as const
+              : platform.reasonCode === "capability_missing" ? "pack" as const
+                : platform.reasonCode === "login_required" ? "login" as const : "off" as const,
+          }))}
+          icon={Circle}
+        />
+        <CapabilityRow
+          label={t("importV2.matrix.abilities")}
+          entries={abilities.map((ability) => ({
+            ...ability,
+            tone: ability.available ? "ok" as const
+              : ability.reasonCode === "capability_missing" ? "pack" as const : "off" as const,
+          }))}
+          icon={MessageSquareText}
+          icons={{ local_asr: Mic2, ocr: ScanText, keyframes: Image }}
+        />
+      </div>
 
       {pendingUrl ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4" role="dialog" aria-modal="true" aria-labelledby="import-url-media-choice-title">
@@ -255,5 +275,36 @@ export function ImportSourceMethods({
         </div>
       ) : null}
     </section>
+  );
+}
+
+type MatrixTone = "type" | "ok" | "login" | "pack" | "off";
+
+function CapabilityRow({ label, entries, icon: DefaultIcon, icons = {} }: {
+  label: string;
+  entries: readonly { id: string; label: string; available: boolean; reasonCode?: string | null; tone: MatrixTone }[];
+  icon: typeof Circle;
+  icons?: Record<string, typeof Circle>;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="import-v2-source-matrix__row">
+      <span className="import-v2-source-matrix__label">{label}</span>
+      <div className="import-v2-source-matrix__tiles">
+        {entries.map((entry) => {
+          const Icon = icons[entry.id] ?? DefaultIcon;
+          const reason = entry.reasonCode
+            ? t(`importV2.platform.reason.${entry.reasonCode}`, { defaultValue: t(entry.available ? "importV2.platform.available" : "importV2.platform.unavailable") })
+            : t(entry.available ? "importV2.platform.available" : "importV2.platform.unavailable");
+          return (
+            <span key={entry.id} className={`import-v2-source-tile is-${entry.tone}`} title={reason} aria-label={`${entry.label}: ${reason}`}>
+              <Icon size={14} aria-hidden="true" />
+              <span>{entry.label}</span>
+              {entry.tone !== "type" ? <i aria-hidden="true" /> : null}
+            </span>
+          );
+        })}
+      </div>
+    </div>
   );
 }

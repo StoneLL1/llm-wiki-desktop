@@ -101,9 +101,21 @@ export function useImportSessionScope(
     let refreshAgain = false;
     setIsSyncingSession(true);
 
-    const request = importV2Api.getSession({ projectId, projectRootPath: rootPath, sessionId });
+    const request = Promise.all([
+      importV2Api.getSession({ projectId, projectRootPath: rootPath, sessionId }),
+      importV2Api.getReadiness({ projectId, projectRootPath: rootPath })
+        .then((nextReadiness) => ({ nextReadiness, warning: null as string | null }))
+        .catch((error) => ({
+          nextReadiness: null,
+          warning: importWorkflowErrorMessage(error),
+        })),
+    ]);
     const refresh = request
-      .then((nextSession) => {
+      .then(([nextSession, readinessResult]) => {
+        if (isScopeCurrent(requestKey, epoch)) {
+          if (readinessResult.nextReadiness) setReadiness(readinessResult.nextReadiness);
+          setReadinessWarning(readinessResult.warning);
+        }
         if (isScopeCurrent(requestKey, epoch) && sessionMutationRevisionRef.current === refreshRevision) {
           useImportStore.getState().replaceSession(requestKey, nextSession, epoch);
         } else if (isScopeCurrent(requestKey, epoch)) {

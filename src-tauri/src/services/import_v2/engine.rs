@@ -39,6 +39,8 @@ pub struct EngineRequest {
     #[serde(default)]
     pub local_ocr_authorized: bool,
     #[serde(default)]
+    pub allow_missing_transcript: bool,
+    #[serde(default)]
     pub media_save_mode: MediaSaveMode,
 }
 
@@ -122,6 +124,23 @@ impl EngineRegistry {
         engine: Arc<dyn ImportEngine>,
     ) -> Result<(), BackendError> {
         self.register_inner(engine, true)
+    }
+
+    pub(crate) fn replace_registered(
+        &self,
+        engine: Arc<dyn ImportEngine>,
+    ) -> Result<(), BackendError> {
+        let descriptor = engine.descriptor();
+        let mut engines = self.engines.write().map_err(|_| registry_error())?;
+        if let Some(existing) = engines
+            .iter_mut()
+            .find(|existing| existing.descriptor().engine_id == descriptor.engine_id)
+        {
+            *existing = engine;
+        } else {
+            engines.push(engine);
+        }
+        Ok(())
     }
 
     fn register_inner(
@@ -377,6 +396,35 @@ mod tests {
     }
 
     #[test]
+    fn registry_can_explicitly_replace_a_capability_engine() {
+        let registry = EngineRegistry::default();
+        let mut production = FixtureEngine::with_route("pack.media", "media.asr", true);
+        production.descriptor.engine_version = "1.0.0".into();
+        registry.ensure_registered(Arc::new(production)).unwrap();
+        let mut development = FixtureEngine::with_route("pack.media", "media.asr", true);
+        development.descriptor.engine_version = "2.0.0-dev".into();
+
+        registry.replace_registered(Arc::new(development)).unwrap();
+
+        let input = ImportInput {
+            source_identity: None,
+            kind: ImportInputKind::File,
+            display_name: "recording.wav".into(),
+            locator: "recording.wav".into(),
+            normalized_locator: None,
+            media_save_mode: Default::default(),
+        };
+        assert_eq!(
+            registry
+                .resolve_route("media.asr", &input)
+                .unwrap()
+                .descriptor()
+                .engine_version,
+            "2.0.0-dev"
+        );
+    }
+
+    #[test]
     fn planned_route_prefers_installed_pack_over_builtin_fallback() {
         let registry = EngineRegistry::default();
         registry
@@ -470,6 +518,7 @@ mod tests {
             chained_input: Some("converted/legacy.docx".into()),
             local_asr_authorized: false,
             local_ocr_authorized: false,
+            allow_missing_transcript: false,
             media_save_mode: Default::default(),
         })
         .unwrap();

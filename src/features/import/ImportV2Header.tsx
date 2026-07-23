@@ -1,4 +1,4 @@
-import { FileOutput } from "lucide-react";
+import { Clock3, FileOutput, Package } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { ImportSession } from "../../types/importV2";
@@ -10,9 +10,13 @@ export interface ImportV2HeaderProps {
   progress?: ImportSessionProgress;
   discoveryTask?: BackendTask | null;
   syncing?: boolean;
+  activeSection?: ImportV2Section;
+  onSectionChange?: (section: ImportV2Section) => void;
 }
 
-export function ImportV2Header({ session, progress, discoveryTask, syncing = false }: ImportV2HeaderProps) {
+export type ImportV2Section = "workbench" | "history" | "capabilities";
+
+export function ImportV2Header({ session, progress, discoveryTask, syncing = false, activeSection = "workbench", onSectionChange }: ImportV2HeaderProps) {
   const { t } = useTranslation();
   const total = session?.items.length ?? 0;
   const completed = session?.items.filter((item) => item.status === "completed").length ?? 0;
@@ -30,7 +34,14 @@ export function ImportV2Header({ session, progress, discoveryTask, syncing = fal
           <h1 className="m-0 text-[20px] font-semibold tracking-[-0.02em]">{t("importV2.header.title")}</h1>
         </div>
       </div>
-      <span className="import-v2-header__stat" aria-live="polite">{discoveryActive ? t("importV2.header.discovery", { count: discoveryCount }) : syncing ? t("importV2.header.syncing") : t("importV2.header.stats", { completed, total, processed, active, failed, needsAction })}</span>
+      <div className="import-v2-header__tools">
+        <nav className="import-v2-header__nav" aria-label={t("importV2.header.sections")}>
+          <button type="button" className={activeSection === "workbench" ? "is-active" : ""} aria-current={activeSection === "workbench" ? "page" : undefined} onClick={() => onSectionChange?.("workbench")}><FileOutput size={14} />{t("importV2.header.workbench")}</button>
+          <button type="button" className={activeSection === "history" ? "is-active" : ""} aria-current={activeSection === "history" ? "page" : undefined} onClick={() => onSectionChange?.("history")}><Clock3 size={14} />{t("importV2.header.history")}</button>
+          <button type="button" className={activeSection === "capabilities" ? "is-active" : ""} aria-current={activeSection === "capabilities" ? "page" : undefined} onClick={() => onSectionChange?.("capabilities")}><Package size={14} />{t("importV2.header.capabilities")}</button>
+        </nav>
+        <span className="import-v2-header__stat" aria-live="polite">{discoveryActive ? t("importV2.header.discovery", { count: discoveryCount }) : syncing ? t("importV2.header.syncing") : t("importV2.header.stats", { completed, total, processed, active, failed, needsAction })}</span>
+      </div>
     </header>
   );
 }

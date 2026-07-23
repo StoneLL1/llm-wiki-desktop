@@ -52,6 +52,10 @@ impl Platform {
 pub struct PlatformSubtitle {
     pub url: String,
     pub automatic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +66,7 @@ pub struct PlatformDocument {
     pub content_type: String,
     pub canonical_url: String,
     pub title: String,
+    pub title_source: String,
     pub author: Option<String>,
     pub published_at: Option<String>,
     pub description: String,
@@ -79,7 +84,11 @@ pub fn extract_platform_document(
     base_url: &str,
 ) -> Option<PlatformDocument> {
     let values = collect_json_values(html);
-    let expected_id = extract_platform_id(platform, base_url).map(|value| normalize_platform_id(platform, &value));
+    let expected_id = extract_platform_id(platform, base_url)
+        .map(|value| normalize_platform_id(platform, &value));
+    if platform == Platform::Xiaohongshu && expected_id.is_none() {
+        return None;
+    }
     let value = if let Some(expected_id) = expected_id.as_deref() {
         values
             .iter()
@@ -94,24 +103,34 @@ pub fn extract_platform_document(
         .ok()?
         .public
         .public_url;
-    let title = first_string(value, &["title", "noteTitle", "videoTitle"])
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            (matches!(platform, Platform::Xiaohongshu | Platform::Douyin))
-                .then(|| first_string(value, &["desc", "description"]))
-                .flatten()
-        })?;
+    let explicit_title = first_string(value, &["title", "noteTitle", "videoTitle"])
+        .filter(|value| !value.trim().is_empty());
     let description = first_string(
         value,
         &["desc", "description", "content", "text", "caption"],
     )
     .unwrap_or_default();
-    let author = first_string(
-        value,
-        &[
-            "author", "nickname", "nickName", "uname", "username", "name",
-        ],
-    );
+    let (title, title_source) = if let Some(title) = explicit_title {
+        (title, "platform".to_string())
+    } else if matches!(platform, Platform::Xiaohongshu | Platform::Douyin) {
+        (infer_title(&description)?, "inferred".to_string())
+    } else {
+        return None;
+    };
+    let author = if platform == Platform::Xiaohongshu {
+        first_nested_string(
+            value,
+            &["user", "author"],
+            &["nickname", "nickName", "username", "name"],
+        )
+    } else {
+        first_string(
+            value,
+            &[
+                "author", "nickname", "nickName", "uname", "username", "name",
+            ],
+        )
+    };
     let published_at = first_string(
         value,
         &[
@@ -119,9 +138,12 @@ pub fn extract_platform_document(
             "publishTime",
             "createTime",
             "create_time",
+            "time",
+            "timestamp",
             "pubdate",
         ],
-    );
+    )
+    .map(|value| normalize_published_at(&value));
     let image_keys = match platform {
         Platform::Bilibili => &["pic", "cover", "thumbnail", "coverUrl", "cover_url"][..],
         Platform::Xiaohongshu => &[
@@ -139,7 +161,11 @@ pub fn extract_platform_document(
             "cover",
         ][..],
     };
-    let images = collect_key_urls(value, image_keys, base_url, 100);
+    let images = if platform == Platform::Xiaohongshu {
+        collect_xiaohongshu_images(value, base_url, 100)
+    } else {
+        collect_key_urls(value, image_keys, base_url, 100)
+    };
     let media_keys = match platform {
         Platform::Bilibili => &[
             "durl",
@@ -179,12 +205,24 @@ pub fn extract_platform_document(
         .map(|url| PlatformSubtitle {
             url,
             automatic: false,
+            language: None,
+            label: None,
         })
         .collect::<Vec<_>>();
     let chapters = collect_key_strings(value, &["chapters", "pages", "part"][..], 100);
-    let hashtags = extract_hashtags(&description);
+    let mut hashtags = extract_hashtags(&description);
+    if platform == Platform::Xiaohongshu {
+        for hashtag in collect_xiaohongshu_tags(value, 100) {
+            if !hashtags.contains(&hashtag) {
+                hashtags.push(hashtag);
+            }
+        }
+    }
     let platform_id = extract_platform_id(platform, base_url);
-    let content_type = if media_url.is_some() {
+    let declared_video = platform == Platform::Xiaohongshu
+        && first_string(value, &["type", "noteType", "note_type"])
+            .is_some_and(|value| value.eq_ignore_ascii_case("video"));
+    let content_type = if declared_video || media_url.is_some() {
         "video"
     } else if !images.is_empty() {
         "image_post"
@@ -197,6 +235,7 @@ pub fn extract_platform_document(
         content_type: content_type.into(),
         canonical_url,
         title,
+        title_source,
         author,
         published_at,
         description,
@@ -207,6 +246,182 @@ pub fn extract_platform_document(
         subtitles,
         chapters,
     })
+}
+
+fn infer_title(description: &str) -> Option<String> {
+    let line = description
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .trim();
+    let title = line.chars().take(80).collect::<String>();
+    (!title.is_empty()).then_some(title)
+}
+
+fn first_nested_string(
+    value: &serde_json::Value,
+    container_keys: &[&str],
+    value_keys: &[&str],
+) -> Option<String> {
+    if let Some(object) = value.as_object() {
+        for container_key in container_keys {
+            if let Some((_, nested)) = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(container_key))
+            {
+                if let Some(value) = first_string(nested, value_keys) {
+                    return Some(value);
+                }
+            }
+        }
+        for child in object.values() {
+            if let Some(value) = first_nested_string(child, container_keys, value_keys) {
+                return Some(value);
+            }
+        }
+    } else if let Some(array) = value.as_array() {
+        for child in array {
+            if let Some(value) = first_nested_string(child, container_keys, value_keys) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn collect_xiaohongshu_tags(value: &serde_json::Value, limit: usize) -> Vec<String> {
+    let mut tags = Vec::new();
+    collect_key_values(value, &["tagList", "tag_list", "tags"], &mut |candidate| {
+        let values = candidate.as_array().map(Vec::as_slice).unwrap_or_default();
+        for value in values {
+            let raw = value.as_str().map(str::to_string).or_else(|| {
+                value.as_object().and_then(|object| {
+                    ["tagName", "tag_name", "name", "title"]
+                        .iter()
+                        .find_map(|key| object.get(*key).and_then(value_as_string))
+                })
+            });
+            let Some(raw) = raw.map(|value| value.trim().to_string()) else {
+                continue;
+            };
+            if raw.is_empty() {
+                continue;
+            }
+            let tag = if raw.starts_with('#') {
+                raw
+            } else {
+                format!("#{raw}")
+            };
+            if !tags.contains(&tag) && tags.len() < limit {
+                tags.push(tag);
+            }
+        }
+    });
+    tags
+}
+
+fn normalize_published_at(value: &str) -> String {
+    let Ok(timestamp) = value.parse::<i64>() else {
+        return value.to_string();
+    };
+    let datetime = if timestamp.abs() >= 100_000_000_000 {
+        chrono::DateTime::from_timestamp_millis(timestamp)
+    } else {
+        chrono::DateTime::from_timestamp(timestamp, 0)
+    };
+    datetime
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn collect_xiaohongshu_images(
+    value: &serde_json::Value,
+    base_url: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut lists = Vec::new();
+    collect_key_values(value, &["imageList", "image_list"], &mut |candidate| {
+        if let Some(array) = candidate.as_array() {
+            lists.push(array.clone());
+        }
+    });
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    for list in lists {
+        for image in list {
+            if result.len() >= limit {
+                return result;
+            }
+            let candidates = preferred_xiaohongshu_image_urls(&image);
+            let Some(raw) = candidates.first() else {
+                continue;
+            };
+            let Ok(base) = Url::parse(base_url) else {
+                continue;
+            };
+            let Ok(url) = base.join(raw).or_else(|_| Url::parse(raw)) else {
+                continue;
+            };
+            let Ok(target) = UrlPolicy.normalize_for_session(url.as_str()) else {
+                continue;
+            };
+            if seen.insert(target.public.public_url) {
+                result.push(target.request_url.to_string());
+            }
+        }
+        if !result.is_empty() {
+            break;
+        }
+    }
+    if result.is_empty() {
+        collect_key_urls(
+            value,
+            &["urlDefault", "url_default", "images"],
+            base_url,
+            limit,
+        )
+    } else {
+        result
+    }
+}
+
+fn preferred_xiaohongshu_image_urls(value: &serde_json::Value) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return value.as_str().map(str::to_string).into_iter().collect();
+    };
+    for key in ["urlDefault", "url_default", "urlPre", "url_pre", "url"] {
+        if let Some(url) = object.get(key).and_then(serde_json::Value::as_str) {
+            if !url.trim().is_empty() {
+                return vec![url.to_string()];
+            }
+        }
+    }
+    for key in ["infoList", "info_list"] {
+        let Some(entries) = object.get(key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let mut fallback = None;
+        for entry in entries {
+            let Some(entry) = entry.as_object() else {
+                continue;
+            };
+            let Some(url) = entry.get("url").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let scene = entry
+                .get("imageScene")
+                .or_else(|| entry.get("image_scene"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if scene.eq_ignore_ascii_case("WB_DFT") {
+                return vec![url.to_string()];
+            }
+            fallback.get_or_insert_with(|| url.to_string());
+        }
+        if let Some(url) = fallback {
+            return vec![url];
+        }
+    }
+    Vec::new()
 }
 
 fn normalize_platform_id(platform: Platform, value: &str) -> String {
@@ -343,13 +558,60 @@ fn balanced_json_value(input: &str) -> Option<serde_json::Value> {
             b'}' | b']' => {
                 depth = depth.checked_sub(1)?;
                 if depth == 0 {
-                    return serde_json::from_str(&input[..=index]).ok();
+                    let candidate = &input[..=index];
+                    return serde_json::from_str(candidate).ok().or_else(|| {
+                        serde_json::from_str(&normalize_undefined_literals(candidate)).ok()
+                    });
                 }
             }
             _ => {}
         }
     }
     None
+}
+
+fn normalize_undefined_literals(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < input.len() {
+        let rest = &input[index..];
+        let character = rest.chars().next().unwrap_or_default();
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            index += character.len_utf8();
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            output.push(character);
+            index += 1;
+            continue;
+        }
+        if rest.starts_with("undefined") {
+            let before = input[..index].bytes().next_back();
+            let after = input.as_bytes().get(index + "undefined".len()).copied();
+            let identifier = |byte: Option<u8>| {
+                byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+            };
+            if !identifier(before) && !identifier(after) {
+                output.push_str("null");
+                index += "undefined".len();
+                continue;
+            }
+        }
+        output.push(character);
+        index += character.len_utf8();
+    }
+    output
 }
 
 fn first_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -513,7 +775,12 @@ fn extract_platform_id(platform: Platform, value: &str) -> Option<String> {
             .iter()
             .find(|segment| segment.starts_with("BV") || segment.starts_with("av"))
             .map(|segment| (*segment).to_string()),
-        Platform::Xiaohongshu => segments.last().map(|segment| (*segment).to_string()),
+        Platform::Xiaohongshu => match segments.as_slice() {
+            ["explore", note_id] => Some((*note_id).to_string()),
+            ["discovery", "item", note_id] => Some((*note_id).to_string()),
+            ["user", "profile", _author_id, note_id] => Some((*note_id).to_string()),
+            _ => None,
+        },
         Platform::Douyin => segments
             .iter()
             .find(|segment| segment.chars().all(|character| character.is_ascii_digit()))
@@ -613,12 +880,9 @@ mod tests {
     #[test]
     fn anchors_platform_json_to_the_requested_url_id() {
         let html = r#"<script type="application/json">{"feed":[{"aweme_id":"999","desc":"Recommended","video":{"play_addr":{"url_list":["https://v3-dy-o-abtest.zjcdn.com/wrong.mp4"]}}},{"aweme_id":"123","desc":"Requested","video":{"play_addr":{"url_list":["https://v3-dy-o-abtest.zjcdn.com/right.mp4"]}}}]}</script>"#;
-        let document = extract_platform_document(
-            Platform::Douyin,
-            html,
-            "https://www.douyin.com/video/123",
-        )
-        .unwrap();
+        let document =
+            extract_platform_document(Platform::Douyin, html, "https://www.douyin.com/video/123")
+                .unwrap();
         assert_eq!(document.title, "Requested");
         assert_eq!(
             document.media_url.as_deref(),

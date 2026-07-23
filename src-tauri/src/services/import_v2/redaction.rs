@@ -64,9 +64,7 @@ pub(crate) fn redact_sensitive_text(input: &str) -> String {
         if before.is_some_and(|value| value.is_ascii_alphanumeric() || value == b'_') {
             let bytes = input.as_bytes();
             let mut token_start = index;
-            while token_start > cursor
-                && bytes[token_start - 1].is_ascii_alphanumeric()
-            {
+            while token_start > cursor && bytes[token_start - 1].is_ascii_alphanumeric() {
                 token_start -= 1;
             }
             let mut token_end = after_key;
@@ -123,7 +121,9 @@ fn redact_sensitive_meta_tags(input: &str) -> String {
     let mut cursor = 0;
     while let Some(offset) = lower[cursor..].find("<meta") {
         let start = cursor + offset;
-        let Some(relative_end) = input[start..].find('>') else { break };
+        let Some(relative_end) = input[start..].find('>') else {
+            break;
+        };
         let end = start + relative_end + 1;
         output.push_str(&input[cursor..start]);
         let tag = &input[start..end];
@@ -152,7 +152,9 @@ fn attribute_value_range(tag: &str, attribute: &str) -> Option<std::ops::Range<u
     let mut search = 0;
     while let Some(offset) = lower[search..].find(attribute) {
         let start = search + offset;
-        let before = start.checked_sub(1).and_then(|index| lower.as_bytes().get(index));
+        let before = start
+            .checked_sub(1)
+            .and_then(|index| lower.as_bytes().get(index));
         let after = lower.as_bytes().get(start + attribute.len());
         if before.is_some_and(|value| value.is_ascii_alphanumeric() || *value == b'-')
             || after.is_some_and(|value| value.is_ascii_alphanumeric() || *value == b'-')
@@ -172,7 +174,9 @@ fn attribute_value_range(tag: &str, attribute: &str) -> Option<std::ops::Range<u
             continue;
         }
         let value_start = cursor + quote.len_utf8();
-        let value_end = tag[value_start..].find(quote).map(|offset| value_start + offset)?;
+        let value_end = tag[value_start..]
+            .find(quote)
+            .map(|offset| value_start + offset)?;
         return Some(value_start..value_end);
     }
     None

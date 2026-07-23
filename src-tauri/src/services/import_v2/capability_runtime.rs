@@ -15,6 +15,8 @@ use super::{
     ImportV2Service,
 };
 
+const STARTUP_LOADER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityRuntimeStatus {
@@ -29,14 +31,87 @@ pub struct ImportCapabilityRuntime {
     statuses: RwLock<Vec<CapabilityRuntimeStatus>>,
     browser_pack: RwLock<Option<ResolvedCapabilityPack>>,
     install_root: RwLock<Option<PathBuf>>,
+    #[cfg(debug_assertions)]
+    development: RwLock<Option<(PathBuf, Vec<u8>)>>,
 }
 
 impl ImportCapabilityRuntime {
+    /// Capability manifests and file inventories are verified off the Windows
+    /// GUI main thread, whose PE stack reserve is only 1 MiB in development.
+    /// The caller still waits for completion so readiness is deterministic
+    /// before the first frontend request can arrive.
+    pub fn load_startup(
+        &self,
+        install_root: &Path,
+        development: Option<(&Path, &Path)>,
+        service: &ImportV2Service,
+    ) -> Result<bool, BackendError> {
+        run_startup_loader(move || {
+            self.load_installed(install_root, service);
+            #[cfg(debug_assertions)]
+            {
+                return development.is_some_and(|(development_root, public_key_path)| {
+                    self.load_development(development_root, public_key_path, service)
+                });
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                let _ = development;
+                false
+            }
+        })
+    }
+
     pub fn load_installed(&self, install_root: &Path, service: &ImportV2Service) {
         if let Ok(mut root) = self.install_root.write() {
             *root = Some(install_root.to_path_buf());
         }
-        self.load_installed_with_keys(install_root, service, embedded_trusted_keys());
+        self.load_installed_with_keys(install_root, service, embedded_trusted_keys(), false);
+        #[cfg(debug_assertions)]
+        self.apply_development_overlay(service);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn load_development(
+        &self,
+        install_root: &Path,
+        public_key_path: &Path,
+        service: &ImportV2Service,
+    ) -> bool {
+        let key = std::fs::read_to_string(public_key_path)
+            .ok()
+            .and_then(|value| decode_hex(value.trim()));
+        let Some(key) = key.filter(|value| value.len() == 32) else {
+            return false;
+        };
+        if let Ok(mut development) = self.development.write() {
+            *development = Some((install_root.to_path_buf(), key));
+        }
+        self.apply_development_overlay(service);
+        self.statuses().iter().any(|status| {
+            status.capability_id == "asr-sensevoice-small"
+                && status.route == "media.asr"
+                && status.available
+        })
+    }
+
+    #[cfg(debug_assertions)]
+    fn apply_development_overlay(&self, service: &ImportV2Service) {
+        let development = self.development.read().ok().and_then(|value| value.clone());
+        let Some((install_root, key)) = development else {
+            return;
+        };
+        let production = self.statuses();
+        self.load_installed_with_keys(
+            &install_root,
+            service,
+            HashMap::from([("development-local".into(), key)]),
+            true,
+        );
+        let merged = merge_development_statuses(production, self.statuses());
+        if let Ok(mut statuses) = self.statuses.write() {
+            *statuses = merged;
+        }
     }
 
     fn load_installed_with_keys(
@@ -44,6 +119,7 @@ impl ImportCapabilityRuntime {
         install_root: &Path,
         service: &ImportV2Service,
         keys: HashMap<String, Vec<u8>>,
+        replace_existing: bool,
     ) {
         let manager = CapabilityPackManager::new(install_root.to_path_buf(), keys);
         let mut statuses = Vec::new();
@@ -74,12 +150,14 @@ impl ImportCapabilityRuntime {
                         false,
                     ));
                 }
-                service.register_capability_pack(
-                    pack,
-                    spec.route.into(),
-                    spec.extensions.iter().map(|v| (*v).into()).collect(),
-                    Duration::from_secs(spec.timeout_seconds),
-                )?;
+                let route = spec.route.into();
+                let extensions = spec.extensions.iter().map(|v| (*v).into()).collect();
+                let timeout = Duration::from_secs(spec.timeout_seconds);
+                if replace_existing {
+                    service.replace_capability_pack(pack, route, extensions, timeout)?;
+                } else {
+                    service.register_capability_pack(pack, route, extensions, timeout)?;
+                }
                 if let Some(pack) = browser_pack {
                     *self.browser_pack.write().map_err(|_| {
                         BackendError::new(
@@ -116,6 +194,65 @@ impl ImportCapabilityRuntime {
     pub fn install_root(&self) -> Option<PathBuf> {
         self.install_root.read().ok().and_then(|root| root.clone())
     }
+}
+
+fn run_startup_loader<T, F>(work: F) -> Result<T, BackendError>
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("import-capability-loader".into())
+            .stack_size(STARTUP_LOADER_STACK_BYTES)
+            .spawn_scoped(scope, work)
+            .map_err(|error| startup_loader_error("could not be started", error.to_string()))?;
+        worker.join().map_err(|payload| {
+            startup_loader_error("panicked", panic_payload_message(payload.as_ref()))
+        })
+    })
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".into())
+}
+
+fn startup_loader_error(message: &str, detail: String) -> BackendError {
+    BackendError::new(
+        "IMPORT_V2_CAPABILITY_LOADER_FAILED",
+        format!("The import capability loader {message}."),
+        true,
+        false,
+    )
+    .with_details(serde_json::json!({ "error": detail }))
+}
+
+#[cfg(debug_assertions)]
+fn merge_development_statuses(
+    production: Vec<CapabilityRuntimeStatus>,
+    development: Vec<CapabilityRuntimeStatus>,
+) -> Vec<CapabilityRuntimeStatus> {
+    let mut merged = production
+        .into_iter()
+        .map(|status| ((status.capability_id.clone(), status.route.clone()), status))
+        .collect::<HashMap<_, _>>();
+    for status in development {
+        let key = (status.capability_id.clone(), status.route.clone());
+        if status.available || !merged.contains_key(&key) {
+            merged.insert(key, status);
+        }
+    }
+    let mut statuses = merged.into_values().collect::<Vec<_>>();
+    statuses.sort_by(|left, right| {
+        left.capability_id
+            .cmp(&right.capability_id)
+            .then_with(|| left.route.cmp(&right.route))
+    });
+    statuses
 }
 
 struct PackSpec {
@@ -268,6 +405,41 @@ fn safe_reason(error: BackendError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_loader_uses_the_named_large_stack_worker() {
+        let thread_name =
+            run_startup_loader(|| std::thread::current().name().map(str::to_owned)).unwrap();
+        assert_eq!(thread_name.as_deref(), Some("import-capability-loader"));
+        assert_eq!(STARTUP_LOADER_STACK_BYTES, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn development_overlay_only_replaces_routes_that_are_ready() {
+        let status = |id: &str, route: &str, available: bool| CapabilityRuntimeStatus {
+            capability_id: id.into(),
+            route: route.into(),
+            available,
+            reason: (!available).then(|| "missing".into()),
+        };
+        let merged = merge_development_statuses(
+            vec![
+                status("browser-runtime", "web.generic.browser", true),
+                status("asr-sensevoice-small", "media.asr", false),
+            ],
+            vec![
+                status("browser-runtime", "web.generic.browser", false),
+                status("asr-sensevoice-small", "media.asr", true),
+            ],
+        );
+        assert!(merged
+            .iter()
+            .any(|entry| { entry.route == "web.generic.browser" && entry.available }));
+        assert!(merged
+            .iter()
+            .any(|entry| entry.route == "media.asr" && entry.available));
+    }
     use crate::services::import_v2::capability_pack::CapabilityPackManifest;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use sha2::{Digest, Sha256};
@@ -302,6 +474,69 @@ mod tests {
             &["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"]
         );
         assert!(ocr.timeout_seconds >= 15 * 60);
+    }
+
+    #[test]
+    #[ignore = "requires scripts/prepare-sensevoice-dev.mjs"]
+    fn prepared_development_sensevoice_pack_passes_runtime_integrity() {
+        let development_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.dev-capabilities");
+        let service = ImportV2Service::default();
+        let runtime = ImportCapabilityRuntime::default();
+        let production_root = std::env::temp_dir().join(format!(
+            "cap-runtime-production-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(runtime
+            .load_startup(
+                &production_root,
+                Some((
+                    &development_root.join("installed"),
+                    &development_root.join("development-public-key.hex"),
+                )),
+                &service,
+            )
+            .unwrap());
+        assert_eq!(
+            runtime.install_root().as_deref(),
+            Some(production_root.as_path())
+        );
+        if !runtime
+            .statuses()
+            .iter()
+            .any(|status| status.route == "media.asr" && status.available)
+        {
+            let key = decode_hex(
+                std::fs::read_to_string(development_root.join("development-public-key.hex"))
+                    .unwrap()
+                    .trim(),
+            )
+            .unwrap();
+            let manager = CapabilityPackManager::new(
+                development_root.join("installed"),
+                HashMap::from([("development-local".into(), key)]),
+            );
+            let error = manager
+                .resolve(&CapabilityRequirement {
+                    capability_id: "asr-sensevoice-small".into(),
+                    minimum_version: None,
+                    protocol_version: "2".into(),
+                    target_triple: target_triple(),
+                    accepted_license_expressions: vec![
+                        "Apache-2.0 AND LGPL-3.0-or-later AND MIT".into()
+                    ],
+                })
+                .unwrap_err();
+            panic!(
+                "development pack validation failed: {}: {}",
+                error.code, error.message
+            );
+        }
+        assert!(service
+            .registered_engine_routes()
+            .unwrap()
+            .iter()
+            .any(|route| route == "media.asr"));
+        std::fs::remove_dir_all(production_root).ok();
     }
 
     #[test]
@@ -347,6 +582,7 @@ mod tests {
             &root,
             &service,
             HashMap::from([("release-test".into(), key.public_key().as_ref().to_vec())]),
+            false,
         );
         let status = runtime
             .statuses()

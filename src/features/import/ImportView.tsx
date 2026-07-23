@@ -9,6 +9,7 @@ import type { AgentCandidateView } from "../../types/importV2Agent";
 import type { CommitConflictAction, CommitItemDecision, ImportItem, ImportSession } from "../../types/importV2";
 import { canOpenHistoricalResult, type ImportHistoryAction, type ImportHistoryEntry, type ImportHistoryPage } from "../../types/importV2Presentation";
 import { ImportCommitBar } from "./ImportCommitBar";
+import { ImportCapabilitiesPanel } from "./ImportCapabilitiesPanel";
 import { ImportBatchStatus } from "./ImportBatchStatus";
 import { ImportDiscoveryStatus } from "./ImportDiscoveryStatus";
 import { ImportHistoryPanel } from "./ImportHistoryPanel";
@@ -18,7 +19,7 @@ import { ImportMigrationNotice } from "./ImportMigrationNotice";
 import { ImportQueue } from "./ImportQueue";
 import { ImportSourceMethods } from "./ImportSourceMethods";
 import { ImportV2Dialogs } from "./ImportV2Dialogs";
-import { ImportV2Header } from "./ImportV2Header";
+import { ImportV2Header, type ImportV2Section } from "./ImportV2Header";
 import type { ImportItemAction } from "./importStatusPresentation";
 import type { ImportWorkflow } from "./useImportWorkflow";
 import type { ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
@@ -53,6 +54,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   const pushToast = useToastStore((state) => state.pushToast);
   const session = workflow.session;
   const [migrationOpen, setMigrationOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState<ImportV2Section>("workbench");
   const [privateItemId, setPrivateItemId] = useState<string | null>(null);
   const [isCancellingDiscovery, setIsCancellingDiscovery] = useState(false);
   const [pendingActionItemIds, setPendingActionItemIds] = useState<ReadonlySet<string>>(new Set());
@@ -86,15 +88,29 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     };
     if (workflow.readiness?.platforms) {
       return workflow.readiness.platforms.map((platform) => ({
+        id: platform.id,
         label: labels[platform.id] ?? platform.id,
         available: platform.available,
         reasonCode: platform.reasonCode,
       }));
     }
     return Object.keys(labels).map((id) => ({
+      id,
       label: labels[id],
       available: false,
       reasonCode: "status_unknown",
+    }));
+  }, [t, workflow.readiness]);
+  const sourceAbilities = useMemo(() => {
+    const labels: Record<string, string> = {
+      subtitle: t("importV2.ability.subtitle"),
+      local_asr: t("importV2.ability.localAsr"),
+      ocr: t("importV2.ability.ocr"),
+      keyframes: t("importV2.ability.keyframes"),
+    };
+    return (workflow.readiness?.abilities ?? Object.keys(labels).map((id) => ({ id, available: false, reasonCode: "status_unknown" }))).map((ability) => ({
+      ...ability,
+      label: labels[ability.id] ?? ability.id,
     }));
   }, [t, workflow.readiness]);
 
@@ -135,6 +151,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
 
   useEffect(() => {
     setMigrationOpen(false);
+    setActiveSection("workbench");
     setPrivateItemId(null);
     setCandidateView(null);
     setHistoryDetail(null);
@@ -257,6 +274,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
       case "switch_route":
       case "switch_parser":
       case "enable_ocr":
+      case "preview_without_transcript":
         await workflow.retryItem(itemId, action);
         return;
       case "skip":
@@ -403,23 +421,23 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   const pendingItemIds = useMemo(() => new Set([...(workflow.pendingItemIds ?? []), ...pendingActionItemIds]), [pendingActionItemIds, workflow.pendingItemIds]);
 
   if (workflow.bootstrapState === "loading") {
-    return <div className="import-v2-layout"><ImportV2Header session={null} progress={workflow.progress} discoveryTask={workflow.discoveryTask} syncing={workflow.isSyncingSession} /><div role="status" className="import-v2-state">{t("importV2.state.loading")}</div></div>;
+    return <div className="import-v2-layout"><ImportV2Header session={null} progress={workflow.progress} discoveryTask={workflow.discoveryTask} syncing={workflow.isSyncingSession} activeSection={activeSection} onSectionChange={setActiveSection} /><div role="status" className="import-v2-state">{t("importV2.state.loading")}</div></div>;
   }
 
   return (
     <div className="import-v2-layout">
-      <ImportV2Header session={session} progress={workflow.progress} discoveryTask={workflow.discoveryTask} syncing={workflow.isSyncingSession} />
+      <ImportV2Header session={session} progress={workflow.progress} discoveryTask={workflow.discoveryTask} syncing={workflow.isSyncingSession} activeSection={activeSection} onSectionChange={setActiveSection} />
       <div className="import-v2-scroll app-pane-scrollbar">
-        <ImportMigrationNotice readiness={workflow.readiness} unavailable={Boolean(workflow.readinessWarning)} onOpenMigration={() => setMigrationOpen(true)} />
+        {activeSection === "workbench" ? <ImportMigrationNotice readiness={workflow.readiness} unavailable={Boolean(workflow.readinessWarning)} onOpenMigration={() => setMigrationOpen(true)} /> : null}
         {blocked ? (
           <div role="alert" className="import-v2-state import-v2-state--blocked">
             <strong>{workflow.bootstrapState === "error" ? t("importV2.state.error") : t("importV2.state.blocked")}</strong>
             {workflow.bootstrapState === "error" && workflow.bootstrapError ? <p className="m-0 mt-2 text-[11px] text-[var(--text-secondary)]">{workflow.bootstrapError}</p> : null}
             {workflow.bootstrapState === "error" && workflow.retryBootstrap ? <button type="button" className="btn btn--sm mt-3" onClick={workflow.retryBootstrap}>{t("importV2.state.retry")}</button> : null}
           </div>
-        ) : (
+        ) : activeSection === "workbench" ? (
           <>
-            <ImportSourceMethods onAddPaths={workflow.addPaths} onAddUrl={workflow.addUrl} addingPaths={workflow.isAddingPaths} addingUrl={Boolean(workflow.isAddingUrl) || discoveryActive} sessionSyncing={workflow.isSyncingSession} platforms={sourcePlatforms} />
+            <ImportSourceMethods onAddPaths={workflow.addPaths} onAddUrl={workflow.addUrl} addingPaths={workflow.isAddingPaths} addingUrl={Boolean(workflow.isAddingUrl) || discoveryActive} sessionSyncing={workflow.isSyncingSession} files={workflow.readiness?.files?.map((file) => ({ ...file, label: file.id.toUpperCase() }))} platforms={sourcePlatforms} abilities={sourceAbilities} />
             <ImportDiscoveryStatus
               task={workflow.discoveryTask ?? null}
               scan={workflow.discoveryScan}
@@ -473,20 +491,23 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               resetKey={session?.sessionId}
               onAction={(action, itemId) => { void handleActionRequest(action, itemId).catch(() => undefined); }}
             />
-            <ImportHistoryPanel
-              page={history}
-              loading={workflow.bootstrapState === "ready" && history === null && !historyError}
-              error={historyError}
-              onRetry={() => { void loadHistory(); }}
-              loadingMore={historyLoadingMore}
-              onLoadMore={(cursor) => { void loadMoreHistory(cursor); }}
-              openingEntryId={openingHistoryEntryId}
-              onOpenEntry={(entryId, action) => { void openHistoryEntry(entryId, action); }}
-            />
           </>
+        ) : activeSection === "history" ? (
+          <ImportHistoryPanel
+            page={history}
+            loading={workflow.bootstrapState === "ready" && history === null && !historyError}
+            error={historyError}
+            onRetry={() => { void loadHistory(); }}
+            loadingMore={historyLoadingMore}
+            onLoadMore={(cursor) => { void loadMoreHistory(cursor); }}
+            openingEntryId={openingHistoryEntryId}
+            onOpenEntry={(entryId, action) => { void openHistoryEntry(entryId, action); }}
+          />
+        ) : (
+          <ImportCapabilitiesPanel capabilities={workflow.readiness?.capabilities ?? []} />
         )}
       </div>
-      <ImportCommitBar selectedReadyCount={selectedReadyCount} unresolvedActionCount={workflow.counts.needsAction} isConfirming={workflow.isConfirming} disabled={writesBlocked} conflictAction={conflictAction} onConflictActionChange={setConflictAction} onConfirm={() => { void workflow.confirm(decisions); }} />
+      {activeSection === "workbench" ? <ImportCommitBar selectedReadyCount={selectedReadyCount} unresolvedActionCount={workflow.counts.needsAction} isConfirming={workflow.isConfirming} disabled={writesBlocked} conflictAction={conflictAction} onConflictActionChange={setConflictAction} onConfirm={() => { void workflow.confirm(decisions); }} /> : null}
       <ImportV2Dialogs
         workflow={workflow}
         capabilities={capabilities}

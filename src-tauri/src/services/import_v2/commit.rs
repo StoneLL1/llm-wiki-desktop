@@ -11,7 +11,7 @@ use crate::errors::{
 use crate::models::git::CheckpointPurpose;
 use crate::models::import_v2::{
     CommitConflictAction, CommitImportSessionRequest, CommitItemDecision, ImportBatchResult,
-    ImportIssue, ImportItemCommitResult, ImportItemStatus, QualityLevel,
+    ImportInputKind, ImportIssue, ImportItemCommitResult, ImportItemStatus, QualityLevel,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::orchestrator::derive_session_status;
@@ -21,6 +21,7 @@ use crate::services::import_v2::source_registry::{
 use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::import_v2::ImportV2Service;
 use crate::services::{FileStore, GitService};
+use crate::utils::markdown_utils::{parse_frontmatter, split_frontmatter};
 
 #[cfg(test)]
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -375,16 +376,18 @@ impl ImportV2Service {
             .then(|| files.file_hash(context, ".app/source-index-v2.json"))
             .transpose()?;
         let index = SourceRegistry::read_index(context, files)?;
-        let locator = item.input.normalized_locator.as_deref().ok_or_else(|| {
-            commit_error(
-                IMPORT_V2_STATE_INVALID,
-                "Normalized source locator is missing.",
-            )
-        })?;
-        let resolution = SourceRegistry::resolve(&index, locator, &content_hash);
+        let locator = canonical_platform_locator(&item.input.kind, &markdown)
+            .or_else(|| item.input.normalized_locator.clone())
+            .ok_or_else(|| {
+                commit_error(
+                    IMPORT_V2_STATE_INVALID,
+                    "Normalized source locator is missing.",
+                )
+            })?;
+        let resolution = SourceRegistry::resolve(&index, &locator, &content_hash);
         let pointer = index
             .by_locator
-            .get(locator)
+            .get(&locator)
             .or_else(|| index.by_content_hash.get(&content_hash));
         let existing_manifest_path =
             pointer.map(|pointer| format!(".app/sources/{}.json", pointer.source_id));
@@ -407,7 +410,7 @@ impl ImportV2Service {
             &index,
             existing_manifest.as_ref(),
             &SourceCommitInput {
-                normalized_locator: locator.into(),
+                normalized_locator: locator.clone(),
                 content_hash: content_hash.clone(),
                 display_name: item.input.display_name.clone(),
                 input_kind: item.input.kind.clone(),
@@ -451,8 +454,7 @@ impl ImportV2Service {
             } else {
                 asset_relative
             };
-            let bytes =
-                verified_artifact(&staging, &asset.relative_path, &asset.sha256)?;
+            let bytes = verified_artifact(&staging, &asset.relative_path, &asset.sha256)?;
             let (relative, bytes) = if source_evidence_artifact
                 && item.input.kind == crate::models::import_v2::ImportInputKind::Url
             {
@@ -544,7 +546,7 @@ impl ImportV2Service {
                         .unwrap_or(&item.input.locator),
                 )
             }),
-            source_locator: crate::services::import_v2::redaction::redact_sensitive_text(locator),
+            source_locator: crate::services::import_v2::redaction::redact_sensitive_text(&locator),
             media_save_mode: item.input.media_save_mode.clone(),
             snapshot_path: plan.raw_path.clone(),
             snapshot_sha256: preview.source_snapshot.sha256.clone(),
@@ -907,15 +909,11 @@ fn prepare_source_snapshot(
     let fallback_extension = fallback_extension.to_ascii_lowercase();
     let json = serde_json::from_str::<serde_json::Value>(trimmed).is_ok();
     let format = if json
-        && (trimmed.starts_with('{')
-            || trimmed.starts_with('[')
-            || fallback_extension == "json")
+        && (trimmed.starts_with('{') || trimmed.starts_with('[') || fallback_extension == "json")
     {
         Some("json")
     } else if text.is_some()
-        && (trimmed.starts_with('<')
-            || fallback_extension == "html"
-            || fallback_extension == "htm")
+        && (trimmed.starts_with('<') || fallback_extension == "html" || fallback_extension == "htm")
     {
         Some("html")
     } else {
@@ -929,10 +927,7 @@ fn prepare_source_snapshot(
         });
     };
     let bytes = if format == "json" {
-        crate::services::import_v2::redaction::redact_json_snapshot(
-            trimmed,
-        )
-        .ok_or_else(|| {
+        crate::services::import_v2::redaction::redact_json_snapshot(trimmed).ok_or_else(|| {
             commit_error(
                 IMPORT_V2_COMMIT_FAILED,
                 "URL JSON snapshot could not be redacted.",
@@ -984,10 +979,7 @@ fn prepare_url_source_evidence(
         .rsplit_once('.')
         .map(|(stem, _)| stem)
         .unwrap_or(relative);
-    Ok((
-        format!("{stem}.{}", prepared.extension),
-        prepared.bytes,
-    ))
+    Ok((format!("{stem}.{}", prepared.extension), prepared.bytes))
 }
 
 fn metadata_author(extracted: &[(String, Vec<u8>)]) -> Option<String> {
@@ -1395,6 +1387,38 @@ fn asset_collision_key(path: &str) -> String {
     path.to_lowercase()
 }
 
+fn canonical_platform_locator(kind: &ImportInputKind, markdown: &[u8]) -> Option<String> {
+    if kind != &ImportInputKind::Url {
+        return None;
+    }
+    let content = std::str::from_utf8(markdown).ok()?;
+    let split = split_frontmatter(content);
+    let frontmatter = parse_frontmatter(split.frontmatter.as_deref()?);
+    if frontmatter.get_scalar("source_platform")?.to_lowercase() != "xiaohongshu" {
+        return None;
+    }
+    let source_id = frontmatter.get_scalar("source_id")?;
+    if source_id.is_empty()
+        || !source_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return None;
+    }
+    let source_url = url::Url::parse(&frontmatter.get_scalar("source_url")?).ok()?;
+    let host = source_url.host_str()?.to_ascii_lowercase();
+    if host != "xiaohongshu.com" && !host.ends_with(".xiaohongshu.com") {
+        return None;
+    }
+    if !source_url
+        .path_segments()?
+        .any(|segment| segment == source_id)
+    {
+        return None;
+    }
+    Some(format!("platform:xiaohongshu:{source_id}"))
+}
+
 #[cfg(test)]
 mod tests {
     use sha2::{Digest, Sha256};
@@ -1419,13 +1443,57 @@ mod tests {
 
     use super::super::ImportV2Service;
     use super::{
-        asset_collision_key, content_identity_hash, set_before_artifact_open_hook,
+        asset_collision_key, canonical_platform_locator, content_identity_hash,
+        prepare_source_snapshot, set_before_artifact_open_hook,
         set_before_failed_history_write_hook, set_commit_durable_targets_hook,
-        set_commit_persistence_hook, verified_artifact, prepare_source_snapshot,
-        CommitPersistenceBoundary, CommitPersistenceTarget,
+        set_commit_persistence_hook, verified_artifact, CommitPersistenceBoundary,
+        CommitPersistenceTarget,
     };
     use crate::services::import_v2::transaction::set_before_checked_displace_hook;
     use crate::services::import_v2::transaction::set_before_new_install_hook;
+
+    #[test]
+    fn canonical_xiaohongshu_locator_uses_verified_note_identity() {
+        let markdown = br#"---
+source_platform: "xiaohongshu"
+source_id: "note-123"
+source_url: "https://www.xiaohongshu.com/explore/note-123?xsec_token=REDACTED"
+---
+# Note
+"#;
+        assert_eq!(
+            canonical_platform_locator(&ImportInputKind::Url, markdown).as_deref(),
+            Some("platform:xiaohongshu:note-123")
+        );
+        assert_eq!(
+            canonical_platform_locator(&ImportInputKind::File, markdown),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_xiaohongshu_locator_rejects_unverified_or_mismatched_urls() {
+        let short_link = br#"---
+source_platform: xiaohongshu
+source_id: note-123
+source_url: https://xhslink.com/a1b2
+---
+"#;
+        let mismatched = br#"---
+source_platform: xiaohongshu
+source_id: note-123
+source_url: https://www.xiaohongshu.com/explore/other-note
+---
+"#;
+        assert_eq!(
+            canonical_platform_locator(&ImportInputKind::Url, short_link),
+            None
+        );
+        assert_eq!(
+            canonical_platform_locator(&ImportInputKind::Url, mismatched),
+            None
+        );
+    }
 
     #[test]
     fn url_content_identity_ignores_volatile_snapshots_but_tracks_extracted_evidence() {

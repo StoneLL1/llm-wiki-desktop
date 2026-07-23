@@ -11,6 +11,7 @@ use crate::services::import_v2::{
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LocalAsrPolicy {
     pub capability_available: bool,
+    pub user_authorized: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -66,16 +67,14 @@ pub fn extract_json(
             ))
         })
         .collect::<Vec<_>>();
-    // Platform imports automatically continue with local ASR when no subtitle
-    // exists. The user's URL media-choice confirmation already establishes the
-    // temporary-media boundary; there is no second ASR authorization prompt.
-    let plan = MediaRouter.plan(
+    let plan = MediaRouter.plan_authorized(
         &MediaInput {
             kind: MediaKind::Video,
             subtitles: subtitles.iter().map(|item| item.0.clone()).collect(),
             cover_path: None,
         },
         asr.capability_available,
+        asr.user_authorized,
     );
     let document = BilibiliDocument {
         title: title.into(),

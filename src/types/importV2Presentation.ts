@@ -25,7 +25,10 @@ export interface ImportFrontendReadiness {
   migrationStatus: MigrationStatus;
   unfinishedSessionId: string | null;
   legacyHistoryAvailable: boolean;
+  files?: ImportFeatureReadiness[];
   platforms?: ImportPlatformReadiness[];
+  abilities?: ImportFeatureReadiness[];
+  capabilities?: ImportCapabilityReadiness[];
 }
 
 export interface ImportPlatformReadiness {
@@ -160,6 +163,19 @@ export interface CompleteImportLoginV2Request {
 export interface RevokeImportLoginV2Request {
   sessionId: string;
   platform?: string | null;
+}
+
+export interface ImportFeatureReadiness {
+  id: string;
+  available: boolean;
+  reasonCode?: string | null;
+}
+
+export interface ImportCapabilityReadiness {
+  capabilityId: string;
+  route: string;
+  available: boolean;
+  reasonCode?: string | null;
 }
 
 export interface AuthorizeImportPrivateTargetV2Request {

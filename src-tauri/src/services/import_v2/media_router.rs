@@ -406,8 +406,7 @@ mod tests {
 
     #[test]
     fn recovery_removes_only_known_item_temporary_workspaces() {
-        let staging =
-            std::env::temp_dir().join(format!("media-recovery-{}", uuid::Uuid::new_v4()));
+        let staging = std::env::temp_dir().join(format!("media-recovery-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(staging.join(".asr-input-orphan")).unwrap();
         fs::create_dir_all(staging.join(".ocr-input-orphan")).unwrap();
         fs::create_dir_all(staging.join(".media-fetch-orphan")).unwrap();
@@ -428,9 +427,15 @@ mod tests {
             ".capability-runtime-orphan",
             "runtime-temp/legacy-orphan",
         ] {
-            assert!(!staging.join(temporary).exists(), "{temporary} was retained");
+            assert!(
+                !staging.join(temporary).exists(),
+                "{temporary} was retained"
+            );
         }
-        assert_eq!(fs::read(staging.join("assets/cover.jpg")).unwrap(), b"durable");
+        assert_eq!(
+            fs::read(staging.join("assets/cover.jpg")).unwrap(),
+            b"durable"
+        );
         assert_eq!(fs::read(staging.join("document.md")).unwrap(), b"durable");
         fs::remove_dir_all(staging).unwrap();
     }
@@ -440,8 +445,7 @@ mod tests {
     fn recovery_does_not_follow_matching_symlink_workspace() {
         use std::os::unix::fs::symlink;
 
-        let staging =
-            std::env::temp_dir().join(format!("media-recovery-{}", uuid::Uuid::new_v4()));
+        let staging = std::env::temp_dir().join(format!("media-recovery-{}", uuid::Uuid::new_v4()));
         let outside =
             std::env::temp_dir().join(format!("media-recovery-outside-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&staging).unwrap();

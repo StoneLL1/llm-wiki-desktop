@@ -29,6 +29,7 @@ use crate::tasks::task_model::CancellationToken;
 
 const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDOUT_LINES: usize = 256;
+const MAX_REMOTE_ASSETS: usize = 128;
 const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 
 pub struct PackProcessEngine {
@@ -584,7 +585,7 @@ fn read_response(reader: impl Read) -> Result<PackResponse, ()> {
                 continue;
             };
             if value.get("method").and_then(|v| v.as_str()) == Some("import.remoteAsset") {
-                if remote_assets.len() >= 32 {
+                if remote_assets.len() >= MAX_REMOTE_ASSETS {
                     return Err(());
                 }
                 let request: RemoteAssetRequest =
@@ -637,6 +638,8 @@ fn localize_remote_assets(
         .map_err(|_| engine_error("The web candidate could not be reopened."))?;
     let mut transcription_ready = false;
     let mut saw_media = false;
+    let mut saw_image = false;
+    let mut successful_images = 0usize;
     let mut localized_media = BTreeMap::<String, String>::new();
     for (index, asset) in assets.into_iter().enumerate() {
         if cancellation.is_cancelled() {
@@ -651,6 +654,7 @@ fn localize_remote_assets(
             _ => return Err(engine_error("The remote asset kind is not allowed.")),
         };
         let marker = format!("asset://{}", asset.placeholder);
+        saw_image |= content == WebFetchContent::Image;
         saw_media |= matches!(
             content,
             WebFetchContent::Media | WebFetchContent::TemporaryMedia
@@ -669,7 +673,7 @@ fn localize_remote_assets(
             // Extraction-only imports must not leave a durable image or media
             // copy. Only the derived Markdown candidate is changed; the raw
             // source snapshot has already crossed its immutable write boundary.
-            markdown = markdown.replace(&marker, "");
+            markdown = remove_asset_reference(&markdown, &marker);
             continue;
         }
         if content == WebFetchContent::TemporaryMedia {
@@ -755,7 +759,7 @@ fn localize_remote_assets(
         let fetched = match fetched {
             Ok(fetched) => fetched,
             Err(error) if remote_asset_failure_is_partial(content, transcription_ready) => {
-                markdown = markdown.replace(&marker, "");
+                markdown = remove_asset_reference(&markdown, &marker);
                 let label = match content {
                     WebFetchContent::Subtitle => "Platform subtitle",
                     WebFetchContent::Image => "Platform image",
@@ -772,7 +776,7 @@ fn localize_remote_assets(
         let extension = match safe_asset_extension(&fetched.content_type, content) {
             Ok(extension) => extension,
             Err(error) if remote_asset_failure_is_partial(content, transcription_ready) => {
-                markdown = markdown.replace(&marker, "");
+                markdown = remove_asset_reference(&markdown, &marker);
                 let label = match content {
                     WebFetchContent::Subtitle => "Platform subtitle",
                     WebFetchContent::Image => "Platform image",
@@ -831,8 +835,9 @@ fn localize_remote_assets(
                 markdown = markdown.replace(&marker, &durable_relative);
                 result.asset_paths.push(durable_relative);
             } else {
-                markdown = markdown.replace(&marker, "");
+                markdown = remove_asset_reference(&markdown, &marker);
             }
+            successful_images += 1;
             continue;
         }
         let directory = match content {
@@ -889,6 +894,9 @@ fn localize_remote_assets(
             continue;
         }
         markdown = markdown.replace(&marker, &relative);
+        if content == WebFetchContent::Image {
+            successful_images += 1;
+        }
         if let Some(transcript) = transcript {
             markdown.push_str("\n\n## Transcript\n\n");
             markdown.push_str(&transcript);
@@ -899,10 +907,22 @@ fn localize_remote_assets(
         }
         result.asset_paths.push(relative);
     }
-    if saw_media && !transcription_ready && !request.local_asr_authorized {
+    if saw_media
+        && !transcription_ready
+        && !request.local_asr_authorized
+        && !request.allow_missing_transcript
+    {
         return Err(BackendError::new(
             "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
             "The platform subtitle candidates were unavailable or not parseable.",
+            true,
+            true,
+        ));
+    }
+    if remote_image_output_is_empty(saw_image, successful_images, result.text_coverage) {
+        return Err(BackendError::new(
+            "IMPORT_WEB_MEDIA_UNAVAILABLE",
+            "The image post had no text and none of its images could be localized.",
             true,
             true,
         ));
@@ -915,6 +935,37 @@ fn localize_remote_assets(
 fn remote_asset_failure_is_partial(content: WebFetchContent, transcription_ready: bool) -> bool {
     matches!(content, WebFetchContent::Image | WebFetchContent::Subtitle)
         || (content == WebFetchContent::Media && transcription_ready)
+}
+
+fn remote_image_output_is_empty(
+    saw_image: bool,
+    successful_images: usize,
+    text_coverage: Option<f64>,
+) -> bool {
+    saw_image && successful_images == 0 && text_coverage.unwrap_or_default() <= 0.0
+}
+
+fn remove_asset_reference(markdown: &str, marker: &str) -> String {
+    let had_trailing_newline = markdown.ends_with('\n');
+    let mut lines = markdown
+        .lines()
+        .filter_map(|line| {
+            if !line.contains(marker) {
+                return Some(line.to_owned());
+            }
+            let trimmed = line.trim();
+            if trimmed.contains("](") && trimmed.ends_with(')') {
+                None
+            } else {
+                Some(line.replace(marker, ""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if had_trailing_newline {
+        lines.push('\n');
+    }
+    lines
 }
 
 fn sanitize_capability_text_artifacts(
@@ -1190,6 +1241,46 @@ mod tests {
         let response = read_response(Cursor::new(input)).unwrap();
         assert_eq!(response.remote_assets.len(), 1);
         assert_eq!(response.remote_assets[0].placeholder, "webasset-0");
+    }
+
+    #[test]
+    fn remote_asset_bound_supports_a_hundred_image_post_without_becoming_unbounded() {
+        let response_line = "{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n";
+        let build = |count: usize| {
+            let mut input = String::new();
+            for index in 0..count {
+                input.push_str(&format!(
+                    "{{\"jsonrpc\":\"2.0\",\"method\":\"import.remoteAsset\",\"params\":{{\"placeholder\":\"webasset-{index}\",\"url\":\"https://cdn.example/{index}.jpg\",\"kind\":\"image\"}}}}\n"
+                ));
+            }
+            input.push_str(response_line);
+            input
+        };
+        assert_eq!(
+            read_response(Cursor::new(build(100)))
+                .unwrap()
+                .remote_assets
+                .len(),
+            100
+        );
+        assert!(read_response(Cursor::new(build(MAX_REMOTE_ASSETS + 1))).is_err());
+    }
+
+    #[test]
+    fn removing_an_unavailable_asset_drops_its_markdown_link_line() {
+        let markdown = "## 图片\n\n1. ![第 1 张](asset://webasset-0)\n2. ![第 2 张](asset://webasset-1)\n\n正文 asset://webasset-0\n";
+        let cleaned = remove_asset_reference(markdown, "asset://webasset-0");
+        assert!(!cleaned.contains("![第 1 张]()"));
+        assert!(!cleaned.contains("asset://webasset-0"));
+        assert!(cleaned.contains("2. ![第 2 张](asset://webasset-1)"));
+        assert!(cleaned.contains("正文 \n"));
+    }
+
+    #[test]
+    fn an_image_only_remote_post_requires_at_least_one_localized_image() {
+        assert!(remote_image_output_is_empty(true, 0, Some(0.0)));
+        assert!(!remote_image_output_is_empty(true, 1, Some(0.0)));
+        assert!(!remote_image_output_is_empty(true, 0, Some(1.0)));
     }
 
     #[test]

@@ -1,11 +1,16 @@
+use std::{borrow::Cow, io::Read};
+
+use flate2::read::GzDecoder;
+use serde::Serialize;
 use serde_json::Value;
 
 const MAX_RENDERED_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Debug)]
-struct Segment {
-    start_ms: Option<u64>,
-    text: String,
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSegment {
+    pub start_ms: Option<u64>,
+    pub text: String,
 }
 
 /// Render the subtitle formats emitted by the supported platform providers.
@@ -13,29 +18,57 @@ struct Segment {
 /// A subtitle URL is not evidence that a usable transcript exists. Callers
 /// use `None` to continue with the next subtitle candidate or local ASR.
 pub fn render_subtitle_markdown(bytes: &[u8], extension: &str) -> Option<String> {
-    match extension.to_ascii_lowercase().as_str() {
-        "vtt" | "srt" => render_timed_text(bytes),
-        "ass" | "ssa" => render_ass(bytes),
-        "json" => render_json(bytes),
-        _ => None,
+    let segments = parse_subtitle_segments(bytes, extension)?;
+    let mut output = String::new();
+    let mut last_line = None::<String>;
+    for segment in segments {
+        append_segment(&mut output, &mut last_line, segment);
+        if output.len() >= MAX_RENDERED_BYTES {
+            break;
+        }
     }
+    (!output.trim().is_empty()).then_some(output)
 }
 
-fn render_timed_text(bytes: &[u8]) -> Option<String> {
+pub fn parse_subtitle_segments(bytes: &[u8], extension: &str) -> Option<Vec<TranscriptSegment>> {
+    let bytes = decode_transport(bytes)?;
+    let segments = match extension.to_ascii_lowercase().as_str() {
+        "vtt" | "srt" => parse_timed_text(&bytes)?,
+        "ass" | "ssa" => parse_ass(&bytes)?,
+        "json" => parse_json(&bytes)?,
+        _ => return None,
+    };
+    (!segments.is_empty()).then_some(segments)
+}
+
+fn decode_transport(bytes: &[u8]) -> Option<Cow<'_, [u8]>> {
+    if !bytes.starts_with(&[0x1f, 0x8b]) {
+        return Some(Cow::Borrowed(bytes));
+    }
+    let mut decoder = GzDecoder::new(bytes);
+    let mut output = Vec::new();
+    decoder
+        .by_ref()
+        .take((MAX_RENDERED_BYTES + 1) as u64)
+        .read_to_end(&mut output)
+        .ok()?;
+    (output.len() <= MAX_RENDERED_BYTES).then_some(Cow::Owned(output))
+}
+
+fn parse_timed_text(bytes: &[u8]) -> Option<Vec<TranscriptSegment>> {
     let text = std::str::from_utf8(bytes)
         .ok()?
         .trim_start_matches('\u{feff}');
-    let mut output = String::new();
-    let mut last_line = None::<String>;
+    let mut output = Vec::new();
     let mut start_ms = None;
     let mut cue_lines = Vec::new();
     for line in text.lines().map(str::trim) {
         if line.is_empty() {
-            flush_timed_cue(&mut output, &mut last_line, &mut start_ms, &mut cue_lines);
+            flush_timed_cue(&mut output, &mut start_ms, &mut cue_lines);
             continue;
         }
         if line.contains("-->") {
-            flush_timed_cue(&mut output, &mut last_line, &mut start_ms, &mut cue_lines);
+            flush_timed_cue(&mut output, &mut start_ms, &mut cue_lines);
             start_ms = line.split("-->").next().and_then(parse_clock_ms);
             continue;
         }
@@ -51,17 +84,16 @@ fn render_timed_text(bytes: &[u8]) -> Option<String> {
         if start_ms.is_some() {
             cue_lines.push(line.to_string());
         }
-        if output.len() >= MAX_RENDERED_BYTES {
+        if output.len() >= 100_000 {
             break;
         }
     }
-    flush_timed_cue(&mut output, &mut last_line, &mut start_ms, &mut cue_lines);
-    (!output.trim().is_empty()).then_some(output)
+    flush_timed_cue(&mut output, &mut start_ms, &mut cue_lines);
+    Some(output)
 }
 
 fn flush_timed_cue(
-    output: &mut String,
-    last_line: &mut Option<String>,
+    output: &mut Vec<TranscriptSegment>,
     start_ms: &mut Option<u64>,
     cue_lines: &mut Vec<String>,
 ) {
@@ -74,22 +106,17 @@ fn flush_timed_cue(
     if text.trim().is_empty() {
         return;
     }
-    append_segment(
-        output,
-        last_line,
-        Segment {
-            start_ms: Some(start_ms),
-            text,
-        },
-    );
+    output.push(TranscriptSegment {
+        start_ms: Some(start_ms),
+        text,
+    });
 }
 
-fn render_ass(bytes: &[u8]) -> Option<String> {
+fn parse_ass(bytes: &[u8]) -> Option<Vec<TranscriptSegment>> {
     let text = std::str::from_utf8(bytes)
         .ok()?
         .trim_start_matches('\u{feff}');
-    let mut output = String::new();
-    let mut last_line = None::<String>;
+    let mut output = Vec::new();
     for line in text.lines().map(str::trim) {
         let Some(dialogue) = line.strip_prefix("Dialogue:") else {
             continue;
@@ -107,40 +134,28 @@ fn render_ass(bytes: &[u8]) -> Option<String> {
         if text.trim().is_empty() {
             continue;
         }
-        append_segment(
-            &mut output,
-            &mut last_line,
-            Segment {
-                start_ms: Some(start_ms),
-                text,
-            },
-        );
-        if output.len() >= MAX_RENDERED_BYTES {
+        output.push(TranscriptSegment {
+            start_ms: Some(start_ms),
+            text,
+        });
+        if output.len() >= 100_000 {
             break;
         }
     }
-    (!output.trim().is_empty()).then_some(output)
+    Some(output)
 }
 
-fn render_json(bytes: &[u8]) -> Option<String> {
+fn parse_json(bytes: &[u8]) -> Option<Vec<TranscriptSegment>> {
     let value = serde_json::from_slice::<Value>(bytes).ok()?;
     let mut segments = Vec::new();
     collect_json_segments(&value, &mut segments);
     if !segments.iter().any(|segment| segment.start_ms.is_some()) {
         return None;
     }
-    let mut output = String::new();
-    let mut last_line = None::<String>;
-    for segment in segments {
-        append_segment(&mut output, &mut last_line, segment);
-        if output.len() >= MAX_RENDERED_BYTES {
-            break;
-        }
-    }
-    (!output.trim().is_empty()).then_some(output)
+    Some(segments)
 }
 
-fn collect_json_segments(value: &Value, output: &mut Vec<Segment>) {
+fn collect_json_segments(value: &Value, output: &mut Vec<TranscriptSegment>) {
     match value {
         Value::Array(values) => values
             .iter()
@@ -171,7 +186,7 @@ fn collect_json_segments(value: &Value, output: &mut Vec<Segment>) {
                             .iter()
                             .find_map(|key| object.get(*key).and_then(number_as_seconds_ms))
                     });
-                output.push(Segment { start_ms, text });
+                output.push(TranscriptSegment { start_ms, text });
                 return;
             }
             object
@@ -182,7 +197,7 @@ fn collect_json_segments(value: &Value, output: &mut Vec<Segment>) {
     }
 }
 
-fn append_segment(output: &mut String, last_line: &mut Option<String>, segment: Segment) {
+fn append_segment(output: &mut String, last_line: &mut Option<String>, segment: TranscriptSegment) {
     let clean = escape_subtitle_text(&segment.text);
     if clean.trim().is_empty() || last_line.as_deref() == Some(clean.as_str()) {
         return;
@@ -300,6 +315,18 @@ fn format_timestamp(milliseconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::render_subtitle_markdown;
+    use std::io::Write;
+
+    #[test]
+    fn renders_gzip_compressed_bilibili_json_subtitles() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(br#"{"body":[{"from":1.25,"content":"hello"}]}"#)
+            .unwrap();
+        let compressed = encoder.finish().unwrap();
+        let markdown = render_subtitle_markdown(&compressed, "json").unwrap();
+        assert!(markdown.contains("[00:00:01.250] hello"));
+    }
 
     #[test]
     fn renders_vtt_without_html_and_keeps_timestamp() {

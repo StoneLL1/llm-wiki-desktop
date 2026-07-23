@@ -494,6 +494,8 @@ impl ImportV2Service {
                 item.status,
                 ImportItemStatus::Queued
                     | ImportItemStatus::Failed
+                    | ImportItemStatus::WaitingCapability
+                    | ImportItemStatus::WaitingAuthorization
                     | ImportItemStatus::Cancelled
                     | ImportItemStatus::Skipped
                     | ImportItemStatus::Paused
@@ -1007,7 +1009,9 @@ impl ImportV2Service {
             }
             if matches!(
                 item.status,
-                ImportItemStatus::WaitingCapability | ImportItemStatus::WaitingLogin
+                ImportItemStatus::WaitingCapability
+                    | ImportItemStatus::WaitingLogin
+                    | ImportItemStatus::WaitingAuthorization
             ) {
                 let recovered_status = item
                     .task_id
@@ -1131,6 +1135,24 @@ impl ImportV2Service {
                 self.connector_profiles_root.clone(),
             )))
     }
+
+    pub(crate) fn replace_capability_pack(
+        &self,
+        pack: ResolvedCapabilityPack,
+        route: String,
+        supported_extensions: Vec<String>,
+        timeout: std::time::Duration,
+    ) -> Result<(), BackendError> {
+        self.engines
+            .replace_registered(Arc::new(PackProcessEngine::new(
+                pack,
+                route,
+                supported_extensions,
+                timeout,
+                self.web_targets.clone(),
+                self.connector_profiles_root.clone(),
+            )))
+    }
     pub fn set_item_selected(
         &self,
         context: &ProjectContext,
@@ -1196,9 +1218,11 @@ impl ImportV2Service {
             .input;
         if matches!(recovery_action, Some(ImportRecoveryAction::EnableOcr))
             && input.kind == crate::models::import_v2::ImportInputKind::Url
-            && !self.engines.registered_routes()?.iter().any(|route| {
-                route == "ocr.cjk-accurate" || route == "ocr.basic"
-            })
+            && !self
+                .engines
+                .registered_routes()?
+                .iter()
+                .any(|route| route == "ocr.cjk-accurate" || route == "ocr.basic")
         {
             return self.finish_failed(
                 context,
@@ -1231,7 +1255,11 @@ impl ImportV2Service {
             );
             self.mutate_item(context, files, session_id, item_id, |item| {
                 transition_item(item, ImportItemStatus::WaitingCapability)?;
-                item.issue = Some(issue_from_engine_error(&error, ImportStage::Route));
+                item.issue = Some(issue_from_engine_error_for_input(
+                    &error,
+                    ImportStage::Route,
+                    &item.input.kind,
+                ));
                 Ok(())
             })?;
             task_call(tasks.append_log(
@@ -1252,26 +1280,15 @@ impl ImportV2Service {
             .as_deref()
             .is_some_and(is_supported_media_platform_url)
         {
-            // Local ASR is part of the URL import policy: when the verified
-            // ASR capability is installed, a missing platform subtitle is
-            // continued automatically. The user already chose the URL media
-            // import mode, so a second per-item authorization prompt would be
-            // redundant. The legacy Bilibili grant remains accepted below.
-            let route_available = self
-                .engines
-                .registered_routes()?
-                .iter()
-                .any(|route| route == "media.asr");
             let exact = self
                 .web_targets
                 .resolve(&input.locator, input.normalized_locator.as_deref())?;
-            route_available
-                || self.web_targets.has_bilibili_asr(
-                    &context.project_id,
-                    session_id,
-                    item_id,
-                    exact.request_url.as_str(),
-                )?
+            self.web_targets.has_bilibili_asr(
+                &context.project_id,
+                session_id,
+                item_id,
+                exact.request_url.as_str(),
+            )?
         } else {
             false
         };
@@ -1292,6 +1309,10 @@ impl ImportV2Service {
             chained_input: None,
             local_asr_authorized,
             local_ocr_authorized,
+            allow_missing_transcript: matches!(
+                recovery_action,
+                Some(ImportRecoveryAction::PreviewWithoutTranscript)
+            ),
             media_save_mode,
         };
         let token = tasks
@@ -1299,6 +1320,8 @@ impl ImportV2Service {
             .ok_or_else(|| task_error("Task cancellation state is unavailable."))?;
         let mut selected = None;
         let mut last_error = None;
+        let mut recovery_error = None;
+        let mut terminal_web_error = None;
         let mut request = request;
         for ((_, quality_floor), engine) in engines {
             let descriptor = engine.descriptor();
@@ -1342,6 +1365,29 @@ impl ImportV2Service {
                             error,
                             ImportStage::Extract,
                         );
+                    }
+                    if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
+                        && !is_bilibili_import_input(&request.input)
+                    {
+                        return self.finish_waiting_local_asr(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
+                        );
+                    }
+                    if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE" {
+                        recovery_error.get_or_insert_with(|| error.clone());
+                    }
+                    if error.code == "IMPORT_WEB_CONTENT_REMOVED"
+                        && is_bilibili_import_input(&request.input)
+                    {
+                        terminal_web_error.get_or_insert(error);
+                        continue;
                     }
                     if is_non_fallback_error(&error) {
                         return self.finish_failed(
@@ -1470,6 +1516,30 @@ impl ImportV2Service {
             break;
         }
         let Some((descriptor, started_at, result)) = selected else {
+            if let Some(error) = recovery_error {
+                return self.finish_waiting_local_asr(
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    item_id,
+                    task_id,
+                    error,
+                    ImportStage::Extract,
+                );
+            }
+            if let Some(error) = terminal_web_error {
+                return self.finish_failed(
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    item_id,
+                    task_id,
+                    error,
+                    ImportStage::Extract,
+                );
+            }
             return self.finish_failed(
                 context,
                 files,
@@ -1632,12 +1702,12 @@ impl ImportV2Service {
             media_save_mode: Default::default(),
         };
         let engine = self.engines.resolve_route("media.asr", &asr_input)?;
-        if !request.local_asr_authorized {
-            let exact = self.web_targets.resolve(
-                &request.input.locator,
-                request.input.normalized_locator.as_deref(),
-            )?;
-            if self
+        let exact = self.web_targets.resolve(
+            &request.input.locator,
+            request.input.normalized_locator.as_deref(),
+        )?;
+        if !request.local_asr_authorized
+            || self
                 .web_targets
                 .take_bilibili_asr(
                     &request.project_id,
@@ -1646,9 +1716,8 @@ impl ImportV2Service {
                     exact.request_url.as_str(),
                 )?
                 .is_none()
-            {
-                return Err(asr_unavailable());
-            }
+        {
+            return Err(asr_unavailable());
         }
         let descriptor = engine.descriptor();
         let started_at = chrono::Utc::now().to_rfc3339();
@@ -1671,9 +1740,9 @@ impl ImportV2Service {
                 || !output_metadata.is_file()
                 || !output_path.starts_with(&canonical_staging)
                 || output_workspace.parent() != Some(canonical_staging.as_path())
-                || !output_workspace.file_name().is_some_and(|name| {
-                    name.to_string_lossy().starts_with(".sensevoice-output-")
-                })
+                || !output_workspace
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".sensevoice-output-"))
             {
                 return Err(asr_unavailable());
             }
@@ -1999,15 +2068,21 @@ impl ImportV2Service {
                 item.status,
                 ImportItemStatus::Queued
                     | ImportItemStatus::Failed
+                    | ImportItemStatus::WaitingCapability
+                    | ImportItemStatus::WaitingAuthorization
                     | ImportItemStatus::Cancelled
                     | ImportItemStatus::Skipped
                     | ImportItemStatus::Paused
                     | ImportItemStatus::PreviewReady
-            ) || item.status != ImportItemStatus::Failed
-                && item
-                    .task_id
-                    .as_deref()
-                    .is_some_and(|bound| bound != task_id)
+            ) || !matches!(
+                item.status,
+                ImportItemStatus::Failed
+                    | ImportItemStatus::WaitingCapability
+                    | ImportItemStatus::WaitingAuthorization
+            ) && item
+                .task_id
+                .as_deref()
+                .is_some_and(|bound| bound != task_id)
             {
                 return Err(task_error(
                     "Import item is already claimed by another task.",
@@ -2124,7 +2199,7 @@ impl ImportV2Service {
         );
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Failed)?;
-            let mut issue = issue_from_engine_error(&error, stage);
+            let mut issue = issue_from_engine_error_for_input(&error, stage, &item.input.kind);
             if is_agent_eligible_failure(&error.code, &issue) {
                 issue.available_actions = vec![
                     crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent,
@@ -2163,6 +2238,56 @@ impl ImportV2Service {
         task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
         Ok(item)
     }
+
+    fn finish_waiting_local_asr(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        error: BackendError,
+        stage: ImportStage,
+    ) -> Result<ImportItem, BackendError> {
+        let asr_available = self
+            .engines
+            .registered_routes()?
+            .iter()
+            .any(|route| route == "media.asr");
+        let item = self.mutate_item(context, files, session_id, item_id, |item| {
+            transition_item(
+                item,
+                if asr_available {
+                    ImportItemStatus::WaitingAuthorization
+                } else {
+                    ImportItemStatus::WaitingCapability
+                },
+            )?;
+            let mut issue = ImportIssue::for_web_code(&error.code, stage);
+            issue.recovery_actions.retain(|action| {
+                if asr_available {
+                    !matches!(action, ImportRecoveryAction::InstallMediaCapability)
+                } else {
+                    !matches!(action, ImportRecoveryAction::AuthorizeLocalAsr)
+                }
+            });
+            item.issue = Some(issue);
+            Ok(())
+        })?;
+        task_call(tasks.append_log(
+            task_id,
+            LogLevel::Warn,
+            if asr_available {
+                "Media import is waiting for explicit local ASR authorization.".into()
+            } else {
+                "Media import is waiting for the local ASR capability.".into()
+            },
+        ))?;
+        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        Ok(item)
+    }
+
     fn mutate_item<F>(
         &self,
         context: &ProjectContext,
@@ -2315,9 +2440,9 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
         }
         if host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv" {
             return vec![
-                "web.generic.browser",
-                "web.bilibili.metadata",
                 "web.bilibili.video",
+                "web.bilibili.metadata",
+                "web.generic.browser",
             ];
         }
         let platform = if host == "mp.weixin.qq.com" {
@@ -2370,6 +2495,23 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
     }
 }
 
+fn is_bilibili_import_input(input: &ImportInput) -> bool {
+    if input.kind != crate::models::import_v2::ImportInputKind::Url {
+        return false;
+    }
+    url::Url::parse(
+        input
+            .normalized_locator
+            .as_deref()
+            .unwrap_or(&input.locator),
+    )
+    .ok()
+    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    .is_some_and(|host| {
+        host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv"
+    })
+}
+
 fn is_supported_media_platform_url(value: &str) -> bool {
     url::Url::parse(value)
         .ok()
@@ -2418,6 +2560,8 @@ fn is_non_fallback_error(error: &BackendError) -> bool {
     error.code == crate::errors::IMPORT_V2_CANCELLED
         || error.code.contains("PASSWORD")
         || error.code.contains("LOGIN")
+        || error.code.contains("CAPTCHA")
+        || error.code == "IMPORT_WEB_CONTENT_REMOVED"
 }
 fn is_web_user_wait(error: &BackendError) -> bool {
     matches!(
@@ -2695,6 +2839,22 @@ fn issue_from_engine_error(error: &BackendError, stage: ImportStage) -> ImportIs
     ImportIssue::for_file_code(code, stage)
 }
 
+fn issue_from_engine_error_for_input(
+    error: &BackendError,
+    stage: ImportStage,
+    input_kind: &ImportInputKind,
+) -> ImportIssue {
+    if *input_kind == ImportInputKind::Url {
+        let code = if error.code == crate::errors::IMPORT_V2_ENGINE_OUTPUT_INVALID {
+            "IMPORT_WEB_STRUCTURE_CHANGED"
+        } else {
+            &error.code
+        };
+        return ImportIssue::for_web_code(code, stage);
+    }
+    issue_from_engine_error(error, stage)
+}
+
 fn stable_file_error_code(code: &str) -> &'static str {
     match code {
         crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE
@@ -2730,6 +2890,7 @@ pub(super) fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus
         NeedsMerge,
         WaitingCapability,
         WaitingLogin,
+        WaitingAuthorization,
         Failed,
     ]) {
         ImportSessionStatus::WaitingForConfirmation
@@ -2774,7 +2935,7 @@ mod tests {
     }
 
     #[test]
-    fn supported_media_platforms_have_explicit_browser_first_routes() {
+    fn supported_media_platforms_have_explicit_routes_with_bilibili_api_first() {
         for (url, expected) in [
             (
                 "https://www.xiaohongshu.com/explore/abc",
@@ -2795,9 +2956,9 @@ mod tests {
             (
                 "https://www.bilibili.com/video/BV1xx411c7mD",
                 vec![
-                    "web.generic.browser",
-                    "web.bilibili.metadata",
                     "web.bilibili.video",
+                    "web.bilibili.metadata",
+                    "web.generic.browser",
                 ],
             ),
         ] {
@@ -2816,6 +2977,13 @@ mod tests {
         );
         let stable = issue_from_engine_error(&invalid, ImportStage::Extract);
         assert_eq!(stable.code, "IMPORT_FILE_PARSE_FAILED");
+        let web = issue_from_engine_error_for_input(
+            &invalid,
+            ImportStage::Extract,
+            &ImportInputKind::Url,
+        );
+        assert_eq!(web.code, "IMPORT_WEB_STRUCTURE_CHANGED");
+        assert_eq!(web.message, "Web import could not be completed.");
         assert!(is_agent_eligible_failure(&invalid.code, &stable));
         assert!(!is_agent_eligible_failure(
             "IMPORT_WEB_LOGIN_REQUIRED",
@@ -3438,6 +3606,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(recovered.items[0].status, ImportItemStatus::Queued);
+        assert!(recovered.items[0].task_id.is_none());
+    }
+
+    #[test]
+    fn recovery_cancels_waiting_authorization_item_with_cancelled_task() {
+        let fixture = OrchestratorFixture::new("waiting-authorization-cancel");
+        let (session, _item, task) = fixture.seed_one_item();
+        let mut persisted = fixture
+            .service
+            .load_session(&fixture.context, &fixture.files, &session.session_id)
+            .unwrap();
+        persisted.items[0].status = ImportItemStatus::WaitingAuthorization;
+        persisted.items[0].task_id = Some(task.id.clone());
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &persisted)
+            .unwrap();
+        fixture.tasks.cancel_task(&task.id).unwrap();
+
+        let recovered = fixture
+            .service
+            .recover_session(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+            )
+            .unwrap();
+        assert_eq!(recovered.items[0].status, ImportItemStatus::Cancelled);
         assert!(recovered.items[0].task_id.is_none());
     }
 
