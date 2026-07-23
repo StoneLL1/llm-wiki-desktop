@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -17,8 +18,8 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
 use crate::services::import_v2::engine::{
-    validate_engine_result, EngineContinuation, EngineOperation, EngineRegistry, EngineRequest,
-    EngineResult, ImportEngine,
+    validate_engine_result, EngineContinuation, EngineOperation, EngineProgress, EngineRegistry,
+    EngineRequest, EngineResult, ImportEngine,
 };
 use crate::services::import_v2::file_router::{
     AttemptOutcome as RouteOutcome, CapabilitySnapshot, FileRoutePlanner, QualityFloor,
@@ -1208,7 +1209,7 @@ impl ImportV2Service {
             return Err(cancelled_error());
         }
         self.start_claimed_task(context, files, tasks, session_id, item_id, task_id)?;
-        task_call(tasks.update_progress(task_id, 0, Some(4), Some("Inspecting input".into())))?;
+        task_call(tasks.update_progress(task_id, 0, Some(100), Some("Inspecting input".into())))?;
         let input = self
             .load_session(context, files, session_id)?
             .items
@@ -1273,7 +1274,7 @@ impl ImportV2Service {
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Extracting)
         })?;
-        task_call(tasks.update_progress(task_id, 1, Some(4), Some("Extracting source".into())))?;
+        task_call(tasks.update_progress(task_id, 5, Some(100), Some("Extracting source".into())))?;
         let staging_root = format!(".app/import-sessions/{session_id}/items/{item_id}/staging");
         let local_asr_authorized = if input
             .normalized_locator
@@ -1323,6 +1324,7 @@ impl ImportV2Service {
         let mut recovery_error = None;
         let mut terminal_web_error = None;
         let mut request = request;
+        let max_task_progress = Cell::new(5_u64);
         for ((_, quality_floor), engine) in engines {
             let descriptor = engine.descriptor();
             if is_capability_route(&descriptor.route)
@@ -1333,85 +1335,95 @@ impl ImportV2Service {
                     materialize_capability_input(context, &staging_root, &request.input)?;
             }
             let started_at = chrono::Utc::now().to_rfc3339();
-            let mut candidate = match engine.execute(&request, &token) {
-                Ok(result) if !token.is_cancelled() => result,
-                Ok(_) => {
-                    return self
-                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+            let report_engine_progress = |progress: EngineProgress| {
+                let mapped = engine_progress_on_task_scale(&progress);
+                if mapped < max_task_progress.get() {
+                    return Ok(());
                 }
-                Err(_) if token.is_cancelled() => {
-                    return self
-                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
-                }
-                Err(error) => {
-                    self.record_attempt(
-                        context,
-                        files,
-                        session_id,
-                        item_id,
-                        &descriptor,
-                        started_at,
-                        crate::models::import_v2::AttemptOutcome::Failed,
-                        Vec::new(),
-                    )?;
-                    if is_web_user_wait(&error) {
-                        return self.finish_waiting_login(
-                            context,
-                            files,
-                            tasks,
-                            session_id,
-                            item_id,
-                            task_id,
-                            error,
-                            ImportStage::Extract,
-                        );
-                    }
-                    if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
-                        && !is_bilibili_import_input(&request.input)
-                    {
-                        return self.finish_waiting_local_asr(
-                            context,
-                            files,
-                            tasks,
-                            session_id,
-                            item_id,
-                            task_id,
-                            error,
-                            ImportStage::Extract,
-                        );
-                    }
-                    if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE" {
-                        recovery_error.get_or_insert_with(|| error.clone());
-                    }
-                    if error.code == "IMPORT_WEB_CONTENT_REMOVED"
-                        && is_bilibili_import_input(&request.input)
-                    {
-                        terminal_web_error.get_or_insert(error);
-                        continue;
-                    }
-                    if is_non_fallback_error(&error) {
-                        return self.finish_failed(
-                            context,
-                            files,
-                            tasks,
-                            session_id,
-                            item_id,
-                            task_id,
-                            error,
-                            ImportStage::Extract,
-                        );
-                    }
-                    let route_record = FileRoutePlanner::record(
-                        descriptor.route.clone(),
-                        RouteOutcome::Failed(classify_route_failure(&error)),
-                    );
-                    last_error = Some(error);
-                    if route_record.allows_fallback() {
-                        continue;
-                    }
-                    break;
-                }
+                max_task_progress.set(mapped);
+                task_call(tasks.update_progress(task_id, mapped, Some(100), Some(progress.label)))
+                    .map(|_| ())
             };
+            let mut candidate =
+                match engine.execute_with_progress(&request, &token, &report_engine_progress) {
+                    Ok(result) if !token.is_cancelled() => result,
+                    Ok(_) => {
+                        return self
+                            .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                    }
+                    Err(_) if token.is_cancelled() => {
+                        return self
+                            .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                    }
+                    Err(error) => {
+                        self.record_attempt(
+                            context,
+                            files,
+                            session_id,
+                            item_id,
+                            &descriptor,
+                            started_at,
+                            crate::models::import_v2::AttemptOutcome::Failed,
+                            Vec::new(),
+                        )?;
+                        if is_web_user_wait(&error) {
+                            return self.finish_waiting_login(
+                                context,
+                                files,
+                                tasks,
+                                session_id,
+                                item_id,
+                                task_id,
+                                error,
+                                ImportStage::Extract,
+                            );
+                        }
+                        if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
+                            && !is_bilibili_import_input(&request.input)
+                        {
+                            return self.finish_waiting_local_asr(
+                                context,
+                                files,
+                                tasks,
+                                session_id,
+                                item_id,
+                                task_id,
+                                error,
+                                ImportStage::Extract,
+                            );
+                        }
+                        if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE" {
+                            recovery_error.get_or_insert_with(|| error.clone());
+                        }
+                        if error.code == "IMPORT_WEB_CONTENT_REMOVED"
+                            && is_bilibili_import_input(&request.input)
+                        {
+                            terminal_web_error.get_or_insert(error);
+                            continue;
+                        }
+                        if is_non_fallback_error(&error) {
+                            return self.finish_failed(
+                                context,
+                                files,
+                                tasks,
+                                session_id,
+                                item_id,
+                                task_id,
+                                error,
+                                ImportStage::Extract,
+                            );
+                        }
+                        let route_record = FileRoutePlanner::record(
+                            descriptor.route.clone(),
+                            RouteOutcome::Failed(classify_route_failure(&error)),
+                        );
+                        last_error = Some(error);
+                        if route_record.allows_fallback() {
+                            continue;
+                        }
+                        break;
+                    }
+                };
             if let Err(error) = validate_engine_result(&staging_root, &candidate) {
                 self.record_attempt(
                     context,
@@ -1436,6 +1448,9 @@ impl ImportV2Service {
                     &request,
                     candidate,
                     &token,
+                    tasks,
+                    task_id,
+                    &max_task_progress,
                 ) {
                     Ok(candidate) => candidate,
                     Err(error) => {
@@ -1561,7 +1576,12 @@ impl ImportV2Service {
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Validating)
         })?;
-        task_call(tasks.update_progress(task_id, 3, Some(4), Some("Validating preview".into())))?;
+        task_call(tasks.update_progress(
+            task_id,
+            95,
+            Some(100),
+            Some("Validating preview".into()),
+        ))?;
         let preview = match self
             .quality
             .evaluate(&context.root.join(Path::new(&staging_root)), &result)
@@ -1596,7 +1616,7 @@ impl ImportV2Service {
             });
             Ok(())
         })?;
-        task_call(tasks.update_progress(task_id, 4, Some(4), Some("Preview ready".into())))?;
+        task_call(tasks.update_progress(task_id, 100, Some(100), Some("Preview ready".into())))?;
         task_call(tasks.set_result(
             task_id,
             TaskResult {
@@ -1623,6 +1643,9 @@ impl ImportV2Service {
         request: &EngineRequest,
         web_result: EngineResult,
         token: &crate::tasks::task_model::CancellationToken,
+        tasks: &TaskService,
+        task_id: &str,
+        max_task_progress: &Cell<u64>,
     ) -> Result<EngineResult, BackendError> {
         match web_result.continuation.as_ref() {
             Some(EngineContinuation::LocalAsr { .. }) => self.execute_local_asr_continuation(
@@ -1634,6 +1657,9 @@ impl ImportV2Service {
                 request,
                 web_result,
                 token,
+                tasks,
+                task_id,
+                max_task_progress,
             ),
             Some(EngineContinuation::LocalOcr { .. }) => self.execute_local_ocr_continuation(
                 context,
@@ -1659,6 +1685,9 @@ impl ImportV2Service {
         request: &EngineRequest,
         mut web_result: EngineResult,
         token: &crate::tasks::task_model::CancellationToken,
+        tasks: &TaskService,
+        task_id: &str,
+        max_task_progress: &Cell<u64>,
     ) -> Result<EngineResult, BackendError> {
         let Some(EngineContinuation::LocalAsr {
             temporary_input_path,
@@ -1730,7 +1759,17 @@ impl ImportV2Service {
         // rejects with IMPORT_ASR_POLICY_BLOCKED.
         asr_request.chained_input = Some(temporary_input_path);
         let outcome = (|| -> Result<(EngineResult, Vec<String>), BackendError> {
-            let asr_result = engine.execute(&asr_request, token)?;
+            let report_asr_progress = |progress: EngineProgress| {
+                let mapped = engine_progress_on_task_scale(&progress);
+                if mapped < max_task_progress.get() {
+                    return Ok(());
+                }
+                max_task_progress.set(mapped);
+                task_call(tasks.update_progress(task_id, mapped, Some(100), Some(progress.label)))
+                    .map(|_| ())
+            };
+            let asr_result =
+                engine.execute_with_progress(&asr_request, token, &report_asr_progress)?;
             validate_engine_result(staging_root, &asr_result)?;
             let output_path = staging
                 .join(&asr_result.markdown_path)
@@ -2804,6 +2843,21 @@ fn item_not_found() -> BackendError {
 }
 fn task_error(message: &str) -> BackendError {
     BackendError::new(IMPORT_V2_STATE_INVALID, message, true, false)
+}
+fn engine_progress_on_task_scale(progress: &EngineProgress) -> u64 {
+    let normalized = progress
+        .total
+        .filter(|total| *total > 0)
+        .map(|total| progress.current.min(total).saturating_mul(10_000) / total)
+        .unwrap_or(0);
+    let (start, end) = if progress.label == "media.downloading" {
+        (5_u64, 20_u64)
+    } else if progress.label.starts_with("asr.") {
+        (20_u64, 90_u64)
+    } else {
+        (5_u64, 90_u64)
+    };
+    start + normalized.saturating_mul(end - start) / 10_000
 }
 fn task_call<T>(result: Result<T, String>) -> Result<T, BackendError> {
     result.map_err(|_| task_error("Import task state could not be updated."))
@@ -4176,5 +4230,33 @@ mod tests {
         assert_eq!(value["reference"]["sessionId"], session.session_id);
         assert_eq!(value["reference"]["itemId"], item.item_id);
         assert_eq!(value["affectedPaths"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn engine_progress_uses_monotonic_task_stage_ranges() {
+        assert_eq!(
+            engine_progress_on_task_scale(&EngineProgress {
+                current: 50,
+                total: Some(100),
+                label: "media.downloading".into(),
+            }),
+            12
+        );
+        assert_eq!(
+            engine_progress_on_task_scale(&EngineProgress {
+                current: 50,
+                total: Some(100),
+                label: "asr.recognizing".into(),
+            }),
+            55
+        );
+        assert_eq!(
+            engine_progress_on_task_scale(&EngineProgress {
+                current: 50,
+                total: None,
+                label: "media.downloading".into(),
+            }),
+            5
+        );
     }
 }

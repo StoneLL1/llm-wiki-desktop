@@ -2,10 +2,11 @@ use crate::{
     errors::BackendError,
     services::import_v2::url_policy::{PrivateTargetGrant, SessionWebTarget, UrlPolicy},
 };
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use reqwest::{header, redirect::Policy, Client, StatusCode};
 use std::{
     collections::BTreeMap,
+    future::Future,
     net::{IpAddr, SocketAddr},
     path::Path,
     time::{Duration, Instant},
@@ -31,6 +32,10 @@ pub struct WebFetchPolicy {
     /// Optional page origin used by platform APIs/CDN requests. It is never
     /// persisted and is only sent as the HTTP Referer header.
     pub referer: Option<String>,
+    /// Optional restrictions applied to the initial target and every redirect
+    /// before DNS resolution or an HTTP request is attempted.
+    pub require_https: bool,
+    pub allowed_host_suffixes: Vec<String>,
 }
 impl Default for WebFetchPolicy {
     fn default() -> Self {
@@ -42,6 +47,8 @@ impl Default for WebFetchPolicy {
             total_timeout_ms: 60_000,
             content: WebFetchContent::Page,
             referer: None,
+            require_https: false,
+            allowed_host_suffixes: Vec::new(),
         }
     }
 }
@@ -63,6 +70,12 @@ pub struct WebFetchArtifact {
     pub elapsed_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebFetchProgress {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
 #[derive(Default)]
 pub struct WebFetchService;
 impl WebFetchService {
@@ -77,7 +90,7 @@ impl WebFetchService {
         cancelled: C,
     ) -> Result<WebFetchArtifact, BackendError>
     where
-        F: FnMut(u64),
+        F: FnMut(WebFetchProgress),
         C: Fn() -> bool,
     {
         self.fetch_inner(
@@ -98,7 +111,7 @@ impl WebFetchService {
         cancelled: C,
     ) -> Result<WebFetchArtifact, BackendError>
     where
-        F: FnMut(u64),
+        F: FnMut(WebFetchProgress),
         C: Fn() -> bool,
     {
         self.fetch_inner(
@@ -126,7 +139,7 @@ impl WebFetchService {
         cancelled: C,
     ) -> Result<WebFetchArtifact, BackendError>
     where
-        F: FnMut(u64),
+        F: FnMut(WebFetchProgress),
         C: Fn() -> bool,
     {
         let started = Instant::now();
@@ -139,16 +152,18 @@ impl WebFetchService {
                     false,
                 ));
             }
+            validate_fetch_target(&target, limits)?;
             let host = target.public.host.clone();
             let port = target
                 .request_url
                 .port_or_known_default()
                 .ok_or_else(|| err("IMPORT_V2_URL_REJECTED", "URL port is invalid.", false))?;
-            let resolved = tokio::net::lookup_host((host.as_str(), port))
-                .await
-                .map_err(|_| err("IMPORT_V2_DNS_FAILED", "DNS resolution failed.", true))?
-                .map(|a| a.ip())
-                .collect::<Vec<IpAddr>>();
+            let resolved =
+                await_or_cancel(tokio::net::lookup_host((host.as_str(), port)), &cancelled)
+                    .await?
+                    .map_err(|_| err("IMPORT_V2_DNS_FAILED", "DNS resolution failed.", true))?
+                    .map(|a| a.ip())
+                    .collect::<Vec<IpAddr>>();
             let connected = *resolved
                 .first()
                 .ok_or_else(|| err("IMPORT_V2_DNS_FAILED", "DNS returned no addresses.", true))?;
@@ -185,13 +200,15 @@ impl WebFetchService {
             if let Some(referer) = limits.referer.as_deref() {
                 request = request.header(header::REFERER, referer);
             }
-            let response = request.send().await.map_err(|_| {
-                err(
-                    "IMPORT_V2_TLS_OR_FETCH_FAILED",
-                    "TLS or HTTP connection failed.",
-                    true,
-                )
-            })?;
+            let response = await_or_cancel(request.send(), &cancelled)
+                .await?
+                .map_err(|_| {
+                    err(
+                        "IMPORT_V2_TLS_OR_FETCH_FAILED",
+                        "TLS or HTTP connection failed.",
+                        true,
+                    )
+                })?;
             if response.status().is_redirection() {
                 let status = response.status().as_u16();
                 let loc = response
@@ -285,6 +302,11 @@ impl WebFetchService {
                     false,
                 ));
             }
+            let total_bytes = response.content_length();
+            progress(WebFetchProgress {
+                downloaded_bytes: 0,
+                total_bytes,
+            });
             let mut headers = BTreeMap::new();
             for name in [
                 header::CONTENT_TYPE,
@@ -308,14 +330,7 @@ impl WebFetchService {
             };
             let mut downloaded = 0u64;
             let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                if cancelled() {
-                    return Err(err(
-                        "IMPORT_V2_CANCELLED",
-                        "Web fetch was cancelled.",
-                        false,
-                    ));
-                }
+            while let Some(chunk) = next_stream_item_or_cancel(&mut stream, &cancelled).await? {
                 let chunk = chunk
                     .map_err(|_| err("IMPORT_V2_FETCH_FAILED", "Response stream failed.", true))?;
                 if downloaded + chunk.len() as u64 > limits.max_response_bytes {
@@ -337,7 +352,10 @@ impl WebFetchService {
                 } else {
                     bytes.extend_from_slice(&chunk);
                 }
-                progress(downloaded);
+                progress(WebFetchProgress {
+                    downloaded_bytes: downloaded,
+                    total_bytes,
+                });
             }
             if let Some(file) = destination_file.as_mut() {
                 file.flush().await.map_err(|_| {
@@ -364,6 +382,144 @@ impl WebFetchService {
             "Redirect limit exceeded.",
             false,
         ))
+    }
+}
+
+async fn next_stream_item_or_cancel<S, C>(
+    stream: &mut S,
+    cancelled: &C,
+) -> Result<Option<S::Item>, BackendError>
+where
+    S: Stream + Unpin,
+    C: Fn() -> bool,
+{
+    await_or_cancel(stream.next(), cancelled).await
+}
+
+async fn await_or_cancel<F, C>(future: F, cancelled: &C) -> Result<F::Output, BackendError>
+where
+    F: Future,
+    C: Fn() -> bool,
+{
+    tokio::pin!(future);
+    loop {
+        if cancelled() {
+            return Err(err(
+                "IMPORT_V2_CANCELLED",
+                "Web fetch was cancelled.",
+                false,
+            ));
+        }
+        match tokio::time::timeout(Duration::from_millis(200), &mut future).await {
+            Ok(output) => return Ok(output),
+            Err(_) => continue,
+        }
+    }
+}
+
+fn validate_fetch_target(
+    target: &SessionWebTarget,
+    limits: &WebFetchPolicy,
+) -> Result<(), BackendError> {
+    if limits.require_https && target.request_url.scheme() != "https" {
+        return Err(err(
+            "IMPORT_V2_REDIRECT_REJECTED",
+            "The fetch target must use HTTPS.",
+            false,
+        ));
+    }
+    if !limits.allowed_host_suffixes.is_empty() {
+        let host = target.public.host.to_ascii_lowercase();
+        let allowed = limits.allowed_host_suffixes.iter().any(|suffix| {
+            let suffix = suffix.to_ascii_lowercase();
+            host == suffix || host.ends_with(&format!(".{suffix}"))
+        });
+        if !allowed {
+            return Err(err(
+                "IMPORT_V2_REDIRECT_REJECTED",
+                "The fetch target left the verified host allowlist.",
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn stalled_response_stream_observes_cancellation_promptly() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation_signal = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancellation_signal.store(true, Ordering::SeqCst);
+        });
+        let mut stream = futures_util::stream::pending::<()>();
+        let started = Instant::now();
+
+        let error = next_stream_item_or_cancel(&mut stream, &|| cancelled.load(Ordering::SeqCst))
+            .await
+            .expect_err("the stalled stream should stop after cancellation");
+
+        assert_eq!(error.code, "IMPORT_V2_CANCELLED");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn stalled_response_headers_observe_cancellation_promptly() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation_signal = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancellation_signal.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+
+        let error = await_or_cancel(std::future::pending::<()>(), &|| {
+            cancelled.load(Ordering::SeqCst)
+        })
+        .await
+        .expect_err("a request stalled before headers should stop after cancellation");
+
+        assert_eq!(error.code, "IMPORT_V2_CANCELLED");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn restricted_fetch_policy_rejects_downgrade_and_untrusted_redirect_targets() {
+        let policy = WebFetchPolicy {
+            require_https: true,
+            allowed_host_suffixes: vec!["edge.mountaintoys.cn".into()],
+            ..WebFetchPolicy::default()
+        };
+        let trusted = UrlPolicy
+            .normalize_for_session("https://809al93l.edge.mountaintoys.cn:4483/upgcxcode/video.mp4")
+            .unwrap();
+        let downgraded = UrlPolicy
+            .normalize_for_session("http://809al93l.edge.mountaintoys.cn:4483/upgcxcode/video.mp4")
+            .unwrap();
+        let untrusted = UrlPolicy
+            .normalize_for_session("https://edge.mountaintoys.cn.evil.example/video.mp4")
+            .unwrap();
+
+        assert!(validate_fetch_target(&trusted, &policy).is_ok());
+        assert_eq!(
+            validate_fetch_target(&downgraded, &policy)
+                .unwrap_err()
+                .code,
+            "IMPORT_V2_REDIRECT_REJECTED"
+        );
+        assert_eq!(
+            validate_fetch_target(&untrusted, &policy).unwrap_err().code,
+            "IMPORT_V2_REDIRECT_REJECTED"
+        );
     }
 }
 fn err(code: &'static str, message: &str, retryable: bool) -> BackendError {

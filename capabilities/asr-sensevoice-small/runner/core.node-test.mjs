@@ -26,6 +26,8 @@ import {
 test("production ASR wrapper has no network client", async () => {
   const source = await fs.readFile(path.join(import.meta.dirname, "index.mjs"), "utf8");
   assert.doesNotMatch(source, /node:(?:net|http|https|http2|dns|tls|dgram)|\bfetch\s*\(|\bWebSocket\b/u);
+  assert.match(source, /method:\s*"import\.progress"/u);
+  assert.match(source, /"asr\.recognizing"/u);
 });
 
 test("accepts the staging-relative chained media handoff and rejects escaping inputs", async (context) => {

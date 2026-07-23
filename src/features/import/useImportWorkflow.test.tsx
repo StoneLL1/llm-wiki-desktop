@@ -252,6 +252,55 @@ describe("useImportWorkflow", () => {
     expect(api.createSession).toHaveBeenCalledTimes(1);
   });
 
+  it("binds streamed ASR task progress to the live import item", async () => {
+    const queued = item("video.mp4");
+    const started = task("asr-task");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [queued]));
+    api.startItems.mockResolvedValue([started]);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+    await act(async () => result.current.startItems(["video.mp4"]));
+    expect(result.current.session?.items[0].taskId).toBe("asr-task");
+
+    const recognizing = {
+      ...started,
+      status: "running" as const,
+      progress: { current: 48, total: 100, label: "asr.recognizing" },
+      updatedAt: "2026-07-13T00:00:01Z",
+    };
+    useTaskStore.getState().upsertTask(recognizing);
+    await act(async () => notifyTaskEventListeners({
+      eventId: "asr-progress",
+      eventType: "task_updated",
+      projectId: projectA.projectId,
+      taskId: recognizing.id,
+      timestamp: recognizing.updatedAt,
+      payload: recognizing,
+    }));
+
+    expect(result.current.session?.items[0]).toMatchObject({
+      status: "extracting",
+      taskId: "asr-task",
+      progress: { current: 48, total: 100, label: "asr.recognizing" },
+    });
+
+    const stale = {
+      ...recognizing,
+      progress: { current: 30, total: 100, label: "asr.recognizing" },
+      updatedAt: started.updatedAt,
+    };
+    await act(async () => notifyTaskEventListeners({
+      eventId: "stale-asr-progress",
+      eventType: "task_updated",
+      projectId: projectA.projectId,
+      taskId: stale.id,
+      timestamp: stale.updatedAt,
+      payload: stale,
+    }));
+    expect(result.current.session?.items[0].progress).toEqual(recognizing.progress);
+  });
+
   it("recovers the unfinished session without creating a competing draft", async () => {
     api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
     api.getSession.mockResolvedValue({ ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" });
@@ -517,6 +566,42 @@ describe("useImportWorkflow", () => {
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
 
     await waitFor(() => expect(result.current.batches?.[0]).toMatchObject({ id: "batch-recovered", total: 1, active: 1 }));
+  });
+
+  it("reattaches live progress events to a recovered import item", async () => {
+    const recovered = item("recover.mp4", "extracting");
+    recovered.taskId = "recover-task";
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
+    api.getSession.mockResolvedValue({ ...session(projectA.projectId, [recovered]), sessionId: "session-recover" });
+    const running = {
+      ...task("recover-task", projectA.projectId, "running"),
+      batchId: "batch-recovered",
+      progress: { current: 37, total: 100, label: "asr.recognizing" },
+    };
+    useTaskStore.getState().upsertTask(running);
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+
+    await waitFor(() => expect(result.current.session?.items[0].progress).toEqual(running.progress));
+
+    const advanced = {
+      ...running,
+      progress: { current: 63, total: 100, label: "asr.recognizing" },
+      updatedAt: "2026-07-13T00:00:01Z",
+    };
+    await act(async () => {
+      useTaskStore.getState().upsertTask(advanced);
+      notifyTaskEventListeners({
+        eventId: "recovered-asr-progress",
+        eventType: "task_updated",
+        projectId: projectA.projectId,
+        taskId: advanced.id,
+        timestamp: advanced.updatedAt,
+        payload: advanced,
+      });
+    });
+
+    expect(result.current.session?.items[0].progress).toEqual(advanced.progress);
   });
 
   it("recovers a review-ready batch that is waiting for confirmation", async () => {

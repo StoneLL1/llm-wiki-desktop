@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { hasPlatformAuthentication, isBlockedAddress, isPinnedTargetHost, isPlatformCookieDomain, isPlatformNavigationHost, isPlatformTargetHost, isTrustedPlatformAssetHost, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
+import { hasPlatformAuthentication, isBlockedAddress, isPinnedTargetHost, isPlatformCookieDomain, isPlatformNavigationHost, isPlatformTargetHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
 
 for (const address of ["127.0.0.1", "10.0.0.1", "169.254.169.254", "192.168.1.1", "224.0.0.1", "::1", "fc00::1", "fe80::1"]) {
   assert.equal(isBlockedAddress(address), true, address);
@@ -29,6 +29,10 @@ assert.equal(isPlatformTargetHost("xiaohongshu", "xhslink.com"), true);
 assert.equal(isPlatformNavigationHost("xiaohongshu", "xhslink.com"), true);
 assert.equal(isPlatformNavigationHost("bilibili", "evil.bilibili.com"), false);
 assert.equal(isTrustedPlatformAssetHost("bilibili", "www.bilibili.com", "upos-sz-mirrorali.bilivideo.com"), true);
+assert.equal(isTrustedPlatformAssetHost("bilibili", "www.bilibili.com", "809al93l.edge.mountaintoys.cn"), true);
+assert.equal(isTrustedPlatformAssetHost("bilibili", "www.bilibili.com", "edge.mountaintoys.cn.evil.example"), false);
+assert.equal(isSecureAssetProtocol("https:"), true);
+assert.equal(isSecureAssetProtocol("http:"), false);
 assert.equal(isTrustedPlatformAssetHost("douyin", "www.douyin.com", "p3-sign.douyinvod.com"), true);
 assert.equal(isTrustedPlatformAssetHost("xiaohongshu", "www.xiaohongshu.com", "sns-img-qc.xhscdn.com"), true);
 assert.equal(isTrustedPlatformAssetHost("bilibili", "www.bilibili.com", "cdn.example.test"), false);

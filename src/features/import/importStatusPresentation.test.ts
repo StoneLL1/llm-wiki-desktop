@@ -82,6 +82,16 @@ describe("presentImportItem", () => {
     expect(presentation.progressLabel).toBe("page 3");
   });
 
+  it("presents streamed ASR progress as a real percentage", () => {
+    const presentation = presentImportItem(item("extracting", {
+      progress: { current: 48, total: 100, label: "asr.recognizing" },
+    }));
+
+    expect(presentation.progressMode).toBe("measured");
+    expect(presentation.progressValue).toBe(48);
+    expect(presentation.progressLabel).toBe("asr.recognizing");
+  });
+
   it("adds only backend-authorized recovery actions", () => {
     const presentation = presentImportItem(item("failed", {
       issue: {

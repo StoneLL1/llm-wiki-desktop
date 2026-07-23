@@ -9,7 +9,7 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
-import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
+import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
 import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractPlatformPayloadFromValue, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence } from "./platform-extract.mjs";
 import { isLoginChallengeState, redactJsonValue, redactSensitiveText, sanitizePublicUrl } from "./snapshot-policy.mjs";
 import { assertLinuxBrowserDependencies } from "./linux-deps.mjs";
@@ -83,6 +83,7 @@ async function confinePage(page, target, platform) {
 }
 
 async function isAllowedAssetUrl(platform, target, candidate) {
+  if (!isSecureAssetProtocol(candidate.protocol)) return false;
   if (platform === "generic" && isPinnedTargetHost(target.hostname, candidate.hostname)) {
     try {
       await resolvePinnedAddress(candidate.hostname);

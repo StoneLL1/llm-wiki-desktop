@@ -27,6 +27,9 @@ export interface ImportItemStatusProps {
 export function ImportItemStatus({ item, presentation = presentImportItem(item) }: ImportItemStatusProps) {
   const { t } = useTranslation();
   const Icon = ICONS[presentation.icon];
+  const progressLabel = presentation.progressLabel
+    ? t(IMPORT_PROGRESS_LABEL_KEYS[presentation.progressLabel] ?? presentation.progressLabel)
+    : t(presentation.labelKey);
   return (
     <div className={`import-v2-item-status is-${presentation.tone}`} data-testid={`import-status-${item.itemId}`}>
       <span className="flex items-center gap-1.5 text-[12px] font-medium" aria-label={t(presentation.labelKey)}>
@@ -35,16 +38,23 @@ export function ImportItemStatus({ item, presentation = presentImportItem(item) 
       </span>
       {presentation.progressMode !== "none" ? (
         <div className="mt-1.5 flex items-center gap-2">
-          <div className="h-1.5 min-w-[72px] flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)]" aria-hidden="true">
+          <div
+            className="h-1.5 min-w-[72px] flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)]"
+            role="progressbar"
+            aria-label={progressLabel}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={presentation.progressValue ?? undefined}
+          >
             <div
-              className={`h-full rounded-full bg-current ${presentation.progressMode === "indeterminate" ? "w-1/2 animate-pulse" : ""}`}
+              className={`h-full rounded-full bg-current animate-pulse ${presentation.progressMode === "indeterminate" ? "w-1/2" : ""}`}
               style={presentation.progressValue === null ? undefined : { width: `${presentation.progressValue}%` }}
             />
           </div>
           {presentation.progressValue !== null ? <span className="font-mono text-[10.5px]">{presentation.progressValue}%</span> : null}
         </div>
       ) : null}
-      {presentation.progressLabel ? <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">{t(IMPORT_PROGRESS_LABEL_KEYS[presentation.progressLabel] ?? presentation.progressLabel)}</span> : null}
+      {presentation.progressLabel ? <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">{progressLabel}</span> : null}
     </div>
   );
 }

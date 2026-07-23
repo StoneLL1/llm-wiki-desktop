@@ -222,8 +222,12 @@ export function useImportBatchController({
       itemId: itemIds[index] ?? "",
       title: itemById.get(itemIds[index] ?? "")?.input.displayName ?? task.title,
     }));
+    const taskIds = new Set(taskRefs.map((task) => task.taskId));
     setBatchRecords((current) => [
-      ...current.filter((record) => record.id !== batchId),
+      ...current.filter(
+        (record) => record.id !== batchId
+          && !record.tasks.some((task) => taskIds.has(task.taskId)),
+      ),
       { id: batchId, sessionId, projectKey: requestKey, epoch, tasks: taskRefs },
     ]);
     setCancellingBatchIds((current) => {
@@ -305,8 +309,13 @@ export function useImportBatchController({
     if (recovered.length === 0) return;
     setBatchRecords((current) => {
       const existing = new Set(current.map((record) => record.id));
+      const recordedTaskIds = new Set(
+        current.flatMap((record) => record.tasks.map((task) => task.taskId)),
+      );
       const additions = recovered.filter(
-        (record) => !existing.has(record.id) && !dismissedBatchIds.has(record.id),
+        (record) => !existing.has(record.id)
+          && !dismissedBatchIds.has(record.id)
+          && !record.tasks.some((task) => recordedTaskIds.has(task.taskId)),
       );
       return additions.length > 0 ? [...current, ...additions] : current;
     });
