@@ -69,6 +69,12 @@ export interface MigrationPlan {
   summary: MigrationSummary;
 }
 
+export interface MigrationPreparation {
+  plan: MigrationPlan;
+  report: MigrationReport;
+  confirmation: MigrationConfirmation;
+}
+
 export type MigrationStatus =
   | "not_scanned"
   | "dry_run_ready"

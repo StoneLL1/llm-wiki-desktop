@@ -14,7 +14,6 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
-from urllib.parse import quote
 
 PACK_VERSION = "24.2.7"
 TARGETS = {".doc": ("docx", "word/document.xml"),
@@ -46,7 +45,7 @@ def fail(request_id, code, message):
 
 def profile_uri(profile):
     # LibreOffice requires an absolute RFC 8089 file URL, including quoted CJK paths.
-    return "file://" + quote(profile.resolve().as_posix(), safe="/:~")
+    return profile.resolve().as_uri()
 
 
 def write_locked_profile(profile):
@@ -60,6 +59,32 @@ def write_locked_profile(profile):
  <item oor:path="/org.openoffice.Office.Jobs/Jobs/UpdateCheck"><prop oor:name="UpdateCheck"><value>false</value></prop></item>
 </oor:items>"""
     (user / "registrymodifications.xcu").write_text(registry, encoding="utf-8")
+
+
+def short_native_temporary_directory():
+    roots = []
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if system_root:
+            windows_temp = Path(system_root) / "Temp"
+            if windows_temp.is_dir():
+                roots.append(windows_temp)
+    roots.append(None)
+    last_error = None
+    for root in roots:
+        try:
+            temporary = tempfile.TemporaryDirectory(
+                prefix="lw-lo-",
+                dir=None if root is None else str(root),
+            )
+        except OSError as error:
+            last_error = error
+            continue
+        if os.name != "nt" or len(str(Path(temporary.name).resolve())) <= 200:
+            return temporary
+        temporary.cleanup()
+        last_error = OSError("No bounded Windows native-tool workspace is available.")
+    raise last_error or OSError("No native-tool workspace is available.")
 
 
 def kill_process_tree(process):
@@ -112,7 +137,7 @@ def execute_libreoffice(executable, source, output_dir, profile, timeout_seconds
     args = [str(executable), "--headless", "--invisible", "--nologo", "--nodefault",
             "--nolockcheck", "--norestore", "--convert-to", extension,
             "--outdir", str(output_dir),
-            "-env:UserInstallation=file://" + profile_uri(profile).removeprefix("file://"),
+            "-env:UserInstallation=" + profile_uri(profile),
             str(source)]
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(profile),
            "USERPROFILE": str(profile), "TMPDIR": str(profile / "tmp"),
@@ -153,13 +178,37 @@ def handle(request):
     try:
         staging.mkdir(parents=True, exist_ok=True)
         converted_dir = staging / "converted"
-        converted_dir.mkdir()
-        with tempfile.TemporaryDirectory(prefix="llm-wiki-lo-profile-") as temporary:
-            profile = Path(temporary)
-            write_locked_profile(profile)
-            execute_libreoffice(Path(executable), source, converted_dir, profile, 120)
+        if converted_dir.exists():
+            if (converted_dir.is_symlink() or not converted_dir.is_dir()
+                    or not contained(staging, converted_dir)):
+                raise ValueError("unsafe converted output directory")
+        else:
+            converted_dir.mkdir()
         target_extension, expected_part = TARGETS[suffix]
         converted = converted_dir / (source.stem + "." + target_extension)
+        if converted.exists():
+            if converted.is_symlink() or not converted.is_file():
+                raise ValueError("unsafe converted output artifact")
+            # A prior modern-reader failure leaves staging in place. Never let
+            # LibreOffice reuse that cache as evidence for a retry.
+            converted.unlink()
+        with short_native_temporary_directory() as temporary:
+            profile = Path(temporary)
+            write_locked_profile(profile)
+            native_source = profile / ("input" + suffix)
+            native_output_dir = profile / "converted"
+            native_output_dir.mkdir()
+            shutil.copyfile(source, native_source)
+            execute_libreoffice(
+                Path(executable),
+                native_source,
+                native_output_dir,
+                profile,
+                120,
+            )
+            native_converted = native_output_dir / ("input." + target_extension)
+            validate_ooxml(native_converted, expected_part)
+            shutil.copyfile(native_converted, converted)
         unit_count = validate_ooxml(converted, expected_part)
         shutil.copyfile(source, staging / "source.bin")
         (staging / "candidate.md").write_text(

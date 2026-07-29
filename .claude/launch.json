@@ -14,6 +14,13 @@
       "runtimeArgs": ["serve", "dist", "-p", "3100", "-s", "--no-clipboard"],
       "port": 3100,
       "autoPort": true
+    },
+    {
+      "name": "design-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "UI-Frontend-design", "-p", "3200", "--no-clipboard"],
+      "port": 3200,
+      "autoPort": true
     }
   ]
 }

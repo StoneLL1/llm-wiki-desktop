@@ -1,5 +1,7 @@
 # Import V2 Web Ingestion Implementation Plan
 
+> Historical implementation plan. Connector and security research remains useful, but current login, media, Source commit and independent compile behavior is defined only by [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Import one exact user-supplied URL into traceable Markdown through SSRF-safe domain routing, deterministic article/video connectors, dedicated login sessions, and a browser fallback, including WeChat, Zhihu, Bilibili, then phase-two Xiaohongshu and X.

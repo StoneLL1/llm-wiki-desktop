@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::models::import_v2::QualityReport;
+use crate::models::source::{SourceBinding, SourceStatus};
+
 /// Coarse page classification used for tree grouping, type filters, and search.
 ///
 /// Inferred from the YAML `type` field when present and recognized, otherwise
@@ -100,6 +103,19 @@ pub struct WikiPageMeta {
     /// Outgoing `[[wikilink]]` targets (deduplicated, order preserved).
     #[serde(default)]
     pub wikilinks: Vec<String>,
+    /// Present only after the page has been bound to a validated Source
+    /// manifest and current immutable version. A `type: source` frontmatter
+    /// value or a `wiki/sources/` path is never sufficient on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_binding: Option<SourceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_status: Option<SourceStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<QualityReport>,
 }
 
 /// A node in the wiki file tree. Folders contain children; files carry metadata.

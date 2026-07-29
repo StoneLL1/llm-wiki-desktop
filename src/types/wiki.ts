@@ -1,3 +1,6 @@
+import type { SourceBinding, SourceStatus } from "./source";
+import type { QualityReport } from "./importV2";
+
 export type WikiPageType =
   | "entity"
   | "concept"
@@ -28,6 +31,11 @@ export interface WikiPageMeta {
   modifiedTime: string;
   hash: string;
   wikilinks: string[];
+  sourceBinding?: SourceBinding | null;
+  sourceId?: string | null;
+  versionId?: string | null;
+  sourceStatus?: SourceStatus | null;
+  quality?: QualityReport | null;
 }
 
 export interface WikiTreeNode {
@@ -128,6 +136,10 @@ export const WIKI_PAGE_TYPES: WikiPageType[] = [
   "comparison",
   "query",
 ];
+
+export const CREATABLE_WIKI_PAGE_TYPES = WIKI_PAGE_TYPES.filter(
+  (type) => type !== "source",
+);
 
 export const PAGE_TYPE_LABEL_KEYS: Record<WikiPageType, string> = {
   entity: "wiki.type.entity",

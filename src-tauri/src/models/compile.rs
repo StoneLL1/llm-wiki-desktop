@@ -95,6 +95,14 @@ pub enum CompilePageType {
     Log,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceVersionRef {
+    pub source_id: String,
+    pub version_id: String,
+    pub content_hash: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompileRequest {
@@ -104,6 +112,9 @@ pub struct CompileRequest {
     pub route: CompileRoutePreference,
     pub agent: Option<AgentKind>,
     pub provider: Option<LlmProviderKind>,
+    /// Explicit, hash-bound Source versions selected by the user. Paths are
+    /// deliberately absent and are resolved only from the trusted registry.
+    pub source_versions: Vec<SourceVersionRef>,
 }
 
 fn default_route() -> CompileRoutePreference {
@@ -116,6 +127,19 @@ pub struct CompileResult {
     pub route: CompileRoute,
     pub affected_paths: Vec<String>,
     pub conflicts: Vec<String>,
+    pub checkpoint: Option<String>,
+    pub consumed_versions: Vec<SourceVersionRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompileConsumptionRecord {
+    pub schema_version: u32,
+    pub compile_task_id: String,
+    pub route: CompileRoute,
+    pub consumed_at: String,
+    pub source_versions: Vec<SourceVersionRef>,
+    pub affected_paths: Vec<String>,
     pub checkpoint: Option<String>,
 }
 

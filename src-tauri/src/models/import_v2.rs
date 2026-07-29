@@ -18,6 +18,7 @@ pub enum ImportInputKind {
     File,
     Folder,
     Url,
+    ClipboardText,
 }
 
 /// Controls whether URL media is retained under `raw/assets` after import.
@@ -32,7 +33,7 @@ pub enum MediaSaveMode {
 
 impl Default for MediaSaveMode {
     fn default() -> Self {
-        Self::PreserveOriginal
+        Self::ExtractOnly
     }
 }
 
@@ -45,6 +46,210 @@ pub enum ImportSessionStatus {
     PartiallyCommitted,
     Completed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportUserState {
+    Discovering,
+    Processing,
+    NeedsAction,
+    Ready,
+    Committing,
+    Committed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportItemResolution {
+    NewSource,
+    ExactDuplicateSkip {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "candidateHash")]
+        candidate_hash: String,
+        #[serde(rename = "currentHash")]
+        current_hash: String,
+        #[serde(rename = "targetVersionId")]
+        target_version_id: String,
+    },
+    SameSourceNewVersion {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "candidateHash")]
+        candidate_hash: String,
+        #[serde(rename = "currentHash")]
+        current_hash: String,
+        #[serde(rename = "targetVersionId")]
+        target_version_id: String,
+    },
+    KeepCurrentSource {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "candidateHash")]
+        candidate_hash: String,
+        #[serde(rename = "currentHash")]
+        current_hash: String,
+        #[serde(rename = "targetVersionId")]
+        target_version_id: String,
+    },
+    ApplyImportCandidate {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "candidateHash")]
+        candidate_hash: String,
+        #[serde(rename = "currentHash")]
+        current_hash: String,
+        #[serde(rename = "targetVersionId")]
+        target_version_id: String,
+    },
+    ManualMerge {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "candidateHash")]
+        candidate_hash: String,
+        #[serde(rename = "currentHash")]
+        current_hash: String,
+        #[serde(rename = "targetVersionId")]
+        target_version_id: String,
+        #[serde(rename = "mergedHash")]
+        merged_hash: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportResolutionKind {
+    NewSource,
+    ExactDuplicate,
+    SameSourceNewVersion,
+    NeedsThreeWayMerge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResolutionBinding {
+    pub source_id: String,
+    pub candidate_hash: String,
+    pub current_hash: String,
+    pub target_version_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResolutionContext {
+    pub kind: ImportResolutionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<ImportResolutionBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_resolution: Option<ImportItemResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_wiki_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportThreeWayMergeContext {
+    pub resolution: ImportResolutionContext,
+    pub baseline_markdown: String,
+    pub current_markdown: String,
+    pub candidate_markdown: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportPrimaryAction {
+    Retry,
+    SignIn,
+    Authorize,
+    InstallCapability,
+    EnableOcr,
+    AuthorizeLocalAsr,
+    InvokeLocalAgent,
+    Review,
+    Resolve,
+    Resume,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportIssueDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub technical_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub technical_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UserIssue {
+    pub code: String,
+    pub title: String,
+    pub data_safety: String,
+    pub primary_action: Option<ImportPrimaryAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ImportIssueDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceVersionChange {
+    pub source_id: String,
+    pub version_id: String,
+    pub wiki_path: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateResult {
+    pub item_id: String,
+    pub source_id: String,
+    pub version_id: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemFailure {
+    pub item_id: String,
+    pub input_label: String,
+    pub issue: UserIssue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCompletion {
+    pub session_id: String,
+    pub batch_id: String,
+    pub new_sources: Vec<SourceVersionChange>,
+    pub updated_sources: Vec<SourceVersionChange>,
+    pub duplicate_skips: Vec<DuplicateResult>,
+    pub warnings: Vec<UserIssue>,
+    pub failures: Vec<ItemFailure>,
+}
+
+impl ImportCompletion {
+    pub fn empty(session_id: impl Into<String>, batch_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            batch_id: batch_id.into(),
+            new_sources: Vec::new(),
+            updated_sources: Vec::new(),
+            duplicate_skips: Vec::new(),
+            warnings: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +284,7 @@ impl ImportItemStatus {
                         | WaitingLogin
                         | WaitingAuthorization
                         | Extracting
+                        | Paused
                         | Failed
                         | Cancelled
                 )
@@ -86,7 +292,10 @@ impl ImportItemStatus {
                     WaitingCapability,
                     Inspecting | Extracting | Cancelled | Skipped | Failed
                 )
-                | (WaitingLogin, Extracting | Cancelled | Skipped | Failed)
+                | (
+                    WaitingLogin,
+                    Inspecting | Extracting | Cancelled | Skipped | Failed
+                )
                 | (
                     WaitingAuthorization,
                     Inspecting | Extracting | Cancelled | Skipped | Failed
@@ -97,10 +306,14 @@ impl ImportItemStatus {
                         | WaitingLogin
                         | WaitingAuthorization
                         | Validating
+                        | Paused
                         | Failed
                         | Cancelled
                 )
-                | (Validating, PreviewReady | Failed | Cancelled)
+                | (
+                    Validating,
+                    PreviewReady | NeedsMerge | Paused | Failed | Cancelled
+                )
                 | (
                     PreviewReady,
                     Inspecting | NeedsMerge | Committing | Skipped | Cancelled
@@ -200,6 +413,85 @@ pub struct QualityReport {
     pub meaningful_image_coverage: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePageType {
+    Source,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceFrontmatter {
+    #[serde(rename = "type")]
+    pub page_type: SourcePageType,
+    pub source_id: String,
+    pub version_id: String,
+    pub source_kind: String,
+    pub title: String,
+    pub imported_at: String,
+    pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_content_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub quality: QualityReport,
+    pub restricted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFrontmatterValidationError {
+    pub field: String,
+    pub code: String,
+}
+
+pub fn validate_source_frontmatter(
+    frontmatter: &SourceFrontmatter,
+    expected_content_hash: &str,
+) -> Result<(), SourceFrontmatterValidationError> {
+    for (field, value) in [
+        ("sourceId", frontmatter.source_id.as_str()),
+        ("versionId", frontmatter.version_id.as_str()),
+        ("sourceKind", frontmatter.source_kind.as_str()),
+        ("title", frontmatter.title.as_str()),
+        ("importedAt", frontmatter.imported_at.as_str()),
+        ("contentHash", frontmatter.content_hash.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(SourceFrontmatterValidationError {
+                field: field.into(),
+                code: "required".into(),
+            });
+        }
+    }
+    if frontmatter.content_hash.len() != 64
+        || !frontmatter
+            .content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(SourceFrontmatterValidationError {
+            field: "contentHash".into(),
+            code: "invalid_sha256".into(),
+        });
+    }
+    if frontmatter.content_hash != expected_content_hash {
+        return Err(SourceFrontmatterValidationError {
+            field: "contentHash".into(),
+            code: "manifest_mismatch".into(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportArtifact {
@@ -242,6 +534,8 @@ pub struct ImportIssue {
     pub recovery_actions: Vec<ImportRecoveryAction>,
     #[serde(default)]
     pub available_actions: Vec<crate::models::import_v2_agent::AgentRecoveryAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtitle_candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -262,7 +556,7 @@ pub enum ImportRecoveryAction {
     InstallMediaCapability,
     InstallOcrCapability,
     AuthorizeLocalAsr,
-    PreviewWithoutTranscript,
+    SelectSubtitle,
 }
 
 impl ImportIssue {
@@ -272,6 +566,7 @@ impl ImportIssue {
             "IMPORT_WEB_LOGIN_REQUIRED"
             | "IMPORT_WEB_CHALLENGE_DETECTED"
             | "IMPORT_WEB_CAPTCHA_REQUIRED" => (false, true, vec![BeginLogin]),
+            "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED" => (false, true, vec![]),
             "IMPORT_V2_URL_REJECTED" | "IMPORT_V2_REDIRECT_REJECTED" => (false, true, vec![Skip]),
             "IMPORT_V2_PRIVATE_TARGET_BLOCKED" => (false, true, vec![AuthorizePrivateTarget]),
             "IMPORT_V2_RESPONSE_TOO_LARGE" => (false, true, vec![SwitchRoute]),
@@ -287,14 +582,12 @@ impl ImportIssue {
             "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => (
                 true,
                 true,
-                vec![
-                    AuthorizeLocalAsr,
-                    PreviewWithoutTranscript,
-                    InstallMediaCapability,
-                    InvokeAgent,
-                ],
+                vec![AuthorizeLocalAsr, InstallMediaCapability, InvokeAgent],
             ),
             "IMPORT_WEB_OCR_UNAVAILABLE" => (true, true, vec![InstallOcrCapability, InvokeAgent]),
+            "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING" => {
+                (true, true, vec![InstallBrowserCapability, InvokeAgent])
+            }
             "IMPORT_ASR_ENGINE_UNAVAILABLE" | "IMPORT_ASR_ENGINE_INTEGRITY_FAILED" => {
                 (true, true, vec![InstallMediaCapability, RetryRoute])
             }
@@ -308,14 +601,20 @@ impl ImportIssue {
             _ => (true, false, vec![RetryRoute, SwitchRoute]),
         };
         recovery_actions.extend([Skip, ViewLog]);
+        let message = if code == "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED" {
+            "The current account cannot access this content."
+        } else {
+            "Web import could not be completed."
+        };
         Self {
             code: code.into(),
-            message: "Web import could not be completed.".into(),
+            message: message.into(),
             stage,
             retryable,
             user_action_required,
             recovery_actions,
             available_actions: Vec::new(),
+            subtitle_candidates: Vec::new(),
         }
     }
     pub fn for_file_code(code: &str, stage: ImportStage) -> Self {
@@ -334,6 +633,7 @@ impl ImportIssue {
                 vec![InstallOcrCapability, EnableOcr, SwitchParser, InvokeAgent],
             ),
             "IMPORT_FILE_CANCELLED" => (true, false, vec![Retry]),
+            "IMPORT_FILE_SUBTITLE_AMBIGUOUS" => (true, true, vec![SelectSubtitle]),
             _ => (true, false, vec![Retry, InvokeAgent]),
         };
         recovery_actions.extend([Skip, ViewLog]);
@@ -345,6 +645,7 @@ impl ImportIssue {
             user_action_required,
             recovery_actions,
             available_actions: Vec::new(),
+            subtitle_candidates: Vec::new(),
         }
     }
 
@@ -358,6 +659,7 @@ impl ImportIssue {
             user_action_required: true,
             recovery_actions: vec![ViewLog],
             available_actions: Vec::new(),
+            subtitle_candidates: Vec::new(),
         }
     }
 }
@@ -370,6 +672,12 @@ pub struct ImportPreviewArtifact {
     pub source_snapshot: ImportArtifact,
     pub quality: QualityReport,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ImportResolutionContext>,
+    /// Staging-bound merged Markdown. `ManualMerge.mergedHash` must match
+    /// this immutable artifact before commit can advance the Source version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_merge: Option<ImportArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -379,11 +687,23 @@ pub struct ImportItem {
     pub input: ImportInput,
     pub status: ImportItemStatus,
     pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_subtitle: Option<String>,
     pub task_id: Option<String>,
     pub progress: Option<TaskProgress>,
     pub attempts: Vec<AttemptRecord>,
     pub preview: Option<ImportPreviewArtifact>,
     pub issue: Option<ImportIssue>,
+    /// Durable access metadata only. Connector cookies and browser profile
+    /// paths must never be serialized into an import session.
+    #[serde(default)]
+    pub authenticated_retry: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_identity_summary: Option<String>,
+    #[serde(default)]
+    pub restricted_content: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restricted_identity_summary: Option<String>,
 }
 
 impl ImportItem {
@@ -393,13 +713,39 @@ impl ImportItem {
             input,
             status: ImportItemStatus::Queued,
             selected: true,
+            selected_subtitle: None,
             task_id: None,
             progress: None,
             attempts: Vec::new(),
             preview: None,
             issue: None,
+            authenticated_retry: false,
+            authenticated_identity_summary: None,
+            restricted_content: false,
+            restricted_identity_summary: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCollectionRelation {
+    pub relation_id: String,
+    pub source_url: String,
+    pub platform: String,
+    pub title: String,
+    pub child_item_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ImportCollectionChildRelation>,
+    pub added_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCollectionChildRelation {
+    pub item_id: String,
+    pub canonical_url: String,
+    pub discovery_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -414,7 +760,44 @@ pub struct ImportSession {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_authorizations: Vec<ImportMediaAuthorization>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collection_relations: Vec<ImportCollectionRelation>,
     pub items: Vec<ImportItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMediaAuthorizationKind {
+    Ocr,
+    Asr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportAsrProfile {
+    Fast,
+    Balanced,
+    Accurate,
+}
+
+impl Default for ImportAsrProfile {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMediaAuthorization {
+    pub item_id: String,
+    pub kind: ImportMediaAuthorizationKind,
+    pub authorized_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_profile: Option<ImportAsrProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 impl ImportSession {
@@ -429,25 +812,29 @@ impl ImportSession {
             created_at: now.clone(),
             updated_at: now,
             discovery_task_id: None,
+            media_authorizations: Vec::new(),
+            collection_relations: Vec::new(),
             items: Vec::new(),
         }
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CommitConflictAction {
-    CreateNew,
-    KeepWiki,
-    ApplyMergedCandidate,
+    pub fn has_media_authorization(
+        &self,
+        item_id: &str,
+        kind: ImportMediaAuthorizationKind,
+    ) -> bool {
+        self.media_authorizations
+            .iter()
+            .any(|authorization| authorization.item_id == item_id && authorization.kind == kind)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitItemDecision {
     pub item_id: String,
-    pub conflict_action: Option<CommitConflictAction>,
-    pub expected_wiki_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ImportItemResolution>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -458,7 +845,18 @@ pub struct CommitImportSessionRequest {
     pub session_id: String,
     #[serde(default)]
     pub batch_task_id: Option<String>,
+    #[serde(default)]
+    pub acknowledge_restricted_content: bool,
     pub decisions: Vec<CommitItemDecision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportCommitDisposition {
+    NewSource,
+    UpdatedSource,
+    DuplicateSkipped,
+    KeptCurrent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -468,6 +866,12 @@ pub struct ImportItemCommitResult {
     pub source_id: Option<String>,
     pub version_id: Option<String>,
     pub wiki_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ImportCommitDisposition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<UserIssue>,
     pub committed: bool,
     pub error_code: Option<String>,
 }
@@ -491,6 +895,10 @@ pub struct ImportBatchResult {
     /// session fallback until they are naturally replaced by a new batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_snapshot: Option<ImportSession>,
+    /// Authoritative production summary used by the completion surface and
+    /// Import History. Kept optional so pre-Batch-2 history remains readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<ImportCompletion>,
 }
 
 #[cfg(test)]
@@ -514,6 +922,32 @@ mod tests {
         assert_eq!(value["sessionId"], json!("session-1"));
         assert_eq!(value["resourceMode"], json!("balanced"));
         assert!(value.get("session_id").is_none());
+    }
+
+    #[test]
+    fn media_authorization_is_bound_to_one_session_only() {
+        let mut authorized = ImportSession::new(
+            "session-authorized",
+            "project-1",
+            ImportResourceMode::Balanced,
+        );
+        authorized
+            .media_authorizations
+            .push(ImportMediaAuthorization {
+                item_id: "item-1".into(),
+                kind: ImportMediaAuthorizationKind::Ocr,
+                authorized_at: "2026-07-26T00:00:00Z".into(),
+                asr_profile: None,
+                language: None,
+            });
+        let next_session =
+            ImportSession::new("session-next", "project-1", ImportResourceMode::Balanced);
+        assert!(authorized.has_media_authorization("item-1", ImportMediaAuthorizationKind::Ocr));
+        assert!(!next_session.has_media_authorization("item-1", ImportMediaAuthorizationKind::Ocr));
+        assert!(serde_json::to_string(&next_session)
+            .unwrap()
+            .find("mediaAuthorizations")
+            .is_none());
     }
 
     #[test]
@@ -548,9 +982,7 @@ mod tests {
         assert!(issue
             .recovery_actions
             .contains(&ImportRecoveryAction::AuthorizeLocalAsr));
-        assert!(issue
-            .recovery_actions
-            .contains(&ImportRecoveryAction::PreviewWithoutTranscript));
+        assert!(!issue.recovery_actions.is_empty());
     }
 
     #[test]
@@ -577,5 +1009,249 @@ mod tests {
             issue.recovery_actions,
             vec![ImportRecoveryAction::Skip, ImportRecoveryAction::ViewLog]
         );
+    }
+
+    #[test]
+    fn authenticated_account_permission_denial_never_loops_back_to_login() {
+        let issue =
+            ImportIssue::for_web_code("IMPORT_WEB_ACCOUNT_PERMISSION_DENIED", ImportStage::Extract);
+        assert!(!issue.retryable);
+        assert_eq!(
+            issue.message,
+            "The current account cannot access this content."
+        );
+        assert!(!issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::BeginLogin));
+        assert_eq!(
+            issue.recovery_actions,
+            vec![ImportRecoveryAction::Skip, ImportRecoveryAction::ViewLog]
+        );
+    }
+
+    #[test]
+    fn missing_platform_route_offers_capability_and_local_agent_recovery() {
+        let issue =
+            ImportIssue::for_web_code("IMPORT_WEB_PLATFORM_CAPABILITY_MISSING", ImportStage::Route);
+        assert!(issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InstallBrowserCapability));
+        assert!(issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InvokeAgent));
+    }
+
+    #[test]
+    fn frozen_batch_zero_contract_serializes_for_typescript_consumers() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-fixtures/import-v2-batch0-contract.json"
+        ))
+        .unwrap();
+        let input_kinds = [
+            ImportInputKind::File,
+            ImportInputKind::Folder,
+            ImportInputKind::Url,
+            ImportInputKind::ClipboardText,
+        ];
+        assert_eq!(
+            serde_json::to_value(input_kinds).unwrap(),
+            contract["inputKinds"]
+        );
+        let states = [
+            ImportUserState::Discovering,
+            ImportUserState::Processing,
+            ImportUserState::NeedsAction,
+            ImportUserState::Ready,
+            ImportUserState::Committing,
+            ImportUserState::Committed,
+            ImportUserState::Failed,
+        ];
+        assert_eq!(
+            serde_json::to_value(states).unwrap(),
+            contract["userStates"]
+        );
+
+        let primary_actions = [
+            ImportPrimaryAction::Retry,
+            ImportPrimaryAction::SignIn,
+            ImportPrimaryAction::Authorize,
+            ImportPrimaryAction::InstallCapability,
+            ImportPrimaryAction::EnableOcr,
+            ImportPrimaryAction::AuthorizeLocalAsr,
+            ImportPrimaryAction::InvokeLocalAgent,
+            ImportPrimaryAction::Review,
+            ImportPrimaryAction::Resolve,
+            ImportPrimaryAction::Resume,
+        ];
+        assert_eq!(
+            serde_json::to_value(primary_actions).unwrap(),
+            contract["primaryActions"]
+        );
+
+        let candidate_hash = "a".repeat(64);
+        let current_hash = "b".repeat(64);
+        let source_id = "src_a".to_string();
+        let target_version_id = "ver_b".to_string();
+        let resolutions = vec![
+            ImportItemResolution::NewSource,
+            ImportItemResolution::ExactDuplicateSkip {
+                source_id: source_id.clone(),
+                candidate_hash: candidate_hash.clone(),
+                current_hash: current_hash.clone(),
+                target_version_id: target_version_id.clone(),
+            },
+            ImportItemResolution::SameSourceNewVersion {
+                source_id: source_id.clone(),
+                candidate_hash: candidate_hash.clone(),
+                current_hash: current_hash.clone(),
+                target_version_id: target_version_id.clone(),
+            },
+            ImportItemResolution::KeepCurrentSource {
+                source_id: source_id.clone(),
+                candidate_hash: candidate_hash.clone(),
+                current_hash: current_hash.clone(),
+                target_version_id: target_version_id.clone(),
+            },
+            ImportItemResolution::ApplyImportCandidate {
+                source_id: source_id.clone(),
+                candidate_hash: candidate_hash.clone(),
+                current_hash: current_hash.clone(),
+                target_version_id: target_version_id.clone(),
+            },
+            ImportItemResolution::ManualMerge {
+                source_id,
+                candidate_hash,
+                current_hash,
+                target_version_id,
+                merged_hash: "c".repeat(64),
+            },
+        ];
+        assert_eq!(
+            serde_json::to_value(resolutions).unwrap(),
+            contract["resolutions"]
+        );
+
+        let completion: ImportCompletion =
+            serde_json::from_value(contract["completion"].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(completion).unwrap(),
+            contract["completion"]
+        );
+
+        let frontmatter: SourceFrontmatter =
+            serde_json::from_value(contract["sourceFrontmatter"].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(frontmatter).unwrap(),
+            contract["sourceFrontmatter"]
+        );
+    }
+
+    #[test]
+    fn source_frontmatter_contract_is_secret_free_and_validates_manifest_hash() {
+        let hash = "c".repeat(64);
+        let frontmatter = SourceFrontmatter {
+            page_type: SourcePageType::Source,
+            source_id: "src_a".into(),
+            version_id: "ver_a".into(),
+            source_kind: "local_document".into(),
+            title: "研究资料".into(),
+            imported_at: "2026-07-25T00:00:00Z".into(),
+            content_hash: hash.clone(),
+            platform: None,
+            canonical_url: None,
+            platform_content_id: None,
+            author: None,
+            published_at: None,
+            language: Some("zh-CN".into()),
+            quality: QualityReport {
+                level: QualityLevel::Pass,
+                metrics: Vec::new(),
+                warnings: Vec::new(),
+                sheet_count_exact: None,
+                slide_count_exact: None,
+                non_empty_cell_coverage: None,
+                formula_value_pairs: None,
+                meaningful_image_coverage: None,
+            },
+            restricted: false,
+        };
+        validate_source_frontmatter(&frontmatter, &hash).unwrap();
+        let value = serde_json::to_value(&frontmatter).unwrap();
+        assert_eq!(value["type"], "source");
+        assert_eq!(value["sourceId"], "src_a");
+        assert_eq!(value["platformContentId"], serde_json::Value::Null);
+        let encoded = serde_json::to_string(&value).unwrap();
+        for forbidden in ["cookie", "token", "staging", "sessionId", "engineId"] {
+            assert!(!encoded.contains(forbidden));
+        }
+        for forbidden in ["cookie", "token", "stagingPath", "sessionId", "engineId"] {
+            let mut forbidden_value = value.clone();
+            forbidden_value[forbidden] = json!("must-not-be-accepted");
+            assert!(
+                serde_json::from_value::<SourceFrontmatter>(forbidden_value).is_err(),
+                "Source frontmatter must reject {forbidden}"
+            );
+        }
+        assert_eq!(
+            validate_source_frontmatter(&frontmatter, &"d".repeat(64))
+                .unwrap_err()
+                .code,
+            "manifest_mismatch"
+        );
+    }
+
+    #[test]
+    fn legacy_cjk_session_preserves_explicit_media_mode_while_new_default_is_extract_only() {
+        let session: ImportSession = serde_json::from_value(json!({
+            "schemaVersion": 2,
+            "sessionId": "session-cjk",
+            "projectId": "project-cjk",
+            "status": "draft",
+            "resourceMode": "balanced",
+            "createdAt": "2026-07-25T00:00:00Z",
+            "updatedAt": "2026-07-25T00:00:00Z",
+            "items": [{
+                "itemId": "item-cjk",
+                "input": {
+                    "kind": "url",
+                    "displayName": "访谈视频：研发复盘.mp4",
+                    "locator": "https://example.com/video",
+                    "normalizedLocator": "https://example.com/video",
+                    "mediaSaveMode": "preserve_original"
+                },
+                "status": "queued",
+                "selected": false,
+                "taskId": null,
+                "progress": null,
+                "attempts": [],
+                "preview": null,
+                "issue": null
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            session.items[0].input.display_name,
+            "访谈视频：研发复盘.mp4"
+        );
+        assert_eq!(
+            session.items[0].input.media_save_mode,
+            MediaSaveMode::PreserveOriginal
+        );
+
+        let input: ImportInput = serde_json::from_value(json!({
+            "kind": "url",
+            "displayName": "新远程媒体",
+            "locator": "https://example.com/new",
+            "normalizedLocator": null
+        }))
+        .unwrap();
+        assert_eq!(input.media_save_mode, MediaSaveMode::ExtractOnly);
+    }
+
+    #[test]
+    fn remote_media_defaults_to_extract_only_without_retaining_the_original_payload() {
+        assert_eq!(MediaSaveMode::default(), MediaSaveMode::ExtractOnly);
+        let value = serde_json::to_value(MediaSaveMode::default()).unwrap();
+        assert_eq!(value, "extract_only");
     }
 }

@@ -8,8 +8,9 @@ import { ImportLoginDialog } from "./ImportLoginDialog";
 const session: ConnectorSessionRef = {
   sessionId: "connector-1",
   platform: "wechat",
-  profileRef: "profile-ref-opaque",
   state: "waiting_login",
+  accountSummary: "Aletta · @aletta",
+  lastVerifiedAt: "2026-07-27T00:00:00Z",
 };
 
 beforeEach(async () => {
@@ -33,6 +34,8 @@ describe("ImportLoginDialog", () => {
     );
 
     expect(screen.getByText(/mp.weixin.qq.com/i)).toBeInTheDocument();
+    expect(screen.getByText(/Aletta · @aletta/i)).toBeInTheDocument();
+    expect(screen.queryByText("connector-1")).not.toBeInTheDocument();
     expect(screen.getByText(/dedicated.*profile/i)).toBeInTheDocument();
     expect(screen.getByText(/complete the captcha yourself/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/password|cookie/i)).not.toBeInTheDocument();
@@ -64,5 +67,27 @@ describe("ImportLoginDialog", () => {
     await waitFor(() => {
       expect(onRevoke).toHaveBeenCalledWith("connector-1");
     });
+  });
+
+  it("closes without consuming or completing the waiting login", () => {
+    const onCancel = vi.fn();
+    const onCheckAgain = vi.fn();
+    render(
+      <ImportLoginDialog
+        open
+        platform="wechat"
+        publicDomain="mp.weixin.qq.com"
+        authState="waiting_login"
+        connectorSession={session}
+        onBeginLogin={vi.fn()}
+        onCheckAgain={onCheckAgain}
+        onRevoke={vi.fn()}
+        onCancel={onCancel}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Cancel"));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onCheckAgain).not.toHaveBeenCalled();
   });
 });

@@ -19,7 +19,7 @@ Before implementation, read the relevant docs:
 - API keys and tokens must use OS credential storage. Never write secrets to project files, logs, or exported artifacts.
 - High-risk file operations need Git checkpoints first: delete, overwrite, batch rewrite, Agent auto-fix, conflict merge, source replacement.
 - Search is local keyword/filter search only. Natural-language answers must enter Chat / Agent / BYOK flow.
-- Agent CLI is an enhancement, not the only path. BYOK API must support core flows.
+- Agent CLI is an enhancement, not the only path. After a readable Source exists, BYOK API must support core AI organization, compile, and Chat flows; it is not an Import parser or recovery route.
 - Do not silently install or run Agent install commands.
 - Long tasks must be cancellable, logged, progress-visible, and safe to run in the background.
 - React UI must not own filesystem, Git, Agent process, or secret-storage logic. Use Tauri IPC and backend services.
@@ -50,6 +50,8 @@ Build the app to look and feel very close to Codex desktop:
 
 The entire `UI-Frontend-design/` folder is the design spec — not just `app.css`, but HTML structure, page components, and JS behavior. Do not treat it as app source; do not modify or commit it. Before any UI work, consult:
 
+Import / Source exception: `docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md` is the sole authority for Import and Source product flow, information architecture, state, copy, media actions, login, OCR / ASR, and AI 整理. Legacy `UI-Frontend-design/import*.html` files remain visual-density and structure references only where they do not conflict; do not restore their compile-after-import, Git toggle, or compile-time OCR behavior.
+
 1. **Page layout & component structure** — `dashboard.html` defines the full shell: left sidebar (3 labeled sections + agent foot), right panel (project info with paths/index/route/tasks), topbar, status bar. Match DOM hierarchy, section labels, and aria roles.
 2. **CSS tokens & visual density** — `assets/app.css` is the canonical style reference. Implement in Tailwind v4 + `src/styles.css`:
    - Font sizes in absolute px: UI body 13px, secondary 12px, muted/mono 11px, micro-labels 10.5px, reading 14–15px. Write `text-[13px]`, not `text-sm`.
@@ -70,29 +72,28 @@ The entire `UI-Frontend-design/` folder is the design spec — not just `app.css
 
 ## Required Checks
 
-After every completed task, automatically run the unified local check:
+Use checks proportionally to the change:
 
-1. `npm run check` - runs tests, lint, build/import resolution, console-log scan, Tauri GUI Rust compile, and Rust no-default-features tests.
-2. If the check fails, fix the issue and rerun `npm run check` from the beginning.
+1. **Documentation-only work** — Markdown/docs, research notes, plans, reviews, and progress/gotchas logging do not require an npm check unless they also change executable configuration or code.
+2. **Ordinary development** — For small or localized code changes, run `npm run check:quick`. It covers lint, the production frontend build/import resolution, the console-log scan, and Rust core compilation.
+3. **Large or high-risk completion** — Run the full `npm run check` when finishing a feature, cross-layer change, architecture or dependency/build change, broad refactor, release-facing work, or code that affects filesystem mutation, Git safety, secrets, IPC, concurrency, background tasks, or other critical paths. Also run it whenever the user explicitly requests the full gate.
+4. If a required check fails because of the scoped change, fix it and rerun that same gate. When the full gate is required, rerun `npm run check` from the beginning after fixes.
 
-If the project is not initialized yet or `npm run check` does not exist, report the exact missing file or script clearly instead of pretending it passed.
+Use judgment rather than treating every edit as a release gate. If the project is not initialized or a required script does not exist, report the exact missing file or script instead of pretending it passed.
 
 
 
 ## Review Workflow
 
-After each feature or meaningful fix:
+Review effort must be proportional and is only required when executable code changes:
 
-1. Run `npm run check`.
-2. Launch two review subagents:
-   - Subagent A with shared context: review design intent, logic, consistency, and integration with existing docs.
-   - Subagent B with fresh context: review with no assumptions, look for blind spots, missing tests, and unclear behavior.
-3. Merge both review results.
-4. Fix all valid issues.
-5. Rerun `npm run check`.
-6. Only then deliver.
+- **Documentation-only work** — Do not launch review subagents for Markdown/docs, research, plans, reviews, progress logs, or gotchas-only changes.
+- **Small localized code changes** — Perform a focused review of the changed code. A review subagent is optional when the change is straightforward and low risk.
+- **Features, meaningful fixes, cross-layer changes, or high-risk code** — Launch two review subagents:
+  - Subagent A with shared context: review design intent, logic, consistency, and integration with existing docs.
+  - Subagent B with fresh context: review with no assumptions, looking for blind spots, missing tests, and unclear behavior.
 
-If subagents are unavailable in the current environment, perform the two reviews manually and say so in the final report.
+Merge applicable review results, fix valid issues, and run the check level required by the change classification above. If subagents are unavailable when a two-review pass is warranted, perform the equivalent reviews manually and say so in the final report.
 
 ## Progress And Gotchas Logging
 

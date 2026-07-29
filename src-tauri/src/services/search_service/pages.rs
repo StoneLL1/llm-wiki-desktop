@@ -177,7 +177,7 @@ impl SearchService {
         // restore the working tree to its pre-rename state. The caller's Git
         // checkpoint protects the before-state for manual recovery, but an
         // automatic rollback keeps the wiki consistent without forcing the
-        // user to dig through git (mirrors apply_source_delete's backup+restore).
+        // user to dig through git (the shared high-risk backup/restore invariant).
         let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
         // (project-relative path, original bytes) for each file we touch,
         // starting with the source page itself.
@@ -299,8 +299,8 @@ impl SearchService {
     /// confirmation), create a pre-delete scoped Git checkpoint (the safety
     /// net, CLAUDE.md hard rule), remove the file, invalidate the graph cache,
     /// and commit the deletion as a FinalResult checkpoint so the change is
-    /// recoverable and visible in history. Mirrors
-    /// `import_service::apply_source_delete`'s two-checkpoint contract.
+    /// recoverable and visible in history. This is the generic Wiki page
+    /// two-checkpoint contract; Source packages use their dedicated lifecycle.
     /// Returns whether the pre-delete checkpoint produced a commit hash.
     pub fn apply_page_delete(
         &self,
@@ -370,7 +370,7 @@ impl SearchService {
         // working tree. `unstage_paths` alone only resets the index, not the
         // working tree, so a successful remove_file followed by a failed
         // post-delete checkpoint would otherwise leave the page gone on disk
-        // (mirrors the backup+restore pattern in apply_source_delete).
+        // (the shared high-risk backup/restore invariant).
         let snapshot = std::fs::read(&absolute).map_err(|err| file_read_error(err, &absolute))?;
 
         let result = (|| {

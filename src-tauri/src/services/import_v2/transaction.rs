@@ -82,7 +82,7 @@ fn run_before_recovery_final_mutation_hook(path: &Path) {
 }
 
 #[cfg(test)]
-fn set_fail_next_candidate_install() {
+pub(super) fn set_fail_next_candidate_install() {
     FAIL_NEXT_CANDIDATE_INSTALL.with(|flag| flag.set(true));
 }
 
@@ -125,6 +125,8 @@ struct JournalEntry {
     relative_path: String,
     previous: Option<Vec<u8>>,
     desired_hash: String,
+    #[serde(default)]
+    desired_absent: bool,
     #[serde(default)]
     installed_identity: Option<FileIdentity>,
     #[serde(default)]
@@ -175,6 +177,7 @@ pub struct FileTransaction {
     installed_ownership: std::collections::HashMap<PathBuf, InstalledOwnership>,
     unverified_installs: std::collections::HashSet<PathBuf>,
     guard_by_destination: std::collections::HashMap<PathBuf, PathBuf>,
+    deleted_destinations: std::collections::HashSet<PathBuf>,
     project_root: Option<PathBuf>,
     journal_path: Option<PathBuf>,
     journal_entries: Vec<JournalEntry>,
@@ -211,6 +214,7 @@ impl FileTransaction {
             installed_ownership: std::collections::HashMap::new(),
             unverified_installs: std::collections::HashSet::new(),
             guard_by_destination: std::collections::HashMap::new(),
+            deleted_destinations: std::collections::HashSet::new(),
             project_root: None,
             journal_path: None,
             journal_entries: Vec::new(),
@@ -288,14 +292,37 @@ impl FileTransaction {
                 };
                 let current_hash = current.as_deref().map(digest_bytes);
                 if journal.state == JournalState::Committed {
-                    if current_hash.as_deref() != Some(&intent.desired_hash)
-                        || !journal_identity_matches(&target, intent)?
+                    let desired_is_present = current_hash.as_deref() == Some(&intent.desired_hash)
+                        && journal_identity_matches(&target, intent)?;
+                    if (intent.desired_absent && current.is_some())
+                        || (!intent.desired_absent && !desired_is_present)
                     {
                         return Err(conflict_error());
                     }
                     continue;
                 }
                 let previous_hash = intent.previous.as_deref().map(digest_bytes);
+                if intent.desired_absent {
+                    if current_hash == previous_hash {
+                        continue;
+                    }
+                    if current.is_some() {
+                        return Err(conflict_error());
+                    }
+                    let previous = intent
+                        .previous
+                        .as_deref()
+                        .ok_or_else(staging_safe_io_error)?;
+                    let temporary = write_synced_temp(
+                        target.parent().ok_or_else(staging_safe_io_error)?,
+                        &target,
+                        previous,
+                    )?;
+                    install_candidate(&parent_binding, &temporary, &target)
+                        .map_err(|error| io_error(error, &target))?;
+                    let _ = std::fs::remove_file(&temporary);
+                    continue;
+                }
                 if intent.recovery.is_some() || current_hash != previous_hash {
                     if intent.recovery.is_some() {
                         resume_recovery_entry(
@@ -378,6 +405,7 @@ impl FileTransaction {
             relative_path: relative.clone(),
             previous,
             desired_hash: digest_bytes(bytes),
+            desired_absent: false,
             // The same-volume install primitives below preserve the candidate's
             // native identity. Persist it before the namespace mutation so a
             // crash immediately after install is still recoverable.
@@ -404,6 +432,51 @@ impl FileTransaction {
         .map_err(|_| staging_safe_io_error())?;
         write_atomic_bytes(&journal_path, &bytes)?;
         Ok(())
+    }
+
+    fn record_delete_intent(&mut self, path: &Path, previous: Vec<u8>) -> Result<(), BackendError> {
+        let Some(root) = self.project_root.as_deref() else {
+            return Ok(());
+        };
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| {
+                BackendError::new(
+                    "PATH_INVALID",
+                    "Commit target is outside the project.",
+                    false,
+                    true,
+                )
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        self.journal_entries.push(JournalEntry {
+            relative_path: relative,
+            previous: Some(previous),
+            desired_hash: digest_bytes(&[]),
+            desired_absent: true,
+            installed_identity: None,
+            recovery: None,
+        });
+        let journal_path = self
+            .journal_path
+            .get_or_insert_with(|| {
+                root.join(format!(
+                    ".app/import-v2-journal/{}.json",
+                    uuid::Uuid::new_v4()
+                ))
+            })
+            .clone();
+        if let Some(parent) = journal_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| io_error(error, parent))?;
+        }
+        let bytes = serde_json::to_vec(&Journal {
+            state: JournalState::InProgress,
+            entries: self.journal_entries.clone(),
+            recovery_artifacts: self.journal_artifacts.clone(),
+        })
+        .map_err(|_| staging_safe_io_error())?;
+        write_atomic_bytes(&journal_path, &bytes)
     }
 
     fn record_recovery_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -455,27 +528,6 @@ impl FileTransaction {
                 Err(error) => return Err(io_error(error, &path)),
             }
         }
-        Ok(())
-    }
-
-    pub fn write(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
-        let was_absent = !path.exists();
-        if let Some(parent) = path.parent() {
-            let mut missing: Vec<_> = parent
-                .ancestors()
-                .take_while(|candidate| !candidate.exists())
-                .map(Path::to_path_buf)
-                .collect();
-            missing.reverse();
-            for directory in missing {
-                std::fs::create_dir(&directory).map_err(|error| io_error(error, &directory))?;
-                self.created_dirs.push(directory);
-            }
-        }
-        self.track(path)?;
-        write_atomic_bytes(path, bytes)?;
-        let _ = was_absent;
-        self.capture_installed(path, bytes)?;
         Ok(())
     }
 
@@ -589,17 +641,6 @@ impl FileTransaction {
         Ok(())
     }
 
-    pub fn track(&mut self, path: &Path) -> Result<(), BackendError> {
-        if !self.backups.iter().any(|(existing, _)| existing == path) {
-            let previous = path
-                .exists()
-                .then(|| std::fs::read(path).map_err(|error| io_error(error, path)))
-                .transpose()?;
-            self.backups.push((path.to_path_buf(), previous));
-        }
-        Ok(())
-    }
-
     pub fn write_if_hash_matches(
         &mut self,
         path: &Path,
@@ -684,6 +725,52 @@ impl FileTransaction {
         self.cleanup_artifact(&guard)
     }
 
+    pub fn delete_if_hash_matches(
+        &mut self,
+        path: &Path,
+        expected_hash: &str,
+    ) -> Result<(), BackendError> {
+        let parent = path.parent().ok_or_else(|| {
+            BackendError::new(
+                "PATH_INVALID",
+                "Cannot determine parent directory.",
+                false,
+                true,
+            )
+        })?;
+        let guard = parent.join(format!(".wiki-delete-guard-{}", uuid::Uuid::new_v4()));
+        let parent_binding = self.bind_mutation_parent(path)?;
+        run_before_checked_displace_hook(path);
+        bound_hard_link(&parent_binding, path, &guard).map_err(|error| io_error(error, path))?;
+        self.recovery_artifacts.push(guard.clone());
+        let before_identity = file_identity(path)?;
+        let guard_identity = file_identity(&guard)?;
+        let previous = read_regular_nofollow(&parent_binding, &guard)?;
+        if before_identity != guard_identity || digest_bytes(&previous) != expected_hash {
+            let _ = self.cleanup_artifact(&guard);
+            return Err(conflict_error());
+        }
+        self.record_delete_intent(path, previous.clone())?;
+        self.record_recovery_artifact(&guard)?;
+        #[cfg(test)]
+        if let Some(entry) = self.journal_entries.last() {
+            commit_fault_boundary("intent", Some(entry.relative_path.as_str()));
+        }
+        if file_identity(path)? != before_identity {
+            let _ = self.cleanup_artifact(&guard);
+            return Err(conflict_error());
+        }
+        bound_remove_file(&parent_binding, path).map_err(|error| io_error(error, path))?;
+        sync_parent(parent)?;
+        #[cfg(test)]
+        if let Some(entry) = self.journal_entries.last() {
+            commit_fault_boundary("installed", Some(entry.relative_path.as_str()));
+        }
+        self.backups.push((path.to_path_buf(), Some(previous)));
+        self.deleted_destinations.insert(path.to_path_buf());
+        self.cleanup_artifact(&guard)
+    }
+
     pub fn commit(mut self) -> Result<(), BackendError> {
         for artifact in self.recovery_artifacts.clone() {
             if let Err(error) = self.cleanup_artifact(&artifact) {
@@ -698,11 +785,6 @@ impl FileTransaction {
         commit_fault_boundary("deleted", None);
         self.finished = true;
         Ok(())
-    }
-
-    fn capture_installed(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
-        let identity = file_identity(path)?;
-        self.capture_installed_expected(path, bytes, identity)
     }
 
     fn capture_installed_expected(
@@ -796,6 +878,13 @@ impl FileTransaction {
                         continue;
                     }
                 }
+            }
+            if self.deleted_destinations.contains(path) && path.exists() {
+                failures.push(format!(
+                    "{}: deleted destination was recreated externally; preserved instead of rolling back",
+                    self.actionable_path(path)
+                ));
+                continue;
             }
             match previous {
                 Some(bytes) => {
@@ -1165,7 +1254,20 @@ fn bound_hard_link(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn bound_hard_link(
+    binding: &RecoveryParentBinding,
+    existing: &Path,
+    new_path: &Path,
+) -> Result<(), std::io::Error> {
+    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
+    std::fs::hard_link(
+        windows_extended_path(existing),
+        windows_extended_path(new_path),
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
 fn bound_hard_link(
     binding: &RecoveryParentBinding,
     existing: &Path,
@@ -1175,7 +1277,13 @@ fn bound_hard_link(
     std::fs::hard_link(existing, new_path)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn bound_remove_file(binding: &RecoveryParentBinding, path: &Path) -> Result<(), std::io::Error> {
+    revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
+    std::fs::remove_file(windows_extended_path(path))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn bound_remove_file(binding: &RecoveryParentBinding, path: &Path) -> Result<(), std::io::Error> {
     revalidate_recovery_parent(binding).map_err(|error| std::io::Error::other(error.message))?;
     std::fs::remove_file(path)
@@ -1675,8 +1783,14 @@ fn replace_existing(temporary: &Path, path: &Path) -> Result<(), std::io::Error>
     }
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let existing: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
-    let new_name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let existing_path = windows_extended_path(temporary);
+    let new_path = windows_extended_path(path);
+    let existing: Vec<u16> = existing_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let new_name: Vec<u16> = new_path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: both paths are valid NUL-terminated UTF-16 buffers for the duration
     // of the synchronous call. MoveFileExW with REPLACE_EXISTING performs the
     // same-volume namespace swap without an unlink/visibility gap; WRITE_THROUGH
@@ -1724,7 +1838,8 @@ fn sync_parent(parent: &Path) -> Result<(), BackendError> {
     const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
     const OPEN_EXISTING: u32 = 3;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    let name: Vec<u16> = parent.as_os_str().encode_wide().chain(Some(0)).collect();
+    let extended = windows_extended_path(parent);
+    let name: Vec<u16> = extended.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: `name` is a live NUL-terminated UTF-16 buffer. BACKUP_SEMANTICS is
     // required to obtain a directory handle. The handle is closed on every path.
     let handle = unsafe {
@@ -1883,6 +1998,33 @@ fn io_error(error: std::io::Error, path: &Path) -> BackendError {
     )
 }
 
+#[cfg(windows)]
+fn windows_extended_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    for code_unit in &mut wide {
+        if *code_unit == b'/' as u16 {
+            *code_unit = b'\\' as u16;
+        }
+    }
+    if wide.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]) {
+        return path.to_path_buf();
+    }
+    let mut extended = if wide.starts_with(&[b'\\' as u16, b'\\' as u16]) {
+        "\\\\?\\UNC\\".encode_utf16().collect::<Vec<_>>()
+    } else {
+        "\\\\?\\".encode_utf16().collect::<Vec<_>>()
+    };
+    extended.extend_from_slice(if wide.starts_with(&[b'\\' as u16, b'\\' as u16]) {
+        &wide[2..]
+    } else {
+        &wide
+    });
+    PathBuf::from(OsString::from_wide(&extended))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1902,9 +2044,11 @@ mod tests {
         std::fs::write(&existing, b"before").unwrap();
         {
             let mut transaction = FileTransaction::new();
-            transaction.write(&existing, b"after").unwrap();
             transaction
-                .write(&root.join("new/tree/file.bin"), b"created")
+                .write_if_hash_matches(&existing, b"after", &digest_bytes(b"before"))
+                .unwrap();
+            transaction
+                .write_new(&root.join("new/tree/file.bin"), b"created")
                 .unwrap();
         }
         assert_eq!(std::fs::read(&existing).unwrap(), b"before");
@@ -1917,24 +2061,32 @@ mod tests {
         let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
         let path = root.join("nested/file.bin");
         let mut transaction = FileTransaction::new();
-        transaction.write(&path, b"kept").unwrap();
+        transaction.write_new(&path, b"kept").unwrap();
         transaction.commit().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"kept");
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn tracked_external_write_is_rolled_back() {
-        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("session.json");
-        std::fs::write(&path, b"preview").unwrap();
+    fn checked_delete_rolls_back_or_commits_atomically() {
+        let root = std::env::temp_dir().join(format!("import-v2-delete-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        let path = root.join("wiki/old.md");
+        std::fs::write(&path, b"before").unwrap();
+        let hash = digest_bytes(b"before");
         {
-            let mut transaction = FileTransaction::new();
-            transaction.track(&path).unwrap();
-            std::fs::write(&path, b"completed").unwrap();
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction.delete_if_hash_matches(&path, &hash).unwrap();
+            assert!(!path.exists());
         }
-        assert_eq!(std::fs::read(&path).unwrap(), b"preview");
+        assert_eq!(std::fs::read(&path).unwrap(), b"before");
+
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.delete_if_hash_matches(&path, &hash).unwrap();
+        transaction.commit().unwrap();
+        assert!(!path.exists());
+        FileTransaction::reconcile_project(&root).unwrap();
+        assert!(!path.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1980,7 +2132,9 @@ mod tests {
         let path = root.join("existing");
         std::fs::write(&path, b"before").unwrap();
         let mut transaction = FileTransaction::new();
-        transaction.write(&path, b"after").unwrap();
+        transaction
+            .write_if_hash_matches(&path, b"after", &digest_bytes(b"before"))
+            .unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         let error = transaction.rollback().unwrap_err();
@@ -1994,7 +2148,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("created");
         let mut transaction = FileTransaction::new();
-        transaction.write(&path, b"new").unwrap();
+        transaction.write_new(&path, b"new").unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         let error = transaction.rollback().unwrap_err();
@@ -2008,7 +2162,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("created");
         let mut transaction = FileTransaction::new();
-        transaction.write(&path, b"new").unwrap();
+        transaction.write_new(&path, b"new").unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         let primary = crate::errors::BackendError::new("PRIMARY", "primary failure", true, false);
@@ -2167,7 +2321,9 @@ mod tests {
         let path = root.join("existing.bin");
         std::fs::write(&path, b"before").unwrap();
         let mut transaction = FileTransaction::new();
-        transaction.write(&path, b"after").unwrap();
+        transaction
+            .write_if_hash_matches(&path, b"after", &digest_bytes(b"before"))
+            .unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"after").unwrap();
         transaction.rollback().unwrap_err();
@@ -2182,7 +2338,9 @@ mod tests {
         let path = root.join("existing.bin");
         std::fs::write(&path, b"before").unwrap();
         let mut transaction = FileTransaction::new();
-        transaction.write(&path, b"after").unwrap();
+        transaction
+            .write_if_hash_matches(&path, b"after", &digest_bytes(b"before"))
+            .unwrap();
         std::fs::remove_file(&path).unwrap();
         transaction.rollback().unwrap_err();
         assert!(!path.exists());

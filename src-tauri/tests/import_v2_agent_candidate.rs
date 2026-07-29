@@ -2,9 +2,9 @@ use llm_wiki_desktop_lib::{
     models::{
         agent::AgentKind,
         import_v2::{
-            AttemptOutcome, AttemptRecord, CommitConflictAction, CommitImportSessionRequest,
-            CommitItemDecision, ImportInput, ImportInputKind, ImportItem, ImportItemStatus,
-            ImportResourceMode, ImportSession, ImportStage, QualityLevel, QualityReport,
+            AttemptOutcome, AttemptRecord, CommitImportSessionRequest, CommitItemDecision,
+            ImportInput, ImportInputKind, ImportItem, ImportItemResolution, ImportItemStatus,
+            ImportResolutionKind, ImportResourceMode, ImportSession, ImportStage,
         },
         import_v2_agent::{
             AgentAssistanceTrigger, AgentAuditRecord, AgentCandidateManifest, AgentToolGrant,
@@ -16,7 +16,7 @@ use llm_wiki_desktop_lib::{
         import_v2::{
             agent_candidate::AgentCandidateService,
             agent_workspace::AgentTaskBundle,
-            source_registry::{SourceIndex, SourceManifest, SourcePointer, SourceVersion},
+            source_registry::{SourceIndex, SourcePointer},
             ImportV2Service, SessionStore,
         },
         FileStore, GitService,
@@ -49,7 +49,7 @@ fn agent_candidate_manifest_rejects_unknown_fields() {
         "markdownSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "assetSha256": {},
         "processingSummary": "AI-assisted extraction",
-        "toolsUsed": ["byok-model"],
+        "toolsUsed": ["unknown-network-model"],
         "uncertainties": ["None stated."],
         "warnings": ["Review before selection."],
         "command": "git status"
@@ -103,6 +103,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         .unwrap();
     let baseline = "# Committed baseline\n\nOriginal.\n";
     let current = "# User-edited Wiki\n\nKeep this edit.\n";
+    let baseline_hash = format!("{:x}", Sha256::digest(baseline.as_bytes()));
     let baseline_path = ".app/source-artifacts/source-old/version-old/baseline.md";
     let wiki_path = "wiki/sources/web/example.md";
     std::fs::create_dir_all(
@@ -115,10 +116,12 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     std::fs::create_dir_all(root.path().join("raw/sources/source-old/version-old")).unwrap();
     std::fs::write(root.path().join(baseline_path), baseline).unwrap();
     std::fs::write(root.path().join(wiki_path), current).unwrap();
+    let old_source = b"old source";
+    let old_content_hash = format!("{:x}", Sha256::digest(old_source));
     std::fs::write(
         root.path()
             .join("raw/sources/source-old/version-old/original.bin"),
-        b"old source",
+        old_source,
     )
     .unwrap();
     let pointer = SourcePointer {
@@ -128,46 +131,59 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     let mut index = SourceIndex::default_v2();
     index
         .by_content_hash
-        .insert("old-content-hash".into(), pointer.clone());
+        .insert(old_content_hash.clone(), pointer.clone());
     index
         .by_locator
         .insert("https://example.com/".into(), pointer);
     files
         .write_json_atomic(&context, ".app/source-index-v2.json", &index)
         .unwrap();
-    let quality = QualityReport {
-        level: QualityLevel::Pass,
-        metrics: Vec::new(),
-        warnings: Vec::new(),
-        sheet_count_exact: None,
-        slide_count_exact: None,
-        non_empty_cell_coverage: None,
-        formula_value_pairs: None,
-        meaningful_image_coverage: None,
-    };
     files
         .write_json_atomic(
             &context,
             ".app/sources/source-old.json",
-            &SourceManifest {
-                schema_version: 2,
-                source_id: "source-old".into(),
-                origins: vec!["https://example.com/".into()],
-                versions: vec![SourceVersion {
-                    version_id: "version-old".into(),
-                    content_hash: "old-content-hash".into(),
-                    raw_path: "raw/sources/source-old/version-old/original.bin".into(),
-                    extracted_path: String::new(),
-                    baseline_path: baseline_path.into(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    route: "generic_web".into(),
-                    engine_id: "deterministic".into(),
-                    engine_version: "1".into(),
-                    quality,
-                }],
-                current_version_id: "version-old".into(),
-                wiki_path: wiki_path.into(),
-            },
+            &serde_json::json!({
+                "schemaVersion": 3,
+                "sourceId": "source-old",
+                "sourceKind": "web_page",
+                "currentVersionId": "version-old",
+                "wikiPath": wiki_path,
+                "origins": ["https://example.com/"],
+                "canonicalUrl": "https://example.com/",
+                "title": "Example",
+                "importedAt": chrono::Utc::now().to_rfc3339(),
+                "versions": [{
+                    "versionId": "version-old",
+                    "contentHash": old_content_hash,
+                    "rawEvidence": [{
+                        "path": "raw/sources/source-old/version-old/original.bin",
+                        "sha256": old_content_hash,
+                        "sizeBytes": old_source.len(),
+                        "kind": "source_snapshot"
+                    }],
+                    "assets": [],
+                    "baselinePath": baseline_path,
+                    "candidate": {
+                        "markdownHash": baseline_hash,
+                        "title": "Example",
+                        "sourceKind": "web_page",
+                        "canonicalUrl": "https://example.com/"
+                    },
+                    "provenance": {
+                        "locator": "https://example.com/",
+                        "route": "generic_web",
+                        "engineId": "deterministic",
+                        "engineVersion": "1"
+                    },
+                    "createdAt": chrono::Utc::now().to_rfc3339(),
+                    "humanEditHash": baseline_hash,
+                    "quality": {
+                        "level": "pass",
+                        "metrics": [],
+                        "warnings": []
+                    }
+                }]
+            }),
         )
         .unwrap();
 
@@ -209,7 +225,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         schema_version: 1,
         session_id: "session-a".into(),
         item_id: "item-a".into(),
-        trigger: AgentAssistanceTrigger::DeterministicHardFailure,
+        trigger: AgentAssistanceTrigger::Manual,
         public_source: "Example".into(),
         input_hashes: vec![source_hash.clone()],
         allowed_tools: vec![AgentToolGrant::ValidateCandidate],
@@ -254,16 +270,14 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
                 task_id: task.id.clone(),
                 session_id: "session-a".into(),
                 item_id: "item-a".into(),
-                trigger: AgentAssistanceTrigger::DeterministicHardFailure,
+                trigger: AgentAssistanceTrigger::Manual,
                 route: "local/claude".into(),
                 agent_kind: Some(AgentKind::Claude),
                 agent_version: "test-version".into(),
-                prompt_template_version: "wiki-ingest-assist/local-v1".into(),
+                prompt_template_version: "import-recovery/local-v1".into(),
                 approved_cost_micros: None,
                 tool_calls: vec![],
                 approved_scope_sha256: None,
-                byok_provider: None,
-                byok_destination: None,
                 workspace_relative_path: relative_workspace.clone(),
                 granted_tools: vec![AgentToolGrant::ValidateCandidate],
                 input_hashes: vec![source_hash.clone()],
@@ -286,7 +300,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     assert_eq!(candidate.agent_version, "test-version");
     assert_eq!(
         candidate.prompt_template_version,
-        "wiki-ingest-assist/local-v1"
+        "import-recovery/local-v1"
     );
     let reconciled_audit: AgentAuditRecord = files
         .read_json(
@@ -510,6 +524,30 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         .markdown
         .relative_path
         .contains("merged-"));
+    let selected_resolution = selected
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.resolution.as_ref())
+        .expect("selected Agent candidate resolution");
+    assert_eq!(
+        selected_resolution.kind,
+        ImportResolutionKind::NeedsThreeWayMerge
+    );
+    assert_eq!(
+        selected_resolution.target_wiki_path.as_deref(),
+        Some(wiki_path)
+    );
+    let selected_binding = selected_resolution
+        .binding
+        .as_ref()
+        .expect("selected Agent candidate binding");
+    assert_eq!(selected_binding.source_id, "source-old");
+    assert_eq!(selected_binding.target_version_id, "version-old");
+    assert_eq!(selected_binding.current_hash, current_hash);
+    assert!(matches!(
+        selected_resolution.default_resolution.as_ref(),
+        Some(ImportItemResolution::ApplyImportCandidate { .. })
+    ));
     assert_eq!(
         std::fs::read_to_string(root.path().join(wiki_path)).unwrap(),
         current
@@ -556,6 +594,18 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         )
         .unwrap();
     assert!(!workspace.exists());
+    let selected_session = imports.load_session(&context, &files, "session-a").unwrap();
+    let selected_item = &selected_session.items[0];
+    let preview = selected_item.preview.as_ref().unwrap();
+    let default_resolution = preview
+        .resolution
+        .as_ref()
+        .and_then(|resolution| resolution.default_resolution.clone())
+        .expect("ordinary Import decisions can commit the selected Agent merge");
+    assert!(matches!(
+        &default_resolution,
+        ImportItemResolution::ApplyImportCandidate { .. }
+    ));
     let git = GitService;
     git.initialize_repository(&context, "Initial fixture")
         .unwrap();
@@ -569,20 +619,26 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
                 project_root_path: root.path().to_string_lossy().into(),
                 session_id: "session-a".into(),
                 batch_task_id: None,
+                acknowledge_restricted_content: false,
                 decisions: vec![CommitItemDecision {
                     item_id: "item-a".into(),
-                    conflict_action: Some(CommitConflictAction::ApplyMergedCandidate),
-                    expected_wiki_hash: Some(current_hash),
+                    resolution: Some(default_resolution),
                 }],
             },
         )
         .unwrap();
     assert_eq!(committed.committed_count, 1, "{committed:?}");
-    assert!(committed.items[0].wiki_path.is_none());
-    assert_eq!(
-        std::fs::read_to_string(root.path().join(wiki_path)).unwrap(),
-        current
-    );
+    assert_eq!(committed.items[0].wiki_path.as_deref(), Some(wiki_path));
+    let final_source = std::fs::read_to_string(root.path().join(wiki_path)).unwrap();
+    assert!(final_source.contains("sourceId: \"source-old\""));
+    assert!(final_source.contains("# Explicit merge"));
+    let migrated: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.path().join(".app/sources/source-old.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(migrated["schemaVersion"], 3);
+    assert!(migrated["versions"][0]["candidate"].is_object());
+    assert!(migrated["timeline"].is_array());
 }
 
 #[test]

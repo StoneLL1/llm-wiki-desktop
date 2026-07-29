@@ -1,5 +1,6 @@
 import type { ImportItem, ImportSession, ImportItemStatus } from "../../types/importV2";
 import type { ImportQueueFilter } from "../../stores/importStore";
+import { presentImportItem } from "./importStatusPresentation";
 
 export interface ImportQueueCounts {
   all: number;
@@ -31,39 +32,40 @@ const ACTIVE_STATUSES: ReadonlySet<ImportItemStatus> = new Set([
 
 export const isImportItemActive = (item: ImportItem): boolean => ACTIVE_STATUSES.has(item.status);
 
-export const isImportItemReady = (item: ImportItem): boolean => item.status === "preview_ready";
+export const isImportItemReady = (item: ImportItem): boolean =>
+  presentImportItem(item).userState === "ready";
 
 export const isImportItemNeedsAction = (item: ImportItem): boolean =>
-  item.status === "waiting_capability" ||
-  item.status === "waiting_login" ||
-  item.status === "waiting_authorization" ||
-  item.status === "needs_merge" ||
-  item.status === "paused" ||
-  item.issue?.userActionRequired === true;
+  presentImportItem(item).userState === "needs_action";
 
 export const selectVisibleItems = (
   session: ImportSession | null,
   filter: ImportQueueFilter,
 ): ImportItem[] => {
   if (!session) return [];
+  const activeQueue = session.items.filter(
+    (item) => item.status !== "completed" && item.status !== "skipped",
+  );
   switch (filter) {
     case "active":
-      return session.items.filter(isImportItemActive);
+      return activeQueue.filter(isImportItemActive);
     case "ready":
-      return session.items.filter(isImportItemReady);
+      return activeQueue.filter(isImportItemReady);
     case "needs_action":
-      return session.items.filter(isImportItemNeedsAction);
+      return activeQueue.filter(isImportItemNeedsAction);
     case "failed":
-      return session.items.filter((item) => item.status === "failed");
+      return activeQueue.filter((item) => item.status === "failed");
     case "completed":
-      return session.items.filter((item) => item.status === "completed");
+      return [];
     case "all":
     default:
-      return session.items;
+      return activeQueue;
   }
 };
 export const selectQueueCounts = (session: ImportSession | null): ImportQueueCounts => {
-  const items = session?.items ?? [];
+  const items = (session?.items ?? []).filter(
+    (item) => item.status !== "completed" && item.status !== "skipped",
+  );
   return {
     all: items.length,
     active: items.filter(isImportItemActive).length,
@@ -75,7 +77,9 @@ export const selectQueueCounts = (session: ImportSession | null): ImportQueueCou
   };
 };
 export const selectCommittableItems = (session: ImportSession | null): ImportItem[] =>
-  (session?.items ?? []).filter((item) => item.selected && isImportItemReady(item));
+  (session?.items ?? []).filter(
+    (item) => item.selected && presentImportItem(item).committable,
+  );
 
 export const selectSessionProgress = (session: ImportSession | null): ImportSessionProgress => {
   const items = session?.items ?? [];

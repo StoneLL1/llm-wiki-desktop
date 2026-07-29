@@ -11,12 +11,20 @@ import {
   MODEL_ID,
   MODEL_SHA256,
   buildArguments,
+  buildEmbeddedSubtitleArguments,
+  buildVideoOcrFrameArguments,
+  buildVideoTextProbeArguments,
   classifyExecutionError,
   currentRuntimeKey,
+  ffmpegRelativePath,
+  isNoAudioExecutionError,
+  isVideoMedia,
   parseTimedText,
   parseWhisperJson,
   renderTranscript,
   resolveStagingMedia,
+  selectStableTextFrameIndexes,
+  sha256File,
   verifyArtifact,
 } from "./core.mjs";
 
@@ -54,6 +62,67 @@ async function readBounded(filePath) {
   return fs.readFile(filePath, "utf8");
 }
 
+async function readJson(filePath) {
+  try { return JSON.parse(await fs.readFile(filePath, "utf8")); }
+  catch { return null; }
+}
+
+async function writeJsonAtomic(filePath, value) {
+  const temporary = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(temporary, JSON.stringify(value), { encoding: "utf8", flag: "wx" });
+  await fs.rename(temporary, filePath);
+}
+
+async function runFfmpeg(binary, args, options) {
+  try {
+    return await execFileAsync(binary, args, {
+      ...options,
+      windowsHide: true,
+      killSignal: "SIGKILL",
+      maxBuffer: 1024 * 1024,
+      encoding: "utf8",
+    });
+  } catch (error) {
+    throw new Error(classifyExecutionError(error));
+  }
+}
+
+async function prepareVideoOcrContinuation(
+  ffmpeg,
+  mediaPath,
+  stagingRoot,
+  temporaryRoot,
+  localOcrAuthorized,
+) {
+  const probeRoot = path.join(temporaryRoot, "video-text-probe");
+  await fs.mkdir(probeRoot, { recursive: true });
+  await runFfmpeg(
+    ffmpeg,
+    buildVideoTextProbeArguments(mediaPath, path.join(probeRoot, "probe-%04d.pgm")),
+    { cwd: packRoot, env: restrictedEnvironment(), timeout: EXECUTION_TIMEOUT_MS },
+  );
+  const probeFiles = (await fs.readdir(probeRoot))
+    .filter((name) => /^probe-\d{4}\.pgm$/u.test(name))
+    .sort((left, right) => left.localeCompare(right, "en"));
+  const selected = selectStableTextFrameIndexes(
+    await Promise.all(probeFiles.map((name) => fs.readFile(path.join(probeRoot, name)))),
+  );
+  if (selected.length === 0) throw new Error("IMPORT_ASR_NO_SPEECH");
+  if (!localOcrAuthorized) throw new Error("IMPORT_VIDEO_FRAME_OCR_REQUIRED");
+  const ocrRoot = await fs.mkdtemp(path.join(stagingRoot, ".ocr-input-"));
+  const temporaryInputPaths = [];
+  for (const [outputIndex, probeIndex] of selected.slice(0, 6).entries()) {
+    const output = path.join(ocrRoot, `frame-${String(outputIndex + 1).padStart(3, "0")}.png`);
+    await runFfmpeg(
+      ffmpeg,
+      buildVideoOcrFrameArguments(mediaPath, probeIndex * 10, output),
+      { cwd: packRoot, env: restrictedEnvironment(), timeout: EXECUTION_TIMEOUT_MS },
+    );
+    temporaryInputPaths.push(path.relative(stagingRoot, output).split(path.sep).join("/"));
+  }
+  return temporaryInputPaths;
+}
+
 let rpc;
 let temporaryRoot;
 let completed = false;
@@ -61,9 +130,15 @@ try {
   rpc = await readRpc();
   const params = rpc?.params;
   if (rpc?.jsonrpc !== "2.0" || !params || params.operation !== "extract" ||
-      params.input?.kind !== "file" || !params.localAsrAuthorized) throw new Error("IMPORT_ASR_INVALID_REQUEST");
+      params.input?.kind !== "file" ||
+      (!params.localAsrAuthorized && !params.asrProbeOnly)) {
+    throw new Error("IMPORT_ASR_INVALID_REQUEST");
+  }
   const mediaLocator = params.chainedInput || params.input.locator;
   const { stagingRoot, mediaPath } = await resolveStagingMedia(params.projectRoot, params.stagingRoot, mediaLocator);
+  const recognitionLanguage = typeof params.recognitionLanguage === "string"
+    ? params.recognitionLanguage : "auto";
+  const asrProfile = typeof params.asrProfile === "string" ? params.asrProfile : "balanced";
 
   const manifest = JSON.parse(await fs.readFile(path.join(packRoot, "manifest.json"), "utf8"));
   const runtimeDeclaration = manifest.runtimeArtifacts?.[currentRuntimeKey()];
@@ -72,47 +147,200 @@ try {
       runtimeDeclaration?.qualificationFixture !== manifest.audioDecoding.qualificationFixture) {
     throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   }
+  const runtimeTemp = path.join(stagingRoot, "runtime-temp");
+  await fs.mkdir(runtimeTemp, { recursive: true });
+  temporaryRoot = await fs.mkdtemp(path.join(runtimeTemp, "asr-output-"));
+  const outputPrefix = path.join(temporaryRoot, "transcript");
+  if (params.asrProbeOnly) {
+    const ffmpeg = await verifyArtifact(
+      packRoot,
+      runtimeDeclaration.ffmpeg,
+      ffmpegRelativePath(),
+    );
+    const embeddedPath = path.join(temporaryRoot, "embedded.srt");
+    let transcript = null;
+    try {
+      await runFfmpeg(
+        ffmpeg,
+        buildEmbeddedSubtitleArguments(mediaPath, embeddedPath),
+        { cwd: packRoot, env: restrictedEnvironment(), timeout: EXECUTION_TIMEOUT_MS },
+      );
+      transcript = parseTimedText(await readBounded(embeddedPath));
+    } catch {
+      transcript = null;
+    }
+    if (!transcript) throw new Error("IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE");
+    const markdown = renderTranscript(
+      transcript,
+      path.basename(mediaPath),
+      "local-embedded-subtitle",
+    );
+    const metadata = {
+      engine: "ffmpeg",
+      model: null,
+      language: transcript.language,
+      requestedLanguage: recognitionLanguage,
+      profile: asrProfile,
+      languageConfidence: transcript.languageConfidence,
+      segmentCount: transcript.segments.length,
+      provenance: "local-embedded-subtitle",
+    };
+    const candidatePath = path.join(temporaryRoot, "candidate.md");
+    const sourcePath = path.join(temporaryRoot, "source.json");
+    const metadataPath = path.join(temporaryRoot, "metadata.json");
+    await Promise.all([
+      fs.writeFile(candidatePath, markdown, { encoding: "utf8", flag: "wx" }),
+      fs.writeFile(sourcePath, JSON.stringify(metadata), { encoding: "utf8", flag: "wx" }),
+      fs.writeFile(metadataPath, JSON.stringify(metadata), { encoding: "utf8", flag: "wx" }),
+    ]);
+    const relative = (value) => path.relative(stagingRoot, value).split(path.sep).join("/");
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: {
+      sourceSnapshotPath: relative(sourcePath),
+      markdownPath: relative(candidatePath),
+      assetPaths: [],
+      metadataPath: relative(metadataPath),
+      title: `Embedded transcript - ${path.basename(mediaPath)}`,
+      textCoverage: 1,
+      continuation: null,
+      warnings: [],
+    }, error: null })}\n`);
+    completed = true;
+  }
+  if (completed) {
+    // The extraction-only probe must not verify or execute the ASR model.
+    process.exitCode = 0;
+  } else {
   const binaryName = process.platform === "win32" ? "bin/whisper-cli.exe" : "bin/whisper-cli";
   const binary = await verifyArtifact(packRoot, runtimeDeclaration, binaryName);
   const modelDeclaration = manifest.models?.find((model) => model.id === "small");
   if (modelDeclaration?.sha256 !== MODEL_SHA256) throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   const model = await verifyArtifact(packRoot, modelDeclaration, "models/ggml-small.bin");
 
-  const runtimeTemp = path.join(stagingRoot, "runtime-temp");
-  await fs.mkdir(runtimeTemp, { recursive: true });
-  temporaryRoot = await fs.mkdtemp(path.join(runtimeTemp, "asr-output-"));
-  const outputPrefix = path.join(temporaryRoot, "transcript");
-  try {
-    await execFileAsync(binary, buildArguments(model, mediaPath, outputPrefix), {
-      cwd: temporaryRoot,
-      env: restrictedEnvironment(),
-      windowsHide: true,
-      timeout: EXECUTION_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-      maxBuffer: 1024 * 1024,
-      encoding: "utf8",
-    });
-  } catch (error) {
-    throw new Error(classifyExecutionError(error));
+  const mediaSha256 = await sha256File(mediaPath);
+  const shardRoot = path.join(stagingRoot, "asr-shards");
+  await fs.mkdir(shardRoot, { recursive: true });
+  const shardPath = path.join(
+    shardRoot,
+    `${mediaSha256}-${MODEL_ID}-${recognitionLanguage}.complete.json`,
+  );
+  let transcript = await readJson(shardPath);
+  let markdown;
+  let safeMetadata;
+  let continuation = null;
+  let warnings = [];
+  if (transcript?.schemaVersion === 1 && transcript?.complete === true &&
+      transcript?.mediaSha256 === mediaSha256 && transcript?.recognitionLanguage === recognitionLanguage) {
+    transcript = transcript.transcript;
+  } else {
+    try {
+      await execFileAsync(binary, buildArguments(model, mediaPath, outputPrefix, recognitionLanguage), {
+        cwd: packRoot,
+        env: restrictedEnvironment(),
+        windowsHide: true,
+        timeout: EXECUTION_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        maxBuffer: 1024 * 1024,
+        encoding: "utf8",
+      });
+    } catch (error) {
+      if (isVideoMedia(mediaPath) && isNoAudioExecutionError(error)) {
+        const ffmpeg = await verifyArtifact(
+          packRoot,
+          runtimeDeclaration.ffmpeg,
+          ffmpegRelativePath(),
+        );
+        const temporaryInputPaths = await prepareVideoOcrContinuation(
+          ffmpeg,
+          mediaPath,
+          stagingRoot,
+          temporaryRoot,
+          params.localOcrAuthorized === true,
+        );
+        markdown = "# Video text\n\nNo audio track was present. Stable frame text candidates were selected without running hidden OCR.\n";
+        safeMetadata = {
+          engine: ENGINE_VERSION,
+          model: MODEL_ID,
+          language: "unknown",
+          requestedLanguage: recognitionLanguage,
+          profile: asrProfile,
+          speechDetected: false,
+          audioTrackPresent: false,
+          stableFrameCandidates: temporaryInputPaths.length,
+          provenance: "authorized-local-video-text-probe",
+        };
+        continuation = {
+          type: "local_ocr",
+          temporary_input_paths: temporaryInputPaths,
+        };
+        warnings = ["IMPORT_ASR_NO_AUDIO_TRACK_VIDEO_OCR"];
+      } else {
+        throw new Error(classifyExecutionError(error));
+      }
+    }
+    if (!continuation) try {
+      try {
+        transcript = parseWhisperJson(JSON.parse(await readBounded(`${outputPrefix}.json`)));
+      } catch (jsonError) {
+        const timedTextPath = (await fs.stat(`${outputPrefix}.vtt`).catch(() => null)) ? `${outputPrefix}.vtt` : `${outputPrefix}.srt`;
+        try { transcript = parseTimedText(await readBounded(timedTextPath)); }
+        catch { throw new Error("IMPORT_ASR_OUTPUT_INVALID", { cause: jsonError }); }
+      }
+    } catch (error) {
+      if (error?.message !== "IMPORT_ASR_OUTPUT_INVALID") throw error;
+      if (!isVideoMedia(mediaPath)) throw new Error("IMPORT_ASR_NO_SPEECH");
+      const ffmpeg = await verifyArtifact(
+        packRoot,
+        runtimeDeclaration.ffmpeg,
+        ffmpegRelativePath(),
+      );
+      const temporaryInputPaths = await prepareVideoOcrContinuation(
+        ffmpeg,
+        mediaPath,
+        stagingRoot,
+        temporaryRoot,
+        params.localOcrAuthorized === true,
+      );
+      markdown = "# Video text\n\nNo speech was detected. Stable frame text candidates were selected without running hidden OCR.\n";
+      safeMetadata = {
+        engine: ENGINE_VERSION,
+        model: MODEL_ID,
+        language: "unknown",
+        requestedLanguage: recognitionLanguage,
+        profile: asrProfile,
+        speechDetected: false,
+        stableFrameCandidates: temporaryInputPaths.length,
+        provenance: "authorized-local-video-text-probe",
+      };
+      continuation = {
+        type: "local_ocr",
+        temporary_input_paths: temporaryInputPaths,
+      };
+      warnings = ["IMPORT_ASR_NO_SPEECH_VIDEO_OCR"];
+      transcript = null;
+    }
+    if (transcript) {
+      await writeJsonAtomic(shardPath, {
+        schemaVersion: 1,
+        complete: true,
+        mediaSha256,
+        recognitionLanguage,
+        transcript,
+      });
+    }
   }
-
-  let transcript;
-  try {
-    transcript = parseWhisperJson(JSON.parse(await readBounded(`${outputPrefix}.json`)));
-  } catch (jsonError) {
-    const timedTextPath = (await fs.stat(`${outputPrefix}.vtt`).catch(() => null)) ? `${outputPrefix}.vtt` : `${outputPrefix}.srt`;
-    try { transcript = parseTimedText(await readBounded(timedTextPath)); }
-    catch { throw new Error("IMPORT_ASR_OUTPUT_INVALID", { cause: jsonError }); }
+  if (!continuation) {
+    markdown = renderTranscript(transcript, path.basename(mediaPath));
+    safeMetadata = {
+      engine: ENGINE_VERSION,
+      model: MODEL_ID,
+      language: transcript.language,
+      requestedLanguage: recognitionLanguage,
+      profile: asrProfile,
+      languageConfidence: transcript.languageConfidence,
+      segmentCount: transcript.segments.length,
+      provenance: "authorized-local-asr",
+    };
   }
-  const markdown = renderTranscript(transcript, path.basename(mediaPath));
-  const safeMetadata = {
-    engine: ENGINE_VERSION,
-    model: MODEL_ID,
-    language: transcript.language,
-    languageConfidence: transcript.languageConfidence,
-    segmentCount: transcript.segments.length,
-    provenance: "authorized-local-asr",
-  };
   const candidatePath = path.join(temporaryRoot, "candidate.md");
   const sourcePath = path.join(temporaryRoot, "source.json");
   const metadataPath = path.join(temporaryRoot, "metadata.json");
@@ -122,10 +350,21 @@ try {
     fs.writeFile(metadataPath, JSON.stringify(safeMetadata), { encoding: "utf8", flag: "wx" }),
   ]);
   const relative = (value) => path.relative(stagingRoot, value).split(path.sep).join("/");
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: relative(sourcePath), markdownPath: relative(candidatePath), assetPaths: [], metadataPath: relative(metadataPath), title: `Transcript - ${path.basename(mediaPath)}`, textCoverage: 1, warnings: [] }, error: null })}\n`);
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: {
+    sourceSnapshotPath: relative(sourcePath),
+    markdownPath: relative(candidatePath),
+    assetPaths: [],
+    metadataPath: relative(metadataPath),
+    title: `Transcript - ${path.basename(mediaPath)}`,
+    textCoverage: continuation ? null : 1,
+    continuation,
+    warnings,
+  }, error: null })}\n`);
   completed = true;
+  }
 } catch (error) {
-  const code = typeof error?.message === "string" && /^IMPORT_ASR_[A-Z_]+$/.test(error.message)
+  const code = typeof error?.message === "string" &&
+      /^(?:IMPORT_ASR_[A-Z_]+|IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE|IMPORT_VIDEO_FRAME_OCR_REQUIRED)$/.test(error.message)
     ? error.message : "IMPORT_ASR_ENGINE_FAILED";
   writeFailure(rpc?.id, code);
 } finally {

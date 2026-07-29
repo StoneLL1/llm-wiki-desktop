@@ -3,13 +3,12 @@ mod bookmark_service;
 mod chat_convenience_service;
 mod chat_service;
 mod compile_instructions;
+mod compile_legacy_adapter;
 mod compile_service;
 mod export_service;
-pub(crate) mod extraction_service;
 mod file_store;
 mod git_service;
 mod graph_service;
-mod import_service;
 pub mod import_v2;
 mod lint_service;
 mod llm_service;
@@ -30,13 +29,14 @@ pub use compile_instructions::{
     render_compile_core_instructions, render_compile_prompt_header, shared_compile_instruction_set,
     CompileInstructionSet, CompilePromptRoute,
 };
-pub use compile_service::CompileService;
+pub use compile_legacy_adapter::{
+    CompileLegacyAdapter, LegacyCompileDiagnostics, LegacyCompileSource,
+};
+pub use compile_service::{CompileService, CompileSourceRegistry, ResolvedCompileSource};
 pub use export_service::ExportService;
-pub use extraction_service::ExtractionService;
 pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
 pub use graph_service::GraphService;
-pub use import_service::{classify_file, ImportService};
 pub use lint_service::LintService;
 pub use llm_service::LlmService;
 pub use project_service::ProjectService;

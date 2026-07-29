@@ -130,6 +130,11 @@ impl SearchService {
             modified_time,
             hash,
             wikilinks: extract_wikilinks(&split.body),
+            source_binding: None,
+            source_id: None,
+            version_id: None,
+            source_status: None,
+            quality: None,
         })
     }
 

@@ -273,6 +273,11 @@ fn build_entry(absolute: &Path, project_relative: &str) -> Result<IndexEntry, Ba
         modified_time: mtime_rfc3339(absolute),
         hash,
         wikilinks: extract_wikilinks(&split.body),
+        source_binding: None,
+        source_id: None,
+        version_id: None,
+        source_status: None,
+        quality: None,
     };
 
     Ok(IndexEntry {

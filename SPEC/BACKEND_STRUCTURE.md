@@ -1,5 +1,8 @@
 # LLM Wiki Desktop 后端架构说明
 
+> Import V2、来源版本、媒体处理、登录态、OCR / ASR 和独立编译的目标后端边界，以 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。本文中的 legacy `ImportService` 模块说明仅描述现状，不得覆盖新规范。
+> Batch 9 收口后，旧 `list_imported_sources` / `request_delete_source` / `request_replace_source` 不再注册为生产命令；Source 生命周期只经 typed `source_commands` 与 Import V2 服务。旧 compile index adapter 与 legacy asset fallback 仅为只读兼容边界，并有“不改写 legacy 文件”的独立测试。
+
 ## 1. 文档目的
 
 本文面向后续开发 Agent / Claude Code，用来确定 LLM Wiki Desktop 的 Tauri / Rust 后端架构、目录结构、模块职责、IPC 边界、任务模型、错误模型和安全规则。
@@ -25,7 +28,7 @@
 - 高风险操作统一返回 `PendingAction`，由用户确认后继续执行。
 - 所有 command 使用统一错误模型 `BackendError`。
 - API Key 和访问令牌只进入系统凭据管理，不写入项目文件。
-- Agent CLI 默认优先，但 BYOK API 必须支撑核心流程。
+- Agent CLI 默认优先；Source 已形成后的 AI 整理、Wiki 编译和 Chat 可由 BYOK 支撑，Import 解析恢复除外。
 - Git 检查点是数据安全边界，不是可选增强。
 
 ## 3. 当前目录结构
@@ -436,6 +439,8 @@ pub struct PendingAction {
 后台任务包括：
 
 - 导入解析。
+- 媒体下载、OCR、ASR 和能力安装。
+- Source AI 整理、重新 OCR / ASR 和平台刷新。
 - Wiki 编译。
 - Agent 执行。
 - BYOK LLM 请求。
@@ -477,11 +482,16 @@ pub struct BackendTask {
 任务要求：
 
 - 每个任务有稳定 id。
+- 每个项目同一时间只有一个活动 `ImportSession`，其中可以有多个独立 `ImportItem`。
+- Import 后端细状态持久化，前端映射为发现、处理、需要操作、可确认、导入中、已导入、失败 / 取消七类。
+- 登录、OCR、ASR 和能力缺失是可恢复的等待状态，不是普通失败。
 - 每个任务可以记录日志。
 - 可取消任务必须接入取消信号。
 - 任务状态变化通过事件推送。
 - 关闭主窗口后任务继续运行。
 - 任务完成、失败或等待确认时触发系统通知。
+- 页面切换和最小化不停止任务；应用重启后耗时下载、OCR、ASR 进入暂停状态，由用户继续。
+- 已完成分片可复用；主动取消清理临时数据，之后重试从头开始。
 
 ## 11. ProjectService
 
@@ -551,7 +561,7 @@ pub struct BackendTask {
 
 ## 13. ImportService
 
-`ImportService` 是 `services/import_service/mod.rs` 中的稳定 unit-struct facade；commands 和 `AppState` 不引用其私有子模块。当前用例分布为：
+仓库仍包含 legacy `services/import_service/` facade，同时已经存在 `services/import_v2/` 链路。legacy 用例分布为：
 
 - `artifacts.rs`：产物路径校验、hash 校验和失败清理 helper。
 - `classification.rs`：文件类型分类、归档目录和确定性重命名；只有 `classify_file` 经 facade 与 `services/mod.rs` 公开 re-export。
@@ -564,47 +574,60 @@ pub struct BackendTask {
 
 `confirmation.rs`、`preview.rs`、`promotion.rs`、`source_actions.rs`、`source_catalog.rs` 分别提供聚焦的 `impl super::ImportService` block；内部 helper 使用 `pub(super)` 或更窄可见性。
 
-职责：
+这些模块可用于理解当前代码和迁移边界，但目标职责由 Import V2 统一：
 
-- 处理文件导入。
-- 处理文件夹导入。
-- 处理普通文件夹初始化后的资料归档。
-- 将原始文件归档到 `raw/sources/` 或 `raw/assets/`。
-- 处理同名和重复文件。
-- 写入 `.app/import-conflicts.json`。
+- `ImportSessionService`：持久化一个项目级活动会话、任务、尝试、取消与恢复。
+- `Discovery / Classification`：处理文件、文件夹、URL、平台、集合和剪贴板。
+- `CapabilityResolver`：把媒体、OCR、ASR、语言包和平台能力解析成用户目标级需求。
+- `LoginSessionService`：管理隔离平台会话；不向 React 暴露 Cookie。
+- `ExtractionService`：确定性提取文档、网页、媒体、字幕、OCR / ASR 结果和资源。
+- `QualityGate`：验证正文覆盖、结构、资源和不确定区间。
+- `SourceCandidateService`：生成最终 Markdown 预览与更新 Diff。
+- `SourceCommitService`：以 `sourceId` 为原子边界提交 raw、`.app` 和 `wiki/sources/`。
+- `SourceVersionService`：管理别名、版本、人工编辑基线、时间线和恢复。
+- `CompileService`：消费显式 `sourceId + versionId` change set，不属于导入提交事务。
 
-归档规则：
+目标存储规则：
 
-- PDF -> `raw/sources/pdfs/`
-- DOCX 等文档 -> `raw/sources/docs/`
-- PPTX -> `raw/sources/slides/`
-- XLSX / CSV -> `raw/sources/sheets/`
-- MD / TXT -> `raw/sources/markdown/`
-- 图片 -> `raw/assets/`
-- 其他 -> `raw/sources/other/`
+- `raw/` 保存不可变原文件、网页 / 平台证据、原图、字幕、OCR / ASR 原始输出和版本证据。
+- `wiki/sources/` 保存忠实、规范化、可阅读、可编辑的当前 Source。
+- `.app/` 保存 `sourceId`、`versionId`、别名、hash、质量、基线、任务和编译消费记录。
+- `wiki/sources/` 物理路径按稳定来源渠道组织，例如 `local/`、`web/<host>/`；媒体类型写入元数据，不作为唯一目录分区。
+- Excel 等可使用一个逻辑来源、多个可读 Markdown 的来源包。
 
 硬边界：
 
 - 导入到当前项目使用复制，不持续跟踪原始路径。
 - 打开普通文件夹为项目可能移动或整理文件，必须确认。
-- 冲突、失败、自动重命名必须记录。
+- 每个成功导入项都必须生成 `wiki/sources/` Source；失败项不得生成占位 Markdown。
+- URL、视频和图文不得因 `input.kind == Url` 跳过 Source 写入。
+- 完全重复项只追加别名，不创建新 Source。
+- 更新来源时保护人工编辑，并通过 Diff 或三方合并确认。
+- 纯新增不需要高风险 Git 检查点；覆盖、合并、替换和删除必须先创建。
+- 批次允许部分成功；单项失败不得回滚其他已成功 `sourceId`。
+- 导入提交不得自动调用 CompileService。
 
 ## 14. ExtractionService
 
 职责：
 
-- 从原始资料提取文本。
-- 提取图片。
-- 提取来源元数据。
-- 写入 `raw/extracted/`。
-- 为导入预览提供摘要。
+- 原生提取文档、表格、网页、平台正文、字幕和媒体元数据。
+- 发现并关联本地音视频伴随字幕或稿件。
+- 根据正文缺口生成 OCR / ASR 用户动作，不自动取得授权。
+- 调用应用管理且校验过的媒体、OCR、ASR 和语言能力包。
+- 生成 staging 产物、资源清单、质量报告和 SourceCandidate。
+- 保留原始证据，但不直接覆盖当前 Source。
 
 解析器策略：
 
-- 当前只确定格式能力，不强行指定 PDF / DOCX / PPTX / XLSX 解析库。
-- 应先定义 `Extractor` 接口，再选择具体解析器。
-- URL 正文提取已确定使用 Readability.js。
-- OCR 和视觉理解不在导入层做，交给后续 Agent / Skill。
+- PDF 文本层优先，仅对缺失或低质量页面请求 OCR。
+- Word / PPT 原生结构优先，只有主体截图进入 OCR 候选。
+- Excel / CSV 保留完整单元格结构，按工作表或连续行拆成来源包，不静默截断。
+- 普通网页先轻量提取，必要时自动升级隔离浏览器。
+- 视频 / 音频优先使用原语言可靠字幕；没有可靠字幕时只提供本地 ASR。
+- 视频 ASR 无有效语音时，可在用户启用后对关键帧做画面 OCR。
+- 图片视觉理解、自动描述和图表解读不在首版范围。
+- BYOK 不参与导入解析；本地 Agent 只能在用户主动触发后操作隔离 staging。
 
 建议接口：
 
@@ -617,12 +640,23 @@ pub trait Extractor {
 
 输出应包含：
 
-- 提取文本。
-- 提取图片路径。
-- 来源元数据。
-- 页数、字数或可用统计。
-- 成功 / 失败状态。
-- 错误原因。
+- 候选 Markdown 与资源引用。
+- 原始证据和 staging 产物描述。
+- 来源身份、规范 URL、别名和版本输入。
+- 页数、字数、时长、语言或可用统计。
+- 质量门槛、警告和可定位问题区间。
+- 后续所需 `CapabilityRequirement` 或登录动作。
+- 用户可读状态、技术错误和重试信息。
+
+### 14.1 Source 重处理与 AI 整理
+
+- 重新 OCR / ASR、换字幕和平台刷新都以当前 `sourceId + versionId + Markdown hash` 为输入，生成新的 `SourceCandidate`。
+- Source 在处理期间变化时，必须重新 Diff 或三方合并，不得直接覆盖。
+- AI 整理由一份内置 `source-rewrite` Skill 合同驱动，Agent 与 BYOK 文本路线必须复用同一合同；输入只包含当前 Source、元数据、已有 OCR / ASR / 字幕和图片引用。
+- `source-rewrite` 可按用户自定义要求重写或纠错事实、数字、人名、URL、引语和时间，但只能依据有界输入，不得引入外部事实或抬高原文确定性。
+- 后端只硬校验有界 JSON / 大小、Markdown 与 app-owned frontmatter、唯一 `## 内容概览`、Source/version/hash 绑定；不得使用事实 token、姓名词表或数字集合等启发式语义 guard 拒绝候选。
+- 所有重处理和 AI 整理结果在确认前只写 staging；确认后创建有意义的版本时间线事件。
+- 普通可恢复失败保留已绑定的 Source 基线和执行设置，等待用户显式重试；同一次运行不得静默 fallback 到另一 Agent / BYOK 路线、第二个模型或双调用。
 
 ## 15. GitService
 
@@ -682,11 +716,26 @@ pub trait Extractor {
 执行规则：
 
 - 配置可用 Agent 时，Agent CLI 是默认优先路径。
-- 用户可以手动选择 BYOK API。
-- 未配置 Agent 时，BYOK API 仍应跑通核心流程。
+- 用户可以在 Source 已经形成后的 AI 整理、编译和 Chat 中手动选择 BYOK API。
+- BYOK 不参与导入解析或失败恢复。
 - 应用不能静默安装 Agent。
 - 安装命令必须用户确认。
 - Agent 输出修改文件前后必须受 GitService 和 PendingAction 保护。
+
+`import-recovery` 规则：
+
+- 仅本地 Agent，并且必须由用户主动触发。
+- 可在当前任务授权范围内使用浏览器、媒体、OCR / ASR 和临时脚本。
+- 只写隔离 staging 候选，不得直接修改 `raw/`、`wiki/` 或 Git。
+- 不安装软件、不执行未知下载二进制、不接触原始 Cookie / API Key、不绕过访问控制。
+
+`source-rewrite` 规则：
+
+- Agent 路线支持 Claude Code、Codex、OpenClaw 和 Hermes；四者与 BYOK 路线消费同一份内置 `source-rewrite` 合同，并复用所选 CLI 可用于执行的本地登录态。
+- 每次 Source Agent 都在临时候选 workspace 中运行，应用不会把项目目录作为可写工作区，也不会让候选绕过 Diff、显式确认和 Git checkpoint 直接落盘。Claude Code 与 Codex 使用无会话、跳过项目规则/扩展的隔离执行配置，其中 Codex 保留认证目录但不加载用户 `config.toml`；OpenClaw 使用 `agent exec` 临时状态的一次性执行；Hermes 使用 `-z` 一次性执行并跳过项目规则。
+- 环境清理后只恢复所选 Agent 必需的认证/配置路径：OpenClaw 保留活动 state/config/profile、auth secret dir 与 include roots；Hermes 优先使用显式 `HERMES_HOME`，否则解析 sticky `active_profile`（Windows 默认根为 `%LOCALAPPDATA%\hermes`），并保留 OAuth/model 路径覆盖。
+- 为复用本机登录与默认模型，Agent 进程仍可使用所选 CLI 的本地配置；该宽松边界不等价于操作系统级只读沙箱。应用只主动提供当前 Source 的有界输入，不承诺所选第三方 CLI 的工具无法读取其他本地路径。
+- 普通可恢复失败必须由用户按保存的 Source 基线、路线和设置显式重试。BYOK 重试锁定 provider 与 model；Agent 重试锁定 Agent 种类，使用重试时该 CLI 当前的 Source 执行 profile（其本地 profile、认证或默认模型若已变化，不伪装成原设置）。运行时禁止静默 fallback、自动第二模型或双调用。
 
 ## 17. LlmService
 
@@ -718,6 +767,7 @@ Provider：
 - API Key 必须从 `SecretService` 获取。
 - 不把密钥写入 `.app/settings.json`。
 - 普通搜索不能自动调用 LLM。
+- BYOK 只处理已经存在的 Source、Wiki 和 Chat 文本，不得成为 Import extractor 或 recovery route。
 
 ## 18. SearchService 与 ChatService
 
@@ -893,6 +943,8 @@ Agent 深度 Lint：
 - 读取 API Key。
 - 删除 API Key。
 - 检查 provider 是否已配置密钥。
+- 管理平台 Cookie、token 和隔离登录 profile 引用。
+- 返回平台、账号摘要、有效状态和最近验证时间。
 
 平台目标：
 
@@ -910,6 +962,7 @@ Agent 深度 Lint：
 - 密钥不写入项目文件。
 - 密钥不写入日志。
 - UI 不默认回显完整密钥。
+- React、项目文件、日志和导出不得接收原始 Cookie、token 或 profile 内容。
 
 ## 24. 数据模型目录
 
@@ -931,9 +984,17 @@ Agent 深度 Lint：
 - `ProjectSummary`
 - `ProjectHealthReport`
 - `WikiPageMeta`
-- `ImportPreview`
-- `ImportConflict`
-- `ExtractResult`
+- `ImportSession`
+- `ImportItem`
+- `ImportAttempt`
+- `CapabilityRequirement`
+- `LoginSessionRef`
+- `SourceCandidate`
+- `SourceRecord`
+- `SourceVersion`
+- `SourceAlias`
+- `QualityReport`
+- `CompileChangeSet`
 - `GitCheckpoint`
 - `AgentInfo`
 - `AgentTaskRequest`

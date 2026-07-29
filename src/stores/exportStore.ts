@@ -40,6 +40,7 @@ export interface ExportPrefs {
   route?: ExportRoutePreference;
   template?: string | null;
   options?: ExportContentOptions;
+  acknowledgeRestrictedContent?: boolean;
 }
 
 export interface ExportState {
@@ -118,6 +119,7 @@ export const useExportStore = create<ExportState>((set) => ({
       provider: null,
       template: prefs?.template ?? null,
       options: prefs?.options,
+      acknowledgeRestrictedContent: prefs?.acknowledgeRestrictedContent ?? false,
     };
     try {
       const task = await invoke<{ id: string }>("start_export", { request });
@@ -145,6 +147,7 @@ export const useExportStore = create<ExportState>((set) => ({
       provider: null,
       template: prefs?.template ?? null,
       options: prefs?.options,
+      acknowledgeRestrictedContent: prefs?.acknowledgeRestrictedContent ?? false,
     };
     try {
       const task = await invoke<{ id: string }>("regenerate_export", { request });

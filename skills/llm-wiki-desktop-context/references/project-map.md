@@ -29,7 +29,7 @@ Use this reference only after `llm-wiki-desktop-context/SKILL.md` triggers and t
 | Chat/page Ask AI | `src/features/chat`, `src/stores/chatStore.ts` | `chat_service`, chat commands/models |
 | Search/index/retrieval | `src/components/app/TopBar.tsx`, `src/types/wiki.ts`, feature consumers | `search_commands`, `search_service`, `wiki_index` |
 | Graph | `src/features/graph` | `graph_service`, graph models/cache |
-| Import/extraction | `src/features/import/useImportWorkflow.ts`, `ImportView.tsx`, `src/stores/importStore.ts`, `src/features/wiki/wikiStore.ts` | `commands/import_commands.rs`, `models/import.rs`, `services/import_service/`, `extraction_service`, compile command/service |
+| Import / Source | `src/features/import/`, `src/stores/importStore.ts`, `src/features/wiki/{sourceStore.ts,SourceRightPanel.tsx,SourceLifecycleDialogs.tsx}` | `commands/import_v2*_commands.rs`, `commands/source_commands.rs`, `models/import_v2*.rs`, `models/source*.rs`, `services/import_v2/`; Compile is a separate explicit flow, while `compile_legacy_adapter.rs` is read-only compatibility |
 | Agent/BYOK/task flows | `src/features/agent`, task UI/stores | `agent_service`, `llm_service`, `task_service`, `git_service` |
 | Exports/HTML skills | `src/features/exports` | `export_service`, `src-tauri/templates/skills` |
 | Lint | `src/features/lint` | `commands/lint_commands.rs`, `services/lint_service/` |
@@ -53,7 +53,7 @@ Use this reference only after `llm-wiki-desktop-context/SKILL.md` triggers and t
 - Frontend call flow is `AppShell -> WorkspaceController -> WorkspaceRouter -> lazy feature views`; global confirmation, task drawer, and toast controllers remain mounted at shell level.
 - Cross-view workflows remain focused and separate. Each project-scoped presentation commit must validate the initiating project key; supersedable requests also use an epoch. Valid backend task records are always upserted globally, while stale-project drawer, navigation, toast, and view-state commits are suppressed.
 - Backend call flow is `commands -> AppState -> stable service facades -> focused use-case modules` over typed DTOs.
-- `ImportService`, `SearchService`, `LintService`, and `ChatService` are stable facade boundaries. `ChatConvenienceService` and `WikiIndex` remain independent.
+- `ImportV2Service`, `SearchService`, `LintService`, and `ChatService` are stable facade boundaries. Import capability/runtime and connector-session services remain typed Import V2 collaborators; `ChatConvenienceService` and `WikiIndex` remain independent.
 - Chat sessions persist as `.app/chats/{id}.json`; Wiki page side Chat uses optional `contextPagePath` and must guard fast page switches.
 - Retrieval diagnostics can include search hits, graph neighbors, and source overlap; saved citations should reflect model-used `[S#]` references.
 - Search/wiki scanning uses local indexes and local files, not a database.

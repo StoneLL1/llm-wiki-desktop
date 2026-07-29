@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
 import type { ImportCapabilityRequirement } from "../../types/importV2Presentation";
+import { capabilityDisplayName, capabilityPurpose } from "./importCapabilityPresentation";
 
 export interface ImportCapabilityDialogProps {
   open: boolean;
@@ -45,19 +46,27 @@ export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel 
         <header className="flex min-h-[52px] items-center gap-3 border-b border-[var(--border)] px-4">
           <Package size={17} className="text-[var(--accent)]" aria-hidden="true" />
           <h2 id="import-capability-title" className="m-0 flex-1 text-[15px] font-semibold">{t("importV2.capability.title")}</h2>
-          <button type="button" className="icon-button" aria-label={t("importV2.capability.cancel")} onClick={onCancel}><X size={16} aria-hidden="true" /></button>
+          <button type="button" className="icon-button" aria-label={t("importV2.capability.cancel")} title={t("importV2.capability.cancel")} onClick={onCancel}><X size={16} aria-hidden="true" /></button>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-[12px]">
           <dl className="grid grid-cols-[150px_1fr] gap-x-4 gap-y-1.5">
-            <dt className="text-[var(--text-muted)]">{t("importV2.capability.purpose")}</dt><dd className="m-0">{requirement.requirement.capabilityId} · {requirement.route}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.capability.name")}</dt><dd className="m-0">{capabilityDisplayName(requirement.requirement.capabilityId, t)}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.capability.purpose")}</dt><dd className="m-0">{capabilityPurpose(requirement.route, t)}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.capability.version")}</dt><dd className="m-0">{requirement.requirement.minimumVersion ?? "—"}</dd>
-            <dt className="text-[var(--text-muted)]">{t("importV2.capability.protocol")}</dt><dd className="m-0">{requirement.requirement.protocolVersion}</dd>
-            <dt className="text-[var(--text-muted)]">{t("importV2.capability.platform")}</dt><dd className="m-0 font-mono text-[11px]">{requirement.requirement.targetTriple}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.capability.compressed")}</dt><dd className="m-0">{bytes(requirement.compressedBytes)}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.capability.installed")}</dt><dd className="m-0">{bytes(requirement.installedBytes)}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.capability.model")}</dt><dd className="m-0">{bytes(requirement.modelBytes)}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.capability.license")}</dt><dd className="m-0">{requirement.license ?? requirement.requirement.acceptedLicenseExpressions.join(", ")}</dd>
           </dl>
+          <details className="import-v2-technical-details mt-3">
+            <summary>{t("importV2.preview.technicalDetails")}</summary>
+            <dl>
+              <dt>{t("importV2.capability.identifier")}</dt><dd>{requirement.requirement.capabilityId}</dd>
+              <dt>{t("importV2.inspector.route")}</dt><dd>{requirement.route}</dd>
+              <dt>{t("importV2.capability.protocol")}</dt><dd>{requirement.requirement.protocolVersion}</dd>
+              <dt>{t("importV2.capability.platform")}</dt><dd>{requirement.requirement.targetTriple}</dd>
+            </dl>
+          </details>
           {requirement.fallback ? <p className="mt-3 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--text-muted)]"><strong>{t("importV2.capability.fallback")}:</strong> {requirement.fallback}</p> : null}
           {requirement.available ? <p className="mt-3 flex items-center gap-1.5 text-[var(--success-text)]" role="status"><Check size={14} aria-hidden="true" />{t("importV2.capability.installedState")}</p> : null}
           {!requirement.installable ? <p className="mt-3 text-[11px] text-[var(--warning-text)]" role="alert">{t("importV2.capability.unavailable")}</p> : null}

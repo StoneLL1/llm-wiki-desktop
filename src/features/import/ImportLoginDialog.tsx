@@ -77,19 +77,25 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
   }
 
   const state = currentSession?.state ?? authState;
+  const verifiedAt = currentSession?.lastVerifiedAt
+    ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+      .format(new Date(currentSession.lastVerifiedAt))
+    : "—";
   return (
     <div ref={dialogRef} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="import-login-title">
       <section className="w-full max-w-[620px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg">
         <header className="flex min-h-[52px] items-center gap-3 border-b border-[var(--border)] px-4">
           <KeyRound size={17} className="text-[var(--accent)]" aria-hidden="true" />
           <h2 id="import-login-title" className="m-0 flex-1 text-[15px] font-semibold">{t("importV2.login.title")}</h2>
-          <button type="button" className="icon-button" aria-label={t("importV2.login.cancel")} onClick={onCancel}><X size={16} aria-hidden="true" /></button>
+          <button type="button" className="icon-button" aria-label={t("importV2.login.cancel")} title={t("importV2.login.cancel")} onClick={onCancel}><X size={16} aria-hidden="true" /></button>
         </header>
         <div className="space-y-3 px-4 py-4 text-[12px]">
           <dl className="grid grid-cols-[110px_1fr] gap-x-4 gap-y-1.5">
             <dt className="text-[var(--text-muted)]">{t("importV2.login.connector")}</dt><dd className="m-0">{platform}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.login.domain")}</dt><dd className="m-0 font-mono text-[11px]">{publicDomain}</dd>
-            <dt className="text-[var(--text-muted)]">{t("importV2.login.state", { state: t(`importV2.login.stateValue.${state}`, { defaultValue: state }) })}</dt><dd className="m-0">{currentSession ? currentSession.sessionId : "—"}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.login.state")}</dt><dd className="m-0">{t(`importV2.login.stateValue.${state}`, { defaultValue: state })}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.login.account")}</dt><dd className="m-0">{currentSession?.accountSummary ?? "—"}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.login.lastVerified")}</dt><dd className="m-0">{verifiedAt}</dd>
           </dl>
           <p className="m-0 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("importV2.login.profile")}</p>
           {authState === "captcha_required" || state === "captcha_required" ? <p className="m-0 rounded-[var(--radius-md)] border border-[var(--warning)] px-3 py-2 text-[11px] text-[var(--warning-text)]">{t("importV2.login.captcha")}</p> : null}

@@ -28,7 +28,7 @@ describe("Import V2 contract", () => {
 
   it("accepts Rust request fixtures without frontend-selected output paths", () => {
     const add = { projectId: "project-1", projectRootPath: "fixture/project", sessionId: "session-1", inputs: [{ kind: "file", displayName: "note.md", locator: "fixture/input/note.md", normalizedLocator: null }] } satisfies AddImportItemsV2Request;
-    const commit = { projectId: "project-1", projectRootPath: "fixture/project", sessionId: "session-1", decisions: [{ itemId: "item-1", conflictAction: null, expectedWikiHash: null }] } satisfies CommitImportSessionRequest;
+    const commit = { projectId: "project-1", projectRootPath: "fixture/project", sessionId: "session-1", decisions: [{ itemId: "item-1", resolution: null }] } satisfies CommitImportSessionRequest;
     const create = { projectId: "project-1", projectRootPath: "fixture/project", resourceMode: "balanced" } satisfies CreateImportSessionV2Request;
     const get = { projectId: "project-1", projectRootPath: "fixture/project", sessionId: "session-1" } satisfies GetImportSessionV2Request;
     const select = { ...get, itemId: "item-1", selected: true } satisfies SetImportItemSelectionV2Request;

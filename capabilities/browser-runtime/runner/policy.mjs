@@ -14,7 +14,7 @@ const PLATFORM_HOSTS = Object.freeze({
   wechat: ["mp.weixin.qq.com"],
   zhihu: ["zhihu.com"],
   bilibili: ["bilibili.com", "b23.tv"],
-  xiaohongshu: ["xiaohongshu.com", "xhslink.com"],
+  xiaohongshu: ["xiaohongshu.com", "xhslink.com", "xhslink.cn"],
   douyin: ["douyin.com", "iesdouyin.com"],
   x: ["x.com", "twitter.com"],
 });
@@ -26,14 +26,14 @@ const PLATFORM_NAVIGATION_HOSTS = Object.freeze({
   wechat: ["mp.weixin.qq.com"],
   zhihu: ["zhihu.com", "www.zhihu.com"],
   bilibili: ["b23.tv", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "space.bilibili.com", "api.bilibili.com"],
-  xiaohongshu: ["xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com", "www.xhslink.com", "edith.xiaohongshu.com"],
+  xiaohongshu: ["xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com", "www.xhslink.com", "xhslink.cn", "www.xhslink.cn", "edith.xiaohongshu.com"],
   douyin: ["douyin.com", "www.douyin.com", "m.douyin.com", "v.douyin.com", "iesdouyin.com", "www.iesdouyin.com"],
   x: ["x.com", "www.x.com", "twitter.com", "www.twitter.com"],
 });
 
 const PLATFORM_ASSET_HOSTS = Object.freeze({
   bilibili: ["bilivideo.com", "bilivideo.cn", "hdslb.com", "biliimg.com", "edge.mountaintoys.cn"],
-  xiaohongshu: ["xhscdn.com", "xhscdn.net", "xhslink.com"],
+  xiaohongshu: ["xhscdn.com", "xhscdn.net", "xhslink.com", "xhslink.cn"],
   douyin: ["douyinvod.com", "douyincdn.com", "douyinpic.com", "amemv.com", "byteimg.com", "ibytedtos.com", "bytecdn.cn", "zjcdn.com"],
 });
 
@@ -121,4 +121,36 @@ export function sanitizeCookieBackup(platform, cookies) {
       path: String(cookie.path || "/"), expires: Number(cookie.expires || -1),
       httpOnly: Boolean(cookie.httpOnly), secure: Boolean(cookie.secure), sameSite: cookie.sameSite,
     }));
+}
+
+export function sanitizeAccountLabel(value) {
+  const normalized = String(value || "")
+    .replace(/\p{Cc}+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    !normalized
+    || normalized.length > 80
+    || /(?:cookie|token|session|authorization)\s*[:=]/i.test(normalized)
+  ) return null;
+  return normalized;
+}
+
+export async function extractAccountSummary(page, platform) {
+  const selectors = {
+    bilibili: [".header-entry-mini .nickname", ".header-avatar-wrap .nickname", ".h-name"],
+    xiaohongshu: ['[data-testid="user-name"]', ".user-name", '[class*="user-name"]'],
+    douyin: ['[data-e2e="user-name"]', '[class*="user-name"]'],
+    wechat: [".weui-desktop-account__nickname", ".account_nickname"],
+    zhihu: ['[data-za-detail-view-element_name="Avatar"] img', ".AppHeader-profileEntry img"],
+  }[platform] || [];
+  for (const selector of selectors) {
+    const node = page.locator(selector).first();
+    const candidate = sanitizeAccountLabel(
+      await node.getAttribute("alt").catch(() => null)
+        || await node.textContent().catch(() => null),
+    );
+    if (candidate) return { displayName: candidate };
+  }
+  return null;
 }

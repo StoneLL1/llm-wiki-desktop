@@ -66,6 +66,8 @@ fn workspace_contains_only_sanitized_current_item_copies() {
             meaningful_image_coverage: None,
         },
         title: "Example".into(),
+        resolution: None,
+        manual_merge: None,
     });
     let mut session = ImportSession::new("session-a", "project-a", ImportResourceMode::Balanced);
     session.items.push(item.clone());
@@ -189,6 +191,8 @@ fn workspace_rejects_symlinked_source_snapshot() {
             meaningful_image_coverage: None,
         },
         title: "source".into(),
+        resolution: None,
+        manual_merge: None,
     });
     let mut session = ImportSession::new("session-a", "project-a", ImportResourceMode::Balanced);
     session.items.push(item.clone());
@@ -234,6 +238,8 @@ fn terminal_cleanup_preserves_output_hashes_but_removes_workspace() {
             meaningful_image_coverage: None,
         },
         title: "source".into(),
+        resolution: None,
+        manual_merge: None,
     });
     let mut session = ImportSession::new("session-a", "project-a", ImportResourceMode::Balanced);
     session.items.push(item.clone());

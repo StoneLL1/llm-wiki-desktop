@@ -52,7 +52,7 @@ export function ImportHistoryDetailDialog({ open, entry, session, onClose, onPre
           <FileClock size={17} className="shrink-0 text-[var(--accent)]" aria-hidden="true" />
           <div className="min-w-0 flex-1">
             <h2 id="import-history-detail-title" className="truncate text-[15px] font-semibold text-[var(--text-primary)]" title={entry.title}>{entry.title}</h2>
-            <p className="m-0 font-mono text-[10.5px] text-[var(--text-muted)]">{t("importV2.history.session", { id: session.sessionId })}</p>
+            <p className="m-0 text-[10.5px] text-[var(--text-muted)]">{t("importV2.history.readOnlyDetail")}</p>
           </div>
           <button type="button" className="icon-button" aria-label={t("importV2.history.closeDetail")} title={t("importV2.history.closeDetail")} onClick={onClose}><X size={16} aria-hidden="true" /></button>
         </header>
@@ -90,7 +90,12 @@ function HistoryItem({ item, onPreview, canViewLogs, onViewLogs }: { item: Impor
         <div className="min-w-0 flex-1">
           <h3 id={historyDomId("import-history-item", item.itemId)} className="m-0 truncate text-[12.5px] font-medium text-[var(--text-primary)]" title={item.input.displayName}>{item.input.displayName}</h3>
           <p className="m-0 mt-1 text-[11px] text-[var(--text-muted)]">{t(statusKey)}</p>
-          {item.issue ? <p role="alert" className="m-0 mt-1 text-[11px] text-[var(--danger-text)]"><strong>{item.issue.code}</strong>: {item.issue.message}</p> : null}
+          {presentation.userIssue ? (
+            <div role="status" className="mt-1 text-[11px] text-[var(--warning-text)]">
+              <strong>{t(presentation.userIssue.title)}</strong>
+              <span className="ml-1">{t(presentation.userIssue.dataSafety)}</span>
+            </div>
+          ) : null}
           {item.attempts.length > 0 ? <details className="mt-2 border-t border-[var(--border-subtle)] pt-2">
             <summary className="cursor-pointer text-[11px] font-medium text-[var(--text-secondary)]">{t("importV2.history.attempts", { count: item.attempts.length })}</summary>
             <ol className="mt-2 space-y-2 border-l border-[var(--border-subtle)] pl-3">
@@ -99,7 +104,7 @@ function HistoryItem({ item, onPreview, canViewLogs, onViewLogs }: { item: Impor
           </details> : null}
           {warnings.length > 0 ? <details className="mt-2 border-t border-[var(--border-subtle)] pt-2">
             <summary className="cursor-pointer text-[11px] font-medium text-[var(--warning-text)]">{t("importV2.history.qualityWarnings", { count: warnings.length })}</summary>
-            <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] text-[var(--warning-text)]">{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+            <p className="m-0 mt-1 text-[11px] text-[var(--warning-text)]">{t("importV2.history.qualityReviewHint")}</p>
           </details> : null}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">

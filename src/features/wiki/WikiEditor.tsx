@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Bold,
@@ -12,7 +12,13 @@ import {
   Save,
   Undo2,
 } from "lucide-react";
-import { commandsCtx, defaultValueCtx, Editor, rootCtx } from "@milkdown/kit/core";
+import {
+  commandsCtx,
+  defaultValueCtx,
+  Editor,
+  editorViewCtx,
+  rootCtx,
+} from "@milkdown/kit/core";
 import {
   commonmark,
   toggleEmphasisCommand,
@@ -39,6 +45,7 @@ interface WikiEditorProps {
   onCancel: () => void;
   onReload: () => void;
   onReviewConflict?: () => void;
+  disabled?: boolean;
 }
 
 /**
@@ -57,9 +64,11 @@ interface WikiEditorProps {
 function MilkdownEditor({
   initialMarkdown,
   onChange,
+  disabled,
 }: {
   initialMarkdown: string;
   onChange: (markdown: string) => void;
+  disabled: boolean;
 }) {
   // Keep the latest onChange without churning the editor's deps array.
   const onChangeRef = useRef(onChange);
@@ -84,6 +93,15 @@ function MilkdownEditor({
     // page). Normal edits flow through the listener, not through here.
     [initialMarkdown],
   );
+
+  useEffect(() => {
+    if (loading) return;
+    const editor = get();
+    if (!editor) return;
+    editor.action((ctx) => {
+      ctx.get(editorViewCtx).setProps({ editable: () => !disabled });
+    });
+  }, [disabled, get, loading]);
 
   const call = (
     command:
@@ -113,7 +131,7 @@ function MilkdownEditor({
   return (
     <>
       <EditorToolbar
-        disabled={loading}
+        disabled={loading || disabled}
         onBold={() => call(toggleStrongCommand)}
         onItalic={() => call(toggleEmphasisCommand)}
         onHeading={() => call(wrapInHeadingCommand, 2)}
@@ -189,9 +207,11 @@ export function WikiEditor({
   onCancel,
   onReload,
   onReviewConflict,
+  disabled = false,
 }: WikiEditorProps) {
   const { t } = useTranslation();
   const saving = saveState === "saving";
+  const controlsDisabled = saving || disabled;
   // Seed the WYSIWYG doc once per mount; the parent remounts us (keyed by page
   // path) when the page changes. Live edits flow out via onDraftChange and must
   // NOT feed back into initialMarkdown, or the editor re-creates itself on
@@ -226,7 +246,7 @@ export function WikiEditor({
             type="button"
             className="h-[26px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
             onClick={onCancel}
-            disabled={saving}
+            disabled={controlsDisabled}
           >
             {t("wiki.editor.cancel")}
           </button>
@@ -237,6 +257,7 @@ export function WikiEditor({
                   type="button"
                   className="h-[26px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
                   onClick={onReviewConflict}
+                  disabled={controlsDisabled}
                 >
                   {t("wiki.editor.reviewConflict")}
                 </button>
@@ -245,6 +266,7 @@ export function WikiEditor({
                 type="button"
                 className="h-[26px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
                 onClick={onReload}
+                disabled={controlsDisabled}
               >
                 {t("wiki.editor.reload")}
               </button>
@@ -254,7 +276,7 @@ export function WikiEditor({
             type="button"
             className="inline-flex h-[26px] items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] px-3 text-[12px] font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-60"
             onClick={onSave}
-            disabled={saving}
+            disabled={controlsDisabled}
           >
             {saving ? (
               <LoaderCircle size={13} className="animate-spin" />
@@ -272,15 +294,20 @@ export function WikiEditor({
       ) : null}
       <div
         className="wiki-editor min-h-0 flex-1 overflow-y-auto px-2 pb-2 text-[13px] leading-[1.7] text-[var(--text-primary)]"
+        aria-disabled={disabled}
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
             event.preventDefault();
-            if (!saving) onSave();
+            if (!controlsDisabled) onSave();
           }
         }}
       >
         <MilkdownProvider>
-          <MilkdownEditor initialMarkdown={seed} onChange={onDraftChange} />
+          <MilkdownEditor
+            initialMarkdown={seed}
+            onChange={onDraftChange}
+            disabled={disabled}
+          />
         </MilkdownProvider>
       </div>
     </div>

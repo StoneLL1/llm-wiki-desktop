@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { hasPlatformAuthentication, isBlockedAddress, isPinnedTargetHost, isPlatformCookieDomain, isPlatformNavigationHost, isPlatformTargetHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
+import { extractAccountSummary, hasPlatformAuthentication, isBlockedAddress, isPinnedTargetHost, isPlatformCookieDomain, isPlatformNavigationHost, isPlatformTargetHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, resolvePinnedAddress, sanitizeAccountLabel, sanitizeCookieBackup } from "./policy.mjs";
 
 for (const address of ["127.0.0.1", "10.0.0.1", "169.254.169.254", "192.168.1.1", "224.0.0.1", "::1", "fc00::1", "fe80::1"]) {
   assert.equal(isBlockedAddress(address), true, address);
@@ -27,6 +27,8 @@ assert.equal(isPlatformCookieDomain("bilibili", ".com"), false);
 assert.equal(isPlatformTargetHost("douyin", "www.douyin.com"), true);
 assert.equal(isPlatformTargetHost("xiaohongshu", "xhslink.com"), true);
 assert.equal(isPlatformNavigationHost("xiaohongshu", "xhslink.com"), true);
+assert.equal(isPlatformTargetHost("xiaohongshu", "xhslink.cn"), true);
+assert.equal(isPlatformNavigationHost("xiaohongshu", "xhslink.cn"), true);
 assert.equal(isPlatformNavigationHost("bilibili", "evil.bilibili.com"), false);
 assert.equal(isTrustedPlatformAssetHost("bilibili", "www.bilibili.com", "upos-sz-mirrorali.bilivideo.com"), true);
 assert.equal(isTrustedPlatformAssetHost("bilibili", "www.bilibili.com", "809al93l.edge.mountaintoys.cn"), true);
@@ -50,3 +52,22 @@ assert.deepEqual(
   [{ name: "SESSDATA", value: "kept", domain: ".bilibili.com", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: undefined }],
 );
 assert.equal(hasPlatformAuthentication("x", "x.com", [], ["public-page-selector"]), false);
+assert.equal(sanitizeAccountLabel("  阅读者 \n "), "阅读者");
+assert.equal(sanitizeAccountLabel("token=secret"), null);
+assert.deepEqual(
+  await extractAccountSummary({
+    locator(selector) {
+      return {
+        first() {
+          return {
+            async getAttribute() { return null; },
+            async textContent() {
+              return selector === ".header-entry-mini .nickname" ? " 阅读者 " : null;
+            },
+          };
+        },
+      };
+    },
+  }, "bilibili"),
+  { displayName: "阅读者" },
+);

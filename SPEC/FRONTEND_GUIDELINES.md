@@ -2,6 +2,8 @@
 
 > Purpose: Define the frontend design system and implementation guardrails for LLM Wiki Desktop.
 > Implementation authority: the entire `UI-Frontend-design/` folder is authoritative for exact DOM hierarchy, interaction structure, CSS tokens, absolute-pixel font sizes, and component heights. `DESIGN.md` remains a high-level visual reference; when exact values or structure differ, follow `UI-Frontend-design/`.
+> Import interaction authority: [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) defines the confirmed information architecture, states, media actions, Source preview and AI 整理 behavior. Existing design HTML is visual evidence only where it conflicts with that flow.
+> Compatibility migration UI is Settings-only. The normal Import workbench must remain free of migration terminology and legacy source actions; icon-only dialog controls require a localized accessible name and matching tooltip.
 > Stack target: React 19, TypeScript, Tailwind CSS v4, shadcn/ui, Lucide React.
 
 ## 1. Design Intent
@@ -400,6 +402,8 @@ Use dialogs for blocking decisions:
 - Initialize a normal folder as project.
 - Store or replace provider credentials.
 
+Permanent Source deletion is not a generic compact dialog. Use a dedicated second-confirmation page that shows the whole source package, freed space, referencing Wiki pages, checkpoint behavior, and the explicit action `永久删除此来源`.
+
 Use drawers for non-blocking inspection:
 
 - Task logs.
@@ -455,6 +459,13 @@ Editor surface:
 - Save state must be visible.
 - External modification conflicts must interrupt save with a clear diff path.
 
+Source surface:
+
+- Sources use the same Wiki tree and reader; do not create a separate top-level Sources app.
+- The only Source-specific toolbar addition is `AI 整理`.
+- Provenance, faithful original, meaningful version history, OCR / ASR reprocessing, subtitle selection and platform refresh belong in the toggleable right panel.
+- AI 整理 produces a candidate with one `## 内容概览`; apply it only after Diff, version/hash revalidation and explicit confirmation.
+
 ### 8.3 Chat
 
 Chat is a knowledge query surface, not the whole app.
@@ -493,21 +504,46 @@ Rules:
 
 ### 8.5 Import
 
-Import is a review workflow.
+Import is a resumable source-production and review workflow. It ends at `wiki/sources/`; compilation is a separate action.
 
 Layout:
 
-- Drop zone or file picker at top.
-- Parsed file list below.
-- Preview and metadata in right panel.
-- Confirm action fixed near the top or bottom of the workflow, depending on view density.
+- Keep three tabs: Workbench, History, Capability Management.
+- Workbench order: compact source entry, capability matrix, batch status / grouped actions, continuous queue, fixed commit bar.
+- Source entry supports files, folders, URL and text / Markdown clipboard.
+- Queue uses compact rows rather than cards.
+- Right context panel owns quick preview, provenance, quality, one primary action, technical details and logs.
+- Full Markdown preview opens in a large dialog and renders the final Source with local resources.
 
 Rules:
 
-- Show file name, type, size, parse status, extracted text preview, and errors.
-- Preserve original files visibly.
-- Do not start wiki compilation until user confirms.
-- Conflicts and renames must be explicit.
+- Show user-facing states only: Discovering, Processing, Needs action, Ready to confirm, Importing, Imported, Failed / cancelled.
+- Show percentages only for real bounded progress; otherwise show stage and activity.
+- All committable items are checked by default. Duplicates, failed items, unresolved conflicts and waiting items are not committable.
+- Each row has a checkbox, source icon, title / locator, status / progress, one primary action and an overflow menu.
+- Group login, OCR, ASR and capability-install actions in the batch status area; never chain unsolicited modals.
+- Preserve the capability matrix. Each tile shows only icon, name and a status dot; hover / focus reveals status, click / Enter pins an action popover, and Escape / outside click closes it.
+- Status dots require accessible names and must not be color-only.
+- The fixed bar shows selected, new, update, warning and unresolved counts. Primary copy is `导入到来源库 N 项`.
+- Do not expose a global conflict-policy selector or Git toggle. Resolve conflicts per item.
+- Show final Markdown and affected paths before confirmation. Updates use Diff; risky overwrite / merge / replacement reports its Git checkpoint.
+- Partial batch success is valid. Unresolved items only block themselves.
+- Completion offers `查看已导入来源` and `用这些来源更新 Wiki`; the latter starts a new compile workflow.
+- Preserve running state, grouped actions, filters and scroll across tab changes and navigation.
+
+Login and capabilities:
+
+- Reuse a valid isolated platform session and show the account summary; otherwise try anonymous extraction first.
+- Raw Cookie values are never visible in React.
+- Capability actions describe the user goal (`启用本地 ASR 并继续`) and aggregate decoder, engine, model and language dependencies in one confirmation.
+- Login, install, OCR, ASR and Agent recovery are explicit user actions; successful preparation automatically resumes the affected item or group.
+
+Source reader:
+
+- Sources remain inside the existing Wiki tree and reader.
+- The only new Source toolbar action is `AI 整理`.
+- Original draft, provenance, meaningful version timeline, OCR / ASR reprocessing and platform refresh belong in the toggleable right panel.
+- AI 整理 always produces a candidate, adds or replaces one `## 内容概览`, and requires Diff plus confirmation before updating the current Source.
 
 ### 8.6 Agent Panel
 
@@ -592,16 +628,22 @@ Every long task must provide:
 
 Do not block the whole UI for long tasks.
 
+Import navigation and window minimization keep tasks running. After an application restart, heavy download, OCR and ASR tasks return as `Paused, ready to continue`; do not resume them automatically. Reuse completed chunks, and clean temporary media only after explicit cancellation.
+
 ### 9.3 Confirmations
 
 Require confirmation for:
 
 - Deleting pages.
-- Replacing original sources.
+- Applying a new Source version or merging it into the current Source.
 - Batch rewrites.
 - Applying Agent-generated diffs.
 - Initializing a normal folder as a project.
 - Saving credentials.
+- Enabling OCR or ASR for the current import session.
+- Installing the dependency chain required by a media, OCR or ASR goal.
+- Importing restricted content into a project for the first time in that project session.
+- Permanently deleting a complete Source package.
 
 Confirmation copy should be specific and calm. Avoid vague labels such as `Are you sure?`.
 
@@ -756,6 +798,8 @@ Rules:
 - Explain risky actions in plain language.
 - File paths and generated filenames should be shown exactly.
 - Chinese labels should not be forced into narrow English-sized controls.
+- User-facing terms are `原始资料`, `来源库 / 来源`, and `Wiki 页面`; normal UI does not expose staging, artifact, manifest, or baseline.
+- Core Chinese actions are `导入到来源库`, `用这些来源更新 Wiki`, and `AI 整理`; English equivalents must preserve the same separation.
 
 ## 15. Do and Do Not
 

@@ -1,5 +1,7 @@
 # Import And Chat Reliability Fix Implementation Plan
 
+> Historical implementation plan. Current Source identity, deduplication, commit and repair behavior is defined by [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Markdown confirmation feed compile correctly and make persisted default-Agent selection match Chat behavior and visible UI state.

@@ -23,7 +23,9 @@ import { GraphControls } from "./GraphControls";
 import { GraphCanvasControls } from "./GraphCanvasControls";
 import { GraphInfo } from "./GraphInfo";
 import { GraphLegend } from "./GraphLegend";
+import { bindGraphCanvasInteractions, fitGraphToViewport } from "./graphCanvasInteractions";
 import { exportGraphPng, exportGraphSvg } from "./graphExport";
+import { createLatestLayoutSaveQueue } from "./graphLayoutSaveQueue";
 import { GRAPH_DEFAULT_EDGE_COLOR, renderedNodeColor, visualForEdge, visualForNode } from "./graphRenderStyle";
 import { buildRenderSnapshot, type RenderSnapshot } from "./graphRenderModel";
 import { edgeSizeForWeight, GRAPH_VISUAL_SCALE, nodeSizeForDegree } from "./graphVisualScale";
@@ -145,6 +147,7 @@ export function GraphView() {
   const [hoveredType, setHoveredType] = useState<WikiPageType | null>(null);
   const [canvasAvailable, setCanvasAvailable] = useState(true);
   const [zoom, setZoom] = useState<number | null>(null);
+  const [layoutSaveQueue] = useState(createLatestLayoutSaveQueue);
 
   useEffect(() => {
     stateRef.current.selectedNodeId = selectedNodeId;
@@ -256,6 +259,21 @@ export function GraphView() {
       // Hover-end restores node size/z-index.
       refresh(refs.current, renderer);
     };
+    const unbindCanvasInteractions = bindGraphCanvasInteractions(renderer, graph, {
+      onClearSelection: () => setSelectedNode(null),
+      onDragStart: (nodeId) => {
+        stopBackgroundLayout(refs.current);
+        setSelectedNode(nodeId);
+      },
+      onDragEnd: () => {
+        refresh(refs.current, renderer);
+        layoutSaveQueue.request(() => {
+          const live = useGraphStore.getState();
+          return persistLayout(graph, live.data, projectId, rootPath, saveLayout);
+        });
+      },
+      onDragStateChange: (dragging) => container.classList.toggle("is-dragging", dragging),
+    });
     renderer.on("clickNode", onClick);
     renderer.on("doubleClickNode", onDoubleClick);
     renderer.on("enterNode", onEnter);
@@ -278,6 +296,7 @@ export function GraphView() {
       renderer?.off("doubleClickNode", onDoubleClick);
       renderer?.off("enterNode", onEnter);
       renderer?.off("leaveNode", onLeave);
+      unbindCanvasInteractions();
       camera.off("updated", syncZoom);
       disposeRenderer(refs.current);
     };
@@ -296,10 +315,15 @@ export function GraphView() {
 
   const handleZoomIn = () => refs.current.renderer?.getCamera().animatedZoom({ duration: 200 });
   const handleZoomOut = () => refs.current.renderer?.getCamera().animatedUnzoom({ duration: 200 });
-  const handleFit = () => refs.current.renderer?.getCamera().animatedReset({ duration: 300 });
+  const handleFit = () => {
+    const renderer = refs.current.renderer;
+    if (!renderer) return;
+    fitGraphToViewport(renderer, () => refresh(refs.current, renderer));
+  };
   const handleResetLayout = () => {
     const graph = refs.current.graph;
     if (!graph) return;
+    refs.current.renderer?.setCustomBBox(null);
     seedRandomPositions(graph);
     startBackgroundLayout(refs.current, graph, () => {
       refresh(refs.current, refs.current.renderer);
@@ -344,6 +368,7 @@ export function GraphView() {
     const recomputeLayout = () => {
       const graph = refs.current.graph;
       if (!graph) return;
+      refs.current.renderer?.setCustomBBox(null);
       seedRandomPositions(graph);
       startBackgroundLayout(refs.current, graph, () => {
         refresh(refs.current, refs.current.renderer);
@@ -689,12 +714,7 @@ function updateRenderSnapshot(refs: RenderRefs): void {
 }
 
 function disposeRenderer(refs: RenderRefs): void {
-  refs.layout?.kill();
-  refs.layout = null;
-  if (refs.layoutTimer) clearTimeout(refs.layoutTimer);
-  if (refs.refreshTimer) clearInterval(refs.refreshTimer);
-  refs.layoutTimer = null;
-  refs.refreshTimer = null;
+  stopBackgroundLayout(refs);
   refs.renderer?.kill();
   refs.renderer = null;
   refs.graph = null;
@@ -702,6 +722,16 @@ function disposeRenderer(refs: RenderRefs): void {
   // construction pass uses the emptySnapshot fallback rather than a stale
   // snapshot referencing the previous graph's node ids.
   refs.snapshot = null;
+}
+
+function stopBackgroundLayout(refs: RenderRefs): void {
+  refs.layout?.stop();
+  refs.layout?.kill();
+  refs.layout = null;
+  if (refs.layoutTimer) clearTimeout(refs.layoutTimer);
+  if (refs.refreshTimer) clearInterval(refs.refreshTimer);
+  refs.layoutTimer = null;
+  refs.refreshTimer = null;
 }
 
 function startBackgroundLayout(

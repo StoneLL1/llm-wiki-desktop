@@ -23,8 +23,9 @@ import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { isTerminalStatus } from "../../types/task";
-import { type ExportRecord, type ExportType } from "../../types/export";
+import { type ExportRecord, type ExportRestrictedContentStatus, type ExportType } from "../../types/export";
 import { ExportDialog, type ExportDialogResult } from "./ExportDialog";
+import { ExportRestrictedContentDialog } from "./ExportRestrictedContentDialog";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
 
 const TYPE_ICON: Record<ExportType, LucideIcon> = {
@@ -79,6 +80,10 @@ export function ExportsView() {
   } as CSSProperties;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingPreviewTaskId, setPendingPreviewTaskId] = useState<string | null>(null);
+  const [restrictedRegeneration, setRestrictedRegeneration] = useState<{
+    record: ExportRecord;
+    count: number;
+  } | null>(null);
   // Guards the terminal handler against re-running for the same task if the
   // task event stream emits two rapid updates before the running-task id clears.
   const processedTerminalRef = useRef<string | null>(null);
@@ -142,6 +147,7 @@ export function ExportsView() {
       route: result.route,
       template: result.template,
       options: result.options,
+      acknowledgeRestrictedContent: result.acknowledgeRestrictedContent,
     }).then((taskId) => {
       if (!taskId) return;
       if (result.openPreview) setPendingPreviewTaskId(taskId);
@@ -171,13 +177,30 @@ export function ExportsView() {
     );
   };
 
-  const handleRegenerate = (record: ExportRecord) => {
-    void regenerateExport(projectId, rootPath, record).then((taskId) => {
+  const runRegeneration = (record: ExportRecord, acknowledgeRestrictedContent: boolean) => {
+    void regenerateExport(projectId, rootPath, record, { acknowledgeRestrictedContent }).then((taskId) => {
       if (!taskId) return;
       void invoke("get_task", { request: { taskId } }).then((task) => {
         if (task) upsertTask(task as never);
       });
       openTaskDrawer(taskId);
+    });
+  };
+
+  const handleRegenerate = (record: ExportRecord) => {
+    void invoke<ExportRestrictedContentStatus>("get_export_restricted_content_status", {
+      request: {
+        projectId,
+        projectRootPath: rootPath,
+        exportType: record.exportType,
+        sourcePath: record.sourcePath ?? null,
+      },
+    }).then((status) => {
+      if (status.containsRestrictedContent) {
+        setRestrictedRegeneration({ record, count: status.restrictedSourceCount });
+      } else {
+        runRegeneration(record, false);
+      }
     });
   };
 
@@ -494,6 +517,17 @@ export function ExportsView() {
         onClose={() => setDialogOpen(false)}
         onGenerate={handleDialogGenerate}
       />
+      {restrictedRegeneration ? (
+        <ExportRestrictedContentDialog
+          count={restrictedRegeneration.count}
+          onCancel={() => setRestrictedRegeneration(null)}
+          onConfirm={() => {
+            const record = restrictedRegeneration.record;
+            setRestrictedRegeneration(null);
+            runRegeneration(record, true);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

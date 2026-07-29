@@ -102,7 +102,18 @@ pub fn html_to_markdown(value: &str) -> (String, Vec<String>) {
     {
         warnings.push("HTML_UNSAFE_URI_REMOVED".into());
     }
-    let clean = remove_element(&remove_element(value, "script"), "style");
+    if lower
+        .split('<')
+        .skip(1)
+        .any(|tag| tag.trim_start().starts_with("img") && is_tracking_pixel(tag))
+    {
+        warnings.push("HTML_TRACKING_PIXEL_REMOVED".into());
+    }
+    let clean = ["script", "style", "iframe", "object", "embed"]
+        .into_iter()
+        .fold(value.to_string(), |clean, name| {
+            remove_element(&clean, name)
+        });
     let mut output = String::new();
     let mut cursor = 0;
     while let Some(relative) = clean[cursor..].find('<') {
@@ -156,6 +167,9 @@ fn render_tag(tag: &str, output: &mut String) {
         (false, "li") => output.push_str("\n- "),
         (false, "br") => output.push('\n'),
         (false, "img") => {
+            if is_tracking_pixel(body) {
+                return;
+            }
             let uri = attribute(body, "data-src")
                 .or_else(|| attribute(body, "src"))
                 .filter(|uri| safe_uri(uri));
@@ -179,6 +193,16 @@ fn render_tag(tag: &str, output: &mut String) {
         _ => {}
     }
 }
+
+fn is_tracking_pixel(tag: &str) -> bool {
+    let dimension = |name| {
+        attribute(tag, name)
+            .and_then(|value| value.trim_end_matches("px").parse::<u32>().ok())
+            .is_some_and(|value| value <= 1)
+    };
+    dimension("width") && dimension("height")
+}
+
 fn attribute(tag: &str, wanted: &str) -> Option<String> {
     for quote in ['\'', '"'] {
         let needle = format!("{wanted}={quote}");
@@ -271,5 +295,16 @@ mod tests {
         assert!(warnings.contains(&"HTML_UNSAFE_URI_REMOVED".to_string()));
         assert!(!markdown.contains("![unsafe]"));
         assert!(markdown.contains("text"));
+    }
+
+    #[test]
+    fn removes_active_embeds_event_handlers_and_tracking_pixels() {
+        let (markdown, warnings) = html_to_markdown(
+            r#"<body onload="steal()"><p>safe</p><img width="1" height="1" src="track.gif"><script>steal()</script><iframe src="https://tracker.invalid">hidden</iframe></body>"#,
+        );
+        assert_eq!(markdown.trim(), "safe");
+        assert!(warnings.contains(&"HTML_SCRIPT_REMOVED".to_string()));
+        assert!(warnings.contains(&"HTML_EVENT_HANDLER_REMOVED".to_string()));
+        assert!(warnings.contains(&"HTML_TRACKING_PIXEL_REMOVED".to_string()));
     }
 }

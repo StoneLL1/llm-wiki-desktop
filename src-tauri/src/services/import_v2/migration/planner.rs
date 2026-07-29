@@ -4,12 +4,11 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::errors::{BackendError, IMPORT_V2_SOURCE_INDEX_INVALID};
-use crate::models::import_v2::IMPORT_V2_SCHEMA_VERSION;
 use crate::models::import_v2_migration::{
     LegacyInventory, LegacyRecord, MatchConfidence, MigrationCandidate, MigrationDecision,
     MigrationPlan, MigrationSummary, IMPORT_V2_MIGRATION_SCHEMA_VERSION,
 };
-use crate::services::import_v2::source_registry::SourceIndex;
+use crate::services::import_v2::source_registry::{SourceIndex, SOURCE_REGISTRY_SCHEMA_VERSION};
 
 pub trait MigrationPlanner: Send + Sync {
     fn plan(
@@ -29,7 +28,7 @@ impl MigrationPlanner for DefaultMigrationPlanner {
         v2_index: &SourceIndex,
     ) -> Result<MigrationPlan, BackendError> {
         inventory.validate()?;
-        if v2_index.schema_version != IMPORT_V2_SCHEMA_VERSION {
+        if v2_index.schema_version != SOURCE_REGISTRY_SCHEMA_VERSION {
             return Err(BackendError::new(
                 IMPORT_V2_SOURCE_INDEX_INVALID,
                 "The V2 source index schema is not supported by migration.",

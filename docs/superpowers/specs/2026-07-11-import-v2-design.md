@@ -1,8 +1,10 @@
 # Import 2.0 全链路重构设计
 
+> 历史设计说明：本文保留 Import V2 的研究、引擎与实现背景。2026-07-24 之后，导入 / 编译边界、`raw/` 与 `wiki/sources/`、媒体、OCR / ASR、登录、能力安装、Source UI 和 AI 整理等产品决策，以 [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md) 为唯一可信源；本文中的冲突描述不再有效。
+
 > 日期：2026-07-11
 >
-> 状态：对话设计已批准，等待书面规范复核
+> 状态：Historical / partially superseded
 >
 > 范围：后端架构、导入协议、文件与网页管线、能力包、Agent、数据安全、迁移与验收
 >

@@ -1,5 +1,8 @@
 # LLM Wiki Desktop — 项目规格说明
 
+> Import V2、来源库、媒体、OCR / ASR、平台登录态和 Source AI 整理的规范入口为 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文件只保留总规格摘要；发生冲突时以前述已确认设计为准。
+> §19 的 32 条场景、review §12.2 的 26 条合同、14 类真实夹具与 9 条禁止关闭方式统一登记在 [`../docs/qa/import-source-media-flow-batch9-evidence.json`](../docs/qa/import-source-media-flow-batch9-evidence.json)。
+
 ## 1. 产品定位
 
 **LLM Wiki Desktop** 是一款本地优先的跨平台桌面应用，用于把个人资料、网页、文档和笔记自动整理成结构化、互相链接、可探索的 Markdown 知识库。
@@ -11,7 +14,7 @@
 1. 导入资料后，应用生成可浏览的 Wiki 页面。
 2. 用户立即看到美观、可探索的知识图谱。
 3. 用户可以基于 Wiki 问答、导出 HTML/卡片/报告。
-4. Agent CLI 提供高级编排能力；未配置 Agent 时，可临时使用 BYOK API 完成核心流程。
+4. Agent CLI 提供高级编排能力；Source 已形成后，未配置 Agent 时可使用 BYOK API 完成 AI 整理、Wiki 编译和 Chat。
 
 ## 2. MVP 范围与验收标准
 
@@ -20,17 +23,17 @@
 ### 2.1 必须跑通的闭环
 
 - 新建项目、打开已有项目、把普通资料文件夹初始化为项目。
-- 导入多格式资料，预览解析结果，确认后进入编译。
+- 导入多格式资料与媒体，预览最终 Source，确认后写入来源库；编译由用户另行启动。
 - 生成 Wiki 页面、索引、概览和页面间链接。
 - 查看知识图谱，支持页面类型着色、社区聚类、布局缓存。
 - 基于 Wiki 内容 Chat 问答，并展示引用来源。
 - 生成单篇 HTML 辅助阅读页、知识卡片、项目级 HTML 报告。
-- Agent CLI 与 BYOK API 两条路径都可跑通。
+- Source 已形成后的 AI 整理、Wiki 编译和 Chat 可走 Agent CLI 或 BYOK API；Import 解析恢复只走用户触发的本地 Agent。
 - Git 自动检查点、冲突合并、Lint 自动修复、后台任务都可跑通。
 
 ### 2.2 测试资料
 
-- 小型多格式资料包：10-20 个文件，覆盖 PDF、DOCX、PPTX、XLSX/CSV、MD/TXT、HTML、URL、剪贴板文本。
+- 小型多格式资料包：10-20 个项目，覆盖 PDF、DOCX、PPTX、XLSX/CSV、MD/TXT、HTML、图片、音频、视频、URL 和剪贴板文本，并包含 OCR / ASR / 登录态分支。
 - 当前仓库中的真实 `wiki/` 样本项目：用于验证真实规模、Obsidian 兼容性和图谱性能。
 
 ### 2.3 性能目标
@@ -71,23 +74,17 @@ project-root/
 ├── purpose.md              # 知识库目标、关键问题、研究方向
 ├── schema.md               # Wiki 结构规则、页面类型定义
 ├── raw/
-│   ├── sources/            # 原始资料，默认不可变
-│   │   ├── pdfs/
-│   │   ├── docs/
-│   │   ├── slides/
-│   │   ├── sheets/
-│   │   ├── markdown/
-│   │   ├── links/
-│   │   └── other/
-│   ├── extracted/          # 标准化后的 Markdown、文本、解析元数据
-│   └── assets/             # 从 PDF/DOCX/PPTX/网页等提取的图片资源
+│   ├── sources/            # 原始本地资料和永久保留的本地媒体，默认不可变
+│   ├── web/                # 网页 / 平台证据、原始字幕和远程来源快照
+│   ├── assets/             # 图文原图和 Source 所需资源
+│   └── extracted/          # 仅兼容读取 legacy 数据；新 staging / 预览不得写入
 ├── wiki/
 │   ├── index.md            # 内容目录（LLM 导航入口）
 │   ├── log.md              # 操作历史记录
 │   ├── overview.md         # 全局摘要
 │   ├── entities/
 │   ├── concepts/
-│   ├── sources/
+│   ├── sources/            # 当前可读、可编辑、编译保护的来源库
 │   ├── queries/
 │   ├── synthesis/
 │   └── comparisons/
@@ -95,6 +92,9 @@ project-root/
 │   └── html/               # HTML/卡片/项目报告导出
 ├── skills/                 # 项目级 Skill，可选
 └── .app/                   # 应用状态（JSON 文件）
+    ├── import/             # 活动会话、任务、处理尝试和能力需求
+    ├── sources/            # sourceId、版本、别名、基线和时间线
+    ├── compile/            # change set 与已消费 Source 版本
     ├── bookmarks.json
     ├── chats/
     │   └── {id}.json
@@ -108,19 +108,11 @@ project-root/
 ### 5.2 两种文件夹入口
 
 - **打开为项目**：该文件夹本身成为 LLM Wiki 项目。应用持续跟踪项目内的 `raw/`、`wiki/`、配置、Git 状态和后台任务。
-- **导入到当前项目**：只把文件夹内容归档到当前项目的 `raw/sources/`，导入完成后不再跟踪原始路径。
+- **导入到当前项目**：把能够形成可读来源的内容提交到当前项目的 `raw/` 与 `wiki/sources/`，导入完成后不再跟踪原始路径。
 
 ### 5.3 普通文件夹初始化为项目
 
-当用户把普通资料文件夹“打开为项目”时，应用自动创建项目结构，并按文件类型迁入：
-
-- 文档进入 `raw/sources/docs/`
-- PDF 进入 `raw/sources/pdfs/`
-- PPTX 进入 `raw/sources/slides/`
-- XLSX/CSV 进入 `raw/sources/sheets/`
-- MD/TXT 进入 `raw/sources/markdown/`
-- 图片进入 `raw/assets/`
-- 其他文件进入 `raw/sources/other/`
+当用户把普通资料文件夹“打开为项目”时，应用先确认项目初始化，再创建项目结构并进入统一导入会话。文件通过发现、提取、必要的 OCR / ASR、候选预览和确认后，才以 `sourceId` 为原子边界写入 raw 证据与 `wiki/sources/`；不支持或失败文件不创建占位 Source。
 
 同名或疑似重复文件处理规则：
 
@@ -130,12 +122,12 @@ project-root/
 
 ## 6. 核心架构
 
-### 6.1 三层架构
+### 6.1 来源与知识页面架构
 
 ```text
-Raw Sources（不可变原始资料）
-  -> Extracted Markdown（标准化中间层）
-  -> Wiki（LLM 生成和维护的结构化页面）
+Raw（不可变证据）
+  -> Sources（当前可读来源）
+  -> Wiki pages（用户另行触发编译的派生页面）
   -> Graph / Chat / HTML Reports（可探索、可问答、可导出）
 ```
 
@@ -159,13 +151,13 @@ Rust 后端
 Agent 优先；未配置 Agent 时允许临时使用 BYOK API。
 
 - **Agent CLI**：负责高级 Skill、多文件维护、Lint 自动修复、HTML/报告生成、复杂编译。
-- **BYOK API**：支持导入后的 Wiki 编译、摘要、问答和引用生成。
+- **BYOK API**：Source 已经形成后，支持 AI 整理、Wiki 编译、问答和引用生成；不参与导入解析或恢复。
 - **本地程序**：负责项目管理、导入归档、搜索、图谱构建、Git 检查点和 UI 展示。
 
 ### 6.3 Agent 集成方式
 
 - 应用启动时检测 `PATH` 中的 Agent CLI，并显示安装状态、版本号和默认绑定。
-- 未安装时提供安装指引和安装命令；高级用户可授权应用执行安装命令。
+- 未安装时提供安装指引和安装命令，但应用不替用户执行 Agent 安装命令。
 - Agent 执行继承 CLI 自身的权限与沙箱机制，应用不额外实现复杂命令沙箱。
 - 应用通过 stdout/stderr 实时读取进度，展示在任务面板中。
 - Agent 任务支持取消、后台运行和系统通知。
@@ -174,6 +166,10 @@ Agent 优先；未配置 Agent 时允许临时使用 BYOK API。
 
 ```text
 skills/
+├── import-recovery/
+│   └── SKILL.md
+├── source-rewrite/
+│   └── SKILL.md
 ├── wiki-ingest/
 │   └── SKILL.md
 ├── wiki-lint/
@@ -195,6 +191,8 @@ skills/
 ```
 
 SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发短语、输入输出约束、工作流程说明。
+
+`import-recovery` 仅供用户主动触发的本地 Agent 使用，只写隔离 staging 候选。`source-rewrite` 用于 Source 的 AI 整理，可走 Agent 或 BYOK 文本处理路线，并始终经过 Diff 与确认。
 
 ## 7. 功能规格
 
@@ -219,6 +217,9 @@ SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发�
 - 渲染 GFM 表格、代码高亮、KaTeX、`[[wikilinks]]`。
 - 展示 YAML frontmatter 元数据。
 - 相关文章区域展示与当前页面有关的页面；首版不单独提供反向链接面板。
+- Sources 继续位于现有 Wiki 树；Source 顶部只新增“AI 整理”。
+- Source 的原始稿、版本时间线、重新 OCR / ASR、更换字幕和刷新来源放在可开关右侧面板。
+- AI 整理在固定绑定启动项目、Source 与任务的非模态浮动工作台中运行，生成带唯一 `## 内容概览` 的候选；切页不改绑、切项目时隐藏，完成后默认显示只读最终稿，Diff 与过程按需查看，只有用户明确确认后才更新当前 Source。
 
 编辑：
 
@@ -246,7 +247,7 @@ Agent 管理：
 
 | 操作 | 说明 | 执行方式 |
 |---|---|---|
-| Ingest | 读取 raw/extracted，生成或更新 wiki 页面 | Agent CLI 或 BYOK |
+| Compile / Ingest | 读取已确认的 `wiki/sources/` 版本，生成或更新其他 Wiki 页面；不写回 Sources | Agent CLI 或 BYOK |
 | Lint | 检查 Wiki 健康并修复 | 本地规则 + Agent Skill |
 | Query | 基于 Wiki 问答 | Agent CLI 或 BYOK |
 | HTML 生成 | 单篇辅助阅读、知识卡片、项目报告 | Agent Skill |
@@ -301,40 +302,47 @@ Agent 管理：
 
 ### 7.8 导入系统
 
-首版支持多格式、多入口导入：
+首版支持多格式、多入口导入，并统一产出可阅读 Source：
 
 | 来源 | 格式 | 说明 |
 |---|---|---|
-| 本地文件 | PDF, DOCX, PPTX, XLSX, CSV, MD, TXT, HTML | 文件选择器或拖拽导入 |
+| 本地文档 | PDF, DOC/DOCX, PPT/PPTX, XLS/XLSX, CSV, MD, TXT, HTML | 原生提取优先；扫描页和主体截图按需 OCR |
+| 本地图片 | PNG, JPEG, WebP, BMP, TIFF, HEIC/HEIF | 必须识别出有效文字才能生成 Source |
+| 本地音频 | MP3, WAV, M4A, AAC, FLAC, OGG, Opus, WMA | 伴随稿优先，否则由用户启用本地 ASR |
+| 本地视频 | MP4, MOV, MKV, WebM, AVI, M4V, WMV | 字幕优先；无字幕走 ASR，无有效语音时可走画面 OCR |
 | 文件夹 | 任意文件夹 | 可打开为项目，或导入到当前项目 |
-| URL/链接 | 网页 | Readability.js 提取正文到 Markdown |
+| URL/链接 | 普通网页、平台文章、图文、视频、集合 | 轻量抓取、浏览器渲染、平台能力或 Agent 修复分层处理 |
 | 剪贴板 | 文本/Markdown | 直接粘贴导入 |
-| 后续扩展 | 浏览器扩展、GitHub 仓库、RSS、音视频转写 | 非首版硬要求 |
+| 后续扩展 | 浏览器扩展、GitHub 仓库、RSS、图片视觉理解 | 非首版硬要求 |
 
 导入流程：
 
 1. 选择资料。
-2. 存入 `raw/sources/` 或 `raw/assets/`。
-3. 提取文本、图片、元数据，写入 `raw/extracted/`。
-4. 展示解析预览：文件列表、格式、大小、解析成功/失败、提取文本预览、页数或字数。
-5. 用户确认后再触发 Wiki 编译。
+2. 创建项目级可恢复导入会话。
+3. 自动执行安全扫描、类型识别、轻量抓取、确定性提取、字幕发现和质量验证。
+4. 缺少必要正文时等待用户主动登录、启用 OCR / ASR、安装能力或运行本地 Agent 修复。
+5. 展示最终 Source Markdown 预览、资源、质量、目标路径；更新项展示 Diff。
+6. 用户点击“导入到来源库”，后端以 `sourceId` 为原子单元写入 raw 证据、版本信息和 `wiki/sources/`。
+7. 导入完成后可查看 Sources，或另行点击“用这些来源更新 Wiki”启动独立编译。
 
-导入层只负责无损保留：
+导入层负责无损证据与可读来源：
 
-- 原文件。
-- 提取文本。
-- 提取图片。
-- 来源元数据。
+- `raw/`：不可变原文件、页面证据、原始图片、字幕、OCR / ASR 原始输出和版本证据。
+- `wiki/sources/`：忠实、规范化、可阅读、可编辑的当前 Source。
+- `.app/`：来源身份、版本、别名、基线、质量、任务和编译消费记录。
 
-OCR 和视觉理解交给后续编译 Agent/Skill，不在导入层判断图片价值。
+OCR 和 ASR 属于导入阶段的按需能力；有可靠正文或字幕时不启用，缺少形成 Source 所需的正文时由用户主动启用。图片视觉理解不在首版范围。
 
-URL 导入保存：
+所有成功 URL 导入必须保存：
 
-- 正文 Markdown。
-- 网页图片。
-- 来源元数据。
+- 原始页面或平台证据。
+- 可追溯资源、字幕或转录。
+- 来源元数据和质量信息。
+- `wiki/sources/` 中的可阅读 Source Markdown。
 
-首版不强制保存完整 HTML 快照。
+完整重复内容不创建第二个 Source；新的 URL 只作为别名。来源更新保存新 raw 版本，并通过 Diff 或三方合并保护人工编辑。
+
+平台登录态使用隔离会话；有效登录态自动复用，没有会话时先匿名尝试，确实需要时再显示“登录并继续”。Cookie、令牌和 API Key 不进入 React、项目文件、日志或导出。
 
 ### 7.9 项目管理
 
@@ -389,12 +397,13 @@ Wiki 页面是普通 Markdown，用户可能在应用内、Obsidian 或外部编
 ### 8.3 Raw Sources 规则
 
 - `raw/sources/` 默认不可变。
-- 用户可以明确选择替换或删除原始资料。
-- 删除或替换原始资料后，应用生成变更预览；用户确认后批量更新相关 Wiki 内容。
+- 来源更新通过新 raw 版本、Diff 或三方合并更新同一 Source。
+- 永久删除进入专用二次确认页，展示 Source、raw、资源、字幕 / 转录、基线、全部版本、释放空间和引用页面。
+- 删除前自动创建 Git 检查点；派生 Wiki 页面不自动删除，由 Lint 标记缺失引用。
 
 ### 8.4 Agent 修改确认
 
-- 普通编译可自动执行。
+- 用户显式启动后，无冲突的普通编译可自动完成；导入不得自动启动编译。
 - 删除、覆盖、冲突操作必须确认。
 - 所有自动修复依靠 Git 检查点提供回滚。
 
@@ -436,7 +445,10 @@ Lint 采用双层健康检查。
 ## 10. 后台任务与通知
 
 - Agent 任务支持后台运行。
+- 导入下载、OCR、ASR 和能力准备属于可取消后台任务。
 - 关闭主窗口时默认最小化到系统托盘，任务继续。
+- 页面切换或最小化不停止导入任务；应用重启后耗时下载、OCR、ASR 保持“已暂停，可继续”，不自动恢复。
+- 已完成分片和可复用中间结果应保留；用户主动取消才清理临时媒体和分片。
 - 用户可在设置中改为关闭时询问或终止任务。
 - 系统通知用于任务完成、失败和需要用户确认。
 - 点击通知打开结果页、错误日志或 Diff 确认页。
@@ -473,19 +485,32 @@ Lint 采用双层健康检查。
 - Lint
 - 设置
 
+右侧面板按主视图切换职责：
+
+- Import：当前来源、一个主操作、候选预览、目标路径、质量、折叠技术详情和日志。
+- Source：来源信息、忠实原稿、版本时间线以及重新 OCR / ASR、换字幕、刷新来源。
+- 普通知识页面：元数据、引用来源和相关文章。
+
 ## 12. 数据流
 
 ### 12.1 导入与编译
 
 ```text
 用户选择资料
-  -> 保存原文件到 raw/sources/ 或 raw/assets/
-  -> 提取文本、图片、元数据到 raw/extracted/
-  -> 展示解析预览
-  -> 用户确认
-  -> 创建 Git 检查点
-  -> Agent 或 BYOK 执行 wiki-ingest
+  -> 创建 / 恢复 ImportSession
+  -> 自动发现、分类、确定性提取与质量验证
+  -> 按需等待登录 / OCR / ASR / 能力安装 / Agent 修复
+  -> 生成 SourceCandidate
+  -> 展示最终 Markdown 预览或更新 Diff
+  -> 用户点击“导入到来源库”
+  -> 写入 raw 不可变证据、.app 来源版本与 wiki/sources 当前页面
+  -> 展示完成摘要
+  -> 用户可另行点击“用这些来源更新 Wiki”
+  -> 创建 CompileChangeSet(sourceId + versionId)
+  -> 高风险编译写入前创建 Git 检查点
+  -> Agent 或 BYOK 执行独立 Wiki 编译
   -> 生成或更新 wiki 页面、index.md、overview.md、log.md
+  -> 禁止编译器写入 wiki/sources/
   -> 合并检测与冲突处理
   -> 成功后 Git 提交
   -> 刷新搜索、图谱和 UI

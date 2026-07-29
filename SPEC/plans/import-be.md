@@ -1,5 +1,7 @@
 # Import 后端 P0+P1 进度账本
 
+> 历史进度记录：本文描述 2026-06 的 legacy Import 实现，不再是产品或架构约束。OCR / ASR、Source 提交、导入与编译分离等当前规则见 [`../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。
+
 > /loop 本轮范围：只动 `src-tauri/`。对照源 SPEC/PRD.md、UI-Frontend-design/import.html、CLAUDE.md。
 > 硬约束：导入层只无损保留（原文件/提取文本/图片/来源元数据）；OCR/视觉理解交给编译 Agent/Skill。
 

@@ -16,8 +16,6 @@ const confirmLabelKeys: Record<PendingAction["actionType"], string> = {
   delete_file: "confirmation.confirm.delete_file",
   overwrite_file: "confirmation.confirm.overwrite_file",
   batch_rewrite: "confirmation.confirm.batch_rewrite",
-  replace_source: "confirmation.confirm.replace_source",
-  delete_source: "confirmation.confirm.delete_source",
   merge_conflict: "confirmation.confirm.merge_conflict",
   agent_auto_fix: "confirmation.confirm.agent_auto_fix",
   install_agent: "confirmation.confirm.install_agent",

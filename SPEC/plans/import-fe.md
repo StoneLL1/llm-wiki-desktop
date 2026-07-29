@@ -1,5 +1,7 @@
 # Import 前端壳 P0+P1 实施账本（/loop 单轮）
 
+> 历史实施账本：旧卡片布局、Git 开关、导入后编译和编译期 OCR 不再是目标。当前 Import / Source 行为只以 [`../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。
+
 > ✅ **本轮完成 @ 2026-06-22** — Import 前端壳 P0+P1 全部 verified。
 >
 > **摘要**：按 `import.html` 重写 ImportView 为「卡片网格 + 文件表 + 右面板 + 底部确认条」四区；Tab+单行输入退场。新增 `importStore`（zustand）跨组件共享预览/选中/确认/对话框/检查点/编译开关；`RightContextPanel` 增 import 分支（选中文件 / 提取预览 / 归档规则 / 冲突记录）。dlg-url 与 dlg-folder 独立对话框（后者调 `preview_open_folder_as_project` → 既有 pendingAction 流）。底部条暴露「Git 检查点」「导入后编译」checkbox 并透传到 `confirm_import_preview.createCheckpoint` + 条件编译。拖拽走 `getCurrentWebview().onDragDropEvent`（无需 dialog 插件）。i18n en/zh-CN 全量补齐。

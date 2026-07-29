@@ -6,6 +6,7 @@ import unittest
 from core import (
     OcrPolicyError,
     mean_confidence,
+    native_tool_path,
     normalize_blocks,
     render_markdown,
     sha256_file,
@@ -15,6 +16,41 @@ from core import (
 
 
 class OcrCoreTests(unittest.TestCase):
+    def test_native_tool_paths_use_the_windows_extended_namespace(self):
+        self.assertEqual(
+            native_tool_path(Path(r"C:\deep\input.png"), "nt"),
+            r"\\?\C:\deep\input.png",
+        )
+        self.assertEqual(
+            native_tool_path(Path(r"\\server\share\input.png"), "nt"),
+            r"\\?\UNC\server\share\input.png",
+        )
+        self.assertEqual(
+            native_tool_path(Path("//server/share/input.png"), "nt"),
+            r"\\?\UNC\server\share\input.png",
+        )
+        self.assertEqual(
+            native_tool_path(Path(r"\\server\share\..\other\input.png"), "nt"),
+            r"\\?\UNC\server\share\other\input.png",
+        )
+        self.assertEqual(
+            native_tool_path(Path(r"\\.\pipe\runner"), "nt"),
+            r"\\.\pipe\runner",
+        )
+        self.assertEqual(
+            native_tool_path(Path(r"\root-relative.png"), "nt"),
+            r"\root-relative.png",
+        )
+        self.assertEqual(
+            native_tool_path(Path(r"C:drive-relative.png"), "nt"),
+            r"C:drive-relative.png",
+        )
+        self.assertEqual(native_tool_path(Path("relative.png"), "nt"), "relative.png")
+        self.assertEqual(
+            native_tool_path(Path(r"C:\deep\input.png"), "posix"),
+            r"C:\deep\input.png",
+        )
+
     def test_rejects_oversized_or_multiframe_images_before_decode(self):
         validate_image_geometry(4096, 4096, 1)
         for geometry in ((16385, 1, 1), (9000, 9000, 1), (100, 100, 2)):

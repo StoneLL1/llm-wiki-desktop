@@ -65,55 +65,20 @@ fn commands_expose_accept_select_and_discard_without_direct_wiki_writes() {
     assert!(!source.contains("std::fs::write"));
     let core_commands = include_str!("../src/commands/import_v2_commands.rs");
     assert!(!core_commands.contains("AgentAssistanceTrigger::QualityOptimization"));
-    assert!(core_commands.contains("AgentAssistanceTrigger::DeterministicHardFailure"));
+    assert!(!core_commands.contains("AgentAssistanceService"));
 }
 
 #[test]
-fn policy_matrix_keeps_quality_manual_and_hard_failure_explicitly_approved() {
+fn policy_matrix_only_checks_explicit_local_agent_availability_and_budget() {
     let policy = AgentAssistancePolicy {
-        auto_local_on_hard_failure: false,
-        auto_local_on_quality_warning: true,
-        auto_byok: false,
         max_attempts_per_item: 1,
     };
     assert_eq!(
-        AgentAssistanceService::local_start_decision(
-            &policy,
-            AgentAssistanceTrigger::QualityOptimization,
-            true,
-            0,
-        ),
-        LocalAgentStartDecision::ManualOnly
-    );
-    assert_eq!(
-        AgentAssistanceService::local_start_decision(
-            &policy,
-            AgentAssistanceTrigger::DeterministicHardFailure,
-            true,
-            0,
-        ),
-        LocalAgentStartDecision::ManualOnly
-    );
-    let approved = AgentAssistancePolicy {
-        auto_local_on_hard_failure: true,
-        ..policy
-    };
-    assert_eq!(
-        AgentAssistanceService::local_start_decision(
-            &approved,
-            AgentAssistanceTrigger::DeterministicHardFailure,
-            true,
-            0,
-        ),
+        AgentAssistanceService::local_start_decision(&policy, true, 0,),
         LocalAgentStartDecision::Start
     );
     assert_eq!(
-        AgentAssistanceService::local_start_decision(
-            &approved,
-            AgentAssistanceTrigger::Manual,
-            false,
-            0,
-        ),
+        AgentAssistanceService::local_start_decision(&policy, false, 0,),
         LocalAgentStartDecision::AgentUnavailable
     );
 }
@@ -310,5 +275,7 @@ fn preview(markdown_path: &str) -> ImportPreviewArtifact {
             meaningful_image_coverage: None,
         },
         title: "Deterministic".into(),
+        resolution: None,
+        manual_merge: None,
     }
 }

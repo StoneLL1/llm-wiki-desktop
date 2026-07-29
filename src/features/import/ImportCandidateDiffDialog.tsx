@@ -45,7 +45,7 @@ export function ImportCandidateDiffDialog({ open, view, onClose, onAction }: Imp
         <header className="flex min-h-[52px] items-center gap-3 border-b border-[var(--border)] px-4">
           <GitCompareArrows size={17} className="text-[var(--accent)]" aria-hidden="true" />
           <h2 id="import-diff-title" className="m-0 flex-1 text-[15px] font-semibold">{t("importV2.diff.title")}</h2>
-          <button type="button" className="icon-button" aria-label={t("importV2.diff.close")} onClick={onClose}><X size={16} aria-hidden="true" /></button>
+          <button type="button" className="icon-button" aria-label={t("importV2.diff.close")} title={t("importV2.diff.close")} onClick={onClose}><X size={16} aria-hidden="true" /></button>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
           <div className="flex flex-col gap-2 md:flex-row">

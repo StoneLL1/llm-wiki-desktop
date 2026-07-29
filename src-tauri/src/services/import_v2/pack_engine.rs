@@ -22,9 +22,7 @@ use crate::services::import_v2::media_router::{
 };
 use crate::services::import_v2::pack_protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::services::import_v2::redaction::redact_sensitive_text;
-use crate::services::import_v2::subtitle::{
-    append_missing_transcript_notice, render_subtitle_markdown,
-};
+use crate::services::import_v2::subtitle::render_subtitle_markdown;
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{
     WebFetchContent, WebFetchPolicy, WebFetchProgress, WebFetchService,
@@ -389,6 +387,7 @@ fn stable_capability_error_code(code: Option<&str>) -> &str {
         value.starts_with("IMPORT_WEB_")
             || value.starts_with("IMPORT_ASR_")
             || value.starts_with("IMPORT_OCR_")
+            || *value == "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE"
     })
     .unwrap_or(IMPORT_V2_ENGINE_UNAVAILABLE)
 }
@@ -413,6 +412,8 @@ fn persistent_connector_profile(
         || host.ends_with(".xiaohongshu.com")
         || host == "xhslink.com"
         || host.ends_with(".xhslink.com")
+        || host == "xhslink.cn"
+        || host.ends_with(".xhslink.cn")
     {
         "xiaohongshu"
     } else if host == "douyin.com"
@@ -452,6 +453,8 @@ fn prepare_web_request(
         || target.public.host == "xiaohongshu.com"
         || target.public.host.ends_with(".xhslink.com")
         || target.public.host == "xhslink.com"
+        || target.public.host.ends_with(".xhslink.cn")
+        || target.public.host == "xhslink.cn"
         || target.public.host.ends_with(".douyin.com")
         || target.public.host == "douyin.com"
         || target.public.host.ends_with(".iesdouyin.com")
@@ -639,11 +642,14 @@ fn is_reparse(_: &std::fs::Metadata) -> bool {
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteAssetRequest {
     placeholder: String,
     url: String,
     kind: String,
+    automatic: Option<bool>,
+    language: Option<String>,
+    label: Option<String>,
 }
 struct PackResponse {
     rpc: JsonRpcResponse<EngineResult>,
@@ -717,6 +723,7 @@ fn read_response_with_progress(
                         request.kind.as_str(),
                         "image" | "media" | "subtitle" | "temporary_media" | "temporary_image"
                     )
+                    || !subtitle_metadata_is_valid(&request)
                 {
                     return Err(());
                 }
@@ -771,11 +778,26 @@ fn localize_remote_assets(
     let markdown_path = root.join(&result.markdown_path);
     let mut markdown = std::fs::read_to_string(&markdown_path)
         .map_err(|_| engine_error("The web candidate could not be reopened."))?;
-    let bilibili_video = metadata_declares_bilibili_video(&root, result);
+    let bilibili_video = metadata_declares_platform_video(&root, result, "bilibili");
+    let xiaohongshu_video = metadata_declares_platform_video(&root, result, "xiaohongshu");
     let mut transcription_ready = false;
     let mut saw_media = false;
+    let mut localized_original_media = false;
     let mut saw_image = false;
+    let mut saw_temporary_image = false;
     let mut successful_images = 0usize;
+    let image_total = assets
+        .iter()
+        .filter(|asset| matches!(asset.kind.as_str(), "image" | "temporary_image"))
+        .count() as u64;
+    let mut processed_images = 0_u64;
+    if image_total > 0 {
+        report_progress(EngineProgress {
+            current: 0,
+            total: Some(image_total),
+            label: "images.downloading".into(),
+        })?;
+    }
     let mut localized_media = BTreeMap::<String, String>::new();
     for (index, asset) in assets.into_iter().enumerate() {
         if cancellation.is_cancelled() {
@@ -791,6 +813,19 @@ fn localize_remote_assets(
         };
         let marker = format!("asset://{}", asset.placeholder);
         saw_image |= content == WebFetchContent::Image;
+        saw_temporary_image |= temporary_image;
+        let source_image_number = if content == WebFetchContent::Image {
+            let source_image_number = processed_images + 1;
+            report_progress(EngineProgress {
+                current: processed_images,
+                total: Some(image_total),
+                label: "images.downloading".into(),
+            })?;
+            processed_images = source_image_number;
+            Some(source_image_number)
+        } else {
+            None
+        };
         saw_media |= matches!(
             content,
             WebFetchContent::Media | WebFetchContent::TemporaryMedia
@@ -847,7 +882,7 @@ fn localize_remote_assets(
             .normalized_locator
             .clone()
             .or_else(|| Some(request.input.locator.clone()));
-        if let Some(suffixes) = bilibili_asset_redirect_suffixes(
+        if let Some(suffixes) = platform_asset_redirect_suffixes(
             request
                 .input
                 .normalized_locator
@@ -960,7 +995,7 @@ fn localize_remote_assets(
         let fetched = match fetched {
             Ok(fetched) => fetched,
             Err(error) if remote_asset_failure_is_partial(content, transcription_ready) => {
-                markdown = remove_asset_reference(&markdown, &marker);
+                markdown = mark_remote_asset_unavailable(&markdown, &marker, content);
                 let label = match content {
                     WebFetchContent::Subtitle => "Platform subtitle",
                     WebFetchContent::Image => "Platform image",
@@ -977,7 +1012,7 @@ fn localize_remote_assets(
         let extension = match safe_asset_extension(&fetched.content_type, content) {
             Ok(extension) => extension,
             Err(error) if remote_asset_failure_is_partial(content, transcription_ready) => {
-                markdown = remove_asset_reference(&markdown, &marker);
+                markdown = mark_remote_asset_unavailable(&markdown, &marker, content);
                 let label = match content {
                     WebFetchContent::Subtitle => "Platform subtitle",
                     WebFetchContent::Image => "Platform image",
@@ -1006,7 +1041,10 @@ fn localize_remote_assets(
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy();
-            let temporary_relative = format!("{name}/input.{extension}");
+            let temporary_relative = format!(
+                "{name}/image-{:03}.{extension}",
+                source_image_number.unwrap_or(1)
+            );
             std::fs::write(root.join(&temporary_relative), &fetched.bytes)
                 .map_err(|_| engine_error("A temporary OCR image could not be written."))?;
             workspace.retain();
@@ -1099,25 +1137,30 @@ fn localize_remote_assets(
             successful_images += 1;
         }
         if let Some(transcript) = transcript {
-            markdown.push_str("\n\n## Transcript\n\n");
-            markdown.push_str(&transcript);
+            append_platform_transcript(&mut markdown, &transcript, &asset);
+            update_transcript_metadata(&root, result, &asset)?;
             transcription_ready = true;
         }
         if content == WebFetchContent::Media {
             localized_media.insert(asset.url, relative.clone());
+            localized_original_media = true;
         }
         result.asset_paths.push(relative);
+    }
+    if image_total > 0 {
+        report_progress(EngineProgress {
+            current: image_total,
+            total: Some(image_total),
+            label: "images.downloading".into(),
+        })?;
     }
     let local_asr_ready = matches!(
         result.continuation.as_ref(),
         Some(crate::services::import_v2::engine::EngineContinuation::LocalAsr { .. })
     );
-    let transcript_missing = transcript_is_missing(saw_media, bilibili_video, transcription_ready);
-    if transcript_failure_required(
-        transcript_missing,
-        local_asr_ready,
-        request.allow_missing_transcript,
-    ) {
+    let declared_video = bilibili_video || xiaohongshu_video;
+    let transcript_missing = transcript_is_missing(saw_media, declared_video, transcription_ready);
+    if transcript_failure_required(transcript_missing, local_asr_ready) {
         return Err(BackendError::new(
             "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
             "The platform subtitle candidates were unavailable or not parseable.",
@@ -1125,16 +1168,29 @@ fn localize_remote_assets(
             true,
         ));
     }
-    if transcript_missing && request.allow_missing_transcript && !local_asr_ready {
-        append_missing_transcript_notice(&mut markdown);
-        result.warnings.push(
-            "The preview contains metadata only because no usable transcript was found.".into(),
-        );
+    if xiaohongshu_video
+        && request.media_save_mode == MediaSaveMode::PreserveOriginal
+        && !localized_original_media
+    {
+        return Err(BackendError::new(
+            "IMPORT_WEB_MEDIA_UNAVAILABLE",
+            "The Xiaohongshu video did not expose a downloadable original media stream.",
+            true,
+            true,
+        ));
     }
     if remote_image_output_is_empty(saw_image, successful_images, result.text_coverage) {
         return Err(BackendError::new(
             "IMPORT_WEB_MEDIA_UNAVAILABLE",
             "The image post had no text and none of its images could be localized.",
+            true,
+            true,
+        ));
+    }
+    if required_ocr_image_output_is_empty(saw_temporary_image, successful_images) {
+        return Err(BackendError::new(
+            "IMPORT_WEB_MEDIA_UNAVAILABLE",
+            "None of the note images could be downloaded for required OCR.",
             true,
             true,
         ));
@@ -1149,8 +1205,8 @@ fn remote_asset_failure_is_partial(content: WebFetchContent, transcription_ready
         || (content == WebFetchContent::Media && transcription_ready)
 }
 
-fn bilibili_asset_redirect_suffixes(source_url: &str) -> Option<&'static [&'static str]> {
-    const SUFFIXES: &[&str] = &[
+fn platform_asset_redirect_suffixes(source_url: &str) -> Option<&'static [&'static str]> {
+    const BILIBILI_SUFFIXES: &[&str] = &[
         "bilibili.com",
         "b23.tv",
         "bilivideo.com",
@@ -1159,15 +1215,33 @@ fn bilibili_asset_redirect_suffixes(source_url: &str) -> Option<&'static [&'stat
         "biliimg.com",
         "edge.mountaintoys.cn",
     ];
+    const XIAOHONGSHU_SUFFIXES: &[&str] = &[
+        "xiaohongshu.com",
+        "xhslink.com",
+        "xhslink.cn",
+        "xhscdn.com",
+        "xhscdn.net",
+    ];
     let host = url::Url::parse(source_url)
         .ok()?
         .host_str()?
         .to_ascii_lowercase();
-    (host == "b23.tv" || host == "bilibili.com" || host.ends_with(".bilibili.com"))
-        .then_some(SUFFIXES)
+    if host == "b23.tv" || host == "bilibili.com" || host.ends_with(".bilibili.com") {
+        Some(BILIBILI_SUFFIXES)
+    } else if host == "xiaohongshu.com"
+        || host.ends_with(".xiaohongshu.com")
+        || host == "xhslink.com"
+        || host.ends_with(".xhslink.com")
+        || host == "xhslink.cn"
+        || host.ends_with(".xhslink.cn")
+    {
+        Some(XIAOHONGSHU_SUFFIXES)
+    } else {
+        None
+    }
 }
 
-fn metadata_declares_bilibili_video(root: &Path, result: &EngineResult) -> bool {
+fn metadata_declares_platform_video(root: &Path, result: &EngineResult, platform: &str) -> bool {
     let Some(relative) = result.metadata_path.as_deref() else {
         return false;
     };
@@ -1177,23 +1251,105 @@ fn metadata_declares_bilibili_video(root: &Path, result: &EngineResult) -> bool 
     let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return false;
     };
-    metadata.get("platform").and_then(serde_json::Value::as_str) == Some("bilibili")
+    metadata.get("platform").and_then(serde_json::Value::as_str) == Some(platform)
         && metadata
             .get("contentType")
             .and_then(serde_json::Value::as_str)
             == Some("video")
 }
 
-fn transcript_is_missing(saw_media: bool, bilibili_video: bool, transcription_ready: bool) -> bool {
-    (saw_media || bilibili_video) && !transcription_ready
+fn transcript_is_missing(saw_media: bool, declared_video: bool, transcription_ready: bool) -> bool {
+    (saw_media || declared_video) && !transcription_ready
 }
 
-fn transcript_failure_required(
-    unresolved_transcript: bool,
-    local_asr_ready: bool,
-    allow_missing_transcript: bool,
-) -> bool {
-    unresolved_transcript && !local_asr_ready && !allow_missing_transcript
+fn transcript_failure_required(unresolved_transcript: bool, local_asr_ready: bool) -> bool {
+    unresolved_transcript && !local_asr_ready
+}
+
+fn subtitle_metadata_is_valid(request: &RemoteAssetRequest) -> bool {
+    let has_metadata =
+        request.automatic.is_some() || request.language.is_some() || request.label.is_some();
+    if request.kind != "subtitle" && has_metadata {
+        return false;
+    }
+    [request.language.as_deref(), request.label.as_deref()]
+        .into_iter()
+        .flatten()
+        .all(|value| !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control))
+}
+
+fn append_platform_transcript(markdown: &mut String, transcript: &str, asset: &RemoteAssetRequest) {
+    let source = match asset.automatic {
+        Some(true) => "平台自动字幕",
+        Some(false) => "平台人工字幕",
+        None => "平台字幕",
+    };
+    let mut provenance = vec![source.to_string()];
+    if let Some(label) = asset.label.as_deref() {
+        provenance.push(format!(
+            "标签：{}",
+            escape_metadata_text(&redact_sensitive_text(label))
+        ));
+    }
+    if let Some(language) = asset.language.as_deref() {
+        provenance.push(format!(
+            "语言：{}",
+            escape_metadata_text(&redact_sensitive_text(language))
+        ));
+    }
+    markdown.push_str("\n\n## 字幕 / 转写\n\n> 来源：");
+    markdown.push_str(&provenance.join(" · "));
+    markdown.push_str("\n\n");
+    markdown.push_str(transcript);
+}
+
+fn update_transcript_metadata(
+    root: &Path,
+    result: &EngineResult,
+    asset: &RemoteAssetRequest,
+) -> Result<(), BackendError> {
+    let Some(relative) = result.metadata_path.as_deref() else {
+        return Ok(());
+    };
+    let path = root.join(relative);
+    let bytes = std::fs::read(&path)
+        .map_err(|_| engine_error("The browser metadata could not be reopened."))?;
+    let mut metadata = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| engine_error("The browser metadata was invalid."))?;
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| engine_error("The browser metadata was not an object."))?;
+    let source = match asset.automatic {
+        Some(true) => "platform_auto_subtitle",
+        Some(false) => "platform_human_subtitle",
+        None => "platform_subtitle",
+    };
+    object.insert("transcriptSource".into(), source.into());
+    if let Some(language) = asset.language.as_deref() {
+        object.insert(
+            "transcriptLanguage".into(),
+            redact_sensitive_text(language).into(),
+        );
+    }
+    if let Some(label) = asset.label.as_deref() {
+        object.insert(
+            "transcriptLabel".into(),
+            redact_sensitive_text(label).into(),
+        );
+    }
+    let serialized = serde_json::to_vec_pretty(&metadata)
+        .map_err(|_| engine_error("The browser metadata could not be serialized."))?;
+    std::fs::write(path, serialized)
+        .map_err(|_| engine_error("The browser metadata could not be updated."))
+}
+
+fn escape_metadata_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn remote_image_output_is_empty(
@@ -1202,6 +1358,10 @@ fn remote_image_output_is_empty(
     text_coverage: Option<f64>,
 ) -> bool {
     saw_image && successful_images == 0 && text_coverage.unwrap_or_default() <= 0.0
+}
+
+fn required_ocr_image_output_is_empty(saw_temporary_image: bool, successful_images: usize) -> bool {
+    saw_temporary_image && successful_images == 0
 }
 
 fn remove_asset_reference(markdown: &str, marker: &str) -> String {
@@ -1218,6 +1378,30 @@ fn remove_asset_reference(markdown: &str, marker: &str) -> String {
             } else {
                 Some(line.replace(marker, ""))
             }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if had_trailing_newline {
+        lines.push('\n');
+    }
+    lines
+}
+
+fn mark_remote_asset_unavailable(markdown: &str, marker: &str, content: WebFetchContent) -> String {
+    if content != WebFetchContent::Image {
+        return remove_asset_reference(markdown, marker);
+    }
+    let had_trailing_newline = markdown.ends_with('\n');
+    let mut lines = markdown
+        .lines()
+        .map(|line| {
+            if !line.contains(marker) {
+                return line.to_owned();
+            }
+            if let Some(image_start) = line.find("![") {
+                return format!("{}（图片不可用）", &line[..image_start]);
+            }
+            line.replace(marker, "（图片不可用）")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1409,14 +1593,19 @@ mod tests {
     use std::io::{Cursor, Read};
 
     #[test]
-    fn bilibili_pack_assets_share_the_builtin_https_redirect_allowlist() {
+    fn platform_pack_assets_share_the_builtin_https_redirect_allowlists() {
         let suffixes =
-            bilibili_asset_redirect_suffixes("https://www.bilibili.com/video/BV1example")
+            platform_asset_redirect_suffixes("https://www.bilibili.com/video/BV1example")
                 .expect("Bilibili imports should constrain remote asset redirects");
         assert!(suffixes.contains(&"edge.mountaintoys.cn"));
         assert!(
-            bilibili_asset_redirect_suffixes("https://bilibili.com.evil.example/video").is_none()
+            platform_asset_redirect_suffixes("https://bilibili.com.evil.example/video").is_none()
         );
+        let xhs = platform_asset_redirect_suffixes("http://xhslink.cn/o/example")
+            .expect("Xiaohongshu imports should constrain remote asset redirects");
+        assert!(xhs.contains(&"xhscdn.com"));
+        assert!(xhs.contains(&"xhscdn.net"));
+        assert!(platform_asset_redirect_suffixes("https://xhslink.cn.evil.example/o/x").is_none());
     }
 
     #[test]
@@ -1435,6 +1624,10 @@ mod tests {
             "IMPORT_ASR_TIMEOUT"
         );
         assert_eq!(
+            stable_capability_error_code(Some("IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE")),
+            "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE"
+        );
+        assert_eq!(
             stable_capability_error_code(Some("UNTRUSTED_ERROR")),
             IMPORT_V2_ENGINE_UNAVAILABLE
         );
@@ -1447,7 +1640,7 @@ mod tests {
             "vtt",
         )
         .unwrap();
-        assert!(markdown.contains("[00:00:01.000] Hello &lt;script&gt;"));
+        assert!(markdown.contains("### [00:00:01.000]\n\nHello &lt;script&gt;"));
         assert!(!markdown.contains("<script>"));
     }
 
@@ -1511,6 +1704,67 @@ mod tests {
         let response = read_response(Cursor::new(input)).unwrap();
         assert_eq!(response.remote_assets.len(), 1);
         assert_eq!(response.remote_assets[0].placeholder, "webasset-0");
+    }
+
+    #[test]
+    fn preserves_bounded_platform_subtitle_provenance_in_markdown_and_metadata() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"import.remoteAsset\",\"params\":{\"placeholder\":\"platform-subtitle-0\",\"url\":\"https://sns-subtitle-s2.xhscdn.com/source.srt\",\"kind\":\"subtitle\",\"automatic\":true,\"language\":\"zh-CN\",\"label\":\"source\"}}\n{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n";
+        let response = read_response(Cursor::new(input)).unwrap();
+        let asset = &response.remote_assets[0];
+        assert_eq!(asset.automatic, Some(true));
+        assert_eq!(asset.language.as_deref(), Some("zh-CN"));
+        assert_eq!(asset.label.as_deref(), Some("source"));
+
+        let mut markdown = "# Video".to_string();
+        append_platform_transcript(&mut markdown, "[00:00:01.000] 你好", asset);
+        assert!(markdown.contains("## 字幕 / 转写"));
+        assert!(markdown.contains("平台自动字幕 · 标签：source · 语言：zh-CN"));
+
+        let root =
+            std::env::temp_dir().join(format!("subtitle-provenance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("metadata.json"),
+            br#"{"platform":"xiaohongshu","contentType":"video"}"#,
+        )
+        .unwrap();
+        let result = EngineResult {
+            source_snapshot_path: "source.html".into(),
+            markdown_path: "candidate.md".into(),
+            asset_paths: Vec::new(),
+            metadata_path: Some("metadata.json".into()),
+            title: "Video".into(),
+            text_coverage: Some(1.0),
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: None,
+            warnings: Vec::new(),
+        };
+        assert!(metadata_declares_platform_video(
+            &root,
+            &result,
+            "xiaohongshu"
+        ));
+        assert!(!metadata_declares_platform_video(
+            &root, &result, "bilibili"
+        ));
+        update_transcript_metadata(&root, &result, asset).unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("metadata.json")).unwrap()).unwrap();
+        assert_eq!(metadata["transcriptSource"], "platform_auto_subtitle");
+        assert_eq!(metadata["transcriptLanguage"], "zh-CN");
+        assert_eq!(metadata["transcriptLabel"], "source");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_subtitle_metadata_on_non_subtitle_remote_assets() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"import.remoteAsset\",\"params\":{\"placeholder\":\"webasset-0\",\"url\":\"https://cdn.example/image.jpg\",\"kind\":\"image\",\"language\":\"zh-CN\"}}\n{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"result\":null,\"error\":{\"code\":-1,\"message\":\"x\",\"data\":null}}\n";
+        assert!(read_response(Cursor::new(input)).is_err());
     }
 
     #[test]
@@ -1602,6 +1856,17 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_image_keeps_an_explicit_partial_preview_notice() {
+        let markdown =
+            "## 图片\n\n1. ![第 1 张](asset://webasset-0)\n2. ![第 2 张](asset://webasset-1)\n";
+        let marked =
+            mark_remote_asset_unavailable(markdown, "asset://webasset-0", WebFetchContent::Image);
+        assert!(marked.contains("1. （图片不可用）"));
+        assert!(marked.contains("2. ![第 2 张](asset://webasset-1)"));
+        assert!(!marked.contains("asset://webasset-0"));
+    }
+
+    #[test]
     fn an_image_only_remote_post_requires_at_least_one_localized_image() {
         assert!(remote_image_output_is_empty(true, 0, Some(0.0)));
         assert!(!remote_image_output_is_empty(true, 1, Some(0.0)));
@@ -1610,9 +1875,9 @@ mod tests {
 
     #[test]
     fn asr_authorization_without_a_local_asr_continuation_still_fails_closed() {
-        assert!(transcript_failure_required(true, false, false));
-        assert!(!transcript_failure_required(true, true, false));
-        assert!(!transcript_failure_required(true, false, true));
+        assert!(transcript_failure_required(true, false));
+        assert!(!transcript_failure_required(true, true));
+        assert!(!transcript_failure_required(false, false));
     }
 
     #[test]
@@ -1623,7 +1888,7 @@ mod tests {
     }
 
     #[test]
-    fn bilibili_metadata_only_candidate_is_labeled_instead_of_silently_succeeding() {
+    fn bilibili_metadata_only_candidate_is_rejected() {
         let project_root =
             std::env::temp_dir().join(format!("bilibili-metadata-{}", uuid::Uuid::new_v4()));
         let staging_root = "staging";
@@ -1659,8 +1924,11 @@ mod tests {
             staging_root: staging_root.into(),
             chained_input: None,
             local_asr_authorized: false,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
             local_ocr_authorized: false,
-            allow_missing_transcript: true,
             media_save_mode: MediaSaveMode::ExtractOnly,
         };
         let mut result = EngineResult {
@@ -1680,7 +1948,7 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        localize_remote_assets(
+        let error = localize_remote_assets(
             &request,
             &mut result,
             Vec::new(),
@@ -1688,15 +1956,12 @@ mod tests {
             Arc::new(DomainLimiter::default()),
             &|_| Ok(()),
         )
-        .unwrap();
+        .unwrap_err();
 
+        assert_eq!(error.code, "IMPORT_WEB_SUBTITLE_UNAVAILABLE");
         let markdown = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
-        assert!(markdown.contains("## 字幕 / 转写"));
-        assert!(markdown.contains("仅包含视频元数据与简介"));
-        assert!(result
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("metadata only")));
+        assert!(!markdown.contains("## 字幕 / 转写"));
+        assert!(result.warnings.is_empty());
         std::fs::remove_dir_all(project_root).ok();
     }
 
@@ -1722,6 +1987,9 @@ mod tests {
             WebFetchContent::TemporaryMedia,
             false
         ));
+        assert!(required_ocr_image_output_is_empty(true, 0));
+        assert!(!required_ocr_image_output_is_empty(true, 1));
+        assert!(!required_ocr_image_output_is_empty(false, 0));
     }
 
     #[test]

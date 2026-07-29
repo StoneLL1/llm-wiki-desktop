@@ -76,7 +76,7 @@ export function WorkspaceRouter({
       case "dashboard":
         return <DashboardView />;
       case "wiki":
-        return <WikiView />;
+        return <WikiView capabilities={capabilities} />;
       case "chat":
         return <ChatView />;
       case "graph":

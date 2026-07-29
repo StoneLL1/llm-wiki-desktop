@@ -8,10 +8,11 @@ use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
 use crate::models::export::{
-    ExportContentOptions, ExportRecord, ExportRoute, ExportRoutePreference, ExportType,
-    ListExportsRequest, OpenExportFolderRequest, OpenExportInBrowserRequest,
-    ReadExportPreviewRequest, RegenerateExportRequest, StartExportRequest,
-    ToggleExportBookmarkRequest, ToggleExportBookmarkResponse,
+    ExportContentOptions, ExportRecord, ExportRestrictedContentStatus, ExportRoute,
+    ExportRoutePreference, ExportType, GetExportRestrictedContentStatusRequest, ListExportsRequest,
+    OpenExportFolderRequest, OpenExportInBrowserRequest, ReadExportPreviewRequest,
+    RegenerateExportRequest, StartExportRequest, ToggleExportBookmarkRequest,
+    ToggleExportBookmarkResponse,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
@@ -66,7 +67,31 @@ pub fn start_export(
     request: StartExportRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    require_restricted_export_acknowledgement(
+        &state,
+        &context,
+        request.export_type,
+        request.source_path.as_deref(),
+        request.acknowledge_restricted_content,
+    )?;
     run_export_task(app, state, request.into(), context)
+}
+
+#[tauri::command]
+pub fn get_export_restricted_content_status(
+    state: State<'_, AppState>,
+    request: GetExportRestrictedContentStatusRequest,
+) -> Result<ExportRestrictedContentStatus, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let restricted_source_count = state.export_service.restricted_source_count(
+        &context,
+        request.export_type,
+        request.source_path.as_deref(),
+    )?;
+    Ok(ExportRestrictedContentStatus {
+        contains_restricted_content: restricted_source_count > 0,
+        restricted_source_count,
+    })
 }
 
 /// Regenerate an export from an existing record's type + source.
@@ -77,7 +102,36 @@ pub fn regenerate_export(
     request: RegenerateExportRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    require_restricted_export_acknowledgement(
+        &state,
+        &context,
+        request.export_type,
+        request.source_path.as_deref(),
+        request.acknowledge_restricted_content,
+    )?;
     run_export_task(app, state, request.into_directive(), context)
+}
+
+fn require_restricted_export_acknowledgement(
+    state: &AppState,
+    context: &ProjectContext,
+    export_type: ExportType,
+    source_path: Option<&str>,
+    acknowledged: bool,
+) -> Result<(), BackendError> {
+    let count = state
+        .export_service
+        .restricted_source_count(context, export_type, source_path)?;
+    if count > 0 && !acknowledged {
+        return Err(BackendError::new(
+            "EXPORT_RESTRICTED_CONTENT_CONFIRMATION_REQUIRED",
+            "This export contains restricted sources and requires explicit confirmation.",
+            false,
+            true,
+        )
+        .with_details(serde_json::json!({ "restrictedSourceCount": count })));
+    }
+    Ok(())
 }
 
 fn run_export_task(

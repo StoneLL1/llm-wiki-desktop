@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
+import { useTaskLauncher } from "../../hooks/useTaskLauncher";
 import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -81,6 +82,7 @@ export function LintView() {
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
+  const taskLauncher = useTaskLauncher(currentProject);
   const layoutStyle = {
     "--lint-details-w-current": `${paneSizes.lintDetails}px`,
   } as CSSProperties;
@@ -155,22 +157,11 @@ export function LintView() {
   }, [deepTask, projectId, rootPath, loadDeepReport, clearDeepTask]);
 
   const triggerRecompile = () => {
-    void invoke<{ id: string }>("start_wiki_compile", {
-      request: {
-        projectId,
-        projectRootPath: rootPath,
+    void taskLauncher
+      .startCompile({
         route: ROUTE_PREFERENCE,
         agent: null,
         provider: null,
-      },
-    })
-      .then((task) => {
-        if (task) {
-          void invoke("get_task", { request: { taskId: task.id } }).then((fetched) => {
-            if (fetched) upsertTask(fetched as never);
-          });
-          openTaskDrawer(task.id);
-        }
       })
       .catch(() => {
         /* recompile is best-effort; failures surface in the task drawer */

@@ -82,11 +82,11 @@ describe("AppShell workspace focus", () => {
 describe("AppShell confirmation dialog checkpoint wiring", () => {
   const baseAction: PendingAction = {
     id: "action-cp",
-    actionType: "delete_source",
-    title: "Delete source",
-    message: "Remove the original source file.",
+    actionType: "delete_file",
+    title: "Delete file",
+    message: "Remove a project file.",
     riskLevel: "destructive",
-    affectedPaths: ["raw/sources/report.pdf"],
+    affectedPaths: ["wiki/report.md"],
     preview: null,
     expiresAt: null,
   };

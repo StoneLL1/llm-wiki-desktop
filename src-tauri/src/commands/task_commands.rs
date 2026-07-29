@@ -72,8 +72,12 @@ pub fn cancel_task(
     let result = if state
         .task_service
         .get_task(&request.task_id)
-        .is_some_and(|task| task.task_type == TaskType::LlmRequest)
-    {
+        .is_some_and(|task| {
+            matches!(
+                task.task_type,
+                TaskType::LlmRequest | TaskType::SourceAiOrganize
+            )
+        }) {
         state.task_service.request_cancel(&request.task_id)
     } else {
         state.task_service.cancel_task(&request.task_id)

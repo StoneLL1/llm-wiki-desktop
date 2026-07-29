@@ -1,7 +1,10 @@
 use std::path::Path;
 
+use image::{DynamicImage, GrayImage, RgbImage};
 use lopdf::{Document, Object};
 use serde::{Deserialize, Serialize};
+
+use crate::errors::BackendError;
 
 const TEXT_LAYER_CHARACTERS: u32 = 500;
 const LOW_TEXT_CHARACTERS: u32 = 32;
@@ -62,6 +65,12 @@ pub struct PdfPagePlan {
     pub page_index: u32,
     pub route: PdfPageRoute,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfSelectiveOcrPreparation {
+    pub markdown: String,
+    pub temporary_input_paths: Vec<String>,
 }
 
 /// Performs only passive parsing. PDF actions, JavaScript, launch targets, and
@@ -173,6 +182,129 @@ pub fn plan_pdf_pages(
             }
         })
         .collect())
+}
+
+pub fn prepare_selective_ocr(
+    path: &Path,
+    staging: &Path,
+    page_plan: &[PdfPagePlan],
+) -> Result<PdfSelectiveOcrPreparation, BackendError> {
+    let document = Document::load(path)
+        .map_err(|_| pdf_stage_error("The PDF could not be reopened for selective OCR."))?;
+    let pages = document.get_pages().into_iter().collect::<Vec<_>>();
+    if pages.len() != page_plan.len() {
+        return Err(pdf_stage_error(
+            "The PDF page list changed during selective OCR preparation.",
+        ));
+    }
+    let workspace =
+        crate::services::import_v2::media_router::TemporaryMediaWorkspace::create_unique(
+            staging,
+            ".ocr-input",
+        )?;
+    let mut markdown = String::new();
+    let mut temporary_input_paths = Vec::new();
+    for ((page_number, page_id), plan) in pages.iter().zip(page_plan) {
+        markdown.push_str(&format!("## Page {page_number}\n\n"));
+        if plan.route == PdfPageRoute::SelectiveOcr {
+            let images = document
+                .get_page_images(*page_id)
+                .map_err(|_| pdf_stage_error("A PDF OCR page image could not be inspected."))?;
+            let image = images
+                .into_iter()
+                .max_by_key(|image| image.width.saturating_mul(image.height))
+                .ok_or_else(|| {
+                    pdf_stage_error("A PDF page selected for OCR has no usable page image.")
+                })?;
+            let output = workspace.path().join(format!("page-{page_number:03}.png"));
+            decode_pdf_image(&document, &image, &output)?;
+            let relative = output
+                .strip_prefix(staging)
+                .map_err(|_| pdf_stage_error("The PDF OCR page path escaped staging."))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            temporary_input_paths.push(relative);
+            markdown.push_str(&format!("<!-- OCR_PAGE_{page_number:03} -->\n\n"));
+        } else {
+            let text = document.extract_text(&[*page_number]).unwrap_or_default();
+            if !text.trim().is_empty() {
+                markdown.push_str(text.trim());
+                markdown.push_str("\n\n");
+            }
+        }
+    }
+    let retained = workspace.retain();
+    debug_assert!(retained.starts_with(staging));
+    Ok(PdfSelectiveOcrPreparation {
+        markdown,
+        temporary_input_paths,
+    })
+}
+
+fn decode_pdf_image(
+    document: &Document,
+    image: &lopdf::xobject::PdfImage<'_>,
+    output: &Path,
+) -> Result<(), BackendError> {
+    let stream = document
+        .get_object(image.id)
+        .and_then(Object::as_stream)
+        .map_err(|_| pdf_stage_error("The PDF OCR image stream is invalid."))?;
+    let filters = image.filters.as_deref().unwrap_or_default();
+    let decoded = if filters
+        .iter()
+        .any(|filter| matches!(filter.as_str(), "DCTDecode" | "JPXDecode"))
+    {
+        image::load_from_memory(image.content)
+            .map_err(|_| pdf_stage_error("The compressed PDF OCR image is unsupported."))?
+    } else {
+        let bytes = stream
+            .decompressed_content()
+            .map_err(|_| pdf_stage_error("The PDF OCR image could not be decompressed."))?;
+        raw_pdf_image(
+            bytes,
+            image.width,
+            image.height,
+            image.color_space.as_deref(),
+            image.bits_per_component,
+        )?
+    };
+    decoded
+        .save_with_format(output, image::ImageFormat::Png)
+        .map_err(|_| pdf_stage_error("The PDF OCR page image could not be staged."))
+}
+
+fn raw_pdf_image(
+    bytes: Vec<u8>,
+    width: i64,
+    height: i64,
+    color_space: Option<&str>,
+    bits_per_component: Option<i64>,
+) -> Result<DynamicImage, BackendError> {
+    let width =
+        u32::try_from(width).map_err(|_| pdf_stage_error("The PDF OCR image width is invalid."))?;
+    let height = u32::try_from(height)
+        .map_err(|_| pdf_stage_error("The PDF OCR image height is invalid."))?;
+    if width == 0 || height == 0 || bits_per_component != Some(8) {
+        return Err(pdf_stage_error(
+            "Only 8-bit PDF page images are supported for local OCR.",
+        ));
+    }
+    match color_space.unwrap_or("DeviceRGB") {
+        "DeviceGray" | "G" => GrayImage::from_raw(width, height, bytes)
+            .map(DynamicImage::ImageLuma8)
+            .ok_or_else(|| pdf_stage_error("The grayscale PDF OCR image length is invalid.")),
+        "DeviceRGB" | "RGB" => RgbImage::from_raw(width, height, bytes)
+            .map(DynamicImage::ImageRgb8)
+            .ok_or_else(|| pdf_stage_error("The RGB PDF OCR image length is invalid.")),
+        _ => Err(pdf_stage_error(
+            "The PDF OCR image color space is unsupported.",
+        )),
+    }
+}
+
+fn pdf_stage_error(message: &str) -> BackendError {
+    BackendError::new("IMPORT_PDF_SELECTIVE_OCR_FAILED", message, true, true)
 }
 
 fn has_active_content(object: &Object) -> bool {

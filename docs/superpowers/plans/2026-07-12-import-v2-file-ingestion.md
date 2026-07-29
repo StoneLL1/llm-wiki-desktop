@@ -1,5 +1,7 @@
 # Import V2 File Ingestion Implementation Plan
 
+> Historical implementation plan. Engine and test research remains useful, but product behavior and storage boundaries are superseded by [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add safe folder/multi-file discovery and high-quality deterministic conversion for Markdown, DOC/DOCX, XLS/XLSX, PPT/PPTX, PDF, OCR, and optional local media while preserving originals and producing Import Core preview artifacts.

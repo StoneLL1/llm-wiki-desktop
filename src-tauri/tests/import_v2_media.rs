@@ -1,10 +1,19 @@
 use std::fs;
 
+use llm_wiki_desktop_lib::models::import_v2::{
+    ImportInput, ImportInputKind, MediaSaveMode, SourceIdentity,
+};
+use llm_wiki_desktop_lib::services::import_v2::engine::{
+    EngineContinuation, EngineOperation, EngineRequest, ImportEngine,
+};
+use llm_wiki_desktop_lib::services::import_v2::local_media_engine::NativeMediaCompanionEngine;
 use llm_wiki_desktop_lib::services::import_v2::media_router::{
     recover_media_temp_root, render_timestamped_markdown, AsrModelCatalog, MediaArtifactPlan,
     MediaInput, MediaKind, MediaRouteStatus, MediaRouter, SubtitleCandidate, SubtitleKind,
     TemporaryMediaWorkspace, TranscriptSegment,
 };
+use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
+use sha2::{Digest, Sha256};
 
 #[test]
 fn subtitle_priority_avoids_asr_when_preferred_text_exists() {
@@ -20,7 +29,7 @@ fn subtitle_priority_avoids_asr_when_preferred_text_exists() {
     };
 
     let plan = router.plan(&input, true);
-    assert_eq!(plan.subtitle.unwrap().path, "human.srt");
+    assert_eq!(plan.subtitle.unwrap().path, "embedded.vtt");
     assert!(!plan.requires_asr);
     assert_eq!(
         plan.artifacts,
@@ -29,19 +38,36 @@ fn subtitle_priority_avoids_asr_when_preferred_text_exists() {
 }
 
 #[test]
-fn subtitle_priority_is_human_then_automatic_then_embedded_then_asr() {
+fn subtitle_priority_is_platform_then_embedded_then_companion_then_asr() {
     let router = MediaRouter::default();
     for (subtitles, expected) in [
         (
             vec![
                 SubtitleCandidate::new(SubtitleKind::Automatic, "a.vtt"),
+                SubtitleCandidate::new(SubtitleKind::HumanLocal, "c.srt"),
                 SubtitleCandidate::new(SubtitleKind::Embedded, "e.vtt"),
+                SubtitleCandidate::new(SubtitleKind::HumanPlatform, "p.vtt"),
             ],
-            Some("a.vtt"),
+            Some("p.vtt"),
         ),
         (
-            vec![SubtitleCandidate::new(SubtitleKind::Embedded, "e.vtt")],
+            vec![
+                SubtitleCandidate::new(SubtitleKind::Automatic, "a.vtt"),
+                SubtitleCandidate::new(SubtitleKind::HumanLocal, "c.srt"),
+                SubtitleCandidate::new(SubtitleKind::Embedded, "e.vtt"),
+            ],
             Some("e.vtt"),
+        ),
+        (
+            vec![
+                SubtitleCandidate::new(SubtitleKind::Automatic, "a.vtt"),
+                SubtitleCandidate::new(SubtitleKind::HumanLocal, "c.srt"),
+            ],
+            Some("c.srt"),
+        ),
+        (
+            vec![SubtitleCandidate::new(SubtitleKind::Automatic, "a.vtt")],
+            Some("a.vtt"),
         ),
         (vec![], None::<&str>),
     ] {
@@ -186,4 +212,82 @@ fn timestamped_markdown_records_provenance_and_language_confidence() {
     assert!(markdown.contains("model: ggml-small"));
     assert!(markdown.contains("languageConfidence: 0.925"));
     assert!(markdown.contains("[00:00:01.250 --> 00:00:03.500] hello"));
+}
+
+#[test]
+fn multiple_companion_subtitles_require_and_honor_an_explicit_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let media = root.path().join("访谈.mp4");
+    let media_bytes = b"\0\0\0\x18ftypisom\0\0\0\0isomiso2";
+    fs::write(&media, media_bytes).unwrap();
+    fs::write(
+        root.path().join("访谈.en.srt"),
+        b"1\n00:00:00,000 --> 00:00:02,000\nEnglish\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("访谈.zh-CN.srt"),
+        "1\n00:00:00,000 --> 00:00:02,000\n中文内容\n".as_bytes(),
+    )
+    .unwrap();
+    let mut request = EngineRequest {
+        protocol_version: "2".into(),
+        request_id: "subtitle-choice".into(),
+        project_id: "project".into(),
+        session_id: "session".into(),
+        item_id: "item".into(),
+        task_id: "task".into(),
+        operation: EngineOperation::Extract,
+        input: ImportInput {
+            kind: ImportInputKind::File,
+            display_name: "访谈.mp4".into(),
+            locator: media.to_string_lossy().into_owned(),
+            normalized_locator: None,
+            source_identity: Some(SourceIdentity {
+                canonical_path: media.canonicalize().unwrap().to_string_lossy().into_owned(),
+                size_bytes: media_bytes.len() as u64,
+                modified_nanos: None,
+                file_id: None,
+                sha256: format!("{:x}", Sha256::digest(media_bytes)),
+                magic: format!("{:x}", Sha256::digest(media_bytes)),
+            }),
+            media_save_mode: MediaSaveMode::ExtractOnly,
+        },
+        project_root: root.path().to_string_lossy().into_owned(),
+        staging_root: "staging".into(),
+        chained_input: None,
+        local_asr_authorized: false,
+        asr_probe_only: false,
+        asr_profile: None,
+        recognition_language: None,
+        selected_subtitle: None,
+        local_ocr_authorized: false,
+        media_save_mode: MediaSaveMode::ExtractOnly,
+    };
+    let token = CancellationToken::new();
+    let engine = NativeMediaCompanionEngine;
+    let ambiguous = engine.execute(&request, &token).unwrap_err();
+    assert_eq!(ambiguous.code, "IMPORT_LOCAL_SUBTITLE_AMBIGUOUS");
+    let details = ambiguous.details.unwrap();
+    let candidates = details["subtitleCandidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(candidates, vec!["访谈.en.srt", "访谈.zh-CN.srt"]);
+
+    request.selected_subtitle = Some("访谈.zh-CN.srt".into());
+    let result = engine.execute(&request, &token).unwrap();
+    assert!(matches!(
+        result.continuation,
+        Some(EngineContinuation::LocalAsr { .. })
+    ));
+    let markdown = fs::read_to_string(
+        root.path()
+            .join("staging/transcripts/companion-fallback.md"),
+    )
+    .unwrap();
+    assert!(markdown.contains("中文内容"));
+    assert!(!markdown.contains("English"));
 }

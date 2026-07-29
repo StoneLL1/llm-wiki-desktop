@@ -35,7 +35,7 @@ export function WorkspaceController() {
 
   const capabilities = useAiCapabilities(
     currentProject,
-    activeView === "agent" || settingsOpen,
+    activeView === "agent" || activeView === "wiki" || settingsOpen,
   );
   const taskLauncher = useTaskLauncher(currentProject);
   const importWorkflow = useImportWorkflow(
@@ -121,6 +121,7 @@ export function WorkspaceController() {
         project={currentProject}
         providers={providerWorkflow.providers}
         agents={capabilities.agents}
+        importWorkflow={importWorkflow}
         onRefreshCapabilities={capabilities.refresh}
         onSaveProvider={providerWorkflow.saveProvider}
         onSaveSecret={providerWorkflow.saveSecret}

@@ -1,19 +1,37 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::app_state::AppState;
-use crate::errors::BackendError;
+use crate::errors::{BackendError, IMPORT_V2_ENGINE_PANICKED};
 use crate::models::import_v2::{
-    CommitImportSessionRequest, ImportInput, ImportRecoveryAction, ImportResourceMode,
-    ImportSession,
+    CommitImportSessionRequest, ImportBatchResult, ImportCompletion, ImportInput, ImportItem,
+    ImportItemResolution, ImportItemStatus, ImportRecoveryAction, ImportResourceMode,
+    ImportSession, ImportThreeWayMergeContext,
 };
-use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
-use crate::services::import_v2::agent_assistance::AgentAssistanceService;
 use crate::services::import_v2::agent_candidate::AgentCandidateService;
+use crate::tasks::TaskService;
+
+const DEFAULT_IMPORT_WORKER_LIMIT: usize = 2;
+const MAX_IMPORT_WORKER_LIMIT: usize = 32;
+static IMPORT_WORK_QUEUE: OnceLock<Mutex<VecDeque<ImportWorkerJob>>> = OnceLock::new();
+static ACTIVE_IMPORT_WORKERS: AtomicUsize = AtomicUsize::new(0);
+static IMPORT_WORKER_LIMIT: AtomicUsize = AtomicUsize::new(DEFAULT_IMPORT_WORKER_LIMIT);
+
+struct ImportWorkerJob {
+    app: AppHandle,
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    item_id: String,
+    task_id: String,
+    recovery_action: Option<ImportRecoveryAction>,
+}
 
 macro_rules! request {
     ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
@@ -33,6 +51,10 @@ request!(GetImportSessionV2Request {
     session_id: String,
     history_batch_id: Option<String>
 });
+request!(GetImportRestrictedContentStatusV2Request {
+    project_id: String,
+    project_root_path: String
+});
 request!(AddImportItemsV2Request { project_id: String, project_root_path: String, session_id: String, inputs: Vec<ImportInput> });
 request!(CancelImportItemV2Request {
     project_id: String,
@@ -40,12 +62,40 @@ request!(CancelImportItemV2Request {
     session_id: String,
     item_id: String
 });
+request!(SetImportItemResolutionV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    item_id: String,
+    resolution: ImportItemResolution
+});
 request!(CancelImportBatchV2Request {
     project_id: String,
     project_root_path: String,
     session_id: String,
     batch_id: String
 });
+
+pub(crate) const RESTRICTED_CONTENT_ACK_PATH: &str = ".app/import-restricted-content-ack.json";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRestrictedContentStatus {
+    pub confirmation_required: bool,
+}
+
+#[tauri::command]
+pub fn get_import_restricted_content_status_v2(
+    state: State<'_, AppState>,
+    request: GetImportRestrictedContentStatusV2Request,
+) -> Result<ImportRestrictedContentStatus, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    Ok(ImportRestrictedContentStatus {
+        confirmation_required: !state
+            .file_store
+            .exists(&context, RESTRICTED_CONTENT_ACK_PATH),
+    })
+}
 request!(AddImportTextV2Request {
     project_id: String,
     project_root_path: String,
@@ -59,6 +109,26 @@ request!(SetImportItemSelectionV2Request {
     session_id: String,
     item_id: String,
     selected: bool
+});
+request!(SelectImportSubtitleV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    item_id: String,
+    file_name: String
+});
+request!(ImportMergeContextV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    item_id: String
+});
+request!(StageImportManualMergeV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    item_id: String,
+    merged_markdown: String
 });
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +216,68 @@ pub fn set_import_item_selection_v2(
         .load_session(&context, &state.file_store, &request.session_id)
 }
 
+#[tauri::command]
+pub fn select_import_subtitle_v2(
+    state: State<'_, AppState>,
+    request: SelectImportSubtitleV2Request,
+) -> Result<ImportSession, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.select_subtitle_for_session(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+        &request.file_name,
+    )?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)
+}
+
+#[tauri::command]
+pub fn get_import_merge_context_v2(
+    state: State<'_, AppState>,
+    request: ImportMergeContextV2Request,
+) -> Result<ImportThreeWayMergeContext, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.get_three_way_merge_context(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+    )
+}
+
+#[tauri::command]
+pub fn set_import_item_resolution_v2(
+    state: State<'_, AppState>,
+    request: SetImportItemResolutionV2Request,
+) -> Result<ImportItem, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.set_item_resolution(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+        request.resolution,
+    )
+}
+
+#[tauri::command]
+pub fn stage_import_manual_merge_v2(
+    state: State<'_, AppState>,
+    request: StageImportManualMergeV2Request,
+) -> Result<ImportItem, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.stage_manual_merge(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+        &request.merged_markdown,
+    )
+}
+
 /// Read a historical session without recovery side effects. History views are
 /// inspection-only; opening them must not resume tasks, accept candidates, or
 /// rewrite staging/session evidence.
@@ -165,11 +297,36 @@ pub fn get_import_history_session_v2(
         .load_session(&context, &state.file_store, &request.session_id)
 }
 
+#[tauri::command]
+pub fn get_import_completion_v2(
+    state: State<'_, AppState>,
+    request: GetImportSessionV2Request,
+) -> Result<Option<ImportCompletion>, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let batch_id = request.history_batch_id.as_deref().ok_or_else(|| {
+        BackendError::new(
+            "IMPORT_V2_HISTORY_INVALID",
+            "A historical batch identity is required.",
+            false,
+            true,
+        )
+    })?;
+    Ok(load_history_batch(&context, &request.session_id, batch_id)?.completion)
+}
+
 pub(crate) fn load_history_snapshot(
     context: &ProjectContext,
     session_id: &str,
     batch_id: &str,
 ) -> Result<Option<ImportSession>, BackendError> {
+    Ok(load_history_batch(context, session_id, batch_id)?.history_snapshot)
+}
+
+pub(crate) fn load_history_batch(
+    context: &ProjectContext,
+    session_id: &str,
+    batch_id: &str,
+) -> Result<ImportBatchResult, BackendError> {
     if batch_id.is_empty()
         || batch_id.len() > 64
         || !batch_id
@@ -192,15 +349,14 @@ pub(crate) fn load_history_snapshot(
             true,
         )
     })?;
-    let batch: crate::models::import_v2::ImportBatchResult = serde_json::from_slice(&bytes)
-        .map_err(|_| {
-            BackendError::new(
-                "IMPORT_V2_HISTORY_CORRUPT",
-                "The historical import record is incomplete.",
-                true,
-                true,
-            )
-        })?;
+    let batch: ImportBatchResult = serde_json::from_slice(&bytes).map_err(|_| {
+        BackendError::new(
+            "IMPORT_V2_HISTORY_CORRUPT",
+            "The historical import record is incomplete.",
+            true,
+            true,
+        )
+    })?;
     if batch.session_id != session_id {
         return Err(BackendError::new(
             "IMPORT_V2_HISTORY_SCOPE_MISMATCH",
@@ -209,7 +365,7 @@ pub(crate) fn load_history_snapshot(
             true,
         ));
     }
-    Ok(batch.history_snapshot)
+    Ok(batch)
 }
 
 #[tauri::command]
@@ -218,12 +374,47 @@ pub fn cancel_import_item_v2(
     request: CancelImportItemV2Request,
 ) -> Result<ImportSession, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.import_v2_service.cancel_queued_item(
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| task_error("Import item was not found."))?;
+    if item.status != ImportItemStatus::Queued {
+        state.import_v2_service.cancel_queued_item(
+            &context,
+            &state.file_store,
+            &request.session_id,
+            &request.item_id,
+        )?;
+    }
+    let bound_task_id = item.task_id.clone();
+    if let Some(task_id) = &bound_task_id {
+        state
+            .task_service
+            .cancel_task(task_id)
+            .map_err(|error| task_error(&error))?;
+    }
+    let cancel_item = state.import_v2_service.cancel_queued_item(
         &context,
         &state.file_store,
         &request.session_id,
         &request.item_id,
-    )?;
+    );
+    if let Err(error) = cancel_item {
+        // The worker can claim the item between the session read and the
+        // durable item mutation. Its task token is already cancelled, so the
+        // worker owns the transition back to Cancelled and cleanup.
+        if !bound_task_id
+            .as_deref()
+            .is_some_and(|task_id| state.task_service.is_cancelled(task_id))
+        {
+            return Err(error);
+        }
+    }
     state
         .import_v2_service
         .load_session(&context, &state.file_store, &request.session_id)
@@ -251,6 +442,14 @@ pub fn skip_import_item_v2(
 pub fn start_import_items_v2(
     app: AppHandle,
     state: State<'_, AppState>,
+    request: StartImportItemsV2Request,
+) -> Result<Vec<BackendTask>, BackendError> {
+    start_import_items_for_state(app, &state, request)
+}
+
+pub(crate) fn start_import_items_for_state(
+    app: AppHandle,
+    state: &AppState,
     request: StartImportItemsV2Request,
 ) -> Result<Vec<BackendTask>, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
@@ -336,55 +535,192 @@ pub fn start_import_items_v2(
             let _ = state.task_service.cancel_task(&replaced_task_id);
         }
     }
+    let worker_limit = state
+        .settings_service
+        .read_settings(&context)
+        .map(|settings| configured_import_worker_limit(settings.max_concurrent_tasks))
+        .unwrap_or(DEFAULT_IMPORT_WORKER_LIMIT);
     let mut tasks = Vec::with_capacity(prepared.len());
+    let mut jobs = Vec::with_capacity(prepared.len());
     for (item_id, task) in prepared {
-        let (app, project_id, root, session_id, task_id, recovery_action) = (
-            app.clone(),
-            request.project_id.clone(),
-            request.project_root_path.clone(),
-            request.session_id.clone(),
-            task.id.clone(),
-            recovery_action.clone(),
-        );
-        tauri::async_runtime::spawn(async move {
-            let state = app.state::<AppState>();
-            let result = state
-                .resolve_project_context(&project_id, &root)
-                .and_then(|context| {
-                    state.import_v2_service.run_item_with_recovery(
-                        &context,
-                        &state.file_store,
-                        &state.task_service,
-                        &session_id,
-                        &item_id,
-                        &task_id,
-                        recovery_action.as_ref(),
-                    )
-                });
-            match result {
-                Err(error) => {
-                    fail_task_unless_cancelled(&state, &task_id, error);
-                    if let Ok(context) = state.resolve_project_context(&project_id, &root) {
-                        if let Ok(settings) = state.settings_service.read_settings(&context) {
-                            if let Some(agent_kind) = settings.agent_default {
-                                run_local_agent_candidate(
-                                    &state,
-                                    &context,
-                                    &session_id,
-                                    &item_id,
-                                    AgentAssistanceTrigger::DeterministicHardFailure,
-                                    agent_kind,
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {}
-            }
+        jobs.push(ImportWorkerJob {
+            app: app.clone(),
+            project_id: request.project_id.clone(),
+            project_root_path: request.project_root_path.clone(),
+            session_id: request.session_id.clone(),
+            item_id,
+            task_id: task.id.clone(),
+            recovery_action: recovery_action.clone(),
         });
         tasks.push(task);
     }
+    enqueue_import_jobs(jobs, worker_limit);
     Ok(tasks)
+}
+
+fn configured_import_worker_limit(value: u64) -> usize {
+    usize::try_from(value)
+        .unwrap_or(MAX_IMPORT_WORKER_LIMIT)
+        .clamp(1, MAX_IMPORT_WORKER_LIMIT)
+}
+
+fn import_work_queue() -> &'static Mutex<VecDeque<ImportWorkerJob>> {
+    IMPORT_WORK_QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn enqueue_import_jobs(jobs: Vec<ImportWorkerJob>, worker_limit: usize) {
+    if jobs.is_empty() {
+        return;
+    }
+    IMPORT_WORKER_LIMIT.store(worker_limit, Ordering::Release);
+    import_work_queue()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(jobs);
+    schedule_import_workers();
+}
+
+fn schedule_import_workers() {
+    loop {
+        let worker_limit = IMPORT_WORKER_LIMIT.load(Ordering::Acquire).max(1);
+        let active = ACTIVE_IMPORT_WORKERS.load(Ordering::Acquire);
+        if active >= worker_limit
+            || import_work_queue()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        {
+            return;
+        }
+        if ACTIVE_IMPORT_WORKERS
+            .compare_exchange(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            continue;
+        }
+        // ImportEngine is a synchronous boundary that performs filesystem,
+        // process, and network-adapter work. A process-wide bounded queue keeps
+        // it off Tokio's async workers without creating one blocking worker per
+        // imported item.
+        tauri::async_runtime::spawn_blocking(|| {
+            loop {
+                if ACTIVE_IMPORT_WORKERS.load(Ordering::Acquire)
+                    > IMPORT_WORKER_LIMIT.load(Ordering::Acquire).max(1)
+                {
+                    break;
+                }
+                let job = import_work_queue()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front();
+                let Some(job) = job else {
+                    break;
+                };
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_import_worker_job(&job);
+                }))
+                .is_err()
+                {
+                    let state = job.app.state::<AppState>();
+                    fail_task_unless_cancelled(
+                        &state,
+                        &job.task_id,
+                        BackendError::new(
+                            IMPORT_V2_ENGINE_PANICKED,
+                            "The import worker stopped unexpectedly.",
+                            true,
+                            false,
+                        ),
+                    );
+                }
+            }
+            ACTIVE_IMPORT_WORKERS.fetch_sub(1, Ordering::AcqRel);
+            // Cover the enqueue/worker-exit race: an enqueue can observe the
+            // old active count just before this worker becomes idle.
+            schedule_import_workers();
+        });
+    }
+}
+
+fn run_import_worker_job(job: &ImportWorkerJob) {
+    let state = job.app.state::<AppState>();
+    let result = state
+        .resolve_project_context(&job.project_id, &job.project_root_path)
+        .and_then(|context| {
+            let item_is_still_bound = state
+                .import_v2_service
+                .load_session(&context, &state.file_store, &job.session_id)?
+                .items
+                .into_iter()
+                .find(|item| item.item_id == job.item_id)
+                .is_some_and(|item| {
+                    item.task_id.as_deref() == Some(job.task_id.as_str())
+                        && !matches!(
+                            item.status,
+                            ImportItemStatus::Cancelled
+                                | ImportItemStatus::Skipped
+                                | ImportItemStatus::Completed
+                        )
+                });
+            if !item_is_still_bound {
+                state
+                    .task_service
+                    .cancel_task(&job.task_id)
+                    .map_err(|error| task_error(&error))?;
+                return Ok(());
+            }
+            state.import_v2_service.run_item_with_recovery(
+                &context,
+                &state.file_store,
+                &state.task_service,
+                &job.session_id,
+                &job.item_id,
+                &job.task_id,
+                job.recovery_action.as_ref(),
+            )?;
+            let restricted_content_acknowledged = state
+                .file_store
+                .exists(&context, RESTRICTED_CONTENT_ACK_PATH);
+            if let Some(batch) = state.import_v2_service.finalize_exact_duplicate(
+                &context,
+                &state.file_store,
+                &state.git_service,
+                &job.session_id,
+                &job.item_id,
+                restricted_content_acknowledged,
+                || {
+                    state
+                        .task_service
+                        .transition_status(&job.task_id, TaskStatus::Running)
+                        .map(|_| ())
+                        .map_err(|error| task_error(&error))
+                },
+            )? {
+                state
+                    .task_service
+                    .complete_running_with_result(
+                        &job.task_id,
+                        TaskResult {
+                            summary: "Duplicate already exists; its locator was recorded.".into(),
+                            affected_paths: vec![format!(
+                                ".app/import-history/{}.json",
+                                batch.batch_id
+                            )],
+                            reference: Some(TaskResultReference::ImportV2SessionPreview {
+                                session_id: batch.session_id.clone(),
+                                batch_id: Some(batch.batch_id.clone()),
+                                completion: batch.completion.clone(),
+                            }),
+                            pending_action: None,
+                        },
+                    )
+                    .map_err(|error| task_error(&error))?;
+            }
+            Ok(())
+        });
+    if let Err(error) = result {
+        fail_task_unless_cancelled(&state, &job.task_id, error);
+    }
 }
 
 /// Cancel only the import tasks belonging to one backend-issued batch. The
@@ -435,53 +771,6 @@ pub fn cancel_import_batch_v2(
         .collect()
 }
 
-fn run_local_agent_candidate(
-    state: &AppState,
-    context: &crate::models::paths::ProjectContext,
-    session_id: &str,
-    item_id: &str,
-    trigger: AgentAssistanceTrigger,
-    agent_kind: crate::models::agent::AgentKind,
-) {
-    let assistance = AgentAssistanceService::new(
-        &state.import_v2_service,
-        &state.file_store,
-        &state.settings_service,
-        &state.agent_service,
-        &state.task_service,
-        AgentAssistanceService::bundled_skill_path(),
-    );
-    let Ok(agent_task) = assistance.start_local(context, session_id, item_id, trigger, agent_kind)
-    else {
-        return;
-    };
-    if assistance
-        .run_local(
-            context,
-            session_id,
-            item_id,
-            &agent_task.id,
-            trigger,
-            agent_kind,
-        )
-        .is_ok()
-    {
-        let accepted = AgentCandidateService::new(
-            &state.import_v2_service,
-            &state.file_store,
-            &state.task_service,
-        )
-        .accept_staged_output(context, session_id, item_id, &agent_task.id);
-        if accepted.is_err() {
-            let _ = state.task_service.append_log(
-                &agent_task.id,
-                crate::tasks::task_model::LogLevel::Warn,
-                "Agent output was staged but candidate validation failed; the deterministic result was preserved.".into(),
-            );
-        }
-    }
-}
-
 fn prepare_all<T>(
     item_ids: Vec<String>,
     mut create: impl FnMut(&str) -> Result<T, BackendError>,
@@ -512,6 +801,50 @@ pub fn confirm_import_session_v2(
     request: CommitImportSessionRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let includes_restricted = request.decisions.iter().any(|decision| {
+        session
+            .items
+            .iter()
+            .any(|item| item.item_id == decision.item_id && item.restricted_content)
+    });
+    let preview_task_ids = request
+        .decisions
+        .iter()
+        .filter_map(|decision| {
+            session
+                .items
+                .iter()
+                .find(|item| item.item_id == decision.item_id)
+                .and_then(|item| item.task_id.as_ref())
+                .map(|task_id| (decision.item_id.clone(), task_id.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    if includes_restricted
+        && !state
+            .file_store
+            .exists(&context, RESTRICTED_CONTENT_ACK_PATH)
+    {
+        if !request.acknowledge_restricted_content {
+            return Err(BackendError::new(
+                "IMPORT_V2_RESTRICTED_CONTENT_CONFIRMATION_REQUIRED",
+                "Restricted content must be acknowledged before its first project commit.",
+                false,
+                true,
+            ));
+        }
+        state.file_store.write_json_atomic(
+            &context,
+            RESTRICTED_CONTENT_ACK_PATH,
+            &serde_json::json!({
+                "schemaVersion": 1,
+                "acknowledgedAt": chrono::Utc::now().to_rfc3339(),
+            }),
+        )?;
+    }
     let task = state
         .task_service
         .create_project_task(
@@ -534,13 +867,24 @@ pub fn confirm_import_session_v2(
                 .task_service
                 .transition_status(&task_id, TaskStatus::Running)
                 .map_err(|error| task_error(&error))?;
-            let batch = state.import_v2_service.commit_items_cancellable(
-                &context,
-                &state.file_store,
-                &state.git_service,
-                &commit_request,
-                || state.task_service.is_cancelled(&task_id),
-            )?;
+            let batch = state
+                .import_v2_service
+                .commit_items_cancellable_with_progress(
+                    &context,
+                    &state.file_store,
+                    &state.git_service,
+                    &commit_request,
+                    || state.task_service.is_cancelled(&task_id),
+                    |batch| {
+                        settle_confirmed_preview_tasks(
+                            &state.task_service,
+                            &preview_task_ids,
+                            batch,
+                        );
+                    },
+                    None,
+                    || Ok(()),
+                )?;
             Ok(TaskResult {
                 summary: format!(
                     "Committed {} import item(s); {} failed.",
@@ -550,6 +894,7 @@ pub fn confirm_import_session_v2(
                 reference: Some(TaskResultReference::ImportV2SessionPreview {
                     session_id: batch.session_id.clone(),
                     batch_id: Some(batch.batch_id.clone()),
+                    completion: batch.completion.clone(),
                 }),
                 pending_action: None,
             })
@@ -566,6 +911,56 @@ pub fn confirm_import_session_v2(
         }
     });
     Ok(task)
+}
+
+fn settle_confirmed_preview_tasks(
+    task_service: &TaskService,
+    preview_task_ids: &HashMap<String, String>,
+    batch: &ImportBatchResult,
+) {
+    for item in &batch.items {
+        let Some(task_id) = preview_task_ids.get(&item.item_id) else {
+            continue;
+        };
+        if !task_service
+            .get_task(task_id)
+            .is_some_and(|task| task.status == TaskStatus::WaitingForConfirmation)
+        {
+            continue;
+        }
+        if !item.committed && item.error_code.as_deref() == Some(crate::errors::IMPORT_V2_CANCELLED)
+        {
+            continue;
+        }
+        if task_service
+            .transition_status(task_id, TaskStatus::Running)
+            .is_err()
+        {
+            continue;
+        }
+        if item.committed {
+            let affected_paths = item.wiki_path.clone().into_iter().collect();
+            let _ = task_service.complete_running_with_result(
+                task_id,
+                TaskResult {
+                    summary: "Import item committed.".into(),
+                    affected_paths,
+                    reference: None,
+                    pending_action: None,
+                },
+            );
+        } else {
+            let code = item
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "IMPORT_V2_COMMIT_FAILED".into());
+            let _ = task_service.set_error(
+                task_id,
+                BackendError::new(code, "The import item could not be committed.", true, false),
+            );
+            let _ = task_service.transition_status(task_id, TaskStatus::Failed);
+        }
+    }
 }
 
 fn task_error(message: &str) -> BackendError {
@@ -587,7 +982,17 @@ fn fail_task_unless_cancelled(state: &AppState, task_id: &str, error: BackendErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::import_v2::ImportInputKind;
+    use crate::models::import_v2::{ImportInputKind, ImportItemCommitResult};
+
+    #[test]
+    fn import_worker_limit_is_always_bounded() {
+        assert_eq!(configured_import_worker_limit(0), 1);
+        assert_eq!(configured_import_worker_limit(4), 4);
+        assert_eq!(
+            configured_import_worker_limit(u64::MAX),
+            MAX_IMPORT_WORKER_LIMIT
+        );
+    }
 
     #[test]
     fn add_items_request_uses_ids_and_inputs_not_target_paths() {
@@ -635,5 +1040,115 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(rolled_back, vec![1, 2]);
+    }
+
+    #[test]
+    fn confirmation_settles_the_original_preview_tasks() {
+        let root = std::env::temp_dir().join(format!("import-v2-confirm-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tasks = TaskService::default();
+        let successful = tasks
+            .create_project_task(
+                TaskType::Import,
+                "project".into(),
+                root.clone(),
+                "successful preview".into(),
+                true,
+            )
+            .unwrap();
+        let failed = tasks
+            .create_project_task(
+                TaskType::Import,
+                "project".into(),
+                root.clone(),
+                "failed preview".into(),
+                true,
+            )
+            .unwrap();
+        let cancelled = tasks
+            .create_project_task(
+                TaskType::Import,
+                "project".into(),
+                root.clone(),
+                "cancelled preview".into(),
+                true,
+            )
+            .unwrap();
+        for task_id in [&successful.id, &failed.id, &cancelled.id] {
+            tasks
+                .transition_status(task_id, TaskStatus::Running)
+                .unwrap();
+            tasks
+                .transition_status(task_id, TaskStatus::WaitingForConfirmation)
+                .unwrap();
+        }
+        let preview_task_ids = HashMap::from([
+            ("success-item".into(), successful.id.clone()),
+            ("failed-item".into(), failed.id.clone()),
+            ("cancelled-item".into(), cancelled.id.clone()),
+        ]);
+        let batch = ImportBatchResult {
+            batch_id: "batch".into(),
+            session_id: "session".into(),
+            created_at: "2026-07-27T00:00:00Z".into(),
+            batch_task_id: None,
+            committed_count: 1,
+            failed_count: 2,
+            items: vec![
+                ImportItemCommitResult {
+                    item_id: "success-item".into(),
+                    source_id: Some("source".into()),
+                    version_id: Some("version".into()),
+                    wiki_path: Some("wiki/source.md".into()),
+                    content_hash: Some("a".repeat(64)),
+                    disposition: None,
+                    warnings: Vec::new(),
+                    committed: true,
+                    error_code: None,
+                },
+                ImportItemCommitResult {
+                    item_id: "failed-item".into(),
+                    source_id: None,
+                    version_id: None,
+                    wiki_path: None,
+                    content_hash: None,
+                    disposition: None,
+                    warnings: Vec::new(),
+                    committed: false,
+                    error_code: Some("IMPORT_V2_COMMIT_CONFLICT".into()),
+                },
+                ImportItemCommitResult {
+                    item_id: "cancelled-item".into(),
+                    source_id: None,
+                    version_id: None,
+                    wiki_path: None,
+                    content_hash: None,
+                    disposition: None,
+                    warnings: Vec::new(),
+                    committed: false,
+                    error_code: Some(crate::errors::IMPORT_V2_CANCELLED.into()),
+                },
+            ],
+            history_snapshot: None,
+            completion: None,
+        };
+
+        settle_confirmed_preview_tasks(&tasks, &preview_task_ids, &batch);
+
+        assert_eq!(
+            tasks.get_task(&successful.id).unwrap().status,
+            TaskStatus::Succeeded
+        );
+        let failed_task = tasks.get_task(&failed.id).unwrap();
+        assert_eq!(failed_task.status, TaskStatus::Failed);
+        assert_eq!(
+            failed_task.error.as_ref().map(|error| error.code.as_str()),
+            Some("IMPORT_V2_COMMIT_CONFLICT")
+        );
+        assert_eq!(
+            tasks.get_task(&cancelled.id).unwrap().status,
+            TaskStatus::WaitingForConfirmation
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

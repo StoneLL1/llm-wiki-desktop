@@ -36,6 +36,7 @@ pub enum TaskType {
     DeepLint,
     AutoFix,
     Export,
+    SourceAiOrganize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +85,32 @@ pub enum TaskResultReference {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         batch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<crate::models::import_v2::ImportCompletion>,
+    },
+    Compile {
+        result: crate::models::compile::CompileResult,
+    },
+    SourceAiOrganize {
+        source_id: String,
+        base_version_id: String,
+        base_markdown_hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route: Option<crate::models::compile::CompileRoutePreference>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<crate::models::agent::AgentKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<crate::models::llm::LlmProviderKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        custom_instructions: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_root_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_engine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_model: Option<String>,
     },
 }
 
@@ -295,6 +322,7 @@ mod tests {
         let reference = TaskResultReference::ImportV2SessionPreview {
             session_id: "session-1".into(),
             batch_id: Some("batch-1".into()),
+            completion: None,
         };
         let value = serde_json::to_value(&reference).unwrap();
         assert_eq!(value["type"], json!("import_v2_session_preview"));
@@ -311,6 +339,7 @@ mod tests {
             TaskResultReference::ImportV2SessionPreview {
                 session_id: "session-1".into(),
                 batch_id: None,
+                completion: None,
             }
         );
     }
@@ -332,5 +361,42 @@ mod tests {
         assert_eq!(value["projectId"], json!("project-1"));
         assert_eq!(value["taskId"], json!("task-1"));
         assert!(value.get("event_type").is_none());
+    }
+
+    #[test]
+    fn source_ai_task_reference_keeps_candidate_binding_typed() {
+        let reference = TaskResultReference::SourceAiOrganize {
+            source_id: "source-中文".into(),
+            base_version_id: "version-1".into(),
+            base_markdown_hash: "abc123".into(),
+            candidate_id: Some("candidate-1".into()),
+            route: Some(crate::models::compile::CompileRoutePreference::Byok),
+            agent: None,
+            provider: Some(crate::models::llm::LlmProviderKind::OpenAi),
+            custom_instructions: Some("保留引文".into()),
+            project_root_path: Some(r"D:\知识库".into()),
+            resolved_engine: Some("open_ai".into()),
+            resolved_model: Some("gpt-source".into()),
+        };
+        let value = serde_json::to_value(&reference).unwrap();
+        assert_eq!(value["type"], json!("source_ai_organize"));
+        assert_eq!(value["sourceId"], json!("source-中文"));
+        assert_eq!(value["baseVersionId"], json!("version-1"));
+        assert_eq!(value["baseMarkdownHash"], json!("abc123"));
+        assert_eq!(value["candidateId"], json!("candidate-1"));
+        assert_eq!(value["route"], json!("byok"));
+        assert_eq!(value["provider"], json!("open_ai"));
+        assert_eq!(value["customInstructions"], json!("保留引文"));
+        assert_eq!(value["projectRootPath"], json!(r"D:\知识库"));
+        assert_eq!(value["resolvedEngine"], json!("open_ai"));
+        assert_eq!(value["resolvedModel"], json!("gpt-source"));
+        assert_eq!(
+            serde_json::from_value::<TaskResultReference>(value).unwrap(),
+            reference
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskType::SourceAiOrganize).unwrap(),
+            "\"source_ai_organize\""
+        );
     }
 }

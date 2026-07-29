@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL } from "node:url";
-import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidence, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence } from "./platform-extract.mjs";
+import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidence, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, platformHasVideoEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence, xiaohongshuImageEvidenceReady, xiaohongshuImageOcrRequired } from "./platform-extract.mjs";
 
 function fixture(name) {
   return readFileSync(new URL(`../../../tests/fixtures/import-v2/web/xiaohongshu/${name}`, import.meta.url), "utf8");
@@ -19,6 +19,25 @@ test("requests temporary OCR inputs only for an explicit image-post OCR run", ()
   assert.equal(classifyRemoteImageKind("douyin", true, true, "preserve_original"), "image");
   assert.equal(classifyRemoteImageKind("xiaohongshu", true, true, "extract_only"), null);
   assert.equal(classifyRemoteImageKind("generic", false, true), "image");
+  assert.equal(platformHasVideoEvidence({ contentType: "video" }, null, null), true);
+  assert.equal(
+    classifyRemoteImageKind(
+      "xiaohongshu",
+      platformHasVideoEvidence({ contentType: "video" }, null, null),
+      true,
+      "extract_only",
+    ),
+    null,
+  );
+});
+
+test("requires verified OCR for XHS image posts but never for video covers", () => {
+  assert.equal(xiaohongshuImageOcrRequired({ contentType: "image_post" }, false), true);
+  assert.equal(xiaohongshuImageOcrRequired({ contentType: "image_post" }, true), false);
+  assert.equal(xiaohongshuImageOcrRequired({ contentType: "video" }, false), false);
+  assert.equal(xiaohongshuImageEvidenceReady({ contentType: "image_post" }, 0), false);
+  assert.equal(xiaohongshuImageEvidenceReady({ contentType: "image_post" }, 1), true);
+  assert.equal(xiaohongshuImageEvidenceReady({ contentType: "video" }, 0), true);
 });
 
 test("extract-only Markdown keeps image evidence as readable non-retention notices", () => {
@@ -76,6 +95,18 @@ test("does not fall back to a recommended item when the requested id is absent",
   assert.equal(extractPlatformPayload("xiaohongshu", html, "https://www.xiaohongshu.com/explore/requested"), null);
 });
 
+test("keeps a non-video XHS note in the image-post contract when image fields changed", () => {
+  const html = `<script>{"note":{"noteId":"changedimages","title":"图文","desc":"正文"}}</script>`;
+  const result = extractPlatformPayload(
+    "xiaohongshu",
+    html,
+    "https://www.xiaohongshu.com/explore/changedimages",
+  );
+  assert.equal(result.contentType, "image_post");
+  assert.deepEqual(result.images, []);
+  assert.equal(xiaohongshuImageEvidenceReady(result, 0), false);
+});
+
 test("does not treat an XHS user profile as a note URL", () => {
   const html = `<script>{"user":{"id":"author-1","title":"作者主页","desc":"个人简介"},"feed":[{"noteId":"recommended","title":"推荐内容","desc":"不应导入"}]}</script>`;
   assert.equal(
@@ -101,6 +132,22 @@ test("extracts XHS playable media separately from the cover", () => {
   assert.equal(result.author, "Author");
   assert.equal(result.images[0], "https://sns-img-qc.xhscdn.com/cover.jpg");
   assert.equal(result.mediaUrl, "https://sns-video-qc.xhscdn.com/video.mp4");
+});
+
+test("extracts XHS mediaV2 subtitles and safely upgrades trusted CDN HTTP URLs", () => {
+  const result = extractPlatformPayload(
+    "xiaohongshu",
+    fixture("video-note-media-v2.html"),
+    "https://www.xiaohongshu.com/discovery/item/6a61c0bf000000000e034c02",
+  );
+  assert.equal(result.contentType, "video");
+  assert.match(result.mediaUrl, /^https:\/\/sns-video-v6\.xhscdn\.com\//u);
+  assert.match(result.images[0], /^https:\/\/sns-webpic-qc\.xhscdn\.com\//u);
+  assert.equal(result.subtitleCandidates.length, 3);
+  assert.equal(result.subtitleCandidates[0].label, "source");
+  assert.equal(result.subtitleCandidates[0].language, "zh-CN");
+  assert.equal(result.subtitleCandidates[0].automatic, true);
+  assert.match(result.subtitles[0], /source\.srt/u);
 });
 
 test("extracts realistic XHS initial state with stable image order and deduplication", () => {
@@ -307,6 +354,39 @@ test("keeps human Chinese Bilibili subtitles ahead of automatic alternatives", (
       ["en", true, "https://aisubtitle.hdslb.com/en.json"],
     ],
   );
+});
+
+test("keeps every Bilibili subtitle track but marks machine translations unreliable", () => {
+  const evidence = extractBilibiliPlayerEvidence(
+    {
+      subtitle: {
+        subtitles: [
+          {
+            lan: "zh-CN",
+            lan_doc: "中文（自动生成）",
+            subtitle_url: "https://aisubtitle.hdslb.com/original.json",
+            ai_status: 1,
+          },
+          {
+            lan: "en",
+            lan_doc: "English translation",
+            subtitle_url: "https://aisubtitle.hdslb.com/translation.json",
+            ai_status: 1,
+            is_translate: true,
+          },
+        ],
+      },
+    },
+    "https://www.bilibili.com/video/BV1abc",
+  );
+  assert.deepEqual(
+    evidence.subtitleCandidates.map(({ language, kind, url }) => [language, kind, url]),
+    [
+      ["zh-CN", "platform_auto_original", "https://aisubtitle.hdslb.com/original.json"],
+      ["en", "machine_translation", "https://aisubtitle.hdslb.com/translation.json"],
+    ],
+  );
+  assert.equal(evidence.subtitles.length, 2);
 });
 
 test("does not merge recommendation player data from unrelated HTML scripts", () => {

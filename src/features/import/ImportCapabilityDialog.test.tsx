@@ -31,10 +31,13 @@ describe("ImportCapabilityDialog", () => {
   it("shows pinned capability facts, license, target platform, and fallback", () => {
     render(<ImportCapabilityDialog open requirement={requirement} onInstall={vi.fn()} onCancel={vi.fn()} />);
 
-    expect(screen.getByText(/browser-runtime/)).toBeInTheDocument();
+    expect(screen.getByText("Interactive web reader")).toBeVisible();
+    expect(screen.getByText("Read dynamic web sources")).toBeVisible();
     expect(screen.getByText(/1\.4\.0/)).toBeInTheDocument();
     expect(screen.getByText(/Apache-2\.0/)).toBeInTheDocument();
-    expect(screen.getByText(/x86_64-pc-windows-msvc/)).toBeInTheDocument();
+    expect(screen.getByText("browser-runtime")).not.toBeVisible();
+    expect(screen.getByText("web.generic.browser")).not.toBeVisible();
+    expect(screen.getByText("x86_64-pc-windows-msvc")).not.toBeVisible();
     expect(screen.getByText(/signed pack from a release/i)).toBeInTheDocument();
   });
 

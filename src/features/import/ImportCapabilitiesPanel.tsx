@@ -1,41 +1,51 @@
-import { CheckCircle2, CircleAlert, Package, Route } from "lucide-react";
+import { CheckCircle2, CircleAlert, Package } from "lucide-react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { ImportItem } from "../../types/importV2";
 import type { ImportCapabilityReadiness } from "../../types/importV2Presentation";
+import type { ImportItemAction } from "./importStatusPresentation";
+import { capabilityDisplayName } from "./importCapabilityPresentation";
 
 export interface ImportCapabilitiesPanelProps {
   capabilities: readonly ImportCapabilityReadiness[];
+  items?: readonly ImportItem[];
+  onAction?: (action: ImportItemAction, itemId: string) => void;
 }
 
 interface CapabilityGroup {
   id: string;
-  routes: ImportCapabilityReadiness[];
+  entries: ImportCapabilityReadiness[];
 }
 
 function groupStatus(group: CapabilityGroup): "ready" | "partial" | "missing" {
-  const available = group.routes.filter((route) => route.available).length;
-  return available === group.routes.length ? "ready" : available > 0 ? "partial" : "missing";
+  const available = group.entries.filter((entry) => entry.available).length;
+  return available === group.entries.length ? "ready" : available > 0 ? "partial" : "missing";
 }
 
-export function ImportCapabilitiesPanel({ capabilities }: ImportCapabilitiesPanelProps) {
+export function ImportCapabilitiesPanel({
+  capabilities,
+  items = [],
+  onAction,
+}: ImportCapabilitiesPanelProps) {
   const { t } = useTranslation();
   const groups = useMemo(() => {
     const byId = new Map<string, CapabilityGroup>();
     for (const capability of capabilities) {
       const current = byId.get(capability.capabilityId) ?? {
         id: capability.capabilityId,
-        routes: [],
+        entries: [],
       };
-      const routeIndex = current.routes.findIndex((route) => route.route === capability.route);
-      if (routeIndex >= 0) current.routes[routeIndex] = capability;
-      else current.routes.push(capability);
+      const entryIndex = current.entries.findIndex((entry) => entry.route === capability.route);
+      if (entryIndex >= 0) current.entries[entryIndex] = capability;
+      else current.entries.push(capability);
       byId.set(capability.capabilityId, current);
     }
     return [...byId.values()].sort((left, right) =>
       Number(groupStatus(right) === "ready") - Number(groupStatus(left) === "ready")
       || left.id.localeCompare(right.id));
   }, [capabilities]);
+  const blocker = items.find((item) => item.status === "waiting_capability") ?? null;
 
   return (
     <section className="import-v2-capabilities" aria-labelledby="import-capabilities-title">
@@ -45,12 +55,23 @@ export function ImportCapabilitiesPanel({ capabilities }: ImportCapabilitiesPane
           <h2 id="import-capabilities-title">{t("importV2.capabilities.title")}</h2>
           <p>{t("importV2.capabilities.description")}</p>
         </div>
-        <span className="import-v2-header__stat">
-          {t("importV2.capabilities.summary", {
-            available: groups.filter((group) => groupStatus(group) === "ready").length,
-            total: groups.length,
-          })}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="import-v2-header__stat">
+            {t("importV2.capabilities.summary", {
+              available: groups.filter((group) => groupStatus(group) === "ready").length,
+              total: groups.length,
+            })}
+          </span>
+          {blocker && onAction ? (
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={() => onAction("view_capability", blocker.itemId)}
+            >
+              {t("importV2.capabilities.manage")}
+            </button>
+          ) : null}
+        </div>
       </header>
       {groups.length === 0 ? (
         <div className="import-v2-state">{t("importV2.capabilities.empty")}</div>
@@ -62,24 +83,10 @@ export function ImportCapabilitiesPanel({ capabilities }: ImportCapabilitiesPane
               <article key={group.id} className="import-v2-capability-row">
                 <Package size={16} className="text-[var(--text-muted)]" aria-hidden="true" />
                 <div className="min-w-0">
-                  <h3>{group.id}</h3>
-                  <div className="import-v2-capability-row__routes">
-                    <Route size={12} aria-hidden="true" />
-                    <span>
-                      {group.routes.map((route) => (
-                        <span
-                          key={route.route}
-                          className={route.available ? "is-ready" : "is-missing"}
-                          title={route.reasonCode ?? undefined}
-                        >
-                          <span>{route.route}</span>
-                          <span aria-hidden="true">
-                            {route.available ? " ✓" : ` — ${route.reasonCode ?? t("importV2.capabilities.missing")}`}
-                          </span>
-                        </span>
-                      ))}
-                    </span>
-                  </div>
+                  <h3>{capabilityDisplayName(group.id, t)}</h3>
+                  <p className="m-0 mt-1 text-[10.5px] text-[var(--text-muted)]">
+                    {t("importV2.capabilities.supportCount", { count: group.entries.length })}
+                  </p>
                 </div>
                 <span className={`import-v2-capability-row__status is-${status}`}>
                   {status === "ready"

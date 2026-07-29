@@ -118,8 +118,8 @@ describe("ImportQueue", () => {
     fireEvent.click(screen.getByTestId("import-item-ready"));
     expect(onSelectItem).toHaveBeenCalledWith("ready");
     expect(screen.getByRole("checkbox", { name: "Select ready.md" })).toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "Select merge.md" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "Select running.md" })).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Select merge.md" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Select running.md" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Select ready.md" }));
     expect(onSetItemSelected).toHaveBeenCalledWith("ready", true);
@@ -142,7 +142,7 @@ describe("ImportQueue", () => {
     );
 
     fireEvent.keyDown(screen.getByRole("checkbox", { name: "Select ready.md" }), { key: " " });
-    fireEvent.keyDown(screen.getByRole("button", { name: /Retry failed/ }), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Retry" }), { key: "Enter" });
     expect(onSelectItem).not.toHaveBeenCalled();
   });
 
@@ -162,7 +162,7 @@ describe("ImportQueue", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Retry failed/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(onAction).toHaveBeenCalledWith("retry", "failed");
   });
 
@@ -183,8 +183,10 @@ describe("ImportQueue", () => {
       />,
     );
 
-    const copy = screen.getByRole("button", { name: "Copy path for very-long-source-name.md" });
-    expect(copy).toHaveAttribute("title", "C:\\sources\\very-long-source-name.md");
+    const more = screen.getByRole("button", { name: "More actions for very-long-source-name.md" });
+    fireEvent.keyDown(more, { key: "Enter" });
+    fireEvent.click(more);
+    const copy = screen.getByRole("menuitem", { name: "Copy original location" });
     fireEvent.click(copy);
     expect(onCopyLocator).toHaveBeenCalledWith("C:\\sources\\very-long-source-name.md");
   });
@@ -206,5 +208,28 @@ describe("ImportQueue", () => {
     );
 
     expect(screen.getByText("Updating queue…")).toBeInTheDocument();
+  });
+
+  it("announces one compact summary without making the whole queue live", () => {
+    render(
+      <ImportQueue
+        items={[item("ready", "preview_ready"), item("failed", "failed")]}
+        counts={{ all: 2, active: 0, ready: 1, needsAction: 0, failed: 1, completed: 0 }}
+        progress={{ completed: 0, total: 2, active: 0 }}
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={vi.fn()}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+      />,
+    );
+
+    const liveRegions = document.querySelectorAll("[aria-live]");
+    expect(liveRegions).toHaveLength(1);
+    expect(liveRegions[0]).toHaveTextContent(
+      "Queue updated: 2 items, 0 need action, 1 ready.",
+    );
+    expect(screen.getByRole("list", { name: "Sources" })).not.toHaveAttribute("aria-live");
   });
 });

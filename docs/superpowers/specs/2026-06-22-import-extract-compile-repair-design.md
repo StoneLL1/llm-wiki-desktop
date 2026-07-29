@@ -1,5 +1,7 @@
 # Import, Extraction, and Compile Repair Design
 
+> Historical design, partially superseded. Keep its legacy bug evidence only; current Import, Source, OCR / ASR and compile boundaries are defined by [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md).
+
 ## Goal
 
 Restore the complete local-first import pipeline:

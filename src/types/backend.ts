@@ -5,8 +5,6 @@ export type PendingActionType =
   | "delete_file"
   | "overwrite_file"
   | "batch_rewrite"
-  | "replace_source"
-  | "delete_source"
   | "merge_conflict"
   | "agent_auto_fix"
   | "install_agent"

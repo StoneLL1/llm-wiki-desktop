@@ -48,6 +48,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Check Import and Source acceptance evidence
+        run: npm run check:import-source-media
+
       - name: Run frontend tests
         run: npm run test
 

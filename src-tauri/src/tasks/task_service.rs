@@ -1268,6 +1268,76 @@ mod tests {
     }
 
     #[test]
+    fn source_ai_recovery_preserves_the_exact_retry_binding_and_settings() {
+        let root = std::env::temp_dir().join(format!("task-recover-source-ai-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (service, _) = make_service();
+        service.set_project_root(Some(root.clone())).unwrap();
+        let task = service.create_task(
+            TaskType::SourceAiOrganize,
+            Some("project-1".into()),
+            "Source AI".into(),
+            true,
+        );
+        service
+            .set_result(
+                &task.id,
+                TaskResult {
+                    summary: "queued".into(),
+                    affected_paths: Vec::new(),
+                    reference: Some(crate::models::task::TaskResultReference::SourceAiOrganize {
+                        source_id: "source-中文".into(),
+                        base_version_id: "version-1".into(),
+                        base_markdown_hash: "abc123".into(),
+                        candidate_id: None,
+                        route: Some(crate::models::compile::CompileRoutePreference::Byok),
+                        agent: None,
+                        provider: Some(crate::models::llm::LlmProviderKind::OpenAi),
+                        custom_instructions: Some("保留原始引文".into()),
+                        project_root_path: Some(root.to_string_lossy().into_owned()),
+                        resolved_engine: Some("open_ai".into()),
+                        resolved_model: Some("gpt-source".into()),
+                    }),
+                    pending_action: None,
+                },
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service.persist_task(&task.id, &root).unwrap();
+
+        let (restarted, _) = make_service();
+        restarted.recover_tasks(&root).unwrap();
+        let recovered = restarted.get_task(&task.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert!(recovered.error.as_ref().unwrap().recoverable);
+        match recovered.result.unwrap().reference.unwrap() {
+            crate::models::task::TaskResultReference::SourceAiOrganize {
+                source_id,
+                base_version_id,
+                base_markdown_hash,
+                route,
+                provider,
+                custom_instructions,
+                ..
+            } => {
+                assert_eq!(source_id, "source-中文");
+                assert_eq!(base_version_id, "version-1");
+                assert_eq!(base_markdown_hash, "abc123");
+                assert_eq!(
+                    route,
+                    Some(crate::models::compile::CompileRoutePreference::Byok)
+                );
+                assert_eq!(provider, Some(crate::models::llm::LlmProviderKind::OpenAi));
+                assert_eq!(custom_instructions.as_deref(), Some("保留原始引文"));
+            }
+            other => panic!("unexpected recovery reference: {other:?}"),
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn test_project_task_root_is_bound_explicitly_not_from_ambient_active_project() {
         let project_a = std::env::temp_dir().join(format!("task-root-a-{}", Uuid::new_v4()));
         let project_b = std::env::temp_dir().join(format!("task-root-b-{}", Uuid::new_v4()));

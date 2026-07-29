@@ -51,6 +51,7 @@ export interface StartExportRequest {
   provider?: LlmProviderKind | null;
   template?: string | null;
   options?: ExportContentOptions;
+  acknowledgeRestrictedContent?: boolean;
 }
 
 export interface RegenerateExportRequest {
@@ -63,6 +64,19 @@ export interface RegenerateExportRequest {
   provider?: LlmProviderKind | null;
   template?: string | null;
   options?: ExportContentOptions;
+  acknowledgeRestrictedContent?: boolean;
+}
+
+export interface GetExportRestrictedContentStatusRequest {
+  projectId: string;
+  projectRootPath: string;
+  exportType: ExportType;
+  sourcePath?: string | null;
+}
+
+export interface ExportRestrictedContentStatus {
+  containsRestrictedContent: boolean;
+  restrictedSourceCount: number;
 }
 
 export interface ListExportsRequest {

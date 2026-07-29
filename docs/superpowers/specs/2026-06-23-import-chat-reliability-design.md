@@ -1,5 +1,7 @@
 # Import And Chat Reliability Design
 
+> Historical design, partially superseded. Current source identity, deduplication, Source commit and test-project repair rules are defined by [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md).
+
 ## Goal
 
 Repair two confirmed failures without widening product behavior:

@@ -40,7 +40,11 @@ export function importPlatformForHost(host: string): ImportPlatformId {
   if (normalized === "mp.weixin.qq.com") return "wechat";
   if (isHostOrSubdomain(normalized, "zhihu.com")) return "zhihu";
   if (isHostOrSubdomain(normalized, "bilibili.com") || normalized === "b23.tv") return "bilibili";
-  if (isHostOrSubdomain(normalized, "xiaohongshu.com") || isHostOrSubdomain(normalized, "xhslink.com")) return "xiaohongshu";
+  if (
+    isHostOrSubdomain(normalized, "xiaohongshu.com")
+    || isHostOrSubdomain(normalized, "xhslink.com")
+    || isHostOrSubdomain(normalized, "xhslink.cn")
+  ) return "xiaohongshu";
   if (isHostOrSubdomain(normalized, "douyin.com") || isHostOrSubdomain(normalized, "iesdouyin.com")) return "douyin";
   if (isHostOrSubdomain(normalized, "x.com") || isHostOrSubdomain(normalized, "twitter.com")) return "x";
   return "connector";
@@ -53,16 +57,6 @@ export function importPlatformForLocator(locator: string): ImportPlatformId {
 
 export function isSupportedMediaPlatformUrl(locator: string): boolean {
   return MEDIA_PLATFORM_IDS.has(importPlatformForLocator(locator));
-}
-
-export function isMediaCandidateUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return isSupportedMediaPlatformUrl(value)
-      || /\.(?:mp4|webm|mov|m4v|m3u8|mp3|wav|jpg|jpeg|png|webp)$/i.test(parsed.pathname);
-  } catch {
-    return false;
-  }
 }
 
 export function isUnsupportedImportUrl(value: string): boolean {

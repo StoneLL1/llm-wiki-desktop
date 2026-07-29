@@ -22,9 +22,6 @@ fn policy_defaults_updates_and_never_persists_provider_secrets() {
     );
 
     let policy = AgentAssistancePolicy {
-        auto_local_on_hard_failure: true,
-        auto_local_on_quality_warning: false,
-        auto_byok: false,
         max_attempts_per_item: 2,
     };
     let saved = service
@@ -55,7 +52,7 @@ fn policy_defaults_updates_and_never_persists_provider_secrets() {
 }
 
 #[test]
-fn legacy_project_settings_default_to_manual_cloud_and_quality_paths() {
+fn legacy_project_settings_default_to_a_bounded_attempt_policy() {
     let value: llm_wiki_desktop_lib::models::settings::ProjectSettingsFile =
         serde_json::from_value(serde_json::json!({
             "agentDefault": "claude",
@@ -64,12 +61,11 @@ fn legacy_project_settings_default_to_manual_cloud_and_quality_paths() {
         .unwrap();
 
     assert_eq!(value.import_agent_policy, AgentAssistancePolicy::default());
-    assert!(!value.import_agent_policy.auto_byok);
-    assert!(!value.import_agent_policy.auto_local_on_quality_warning);
+    assert_eq!(value.import_agent_policy.max_attempts_per_item, 1);
 }
 
 #[test]
-fn policy_rejects_automatic_cloud_and_unbounded_attempts() {
+fn policy_rejects_zero_and_unbounded_attempts() {
     let project = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let context = ProjectContext::new("project-invalid-policy", project.path().to_path_buf());
@@ -77,19 +73,11 @@ fn policy_rejects_automatic_cloud_and_unbounded_attempts() {
 
     for policy in [
         AgentAssistancePolicy {
-            auto_byok: true,
-            ..AgentAssistancePolicy::default()
-        },
-        AgentAssistancePolicy {
             max_attempts_per_item: 0,
             ..AgentAssistancePolicy::default()
         },
         AgentAssistancePolicy {
             max_attempts_per_item: 4,
-            ..AgentAssistancePolicy::default()
-        },
-        AgentAssistancePolicy {
-            auto_local_on_quality_warning: true,
             ..AgentAssistancePolicy::default()
         },
     ] {
@@ -101,16 +89,38 @@ fn policy_rejects_automatic_cloud_and_unbounded_attempts() {
 }
 
 #[test]
-fn policy_commands_are_thin_facade_calls_and_registered() {
+fn policy_remains_internal_to_explicit_agent_runs_without_a_dead_command_surface() {
     let commands = include_str!("../src/commands/import_v2_agent_commands.rs");
-    assert!(commands.contains("resolve_project_context"));
-    assert!(commands.contains("settings_service.get_import_agent_policy"));
-    assert!(commands.contains("settings_service.set_import_agent_policy"));
-    for forbidden in ["std::fs", "ProcessRunner", "AgentService", "SecretService"] {
-        assert!(!commands.contains(forbidden));
-    }
-
     let lib = include_str!("../src/lib.rs");
-    assert!(lib.contains("get_import_agent_policy_v2"));
-    assert!(lib.contains("set_import_agent_policy_v2"));
+    for removed in ["get_import_agent_policy_v2", "set_import_agent_policy_v2"] {
+        assert!(!commands.contains(removed));
+        assert!(!lib.contains(removed));
+    }
+    let service = include_str!("../src/services/import_v2/agent_assistance.rs");
+    assert!(service.contains("settings.import_agent_policy"));
+}
+
+#[test]
+fn import_recovery_skill_is_staging_only_and_forbids_secret_or_project_mutation() {
+    let skill = include_str!("../templates/skills/import-recovery/SKILL.md").to_ascii_lowercase();
+    for required in [
+        "one import item",
+        "staging",
+        "authorized evidence",
+        "disposable scripts",
+        "public apis",
+        "never install",
+        "cookies",
+        "secrets",
+        "raw/",
+        "wiki/",
+        "git",
+        "paywall",
+        "captcha",
+    ] {
+        assert!(
+            skill.contains(required),
+            "missing skill boundary: {required}"
+        );
+    }
 }

@@ -1,5 +1,7 @@
 # Import V2 体验优先复审补充与修复记录
 
+> 历史 UX 审查与修复记录。当前工作台、媒体待办、Source 阅读和 AI 整理行为以 [`../superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。
+
 日期：2026-07-16  
 范围：对照 `2026-07-11-import-v2-design.md`，聚焦本地工具场景下的连续性、反馈真实性和操作流畅度。
 

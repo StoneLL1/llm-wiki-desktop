@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 3,
+  "sourceId": "source-contract",
+  "sourceKind": "web_page",
+  "currentVersionId": "version-contract",
+  "wikiPath": "wiki/sources/web/example.com/contract.md",
+  "aliases": [
+    {
+      "kind": "canonical_url",
+      "value": "https://example.com/contract",
+      "createdAt": "2026-07-25T08:00:00Z"
+    }
+  ],
+  "origins": [
+    "https://example.com/contract"
+  ],
+  "canonicalUrl": "https://example.com/contract",
+  "platform": "web",
+  "platformContentId": "contract-article",
+  "title": "Manifest contract fixture",
+  "author": "Fixture Author",
+  "publishedAt": "2026-07-24T08:00:00Z",
+  "importedAt": "2026-07-25T08:00:00Z",
+  "language": "en",
+  "versions": [
+    {
+      "versionId": "version-contract",
+      "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "rawEvidence": [
+        {
+          "path": "raw/web/source-contract/version-contract/snapshot.html",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sizeBytes": 128,
+          "kind": "source_snapshot"
+        }
+      ],
+      "assets": [
+        {
+          "path": "raw/assets/source-contract/version-contract/cover.png",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "sizeBytes": 64,
+          "kind": "image"
+        }
+      ],
+      "baselinePath": ".app/source-artifacts/source-contract/version-contract/baseline.md",
+      "candidate": {
+        "markdownHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "title": "Manifest contract fixture",
+        "sourceKind": "web_page",
+        "canonicalUrl": "https://example.com/contract",
+        "platform": "web",
+        "platformContentId": "contract-article",
+        "author": "Fixture Author",
+        "publishedAt": "2026-07-24T08:00:00Z",
+        "language": "en"
+      },
+      "provenance": {
+        "locator": "https://example.com/contract",
+        "route": "generic_web",
+        "engineId": "fixture-engine",
+        "engineVersion": "1.0.0"
+      },
+      "quality": {
+        "level": "pass",
+        "metrics": [],
+        "warnings": [],
+        "sheetCountExact": null,
+        "slideCountExact": null,
+        "nonEmptyCellCoverage": null,
+        "formulaValuePairs": null,
+        "meaningfulImageCoverage": null
+      },
+      "createdAt": "2026-07-25T08:00:00Z",
+      "humanEditHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "checkpoint": "checkpoint-contract"
+    }
+  ],
+  "compiledConsumptions": [
+    {
+      "versionId": "version-contract",
+      "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "compileTaskId": "compile-contract",
+      "consumedAt": "2026-07-25T09:00:00Z"
+    }
+  ],
+  "restrictedContent": false,
+  "timeline": [
+    {
+      "eventId": "event-contract",
+      "kind": "imported",
+      "versionId": "version-contract",
+      "createdAt": "2026-07-25T08:00:00Z",
+      "checkpoint": "checkpoint-contract"
+    }
+  ]
+}

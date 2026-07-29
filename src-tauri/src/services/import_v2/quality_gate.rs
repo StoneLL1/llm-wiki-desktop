@@ -188,6 +188,8 @@ impl QualityGate {
                 meaningful_image_coverage: result.meaningful_image_coverage,
             },
             title: result.title.clone(),
+            resolution: None,
+            manual_merge: None,
         })
     }
 }

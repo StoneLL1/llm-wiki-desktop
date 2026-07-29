@@ -1,5 +1,7 @@
 # Import V2 Open-Source Research Record
 
+> Historical technical research. Libraries and engine evidence may inform implementation but cannot change the confirmed user flow in [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md).
+
 > Date: 2026-07-12
 > Scope: File Ingestion, Web Ingestion, Agent Assistance, Migration & Cutover
 > Decision basis: official repositories and official project documentation checked on 2026-07-12

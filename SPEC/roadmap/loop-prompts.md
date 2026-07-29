@@ -1,5 +1,7 @@
 # LLM Wiki Desktop — 板块修复 /loop 提示词集
 
+> 历史提示词集：不得直接使用其中与 Import 相关的旧提示词恢复自动编译或编译期 OCR。Import 的当前决策以 [`../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。
+
 > 本文档收录所有板块修复的 `/loop`（自定步调）提示词。每条提示词自包含，可直接整段贴进 `/loop`。
 >
 > 执行模型：`/loop` 自定步调（dynamic）—— Claude 自己用 `ScheduleWakeup` 续跑，全部 P0+P1 项 `verified` 后停止调度、自动结束 loop。

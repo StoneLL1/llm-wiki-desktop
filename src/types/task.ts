@@ -6,7 +6,8 @@ export type TaskType =
   | "graph_build"
   | "deep_lint"
   | "auto_fix"
-  | "export";
+  | "export"
+  | "source_ai_organize";
 
 export type TaskStatus =
   | "queued"
@@ -54,6 +55,23 @@ export type TaskResultReference = {
   type: "import_v2_session_preview";
   sessionId: string;
   batchId?: string | null;
+  completion?: import("./importV2").ImportCompletion | null;
+} | {
+  type: "compile";
+  result: import("./compile").CompileResult;
+} | {
+  type: "source_ai_organize";
+  sourceId: string;
+  baseVersionId: string;
+  baseMarkdownHash: string;
+  candidateId?: string | null;
+  route?: "auto" | "agent" | "byok" | null;
+  agent?: import("./agent").AgentKind | null;
+  provider?: import("./llm").LlmProviderKind | null;
+  customInstructions?: string | null;
+  projectRootPath?: string | null;
+  resolvedEngine?: string | null;
+  resolvedModel?: string | null;
 };
 
 export interface BackendError {
@@ -149,6 +167,7 @@ export const TASK_TYPE_LABELS: Record<TaskType, string> = {
   deep_lint: "task.type.deepLint",
   auto_fix: "task.type.autoFix",
   export: "task.type.export",
+  source_ai_organize: "task.type.sourceAiOrganize",
 };
 
 export const TASK_STATUS_ORDER: Record<TaskStatus, number> = {

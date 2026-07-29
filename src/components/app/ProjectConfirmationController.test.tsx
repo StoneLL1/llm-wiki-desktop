@@ -1,26 +1,16 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
-import { useToastStore } from "../../stores/toastStore";
 import type { ConfirmedAction, PendingAction } from "../../types/backend";
 import type { BackendTask } from "../../types/task";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  startCompile: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
-vi.mock("../../hooks/useTaskLauncher", () => ({
-  useTaskLauncher: () => ({
-    startCompile: mocks.startCompile,
-    startDeepLint: vi.fn(),
-    startExport: vi.fn(),
-    cancel: vi.fn(),
-  }),
-}));
 vi.mock("./ConfirmationDialog", () => ({
   ConfirmationDialog: ({
     action,
@@ -62,18 +52,18 @@ const project = {
   name: "Project A",
   rootPath: "D:/知识库/project-a",
 };
-const sourceAction: PendingAction = {
-  id: "source-action",
-  actionType: "delete_source",
-  title: "Delete source",
-  message: "Delete source",
+const projectAction: PendingAction = {
+  id: "project-action",
+  actionType: "delete_file",
+  title: "Delete file",
+  message: "Delete file",
   riskLevel: "destructive",
-  affectedPaths: ["raw/sources/a.pdf"],
+  affectedPaths: ["wiki/a.md"],
   preview: null,
   expiresAt: null,
 };
 const compileAction: PendingAction = {
-  ...sourceAction,
+  ...projectAction,
   id: "compile-action",
   actionType: "batch_rewrite",
   title: "Apply compile",
@@ -101,9 +91,8 @@ let cancelPendingAction: ReturnType<typeof vi.fn<() => Promise<void>>>;
 
 beforeEach(() => {
   mocks.invoke.mockReset();
-  mocks.startCompile.mockReset().mockResolvedValue(task);
   confirmPendingAction = vi.fn(async () => ({
-    action: sourceAction,
+    action: projectAction,
     status: "confirmed",
     checkpointExists: true,
     projectSummary: project,
@@ -122,39 +111,17 @@ beforeEach(() => {
     selectedTaskId: null,
     runningCount: 0,
   });
-  useToastStore.setState({ toasts: [] });
 });
 
 describe("ProjectConfirmationController", () => {
-  it("confirms a source action before starting a shared compile task", async () => {
-    useProjectStore.setState({ pendingAction: sourceAction });
+  it("confirms a generic project action without starting another workflow", async () => {
+    useProjectStore.setState({ pendingAction: projectAction });
     render(<ProjectConfirmationController />);
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
 
     await waitFor(() => expect(confirmPendingAction).toHaveBeenCalledTimes(1));
-    expect(mocks.startCompile).toHaveBeenCalledWith({
-      route: "auto",
-      agent: null,
-      provider: null,
-    });
-    expect(confirmPendingAction.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.startCompile.mock.invocationCallOrder[0],
-    );
-  });
-
-  it("reports source compile errors without losing their context", async () => {
-    mocks.startCompile.mockRejectedValue(new Error("compile worker unavailable"));
-    useProjectStore.setState({ pendingAction: sourceAction });
-    render(<ProjectConfirmationController />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
-
-    await waitFor(() =>
-      expect(useToastStore.getState().toasts[0]?.message).toContain(
-        "compile worker unavailable",
-      ),
-    );
+    expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -201,38 +168,4 @@ describe("ProjectConfirmationController", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("does not compile after a confirmed source action when the project changed", async () => {
-    let resolve!: (value: ConfirmedAction) => void;
-    confirmPendingAction.mockImplementation(() => new Promise((next) => { resolve = next; }));
-    useProjectStore.setState({ pendingAction: sourceAction });
-    render(<ProjectConfirmationController />);
-    fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
-    useProjectStore.getState().setCurrentProject({ ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" });
-    resolve({ action: sourceAction, status: "confirmed", checkpointExists: true, projectSummary: project });
-    await waitFor(() => expect(confirmPendingAction).toHaveBeenCalled());
-    expect(mocks.startCompile).not.toHaveBeenCalled();
-  });
-
-  it("does not toast a source compile failure after the project changed", async () => {
-    let rejectCompile!: (reason: Error) => void;
-    mocks.startCompile.mockImplementation(
-      () => new Promise((_, reject) => { rejectCompile = reject; }),
-    );
-    useProjectStore.setState({ pendingAction: sourceAction });
-    render(<ProjectConfirmationController />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
-    await waitFor(() => expect(mocks.startCompile).toHaveBeenCalledTimes(1));
-
-    useProjectStore.getState().setCurrentProject({
-      ...project,
-      projectId: "project-b",
-      rootPath: "D:/wiki/project-b",
-    });
-    await act(async () => {
-      rejectCompile(new Error("old project compile failed"));
-    });
-
-    expect(useToastStore.getState().toasts).toEqual([]);
-  });
 });

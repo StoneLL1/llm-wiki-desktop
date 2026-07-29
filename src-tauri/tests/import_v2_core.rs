@@ -5,9 +5,9 @@ use llm_wiki_desktop_lib::{
     },
     models::{
         import_v2::{
-            CommitConflictAction, CommitImportSessionRequest, CommitItemDecision,
-            ImportBatchResult, ImportInput, ImportInputKind, ImportItemStatus, ImportResourceMode,
-            ImportSession,
+            CommitImportSessionRequest, CommitItemDecision, ImportBatchResult, ImportInput,
+            ImportInputKind, ImportItemResolution, ImportItemStatus, ImportResourceMode,
+            ImportSession, SourceIdentity,
         },
         paths::ProjectContext,
         task::TaskType,
@@ -22,6 +22,7 @@ use llm_wiki_desktop_lib::{
     },
     tasks::{task_model::CancellationToken, TaskService},
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -179,6 +180,7 @@ fn result(markdown: &str, title: &str) -> EngineResult {
 
 struct CoreIntegrationFixture {
     root: PathBuf,
+    source_root: PathBuf,
     context: ProjectContext,
     files: FileStore,
     git: GitService,
@@ -189,12 +191,22 @@ struct CoreIntegrationFixture {
 
 impl CoreIntegrationFixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "llm-wiki-import-v2-core-{}-资料",
-            uuid::Uuid::new_v4()
-        ));
+        let fixture_id = uuid::Uuid::new_v4();
+        let root =
+            std::env::temp_dir().join(format!("llm-wiki-import-v2-core-{}-资料", fixture_id));
+        let source_root =
+            std::env::temp_dir().join(format!("llm-wiki-import-v2-core-inputs-{fixture_id}"));
         std::fs::create_dir_all(root.join(".app")).unwrap();
         std::fs::create_dir_all(root.join("raw/legacy")).unwrap();
+        std::fs::create_dir_all(&source_root).unwrap();
+        let docx =
+            include_bytes!("../../tests/fixtures/import-v2/local/batch3/matrix/document.docx");
+        let pdf = include_bytes!("../../tests/fixtures/import-v2/local/batch3/matrix/document.pdf");
+        for name in ["report.docx", "escape.docx", "secret.docx"] {
+            std::fs::write(source_root.join(name), docx).unwrap();
+        }
+        std::fs::write(source_root.join("failed.pdf"), pdf).unwrap();
+        std::fs::write(source_root.join("cancel.md"), b"# cancel fixture\n").unwrap();
         std::fs::write(root.join(".app/source-index.json"), b"legacy-index").unwrap();
         std::fs::write(root.join("raw/legacy/untouched.bin"), b"legacy-raw").unwrap();
         let context = ProjectContext::new("project-core-资料", root.clone());
@@ -203,6 +215,7 @@ impl CoreIntegrationFixture {
         register_fixture_routes(&service, &engine);
         Self {
             root,
+            source_root,
             context,
             files: FileStore,
             git: GitService,
@@ -222,8 +235,14 @@ impl CoreIntegrationFixture {
                 &self.files,
                 &session.session_id,
                 vec![
-                    input("研究报告.docx", r"D:\资料\研究报告.docx"),
-                    input("失败项.pdf", r"D:\资料\失败项.pdf"),
+                    input(
+                        "研究报告.docx",
+                        &self.source_root.join("report.docx").to_string_lossy(),
+                    ),
+                    input(
+                        "失败项.pdf",
+                        &self.source_root.join("failed.pdf").to_string_lossy(),
+                    ),
                 ],
             )
             .unwrap()
@@ -264,15 +283,23 @@ impl CoreIntegrationFixture {
         session: &str,
         item: &str,
     ) -> ImportBatchResult {
-        self.commit(service, session, item, None, None)
+        let resolution = service
+            .load_session(&self.context, &self.files, session)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|candidate| candidate.item_id == item)
+            .and_then(|candidate| candidate.preview)
+            .and_then(|preview| preview.resolution)
+            .and_then(|resolution| resolution.default_resolution);
+        self.commit(service, session, item, resolution)
     }
     fn commit(
         &self,
         service: &ImportV2Service,
         session: &str,
         item: &str,
-        action: Option<CommitConflictAction>,
-        hash: Option<&str>,
+        resolution: Option<ImportItemResolution>,
     ) -> ImportBatchResult {
         service
             .commit_items(
@@ -284,10 +311,10 @@ impl CoreIntegrationFixture {
                     project_root_path: self.root.to_string_lossy().into(),
                     session_id: session.into(),
                     batch_task_id: None,
+                    acknowledge_restricted_content: false,
                     decisions: vec![CommitItemDecision {
                         item_id: item.into(),
-                        conflict_action: action,
-                        expected_wiki_hash: hash.map(str::to_string),
+                        resolution,
                     }],
                 },
             )
@@ -336,15 +363,7 @@ impl CoreIntegrationFixture {
     fn same_locator_new_version_is_recorded(&self, locator: &str) -> bool {
         self.engine.set_content(locator, b"second version");
         let (s, i) = self.import_one(locator);
-        self.commit(
-            &self.service,
-            &s,
-            &i,
-            Some(CommitConflictAction::KeepWiki),
-            None,
-        )
-        .committed_count
-            == 1
+        self.commit_selected(&self.service, &s, &i).committed_count == 1
             && self.raw_version_count() == 2
     }
     fn external_edit_update_is_blocked(&self, locator: &str) -> bool {
@@ -365,12 +384,21 @@ impl CoreIntegrationFixture {
         self.engine.set_content(locator, b"third version");
         let before = self.raw_version_count();
         let (s, i) = self.import_one(locator);
+        let session = self
+            .service
+            .load_session(&self.context, &self.files, &s)
+            .unwrap();
+        let preview = session.items[0].preview.as_ref().unwrap();
         let result = self.commit(
             &self.service,
             &s,
             &i,
-            Some(CommitConflictAction::ApplyMergedCandidate),
-            Some("stale-hash"),
+            Some(ImportItemResolution::ApplyImportCandidate {
+                source_id: pointer.source_id.clone(),
+                candidate_hash: preview.source_snapshot.sha256.clone(),
+                current_hash: "stale-hash".into(),
+                target_version_id: manifest.current_version_id.clone(),
+            }),
         );
         result.items[0].error_code.as_deref() == Some(IMPORT_V2_COMMIT_CONFLICT)
             && self.raw_version_count() == before
@@ -381,16 +409,26 @@ impl CoreIntegrationFixture {
 impl Drop for CoreIntegrationFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
+        let _ = std::fs::remove_dir_all(&self.source_root);
     }
 }
 
 fn input(name: &str, locator: &str) -> ImportInput {
+    let path = Path::new(locator).canonicalize().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     ImportInput {
-        source_identity: None,
+        source_identity: Some(SourceIdentity {
+            canonical_path: path.to_string_lossy().into_owned(),
+            size_bytes: bytes.len() as u64,
+            modified_nanos: None,
+            file_id: None,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            magic: format!("{:x}", Sha256::digest(&bytes[..bytes.len().min(8192)])),
+        }),
         kind: ImportInputKind::File,
         display_name: name.into(),
-        locator: locator.into(),
-        normalized_locator: Some(locator.replace('\\', "/")),
+        locator: path.to_string_lossy().into_owned(),
+        normalized_locator: Some(path.to_string_lossy().replace('\\', "/")),
         media_save_mode: Default::default(),
     }
 }
@@ -441,10 +479,25 @@ fn import_v2_core_is_resumable_partial_atomic_and_deduplicated() {
     assert_eq!(batch.committed_count, 1);
     assert_eq!(fixture.raw_version_count(), 1);
     assert_eq!(fixture.wiki_page_count(), 1);
-    let locator = r"D:\资料\研究报告.docx";
-    assert!(fixture.reimport_same_bytes_is_exact_duplicate(locator));
-    assert!(fixture.same_locator_new_version_is_recorded(locator));
-    assert!(fixture.external_edit_update_is_blocked(locator));
+    reopened_service
+        .skip_item(
+            &fixture.context,
+            &fixture.files,
+            &fixture.tasks,
+            &session.session_id,
+            &reopened.items[1].item_id,
+        )
+        .unwrap();
+    let locator = fixture
+        .source_root
+        .join("report.docx")
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(fixture.reimport_same_bytes_is_exact_duplicate(&locator));
+    assert!(fixture.same_locator_new_version_is_recorded(&locator));
+    assert!(fixture.external_edit_update_is_blocked(&locator));
     assert_eq!(
         std::fs::read(fixture.root.join(".app/source-index.json")).unwrap(),
         b"legacy-index"
@@ -505,7 +558,10 @@ fn import_v2_core_rejects_escape_and_redacts_secrets() {
             &fixture.context,
             &fixture.files,
             &session.session_id,
-            vec![input("escape.docx", r"C:\safe\escape.docx")],
+            vec![input(
+                "escape.docx",
+                &fixture.source_root.join("escape.docx").to_string_lossy(),
+            )],
         )
         .unwrap();
     fixture.engine.escape_next.store(true, Ordering::SeqCst);
@@ -517,6 +573,16 @@ fn import_v2_core_rejects_escape_and_redacts_secrets() {
         IMPORT_V2_ENGINE_OUTPUT_INVALID
     );
     assert!(!fixture.root.join("escaped.md").exists());
+    fixture
+        .service
+        .skip_item(
+            &fixture.context,
+            &fixture.files,
+            &fixture.tasks,
+            &session.session_id,
+            &session.items[0].item_id,
+        )
+        .unwrap();
     let session = fixture
         .service
         .create_session(
@@ -531,7 +597,10 @@ fn import_v2_core_rejects_escape_and_redacts_secrets() {
             &fixture.context,
             &fixture.files,
             &session.session_id,
-            vec![input("secret.docx", r"C:\safe\secret.docx")],
+            vec![input(
+                "secret.docx",
+                &fixture.source_root.join("secret.docx").to_string_lossy(),
+            )],
         )
         .unwrap();
     fixture.engine.secret_next.store(true, Ordering::SeqCst);
@@ -566,7 +635,10 @@ fn import_v2_core_honors_cancellation() {
             &fixture.context,
             &fixture.files,
             &session.session_id,
-            vec![input("取消.md", r"D:\资料\取消.md")],
+            vec![input(
+                "取消.md",
+                &fixture.source_root.join("cancel.md").to_string_lossy(),
+            )],
         )
         .unwrap();
     let task = fixture

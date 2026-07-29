@@ -316,6 +316,11 @@ mod tests {
             modified_time: String::new(),
             hash: format!("h-{path}"),
             wikilinks: Vec::new(),
+            source_binding: None,
+            source_id: None,
+            version_id: None,
+            source_status: None,
+            quality: None,
         }
     }
 

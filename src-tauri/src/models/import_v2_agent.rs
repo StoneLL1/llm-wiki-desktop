@@ -5,24 +5,17 @@ use std::collections::BTreeMap;
 use super::{
     agent::AgentKind,
     import_v2::{ImportArtifact, QualityReport},
-    llm::LlmProviderKind,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAssistancePolicy {
-    pub auto_local_on_hard_failure: bool,
-    pub auto_local_on_quality_warning: bool,
-    pub auto_byok: bool,
     pub max_attempts_per_item: u8,
 }
 
 impl AgentAssistancePolicy {
-    pub fn balanced(auto_local_on_hard_failure: bool) -> Self {
+    pub fn balanced() -> Self {
         Self {
-            auto_local_on_hard_failure,
-            auto_local_on_quality_warning: false,
-            auto_byok: false,
             max_attempts_per_item: 1,
         }
     }
@@ -30,14 +23,13 @@ impl AgentAssistancePolicy {
 
 impl Default for AgentAssistancePolicy {
     fn default() -> Self {
-        Self::balanced(false)
+        Self::balanced()
     }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentAssistanceTrigger {
-    DeterministicHardFailure,
     Manual,
     QualityOptimization,
 }
@@ -46,7 +38,6 @@ pub enum AgentAssistanceTrigger {
 #[serde(rename_all = "snake_case")]
 pub enum AgentRecoveryAction {
     InvokeLocalAgent,
-    RequestByok,
     CompareCandidate,
     DiscardCandidate,
 }
@@ -71,79 +62,6 @@ pub struct AgentInvocationRequest {
     pub item_id: String,
     pub trigger: AgentAssistanceTrigger,
     pub agent_kind: AgentKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GetImportAgentPolicyRequest {
-    pub project_id: String,
-    pub project_root_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SetImportAgentPolicyRequest {
-    pub project_id: String,
-    pub project_root_path: String,
-    pub policy: AgentAssistancePolicy,
-    pub local_agent_kind: Option<AgentKind>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SendScopeFile {
-    pub relative_path: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-    pub estimated_tokens: u64,
-    #[serde(default)]
-    pub redactions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSendScope {
-    pub approval_id: String,
-    pub item_id: String,
-    pub provider: String,
-    pub model: String,
-    pub destination: String,
-    #[serde(default)]
-    pub public_metadata: Vec<String>,
-    pub files: Vec<SendScopeFile>,
-    pub estimated_input_tokens: u64,
-    pub estimated_cost_micros: Option<u64>,
-    #[serde(default)]
-    pub requires_duplicate_charge_acknowledgement: bool,
-    pub scope_sha256: String,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PreviewImportByokScopeRequest {
-    pub project_id: String,
-    pub project_root_path: String,
-    pub session_id: String,
-    pub item_id: String,
-    pub trigger: AgentAssistanceTrigger,
-    pub provider: LlmProviderKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ApproveImportByokAssistanceRequest {
-    pub project_id: String,
-    pub project_root_path: String,
-    pub session_id: String,
-    pub item_id: String,
-    pub trigger: AgentAssistanceTrigger,
-    pub provider: LlmProviderKind,
-    pub model: String,
-    pub approval_id: String,
-    pub scope_sha256: String,
-    #[serde(default)]
-    pub acknowledge_possible_duplicate_charge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +167,7 @@ pub struct AgentCandidateActionResult {
     pub item_id: String,
     pub candidate_id: String,
     pub item: super::import_v2::ImportItem,
+    pub completion: Option<super::import_v2::ImportCompletion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -266,8 +185,6 @@ pub struct AgentAuditRecord {
     pub approved_cost_micros: Option<u64>,
     pub tool_calls: Vec<String>,
     pub approved_scope_sha256: Option<String>,
-    pub byok_provider: Option<String>,
-    pub byok_destination: Option<String>,
     pub workspace_relative_path: String,
     pub granted_tools: Vec<AgentToolGrant>,
     pub input_hashes: Vec<String>,

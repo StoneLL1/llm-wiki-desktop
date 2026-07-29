@@ -2,8 +2,8 @@ use llm_wiki_desktop_lib::{
     errors::BackendError,
     models::{
         import_v2::{
-            ImportInput, ImportInputKind, ImportItemStatus, ImportRecoveryAction,
-            ImportResourceMode,
+            ImportAsrProfile, ImportInput, ImportInputKind, ImportItemStatus,
+            ImportMediaAuthorizationKind, ImportRecoveryAction, ImportResourceMode,
         },
         import_v2_web::WebImportErrorCode,
         paths::ProjectContext,
@@ -24,6 +24,10 @@ use llm_wiki_desktop_lib::{
     tasks::{task_model::CancellationToken, TaskService},
 };
 use std::sync::Arc;
+
+const SILENCE_WAV: &[u8] =
+    include_bytes!("../../tests/fixtures/import-v2/local/batch3/silence.wav");
+
 #[test]
 fn stage_one_routes_and_stable_errors_are_frozen() {
     let a = ConnectorAvailability {
@@ -72,32 +76,6 @@ impl ImportEngine for AuthorizedMediaPlatformEngine {
         request: &EngineRequest,
         _: &CancellationToken,
     ) -> Result<EngineResult, BackendError> {
-        if request.allow_missing_transcript {
-            let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
-            std::fs::create_dir_all(&staging).unwrap();
-            std::fs::write(staging.join("source.json"), b"{}").unwrap();
-            std::fs::write(
-                staging.join("candidate.md"),
-                b"# Video\n\nMetadata-only preview; transcript unavailable.\n",
-            )
-            .unwrap();
-            return Ok(EngineResult {
-                source_snapshot_path: "source.json".into(),
-                markdown_path: "candidate.md".into(),
-                asset_paths: vec![],
-                metadata_path: None,
-                title: "Video".into(),
-                text_coverage: Some(1.0),
-                table_cell_accuracy: None,
-                sheet_count_exact: None,
-                slide_count_exact: None,
-                non_empty_cell_coverage: None,
-                formula_value_pairs: None,
-                meaningful_image_coverage: None,
-                continuation: None,
-                warnings: vec!["Transcript unavailable".into()],
-            });
-        }
         if !request.local_asr_authorized {
             return Err(BackendError::new(
                 "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
@@ -108,11 +86,7 @@ impl ImportEngine for AuthorizedMediaPlatformEngine {
         }
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
         std::fs::create_dir_all(staging.join(".asr-input-fixture")).unwrap();
-        std::fs::write(
-            staging.join(".asr-input-fixture/input.m4a"),
-            b"authorized audio",
-        )
-        .unwrap();
+        std::fs::write(staging.join(".asr-input-fixture/input.wav"), SILENCE_WAV).unwrap();
         std::fs::write(staging.join("source.json"), b"{}").unwrap();
         std::fs::write(staging.join("candidate.md"), b"# Video\n\nMetadata\n").unwrap();
         Ok(EngineResult {
@@ -129,7 +103,7 @@ impl ImportEngine for AuthorizedMediaPlatformEngine {
             formula_value_pairs: None,
             meaningful_image_coverage: None,
             continuation: Some(EngineContinuation::LocalAsr {
-                temporary_input_path: ".asr-input-fixture/input.m4a".into(),
+                temporary_input_path: ".asr-input-fixture/input.wav".into(),
                 media_kind: "audio".into(),
             }),
             warnings: vec![],
@@ -138,7 +112,7 @@ impl ImportEngine for AuthorizedMediaPlatformEngine {
 }
 
 #[test]
-fn bilibili_without_subtitles_can_generate_a_metadata_only_preview() {
+fn bilibili_without_subtitles_cannot_generate_a_committable_preview() {
     let root = std::env::temp_dir().join(format!("web-no-transcript-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".app")).unwrap();
     let context = ProjectContext::new("p", root.clone());
@@ -180,7 +154,7 @@ fn bilibili_without_subtitles_can_generate_a_metadata_only_preview() {
             true,
         )
         .unwrap();
-    let item = service
+    let waiting = service
         .run_item_with_recovery(
             &context,
             &files,
@@ -188,19 +162,23 @@ fn bilibili_without_subtitles_can_generate_a_metadata_only_preview() {
             &session.session_id,
             &session.items[0].item_id,
             &task.id,
-            Some(&ImportRecoveryAction::PreviewWithoutTranscript),
+            None,
         )
         .unwrap();
-    assert_eq!(item.status, ImportItemStatus::PreviewReady);
-    let preview_path = root
-        .join(format!(
-            ".app/import-sessions/{}/items/{}/staging",
-            session.session_id, item.item_id
-        ))
-        .join(&item.preview.unwrap().markdown.relative_path);
-    assert!(std::fs::read_to_string(preview_path)
-        .unwrap()
-        .contains("Metadata-only preview"));
+    assert_eq!(waiting.status, ImportItemStatus::WaitingCapability);
+    assert!(waiting.preview.is_none());
+    let recovered = service
+        .load_session(&context, &files, &session.session_id)
+        .unwrap();
+    let item = &recovered.items[0];
+    assert_eq!(item.status, ImportItemStatus::WaitingCapability);
+    assert!(item.preview.is_none());
+    assert!(item
+        .issue
+        .as_ref()
+        .is_some_and(|issue| issue.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE"));
+    assert!(!root.join("raw").exists());
+    assert!(!root.join("wiki/sources").exists());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -214,7 +192,7 @@ impl ImportEngine for LocalAsrEngine {
         }
     }
     fn supports(&self, input: &ImportInput) -> bool {
-        input.kind == ImportInputKind::File && input.locator.ends_with(".m4a")
+        input.kind == ImportInputKind::File && input.locator.ends_with(".wav")
     }
     fn execute(
         &self,
@@ -224,7 +202,7 @@ impl ImportEngine for LocalAsrEngine {
         assert!(request.local_asr_authorized);
         assert_eq!(
             request.chained_input.as_deref(),
-            Some(".asr-input-fixture/input.m4a")
+            Some(".asr-input-fixture/input.wav")
         );
         assert!(!std::path::Path::new(request.chained_input.as_deref().unwrap()).is_absolute());
         let staging = std::path::Path::new(&request.project_root).join(&request.staging_root);
@@ -255,6 +233,33 @@ impl ImportEngine for LocalAsrEngine {
             continuation: None,
             warnings: vec![],
         })
+    }
+}
+
+struct NoSpeechAsrEngine;
+impl ImportEngine for NoSpeechAsrEngine {
+    fn descriptor(&self) -> EngineDescriptor {
+        EngineDescriptor {
+            engine_id: "sensevoice-no-speech-fixture".into(),
+            engine_version: "1".into(),
+            route: "media.asr".into(),
+        }
+    }
+    fn supports(&self, input: &ImportInput) -> bool {
+        input.kind == ImportInputKind::File && input.locator.ends_with(".wav")
+    }
+    fn execute(
+        &self,
+        request: &EngineRequest,
+        _: &CancellationToken,
+    ) -> Result<EngineResult, BackendError> {
+        assert!(request.local_asr_authorized);
+        Err(BackendError::new(
+            "IMPORT_ASR_NO_SPEECH",
+            "No speech was detected.",
+            false,
+            true,
+        ))
     }
 }
 
@@ -473,6 +478,114 @@ fn bilibili_without_subtitles_waits_for_explicit_asr_authorization_and_cleans_te
 }
 
 #[test]
+fn authorized_audio_with_no_speech_creates_no_source_or_raw() {
+    assert!(!SILENCE_WAV.is_empty());
+    let root = std::env::temp_dir().join(format!("web-asr-no-speech-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(".app")).unwrap();
+    let context = ProjectContext::new("p", root.clone());
+    let files = FileStore;
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
+    service
+        .register_engine(Arc::new(AuthorizedMediaPlatformEngine {
+            route: "web.bilibili.metadata",
+        }))
+        .unwrap();
+    service
+        .register_engine(Arc::new(NoSpeechAsrEngine))
+        .unwrap();
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let target = UrlPolicy
+        .normalize_for_session("https://www.bilibili.com/video/BV1NoSpeech")
+        .unwrap();
+    let reference = service.store_web_target(&target).unwrap();
+    let session = service
+        .add_inputs(
+            &context,
+            &files,
+            &session.session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "no speech".into(),
+                locator: reference,
+                normalized_locator: Some(target.public.public_url.clone()),
+                source_identity: None,
+                media_save_mode: Default::default(),
+            }],
+        )
+        .unwrap();
+    let item_id = session.items[0].item_id.clone();
+    let tasks = TaskService::default();
+    let first = tasks
+        .create_project_task(
+            TaskType::Import,
+            "p".into(),
+            root.clone(),
+            "wait for ASR".into(),
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .run_item(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &item_id,
+                &first.id,
+            )
+            .unwrap()
+            .status,
+        ImportItemStatus::WaitingAuthorization
+    );
+    service
+        .authorize_media_for_session(
+            &context,
+            &files,
+            &session.session_id,
+            &item_id,
+            ImportMediaAuthorizationKind::Asr,
+            Some(ImportAsrProfile::Balanced),
+            None,
+        )
+        .unwrap();
+    let second = tasks
+        .create_project_task(
+            TaskType::Import,
+            "p".into(),
+            root.clone(),
+            "authorized ASR".into(),
+            true,
+        )
+        .unwrap();
+    let error = service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item_id,
+            &second.id,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "IMPORT_ASR_NO_SPEECH");
+    assert_eq!(
+        service
+            .load_session(&context, &files, &session.session_id)
+            .unwrap()
+            .items[0]
+            .status,
+        ImportItemStatus::Failed
+    );
+    assert!(!root.join("raw").exists());
+    assert!(!root.join("wiki").exists());
+    assert!(!root.join(".app/sources").exists());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn installing_asr_resumes_waiting_capability_into_explicit_authorization() {
     let root = std::env::temp_dir().join(format!("web-install-asr-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".app")).unwrap();
@@ -641,13 +754,15 @@ fn assert_platform_authorized_asr(route: &'static str, exact: &str) {
         .iter()
         .any(|attempt| attempt.route == "media.asr"));
     service
-        .authorize_bilibili_asr(BilibiliAsrGrant {
-            project_id: "p".into(),
-            session_id: session.session_id.clone(),
-            item_id: item.item_id.clone(),
-            target_sha256: asr_target_sha256(target.request_url.as_str()),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-        })
+        .authorize_media_for_session(
+            &context,
+            &files,
+            &session.session_id,
+            &item.item_id,
+            ImportMediaAuthorizationKind::Asr,
+            Some(ImportAsrProfile::Balanced),
+            None,
+        )
         .unwrap();
     let authorized = tasks
         .create_project_task(
@@ -862,7 +977,7 @@ impl ImportEngine for LoginEngine {
 }
 
 #[test]
-fn login_required_pauses_item_and_task_with_typed_recovery_without_secret_logs() {
+fn anonymous_attempt_precedes_login_recovery_and_pauses_without_secret_logs() {
     let root = std::env::temp_dir().join(format!("web-login-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".app")).unwrap();
     let context = ProjectContext::new("p", root.clone());
@@ -909,6 +1024,9 @@ fn login_required_pauses_item_and_task_with_typed_recovery_without_secret_logs()
         )
         .unwrap();
     assert_eq!(result.status, ImportItemStatus::WaitingLogin);
+    assert_eq!(result.attempts.len(), 1);
+    assert_eq!(result.attempts[0].route, "web.wechat.article");
+    assert_eq!(result.attempts[0].engine_id, "login-fixture");
     assert!(result
         .issue
         .unwrap()
@@ -925,30 +1043,20 @@ fn login_required_pauses_item_and_task_with_typed_recovery_without_secret_logs()
     .unwrap();
     let logs = serde_json::to_string(&tasks.get_logs(&task.id).unwrap()).unwrap();
     assert!(!persisted.contains("secret-cookie") && !logs.contains("secret-cookie"));
-    let released = service
-        .release_item_after_login(&context, &files, &session.session_id, &item.item_id)
+    // Closing the login window is a frontend-only dismissal. It must not
+    // release the item through a synthetic Failed state or consume its task.
+    let still_waiting = service
+        .load_session(&context, &files, &session.session_id)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|candidate| candidate.item_id == item.item_id)
         .unwrap();
-    assert_eq!(released.status, ImportItemStatus::Failed);
-    assert!(released.task_id.is_none());
-    let retry = tasks
-        .create_project_task(
-            TaskType::Import,
-            "p".into(),
-            root.clone(),
-            "retry".into(),
-            true,
-        )
-        .unwrap();
-    let retried = service
-        .run_item(
-            &context,
-            &files,
-            &tasks,
-            &session.session_id,
-            &item.item_id,
-            &retry.id,
-        )
-        .unwrap();
-    assert_eq!(retried.status, ImportItemStatus::WaitingLogin);
+    assert_eq!(still_waiting.status, ImportItemStatus::WaitingLogin);
+    assert_eq!(still_waiting.task_id.as_deref(), Some(task.id.as_str()));
+    assert_eq!(
+        tasks.get_task(&task.id).unwrap().status,
+        TaskStatus::WaitingForConfirmation
+    );
     std::fs::remove_dir_all(root).ok();
 }

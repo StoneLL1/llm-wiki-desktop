@@ -4,11 +4,11 @@ use std::path::{Component, Path};
 use crate::errors::BackendError;
 use crate::models::compile::{
     CompileAction, CompileConflictResolution, CompileFile, CompileManifest, CompilePageType,
-    CompilePlan, CompilePlanItem,
+    CompilePlan, CompilePlanItem, SourceVersionRef,
 };
-use crate::models::import::SourceArtifactIndex;
 use crate::models::paths::ProjectContext;
-use crate::services::{CompilePromptRoute, FileStore, WriteMode};
+use crate::services::import_v2::source_registry::SourceRegistry;
+use crate::services::{CompileLegacyAdapter, CompilePromptRoute, FileStore, WriteMode};
 use crate::utils::markdown_utils::{parse_frontmatter, split_frontmatter};
 use sha2::{Digest, Sha256};
 
@@ -20,6 +20,22 @@ pub struct CompileApplyOutcome {
 
 pub struct CompileBackup {
     entries: Vec<(String, Option<Vec<u8>>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileSourceRegistry {
+    V2,
+    Legacy,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedCompileSource {
+    pub reference: SourceVersionRef,
+    pub project_path: String,
+    pub workspace_path: String,
+    pub absolute_path: std::path::PathBuf,
+    pub already_consumed: bool,
+    pub registry: CompileSourceRegistry,
 }
 
 #[derive(Default)]
@@ -112,63 +128,138 @@ impl CompileService {
     pub fn extracted_markdown_files(
         context: &ProjectContext,
     ) -> Result<Vec<std::path::PathBuf>, BackendError> {
-        let index_path = context.app_dir.join("source-index.json");
-        let index_exists = index_path.exists();
-        let index = if index_exists {
-            FileStore.read_json_file::<SourceArtifactIndex>(&index_path)?
-        } else {
-            SourceArtifactIndex::default()
-        };
-
-        // Confirmed sources are the index keys; their extracted Markdown
-        // artifacts are either wiki/sources/*.md (promoted originals, the
-        // current path) or legacy raw/extracted/*.md (older projects). We
-        // admit both so mixed/legacy projects still compile. Track the
-        // confirmed-source keys so the empty error can explain *why* compile
-        // has no input rather than just that it doesn't — the generic message
-        // sends users hunting for a pipeline bug when the real cause is "I
-        // imported an image-only PDF".
-        let confirmed_sources: Vec<String> = {
-            let mut keys: Vec<String> = index.sources.keys().cloned().collect();
-            keys.sort();
-            keys
-        };
-        let mut relative_paths: Vec<String> = index
-            .sources
-            .values()
-            .flatten()
-            .filter(|path| {
-                let p = path.as_str();
-                (p.starts_with("raw/extracted/") || p.starts_with("wiki/sources/"))
-                    && p.ends_with(".md")
-            })
-            .cloned()
-            .collect();
-        relative_paths.sort();
-        relative_paths.dedup();
-
-        let mut files = Vec::new();
-        let mut empty_on_disk: Vec<String> = Vec::new();
-        for relative in &relative_paths {
-            let file = context.resolve_project_path(relative)?;
-            let content = std::fs::read_to_string(&file)
-                .map_err(|error| io_error("COMPILE_INPUT_READ_FAILED", error, &file))?;
-            if content.trim().is_empty() {
-                empty_on_disk.push(relative.clone());
-            } else {
-                files.push(file);
+        let references = Self::list_source_versions(context)?;
+        if references.is_empty() {
+            if CompileLegacyAdapter::exists(context)
+                && !context.app_dir.join("source-index-v2.json").is_file()
+            {
+                let diagnostics = CompileLegacyAdapter::diagnostics(context)?;
+                return Err(compile_input_empty_error(
+                    true,
+                    &diagnostics.confirmed_sources,
+                    &diagnostics.markdown_paths,
+                    &diagnostics.empty_markdown_paths,
+                ));
             }
+            return Err(compile_input_empty_error(false, &[], &[], &[]));
         }
-        files.sort();
-        if files.is_empty() {
-            return Err(compile_input_empty_error(
-                index_exists,
-                &confirmed_sources,
-                &relative_paths,
-                &empty_on_disk,
+        Ok(Self::resolve_source_versions(context, &references)?
+            .into_iter()
+            .map(|source| source.absolute_path)
+            .collect())
+    }
+
+    pub fn list_source_versions(
+        context: &ProjectContext,
+    ) -> Result<Vec<SourceVersionRef>, BackendError> {
+        if context.app_dir.join("source-index-v2.json").is_file() {
+            let files = FileStore;
+            let index = SourceRegistry::read_index(context, &files)?;
+            let mut source_ids = index
+                .by_content_hash
+                .values()
+                .chain(index.by_locator.values())
+                .map(|pointer| pointer.source_id.clone())
+                .collect::<Vec<_>>();
+            source_ids.sort();
+            source_ids.dedup();
+            let mut references = Vec::with_capacity(source_ids.len());
+            for source_id in source_ids {
+                validate_source_identity(&source_id)?;
+                let manifest = SourceRegistry::read_manifest(
+                    context,
+                    &files,
+                    &format!(".app/sources/{source_id}.json"),
+                )?;
+                let version = manifest
+                    .versions
+                    .iter()
+                    .find(|version| version.version_id == manifest.current_version_id)
+                    .ok_or_else(invalid_source_version)?;
+                references.push(SourceVersionRef {
+                    source_id,
+                    version_id: version.version_id.clone(),
+                    content_hash: version.content_hash.clone(),
+                });
+            }
+            return Ok(references);
+        }
+        Ok(CompileLegacyAdapter::list(context)?
+            .into_iter()
+            .map(|source| source.reference)
+            .collect())
+    }
+
+    pub fn resolve_source_versions(
+        context: &ProjectContext,
+        requested: &[SourceVersionRef],
+    ) -> Result<Vec<ResolvedCompileSource>, BackendError> {
+        if requested.is_empty() {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_SELECTION_EMPTY",
+                "Select at least one Source version before updating the Wiki.",
+                true,
+                true,
             ));
         }
-        Ok(files)
+        let unique = requested.iter().cloned().collect::<HashSet<_>>();
+        if unique.len() != requested.len() {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_SELECTION_DUPLICATE",
+                "Selected Source versions must be unique.",
+                true,
+                true,
+            ));
+        }
+        let mut source_ids = HashSet::new();
+        if requested
+            .iter()
+            .any(|reference| !source_ids.insert(reference.source_id.as_str()))
+        {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_SELECTION_AMBIGUOUS",
+                "Only one version of each Source can be compiled at a time.",
+                true,
+                true,
+            ));
+        }
+        if !context.app_dir.join("source-index-v2.json").is_file() {
+            return Ok(CompileLegacyAdapter::resolve(context, requested)?
+                .into_iter()
+                .map(|source| ResolvedCompileSource {
+                    workspace_path: source.project_path.clone(),
+                    project_path: source.project_path,
+                    absolute_path: source.absolute_path,
+                    reference: source.reference,
+                    already_consumed: source.already_consumed,
+                    registry: CompileSourceRegistry::Legacy,
+                })
+                .collect());
+        }
+        let files = FileStore;
+        let index = SourceRegistry::read_index(context, &files)?;
+        let mut resolved = Vec::with_capacity(requested.len());
+        for reference in requested {
+            let validated =
+                SourceRegistry::resolve_compile_source_version(context, &files, &index, reference)?;
+            let manifest = validated.manifest;
+            let project_path = validated.project_path;
+            let absolute_path = context.resolve_project_path(&project_path)?;
+            let workspace_path = manifest.wiki_path.clone();
+            let already_consumed = manifest.compiled_consumptions.iter().any(|consumption| {
+                consumption.version_id == reference.version_id
+                    && consumption.content_hash == reference.content_hash
+            });
+            resolved.push(ResolvedCompileSource {
+                reference: reference.clone(),
+                project_path,
+                workspace_path,
+                absolute_path,
+                already_consumed,
+                registry: CompileSourceRegistry::V2,
+            });
+        }
+        Ok(resolved)
     }
 
     pub fn resolve_conflict_manifest(
@@ -286,9 +377,10 @@ impl CompileService {
         Ok(plan)
     }
 
-    pub fn create_workspace(
+    pub fn create_workspace_for_sources(
         context: &ProjectContext,
         task_id: &str,
+        sources: &[ResolvedCompileSource],
     ) -> Result<std::path::PathBuf, BackendError> {
         let workspace = std::env::temp_dir().join("llm-wiki-desktop").join(task_id);
         if workspace.exists() {
@@ -297,7 +389,7 @@ impl CompileService {
         }
         std::fs::create_dir_all(&workspace)
             .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &workspace))?;
-        let result = Self::populate_workspace(context, &workspace);
+        let result = Self::populate_workspace_for_sources(context, &workspace, sources);
         if let Err(error) = result {
             let _ = std::fs::remove_dir_all(&workspace);
             return Err(error);
@@ -305,10 +397,14 @@ impl CompileService {
         Ok(workspace)
     }
 
-    fn populate_workspace(context: &ProjectContext, workspace: &Path) -> Result<(), BackendError> {
+    fn populate_workspace_for_sources(
+        context: &ProjectContext,
+        workspace: &Path,
+        sources: &[ResolvedCompileSource],
+    ) -> Result<(), BackendError> {
         for name in ["purpose.md", "schema.md"] {
             let source = context.root.join(name);
-            if !source.exists() {
+            if !source.is_file() {
                 return Err(BackendError::new(
                     "COMPILE_INPUT_MISSING",
                     format!("Required input is missing: {name}"),
@@ -316,36 +412,32 @@ impl CompileService {
                     true,
                 ));
             }
-            std::fs::copy(&source, workspace.join(name))
-                .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &source))?;
+            copy_workspace_file(&source, &workspace.join(name))?;
         }
-        let workspace_extracted = workspace.join("raw/extracted");
-        std::fs::create_dir_all(&workspace_extracted)
-            .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &workspace_extracted))?;
-        for source in Self::extracted_markdown_files(context)? {
-            // Only legacy raw/extracted/ originals need copying into the
-            // workspace's raw/extracted/ bucket. wiki/sources/ originals are
-            // already brought in by the copy_tree of wiki/ below; copying them
-            // here would inject the same source twice into the prompt.
-            let is_legacy = context
-                .to_project_relative(&source)
-                .map(|rel| rel.starts_with("raw/extracted/"))
-                .unwrap_or(false);
-            if !is_legacy {
+        let selected_refs = Self::known_source_refs_for_sources(sources);
+        for source in sources {
+            copy_workspace_file(
+                &source.absolute_path,
+                &workspace.join(&source.workspace_path),
+            )?;
+        }
+        for absolute in FileStore.list_markdown_files(&context.wiki_dir)? {
+            let relative = context.to_project_relative(&absolute)?;
+            if is_compile_protected_path(&relative) {
                 continue;
             }
-            let file_name = source.file_name().ok_or_else(|| {
-                BackendError::new(
-                    "COMPILE_INPUT_PATH_INVALID",
-                    "An extracted Markdown path has no file name.",
-                    false,
-                    true,
-                )
-            })?;
-            std::fs::copy(&source, workspace_extracted.join(file_name))
-                .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &source))?;
+            let include = is_structural_page(&relative)
+                || std::fs::read_to_string(&absolute)
+                    .map(|content| {
+                        selected_refs
+                            .iter()
+                            .any(|source_ref| content.contains(source_ref))
+                    })
+                    .unwrap_or(false);
+            if include {
+                copy_workspace_file(&absolute, &workspace.join(&relative))?;
+            }
         }
-        copy_tree(&context.wiki_dir, &workspace.join("wiki"))?;
         let skill_dir = workspace.join("skills/wiki-ingest");
         std::fs::create_dir_all(&skill_dir)
             .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &skill_dir))?;
@@ -361,6 +453,41 @@ impl CompileService {
         workspace: &Path,
         baseline: &HashMap<String, String>,
     ) -> Result<CompileManifest, BackendError> {
+        let protected = Self::snapshot_workspace_sources(workspace)?;
+        Self::manifest_from_workspace_protected(workspace, baseline, &protected)
+    }
+
+    pub fn snapshot_workspace_sources(
+        workspace: &Path,
+    ) -> Result<HashMap<String, String>, BackendError> {
+        let wiki_root = workspace.join("wiki");
+        let mut hashes = HashMap::new();
+        for absolute in FileStore.list_markdown_files(&wiki_root)? {
+            let relative = absolute
+                .strip_prefix(workspace)
+                .map_err(|_| invalid_source_version())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if is_compile_protected_path(&relative) {
+                hashes.insert(relative, hash_file(&absolute)?);
+            }
+        }
+        Ok(hashes)
+    }
+
+    pub fn manifest_from_workspace_protected(
+        workspace: &Path,
+        baseline: &HashMap<String, String>,
+        protected_sources: &HashMap<String, String>,
+    ) -> Result<CompileManifest, BackendError> {
+        if &Self::snapshot_workspace_sources(workspace)? != protected_sources {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_MUTATION_FORBIDDEN",
+                "Compile attempted to create, modify, or delete an import-owned Source.",
+                false,
+                true,
+            ));
+        }
         let wiki = workspace.join("wiki");
         let mut files = Vec::new();
         for absolute in FileStore.list_markdown_files(&wiki)? {
@@ -376,8 +503,6 @@ impl CompileService {
                 })?
                 .to_string_lossy()
                 .replace('\\', "/");
-            // wiki/sources/ originals are import-owned; the agent may read and
-            // cite them but must not echo them back into its output manifest.
             if is_compile_protected_path(&relative) {
                 continue;
             }
@@ -908,29 +1033,27 @@ impl CompileService {
     }
 
     pub fn known_source_refs(context: &ProjectContext) -> Result<HashSet<String>, BackendError> {
+        let references = Self::list_source_versions(context)?;
+        let sources = if references.is_empty() {
+            Vec::new()
+        } else {
+            Self::resolve_source_versions(context, &references)?
+        };
+        Ok(Self::known_source_refs_for_sources(&sources))
+    }
+
+    pub fn known_source_refs_for_sources(sources: &[ResolvedCompileSource]) -> HashSet<String> {
         let mut refs = HashSet::new();
-        let wiki_sources = context.wiki_dir.join("sources");
-        if wiki_sources.exists() {
-            for absolute in FileStore.list_markdown_files(&wiki_sources)? {
-                add_source_ref(&mut refs, context, &absolute)?;
-            }
-        }
-        let index_path = context.app_dir.join("source-index.json");
-        if index_path.exists() {
-            let index = FileStore.read_json_file::<SourceArtifactIndex>(&index_path)?;
-            for relative in index
-                .sources
-                .values()
-                .flatten()
-                .filter(|path| path.starts_with("raw/extracted/") && path.ends_with(".md"))
+        for source in sources {
+            refs.insert(source.workspace_path.clone());
+            if let Some(name) = Path::new(&source.workspace_path)
+                .file_name()
+                .and_then(|name| name.to_str())
             {
-                let absolute = context.resolve_project_path(relative)?;
-                if absolute.exists() {
-                    add_source_ref(&mut refs, context, &absolute)?;
-                }
+                refs.insert(name.to_string());
             }
         }
-        Ok(refs)
+        refs
     }
 }
 
@@ -949,38 +1072,25 @@ fn extract_json_object<'a>(raw: &'a str, error_code: &str) -> Result<&'a str, Ba
     Ok(trimmed)
 }
 
-fn copy_tree(source: &Path, target: &Path) -> Result<(), BackendError> {
-    if !source.exists() {
-        std::fs::create_dir_all(target)
-            .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, target))?;
-        return Ok(());
-    }
-    std::fs::create_dir_all(target)
-        .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, target))?;
-    for entry in std::fs::read_dir(source)
-        .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, source))?
+fn validate_source_identity(value: &str) -> Result<(), BackendError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        let entry = entry.map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, source))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &entry.path()))?;
-        let destination = target.join(entry.file_name());
-        if file_type.is_symlink() {
-            return Err(BackendError::new(
-                "COMPILE_SYMLINK_REJECTED",
-                "Compile inputs cannot contain symbolic links.",
-                true,
-                true,
-            ));
-        }
-        if file_type.is_dir() {
-            copy_tree(&entry.path(), &destination)?;
-        } else if file_type.is_file() {
-            std::fs::copy(entry.path(), &destination)
-                .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &destination))?;
-        }
+        return Err(invalid_source_version());
     }
     Ok(())
+}
+
+fn invalid_source_version() -> BackendError {
+    BackendError::new(
+        "COMPILE_SOURCE_VERSION_INVALID",
+        "A selected Source version is missing or its content hash no longer matches.",
+        true,
+        true,
+    )
 }
 
 fn io_error(code: &str, error: std::io::Error, path: &Path) -> BackendError {
@@ -1036,23 +1146,30 @@ fn compile_input_empty_error(
     BackendError::new("COMPILE_INPUT_EMPTY", summary, true, true).with_details(details)
 }
 
-fn add_source_ref(
-    refs: &mut HashSet<String>,
-    context: &ProjectContext,
-    absolute: &Path,
-) -> Result<(), BackendError> {
-    let relative = context.to_project_relative(absolute)?;
-    refs.insert(relative.clone());
-    if let Some(name) = absolute.file_name().and_then(|name| name.to_str()) {
-        refs.insert(name.to_string());
+fn copy_workspace_file(source: &Path, target: &Path) -> Result<(), BackendError> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, parent))?;
     }
-    Ok(())
+    std::fs::copy(source, target)
+        .map(|_| ())
+        .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, source))
+}
+
+fn hash_file(path: &Path) -> Result<String, BackendError> {
+    let bytes =
+        std::fs::read(path).map_err(|error| io_error("COMPILE_INPUT_READ_FAILED", error, path))?;
+    Ok(hash_bytes(&bytes))
 }
 
 /// `wiki/sources/` is import-owned: it holds the verbatim extracted originals.
 /// Compile may read and cite them but must never create, modify, or delete them.
 fn is_compile_protected_path(raw: &str) -> bool {
-    raw.replace('\\', "/").starts_with("wiki/sources/")
+    let normalized = raw.replace('\\', "/");
+    normalized.eq_ignore_ascii_case("wiki/sources")
+        || normalized
+            .get(.."wiki/sources/".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("wiki/sources/"))
 }
 
 fn is_structural_page(raw: &str) -> bool {
@@ -1191,8 +1308,18 @@ mod tests {
     use super::*;
     use crate::models::compile::{
         CompileAction, CompileFile, CompileManifest, CompilePageType, CompilePlan, CompilePlanItem,
+        SourceVersionRef,
     };
+    use crate::models::import_v2::{QualityLevel, QualityReport};
     use crate::models::paths::ProjectContext;
+    use crate::services::import_v2::source_finalization::{
+        finalize_source, CandidateMetadata, FinalizationInput,
+    };
+    use crate::services::import_v2::source_registry::{
+        SourceArtifactRecord, SourceCandidateRecord, SourceIndex, SourceManifest, SourcePointer,
+        SourceProvenance, SourceVersion, SOURCE_REGISTRY_SCHEMA_VERSION,
+    };
+    use std::collections::BTreeMap;
     use std::fs;
 
     #[test]
@@ -1301,9 +1428,12 @@ mod tests {
         )
         .unwrap();
         let context = ProjectContext::new("project", root.clone());
-        let workspace = CompileService::create_workspace(
+        let references = CompileService::list_source_versions(&context).unwrap();
+        let sources = CompileService::resolve_source_versions(&context, &references).unwrap();
+        let workspace = CompileService::create_workspace_for_sources(
             &context,
             &format!("prompt-test-{}", uuid::Uuid::new_v4()),
+            &sources,
         )
         .unwrap();
 
@@ -1833,6 +1963,248 @@ mod tests {
             ],
             deletions: vec![],
             summary: "compile".into(),
+        }
+    }
+
+    fn seed_v2_source(
+        context: &ProjectContext,
+        source_id: &str,
+        version_id: &str,
+        file_name: &str,
+        content: &str,
+    ) -> SourceVersionRef {
+        let files = FileStore;
+        let content_hash = hash_bytes(content.as_bytes());
+        let wiki_path = format!("wiki/sources/local/{file_name}");
+        let baseline_path = format!(".app/source-artifacts/{source_id}/{version_id}/baseline.md");
+        let raw_path = format!("raw/sources/{source_id}/{version_id}/original.txt");
+        let quality = QualityReport {
+            level: QualityLevel::Pass,
+            metrics: Vec::new(),
+            warnings: Vec::new(),
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+        };
+        let candidate = CandidateMetadata {
+            source_kind: "local_document".into(),
+            title: file_name.into(),
+            canonical_url: None,
+            platform: None,
+            platform_content_id: None,
+            author: None,
+            published_at: None,
+            language: Some("zh-CN".into()),
+        };
+        let finalized = finalize_source(FinalizationInput {
+            candidate_markdown: content.as_bytes(),
+            candidate: &candidate,
+            source_id,
+            version_id,
+            content_hash: &content_hash,
+            imported_at: "2026-07-26T00:00:00Z",
+            quality: &quality,
+            restricted: false,
+        })
+        .unwrap();
+        let wiki_absolute = context.resolve_project_path(&wiki_path).unwrap();
+        fs::create_dir_all(wiki_absolute.parent().unwrap()).unwrap();
+        fs::write(&wiki_absolute, &finalized.bytes).unwrap();
+        let baseline_absolute = context.resolve_project_path(&baseline_path).unwrap();
+        fs::create_dir_all(baseline_absolute.parent().unwrap()).unwrap();
+        fs::write(&baseline_absolute, &finalized.bytes).unwrap();
+        let raw_absolute = context.resolve_project_path(&raw_path).unwrap();
+        fs::create_dir_all(raw_absolute.parent().unwrap()).unwrap();
+        fs::write(&raw_absolute, content).unwrap();
+        let manifest = SourceManifest {
+            schema_version: SOURCE_REGISTRY_SCHEMA_VERSION,
+            source_id: source_id.into(),
+            source_kind: "local_document".into(),
+            current_version_id: version_id.into(),
+            wiki_path: wiki_path.clone(),
+            aliases: Vec::new(),
+            origins: vec![format!("file:/{file_name}")],
+            canonical_url: None,
+            platform: None,
+            platform_content_id: None,
+            title: file_name.into(),
+            author: None,
+            published_at: None,
+            imported_at: "2026-07-26T00:00:00Z".into(),
+            language: Some("zh-CN".into()),
+            versions: vec![SourceVersion {
+                version_id: version_id.into(),
+                content_hash: content_hash.clone(),
+                raw_evidence: vec![SourceArtifactRecord {
+                    path: raw_path,
+                    sha256: content_hash.clone(),
+                    size_bytes: content.len() as u64,
+                    kind: "source_snapshot".into(),
+                }],
+                assets: Vec::new(),
+                baseline_path,
+                candidate: SourceCandidateRecord {
+                    markdown_hash: content_hash.clone(),
+                    title: file_name.into(),
+                    source_kind: "local_document".into(),
+                    canonical_url: None,
+                    platform: None,
+                    platform_content_id: None,
+                    author: None,
+                    published_at: None,
+                    language: Some("zh-CN".into()),
+                },
+                provenance: SourceProvenance {
+                    locator: format!("file:/{file_name}"),
+                    route: "native".into(),
+                    engine_id: "fixture".into(),
+                    engine_version: "1".into(),
+                },
+                quality,
+                created_at: "2026-07-26T00:00:00Z".into(),
+                human_edit_hash: Some(finalized.human_edit_hash),
+                checkpoint: None,
+            }],
+            compiled_consumptions: Vec::new(),
+            restricted_content: false,
+            restricted_identity_summary: None,
+            timeline: Vec::new(),
+        };
+        files
+            .write_json_atomic(
+                context,
+                &format!(".app/sources/{source_id}.json"),
+                &manifest,
+            )
+            .unwrap();
+        SourceVersionRef {
+            source_id: source_id.into(),
+            version_id: version_id.into(),
+            content_hash,
+        }
+    }
+
+    #[test]
+    fn v2_compile_resolves_only_explicit_hash_bound_sources() {
+        let context = temp_project_context("compile-v2-explicit");
+        fs::write(context.root.join("purpose.md"), "# Purpose").unwrap();
+        fs::write(context.root.join("schema.md"), "# Schema").unwrap();
+        let selected = seed_v2_source(&context, "source-a", "version-a", "资料甲.md", "# 甲");
+        let unselected = seed_v2_source(&context, "source-b", "version-b", "other.md", "# B");
+        fs::write(
+            context.root.join("wiki/related.md"),
+            "sources:\n  - wiki/sources/local/资料甲.md",
+        )
+        .unwrap();
+        fs::write(
+            context.root.join("wiki/unrelated.md"),
+            "sources:\n  - wiki/sources/local/other.md",
+        )
+        .unwrap();
+        let pointer_a = SourcePointer {
+            source_id: selected.source_id.clone(),
+            version_id: selected.version_id.clone(),
+        };
+        let pointer_b = SourcePointer {
+            source_id: unselected.source_id.clone(),
+            version_id: unselected.version_id.clone(),
+        };
+        FileStore
+            .write_json_atomic(
+                &context,
+                ".app/source-index-v2.json",
+                &SourceIndex {
+                    schema_version: SOURCE_REGISTRY_SCHEMA_VERSION,
+                    by_content_hash: BTreeMap::from([
+                        (selected.content_hash.clone(), pointer_a.clone()),
+                        (unselected.content_hash.clone(), pointer_b.clone()),
+                    ]),
+                    by_locator: BTreeMap::from([
+                        ("file:/a".into(), pointer_a),
+                        ("file:/b".into(), pointer_b),
+                    ]),
+                },
+            )
+            .unwrap();
+
+        let resolved =
+            CompileService::resolve_source_versions(&context, std::slice::from_ref(&selected))
+                .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].reference, selected);
+        let workspace =
+            CompileService::create_workspace_for_sources(&context, "explicit-test", &resolved)
+                .unwrap();
+        assert!(workspace.join("wiki/sources/local/资料甲.md").is_file());
+        assert!(!workspace.join("wiki/sources/local/other.md").exists());
+        assert!(workspace.join("wiki/related.md").is_file());
+        assert!(!workspace.join("wiki/unrelated.md").exists());
+
+        let mut wrong_hash = selected.clone();
+        wrong_hash.content_hash = "0".repeat(64);
+        let error = CompileService::resolve_source_versions(&context, &[wrong_hash]).unwrap_err();
+        assert_eq!(error.code, "COMPILE_SOURCE_VERSION_INVALID");
+        fs::write(&resolved[0].absolute_path, "# externally changed").unwrap();
+        let error =
+            CompileService::resolve_source_versions(&context, std::slice::from_ref(&selected))
+                .unwrap_err();
+        assert_eq!(error.code, "COMPILE_SOURCE_VERSION_INVALID");
+        fs::remove_dir_all(&context.root).ok();
+        fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn agent_source_mutation_is_an_explicit_compile_failure() {
+        for case in ["modify", "delete", "add", "case_variant_add"] {
+            let workspace = temp_compile_workspace(&format!("compile-protected-{case}"));
+            let baseline = HashMap::new();
+            let protected = CompileService::snapshot_workspace_sources(&workspace).unwrap();
+            match case {
+                "modify" => {
+                    fs::write(workspace.join("wiki/sources/source-a.md"), "# Mutated").unwrap();
+                }
+                "delete" => {
+                    fs::remove_file(workspace.join("wiki/sources/source-a.md")).unwrap();
+                }
+                "add" => {
+                    fs::write(workspace.join("wiki/sources/injected.md"), "# Injected").unwrap();
+                }
+                "case_variant_add" => {
+                    fs::create_dir_all(workspace.join("wiki/SOURCES")).unwrap();
+                    fs::write(workspace.join("wiki/SOURCES/injected.md"), "# Injected").unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let error = CompileService::manifest_from_workspace_protected(
+                &workspace, &baseline, &protected,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code, "COMPILE_SOURCE_MUTATION_FORBIDDEN",
+                "case {case} must fail explicitly"
+            );
+            fs::remove_dir_all(workspace).ok();
+        }
+    }
+
+    #[test]
+    fn compile_source_guard_is_separator_and_ascii_case_insensitive() {
+        for (path, protected) in [
+            ("wiki/sources/a.md", true),
+            ("wiki\\sources\\a.md", true),
+            ("wiki/SOURCES/a.md", true),
+            ("WIKI/Sources/a.md", true),
+            ("wiki/source/a.md", false),
+            ("wiki/sources-old/a.md", false),
+        ] {
+            assert_eq!(
+                is_compile_protected_path(path),
+                protected,
+                "unexpected protection decision for {path}"
+            );
         }
     }
 }

@@ -4,12 +4,11 @@ fn sessions_use_dedicated_opaque_profiles_and_revoke_them() {
     let root = tempfile::tempdir().unwrap();
     let s = ConnectorSessionService::default();
     let r = s.create("wechat", root.path()).unwrap();
-    assert!(
-        r.profile_ref.starts_with("connector-profile:")
-            && !r
-                .profile_ref
-                .contains(root.path().to_string_lossy().as_ref())
-    );
+    let serialized = serde_json::to_value(&r).unwrap();
+    assert!(serialized.get("profileRef").is_none());
+    assert!(!serialized
+        .to_string()
+        .contains(root.path().to_string_lossy().as_ref()));
     s.revoke(&r.session_id).unwrap();
 }
 #[test]

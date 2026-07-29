@@ -5,7 +5,7 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::import_v2_migration::{
     LegacyInventory, MigrationApplyResult, MigrationConfirmation, MigrationPlan,
-    MigrationStatusSnapshot,
+    MigrationPreparation, MigrationStatusSnapshot,
 };
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::import_v2::migration::MigrationService;
@@ -68,13 +68,13 @@ pub fn scan_import_v2_migration(
 pub fn plan_import_v2_migration(
     state: State<'_, AppState>,
     request: PlanImportV2MigrationRequest,
-) -> Result<MigrationPlan, BackendError> {
+) -> Result<MigrationPreparation, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let _guard = state.import_v2_service.acquire_migration_lock()?;
     state
         .import_v2_service
         .preflight_migration_locked(&context)?;
-    MigrationService::default().plan(&context.root, &request.inventory)
+    MigrationService::default().prepare(&context.root, &request.inventory)
 }
 
 #[tauri::command]

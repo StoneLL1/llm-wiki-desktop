@@ -16,8 +16,7 @@ export function importWorkflowErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = (error as { message: unknown }).message;
     if (typeof message === "string") {
-      const code = "code" in error ? (error as { code: unknown }).code : null;
-      return typeof code === "string" && code.length > 0 ? `${code}: ${message}` : message;
+      return message;
     }
   }
   return String(error);
@@ -155,7 +154,11 @@ export function useImportSessionScope(
     }
 
     const currentStore = useImportStore.getState();
-    if (currentStore.projectKey === projectKey && currentStore.session?.projectId === projectId) {
+    if (
+      currentStore.projectKey === projectKey
+      && currentStore.session?.projectId === projectId
+      && !matchesEndedSession(currentStore.session)
+    ) {
       setBootstrapState("ready");
       return;
     }
@@ -242,4 +245,11 @@ export function useImportSessionScope(
     isSessionMutationRevisionCurrent,
     refreshForScope,
   };
+}
+
+function matchesEndedSession(session: { status: string; items: readonly { status: string }[] }): boolean {
+  if (session.status === "completed" || session.status === "cancelled") return true;
+  return session.items.length > 0 && session.items.every(
+    (item) => item.status === "completed" || item.status === "skipped" || item.status === "cancelled",
+  );
 }

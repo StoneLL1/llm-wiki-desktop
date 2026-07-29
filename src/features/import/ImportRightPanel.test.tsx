@@ -1,9 +1,17 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
+import { importV2Api } from "../../services/importV2Api";
 import type { ImportItem } from "../../types/importV2";
+import type { ImportPreviewContent } from "../../types/importV2Presentation";
 import { ImportRightPanel } from "./ImportRightPanel";
+
+vi.mock("../../services/importV2Api", () => ({
+  importV2Api: {
+    getPreviewContent: vi.fn(),
+  },
+}));
 
 function item(overrides: Partial<ImportItem> = {}): ImportItem {
   return {
@@ -38,14 +46,7 @@ function item(overrides: Partial<ImportItem> = {}): ImportItem {
         sha256: "markdown-hash",
         sizeBytes: 120,
       },
-      assets: [
-        {
-          kind: "image",
-          relativePath: "raw/assets/figure.png",
-          sha256: "asset-hash",
-          sizeBytes: 2048,
-        },
-      ],
+      assets: [],
       sourceSnapshot: {
         kind: "source_snapshot",
         relativePath: "raw/sources/研究笔记.md",
@@ -56,7 +57,6 @@ function item(overrides: Partial<ImportItem> = {}): ImportItem {
         level: "warning",
         metrics: [
           { code: "TEXT_COVERAGE", actual: 0.91, minimum: 0.98, passed: false },
-          { code: "TABLE_CELL_ACCURACY", actual: 1, minimum: 0.95, passed: true },
         ],
         warnings: ["LOW_TEXT_COVERAGE"],
       },
@@ -66,7 +66,52 @@ function item(overrides: Partial<ImportItem> = {}): ImportItem {
   };
 }
 
+function preview(): ImportPreviewContent {
+  return {
+    sessionId: "session-a",
+    itemId: "item-a",
+    candidateId: null,
+    title: "研究笔记",
+    markdown: "# 最终候选\n\n可读正文",
+    truncated: false,
+    totalBytes: 22,
+    sha256: "markdown-hash",
+    target: {
+      disposition: "update",
+      sourceId: "source-a",
+      versionId: "version-b",
+      wikiPath: "wiki/sources/local/研究笔记.md",
+    },
+    quality: {
+      level: "warning",
+      metrics: [],
+      warnings: ["LOW_TEXT_COVERAGE"],
+    },
+    rawLabel: "研究笔记.md",
+    resources: [],
+  };
+}
+
+function renderPanel(
+  selectedItem: ImportItem,
+  onPreviewMarkdown = vi.fn(),
+  onPrimaryAction = vi.fn(),
+) {
+  return render(
+    <ImportRightPanel
+      selectedItem={selectedItem}
+      sessionId="session-a"
+      projectId="project-a"
+      projectRootPath="D:\\Wiki"
+      onPreviewMarkdown={onPreviewMarkdown}
+      onPrimaryAction={onPrimaryAction}
+    />,
+  );
+}
+
 beforeEach(async () => {
+  vi.mocked(importV2Api.getPreviewContent).mockReset();
+  vi.mocked(importV2Api.getPreviewContent).mockResolvedValue(preview());
   await i18next.changeLanguage("en");
 });
 
@@ -77,101 +122,92 @@ describe("ImportRightPanel", () => {
     expect(screen.getByText(/select an item/i)).toBeInTheDocument();
   });
 
-  it("inspects local source identity, quality, attempts, provenance, and assets", () => {
+  it("orders the next step, quick preview, target, quality, raw source, and collapsed diagnostics", async () => {
     const onPreviewMarkdown = vi.fn();
-    render(<ImportRightPanel selectedItem={item()} onPreviewMarkdown={onPreviewMarkdown} />);
+    const onPrimaryAction = vi.fn();
+    renderPanel(item(), onPreviewMarkdown, onPrimaryAction);
 
-    expect(screen.getByText("研究笔记.md")).toBeInTheDocument();
-    expect(screen.getAllByText(/source/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("core-markdown 2.0.0").length).toBeGreaterThan(0);
-    expect(screen.getByText("TEXT_COVERAGE")).toBeInTheDocument();
-    expect(screen.getByText("LOW_TEXT_COVERAGE")).toBeInTheDocument();
-    expect(screen.getAllByText("native_markdown").length).toBeGreaterThan(0);
-    expect(screen.getByText("raw/extracted/研究笔记.md")).toHaveAttribute("title", "raw/extracted/研究笔记.md");
-    expect(screen.getByText(/1 asset/i)).toBeInTheDocument();
+    expect(await screen.findByText("最终候选")).toBeInTheDocument();
+    expect(screen.getByText("可读正文")).toBeInTheDocument();
+    expect(screen.getByText("Update an existing Source")).toBeInTheDocument();
+    expect(screen.getByText("wiki/sources/local/研究笔记.md")).toBeInTheDocument();
+    expect(screen.getByText("Raw source")).toBeInTheDocument();
+    expect(screen.getByText("Text coverage")).toBeVisible();
+    expect(screen.getByText("Low text coverage")).toBeVisible();
+    expect(screen.queryByText("TEXT_COVERAGE")).not.toBeInTheDocument();
+    expect(screen.queryByText("LOW_TEXT_COVERAGE")).not.toBeInTheDocument();
+
+    const technical = screen.getByText("Technical details and attempts").closest("details");
+    expect(technical).not.toHaveAttribute("open");
+    expect(technical).toHaveTextContent("item-a");
+    expect(technical).toHaveTextContent("native_markdown");
+    expect(technical).toHaveTextContent("markdown-hash");
+    expect(screen.getByText("source-a")).not.toBeVisible();
+    expect(screen.getByText("version-b")).not.toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: /preview markdown/i }));
-    expect(onPreviewMarkdown).toHaveBeenCalledWith("item-a");
+    expect(onPrimaryAction).toHaveBeenCalledWith("preview_markdown", "item-a");
+    expect(onPreviewMarkdown).not.toHaveBeenCalled();
   });
 
-  it("distinguishes generic URLs and platform video routes without hardcoded archive rules", () => {
-    render(
+  it("shows stable user copy and keeps raw errors, routes, and engines in technical details", async () => {
+    renderPanel(item({
+      status: "failed",
+      issue: {
+        code: "LOGIN_REQUIRED",
+        message: "raw connector message",
+        stage: "extract",
+        retryable: true,
+        userActionRequired: true,
+        recoveryActions: ["begin_login"],
+        availableActions: [],
+      },
+    }));
+
+    expect(await screen.findByText("Sign in to continue")).toBeInTheDocument();
+    expect(screen.getByText(/nothing has been committed/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue login" })).toBeInTheDocument();
+    const technical = screen.getByText("Technical details and attempts").closest("details");
+    expect(technical).not.toHaveAttribute("open");
+    expect(technical).toHaveTextContent("LOGIN_REQUIRED");
+    expect(technical).toHaveTextContent("raw connector message");
+    expect(technical).toHaveTextContent("native_markdown");
+    expect(technical).toHaveTextContent("core-markdown 2.0.0");
+  });
+
+  it("does not let a stale preview replace the newly selected item", async () => {
+    let resolveFirst!: (value: ImportPreviewContent) => void;
+    vi.mocked(importV2Api.getPreviewContent)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce({ ...preview(), itemId: "item-b", title: "第二项", markdown: "# 第二项" });
+
+    const view = renderPanel(item());
+    view.rerender(
       <ImportRightPanel
-        selectedItem={item({
-          input: {
-            kind: "url",
-            displayName: "Example video",
-            locator: "https://www.bilibili.com/video/BV1xx",
-            normalizedLocator: "https://www.bilibili.com/video/BV1xx",
-          },
-          preview: {
-            ...item().preview!,
-            title: "Example video",
-          },
-        })}
+        selectedItem={item({ itemId: "item-b", input: { ...item().input, displayName: "第二项.md" } })}
+        sessionId="session-a"
+        projectId="project-a"
+        projectRootPath="D:\\Wiki"
         onPreviewMarkdown={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("www.bilibili.com")).toBeInTheDocument();
-    expect(screen.getAllByText(/generic_http|bilibili/i).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/archive rules/i)).not.toBeInTheDocument();
+    expect(await screen.findByText("第二项")).toBeInTheDocument();
+    resolveFirst(preview());
+    await waitFor(() => expect(screen.queryByText("最终候选")).not.toBeInTheDocument());
   });
 
-  it("shows fail state and preserves all attempt history", () => {
-    render(
-      <ImportRightPanel
-        selectedItem={item({
-          status: "failed",
-          attempts: [
-            ...item().attempts,
-            {
-              route: "browser_runtime",
-              engineId: "browser-lite",
-              engineVersion: "1.4.0",
-              stage: "validate",
-              startedAt: "2026-07-13T09:01:00Z",
-              completedAt: "2026-07-13T09:01:01Z",
-              outcome: "failed",
-              warnings: ["CHALLENGE"],
-            },
-          ],
-          issue: {
-            code: "LOGIN_REQUIRED",
-            message: "Login is required.",
-            stage: "extract",
-            retryable: true,
-            userActionRequired: true,
-            recoveryActions: ["begin_login"],
-            availableActions: [],
-          },
-        })}
-        onPreviewMarkdown={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText(/login is required/i)).toBeInTheDocument();
-    expect(screen.getAllByText("browser_runtime").length).toBeGreaterThan(0);
-    expect(screen.getByText("CHALLENGE")).toBeInTheDocument();
-    expect(screen.getAllByText(/failed/i).length).toBeGreaterThan(0);
-  });
-
-  it("shows live local recognition percentage and stage in the inspector", () => {
-    render(
-      <ImportRightPanel
-        selectedItem={item({
-          status: "extracting",
-          preview: null,
-          progress: { current: 48, total: 100, label: "asr.recognizing" },
-        })}
-        onPreviewMarkdown={vi.fn()}
-      />,
-    );
+  it("shows live local recognition percentage and stage before a preview exists", () => {
+    renderPanel(item({
+      status: "extracting",
+      preview: null,
+      progress: { current: 48, total: 100, label: "asr.recognizing" },
+    }));
 
     const progressbar = screen.getByRole("progressbar", { name: /recognizing audio segments/i });
     expect(progressbar).toHaveAttribute("aria-valuenow", "48");
-    expect(progressbar.firstElementChild).toHaveClass("animate-pulse");
     expect(screen.getByText("48%")).toBeInTheDocument();
-    expect(screen.getByText(/recognizing audio segments/i)).toBeInTheDocument();
+    expect(screen.getByText(/preview appears here/i)).toBeInTheDocument();
+    expect(importV2Api.getPreviewContent).not.toHaveBeenCalled();
   });
 });

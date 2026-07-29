@@ -1,27 +1,28 @@
 import type { AgentKind } from "../../types/agent";
-import type { LlmProviderKind } from "../../types/llm";
-import type { CommitItemDecision, ImportItem, ImportRecoveryAction, ImportSession, MediaSaveMode } from "../../types/importV2";
+import type { CommitItemDecision, ImportAsrProfile, ImportCompletion, ImportItem, ImportItemResolution, ImportRecoveryAction, ImportSession, ImportThreeWayMergeContext, MediaSaveMode } from "../../types/importV2";
 import type {
-  AgentAssistancePolicy,
   AgentAssistanceTrigger,
   AgentCandidateActionResult,
   AgentCandidateView,
-  AgentSendScope,
 } from "../../types/importV2Agent";
 import type { FileScanResult } from "../../types/importV2File";
-import type { LegacyInventory, MigrationConfirmation, MigrationPlan, MigrationStatusSnapshot } from "../../types/importV2Migration";
+import type { ImportCollectionPreview, RemoteMediaRetentionPlan } from "../../types/importV2Web";
+import type { LegacyInventory, MigrationConfirmation, MigrationPlan, MigrationPreparation, MigrationStatusSnapshot } from "../../types/importV2Migration";
 import type {
   ConnectorSessionRef,
+  ImportAsrEnablementPlan,
   ImportCapabilityRequirement,
   ImportFrontendReadiness,
   ImportHistoryPage,
   ImportPreviewContent,
+  ImportWorkbenchPreferences,
 } from "../../types/importV2Presentation";
 import type { BackendTask } from "../../types/task";
 import type { ImportQueueFilter } from "../../stores/importStore";
 import type { ImportQueueCounts, ImportSessionProgress } from "./importViewModel";
 
 export type ImportBootstrapState = "loading" | "ready" | "blocked" | "error";
+export interface AsrAuthorizationOptions { profile: ImportAsrProfile; language: string | null; }
 
 export interface ImportBatchTask {
   id: string;
@@ -55,6 +56,7 @@ export interface ImportBatchProgress {
 export interface ImportWorkflow {
   projectKey: string;
   session: ImportSession | null;
+  completion: ImportCompletion | null;
   readiness: ImportFrontendReadiness | null;
   /** Readiness is advisory; a warning must not prevent V2 staging. */
   readinessWarning?: string | null;
@@ -69,6 +71,7 @@ export interface ImportWorkflow {
   discoveryScan?: FileScanResult | null;
   discoveryTaskUnavailable?: boolean;
   isAddingPaths?: boolean;
+  isAddingText?: boolean;
   isAddingUrl?: boolean;
   pendingItemIds?: ReadonlySet<string>;
   isSyncingSession?: boolean;
@@ -78,8 +81,17 @@ export interface ImportWorkflow {
   isBatchCancelling?: (batchId: string) => boolean;
   selectedItemId: string | null;
   filter: ImportQueueFilter;
-  addPaths: (paths: string[]) => Promise<void>;
+  addPaths: (paths: string[], largeDataConfirmed?: boolean) => Promise<void>;
+  addText: (content: string, sourceName: string) => Promise<void>;
   addUrl: (url: string, mediaSaveMode?: MediaSaveMode) => Promise<void>;
+  collectionPreview: ImportCollectionPreview | null;
+  loadCollectionPage: (loadAll?: boolean) => Promise<void>;
+  confirmCollection: (itemRefs: readonly string[]) => Promise<void>;
+  dismissCollection: () => void;
+  remoteMediaRetentionPlan: RemoteMediaRetentionPlan | null;
+  planRemoteMediaRetention: (itemId: string) => Promise<void>;
+  confirmRemoteMediaRetention: () => Promise<void>;
+  dismissRemoteMediaRetention: () => void;
   cancelDiscovery?: () => Promise<void>;
   dismissDiscovery?: () => void;
   cancelBatch?: (batchId?: string) => Promise<void>;
@@ -90,28 +102,32 @@ export interface ImportWorkflow {
   retryItem: (itemId: string, recoveryAction?: ImportRecoveryAction | null) => Promise<void>;
   cancelItem: (itemId: string) => Promise<void>;
   skipItem: (itemId: string) => Promise<void>;
-  authorizeLocalAsr: (itemId: string) => Promise<void>;
+  authorizeLocalAsr: (itemId: string, options: AsrAuthorizationOptions) => Promise<void>;
+  authorizeLocalAsrGroup?: (itemIds: readonly string[], options: AsrAuthorizationOptions) => Promise<void>;
+  authorizeLocalOcr: (itemId: string) => Promise<void>;
+  authorizeLocalOcrGroup?: (itemIds: readonly string[]) => Promise<void>;
+  selectSubtitle: (itemId: string, fileName: string) => Promise<void>;
   confirm: (decisions: CommitItemDecision[]) => Promise<void>;
+  restrictedCommitPending: boolean;
+  confirmRestrictedContent: () => Promise<void>;
+  dismissRestrictedContent: () => void;
+  viewImportedSources: (
+    completion?: ImportCompletion | null,
+    preferredWikiPath?: string,
+  ) => Promise<void>;
+  updateWiki: (completion?: ImportCompletion | null) => Promise<BackendTask | null>;
   isConfirming: boolean;
   refreshSession: () => Promise<void>;
   selectItem: (itemId: string | null) => void;
   setFilter: (filter: ImportQueueFilter) => void;
   requestClipboard: (content: string) => Promise<void>;
   loadPreview: (identity: { sessionId: string; itemId: string; candidateId: string | null; historyBatchId?: string | null }) => Promise<ImportPreviewContent>;
+  loadMergeContext: (itemId: string) => Promise<ImportThreeWayMergeContext>;
+  setItemResolution: (itemId: string, resolution: ImportItemResolution) => Promise<void>;
+  stageManualMerge: (itemId: string, mergedMarkdown: string) => Promise<void>;
   loadSession: (sessionId: string, historyBatchId?: string | null) => Promise<ImportSession | null>;
-  getAgentPolicy: () => Promise<AgentAssistancePolicy | null>;
-  setAgentPolicy: (policy: AgentAssistancePolicy, localAgentKind: AgentKind | null) => Promise<AgentAssistancePolicy | null>;
+  loadCompletion: (sessionId: string, historyBatchId: string) => Promise<ImportCompletion | null>;
   invokeLocalAgent: (itemId: string, trigger: AgentAssistanceTrigger, agentKind: AgentKind) => Promise<BackendTask | null>;
-  previewByokScope: (itemId: string, trigger: AgentAssistanceTrigger, provider: LlmProviderKind) => Promise<AgentSendScope | null>;
-  approveByokAssistance: (request: {
-    itemId: string;
-    trigger: AgentAssistanceTrigger;
-    provider: LlmProviderKind;
-    model: string;
-    approvalId: string;
-    scopeSha256: string;
-    acknowledgePossibleDuplicateCharge: boolean;
-  }) => Promise<BackendTask | null>;
   acceptAgentCandidate: (itemId: string, taskId: string) => Promise<AgentCandidateView | null>;
   selectAgentCandidate: (request: {
     itemId: string;
@@ -125,11 +141,14 @@ export interface ImportWorkflow {
   revokeLogin: (connectorSessionId: string, platform?: string | null) => Promise<boolean>;
   authorizePrivateTarget: (itemId: string, url: string) => Promise<string | null>;
   getCapabilityRequirement: (itemId: string) => Promise<ImportCapabilityRequirement | null>;
+  getAsrEnablementPlan: (itemId: string) => Promise<ImportAsrEnablementPlan | null>;
   installCapability: (itemId: string, capabilityId: string) => Promise<BackendTask | null>;
   scanMigration: () => Promise<LegacyInventory | null>;
-  planMigration: (inventory: LegacyInventory) => Promise<MigrationPlan | null>;
+  planMigration: (inventory: LegacyInventory) => Promise<MigrationPreparation | null>;
   applyMigration: (plan: MigrationPlan, confirmation: MigrationConfirmation) => Promise<BackendTask | null>;
   getMigrationStatus: () => Promise<MigrationStatusSnapshot | null>;
   resumeMigration: (plan: MigrationPlan, confirmation: MigrationConfirmation) => Promise<BackendTask | null>;
   listHistory: (cursor?: string | null) => Promise<ImportHistoryPage | null>;
+  loadWorkbenchPreferences?: () => Promise<ImportWorkbenchPreferences>;
+  saveWorkbenchPreferences?: (preferences: ImportWorkbenchPreferences) => Promise<ImportWorkbenchPreferences>;
 }

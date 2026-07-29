@@ -1,5 +1,60 @@
 # 踩坑清单 (gotchas.txt)
 
+Agent model identity and CLI version are different audit fields — Root cause: storing a CLI version in `model` makes retries and provenance look pinned to a model that the app never selected — How to avoid: record the Agent execution profile/model identity separately from `engineVersion`, and normalize legacy candidate metadata on read.
+
+Stale Source AI workspace cleanup needs an active lease — Root cause: age-only cleanup can race a long-running or resumed task after sleep or a clock jump — How to avoid: skip current-process leased workspaces and unregister the lease on every normal cleanup path.
+
+Hermes profile resolution is not the same as a fixed default `HERMES_HOME` — Root cause: forcing the platform root bypasses sticky `active_profile`, while native Windows uses `%LOCALAPPDATA%\hermes` — How to avoid: let explicit `HERMES_HOME` win; otherwise resolve `active_profile` from the platform root and preserve only the selected OAuth/model/path selectors.
+
+Source Agent capability checks must mirror the exact workflow argv — Root cause: stale assumptions about OpenClaw/Hermes command surfaces can make an installed Agent fail preflight or start interactively — How to avoid: validate the current official one-shot entry and every exact flag together with invocation and fake-help tests.
+
+Claude Code bare isolation and local OAuth/keychain reuse are mutually exclusive — Root cause: bare mode disables the credential channel required by a GUI-launched Source task — How to avoid: use the safe-mode/no-session/no-project-rule Source profile when reusing local Claude login, and test the exact current CLI help flags.
+
+旧端到端测试若没有创建真实 Source，可能在只读兼容回退上形成假绿 — Root cause: Compile 曾能从 legacy 索引解析来源，测试因而没有经过 Import V2 的 discovery、preview、commit、manifest/index 契约 — How to avoid: 端到端 Project→Wiki 测试先走生产 Import V2 commit，断言 `wiki/sources/`、`.app/sources/` 与 `source-index-v2.json`，再执行 Compile。
+
+能力包测试替身和静态证据清单不能证明生产能力边界可用 — Root cause: 直接调用 `ImportEngine` double 或只搜索测试名称会绕过不可变 pack、JSON-RPC、子进程、staging、结果校验，也不能证明原始文件被逐字节保留 — How to avoid: 资格矩阵必须穿过 `PackProcessEngine` 生产边界，并对每个 fixture 的 committed raw bytes、SHA-256、size 与真实测试声明做可执行核验。
+
+OOXML part 的物理编号不能当作工作表、幻灯片或媒体的逻辑顺序 — Root cause: `sheetN.xml` / `slideN.xml` 名称不保证等于 workbook/presentation 关系顺序，孤儿 part 与缺失 relationship 还会让文本或图片错误归属并制造完整性假绿 — How to avoid: 从 workbook/presentation 的关系图解析逻辑顺序和媒体引用；关系缺失时 fail closed，跳过孤儿 part，并按有效引用数计算图片覆盖率。
+
+Windows 路径去重不能无条件 lower-case，LibreOffice profile URL 也不能手拼 `file://` — Root cause: 大小写不同的真实路径会被错误折叠，而手拼 URL 会在盘符路径上得到双斜杠、未编码空格或 CJK — How to avoid: 去重保留 canonical path 的实际大小写并只折叠精确重复；LibreOffice 使用 `Path.resolve().as_uri()`，再对真实 `Popen` argv 做参数级测试。
+
+重试外部转换时复用旧 converted 产物会让失败看起来成功 — Root cause: 上一次 LibreOffice 尝试遗留的目标文件可能在下一次超时/失败后仍被当作本次输出 — How to avoid: 每次尝试前只删除 staging 内预期的旧转换目标，保留 immutable original，并在成功后重新验证本次产物。
+
+并行门禁里的测试临时目录不要建在仓库扫描范围内 — Root cause: Windows 上 Python fixture 清理与 ESLint/Vite 递归扫描同一仓库子目录会产生短暂 ACL/不存在竞态 — How to avoid: 使用系统 `tempfile`/`tempdir` 并以 RAII 清理，让仓库扫描只看到稳定的源码树。
+
+Agent 子进程执行了 `env_clear` 仍可能重新暴露主机凭据目录 — Root cause: isolation helper cleared inherited variables but then repopulated real `CODEX_HOME` / `CLAUDE_CONFIG_DIR`, giving a candidate-only Source task access to host Agent session state — How to avoid: make credential-directory exposure an explicit per-flow capability, keep Source AI on the non-exposing runner, and fail closed for Agent kinds that lack a credential broker.
+
+无结束标记且后面没有新标题的“内容概览”不能安全自动替换 — Root cause: plain paragraphs do not reveal where the old overview ends and Source正文 begins, so either deleting to EOF or preserving the old overview violates the replacement contract — How to avoid: return a recoverable ambiguity error and require a following section boundary or the app-owned end marker before rerunning.
+
+候选稿应用按钮禁用时机不能只检查点击前的草稿 — Root cause: backend apply is asynchronous, so an editor event arriving after the click but before reload can otherwise be overwritten by the applied Source version — How to avoid: keep the Source editor read-only for the whole mutation and re-check the draft snapshot before reloading; if it changed, preserve the draft and surface a conflict-safe warning.
+
+Source 新版本不能直接复用旧版本的证据路径记录 — Root cause: Source manifest 的 raw evidence / asset / package baseline 都受 version-scoped 路径契约约束，直接克隆旧记录会让 registry 校验失败，或让当前版本失去真实处理证据 — How to avoid: 在 apply/restore 的同一原子事务内把不可变证据复制到新 `versionId` 路径，替换 package descriptor 和 candidate artifact，并把本次 OCR/ASR 产物先 hash 绑定到 candidate、确认后再迁入新版本。
+
+Agent candidate 选择也是生产预览入口，不能只替换前端 preview — Root cause: candidate 选择若不在同一生命周期中重派生并绑定 resolution/target、终结 exact duplicate，或只在失败后校验旧指纹，会留下伪完成、悬挂任务和竞态 history — How to avoid: every preview producer must reuse the production planner/commit path; serialize select/discard actions and perform the task ID plus full-preview CAS under the mutation lock before task-state or history writes.
+
+冻结 preview target 后直接修改测试 fixture 会制造假冲突 — Root cause: production reruns target planning when display name, canonical metadata, package members, or disk collisions change, but a test that mutates those inputs behind the orchestrator leaves the old frozen target attached — How to avoid: after manually changing target-affecting fixture data, call the production target-refresh path and persist the result; never weaken commit-time frozen-target conflict checks to make the fixture pass.
+
+登录成功不能作为受限内容证据 — Root cause: conflating an authenticated retry with provider metadata marks every login-assisted public page private and creates false commit/export warnings — How to avoid: keep authentication and restriction as separate typed fields, and set `restrictedContent` only from target-bound provider metadata that explicitly says private, paid, or members-only.
+
+合集增量加载会意外恢复用户已取消的选择 — Root cause: reselecting the complete loaded item array after every page append cannot distinguish newly arrived refs from refs the user deliberately deselected — How to avoid: track the previously loaded opaque refs per collection and default-select only the new delta while preserving the existing selection set.
+
+主体图片“下载成功”必须在持久化后计数 — Root cause: incrementing successful image count before the durable asset write lets an image post pass completeness even when its required source image was never staged — How to avoid: count an image only after the best-source bytes are written inside staging, and fail the whole item when any required main image is missing.
+
+多输入 OCR 在首张后报其余输入消失 — Root cause: every per-image cleanup guard adopted the same shared workspace and the first guard deleted the whole directory at loop end — How to avoid: validate all inputs first, deduplicate workspaces, and keep every workspace guard alive until the entire continuation finishes.
+
+平台 `automatic` 字段无法区分原语言自动字幕与机器翻译 — Root cause: treating a generic automatic flag as provenance lets translation-only tracks satisfy the reliable-transcript gate — How to avoid: model subtitle kind explicitly, use provider language/translation signals, retain every track as evidence, and allow only reliable original-language tracks to bypass ASR.
+
+在内嵌字幕探测前暂存伴随字幕时可能丢失本地媒体身份元数据 — Root cause: the continuation candidate preserved transcript evidence but returned no metadata artifact until a transcript path won — How to avoid: persist source name and folder-relative path before probing, then keep transcript-specific evidence separate from the stable local-media identity metadata.
+
+ADTS AAC fixture can be misclassified as MP3 — Root cause: a broad MPEG audio frame-sync predicate ran before the more specific ADTS signature — How to avoid: test specific magic/container signatures before broad frame predicates, and keep every format row backed by a real parseable fixture.
+
+Compile Source protection can be bypassed by path aliases or hidden additions — Root cause: a case-sensitive string prefix and a snapshot of only previously known files do not protect a case-insensitive filesystem and silently miss newly created files — How to avoid: normalize separators, compare the ASCII protected prefix case-insensitively on every platform, and compare the complete protected subtree path/hash set before and after Agent execution.
+Windows managed-sandbox checks can fail before project code runs — Root cause: Node/Tailwind native loading and child spawning may return module or `EPERM` failures in the sandbox, while a default-feature Rust test binary can fail with `STATUS_ENTRYPOINT_NOT_FOUND` even though the project’s supported no-default-features suite is healthy — How to avoid: run the canonical `npm run check` with the approved unsandboxed prefix and use the same `--no-default-features` configuration as the unified script for focused Rust tests.
+
+Windows 本地 OCR continuation 在生产路由中可能永远到不了 OCR 引擎 — Root cause: `canonicalize()` 会把 staging/workspace 变成 `\\?\` namespaced path，但后续用未规范化的普通项目根执行 `strip_prefix`，同一目录的字符串前缀不一致并被误报为 `IMPORT_WEB_OCR_UNAVAILABLE` — How to avoid: containment 检查和相对路径派生必须使用同一个 canonical project root；Gate A 要通过真实小红书→图片下载→OCR continuation 链路覆盖 Windows，而不是用直接产出候选 Markdown 的假引擎。
+
+Source frontmatter 禁密字段必须在反序列化边界拒绝 — Root cause: 对已经反序列化的 typed struct 再做校验，无法发现 Serde 默认静默丢弃的 `cookie`、`token`、`stagingPath`、`sessionId` 或 `engineId` 等未知字段 — How to avoid: 给最终 Source frontmatter struct 加 `deny_unknown_fields`，并用 Rust 与 TypeScript 共用的 canonical JSON fixture 加禁用键拒绝测试。
+
 Platform asset warnings can be scheme failures, not host failures — Root cause: Bilibili metadata still returns some trusted `i*.hdslb.com` image URLs as plain HTTP, while the hardened asset policy intentionally accepts only HTTPS; the generic warning text says “host” and repeats once per skipped image — How to avoid: inspect the persisted provider evidence before expanding a host allowlist, keep HTTP blocked, and prefer a separately tested HTTPS-upgrade/aggregated-warning path for known image CDNs.
 Progress must be wired through the engine selected at runtime — Root cause: the Bilibili import actually selected `builtin.web-bilibili`, while the first download-progress implementation covered only pack remote assets, leaving the real 130 MB media download at the generic “Extracting source” stage — How to avoid: trace the persisted attempt’s route and engine ID, then test progress at that concrete engine boundary rather than an adjacent architecture path.
 Bilibili playback CDN trust must follow exact runtime evidence — Root cause: the player API can return HTTPS media from `*.edge.mountaintoys.cn` on a non-default port, not only `*.bilivideo.com`; an incomplete allowlist rejected the media before download/ASR began — How to avoid: allow only the exact verified suffix with label-boundary matching, require HTTPS, revalidate every redirect before the request, and retain DNS/private-address checks.
@@ -380,3 +435,11 @@ Windows Tauri startup can overflow before the first window appears — Root caus
 Capability runtime trees must not be traversed recursively — Root cause: a deeply nested or hostile installed pack can consume the loader thread stack even after increasing its reserve — How to avoid: use a bounded iterative directory walk, reject symlinks and special files, and enforce entry-count and depth limits before hashing.
 Bilibili HTML success must not outrank parsed API evidence — Root cause: the page edge can return compressed or anti-bot bytes with a successful HTTP status, and the engine previously decoded those bytes even after the public JSON API had produced a valid video document — How to avoid: prefer validated Bilibili API evidence for exact BV/AV targets, keep HTML only as fallback, and test against unreadable page bytes plus a live public BV.
 Recoverable provider errors can be lost during fallback — Root cause: a later route's generic validation or structure error overwrote an earlier subtitle-unavailable result that carried the required local-ASR action — How to avoid: retain actionable recovery errors separately from the last diagnostic error, prefer them only after all providers fail, and regression-test mixed failure sequences.
+Sigma node dragging makes later layout resets appear clipped or strangely scaled — Dragging needs a fixed `customBBox` so graph-to-viewport normalization does not shift under the pointer, but leaving that box installed freezes the old extent — Keep the custom box during manual dragging, then call `renderer.setCustomBBox(null)` before any full ForceAtlas2 recompute.
+Sigma emits `mousemovebody` before incrementing `draggedEvents` — Calling `preventSigmaDefault()` in a custom node-drag move handler stops camera movement but also bypasses Sigma's click-suppression counter, so mouseup may be followed by a synthetic node/stage click — Disable the camera for drag ownership, let real drag moves reach Sigma's counter, keep a pixel threshold, and suppress only the immediate post-drag stage click as a picking-buffer safeguard.
+Fast graph layout saves can finish out of order and persist stale coordinates — Fire-and-forget Tauri invokes have no completion ordering, even when mouseup events are ordered — Serialize saves and coalesce pending work so only the newest pending full-position snapshot runs after the active request.
+Structured CLI contracts must be parsed at their real final-output field — Root cause: Claude `--json-schema` returns the candidate object in `structured_output`, while a generic stream parser that only reads text/result silently hands an empty string to Source validation — How to avoid: pair CLI schema flags with parser coverage for structured final events, use Codex `--output-last-message`, and regression-test transport parsing before domain validation.
+
+Long-running structured BYOK generation cannot reuse an interactive non-streaming completion contract — Root cause: a full candidate can reach the 120-second response boundary and an OpenAI-compatible provider may return text without a JSON-output constraint — How to avoid: stream the bounded background request with a long-task timeout, request provider-native JSON output where supported, preserve cancellation between chunks, and validate the assembled candidate once.
+
+Agent detection contracts can regress after adding a required invocation flag — Root cause: fake CLI `--help` fixtures still advertised the previous capability set, so detection correctly changed from Installed to Failed even though runtime code was valid — How to avoid: update every fake help fixture and run detection contract tests whenever `help_supports_invocation` gains a required flag.

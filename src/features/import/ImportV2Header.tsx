@@ -28,12 +28,7 @@ export function ImportV2Header({ session, progress, discoveryTask, syncing = fal
   const discoveryCount = discoveryTask?.progress?.current ?? 0;
   return (
     <header className="import-v2-header">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <FileOutput size={18} className="shrink-0 text-[var(--accent)]" aria-hidden="true" />
-          <h1 className="m-0 text-[20px] font-semibold tracking-[-0.02em]">{t("importV2.header.title")}</h1>
-        </div>
-      </div>
+      <h1 className="sr-only">{t("importV2.header.title")}</h1>
       <div className="import-v2-header__tools">
         <nav className="import-v2-header__nav" aria-label={t("importV2.header.sections")}>
           <button type="button" className={activeSection === "workbench" ? "is-active" : ""} aria-current={activeSection === "workbench" ? "page" : undefined} onClick={() => onSectionChange?.("workbench")}><FileOutput size={14} />{t("importV2.header.workbench")}</button>

@@ -1,5 +1,7 @@
 # Import V2：连续性与流畅性补充 Review / 修复记录
 
+> 历史 UX 审查与修复记录。当前工作台、媒体待办、Source 阅读和 AI 整理行为以 [`../superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。
+
 日期：2026-07-16
 
 本轮以“本地工具优先保证用户始终知道发生了什么、能否继续、下一步是什么”为第一性原理，补充复核并修复上一轮 review 中遗留的三个高价值问题。

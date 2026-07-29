@@ -1,5 +1,7 @@
 # Current Architecture Documentation Alignment Design
 
+> Historical architecture snapshot. Its legacy confirm-to-optional-compile chain is not a current product rule; follow [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md) for Import and Source behavior.
+
 ## Goal
 
 Align the living project specifications with the AppShell workflow-controller refactor and the Rust service use-case modularization currently present on `master`, without changing product scope, runtime behavior, public IPC contracts, or historical evidence.

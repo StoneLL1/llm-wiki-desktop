@@ -1,5 +1,7 @@
 # Import V2 Frontend Release Evidence
 
+> Historical QA evidence for the previous layout and behavior. It is not a release gate for the current Import / Source flow in [`../superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../superpowers/specs/2026-07-24-import-source-media-flow-design.md).
+
 Date: 2026-07-14
 Migration prerequisite: `55ce16c`
 Frontend certification baseline: `a60d809`

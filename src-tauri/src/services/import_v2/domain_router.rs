@@ -28,7 +28,9 @@ impl DomainRouter {
             WebRouteKind::Zhihu
         } else if (host(&h, "bilibili.com") || host(&h, "b23.tv")) && a.bilibili {
             WebRouteKind::Bilibili
-        } else if (host(&h, "xiaohongshu.com") || host(&h, "xhslink.com")) && a.xiaohongshu {
+        } else if (host(&h, "xiaohongshu.com") || host(&h, "xhslink.com") || host(&h, "xhslink.cn"))
+            && a.xiaohongshu
+        {
             WebRouteKind::Xiaohongshu
         } else if (host(&h, "douyin.com") || host(&h, "iesdouyin.com")) && a.douyin {
             WebRouteKind::Douyin
@@ -96,6 +98,10 @@ mod tests {
         );
         assert_eq!(
             DomainRouter::plan(&url("xhslink.com"), &availability).primary,
+            WebRouteKind::Xiaohongshu
+        );
+        assert_eq!(
+            DomainRouter::plan(&url("xhslink.cn"), &availability).primary,
             WebRouteKind::Xiaohongshu
         );
         assert_eq!(

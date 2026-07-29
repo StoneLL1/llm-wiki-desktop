@@ -1,5 +1,7 @@
 # Import V2 Migration & Cutover Implementation Plan
 
+> Historical internal cutover plan. It must not create a user-facing migration or repair feature; the current test project is repaired once during implementation. Current rules: [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md).
+
 > **For Codex:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Do not combine this plan with File Ingestion, Web Ingestion, or Agent Assistance implementation.
 
 **Goal:** Migrate legacy import metadata into the completed Import V2 Core without moving or rewriting user content, then make V2 the single active import path through an observable, reversible release cutover.

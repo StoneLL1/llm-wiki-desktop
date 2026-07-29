@@ -1,5 +1,7 @@
 # Import V2 Frontend Implementation Plan
 
+> Historical implementation plan. Keep task-level code and test guidance only where it agrees with [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md), which is the sole authority for current Import, Source, media, OCR / ASR, login, and AI 整理 behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the legacy Import view with a compact, accessible Import V2 workspace where users can repeatedly add files, folders, or exact URLs, follow independent item progress, resolve required actions, preview Markdown and quality evidence, request Agent assistance, and explicitly confirm selected results.

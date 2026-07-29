@@ -3,7 +3,7 @@ import type {
   ApplyImportV2MigrationRequest,
   LegacyInventory,
   MigrationApplyTask,
-  MigrationPlan,
+  MigrationPreparation,
   MigrationStatusSnapshot,
   PlanImportV2MigrationRequest,
   ResumeImportV2MigrationRequest,
@@ -19,8 +19,8 @@ export function scanImportV2Migration(
 
 export function planImportV2Migration(
   request: PlanImportV2MigrationRequest,
-): Promise<MigrationPlan> {
-  return invoke<MigrationPlan>("plan_import_v2_migration", { request });
+): Promise<MigrationPreparation> {
+  return invoke<MigrationPreparation>("plan_import_v2_migration", { request });
 }
 
 export function applyImportV2Migration(

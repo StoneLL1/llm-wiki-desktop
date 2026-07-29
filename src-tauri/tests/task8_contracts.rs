@@ -27,7 +27,10 @@ impl ProcessRunner for FakeProcessRunner {
         Ok(if args == ["--version"] {
             "1.0.0".into()
         } else {
-            "--print --output-format --settings --bare".into()
+            "--print --output-format --verbose --permission-mode --settings --bare \
+             --safe-mode --disable-slash-commands --no-session-persistence --no-chrome \
+             --prompt-suggestions --strict-mcp-config --tools --allowedTools --json-schema"
+                .into()
         })
     }
 

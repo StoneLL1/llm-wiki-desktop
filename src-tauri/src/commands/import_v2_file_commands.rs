@@ -5,7 +5,9 @@ use tauri::{AppHandle, Manager, State};
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::import_v2::ImportSession;
-use crate::models::import_v2_file::{FileScanPolicy, FileScanResult};
+use crate::models::import_v2_file::{
+    DiscoveredFile, FileScanPolicy, FileScanResult, FileSkipReason, SkippedFile,
+};
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::file_discovery::{new_import_inputs, FileDiscoveryService};
@@ -23,6 +25,8 @@ pub struct AddImportPathsV2Request {
     pub project_root_path: String,
     pub session_id: String,
     pub source_paths: Vec<String>,
+    #[serde(default)]
+    pub large_data_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -43,6 +47,11 @@ pub fn start_add_import_paths_v2(
 ) -> Result<BackendTask, BackendError> {
     let state = app.state::<AppState>();
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.ensure_session_accepts_inputs(
+        &context,
+        &state.file_store,
+        &request.session_id,
+    )?;
     let task = state
         .task_service
         .create_project_task(
@@ -89,7 +98,7 @@ pub fn start_add_import_paths_v2(
                 .map(PathBuf::from)
                 .collect::<Vec<_>>();
             let mut discovered = 0_u64;
-            let scan = FileDiscoveryService::default().scan(
+            let mut scan = FileDiscoveryService::default().scan(
                 &context,
                 &roots,
                 FileScanPolicy::default(),
@@ -111,11 +120,12 @@ pub fn start_add_import_paths_v2(
                 ".app/import-sessions/{}/scans/{}.json",
                 request.session_id, task_id
             );
+            let importable = take_importable_files(&mut scan, request.large_data_confirmed);
             state
                 .file_store
                 .write_json_atomic(&context, &scan_path, &scan)?;
             let skipped = scan.skipped.len();
-            let inputs = new_import_inputs(&session, scan.files);
+            let inputs = new_import_inputs(&session, importable);
             let added = inputs.len();
             if !inputs.is_empty() {
                 state.import_v2_service.add_inputs(
@@ -201,14 +211,15 @@ pub fn add_import_paths_v2(
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let scan = FileDiscoveryService::default().scan(
+    let mut scan = FileDiscoveryService::default().scan(
         &context,
         &roots,
         FileScanPolicy::default(),
         |_| {},
         || false,
     )?;
-    let inputs = new_import_inputs(&session, scan.files);
+    let importable = take_importable_files(&mut scan, request.large_data_confirmed);
+    let inputs = new_import_inputs(&session, importable);
     if inputs.is_empty() {
         return Ok(session);
     }
@@ -217,9 +228,54 @@ pub fn add_import_paths_v2(
         .add_inputs(&context, &state.file_store, &request.session_id, inputs)
 }
 
+fn take_importable_files(
+    scan: &mut FileScanResult,
+    large_data_confirmed: bool,
+) -> Vec<DiscoveredFile> {
+    let pending = scan
+        .files
+        .iter()
+        .filter(|file| {
+            !large_data_confirmed
+                && file
+                    .large_data
+                    .as_ref()
+                    .is_some_and(|estimate| estimate.requires_confirmation)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let importable = scan
+        .files
+        .iter()
+        .filter(|file| {
+            large_data_confirmed
+                || !file
+                    .large_data
+                    .as_ref()
+                    .is_some_and(|estimate| estimate.requires_confirmation)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for file in &pending {
+        let estimate = file.large_data.as_ref().expect("partition checked");
+        scan.skipped.push(SkippedFile {
+            source_path: file.source_path.clone(),
+            relative_path: Some(file.relative_path.clone()),
+            reason: FileSkipReason::LargeDataConfirmationRequired,
+            detail: Some(format!(
+                "{} rows, about {} output files, {} bytes",
+                estimate.row_count, estimate.estimated_output_files, estimate.total_bytes
+            )),
+        });
+    }
+    importable
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::paths::ProjectContext;
+
     #[test]
     fn request_has_sources_but_no_target_paths_or_policy_override() {
         let value = serde_json::to_value(AddImportPathsV2Request {
@@ -227,6 +283,7 @@ mod tests {
             project_root_path: "root".into(),
             session_id: "s".into(),
             source_paths: vec!["a.md".into()],
+            large_data_confirmed: false,
         })
         .unwrap();
         assert_eq!(value["sourcePaths"][0], "a.md");
@@ -241,9 +298,43 @@ mod tests {
             project_root_path: "root".into(),
             session_id: "s".into(),
             source_paths: vec!["folder".into(), "file.pdf".into()],
+            large_data_confirmed: false,
         })
         .unwrap();
         assert_eq!(value["sourcePaths"].as_array().unwrap().len(), 2);
         assert!(value.get("install").is_none());
+    }
+
+    #[test]
+    fn large_csv_requires_confirmation_before_it_becomes_importable() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("large-csv", root.path().to_path_buf());
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/import-v2/local/batch3/large.csv");
+        let scan = FileDiscoveryService::default()
+            .scan(
+                &context,
+                &[fixture],
+                FileScanPolicy::default(),
+                |_| {},
+                || false,
+            )
+            .unwrap();
+        assert!(scan.files[0]
+            .large_data
+            .as_ref()
+            .is_some_and(|estimate| estimate.requires_confirmation));
+
+        let mut pending = scan.clone();
+        assert!(take_importable_files(&mut pending, false).is_empty());
+        assert!(pending
+            .skipped
+            .iter()
+            .any(|entry| entry.reason == FileSkipReason::LargeDataConfirmationRequired));
+
+        let mut confirmed = scan;
+        let accepted = take_importable_files(&mut confirmed, true);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].large_data.as_ref().unwrap().row_count, 10_052);
     }
 }

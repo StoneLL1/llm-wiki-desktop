@@ -1,5 +1,7 @@
 # Import 2.0 Core Implementation Plan
 
+> Historical implementation plan. Do not use it to restore old Source paths, migration UI, automatic Agent fallback, or compile-after-import; follow [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立 Import 2.0 的稳定后端核心：版本化 DTO、可恢复会话、引擎协议、来源版本注册、质量门、逐项原子提交、任务事件和 Tauri IPC；使用测试引擎完成端到端验证，但不接入真实文件解析器或网页连接器。

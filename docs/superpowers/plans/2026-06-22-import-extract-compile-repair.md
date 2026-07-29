@@ -1,5 +1,7 @@
 # Import, Extraction, and Compile Repair Implementation Plan
 
+> Historical implementation plan; do not execute it as the current Import roadmap. Use [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md) as the product and architecture authority.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make native drag-and-drop start an import preview, make every supported textual source produce real Markdown under `raw/extracted/`, and make compile consume that Markdown or fail clearly before invoking an Agent/LLM.

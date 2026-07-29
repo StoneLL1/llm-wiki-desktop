@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -82,18 +82,38 @@ describe("CI validation contract", () => {
     const packageJson = JSON.parse(readRootFile("package.json")) as {
       scripts: Record<string, string>;
     };
+    const checkOrchestrator = readRootFile("scripts/run-checks.mjs");
 
-    expect(packageJson.scripts.check).toBe(
-      "npm run test && npm run test:capability-tools && npm run lint && npm run build && npm run check:console && npm run check:rust:gui && npm run test:rust",
+    expect(packageJson.scripts.check).toBe("node scripts/run-checks.mjs");
+    expect(checkOrchestrator).toContain(
+      'scripts: ["check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:console"]',
+    );
+    expect(checkOrchestrator).toContain(
+      'scripts: ["check:rust:gui", "test:rust"]',
+    );
+    expect(checkOrchestrator).toContain(
+      'scripts: ["lint", "build", "check:console"]',
+    );
+    expect(checkOrchestrator).toContain(
+      'scripts: ["check:rust:core"]',
     );
     expect(packageJson.scripts["check:console"]).toBe(
       "node scripts/check-console-log.mjs",
+    );
+    expect(packageJson.scripts["check:import-source-media"]).toBe(
+      "node scripts/check-import-source-media-flow.mjs",
     );
     expect(packageJson.scripts["check:rust:gui"]).toBe(
       "cargo check --manifest-path src-tauri/Cargo.toml",
     );
     expect(packageJson.scripts["test:rust"]).toBe(
       "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
+    );
+    expect(packageJson.scripts["check:quick"]).toBe(
+      "node scripts/run-checks.mjs quick",
+    );
+    expect(packageJson.scripts["check:rust:core"]).toBe(
+      "cargo check --manifest-path src-tauri/Cargo.toml --no-default-features",
     );
   });
 
@@ -116,6 +136,7 @@ describe("CI validation contract", () => {
     expect(workflow).toContain("libwebkit2gtk-4.1-dev");
     expectCommandsInOrder(runCommands, [
       "npm ci",
+      "npm run check:import-source-media",
       "npm run test",
       "npm run test:capability-tools",
       "npm run lint",
@@ -141,5 +162,20 @@ describe("CI validation contract", () => {
     expect(workflow).toContain("runner/qualification.mjs");
     expect(workflow).not.toContain("--clobber");
     expect(workflow).not.toMatch(/uses:\s+[^\s#]+@(v\d+|stable)\b/);
+  });
+
+  it("keeps every Import icon-only dialog button named and titled", () => {
+    const importRoot = rootPath("src/features/import");
+    const dialogFiles = readdirSync(importRoot)
+      .filter((name) => /^Import.*Dialog\.tsx$/.test(name));
+
+    for (const name of dialogFiles) {
+      const source = readFileSync(path.join(importRoot, name), "utf8");
+      const buttons = source.match(/<button\b[\s\S]*?>/g) ?? [];
+      for (const button of buttons.filter((tag) => tag.includes('className="icon-button"'))) {
+        expect(button, `${name}: ${button}`).toContain("aria-label=");
+        expect(button, `${name}: ${button}`).toContain("title=");
+      }
+    }
   });
 });

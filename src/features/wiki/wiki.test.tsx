@@ -24,6 +24,7 @@ import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const emptyAiCapabilities = { agents: [], providers: [] };
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -916,7 +917,7 @@ describe("Wiki HTML preview", () => {
       },
     });
 
-    render(<WikiView />);
+    render(<WikiView capabilities={emptyAiCapabilities} />);
 
     expect(await screen.findByRole("separator", { name: "Resize wiki tree" })).toHaveAttribute("aria-valuemin", "220");
   });
@@ -942,7 +943,7 @@ describe("Wiki HTML preview", () => {
       },
     });
 
-    render(<WikiView />);
+    render(<WikiView capabilities={emptyAiCapabilities} />);
     fireEvent.click(await screen.findByRole("button", { name: "Ask AI" }));
 
     expect(useNavigationStore.getState().rightPanelMode).toBe("wikiAssistant");
@@ -966,7 +967,7 @@ describe("Wiki HTML preview", () => {
       wikiAssistantPagePath: "wiki/old.md",
     });
 
-    render(<WikiView />);
+    render(<WikiView capabilities={emptyAiCapabilities} />);
     act(() => {
       useWikiStore.setState({
         page: pageContent({ meta: pageMeta({ path: "wiki/concepts/updated.md" }) }),

@@ -49,6 +49,44 @@ fn declared_video_without_a_playable_stream_fails_closed() {
 }
 
 #[test]
+fn declared_video_with_a_platform_subtitle_candidate_is_accepted_for_localization() {
+    let media_v2 = serde_json::json!({
+        "subtitles": {
+            "source": [{
+                "url": "https://sns-video-qc.xhscdn.com/source.srt",
+                "language": "zh-CN",
+                "automatic": true
+            }]
+        }
+    })
+    .to_string();
+    let html = format!(
+        r#"<script>{{"note":{{"noteId":"video-subtitle","type":"video","title":"视频笔记","desc":"正文","mediaV2":{}}}}}</script>"#,
+        serde_json::to_string(&media_v2).unwrap()
+    );
+    let document =
+        xiaohongshu::extract_page(&html, "https://www.xiaohongshu.com/explore/video-subtitle")
+            .unwrap();
+    assert_eq!(document.content_type, "video");
+    assert!(document.media_url.is_none());
+    assert_eq!(document.subtitles.len(), 1);
+    assert_eq!(document.subtitles[0].language.as_deref(), Some("zh-CN"));
+}
+
+#[test]
+fn non_video_note_without_image_evidence_fails_as_a_structure_change() {
+    let html = r#"<script>{"note":{"noteId":"image-without-images","title":"图文笔记","desc":"只有简介，没有可识别图片字段"}}</script>"#;
+    assert_eq!(
+        xiaohongshu::extract_page(
+            html,
+            "https://www.xiaohongshu.com/explore/image-without-images"
+        )
+        .unwrap_err(),
+        ConnectorFailure::StructureChanged
+    );
+}
+
+#[test]
 fn video_note_keeps_cover_separate_from_playable_media() {
     let html = include_str!("../../tests/fixtures/import-v2/web/xiaohongshu/video-note.html");
     let document = xiaohongshu::extract_page(
@@ -66,6 +104,32 @@ fn video_note_keeps_cover_separate_from_playable_media() {
         .as_deref()
         .is_some_and(|url| url.contains("video.mp4") && url.contains("video-secret")));
     assert_ne!(document.media_url, document.cover_url);
+}
+
+#[test]
+fn media_v2_json_string_prefers_source_subtitle_and_upgrades_trusted_cdn_urls() {
+    let html =
+        include_str!("../../tests/fixtures/import-v2/web/xiaohongshu/video-note-media-v2.html");
+    let document = xiaohongshu::extract_page(
+        html,
+        "https://www.xiaohongshu.com/discovery/item/6a61c0bf000000000e034c02",
+    )
+    .unwrap();
+
+    assert_eq!(document.content_type, "video");
+    assert!(document
+        .media_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("https://sns-video-v6.xhscdn.com/")));
+    assert!(document
+        .cover_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("https://sns-webpic-qc.xhscdn.com/")));
+    assert_eq!(document.subtitles.len(), 3);
+    assert_eq!(document.subtitles[0].label.as_deref(), Some("source"));
+    assert_eq!(document.subtitles[0].language.as_deref(), Some("zh-CN"));
+    assert!(document.subtitles[0].automatic);
+    assert!(document.subtitles[0].url.contains("source.srt"));
 }
 
 #[test]
