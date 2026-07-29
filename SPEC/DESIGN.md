@@ -1,5 +1,7 @@
 # Design System Inspired by OpenAI
 
+> Scope: this file is a high-level visual reference. Confirmed Import / Source product flows, information architecture, states, copy, media actions, and AI 整理 behavior are defined by [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md).
+
 > Category: AI & LLM
 > Calm, near-monochrome system anchored in deep teal-black with generous white space and editorial typography.
 

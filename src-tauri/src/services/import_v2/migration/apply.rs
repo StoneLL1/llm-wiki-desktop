@@ -8,7 +8,7 @@ use crate::errors::BackendError;
 use crate::models::git::{CheckpointPurpose, GitCheckpoint};
 use crate::models::import_v2_migration::{
     LegacyInventory, MigrationApplyResult, MigrationConfirmation, MigrationDecision, MigrationPlan,
-    MigrationReport, MigrationStatus, MigrationStatusSnapshot,
+    MigrationPreparation, MigrationReport, MigrationStatus, MigrationStatusSnapshot,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::migration::planner::{DefaultMigrationPlanner, MigrationPlanner};
@@ -61,6 +61,25 @@ impl MigrationService {
             )
             .as_bytes(),
         )
+    }
+
+    pub fn prepare(
+        &self,
+        project_root: &Path,
+        inventory: &LegacyInventory,
+    ) -> Result<MigrationPreparation, BackendError> {
+        let plan = self.plan(project_root, inventory)?;
+        let report = MigrationReport::from_plan(&plan, inventory)?;
+        let confirmation = MigrationConfirmation {
+            plan_fingerprint: plan.fingerprint(),
+            token: self.confirmation_token(&plan, &inventory.project_identity),
+            acknowledge_no_git_rollback: false,
+        };
+        Ok(MigrationPreparation {
+            plan,
+            report,
+            confirmation,
+        })
     }
 
     pub fn apply_metadata(

@@ -41,6 +41,8 @@ interface WikiTreeProps {
   onCreate: () => void;
   onRename: (path: string) => void;
   onDelete: (path: string) => void;
+  onSourceRename?: (sourceId: string, path: string) => void;
+  onSourceDelete?: (sourceId: string) => void;
 }
 
 type TypeFilter = WikiPageType | "all";
@@ -54,6 +56,8 @@ export function WikiTree({
   onCreate,
   onRename,
   onDelete,
+  onSourceRename = () => {},
+  onSourceDelete = () => {},
 }: WikiTreeProps) {
   const { t } = useTranslation();
   const [filterText, setFilterText] = useState("");
@@ -80,6 +84,15 @@ export function WikiTree({
     }
     return set;
   }, [pages, filterText, typeFilter]);
+  const sourceIdsByPath = useMemo(
+    () =>
+      new Map(
+        pages
+          .filter((page) => page.pageType === "source" && page.sourceBinding?.sourceId)
+          .map((page) => [page.path, page.sourceBinding!.sourceId]),
+      ),
+    [pages],
+  );
 
   return (
     <div className="wiki-tree">
@@ -145,6 +158,9 @@ export function WikiTree({
             onSelect={onSelect}
             onRename={onRename}
             onDelete={onDelete}
+            onSourceRename={onSourceRename}
+            onSourceDelete={onSourceDelete}
+            sourceIdsByPath={sourceIdsByPath}
             depth={0}
           />
         )}
@@ -184,6 +200,9 @@ function TreeChildren({
   onSelect,
   onRename,
   onDelete,
+  onSourceRename,
+  onSourceDelete,
+  sourceIdsByPath,
   depth,
 }: {
   node: WikiTreeNode;
@@ -192,6 +211,9 @@ function TreeChildren({
   onSelect: (path: string) => void;
   onRename: (path: string) => void;
   onDelete: (path: string) => void;
+  onSourceRename: (sourceId: string, path: string) => void;
+  onSourceDelete: (sourceId: string) => void;
+  sourceIdsByPath: Map<string, string>;
   depth: number;
 }) {
   return (
@@ -205,6 +227,9 @@ function TreeChildren({
           onSelect={onSelect}
           onRename={onRename}
           onDelete={onDelete}
+          onSourceRename={onSourceRename}
+          onSourceDelete={onSourceDelete}
+          sourceIdsByPath={sourceIdsByPath}
           depth={depth}
         />
       ))}
@@ -219,6 +244,9 @@ function TreeRow({
   onSelect,
   onRename,
   onDelete,
+  onSourceRename,
+  onSourceDelete,
+  sourceIdsByPath,
   depth,
 }: {
   node: WikiTreeNode;
@@ -227,12 +255,17 @@ function TreeRow({
   onSelect: (path: string) => void;
   onRename: (path: string) => void;
   onDelete: (path: string) => void;
+  onSourceRename: (sourceId: string, path: string) => void;
+  onSourceDelete: (sourceId: string) => void;
+  sourceIdsByPath: Map<string, string>;
   depth: number;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(depth < 1);
   const [menuOpen, setMenuOpen] = useState(false);
   const isFile = node.kind === "file";
+  const sourceId = sourceIdsByPath.get(node.path);
+  const sourceLike = node.type === "source";
 
   if (isFile) {
     if (!allowedPaths.has(node.path)) return null;
@@ -258,39 +291,43 @@ function TreeRow({
             ) : null}
           </span>
         </button>
-        <button
-          type="button"
-          aria-label={t("wiki.tree.pageActions", { name: node.name })}
-          title={t("wiki.tree.pageActions", { name: node.name })}
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((value) => !value)}
-          className="absolute right-0.5 grid h-[24px] w-[24px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] opacity-0 hover:bg-[var(--surface-muted)] group-hover:opacity-100 focus:opacity-100"
-        >
-          <MoreHorizontal size={13} />
-        </button>
+        {!sourceLike || sourceId ? (
+          <button
+            type="button"
+            aria-label={t("wiki.tree.pageActions", { name: node.name })}
+            title={t("wiki.tree.pageActions", { name: node.name })}
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((value) => !value)}
+            className="absolute right-0.5 grid h-[24px] w-[24px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] opacity-0 hover:bg-[var(--surface-muted)] group-hover:opacity-100 focus:opacity-100"
+          >
+            <MoreHorizontal size={13} />
+          </button>
+        ) : null}
         {menuOpen ? (
           <div className="absolute right-0 top-[26px] z-20 min-w-[132px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] p-1 shadow-lg">
             <button
               type="button"
               onClick={() => {
                 setMenuOpen(false);
-                onRename(node.path);
+                if (sourceId) onSourceRename(sourceId, node.path);
+                else onRename(node.path);
               }}
               className="flex h-[28px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
             >
               <Pencil size={13} />
-              {t("wiki.tree.rename")}
+              {sourceId ? t("source.action.move") : t("wiki.tree.rename")}
             </button>
             <button
               type="button"
               onClick={() => {
                 setMenuOpen(false);
-                onDelete(node.path);
+                if (sourceId) onSourceDelete(sourceId);
+                else onDelete(node.path);
               }}
               className="flex h-[28px] w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[12px] text-[var(--danger)] hover:bg-[var(--surface-muted)]"
             >
               <Trash2 size={13} />
-              {t("wiki.tree.delete")}
+              {sourceId ? t("source.action.delete") : t("wiki.tree.delete")}
             </button>
           </div>
         ) : null}
@@ -332,6 +369,9 @@ function TreeRow({
           onSelect={onSelect}
           onRename={onRename}
           onDelete={onDelete}
+          onSourceRename={onSourceRename}
+          onSourceDelete={onSourceDelete}
+          sourceIdsByPath={sourceIdsByPath}
           depth={depth + 1}
         />
       ) : null}

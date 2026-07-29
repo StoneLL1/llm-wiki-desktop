@@ -3,8 +3,11 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{BackendError, IMPORT_V2_ENGINE_OUTPUT_INVALID, IMPORT_V2_ENGINE_UNAVAILABLE};
-use crate::models::import_v2::{ImportInput, MediaSaveMode};
+use crate::errors::{
+    BackendError, IMPORT_V2_ENGINE_OUTPUT_INVALID, IMPORT_V2_ENGINE_PANICKED,
+    IMPORT_V2_ENGINE_UNAVAILABLE,
+};
+use crate::models::import_v2::{ImportAsrProfile, ImportInput, MediaSaveMode};
 use crate::models::paths::ProjectContext;
 use crate::tasks::task_model::CancellationToken;
 
@@ -36,10 +39,18 @@ pub struct EngineRequest {
     pub chained_input: Option<String>,
     #[serde(default)]
     pub local_asr_authorized: bool,
+    /// Allows a signed media capability to inspect only embedded subtitle
+    /// tracks before the user grants ASR. It must never run speech recognition.
+    #[serde(default)]
+    pub asr_probe_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_profile: Option<ImportAsrProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognition_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_subtitle: Option<String>,
     #[serde(default)]
     pub local_ocr_authorized: bool,
-    #[serde(default)]
-    pub allow_missing_transcript: bool,
     #[serde(default)]
     pub media_save_mode: MediaSaveMode,
 }
@@ -118,6 +129,50 @@ pub trait ImportEngine: Send + Sync {
     }
 }
 
+pub(crate) fn execute_engine(
+    engine: &dyn ImportEngine,
+    request: &EngineRequest,
+    cancellation: &CancellationToken,
+) -> Result<EngineResult, BackendError> {
+    catch_engine_panic(|| engine.execute(request, cancellation))
+}
+
+pub(crate) fn execute_engine_with_progress(
+    engine: &dyn ImportEngine,
+    request: &EngineRequest,
+    cancellation: &CancellationToken,
+    report_progress: &EngineProgressReporter<'_>,
+) -> Result<EngineResult, BackendError> {
+    catch_engine_panic(|| engine.execute_with_progress(request, cancellation, report_progress))
+}
+
+pub(crate) fn describe_engine(engine: &dyn ImportEngine) -> Result<EngineDescriptor, BackendError> {
+    catch_engine_panic(|| Ok(engine.descriptor()))
+}
+
+pub(crate) fn engine_supports(
+    engine: &dyn ImportEngine,
+    input: &ImportInput,
+) -> Result<bool, BackendError> {
+    catch_engine_panic(|| Ok(engine.supports(input)))
+}
+
+fn catch_engine_panic<T>(
+    execute: impl FnOnce() -> Result<T, BackendError>,
+) -> Result<T, BackendError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(execute))
+        .unwrap_or_else(|_| Err(engine_panicked_error()))
+}
+
+pub(crate) fn engine_panicked_error() -> BackendError {
+    BackendError::new(
+        IMPORT_V2_ENGINE_PANICKED,
+        "The import engine stopped unexpectedly.",
+        true,
+        false,
+    )
+}
+
 #[derive(Default)]
 pub struct EngineRegistry {
     engines: RwLock<Vec<Arc<dyn ImportEngine>>>,
@@ -125,13 +180,12 @@ pub struct EngineRegistry {
 
 impl EngineRegistry {
     pub fn registered_routes(&self) -> Result<Vec<String>, BackendError> {
-        Ok(self
-            .engines
-            .read()
-            .map_err(|_| registry_error())?
-            .iter()
-            .map(|engine| engine.descriptor().route)
-            .collect())
+        let engines = self.engines.read().map_err(|_| registry_error())?;
+        let mut routes = Vec::with_capacity(engines.len());
+        for engine in engines.iter() {
+            routes.push(describe_engine(engine.as_ref())?.route);
+        }
+        Ok(routes)
     }
     pub fn register(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
         self.register_inner(engine, false)
@@ -148,16 +202,15 @@ impl EngineRegistry {
         &self,
         engine: Arc<dyn ImportEngine>,
     ) -> Result<(), BackendError> {
-        let descriptor = engine.descriptor();
+        let descriptor = describe_engine(engine.as_ref())?;
         let mut engines = self.engines.write().map_err(|_| registry_error())?;
-        if let Some(existing) = engines
-            .iter_mut()
-            .find(|existing| existing.descriptor().engine_id == descriptor.engine_id)
-        {
-            *existing = engine;
-        } else {
-            engines.push(engine);
+        for existing in engines.iter_mut() {
+            if describe_engine(existing.as_ref())?.engine_id == descriptor.engine_id {
+                *existing = engine;
+                return Ok(());
+            }
         }
+        engines.push(engine);
         Ok(())
     }
 
@@ -166,45 +219,39 @@ impl EngineRegistry {
         engine: Arc<dyn ImportEngine>,
         allow_exact_match: bool,
     ) -> Result<(), BackendError> {
-        let descriptor = engine.descriptor();
+        let descriptor = describe_engine(engine.as_ref())?;
         let mut engines = self.engines.write().map_err(|_| registry_error())?;
-        if allow_exact_match
-            && engines
-                .iter()
-                .any(|existing| existing.descriptor() == descriptor)
-        {
-            return Ok(());
-        }
-        if engines
-            .iter()
-            .any(|existing| existing.descriptor().engine_id == descriptor.engine_id)
-        {
-            return Err(BackendError::new(
-                IMPORT_V2_ENGINE_UNAVAILABLE,
-                "An import engine with this identifier is already registered.",
-                true,
-                false,
-            ));
+        for existing in engines.iter() {
+            let existing_descriptor = describe_engine(existing.as_ref())?;
+            if allow_exact_match && existing_descriptor == descriptor {
+                return Ok(());
+            }
+            if existing_descriptor.engine_id == descriptor.engine_id {
+                return Err(BackendError::new(
+                    IMPORT_V2_ENGINE_UNAVAILABLE,
+                    "An import engine with this identifier is already registered.",
+                    true,
+                    false,
+                ));
+            }
         }
         engines.push(engine);
         Ok(())
     }
 
     pub fn resolve(&self, input: &ImportInput) -> Result<Arc<dyn ImportEngine>, BackendError> {
-        self.engines
-            .read()
-            .map_err(|_| registry_error())?
-            .iter()
-            .find(|engine| engine.supports(input))
-            .cloned()
-            .ok_or_else(|| {
-                BackendError::new(
-                    IMPORT_V2_ENGINE_UNAVAILABLE,
-                    "No installed import engine supports this input.",
-                    true,
-                    true,
-                )
-            })
+        let engines = self.engines.read().map_err(|_| registry_error())?;
+        for engine in engines.iter() {
+            if engine_supports(engine.as_ref(), input)? {
+                return Ok(engine.clone());
+            }
+        }
+        Err(BackendError::new(
+            IMPORT_V2_ENGINE_UNAVAILABLE,
+            "No installed import engine supports this input.",
+            true,
+            true,
+        ))
     }
 
     /// Resolve an explicitly planned route; registration order is never routing policy.
@@ -213,26 +260,67 @@ impl EngineRegistry {
         route: &str,
         input: &ImportInput,
     ) -> Result<Arc<dyn ImportEngine>, BackendError> {
-        self.engines
-            .read()
-            .map_err(|_| registry_error())?
-            .iter()
-            .filter(|engine| {
-                let descriptor = engine.descriptor();
-                descriptor.route == route && engine.supports(input)
-            })
+        let engines = self.engines.read().map_err(|_| registry_error())?;
+        let mut selected: Option<(bool, Arc<dyn ImportEngine>)> = None;
+        for engine in engines.iter() {
+            let descriptor = describe_engine(engine.as_ref())?;
+            if descriptor.route != route || !engine_supports(engine.as_ref(), input)? {
+                continue;
+            }
             // Built-ins are safe fallbacks. Prefer an installed capability pack
             // when it provides the same planned route (notably browser/web).
-            .min_by_key(|engine| engine.descriptor().engine_id.starts_with("builtin."))
-            .cloned()
-            .ok_or_else(|| {
-                BackendError::new(
-                    IMPORT_V2_ENGINE_UNAVAILABLE,
-                    "The planned import route is not installed.",
-                    true,
-                    true,
-                )
-            })
+            let is_builtin = descriptor.engine_id.starts_with("builtin.");
+            if selected
+                .as_ref()
+                .is_none_or(|(selected_is_builtin, _)| *selected_is_builtin && !is_builtin)
+            {
+                selected = Some((is_builtin, engine.clone()));
+            }
+        }
+        selected.map(|(_, engine)| engine).ok_or_else(|| {
+            BackendError::new(
+                IMPORT_V2_ENGINE_UNAVAILABLE,
+                "The planned import route is not installed.",
+                true,
+                true,
+            )
+        })
+    }
+
+    pub fn resolve_media_asr(
+        &self,
+        input: &ImportInput,
+        profile: Option<&ImportAsrProfile>,
+    ) -> Result<Arc<dyn ImportEngine>, BackendError> {
+        let engines = self.engines.read().map_err(|_| registry_error())?;
+        let mut selected: Option<((bool, String), Arc<dyn ImportEngine>)> = None;
+        for engine in engines.iter() {
+            let descriptor = describe_engine(engine.as_ref())?;
+            if descriptor.route != "media.asr" || !engine_supports(engine.as_ref(), input)? {
+                continue;
+            }
+            let id = descriptor.engine_id;
+            let key = match profile.unwrap_or(&ImportAsrProfile::Balanced) {
+                ImportAsrProfile::Accurate => (!id.contains("whisper"), id),
+                ImportAsrProfile::Fast | ImportAsrProfile::Balanced => {
+                    (!id.contains("sensevoice"), id)
+                }
+            };
+            if selected
+                .as_ref()
+                .is_none_or(|(selected_key, _)| key < *selected_key)
+            {
+                selected = Some((key, engine.clone()));
+            }
+        }
+        selected.map(|(_, engine)| engine).ok_or_else(|| {
+            BackendError::new(
+                IMPORT_V2_ENGINE_UNAVAILABLE,
+                "No installed local ASR engine supports this media.",
+                true,
+                true,
+            )
+        })
     }
 }
 
@@ -309,6 +397,7 @@ fn output_error() -> BackendError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
@@ -356,6 +445,83 @@ mod tests {
         }
     }
 
+    struct PanickingEngine;
+
+    impl ImportEngine for PanickingEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "panicking.fixture".into(),
+                engine_version: "1.0.0".into(),
+                route: "fixture".into(),
+            }
+        }
+
+        fn supports(&self, _input: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _request: &EngineRequest,
+            _cancellation: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            panic!("injected engine panic");
+        }
+    }
+
+    struct PanickingSupportsEngine;
+
+    impl ImportEngine for PanickingSupportsEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "panicking-supports.fixture".into(),
+                engine_version: "1.0.0".into(),
+                route: "fixture".into(),
+            }
+        }
+
+        fn supports(&self, _input: &ImportInput) -> bool {
+            panic!("injected supports panic");
+        }
+
+        fn execute(
+            &self,
+            _request: &EngineRequest,
+            _cancellation: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            unreachable!("the registry must reject the engine before execution")
+        }
+    }
+
+    struct DescriptorPanicsAfterRegistration {
+        calls: AtomicUsize,
+    }
+
+    impl ImportEngine for DescriptorPanicsAfterRegistration {
+        fn descriptor(&self) -> EngineDescriptor {
+            if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                panic!("injected descriptor panic");
+            }
+            EngineDescriptor {
+                engine_id: "panicking-descriptor.fixture".into(),
+                engine_version: "1.0.0".into(),
+                route: "fixture".into(),
+            }
+        }
+
+        fn supports(&self, _input: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _request: &EngineRequest,
+            _cancellation: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            unreachable!("the registry must reject the engine before execution")
+        }
+    }
+
     fn valid_result() -> EngineResult {
         EngineResult {
             source_snapshot_path: "source.bin".into(),
@@ -373,6 +539,82 @@ mod tests {
             continuation: None,
             warnings: Vec::new(),
         }
+    }
+
+    fn fixture_request() -> EngineRequest {
+        EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "request".into(),
+            project_id: "project".into(),
+            session_id: "session".into(),
+            item_id: "item".into(),
+            task_id: "task".into(),
+            operation: EngineOperation::Extract,
+            input: ImportInput {
+                source_identity: None,
+                kind: ImportInputKind::File,
+                display_name: "fixture.txt".into(),
+                locator: "fixture.txt".into(),
+                normalized_locator: None,
+                media_save_mode: Default::default(),
+            },
+            project_root: "root".into(),
+            staging_root: "staging".into(),
+            chained_input: None,
+            local_asr_authorized: false,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
+            local_ocr_authorized: false,
+            media_save_mode: Default::default(),
+        }
+    }
+
+    #[test]
+    fn engine_panics_become_recoverable_backend_errors() {
+        let engine = PanickingEngine;
+        let request = fixture_request();
+        let cancellation = CancellationToken::new();
+
+        for error in [
+            execute_engine(&engine, &request, &cancellation).unwrap_err(),
+            execute_engine_with_progress(&engine, &request, &cancellation, &|_| Ok(()))
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, crate::errors::IMPORT_V2_ENGINE_PANICKED);
+            assert!(error.recoverable);
+            assert!(!error.user_action_required);
+        }
+    }
+
+    #[test]
+    fn registry_metadata_panics_become_recoverable_backend_errors() {
+        let input = fixture_request().input;
+        let supports_registry = EngineRegistry::default();
+        supports_registry
+            .register(Arc::new(PanickingSupportsEngine))
+            .unwrap();
+        let supports_error = match supports_registry.resolve(&input) {
+            Err(error) => error,
+            Ok(_) => panic!("a panicking supports call must not resolve an engine"),
+        };
+        assert_eq!(
+            supports_error.code,
+            crate::errors::IMPORT_V2_ENGINE_PANICKED
+        );
+
+        let descriptor_registry = EngineRegistry::default();
+        descriptor_registry
+            .register(Arc::new(DescriptorPanicsAfterRegistration {
+                calls: AtomicUsize::new(0),
+            }))
+            .unwrap();
+        let descriptor_error = descriptor_registry.registered_routes().unwrap_err();
+        assert_eq!(
+            descriptor_error.code,
+            crate::errors::IMPORT_V2_ENGINE_PANICKED
+        );
     }
 
     #[test]
@@ -535,8 +777,11 @@ mod tests {
             staging_root: "staging".into(),
             chained_input: Some("converted/legacy.docx".into()),
             local_asr_authorized: false,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
             local_ocr_authorized: false,
-            allow_missing_transcript: false,
             media_save_mode: Default::default(),
         })
         .unwrap();

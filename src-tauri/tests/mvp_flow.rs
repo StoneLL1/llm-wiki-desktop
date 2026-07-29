@@ -23,11 +23,15 @@ use llm_wiki_desktop_lib::models::chat::{ChatMessage, ChatRole, ChatRoute};
 use llm_wiki_desktop_lib::models::compile::{CompileFile, CompileManifest};
 use llm_wiki_desktop_lib::models::export::{ExportContentOptions, ExportRoute, ExportType};
 use llm_wiki_desktop_lib::models::git::CheckpointPurpose;
-use llm_wiki_desktop_lib::models::import::{ExtractionStatus, ImportRequest, SourceFileType};
+use llm_wiki_desktop_lib::models::import_v2::{
+    CommitImportSessionRequest, CommitItemDecision, ImportItemStatus, ImportResourceMode,
+};
+use llm_wiki_desktop_lib::models::import_v2_file::FileScanPolicy;
 use llm_wiki_desktop_lib::models::llm::LlmProviderKind;
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTemplate;
 use llm_wiki_desktop_lib::models::search::SearchRequest;
+use llm_wiki_desktop_lib::models::task::TaskType;
 
 fn search_request(context: &ProjectContext, query: &str) -> SearchRequest {
     SearchRequest {
@@ -40,10 +44,14 @@ fn search_request(context: &ProjectContext, query: &str) -> SearchRequest {
         limit: None,
     }
 }
+use llm_wiki_desktop_lib::services::import_v2::{
+    file_discovery::{new_import_inputs, FileDiscoveryService},
+    ImportV2Service,
+};
 use llm_wiki_desktop_lib::services::{
-    AgentInvocation, AgentService, ChatService, CompileService, ExportService, ExtractionService,
-    FileStore, GitService, GraphService, ImportService, LintService, LlmService, ProcessRunner,
-    ProjectService, SearchService, SecretService,
+    AgentInvocation, AgentService, ChatService, CompileService, ExportService, FileStore,
+    GitService, GraphService, LintService, LlmService, ProcessRunner, ProjectService,
+    SearchService, SecretService,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 use std::path::{Path, PathBuf};
@@ -73,7 +81,10 @@ impl ProcessRunner for FakeAgentRunner {
         Ok(if args == ["--version"] {
             "1.0.0".into()
         } else {
-            "--print --output-format --settings --bare".into()
+            "--print --output-format --verbose --permission-mode --settings --bare \
+             --safe-mode --disable-slash-commands --no-session-persistence --no-chrome \
+             --prompt-suggestions --strict-mcp-config --tools --allowedTools --json-schema"
+                .into()
         })
     }
 
@@ -122,12 +133,108 @@ fn write_page(context: &ProjectContext, rel: &str, body: &str) {
     FileStore.write_markdown(context, rel, body).unwrap();
 }
 
+fn import_markdown_source(context: &ProjectContext, root: &Path) -> String {
+    let source_fixture = tempfile::tempdir().unwrap();
+    let source_path = source_fixture.path().join("notes.md");
+    std::fs::write(
+        &source_path,
+        "# Imported notes\n\nAttention connects tokens across a sequence.",
+    )
+    .unwrap();
+
+    let files = FileStore;
+    let git = GitService;
+    let tasks = TaskService::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
+    let discovered = FileDiscoveryService::default()
+        .scan(
+            context,
+            &[source_path.clone()],
+            FileScanPolicy::default(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
+    assert!(
+        discovered.skipped.is_empty(),
+        "production source discovery unexpectedly skipped the fixture: {:?}",
+        discovered.skipped
+    );
+    assert_eq!(discovered.files.len(), 1);
+
+    let draft = service
+        .create_session(context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let inputs = new_import_inputs(&draft, discovered.files);
+    assert_eq!(inputs.len(), 1);
+    let session = service
+        .add_inputs(context, &files, &draft.session_id, inputs)
+        .unwrap();
+    let item = &session.items[0];
+    let task = tasks
+        .create_project_task(
+            TaskType::Import,
+            context.project_id.clone(),
+            root.to_path_buf(),
+            "MVP production Markdown import".into(),
+            true,
+        )
+        .unwrap();
+    let preview = service
+        .run_item(
+            context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item.item_id,
+            &task.id,
+        )
+        .unwrap();
+    assert_eq!(preview.status, ImportItemStatus::PreviewReady);
+
+    let batch = service
+        .commit_items(
+            context,
+            &files,
+            &git,
+            &CommitImportSessionRequest {
+                project_id: context.project_id.clone(),
+                project_root_path: root.to_string_lossy().into_owned(),
+                session_id: session.session_id,
+                batch_task_id: None,
+                acknowledge_restricted_content: false,
+                decisions: vec![CommitItemDecision {
+                    item_id: item.item_id.clone(),
+                    resolution: preview
+                        .preview
+                        .as_ref()
+                        .and_then(|artifact| artifact.resolution.as_ref())
+                        .and_then(|resolution| resolution.default_resolution.clone()),
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(batch.committed_count, 1);
+    assert_eq!(batch.failed_count, 0);
+    let committed = &batch.items[0];
+    assert!(committed.committed);
+    let wiki_path = committed.wiki_path.clone().expect("committed source path");
+    assert!(wiki_path.starts_with("wiki/sources/"));
+    assert!(root.join(&wiki_path).is_file());
+    let source_id = committed.source_id.as_ref().expect("committed source id");
+    assert!(root
+        .join(format!(".app/sources/{source_id}.json"))
+        .is_file());
+    assert!(root.join(".app/source-index-v2.json").is_file());
+    wiki_path
+}
+
 // =====================================================================
 // Loop 1 — project → wiki
 // =====================================================================
 
 #[test]
-fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
+fn project_to_wiki_loop_compiles_searches_and_graphs() {
     let (_project_service, context, root) = create_project("p2w");
 
     // Core skeleton pages must exist (create_project writes them).
@@ -135,74 +242,12 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
     assert!(context.wiki_dir.join("overview.md").exists());
     assert!(context.wiki_dir.join("log.md").exists());
 
-    // --- Import: stage sources OUTSIDE the project (realistic flow — sources
-    //     arrive from elsewhere; staging inside raw/ would make scan_existing
-    //     flag them as duplicates of themselves). ---
-    let staging = unique_root("p2w-staging");
-    let notes_md = staging.join("notes.md");
-    std::fs::write(
-        &notes_md,
-        "# Notes\n\nSome extracted text about transformers.",
-    )
-    .unwrap();
-    let data_csv = staging.join("data.csv");
-    std::fs::write(&data_csv, "name,value\nalpha,1\n").unwrap();
-    let readme_txt = staging.join("readme.txt");
-    std::fs::write(&readme_txt, "A plain-text note about attention.").unwrap();
-
-    // --- Import: preview + confirm FIRST (before extraction), so scan_existing
-    //     doesn't see same-hash extracted text in raw/extracted and flag the
-    //     sources as duplicates of themselves. ---
-    let import = ImportService;
-    let request = ImportRequest {
-        source_paths: vec![
-            notes_md.to_string_lossy().into_owned(),
-            data_csv.to_string_lossy().into_owned(),
-            readme_txt.to_string_lossy().into_owned(),
-        ],
-        allow_duplicates: false,
-        link_duplicates: false,
-    };
-    let preview = import
-        .preview_import(&context, &FileStore, &request, &[])
+    let source_path = import_markdown_source(&context, &root);
+    let source_name = Path::new(&source_path)
+        .file_name()
+        .and_then(|name| name.to_str())
         .unwrap();
-    assert!(preview.summary.archived_files >= 1, "at least MD archived");
-    import
-        .confirm_import(&context, &FileStore, &preview)
-        .unwrap();
-
-    // --- Extraction: MD and TXT extract cleanly; CSV (no MVP parser) surfaces
-    //     as `unsupported` — an explicit partial result, pinned (not also
-    //     accepting `extracted`, so a future silent CSV parser can't hide).
-    let extraction = ExtractionService;
-    let extracted_dir = context.raw_dir.join("extracted");
-    std::fs::create_dir_all(&extracted_dir).unwrap();
-    let r1 = extraction
-        .extract_text(&context, &FileStore, &notes_md, &extracted_dir)
-        .unwrap();
-    let r2 = extraction
-        .extract_text(&context, &FileStore, &data_csv, &extracted_dir)
-        .unwrap();
-    let r3 = extraction
-        .extract_text(&context, &FileStore, &readme_txt, &extracted_dir)
-        .unwrap();
-    assert_eq!(r1.status, ExtractionStatus::Extracted, "markdown extracts");
-    assert_eq!(r1.file_type, SourceFileType::Markdown);
-    assert_eq!(
-        r3.status,
-        ExtractionStatus::Extracted,
-        "plain text extracts"
-    );
-    assert_eq!(r3.file_type, SourceFileType::Text);
-    // CSV shares the Markdown/Text text-extraction branch, so it extracts as
-    // raw text — pinned here so a regression that silently drops CSV fails loud.
-    assert_eq!(r2.file_type, SourceFileType::Csv);
-    assert_eq!(
-        r2.status,
-        ExtractionStatus::Extracted,
-        "CSV extracts as raw text (shared text branch)"
-    );
-    std::fs::remove_dir_all(&staging).ok();
+    let source_stem = source_name.strip_suffix(".md").unwrap();
 
     // --- Compile: build a manifest (fake model output) + apply it. The
     //     manifest must include all three core pages (validate_manifest rule).
@@ -215,7 +260,9 @@ fn project_to_wiki_loop_creates_imports_compiles_searches_and_graphs() {
         files: vec![
             CompileFile::new(
                 "wiki/concepts/transformers.md",
-                "---\ntype: concept\ntitle: Transformers\nsources: [notes.md]\n---\n\n# Transformers\n\nTransformers connect attention patterns across the imported notes. See [[index]].\n\n> Sources: [[sources/notes]]\n",
+                &format!(
+                    "---\ntype: concept\ntitle: Transformers\nsources: [\"{source_name}\"]\n---\n\n# Transformers\n\nTransformers connect attention patterns across the imported notes. See [[index]].\n\n> Sources: [[sources/{source_stem}]]\n"
+                ),
             ),
             CompileFile::new("wiki/index.md", "# Index\n\n- [[transformers]]\n"),
             CompileFile::new("wiki/overview.md", &overview_disk),
@@ -639,6 +686,11 @@ fn safety_loop_confirm_requires_matching_state_and_creates_checkpoint() {
     std::fs::write(
         context.wiki_dir.join("sources/source-a.md"),
         "# Source A\n\nA confirmed source.",
+    )
+    .unwrap();
+    std::fs::write(
+        context.app_dir.join("source-index.json"),
+        r#"{"sources":{"raw/sources/source-a.txt":["wiki/sources/source-a.md"]}}"#,
     )
     .unwrap();
     let overview_disk = std::fs::read_to_string(context.wiki_dir.join("overview.md")).unwrap();

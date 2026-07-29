@@ -9,6 +9,7 @@ import {
   Settings as SettingsIcon,
   Shield,
   Sun,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 
@@ -22,6 +23,8 @@ import { BackgroundTaskSettings } from "./BackgroundTaskSettings";
 import { LanguageSettings } from "./LanguageSettings";
 import { SecuritySettings, type ProviderSecretRow } from "./SecuritySettings";
 import { UpdateSettings } from "./UpdateSettings";
+import { ImportCompatibilitySettings } from "./ImportCompatibilitySettings";
+import type { ImportWorkflow } from "../import/importWorkflow";
 
 export interface SettingsViewProps {
   project: ProjectSummary;
@@ -32,6 +35,7 @@ export interface SettingsViewProps {
   onSaveSecret: (provider: LlmProviderKind, secret: string) => Promise<unknown> | unknown;
   onDeleteSecret: (provider: LlmProviderKind) => Promise<unknown> | unknown;
   onTestProvider: (config: LlmProviderConfig) => Promise<ProviderTestResult>;
+  importWorkflow?: ImportWorkflow;
 }
 
 type SettingsSectionKey =
@@ -40,6 +44,7 @@ type SettingsSectionKey =
   | "language"
   | "ai"
   | "security"
+  | "compatibility"
   | "background"
   | "updates";
 
@@ -75,6 +80,7 @@ const NAV_GROUPS: SettingsNavGroup[] = [
     labelKey: "settings.nav.group.system",
     items: [
       { key: "security", labelKey: "settings.nav.security", icon: Shield },
+      { key: "compatibility", labelKey: "settings.nav.compatibility", icon: Wrench },
       { key: "background", labelKey: "settings.nav.background", icon: Clock },
       { key: "updates", labelKey: "settings.nav.updates", icon: RefreshCw },
     ],
@@ -97,6 +103,7 @@ export function SettingsView({
   onSaveSecret,
   onDeleteSecret,
   onTestProvider,
+  importWorkflow,
 }: SettingsViewProps) {
   const { t } = useTranslation();
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>("general");
@@ -273,6 +280,10 @@ export function SettingsView({
                 void revokeAllChatConvenienceAuthorizations();
               }}
             />
+          ) : null}
+
+          {activeSection === "compatibility" ? (
+            <ImportCompatibilitySettings workflow={importWorkflow ?? null} />
           ) : null}
 
           {activeSection === "background" ? (

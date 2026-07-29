@@ -18,6 +18,7 @@ default = ["gui"]
 gui = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-notification", "dep:tauri-build"]
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1"
 encoding_rs = "0.8"
@@ -41,6 +42,7 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 pdf-extract = "0.10"
 lopdf = { version = "0.38", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 quick-xml = "0.36"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 unicode-normalization = "0.1"
@@ -49,7 +51,12 @@ unicode-normalization = "0.1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.test]
+# Preserve line-level backtraces without generating full Windows PDB debug data
+# for every integration-test binary.
+debug = 1

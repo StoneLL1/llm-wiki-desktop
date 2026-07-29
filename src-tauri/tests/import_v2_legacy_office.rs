@@ -61,7 +61,8 @@ fn manifest_and_runner_freeze_isolation_and_cache_contracts() {
             .unwrap();
     for contract in [
         "shell=False",
-        "-env:UserInstallation=file://",
+        "profile.resolve().as_uri()",
+        "\"-env:UserInstallation=\" + profile_uri(profile)",
         "MacroSecurityLevel",
         "DisablePlugins",
         "UpdateCheck",

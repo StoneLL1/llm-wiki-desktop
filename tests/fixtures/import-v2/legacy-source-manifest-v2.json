@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 2,
+  "sourceId": "source-legacy",
+  "origins": [
+    "file:/fixtures/legacy.md"
+  ],
+  "versions": [
+    {
+      "versionId": "version-legacy",
+      "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "rawPath": "raw/sources/source-legacy/version-legacy/original.md",
+      "extractedPath": "raw/extracted/source-legacy/version-legacy",
+      "baselinePath": ".app/source-artifacts/source-legacy/version-legacy/baseline.md",
+      "createdAt": "2026-07-24T00:00:00Z",
+      "route": "file.native",
+      "engineId": "legacy-native",
+      "engineVersion": "2",
+      "quality": {
+        "level": "pass",
+        "metrics": [],
+        "warnings": []
+      }
+    }
+  ],
+  "currentVersionId": "version-legacy",
+  "wikiPath": "wiki/sources/files/legacy.md"
+}

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,34 +17,102 @@ use crate::services::import_v2::markdown_normalizer::{
 use crate::services::import_v2::media_router::{
     link_or_copy, move_staged_file, TemporaryMediaWorkspace,
 };
-use crate::services::import_v2::platform_provider::{extract_platform_document, Platform};
-use crate::services::import_v2::redaction::redact_sensitive_text;
-use crate::services::import_v2::subtitle::{
-    append_missing_transcript_notice, parse_subtitle_segments, render_subtitle_markdown,
+use crate::services::import_v2::platform_provider::{
+    extract_platform_document, Platform, PlatformSubtitleKind,
 };
-use crate::services::import_v2::url_policy::UrlPolicy;
+use crate::services::import_v2::redaction::redact_sensitive_text;
+use crate::services::import_v2::subtitle::{parse_subtitle_segments, render_subtitle_markdown};
+use crate::services::import_v2::url_policy::{SessionWebTarget, UrlPolicy};
 use crate::services::import_v2::web_fetch::{
     WebFetchArtifact, WebFetchContent, WebFetchPolicy, WebFetchProgress, WebFetchService,
 };
 use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 pub struct GenericWebEngine {
     web_targets: Arc<WebTargetStore>,
+    artifact_source: Arc<dyn WebArtifactSource>,
     route: &'static str,
     engine_id: &'static str,
 }
 
+pub trait WebArtifactSource: Send + Sync {
+    fn fetch(
+        &self,
+        target: SessionWebTarget,
+        policy: WebFetchPolicy,
+        item_id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<WebFetchArtifact, BackendError>;
+
+    fn supports_live_platform_api(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct NetworkWebArtifactSource;
+
+impl WebArtifactSource for NetworkWebArtifactSource {
+    fn fetch(
+        &self,
+        target: SessionWebTarget,
+        policy: WebFetchPolicy,
+        item_id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<WebFetchArtifact, BackendError> {
+        let item_id = item_id.to_owned();
+        let cancellation = cancellation.clone();
+        let worker = std::thread::Builder::new()
+            .name("import-web-fetch".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| unavailable("The web fetch runtime could not be started."))?;
+                runtime.block_on(WebFetchService::default().fetch(
+                    target,
+                    &UrlPolicy::default(),
+                    &policy,
+                    None,
+                    &item_id,
+                    |_| {},
+                    || cancellation.is_cancelled(),
+                ))
+            })
+            .map_err(|_| unavailable("The web fetch worker could not be started."))?;
+        worker
+            .join()
+            .map_err(|_| unavailable("The web fetch worker stopped unexpectedly."))?
+    }
+}
+
 impl GenericWebEngine {
-    pub const fn new(
+    pub fn new(
         web_targets: Arc<WebTargetStore>,
         engine_id: &'static str,
         route: &'static str,
     ) -> Self {
+        Self::new_with_artifact_source(
+            web_targets,
+            engine_id,
+            route,
+            Arc::new(NetworkWebArtifactSource),
+        )
+    }
+
+    pub fn new_with_artifact_source(
+        web_targets: Arc<WebTargetStore>,
+        engine_id: &'static str,
+        route: &'static str,
+        artifact_source: Arc<dyn WebArtifactSource>,
+    ) -> Self {
         Self {
             web_targets,
+            artifact_source,
             route,
             engine_id,
         }
@@ -79,6 +148,19 @@ struct WebMetadata<'a> {
     image_count: usize,
     hashtag_count: usize,
     media_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_size_bytes: Option<u64>,
+    restricted_content: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletedMediaDownload {
+    schema_version: u32,
+    complete: bool,
+    content_type: String,
+    byte_len: u64,
+    sha256: String,
 }
 
 impl ImportEngine for GenericWebEngine {
@@ -122,8 +204,6 @@ impl ImportEngine for GenericWebEngine {
             request.input.normalized_locator.as_deref(),
         )?;
         let item_id = request.item_id.clone();
-        let fetch_item_id = item_id.clone();
-        let token = cancellation.clone();
         let mut fetch_policy = WebFetchPolicy::default();
         let direct_media_url = is_direct_media_locator(&request.input);
         let direct_image_url = is_direct_image_locator(&request.input);
@@ -134,27 +214,13 @@ impl ImportEngine for GenericWebEngine {
             fetch_policy.content = WebFetchContent::Image;
             fetch_policy.max_response_bytes = 8 * 1024 * 1024;
         }
-        let page_artifact = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|_| unavailable("The web fetch runtime could not be started."))?;
-            runtime.block_on(WebFetchService::default().fetch(
-                target,
-                &UrlPolicy::default(),
-                &fetch_policy,
-                None,
-                &fetch_item_id,
-                |_| {},
-                || token.is_cancelled(),
-            ))
-        })
-        .join()
-        .map_err(|_| unavailable("The web fetch worker stopped unexpectedly."))?;
+        let page_artifact =
+            self.artifact_source
+                .fetch(target, fetch_policy, &item_id, cancellation);
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
-        let platform = Platform::from_url(
+        let requested_platform = Platform::from_url(
             request
                 .input
                 .normalized_locator
@@ -166,35 +232,38 @@ impl ImportEngine for GenericWebEngine {
             resolved.input.normalized_locator = Some(artifact.final_public_url.clone());
             resolved
         });
-        let bilibili_api =
-            if self.route == "web.bilibili.video" && platform == Some(Platform::Bilibili) {
-                match bilibili::fetch(
-                    bilibili_api_request.as_ref().unwrap_or(request),
-                    cancellation,
-                ) {
-                    Ok(result) => result,
-                    Err(error) if error.code == "IMPORT_V2_CANCELLED" => return Err(error),
-                    Err(error)
-                        if matches!(
-                            error.code.as_str(),
-                            "IMPORT_WEB_LOGIN_REQUIRED"
-                                | "IMPORT_WEB_CHALLENGE_DETECTED"
-                                | "IMPORT_WEB_CONTENT_REMOVED"
-                        ) =>
-                    {
-                        return Err(error)
-                    }
-                    Err(_) => None,
+        let bilibili_api = if self.artifact_source.supports_live_platform_api()
+            && self.route == "web.bilibili.video"
+            && requested_platform == Some(Platform::Bilibili)
+        {
+            match bilibili::fetch(
+                bilibili_api_request.as_ref().unwrap_or(request),
+                cancellation,
+            ) {
+                Ok(result) => result,
+                Err(error) if error.code == "IMPORT_V2_CANCELLED" => return Err(error),
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "IMPORT_WEB_LOGIN_REQUIRED"
+                            | "IMPORT_WEB_CHALLENGE_DETECTED"
+                            | "IMPORT_WEB_CONTENT_REMOVED"
+                    ) =>
+                {
+                    return Err(error)
                 }
-            } else {
-                None
-            };
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
         let (artifact, api_is_source) = select_primary_web_artifact(
             page_artifact,
             bilibili_api.as_ref(),
             bilibili_api_request.as_ref(),
             request,
         )?;
+        let platform = platform_after_redirect(requested_platform, &artifact.final_public_url);
         if is_media_content_type(&artifact.content_type)
             || (direct_media_url && artifact.content_type.contains("octet-stream"))
         {
@@ -261,16 +330,14 @@ impl ImportEngine for GenericWebEngine {
                 extract_platform_document(platform, &body, &artifact.final_public_url)
             })
         };
+        if platform_image_requires_ocr(platform_document.as_ref(), request.local_ocr_authorized) {
+            return Err(ocr_unavailable(
+                "Xiaohongshu image posts require verified local OCR before preview.",
+            ));
+        }
         let (mut markdown, mut warnings) = platform_document
             .as_ref()
-            .map(|document| {
-                render_platform_markdown(
-                    document,
-                    self.route,
-                    self.engine_id,
-                    env!("CARGO_PKG_VERSION"),
-                )
-            })
+            .map(render_platform_markdown)
             .map(|markdown| (markdown, Vec::new()))
             .unwrap_or_else(|| {
                 if artifact.content_type.contains("html") {
@@ -327,8 +394,27 @@ impl ImportEngine for GenericWebEngine {
             .as_ref()
             .map(|document| document.images.clone())
             .unwrap_or_else(|| extract_html_image_urls(&body, &artifact.final_public_url));
+        let image_total = image_urls.len() as u64;
+        let report_image_progress = image_total > 0
+            && platform_document
+                .as_ref()
+                .is_none_or(|document| document.content_type != "video");
+        if report_image_progress {
+            report_progress(EngineProgress {
+                current: 0,
+                total: Some(image_total),
+                label: "images.downloading".into(),
+            })?;
+        }
         let mut successful_images = 0usize;
         for (index, image_url) in image_urls.into_iter().enumerate() {
+            if report_image_progress {
+                report_progress(EngineProgress {
+                    current: index as u64,
+                    total: Some(image_total),
+                    label: "images.downloading".into(),
+                })?;
+            }
             if let Some(platform) = platform {
                 if !is_trusted_platform_asset_url(platform, &image_url) {
                     markdown = replace_markdown_asset_reference(
@@ -340,16 +426,13 @@ impl ImportEngine for GenericWebEngine {
                     continue;
                 }
             }
-            if request.media_save_mode == MediaSaveMode::ExtractOnly && !image_ocr_enabled {
-                markdown =
-                    replace_markdown_asset_reference(&markdown, &image_url, "（原图未保留）");
-                continue;
-            }
             match fetch_image(
                 &image_url,
                 &item_id,
                 cancellation,
                 &artifact.final_public_url,
+                platform,
+                self.artifact_source.as_ref(),
             ) {
                 Ok(image) => {
                     if platform.is_some_and(|platform| {
@@ -365,7 +448,6 @@ impl ImportEngine for GenericWebEngine {
                         );
                         continue;
                     }
-                    successful_images += 1;
                     let extension = image_extension(&image.content_type);
                     if image_ocr_enabled {
                         temporary_ocr_inputs.push(stage_temporary_ocr_input(
@@ -375,21 +457,23 @@ impl ImportEngine for GenericWebEngine {
                             &image.bytes,
                         )?);
                     }
-                    if request.media_save_mode == MediaSaveMode::PreserveOriginal {
-                        let relative = format!("assets/images/{:03}.{extension}", index + 1);
-                        std::fs::create_dir_all(staging.join("assets/images")).map_err(|_| {
-                            unavailable("The original image directory could not be created.")
-                        })?;
-                        std::fs::write(staging.join(&relative), &image.bytes)
-                            .map_err(|_| unavailable("An original image could not be staged."))?;
-                        markdown = markdown.replace(&image_url, &relative);
-                        asset_paths.push(relative);
-                    } else {
+                    let relative = format!("assets/images/{:03}.{extension}", index + 1);
+                    if std::fs::create_dir_all(staging.join("assets/images")).is_err()
+                        || std::fs::write(staging.join(&relative), &image.bytes).is_err()
+                    {
                         markdown = replace_markdown_asset_reference(
                             &markdown,
                             &image_url,
-                            "（原图未保留）",
+                            "（原图保留失败）",
                         );
+                        warnings.push(
+                            "Original image preservation failed after text extraction succeeded."
+                                .into(),
+                        );
+                    } else {
+                        successful_images += 1;
+                        markdown = markdown.replace(&image_url, &relative);
+                        asset_paths.push(relative);
                     }
                 }
                 Err(error) => {
@@ -402,21 +486,31 @@ impl ImportEngine for GenericWebEngine {
                 }
             }
         }
+        if report_image_progress {
+            report_progress(EngineProgress {
+                current: image_total,
+                total: Some(image_total),
+                label: "images.downloading".into(),
+            })?;
+        }
         if platform_document.as_ref().is_some_and(|document| {
             !platform_image_output_is_meaningful(document, successful_images)
         }) {
             return Err(BackendError::new(
                 "IMPORT_WEB_MEDIA_UNAVAILABLE",
-                "The Xiaohongshu image post had no text and none of its images could be localized.",
+                "The image post is incomplete because one or more required source images could not be localized.",
                 true,
                 true,
             ));
         }
         if image_ocr_enabled {
             if temporary_ocr_inputs.is_empty() {
-                warnings.push(
-                    "Local OCR was requested, but no platform image could be downloaded.".into(),
-                );
+                return Err(BackendError::new(
+                    "IMPORT_WEB_MEDIA_UNAVAILABLE",
+                    "None of the Xiaohongshu note images could be downloaded for required OCR.",
+                    true,
+                    true,
+                ));
             } else {
                 continuation = Some(
                     crate::services::import_v2::engine::EngineContinuation::LocalOcr {
@@ -442,6 +536,8 @@ impl ImportEngine for GenericWebEngine {
                     &item_id,
                     cancellation,
                     &artifact.final_public_url,
+                    platform,
+                    self.artifact_source.as_ref(),
                 ) {
                     Ok(subtitle_artifact) => {
                         if platform.is_some_and(|platform| {
@@ -464,27 +560,6 @@ impl ImportEngine for GenericWebEngine {
                             parse_subtitle_segments(&subtitle_artifact.bytes, extension),
                             render_subtitle_markdown(&subtitle_artifact.bytes, extension),
                         ) {
-                            transcript_source = Some(if subtitle.automatic {
-                                "platform_auto_subtitle".into()
-                            } else {
-                                "platform_human_subtitle".into()
-                            });
-                            transcript_language = subtitle.language.clone();
-                            markdown.push_str("\n\n## 字幕 / 转写\n\n");
-                            markdown.push_str(&format!(
-                                "> 来源：{}{}\n\n",
-                                if subtitle.automatic {
-                                    "平台自动字幕"
-                                } else {
-                                    "平台人工字幕"
-                                },
-                                subtitle
-                                    .label
-                                    .as_deref()
-                                    .map(|label| format!(" · {label}"))
-                                    .unwrap_or_default()
-                            ));
-                            markdown.push_str(&rendered);
                             let relative =
                                 format!("subtitles/platform-subtitle-{subtitle_index}.{extension}");
                             std::fs::create_dir_all(staging.join("subtitles")).map_err(|_| {
@@ -495,23 +570,68 @@ impl ImportEngine for GenericWebEngine {
                                     unavailable("The platform subtitle could not be staged.")
                                 })?;
                             asset_paths.push(relative);
-                            let segments_relative = "subtitles/segments.json";
+                            let segments_relative = format!(
+                                "subtitles/platform-subtitle-{subtitle_index}.segments.json"
+                            );
                             let serialized =
                                 serde_json::to_vec_pretty(&segments).map_err(|_| {
                                     unavailable(
                                         "The normalized subtitle segments could not be serialized.",
                                     )
                                 })?;
-                            std::fs::write(staging.join(segments_relative), serialized).map_err(
+                            std::fs::write(staging.join(&segments_relative), serialized).map_err(
                                 |_| {
                                     unavailable(
                                         "The normalized subtitle segments could not be staged.",
                                     )
                                 },
                             )?;
-                            asset_paths.push(segments_relative.into());
-                            transcription_ready = true;
-                            break;
+                            asset_paths.push(segments_relative);
+                            if !transcription_ready && subtitle.kind.is_reliable_source() {
+                                transcript_source = Some(
+                                    match subtitle.kind {
+                                        PlatformSubtitleKind::AuthorOriginal => {
+                                            "platform_author_original_subtitle"
+                                        }
+                                        PlatformSubtitleKind::PlatformAutoOriginal => {
+                                            "platform_auto_original_subtitle"
+                                        }
+                                        PlatformSubtitleKind::AuthorOther => {
+                                            "platform_author_other_subtitle"
+                                        }
+                                        PlatformSubtitleKind::MachineTranslation => unreachable!(
+                                            "machine translations are evidence, not source transcripts"
+                                        ),
+                                    }
+                                    .into(),
+                                );
+                                transcript_language = subtitle.language.clone();
+                                markdown.push_str("\n\n## 字幕 / 转写\n\n");
+                                markdown.push_str(&format!(
+                                    "> 来源：{}{}\n\n",
+                                    match subtitle.kind {
+                                        PlatformSubtitleKind::AuthorOriginal => "作者原语言字幕",
+                                        PlatformSubtitleKind::PlatformAutoOriginal => {
+                                            "平台原语言自动字幕"
+                                        }
+                                        PlatformSubtitleKind::AuthorOther => "作者其他语言字幕",
+                                        PlatformSubtitleKind::MachineTranslation => unreachable!(
+                                            "machine translations are evidence, not source transcripts"
+                                        ),
+                                    },
+                                    subtitle
+                                        .label
+                                        .as_deref()
+                                        .map(|label| format!(" · {label}"))
+                                        .unwrap_or_default()
+                                ));
+                                markdown.push_str(&rendered);
+                                transcription_ready = true;
+                            } else if !subtitle.kind.is_reliable_source() {
+                                warnings.push(
+                                    "Machine-translated subtitle was retained as evidence but not used as the source transcript.".into(),
+                                );
+                            }
                         }
                     }
                     Err(error) => warnings.push(format!(
@@ -528,41 +648,48 @@ impl ImportEngine for GenericWebEngine {
                 extract_html_media_url(&body)
                     .and_then(|value| resolve_web_asset_url(&value, &artifact.final_public_url))
             });
+        let mut remote_media_bytes = platform_document
+            .as_ref()
+            .and_then(|document| document.media_size_bytes);
+        let xiaohongshu_video = platform_document.as_ref().is_some_and(|document| {
+            document.platform == "xiaohongshu" && document.content_type == "video"
+        });
+        if xiaohongshu_video && media_url.is_none() {
+            if !transcription_ready {
+                return Err(BackendError::new(
+                    "IMPORT_WEB_MEDIA_UNAVAILABLE",
+                    "The Xiaohongshu subtitle candidates were unusable and no media was available for local ASR.",
+                    true,
+                    true,
+                ));
+            }
+            if request.media_save_mode == MediaSaveMode::PreserveOriginal {
+                warnings.push(
+                    "Original media was not retained because the platform did not expose a downloadable stream."
+                        .into(),
+                );
+            }
+        }
         if platform == Some(Platform::Bilibili)
             && (is_bilibili_video_locator(request)
                 || is_bilibili_video_url(&artifact.final_public_url))
             && media_url.is_none()
         {
-            if transcription_ready && request.media_save_mode == MediaSaveMode::ExtractOnly {
-                // A verified transcript satisfies extraction-only imports;
-                // no media download is needed.
-            } else if request.allow_missing_transcript
-                && request.media_save_mode == MediaSaveMode::ExtractOnly
-            {
-                warnings.push(
-                    "Bilibili metadata was imported without a transcript or local media stream."
-                        .into(),
-                );
-            } else if !transcription_ready
-                && !request.local_asr_authorized
-                && !request.allow_missing_transcript
-            {
+            if !transcription_ready {
                 return Err(BackendError::new(
                     "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
                     "Bilibili did not expose usable subtitles and no media was available for local ASR.",
                     true,
                     true,
                 ));
-            } else {
-                return Err(BackendError::new(
-                    "IMPORT_WEB_MEDIA_UNAVAILABLE",
-                    "Bilibili did not expose a downloadable media stream for this video.",
-                    true,
-                    true,
-                ));
+            } else if request.media_save_mode == MediaSaveMode::PreserveOriginal {
+                warnings.push(
+                    "Original media was not retained because Bilibili did not expose a downloadable stream."
+                        .into(),
+                );
             }
         }
-        if is_supported_media_target(request) {
+        if platform.is_some() {
             if let Some(media_url) = media_url {
                 let platform_media_allowed = platform
                     .is_none_or(|platform| is_trusted_platform_asset_url(platform, &media_url));
@@ -583,10 +710,7 @@ impl ImportEngine for GenericWebEngine {
                     }
                 }
                 let media = if platform_media_allowed {
-                    if !transcription_ready
-                        && !request.local_asr_authorized
-                        && !request.allow_missing_transcript
-                    {
+                    if !transcription_ready && !request.local_asr_authorized {
                         return Err(BackendError::new(
                             "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
                             "Local ASR is required because the platform did not provide usable subtitles.",
@@ -594,10 +718,13 @@ impl ImportEngine for GenericWebEngine {
                             true,
                         ));
                     }
-                    if request.media_save_mode == MediaSaveMode::ExtractOnly
-                        && (transcription_ready || request.allow_missing_transcript)
+                    if request.media_save_mode == MediaSaveMode::ExtractOnly && transcription_ready
                     {
                         None
+                    } else if let Some(media) = load_completed_media_download(&staging, &media_url)?
+                    {
+                        warnings.push("IMPORT_MEDIA_REUSED_COMPLETE_DOWNLOAD".into());
+                        Some((media, None))
                     } else {
                         let download =
                             TemporaryMediaWorkspace::create_unique(&staging, ".media-fetch")?;
@@ -615,7 +742,7 @@ impl ImportEngine for GenericWebEngine {
                             &download_path,
                             report_progress,
                         ) {
-                            Ok(media) => Some((media, download)),
+                            Ok(media) => Some((media, Some(download))),
                             Err(error) if transcription_ready => {
                                 markdown = replace_markdown_asset_reference(
                                     &markdown,
@@ -657,27 +784,48 @@ impl ImportEngine for GenericWebEngine {
                     media => media,
                 };
                 if let Some((media, download)) = media {
+                    remote_media_bytes = Some(media.byte_len);
                     let extension = media_extension(&media.content_type, &media.final_public_url);
                     if media.byte_len == 0 {
                         return Err(unavailable("The platform media response was empty."));
                     }
-                    let downloaded_path = download.path().join("response.bin");
+                    let downloaded_path = if let Some(download) = download {
+                        let path = store_completed_media_download(
+                            &staging,
+                            &download.path().join("response.bin"),
+                            &media,
+                        )?;
+                        drop(download);
+                        path
+                    } else {
+                        staging.join("media-download/payload.bin")
+                    };
                     let durable_media = if request.media_save_mode
                         == MediaSaveMode::PreserveOriginal
                     {
                         let relative = format!("assets/original-media.{extension}");
-                        std::fs::create_dir_all(staging.join("assets")).map_err(|_| {
-                            unavailable("The original media directory could not be created.")
-                        })?;
                         let durable_path = staging.join(&relative);
-                        move_staged_file(&downloaded_path, &durable_path)
-                            .map_err(|_| unavailable("The original media could not be staged."))?;
-                        markdown = markdown.replace(&media_url, &relative);
-                        markdown.push_str(&format!(
-                            "\n\n## Original media\n\n[Download original media]({relative})\n"
-                        ));
-                        asset_paths.push(relative);
-                        Some(durable_path)
+                        if std::fs::create_dir_all(staging.join("assets")).is_err()
+                            || link_or_copy(&downloaded_path, &durable_path).is_err()
+                        {
+                            markdown = replace_markdown_asset_reference(
+                                &markdown,
+                                &media_url,
+                                "（原始媒体保留失败）",
+                            );
+                            warnings.push(
+                                "Original media preservation failed after text extraction succeeded."
+                                    .into(),
+                            );
+                            None
+                        } else {
+                            markdown = markdown.replace(&media_url, &relative);
+                            markdown.push_str(&format!(
+                                "\n\n## Original media\n\n[Download original media]({relative})\n"
+                            ));
+                            asset_paths.push(relative);
+                            Some(durable_path)
+                        }
                     } else {
                         markdown = replace_markdown_asset_reference(
                             &markdown,
@@ -695,7 +843,7 @@ impl ImportEngine for GenericWebEngine {
                                 unavailable("The temporary media could not be staged.")
                             })?;
                         } else {
-                            move_staged_file(&downloaded_path, &temporary_path).map_err(|_| {
+                            link_or_copy(&downloaded_path, &temporary_path).map_err(|_| {
                                 unavailable("The temporary media could not be staged.")
                             })?;
                         }
@@ -714,13 +862,6 @@ impl ImportEngine for GenericWebEngine {
                     }
                 }
             }
-        }
-        if platform == Some(Platform::Bilibili)
-            && request.allow_missing_transcript
-            && !transcription_ready
-            && continuation.is_none()
-        {
-            append_missing_transcript_notice(&mut markdown);
         }
         let descriptor = self.descriptor();
         markdown = redact_sensitive_text(&markdown);
@@ -764,6 +905,10 @@ impl ImportEngine for GenericWebEngine {
             media_present: platform_document
                 .as_ref()
                 .is_some_and(|document| document.media_url.is_some()),
+            media_size_bytes: remote_media_bytes,
+            restricted_content: platform_document
+                .as_ref()
+                .is_some_and(|document| document.restricted_content),
         };
         let title = platform_document
             .as_ref()
@@ -875,32 +1020,8 @@ fn unavailable(message: &'static str) -> BackendError {
 
 fn render_platform_markdown(
     document: &crate::services::import_v2::platform_provider::PlatformDocument,
-    route: &str,
-    engine_id: &str,
-    engine_version: &str,
 ) -> String {
-    let yaml = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
-    let mut markdown = String::from("---\n");
-    markdown.push_str("type: source\n");
-    markdown.push_str(&format!("title: {}\n", yaml(&document.title)));
-    markdown.push_str(&format!("title_source: {}\n", yaml(&document.title_source)));
-    markdown.push_str(&format!("source_url: {}\n", yaml(&document.canonical_url)));
-    markdown.push_str(&format!("source_platform: {}\n", yaml(&document.platform)));
-    markdown.push_str(&format!("content_type: {}\n", yaml(&document.content_type)));
-    markdown.push_str(&format!("route: {}\n", yaml(route)));
-    markdown.push_str(&format!("engine_id: {}\n", yaml(engine_id)));
-    markdown.push_str(&format!("engine_version: {}\n", yaml(engine_version)));
-    if let Some(platform_id) = document.platform_id.as_deref() {
-        markdown.push_str(&format!("source_id: {}\n", yaml(platform_id)));
-    }
-    if let Some(author) = document.author.as_deref() {
-        markdown.push_str(&format!("author: {}\n", yaml(author)));
-    }
-    if let Some(published_at) = document.published_at.as_deref() {
-        markdown.push_str(&format!("published_at: {}\n", yaml(published_at)));
-    }
-    markdown.push_str("---\n\n");
-    markdown.push_str(&format!("# {}\n\n", document.title));
+    let mut markdown = format!("# {}\n\n", document.title);
     markdown.push_str(&format!(
         "> 来源：[{}]({})\n\n",
         platform_display_name(&document.platform),
@@ -921,7 +1042,6 @@ fn render_platform_markdown(
         markdown.push_str(&format!("- 发布时间：{published_at}\n"));
     }
     markdown.push_str(&format!("- 来源：{}\n", document.canonical_url));
-    markdown.push_str(&format!("- 导入路线：`{route}`\n"));
     if document.title_source == "inferred" {
         markdown.push_str("- 标题来源：由原始正文首行推断\n");
     }
@@ -1077,16 +1197,20 @@ fn direct_media_result(
         redact_sensitive_text(&artifact.final_public_url)
     );
     let mut asset_paths = Vec::new();
+    let mut warnings = Vec::new();
     if request.media_save_mode == MediaSaveMode::PreserveOriginal {
         let relative = format!("assets/original-media.{extension}");
-        std::fs::create_dir_all(staging.join("assets"))
-            .map_err(|_| unavailable("The original media directory could not be created."))?;
-        std::fs::write(staging.join(&relative), &artifact.bytes)
-            .map_err(|_| unavailable("The original media could not be staged."))?;
-        markdown.push_str(&format!("\n[Download original media]({relative})\n"));
-        asset_paths.push(relative);
+        if std::fs::create_dir_all(staging.join("assets")).is_ok()
+            && std::fs::write(staging.join(&relative), &artifact.bytes).is_ok()
+        {
+            markdown.push_str(&format!("\n[Download original media]({relative})\n"));
+            asset_paths.push(relative);
+        } else {
+            warnings.push(
+                "Original media preservation failed; text extraction can still continue.".into(),
+            );
+        }
     }
-    let warnings = Vec::new();
     let continuation = if request.local_asr_authorized {
         let temporary = TemporaryMediaWorkspace::create_unique(&staging, ".asr-input")?;
         let temporary_path = temporary.path().join(format!("input.{extension}"));
@@ -1133,6 +1257,8 @@ fn direct_media_result(
         image_count: 0,
         hashtag_count: 0,
         media_present: true,
+        media_size_bytes: Some(artifact.byte_len),
+        restricted_content: false,
     };
     std::fs::write(staging.join("source.bin"), &artifact.bytes)
         .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
@@ -1180,14 +1306,19 @@ fn direct_image_result(
     let public_url = redact_sensitive_text(&artifact.final_public_url);
     let mut markdown = format!("# {}\n\n", request.input.display_name);
     let mut asset_paths = Vec::new();
+    let mut warnings = Vec::new();
     if request.media_save_mode == MediaSaveMode::PreserveOriginal {
         let relative = format!("assets/original-image.{extension}");
-        std::fs::create_dir_all(staging.join("assets"))
-            .map_err(|_| unavailable("The original image directory could not be created."))?;
-        std::fs::write(staging.join(&relative), &artifact.bytes)
-            .map_err(|_| unavailable("The original image could not be staged."))?;
-        markdown.push_str(&format!("![Original image]({relative})\n"));
-        asset_paths.push(relative);
+        if std::fs::create_dir_all(staging.join("assets")).is_ok()
+            && std::fs::write(staging.join(&relative), &artifact.bytes).is_ok()
+        {
+            markdown.push_str(&format!("![Original image]({relative})\n"));
+            asset_paths.push(relative);
+        } else {
+            warnings
+                .push("Original image preservation failed; local OCR can still continue.".into());
+            markdown.push_str("(original image could not be retained after local OCR)\n");
+        }
     } else {
         markdown.push_str("(original image not retained after local OCR)\n");
     }
@@ -1199,7 +1330,7 @@ fn direct_image_result(
         final_public_url: &public_url,
         content_type: &artifact.content_type,
         redirect_count: artifact.redirects.len(),
-        warnings: &[],
+        warnings: &warnings,
         platform: None,
         platform_id: None,
         title_source: None,
@@ -1211,6 +1342,8 @@ fn direct_image_result(
         image_count: 1,
         hashtag_count: 0,
         media_present: false,
+        media_size_bytes: None,
+        restricted_content: false,
     };
     std::fs::write(staging.join("source.bin"), &artifact.bytes)
         .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
@@ -1241,7 +1374,7 @@ fn direct_image_result(
                 temporary_input_paths: vec![temporary_input],
             },
         ),
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -1251,9 +1384,10 @@ fn stage_temporary_ocr_input(
     extension: &str,
     bytes: &[u8],
 ) -> Result<String, BackendError> {
-    let _ = index;
     let temporary = TemporaryMediaWorkspace::create_unique(staging, ".ocr-input")?;
-    let temporary_path = temporary.path().join(format!("input.{extension}"));
+    let temporary_path = temporary
+        .path()
+        .join(format!("image-{:03}.{extension}", index + 1));
     std::fs::write(&temporary_path, bytes)
         .map_err(|_| unavailable("A temporary OCR image could not be staged."))?;
     let relative = temporary_path
@@ -1270,18 +1404,32 @@ fn should_run_platform_image_ocr(
     authorized: bool,
 ) -> bool {
     authorized
-        && document
-            .is_some_and(|document| !document.images.is_empty() && document.media_url.is_none())
+        && document.is_some_and(|document| {
+            document.content_type == "image_post" && !document.images.is_empty()
+        })
+}
+
+fn platform_after_redirect(
+    requested: Option<Platform>,
+    final_public_url: &str,
+) -> Option<Platform> {
+    Platform::from_url(final_public_url).or(requested)
+}
+
+fn platform_image_requires_ocr(
+    document: Option<&crate::services::import_v2::platform_provider::PlatformDocument>,
+    authorized: bool,
+) -> bool {
+    document.is_some_and(|document| {
+        document.platform == "xiaohongshu" && document.content_type == "image_post" && !authorized
+    })
 }
 
 fn platform_image_output_is_meaningful(
     document: &crate::services::import_v2::platform_provider::PlatformDocument,
     successful_images: usize,
 ) -> bool {
-    document.platform != "xiaohongshu"
-        || document.content_type != "image_post"
-        || !document.description.trim().is_empty()
-        || successful_images > 0
+    document.content_type != "image_post" || successful_images == document.images.len()
 }
 
 fn ocr_unavailable(message: &str) -> BackendError {
@@ -1315,30 +1463,6 @@ fn is_direct_image_locator(input: &ImportInput) -> bool {
     [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]
         .iter()
         .any(|extension| value.contains(extension))
-}
-
-fn is_supported_media_target(request: &EngineRequest) -> bool {
-    let value = request
-        .input
-        .normalized_locator
-        .as_deref()
-        .unwrap_or(&request.input.locator);
-    url::Url::parse(value)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| {
-            host == "b23.tv"
-                || host == "bilibili.com"
-                || host.ends_with(".bilibili.com")
-                || host == "xiaohongshu.com"
-                || host.ends_with(".xiaohongshu.com")
-                || host == "xhslink.com"
-                || host.ends_with(".xhslink.com")
-                || host == "douyin.com"
-                || host.ends_with(".douyin.com")
-                || host == "iesdouyin.com"
-                || host.ends_with(".iesdouyin.com")
-        })
 }
 
 fn is_bilibili_video_locator(request: &EngineRequest) -> bool {
@@ -1393,7 +1517,13 @@ fn trusted_platform_asset_suffixes(platform: Platform) -> &'static [&'static str
             "biliimg.com",
             "edge.mountaintoys.cn",
         ],
-        Platform::Xiaohongshu => &["xiaohongshu.com", "xhslink.com", "xhscdn.com", "xhscdn.net"],
+        Platform::Xiaohongshu => &[
+            "xiaohongshu.com",
+            "xhslink.com",
+            "xhslink.cn",
+            "xhscdn.com",
+            "xhscdn.net",
+        ],
         Platform::Douyin => &[
             "douyin.com",
             "iesdouyin.com",
@@ -1428,6 +1558,8 @@ fn is_platform_auth_challenge(request: &EngineRequest, body: &str) -> bool {
         || host.ends_with(".xiaohongshu.com")
         || host == "xhslink.com"
         || host.ends_with(".xhslink.com")
+        || host == "xhslink.cn"
+        || host.ends_with(".xhslink.cn")
         || host == "douyin.com"
         || host.ends_with(".douyin.com")
         || host == "iesdouyin.com"
@@ -1546,6 +1678,128 @@ fn attribute_after(fragment: &str, name: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.replace("&amp;", "&"))
 }
 
+fn load_completed_media_download(
+    staging: &Path,
+    current_media_url: &str,
+) -> Result<Option<WebFetchArtifact>, BackendError> {
+    let root = staging.join("media-download");
+    let payload = root.join("payload.bin");
+    let manifest_path = root.join("complete.json");
+    if !payload.exists() || !manifest_path.exists() {
+        return Ok(None);
+    }
+    let payload_metadata = std::fs::symlink_metadata(&payload)
+        .map_err(|_| unavailable("The completed media cache could not be inspected."))?;
+    let manifest_metadata = std::fs::symlink_metadata(&manifest_path)
+        .map_err(|_| unavailable("The completed media cache could not be inspected."))?;
+    if payload_metadata.file_type().is_symlink()
+        || manifest_metadata.file_type().is_symlink()
+        || !payload_metadata.is_file()
+        || !manifest_metadata.is_file()
+    {
+        return Ok(None);
+    }
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|_| unavailable("The completed media cache manifest could not be read."))?;
+    if manifest_bytes.len() > 64 * 1024 {
+        return Ok(None);
+    }
+    let manifest: CompletedMediaDownload = match serde_json::from_slice(&manifest_bytes) {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(None),
+    };
+    if manifest.schema_version != 1
+        || !manifest.complete
+        || manifest.byte_len == 0
+        || manifest.byte_len != payload_metadata.len()
+        || manifest.sha256.len() != 64
+        || !manifest
+            .sha256
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
+        || !hash_media_file(&payload)?.eq_ignore_ascii_case(&manifest.sha256)
+    {
+        return Ok(None);
+    }
+    let target = UrlPolicy.normalize_for_session(current_media_url)?;
+    Ok(Some(WebFetchArtifact {
+        bytes: Vec::new(),
+        byte_len: manifest.byte_len,
+        final_public_url: target.public.public_url.clone(),
+        final_session_target: target,
+        content_type: manifest.content_type,
+        sanitized_headers: BTreeMap::new(),
+        redirects: Vec::new(),
+        elapsed_ms: 0,
+    }))
+}
+
+fn store_completed_media_download(
+    staging: &Path,
+    downloaded_path: &Path,
+    artifact: &WebFetchArtifact,
+) -> Result<PathBuf, BackendError> {
+    let root = staging.join("media-download");
+    std::fs::create_dir_all(&root)
+        .map_err(|_| unavailable("The completed media cache could not be created."))?;
+    let nonce = uuid::Uuid::new_v4();
+    let pending_payload = root.join(format!(".pending-payload-{nonce}"));
+    let pending_manifest = root.join(format!(".pending-manifest-{nonce}"));
+    move_staged_file(downloaded_path, &pending_payload)
+        .map_err(|_| unavailable("The completed media payload could not be staged."))?;
+    let byte_len = std::fs::metadata(&pending_payload)
+        .map_err(|_| unavailable("The completed media payload could not be measured."))?
+        .len();
+    if byte_len == 0 || byte_len != artifact.byte_len {
+        let _ = std::fs::remove_file(&pending_payload);
+        return Err(unavailable("The completed media payload length changed."));
+    }
+    let manifest = CompletedMediaDownload {
+        schema_version: 1,
+        complete: true,
+        content_type: artifact.content_type.clone(),
+        byte_len,
+        sha256: hash_media_file(&pending_payload)?,
+    };
+    std::fs::write(
+        &pending_manifest,
+        serde_json::to_vec_pretty(&manifest)
+            .map_err(|_| unavailable("The completed media cache manifest is invalid."))?,
+    )
+    .map_err(|_| unavailable("The completed media cache manifest could not be staged."))?;
+    let payload = root.join("payload.bin");
+    let manifest_path = root.join("complete.json");
+    for path in [&payload, &manifest_path] {
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|_| {
+                unavailable("The previous completed media cache could not be replaced.")
+            })?;
+        }
+    }
+    std::fs::rename(&pending_payload, &payload)
+        .map_err(|_| unavailable("The completed media payload could not be finalized."))?;
+    std::fs::rename(&pending_manifest, &manifest_path)
+        .map_err(|_| unavailable("The completed media cache manifest could not be finalized."))?;
+    Ok(payload)
+}
+
+fn hash_media_file(path: &Path) -> Result<String, BackendError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| unavailable("The completed media payload could not be verified."))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| unavailable("The completed media payload could not be verified."))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn fetch_media_to_file(
     url: &str,
     platform: Option<Platform>,
@@ -1655,33 +1909,28 @@ fn fetch_image(
     item_id: &str,
     cancellation: &CancellationToken,
     referer: &str,
+    platform: Option<Platform>,
+    artifact_source: &dyn WebArtifactSource,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
     let target = UrlPolicy.normalize_for_session(url)?;
-    let item_id = item_id.to_string();
-    let referer = referer.to_string();
-    let token = cancellation.clone();
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| unavailable("The image fetch runtime could not be started."))?;
-        runtime.block_on(WebFetchService::default().fetch(
-            target,
-            &UrlPolicy::default(),
-            &WebFetchPolicy {
-                max_response_bytes: 8 * 1024 * 1024,
-                content: WebFetchContent::Image,
-                referer: Some(referer),
-                ..WebFetchPolicy::default()
-            },
-            None,
-            &item_id,
-            |_| {},
-            || token.is_cancelled(),
-        ))
-    })
-    .join()
-    .map_err(|_| unavailable("The image fetch worker stopped unexpectedly."))?
+    artifact_source.fetch(
+        target,
+        WebFetchPolicy {
+            max_response_bytes: 8 * 1024 * 1024,
+            content: WebFetchContent::Image,
+            referer: Some(referer.to_string()),
+            require_https: platform.is_some(),
+            allowed_host_suffixes: platform
+                .map(trusted_platform_asset_suffixes)
+                .unwrap_or_default()
+                .iter()
+                .map(|suffix| (*suffix).into())
+                .collect(),
+            ..WebFetchPolicy::default()
+        },
+        item_id,
+        cancellation,
+    )
 }
 
 fn fetch_subtitle(
@@ -1689,33 +1938,28 @@ fn fetch_subtitle(
     item_id: &str,
     cancellation: &CancellationToken,
     referer: &str,
+    platform: Option<Platform>,
+    artifact_source: &dyn WebArtifactSource,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
     let target = UrlPolicy.normalize_for_session(url)?;
-    let item_id = item_id.to_string();
-    let referer = referer.to_string();
-    let token = cancellation.clone();
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| unavailable("The subtitle fetch runtime could not be started."))?;
-        runtime.block_on(WebFetchService::default().fetch(
-            target,
-            &UrlPolicy::default(),
-            &WebFetchPolicy {
-                max_response_bytes: 4 * 1024 * 1024,
-                content: WebFetchContent::Subtitle,
-                referer: Some(referer),
-                ..WebFetchPolicy::default()
-            },
-            None,
-            &item_id,
-            |_| {},
-            || token.is_cancelled(),
-        ))
-    })
-    .join()
-    .map_err(|_| unavailable("The subtitle fetch worker stopped unexpectedly."))?
+    artifact_source.fetch(
+        target,
+        WebFetchPolicy {
+            max_response_bytes: 4 * 1024 * 1024,
+            content: WebFetchContent::Subtitle,
+            referer: Some(referer.to_string()),
+            require_https: platform.is_some(),
+            allowed_host_suffixes: platform
+                .map(trusted_platform_asset_suffixes)
+                .unwrap_or_default()
+                .iter()
+                .map(|suffix| (*suffix).into())
+                .collect(),
+            ..WebFetchPolicy::default()
+        },
+        item_id,
+        cancellation,
+    )
 }
 
 fn image_extension(content_type: &str) -> &'static str {
@@ -1773,25 +2017,51 @@ fn media_extension(content_type: &str, url: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_html_image_urls, extract_html_media_url, extract_html_title, is_bilibili_video_url,
-        is_trusted_platform_asset_url, media_extension, platform_image_output_is_meaningful,
-        render_platform_markdown, replace_markdown_asset_reference, report_media_download_progress,
-        select_primary_web_artifact, should_run_platform_image_ocr, xiaohongshu_error,
-        GenericWebEngine,
+        direct_image_result, direct_media_result, extract_html_image_urls, extract_html_media_url,
+        extract_html_title, is_bilibili_video_url, is_trusted_platform_asset_url,
+        load_completed_media_download, media_extension, platform_after_redirect,
+        platform_image_output_is_meaningful, platform_image_requires_ocr, render_platform_markdown,
+        replace_markdown_asset_reference, report_media_download_progress,
+        select_primary_web_artifact, should_run_platform_image_ocr, store_completed_media_download,
+        xiaohongshu_error, NetworkWebArtifactSource, WebArtifactSource,
     };
     use crate::models::import_v2::{ImportInput, ImportInputKind, MediaSaveMode};
     use crate::services::import_v2::connectors::ConnectorFailure;
-    use crate::services::import_v2::engine::{
-        validate_engine_result, EngineOperation, EngineRequest, ImportEngine,
-    };
+    use crate::services::import_v2::engine::{EngineOperation, EngineRequest};
+    use crate::services::import_v2::platform_provider::PlatformSubtitleKind;
     use crate::services::import_v2::platform_provider::{Platform, PlatformDocument};
     use crate::services::import_v2::redaction::redact_sensitive_text;
     use crate::services::import_v2::url_policy::UrlPolicy;
-    use crate::services::import_v2::web_fetch::{WebFetchArtifact, WebFetchProgress};
-    use crate::services::import_v2::web_target_store::WebTargetStore;
-    use crate::services::SecretService;
+    use crate::services::import_v2::web_fetch::{
+        WebFetchArtifact, WebFetchPolicy, WebFetchProgress,
+    };
     use crate::tasks::task_model::CancellationToken;
-    use std::sync::Arc;
+
+    #[test]
+    fn network_web_fetch_is_safe_when_called_from_a_tokio_runtime() {
+        let target = UrlPolicy::default()
+            .normalize_for_session("https://example.com/article")
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(async {
+                NetworkWebArtifactSource.fetch(
+                    target,
+                    WebFetchPolicy::default(),
+                    "runtime-boundary",
+                    &cancellation,
+                )
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code, "IMPORT_V2_CANCELLED");
+    }
 
     #[test]
     fn preserves_audio_and_video_container_extensions() {
@@ -1830,6 +2100,162 @@ mod tests {
                 total: Some(1024),
                 label: "media.downloading".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn completed_media_download_cache_is_reusable_only_while_payload_is_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let downloaded = root.path().join("response.bin");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(&downloaded, b"downloaded-media").unwrap();
+        let url = "https://cdn.example/video.mp4";
+        let target = UrlPolicy::default().normalize_for_session(url).unwrap();
+        let artifact = WebFetchArtifact {
+            bytes: Vec::new(),
+            byte_len: 16,
+            final_public_url: target.public.public_url.clone(),
+            final_session_target: target,
+            content_type: "video/mp4".into(),
+            sanitized_headers: Default::default(),
+            redirects: Vec::new(),
+            elapsed_ms: 5,
+        };
+
+        let payload = store_completed_media_download(&staging, &downloaded, &artifact).unwrap();
+        assert!(!downloaded.exists());
+        assert_eq!(std::fs::read(&payload).unwrap(), b"downloaded-media");
+        let reused = load_completed_media_download(&staging, url)
+            .unwrap()
+            .expect("completed cache should be reusable");
+        assert_eq!(reused.byte_len, artifact.byte_len);
+        assert_eq!(reused.content_type, artifact.content_type);
+        assert!(reused.bytes.is_empty());
+
+        std::fs::write(&payload, b"tampered-payload").unwrap();
+        assert!(load_completed_media_download(&staging, url)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn direct_media_preservation_failure_does_not_block_asr_continuation() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("assets"), b"directory-conflict").unwrap();
+        let url = "https://cdn.example/original.mp4";
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "media-preservation".into(),
+            project_id: "project".into(),
+            session_id: "session".into(),
+            item_id: "item".into(),
+            task_id: "task".into(),
+            operation: EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "Video".into(),
+                locator: url.into(),
+                normalized_locator: Some(url.into()),
+                source_identity: None,
+                media_save_mode: MediaSaveMode::PreserveOriginal,
+            },
+            project_root: root.path().to_string_lossy().into_owned(),
+            staging_root: "staging".into(),
+            chained_input: None,
+            local_asr_authorized: true,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
+            local_ocr_authorized: false,
+            media_save_mode: MediaSaveMode::PreserveOriginal,
+        };
+        let target = UrlPolicy::default().normalize_for_session(url).unwrap();
+        let artifact = WebFetchArtifact {
+            bytes: b"video-bytes".to_vec(),
+            byte_len: 11,
+            final_public_url: url.into(),
+            final_session_target: target,
+            content_type: "video/mp4".into(),
+            sanitized_headers: Default::default(),
+            redirects: Vec::new(),
+            elapsed_ms: 1,
+        };
+
+        let result = direct_media_result(&request, &CancellationToken::new(), &artifact).unwrap();
+
+        assert!(result.asset_paths.is_empty());
+        assert!(result.continuation.is_some());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("preservation failed")));
+        assert_eq!(
+            std::fs::read(staging.join("source.bin")).unwrap(),
+            b"video-bytes"
+        );
+    }
+
+    #[test]
+    fn direct_image_preservation_failure_does_not_block_ocr_continuation() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("assets"), b"directory-conflict").unwrap();
+        let url = "https://cdn.example/original.png";
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "image-preservation".into(),
+            project_id: "project".into(),
+            session_id: "session".into(),
+            item_id: "item".into(),
+            task_id: "task".into(),
+            operation: EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "Image".into(),
+                locator: url.into(),
+                normalized_locator: Some(url.into()),
+                source_identity: None,
+                media_save_mode: MediaSaveMode::PreserveOriginal,
+            },
+            project_root: root.path().to_string_lossy().into_owned(),
+            staging_root: "staging".into(),
+            chained_input: None,
+            local_asr_authorized: false,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
+            local_ocr_authorized: true,
+            media_save_mode: MediaSaveMode::PreserveOriginal,
+        };
+        let target = UrlPolicy::default().normalize_for_session(url).unwrap();
+        let artifact = WebFetchArtifact {
+            bytes: b"image-bytes".to_vec(),
+            byte_len: 11,
+            final_public_url: url.into(),
+            final_session_target: target,
+            content_type: "image/png".into(),
+            sanitized_headers: Default::default(),
+            redirects: Vec::new(),
+            elapsed_ms: 1,
+        };
+
+        let result = direct_image_result(&request, &CancellationToken::new(), &artifact).unwrap();
+
+        assert!(result.asset_paths.is_empty());
+        assert!(result.continuation.is_some());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("preservation failed")));
+        assert_eq!(
+            std::fs::read(staging.join("source.bin")).unwrap(),
+            b"image-bytes"
         );
     }
 
@@ -1887,9 +2313,11 @@ mod tests {
                 "https://sns-img-qc.xhscdn.com/1.jpg?xsec_token=image-secret&sign=signature".into(),
             ],
             media_url: None,
+            media_size_bytes: None,
             cover_url: None,
             subtitles: Vec::new(),
             chapters: Vec::new(),
+            restricted_content: false,
         };
         let persisted = redact_sensitive_text(&serde_json::to_string_pretty(&document).unwrap());
         assert!(serde_json::from_str::<serde_json::Value>(&persisted).is_ok());
@@ -1945,6 +2373,24 @@ mod tests {
     }
 
     #[test]
+    fn redirect_target_reclassifies_an_unknown_short_link_as_xiaohongshu() {
+        assert_eq!(
+            platform_after_redirect(
+                None,
+                "https://www.xiaohongshu.com/discovery/item/6a61c0bf000000000e034c02"
+            ),
+            Some(Platform::Xiaohongshu)
+        );
+        assert_eq!(
+            platform_after_redirect(
+                Some(Platform::Xiaohongshu),
+                "https://www.xiaohongshu.com/explore/note-1"
+            ),
+            Some(Platform::Xiaohongshu)
+        );
+    }
+
+    #[test]
     fn successful_bilibili_api_evidence_precedes_unreadable_page_bytes() {
         let url = "https://www.bilibili.com/video/BV1N7411A7WU/";
         let target = UrlPolicy::default().normalize_for_session(url).unwrap();
@@ -1968,8 +2414,11 @@ mod tests {
             staging_root: String::new(),
             chained_input: None,
             local_asr_authorized: false,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
             local_ocr_authorized: false,
-            allow_missing_transcript: false,
             media_save_mode: MediaSaveMode::ExtractOnly,
         };
         let page = WebFetchArtifact {
@@ -1997,9 +2446,11 @@ mod tests {
                 hashtags: Vec::new(),
                 images: Vec::new(),
                 media_url: None,
+                media_size_bytes: None,
                 cover_url: None,
                 subtitles: Vec::new(),
                 chapters: Vec::new(),
+                restricted_content: false,
             },
         };
 
@@ -2012,62 +2463,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the public Bilibili API"]
-    fn public_bilibili_engine_result_obeys_the_staging_contract() {
-        let root = std::env::temp_dir().join(format!("bilibili-engine-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join(".app")).unwrap();
-        let url = std::env::var("LLM_WIKI_BILIBILI_TEST_URL")
-            .unwrap_or_else(|_| "https://www.bilibili.com/video/BV1N7411A7WU/".into());
-        let target = UrlPolicy::default().normalize_for_session(&url).unwrap();
-        let targets = Arc::new(WebTargetStore::new(SecretService::memory()));
-        let reference = targets.store(&target).unwrap();
-        let engine = GenericWebEngine::new(targets, "builtin.web-bilibili", "web.bilibili.video");
-        let staging_root = ".app/import-sessions/session/items/item/staging";
-        let request = EngineRequest {
-            protocol_version: "2".into(),
-            request_id: "network-fixture".into(),
-            project_id: "network-fixture".into(),
-            session_id: "session".into(),
-            item_id: "item".into(),
-            task_id: "task".into(),
-            operation: EngineOperation::Extract,
-            input: ImportInput {
-                kind: ImportInputKind::Url,
-                display_name: "www.bilibili.com".into(),
-                locator: reference,
-                normalized_locator: Some(target.public.public_url),
-                source_identity: None,
-                media_save_mode: MediaSaveMode::ExtractOnly,
-            },
-            project_root: root.to_string_lossy().into_owned(),
-            staging_root: staging_root.into(),
-            chained_input: None,
-            local_asr_authorized: false,
-            local_ocr_authorized: false,
-            allow_missing_transcript: true,
-            media_save_mode: MediaSaveMode::ExtractOnly,
-        };
-
-        let result = engine
-            .execute(&request, &CancellationToken::new())
-            .expect("metadata-only Bilibili preview should remain available without subtitles");
-        assert!(
-            validate_engine_result(staging_root, &result).is_ok(),
-            "Bilibili result violated staging: assets={:?}, continuation={:?}",
-            result.asset_paths,
-            result.continuation
-        );
-        let markdown = std::fs::read_to_string(root.join(staging_root).join("document.md"))
-            .expect("the Bilibili Markdown candidate should be readable");
-        assert!(
-            markdown.contains("## 字幕 / 转写"),
-            "the candidate must contain either a transcript or an explicit missing-transcript notice"
-        );
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn platform_image_posts_do_not_require_ocr_unless_explicitly_enabled() {
+    fn xiaohongshu_image_posts_require_ocr_before_preview() {
         let document = PlatformDocument {
             platform: "xiaohongshu".into(),
             platform_id: Some("note-1".into()),
@@ -2081,16 +2477,42 @@ mod tests {
             hashtags: Vec::new(),
             images: vec!["https://sns-img-qc.xhscdn.com/one.jpg".into()],
             media_url: None,
+            media_size_bytes: None,
             cover_url: None,
             subtitles: Vec::new(),
             chapters: Vec::new(),
+            restricted_content: false,
         };
+        assert!(platform_image_requires_ocr(Some(&document), false));
+        assert!(!platform_image_requires_ocr(Some(&document), true));
         assert!(!should_run_platform_image_ocr(Some(&document), false));
         assert!(should_run_platform_image_ocr(Some(&document), true));
+        let mut video = document.clone();
+        video.content_type = "video".into();
+        video.subtitles.push(
+            crate::services::import_v2::platform_provider::PlatformSubtitle {
+                url: "https://sns-subtitle-s2.xhscdn.com/source.srt".into(),
+                automatic: true,
+                kind: PlatformSubtitleKind::PlatformAutoOriginal,
+                language: Some("zh-CN".into()),
+                label: Some("source".into()),
+            },
+        );
+        assert!(
+            !should_run_platform_image_ocr(Some(&video), true),
+            "a subtitle-only video cover must never enter the image OCR continuation"
+        );
         let mut image_only = document.clone();
         image_only.description.clear();
         assert!(!platform_image_output_is_meaningful(&image_only, 0));
         assert!(platform_image_output_is_meaningful(&image_only, 1));
+    }
+
+    #[test]
+    fn ordinary_webpage_images_never_enter_platform_ocr_continuation() {
+        assert!(!platform_image_requires_ocr(None, false));
+        assert!(!platform_image_requires_ocr(None, true));
+        assert!(!should_run_platform_image_ocr(None, true));
     }
 
     #[test]
@@ -2108,21 +2530,14 @@ mod tests {
             hashtags: vec!["#知识库".into()],
             images: vec!["https://sns-webpic-qc.xhscdn.com/1.jpg".into()],
             media_url: None,
+            media_size_bytes: None,
             cover_url: Some("https://sns-webpic-qc.xhscdn.com/1.jpg".into()),
             subtitles: Vec::new(),
             chapters: Vec::new(),
+            restricted_content: false,
         };
-        let markdown = render_platform_markdown(
-            &document,
-            "web.xiaohongshu.note",
-            "builtin.web-xiaohongshu",
-            "0.1.0",
-        );
+        let markdown = render_platform_markdown(&document);
         for expected in [
-            "type: source",
-            "source_platform: \"xiaohongshu\"",
-            "source_id: \"note-1\"",
-            "title_source: \"inferred\"",
             "## 原始正文",
             "## 话题",
             "## 图片",
@@ -2130,6 +2545,9 @@ mod tests {
         ] {
             assert!(markdown.contains(expected), "missing {expected}");
         }
+        assert!(!markdown.starts_with("---"));
+        assert!(!markdown.contains("engine_id"));
+        assert!(!markdown.contains("source_id"));
         assert!(!markdown.contains("## 字幕 / 转写"));
         assert!(!markdown.contains("## 封面"));
     }

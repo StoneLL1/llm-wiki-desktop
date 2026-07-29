@@ -1,25 +1,10 @@
 import type { AgentKind } from "./agent";
 import type { ImportArtifact, QualityReport } from "./importV2";
 
-export interface AgentAssistancePolicy {
-  autoLocalOnHardFailure: boolean;
-  autoLocalOnQualityWarning: boolean;
-  autoByok: boolean;
-  maxAttemptsPerItem: number;
-}
-
-export const balancedAgentAssistancePolicy = (autoLocalOnHardFailure = false): AgentAssistancePolicy => ({
-  autoLocalOnHardFailure,
-  autoLocalOnQualityWarning: false,
-  autoByok: false,
-  maxAttemptsPerItem: 1,
-});
-
-export type AgentAssistanceTrigger = "deterministic_hard_failure" | "manual" | "quality_optimization";
+export type AgentAssistanceTrigger = "manual" | "quality_optimization";
 
 export const AGENT_RECOVERY_ACTIONS = [
   "invoke_local_agent",
-  "request_byok",
   "compare_candidate",
   "discard_candidate",
 ] as const;
@@ -40,29 +25,6 @@ export interface AgentInvocationRequest {
   itemId: string;
   trigger: AgentAssistanceTrigger;
   agentKind: AgentKind;
-}
-
-export interface SendScopeFile {
-  relativePath: string;
-  sha256: string;
-  sizeBytes: number;
-  estimatedTokens: number;
-  redactions: string[];
-}
-
-export interface AgentSendScope {
-  approvalId: string;
-  itemId: string;
-  provider: string;
-  model: string;
-  destination: string;
-  publicMetadata: string[];
-  files: SendScopeFile[];
-  estimatedInputTokens: number;
-  estimatedCostMicros: number | null;
-  requiresDuplicateChargeAcknowledgement: boolean;
-  scopeSha256: string;
-  expiresAt: string;
 }
 
 export interface AgentCandidate {
@@ -110,6 +72,7 @@ export interface AgentCandidateActionResult {
   itemId: string;
   candidateId: string;
   item: import("./importV2").ImportItem;
+  completion: import("./importV2").ImportCompletion | null;
 }
 
 export interface AcceptImportAgentCandidateRequest {
@@ -151,8 +114,6 @@ export interface AgentAuditRecord {
   approvedCostMicros: number | null;
   toolCalls: string[];
   approvedScopeSha256: string | null;
-  byokProvider: string | null;
-  byokDestination: string | null;
   workspaceRelativePath: string;
   grantedTools: AgentToolGrant[];
   inputHashes: string[];

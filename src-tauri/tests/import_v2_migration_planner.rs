@@ -39,7 +39,7 @@ fn index(hash: &str, source_id: &str) -> SourceIndex {
         version_id: "version-1".into(),
     };
     SourceIndex {
-        schema_version: 2,
+        schema_version: 3,
         by_content_hash: BTreeMap::from([(hash.into(), pointer)]),
         by_locator: BTreeMap::new(),
     }

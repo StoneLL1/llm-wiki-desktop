@@ -21,14 +21,35 @@ export function AgentActivityTimeline({ activities, compact = false, taskStatus 
   const runFailed = taskStatus === "failed" || taskStatus === "cancelled";
 
   const rows: ActivityRow[] = [];
+  const pairedActivityIndexes = new Set<number>();
   for (let index = 0; index < activities.length; index += 1) {
+    if (pairedActivityIndexes.has(index)) continue;
     const activity = activities[index];
     if (activity.kind === "thinking" && activity.status === "started") {
-      const completed = activities.slice(index + 1).find(
-        (candidate) => candidate.kind === "thinking" && candidate.status === "completed",
+      const completedIndex = activities.findIndex(
+        (candidate, candidateIndex) =>
+          candidateIndex > index &&
+          candidate.kind === "thinking" &&
+          candidate.status !== "started",
       );
+      const completed =
+        completedIndex >= 0 ? activities[completedIndex] : undefined;
       rows.push({ activity: completed ?? activity });
-      if (completed) index = activities.indexOf(completed, index + 1);
+      if (completedIndex >= 0) pairedActivityIndexes.add(completedIndex);
+      continue;
+    }
+    if (activity.kind === "phase" && activity.status === "started") {
+      const completedIndex = activities.findIndex(
+        (candidate, candidateIndex) =>
+          candidateIndex > index &&
+          candidate.kind === "phase" &&
+          candidate.name === activity.name &&
+          candidate.status !== "started",
+      );
+      const completed =
+        completedIndex >= 0 ? activities[completedIndex] : undefined;
+      rows.push({ activity: completed ?? activity });
+      if (completedIndex >= 0) pairedActivityIndexes.add(completedIndex);
       continue;
     }
     if (activity.kind === "tool_result") continue;
@@ -104,6 +125,8 @@ export function AgentActivityTimeline({ activities, compact = false, taskStatus 
             generation: "agent.activity.phase.generation",
             agent: "agent.activity.phase.agent",
             "import-agent": "agent.activity.phase.importAgent",
+            "source-ai-organize": "agent.activity.phase.sourceAiOrganize",
+            "source-ai-provider": "agent.activity.phase.sourceAiProvider",
           }[activity.name];
           return (
             <div className={`agent-activity-row agent-activity-row--phase${failed ? " agent-activity-row--failed" : ""}`} key={`phase-${activity.name}-${index}`}>

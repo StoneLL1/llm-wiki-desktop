@@ -40,11 +40,16 @@ fn prepare(
 ) {
     let service = MigrationService::default();
     let inventory = service.scan(root).unwrap();
-    let plan = service.plan(root, &inventory).unwrap();
+    let preparation = service.prepare(root, &inventory).unwrap();
+    assert_eq!(
+        preparation.report.plan_fingerprint,
+        preparation.confirmation.plan_fingerprint
+    );
+    assert!(!preparation.confirmation.token.is_empty());
+    let plan = preparation.plan;
     let confirmation = MigrationConfirmation {
-        plan_fingerprint: plan.fingerprint(),
-        token: service.confirmation_token(&plan, &inventory.project_identity),
         acknowledge_no_git_rollback: true,
+        ..preparation.confirmation
     };
     let context = ProjectContext::new("migration-test", root.to_path_buf());
     (service, plan, confirmation, context)

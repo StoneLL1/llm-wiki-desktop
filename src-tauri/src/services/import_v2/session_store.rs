@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,14 +7,21 @@ use crate::errors::{
     IMPORT_V2_STATE_INVALID,
 };
 use crate::models::import_v2::{
-    ImportInput, ImportItem, ImportResourceMode, ImportSession, ImportSessionStatus,
-    IMPORT_V2_SCHEMA_VERSION,
+    ImportCollectionChildRelation, ImportCollectionRelation, ImportInput, ImportItem,
+    ImportItemStatus, ImportMediaAuthorization, ImportResourceMode, ImportSession,
+    ImportSessionStatus, IMPORT_V2_SCHEMA_VERSION,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::FileStore;
 
 #[derive(Default)]
 pub struct SessionStore;
+
+#[derive(Debug, Clone)]
+pub struct CollectionImportInput {
+    pub input: ImportInput,
+    pub discovery_fingerprint: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +35,10 @@ struct SessionRecord {
     updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     discovery_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    media_authorizations: Vec<ImportMediaAuthorization>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    collection_relations: Vec<ImportCollectionRelation>,
     item_ids: Vec<String>,
 }
 
@@ -42,6 +53,8 @@ impl From<&ImportSession> for SessionRecord {
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             discovery_task_id: session.discovery_task_id.clone(),
+            media_authorizations: session.media_authorizations.clone(),
+            collection_relations: session.collection_relations.clone(),
             item_ids: session
                 .items
                 .iter()
@@ -73,6 +86,21 @@ fn session_root(session_id: &str) -> String {
 }
 
 impl SessionStore {
+    pub(crate) fn ensure_accepts_new_items(session: &ImportSession) -> Result<(), BackendError> {
+        if matches!(
+            session.status,
+            ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
+        ) {
+            return Err(BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "This import session has ended. Start a new import session before adding sources.",
+                false,
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn serialized_writes(
         &self,
         session: &ImportSession,
@@ -164,6 +192,8 @@ impl SessionStore {
             created_at: record.created_at,
             updated_at: record.updated_at,
             discovery_task_id: record.discovery_task_id,
+            media_authorizations: record.media_authorizations,
+            collection_relations: record.collection_relations,
             items,
         })
     }
@@ -219,6 +249,7 @@ impl SessionStore {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         let mut session = self.load(context, file_store, session_id)?;
+        Self::ensure_accepts_new_items(&session)?;
         let inputs = inputs
             .into_iter()
             .map(public_import_input)
@@ -231,6 +262,154 @@ impl SessionStore {
         session.updated_at = chrono::Utc::now().to_rfc3339();
         self.save(context, file_store, &session)?;
         Ok(session)
+    }
+
+    pub fn add_collection_inputs(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        inputs: Vec<CollectionImportInput>,
+        source_url: String,
+        platform: String,
+        title: String,
+    ) -> Result<ImportSession, BackendError> {
+        let mut session = self.load(context, file_store, session_id)?;
+        Self::ensure_accepts_new_items(&session)?;
+        let mut known_urls = session
+            .items
+            .iter()
+            .filter_map(|item| item.input.normalized_locator.clone())
+            .collect::<HashSet<_>>();
+        let known_collection_fingerprints = session
+            .collection_relations
+            .iter()
+            .filter(|relation| relation.source_url == source_url && relation.platform == platform)
+            .flat_map(|relation| relation.children.iter())
+            .map(|child| {
+                (
+                    child.canonical_url.clone(),
+                    child.discovery_fingerprint.clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut seen_collection_pairs = known_collection_fingerprints
+            .iter()
+            .map(|(url, fingerprint)| (url.clone(), fingerprint.clone()))
+            .collect::<HashSet<_>>();
+        let mut child_item_ids = Vec::new();
+        let mut children = Vec::new();
+        for collection_input in inputs {
+            let input = public_import_input(collection_input.input)?;
+            if let Some(url) = input.normalized_locator.as_ref() {
+                if !seen_collection_pairs
+                    .insert((url.clone(), collection_input.discovery_fingerprint.clone()))
+                {
+                    continue;
+                }
+                let changed_collection_child = known_collection_fingerprints.contains_key(url);
+                if !known_urls.insert(url.clone()) && !changed_collection_child {
+                    continue;
+                }
+            }
+            let item_id = uuid::Uuid::new_v4().to_string();
+            child_item_ids.push(item_id.clone());
+            if let Some(canonical_url) = input.normalized_locator.clone() {
+                children.push(ImportCollectionChildRelation {
+                    item_id: item_id.clone(),
+                    canonical_url,
+                    discovery_fingerprint: collection_input.discovery_fingerprint,
+                });
+            }
+            session.items.push(ImportItem::queued(&item_id, input));
+        }
+        if child_item_ids.is_empty() {
+            return Ok(session);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Some(relation) = session
+            .collection_relations
+            .iter_mut()
+            .find(|relation| relation.source_url == source_url && relation.platform == platform)
+        {
+            relation.child_item_ids.extend(child_item_ids);
+            relation.children.extend(children);
+            relation.title = title;
+            relation.added_at = now.clone();
+        } else {
+            session.collection_relations.push(ImportCollectionRelation {
+                relation_id: uuid::Uuid::new_v4().to_string(),
+                source_url,
+                platform,
+                title,
+                child_item_ids,
+                children,
+                added_at: now.clone(),
+            });
+        }
+        session.updated_at = now;
+        self.save(context, file_store, &session)?;
+        Ok(session)
+    }
+
+    pub fn completed_collection_fingerprints(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        source_url: &str,
+        platform: &str,
+    ) -> HashMap<String, String> {
+        let mut newest_fingerprints: HashMap<String, (String, String)> = HashMap::new();
+        let sessions_root = context.root.join(".app/import-sessions");
+        let Ok(entries) = std::fs::read_dir(sessions_root) else {
+            return HashMap::new();
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let session_id = if path.is_dir() {
+                path.file_name().and_then(|value| value.to_str())
+            } else if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                path.file_stem().and_then(|value| value.to_str())
+            } else {
+                None
+            };
+            let Some(session_id) = session_id else {
+                continue;
+            };
+            let Ok(session) = self.load(context, file_store, session_id) else {
+                continue;
+            };
+            let completed = session
+                .items
+                .iter()
+                .filter(|item| item.status == ImportItemStatus::Completed)
+                .map(|item| item.item_id.as_str())
+                .collect::<HashSet<_>>();
+            for relation in session.collection_relations.iter().filter(|relation| {
+                relation.source_url == source_url && relation.platform == platform
+            }) {
+                for child in &relation.children {
+                    if completed.contains(child.item_id.as_str()) {
+                        let replace = newest_fingerprints
+                            .get(&child.canonical_url)
+                            .is_none_or(|(updated_at, _)| updated_at <= &session.updated_at);
+                        if replace {
+                            newest_fingerprints.insert(
+                                child.canonical_url.clone(),
+                                (
+                                    session.updated_at.clone(),
+                                    child.discovery_fingerprint.clone(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        newest_fingerprints
+            .into_iter()
+            .map(|(url, (_, fingerprint))| (url, fingerprint))
+            .collect()
     }
 
     pub fn update_item(
@@ -331,12 +510,57 @@ fn sensitive_query_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::errors::IMPORT_V2_SESSION_INVALID;
-    use crate::models::import_v2::ImportResourceMode;
+    use crate::errors::{IMPORT_V2_SESSION_INVALID, IMPORT_V2_STATE_INVALID};
+    use crate::models::import_v2::{
+        ImportInput, ImportInputKind, ImportResourceMode, ImportSessionStatus, MediaSaveMode,
+    };
     use crate::services::import_v2::test_support::{test_context, test_file_input};
     use crate::services::FileStore;
 
-    use super::SessionStore;
+    use super::{CollectionImportInput, SessionStore};
+
+    fn collection_input(url: &str) -> CollectionImportInput {
+        CollectionImportInput {
+            input: ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "合集子项".into(),
+                locator: url.into(),
+                normalized_locator: Some(url.into()),
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+            discovery_fingerprint: format!("fingerprint:{url}"),
+        }
+    }
+
+    #[test]
+    fn completed_session_rejects_new_items() {
+        let (context, root) = test_context("completed-session-add");
+        let files = FileStore::default();
+        let store = SessionStore::default();
+        let mut session = store
+            .create(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        session.status = ImportSessionStatus::Completed;
+        store.save(&context, &files, &session).unwrap();
+
+        let error = store
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![test_file_input("new.pdf")],
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, IMPORT_V2_STATE_INVALID);
+        assert!(store
+            .load(&context, &files, &session.session_id)
+            .unwrap()
+            .items
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn url_credentials_sensitive_query_and_fragment_never_reach_session_files() {
@@ -411,6 +635,117 @@ mod tests {
             .unwrap();
         assert_eq!(reopened.items.len(), 1);
         assert_eq!(reopened.items[0].input.display_name, "研究报告.pdf");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collection_relation_round_trips_and_reimport_only_adds_new_children() {
+        let (context, root) = test_context("session-collection-relation");
+        let files = FileStore::default();
+        let store = SessionStore::default();
+        let session = store
+            .create(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = store
+            .add_collection_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![
+                    collection_input("https://www.bilibili.com/video/BV1first"),
+                    collection_input("https://www.bilibili.com/video/BV2second"),
+                ],
+                "https://www.bilibili.com/medialist/play/42".into(),
+                "bilibili".into(),
+                "课程合集".into(),
+            )
+            .unwrap();
+        let session = store
+            .add_collection_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![
+                    collection_input("https://www.bilibili.com/video/BV2second"),
+                    collection_input("https://www.bilibili.com/video/BV3third"),
+                ],
+                "https://www.bilibili.com/medialist/play/42".into(),
+                "bilibili".into(),
+                "课程合集（更新）".into(),
+            )
+            .unwrap();
+        let changed = CollectionImportInput {
+            input: collection_input("https://www.bilibili.com/video/BV2second").input,
+            discovery_fingerprint: "changed-fingerprint".into(),
+        };
+        let session = store
+            .add_collection_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![changed],
+                "https://www.bilibili.com/medialist/play/42".into(),
+                "bilibili".into(),
+                "课程合集（内容变化）".into(),
+            )
+            .unwrap();
+
+        assert_eq!(session.items.len(), 4);
+        assert_eq!(session.collection_relations.len(), 1);
+        assert_eq!(
+            session.collection_relations[0].child_item_ids.len(),
+            session.items.len()
+        );
+        assert_eq!(
+            session.collection_relations[0].title,
+            "课程合集（内容变化）"
+        );
+        let reopened = SessionStore::default()
+            .load(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(reopened.collection_relations, session.collection_relations);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completed_collection_fingerprints_are_reused_across_sessions() {
+        let (context, root) = test_context("collection-cross-session");
+        let files = FileStore::default();
+        let store = SessionStore::default();
+        let source_url = "https://space.bilibili.com/42";
+        let session = store
+            .create(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let mut session = store
+            .add_collection_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![collection_input(
+                    "https://www.bilibili.com/video/BV1completed",
+                )],
+                source_url.into(),
+                "bilibili".into(),
+                "作者视频".into(),
+            )
+            .unwrap();
+        session.items[0].status = crate::models::import_v2::ImportItemStatus::Completed;
+        store.save(&context, &files, &session).unwrap();
+
+        let fingerprints =
+            store.completed_collection_fingerprints(&context, &files, source_url, "bilibili");
+        assert_eq!(
+            fingerprints
+                .get("https://www.bilibili.com/video/BV1completed")
+                .map(String::as_str),
+            Some("fingerprint:https://www.bilibili.com/video/BV1completed")
+        );
+        assert_ne!(
+            fingerprints
+                .get("https://www.bilibili.com/video/BV1completed")
+                .map(String::as_str),
+            Some("changed-fingerprint")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum FileFormat {
     Markdown,
+    Text,
+    Html,
+    Csv,
     Doc,
     Docx,
     Xls,
@@ -11,14 +14,139 @@ pub enum FileFormat {
     Ppt,
     Pptx,
     Pdf,
+    Png,
+    Jpeg,
+    Webp,
+    Bmp,
+    Tiff,
+    Heic,
+    Heif,
+    AnimatedGif,
+    Mp3,
+    Wav,
+    M4a,
+    Aac,
+    Flac,
+    Ogg,
+    Opus,
+    Wma,
+    Mp4,
+    Mov,
+    Mkv,
+    Webm,
+    Avi,
+    M4v,
+    Wmv,
+    Srt,
+    Vtt,
+    Ass,
+    Lrc,
+}
+
+impl FileFormat {
+    pub fn canonical_extension(self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Text => "txt",
+            Self::Html => "html",
+            Self::Csv => "csv",
+            Self::Doc => "doc",
+            Self::Docx => "docx",
+            Self::Xls => "xls",
+            Self::Xlsx => "xlsx",
+            Self::Ppt => "ppt",
+            Self::Pptx => "pptx",
+            Self::Pdf => "pdf",
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+            Self::Bmp => "bmp",
+            Self::Tiff => "tiff",
+            Self::Heic => "heic",
+            Self::Heif => "heif",
+            Self::AnimatedGif => "gif",
+            Self::Mp3 => "mp3",
+            Self::Wav => "wav",
+            Self::M4a => "m4a",
+            Self::Aac => "aac",
+            Self::Flac => "flac",
+            Self::Ogg => "ogg",
+            Self::Opus => "opus",
+            Self::Wma => "wma",
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::Mkv => "mkv",
+            Self::Webm => "webm",
+            Self::Avi => "avi",
+            Self::M4v => "m4v",
+            Self::Wmv => "wmv",
+            Self::Srt => "srt",
+            Self::Vtt => "vtt",
+            Self::Ass => "ass",
+            Self::Lrc => "lrc",
+        }
+    }
+
+    pub fn content_kind(self) -> FileContentKind {
+        match self {
+            Self::Png
+            | Self::Jpeg
+            | Self::Webp
+            | Self::Bmp
+            | Self::Tiff
+            | Self::Heic
+            | Self::Heif => FileContentKind::Image,
+            Self::Mp3
+            | Self::Wav
+            | Self::M4a
+            | Self::Aac
+            | Self::Flac
+            | Self::Ogg
+            | Self::Opus
+            | Self::Wma => FileContentKind::Audio,
+            Self::AnimatedGif
+            | Self::Mp4
+            | Self::Mov
+            | Self::Mkv
+            | Self::Webm
+            | Self::Avi
+            | Self::M4v
+            | Self::Wmv => FileContentKind::Video,
+            Self::Srt | Self::Vtt | Self::Ass | Self::Lrc => FileContentKind::Subtitle,
+            _ => FileContentKind::Document,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentKind {
+    Document,
+    Image,
+    Audio,
+    Video,
+    Subtitle,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDetectionMethod {
+    Magic,
+    Container,
+    StructuredText,
+    ExtensionFallback,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileIdentity {
+    /// The user-visible extension, retained only as a hint.
     pub extension: String,
+    /// Stable human-readable signature/container label, never raw prefix bytes.
     pub magic: String,
     pub mime: String,
+    pub detection_method: FileDetectionMethod,
+    pub extension_mismatch: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,15 +154,15 @@ pub struct FileIdentity {
 pub enum FileSkipReason {
     SymlinkOrReparsePoint,
     HiddenOrSystem,
+    IgnoredDirectory,
     ProjectInternal,
     UnsupportedFormat,
     CycleDetected,
     DepthLimitExceeded,
     FileLimitExceeded,
     FileTooLarge,
+    LargeDataConfirmationRequired,
     Duplicate,
-    CaseCollision,
-    UnicodeNormalizationCollision,
     InvalidPath,
     Unreadable,
 }
@@ -46,9 +174,21 @@ pub struct DiscoveredFile {
     pub relative_path: String,
     pub display_name: String,
     pub format: FileFormat,
+    pub content_kind: FileContentKind,
     pub size_bytes: u64,
     pub identity: FileIdentity,
     pub source_identity: crate::models::import_v2::SourceIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_data: Option<LargeDataEstimate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeDataEstimate {
+    pub row_count: u64,
+    pub estimated_output_files: u32,
+    pub total_bytes: u64,
+    pub requires_confirmation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

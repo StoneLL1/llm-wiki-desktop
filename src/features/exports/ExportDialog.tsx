@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { FileOutput, FileSearch, X } from "lucide-react";
+import { FileOutput, FileSearch, LockKeyhole, X } from "lucide-react";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
 import type { WikiTree } from "../../types/wiki";
@@ -11,6 +11,7 @@ import {
   SINGLE_PAGE_EXPORT_TYPES,
   type ExportContentOptions,
   type ExportRoutePreference,
+  type ExportRestrictedContentStatus,
   type ExportType,
 } from "../../types/export";
 
@@ -21,6 +22,7 @@ export interface ExportDialogResult {
   template: string | null;
   options: ExportContentOptions;
   openPreview: boolean;
+  acknowledgeRestrictedContent: boolean;
 }
 
 interface ExportDialogProps {
@@ -70,6 +72,8 @@ export function ExportDialog({
   const [route, setRoute] = useState<ExportRoutePreference>("auto");
   const [options, setOptions] = useState<ExportContentOptions>(DEFAULT_EXPORT_OPTIONS);
   const [openPreview, setOpenPreview] = useState(true);
+  const [restrictedStatus, setRestrictedStatus] = useState<ExportRestrictedContentStatus | null>(null);
+  const [acknowledgeRestrictedContent, setAcknowledgeRestrictedContent] = useState(false);
 
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseLoading, setBrowseLoading] = useState(false);
@@ -86,13 +90,42 @@ export function ExportDialog({
       setRoute("auto");
       setOptions(DEFAULT_EXPORT_OPTIONS);
       setOpenPreview(true);
+      setRestrictedStatus(null);
+      setAcknowledgeRestrictedContent(false);
       setBrowseOpen(false);
       setQuery("");
     }
   }, [open, initialType, initialSourcePath]);
 
   const needsSource = SINGLE_PAGE_EXPORT_TYPES.includes(type);
-  const canGenerate = !needsSource || sourcePath.trim().length > 0;
+  const canGenerate = (!needsSource || sourcePath.trim().length > 0)
+    && (!restrictedStatus?.containsRestrictedContent || acknowledgeRestrictedContent);
+
+  useEffect(() => {
+    if (!open || (needsSource && sourcePath.trim().length === 0)) {
+      setRestrictedStatus(null);
+      setAcknowledgeRestrictedContent(false);
+      return;
+    }
+    let current = true;
+    setRestrictedStatus(null);
+    setAcknowledgeRestrictedContent(false);
+    void invoke<ExportRestrictedContentStatus>("get_export_restricted_content_status", {
+      request: {
+        projectId,
+        projectRootPath: rootPath,
+        exportType: type,
+        sourcePath: needsSource ? sourcePath.trim() : null,
+      },
+    }).then((status) => {
+      if (current) setRestrictedStatus(status);
+    }).catch(() => {
+      if (current) setRestrictedStatus(null);
+    });
+    return () => {
+      current = false;
+    };
+  }, [needsSource, open, projectId, rootPath, sourcePath, type]);
 
   const openBrowse = async () => {
     setBrowseOpen(true);
@@ -133,6 +166,7 @@ export function ExportDialog({
       template,
       options,
       openPreview,
+      acknowledgeRestrictedContent,
     });
   };
 
@@ -184,6 +218,28 @@ export function ExportDialog({
               </div>
             </div>
           </div>
+
+          {restrictedStatus?.containsRestrictedContent ? (
+            <div className="rounded-[var(--radius-md)] border border-[var(--warning-border)] bg-[var(--warning-subtle)] px-3 py-2.5 text-[12px] text-[var(--warning-text)]" role="alert">
+              <div className="flex items-start gap-2">
+                <LockKeyhole size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
+                <div className="space-y-2">
+                  <p className="m-0 leading-5">
+                    {t("exports.restricted.warning", { count: restrictedStatus.restrictedSourceCount })}
+                  </p>
+                  <label className="flex cursor-pointer items-start gap-2 text-[11px] leading-4">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={acknowledgeRestrictedContent}
+                      onChange={(event) => setAcknowledgeRestrictedContent(event.target.checked)}
+                    />
+                    <span>{t("exports.restricted.acknowledge")}</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           <div className="formrow">
             <div>

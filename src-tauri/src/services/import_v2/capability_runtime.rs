@@ -368,6 +368,16 @@ const PACK_SPECS: &[PackSpec] = &[
         licenses: &["Apache-2.0 AND LGPL-3.0-or-later AND MIT"],
         timeout_seconds: ASR_PACK_TIMEOUT_SECONDS,
     },
+    PackSpec {
+        id: "asr-whisper",
+        route: "media.asr",
+        extensions: &[
+            "aac", "flac", "m4a", "mka", "mp3", "ogg", "opus", "wav", "avi", "m4v",
+            "mkv", "mov", "mp4", "mpeg", "mpg", "webm",
+        ],
+        licenses: &["MIT AND LGPL-2.1-or-later"],
+        timeout_seconds: ASR_PACK_TIMEOUT_SECONDS,
+    },
 ];
 
 fn embedded_trusted_keys() -> HashMap<String, Vec<u8>> {

@@ -1,4 +1,4 @@
-import { Copy, File, Folder, Globe2 } from "lucide-react";
+import { File, Folder, Globe2, LockKeyhole } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ImportItem } from "../../types/importV2";
@@ -33,7 +33,6 @@ const FILTERS: readonly { key: ImportQueueFilter; labelKey: string; count: (coun
   { key: "ready", labelKey: "importV2.queue.filter.ready", count: (counts) => counts.ready },
   { key: "needs_action", labelKey: "importV2.queue.filter.needsAction", count: (counts) => counts.needsAction },
   { key: "failed", labelKey: "importV2.queue.filter.failed", count: (counts) => counts.failed },
-  { key: "completed", labelKey: "importV2.queue.filter.completed", count: (counts) => counts.completed },
 ];
 
 const QUEUE_PAGE_SIZE = 200;
@@ -85,11 +84,20 @@ export function ImportQueue({
           <h2 className="m-0 text-[15px] font-semibold">{t("importV2.queue.title")}</h2>
           <span className="text-[11px] text-[var(--text-muted)]">{t("importV2.queue.items", { count: counts.all })}</span>
         </div>
-        <div className="flex items-center gap-2 font-mono text-[11px] text-[var(--text-muted)]" role="status" aria-live="polite">
+        <div className="flex items-center gap-2 font-mono text-[11px] text-[var(--text-muted)]">
           <span>{discoveryActive ? t("importV2.queue.discoveryProgress", { count: discoveryCount }) : sessionSyncing ? t("importV2.queue.syncing") : t("importV2.queue.progress", { percent, processed, total: progress.total })}</span>
           {progress.active > 0 || failed > 0 || needsAction > 0 ? <span className="text-[var(--text-secondary)]">{t("importV2.queue.summary", { active: progress.active, failed, needsAction })}</span> : null}
         </div>
       </header>
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {t("importV2.queue.liveSummary", {
+          total: counts.all,
+          active: progress.active,
+          ready: counts.ready,
+          needsAction,
+          failed,
+        })}
+      </p>
       <nav className="import-v2-queue__filters" aria-label={t("importV2.queue.filters")}>
         {FILTERS.map((entry) => (
           <button
@@ -130,32 +138,45 @@ export function ImportQueue({
               aria-current={isSelected ? "true" : undefined}
             >
               <div className="flex min-w-0 items-start gap-2">
-                {presentation.selectable ? (
-                  <input
-                    type="checkbox"
-                    aria-label={t("importV2.queue.select", { name: item.input.displayName })}
-                    checked={item.selected}
-                    disabled={pendingItemIds.has(item.itemId)}
-                    aria-busy={pendingItemIds.has(item.itemId)}
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(event) => onSetItemSelected(item.itemId, event.target.checked)}
-                  />
-                ) : null}
+                <input
+                  type="checkbox"
+                  aria-label={t("importV2.queue.select", { name: item.input.displayName })}
+                  checked={presentation.selectable && item.selected}
+                  disabled={!presentation.selectable || pendingItemIds.has(item.itemId)}
+                  aria-busy={pendingItemIds.has(item.itemId)}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => onSetItemSelected(item.itemId, event.target.checked)}
+                />
                 <SourceIcon size={15} className="mt-0.5 shrink-0 text-[var(--text-muted)]" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate text-[13px] font-medium" title={item.input.locator}>{item.input.displayName}</span>
+                    {item.restrictedContent ? (
+                      <span
+                        className="shrink-0 text-[var(--warning)]"
+                        title={item.restrictedIdentitySummary ?? t("importV2.restricted.locked")}
+                        aria-label={item.restrictedIdentitySummary ?? t("importV2.restricted.locked")}
+                      >
+                        <LockKeyhole size={12} aria-hidden="true" />
+                      </span>
+                    ) : null}
                     <span className="shrink-0 font-mono text-[10.5px] text-[var(--text-muted)]">{t(`importV2.queue.kind.${item.input.kind}`)}</span>
                   </div>
-                  <div className="flex min-w-0 items-center gap-1">
-                    <p className="m-0 min-w-0 flex-1 truncate font-mono text-[10.5px] text-[var(--text-muted)]" title={item.input.locator}>{item.input.locator}</p>
-                    {onCopyLocator ? <button type="button" className="icon-button shrink-0" title={item.input.locator} aria-label={t("importV2.queue.copyLocator", { name: item.input.displayName })} onClick={(event) => { event.stopPropagation(); void onCopyLocator(item.input.locator); }}><Copy size={12} aria-hidden="true" /></button> : null}
-                  </div>
-                  {item.issue ? <p className="m-0 truncate text-[11px] text-[var(--danger)]" title={item.issue.message}>{item.issue.message}</p> : null}
+                  {presentation.userIssue ? (
+                    <p className="m-0 truncate text-[11px] text-[var(--warning-text)]">
+                      {t(presentation.userIssue.title)}
+                    </p>
+                  ) : null}
                 </div>
               </div>
               <ImportItemStatus item={item} presentation={presentation} />
-              <ImportItemActions item={item} presentation={presentation} pending={pendingItemIds.has(item.itemId)} onAction={onAction} />
+              <ImportItemActions
+                item={item}
+                presentation={presentation}
+                pending={pendingItemIds.has(item.itemId)}
+                onAction={onAction}
+                onCopyLocator={onCopyLocator}
+              />
             </article>
           );
         })}

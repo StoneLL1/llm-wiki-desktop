@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,8 +13,12 @@ import {
   buildFfmpegArguments,
   buildSenseVoiceBatchArguments,
   buildSenseVoiceArguments,
+  buildVideoOcrFrameArguments,
+  buildVideoTextProbeArguments,
   executeWithProviderFallback,
+  isNoAudioExecutionError,
   mergeSenseVoiceTranscripts,
+  nativeToolPath,
   parseSenseVoiceBatchStdout,
   parseEmbeddedSubtitle,
   parseSenseVoiceStdout,
@@ -21,6 +26,7 @@ import {
   renderEmbeddedTranscript,
   renderTranscript,
   resolveStagingMedia,
+  selectStableTextFrameIndexes,
 } from "./core.mjs";
 
 test("production ASR wrapper has no network client", async () => {
@@ -28,6 +34,8 @@ test("production ASR wrapper has no network client", async () => {
   assert.doesNotMatch(source, /node:(?:net|http|https|http2|dns|tls|dgram)|\bfetch\s*\(|\bWebSocket\b/u);
   assert.match(source, /method:\s*"import\.progress"/u);
   assert.match(source, /"asr\.recognizing"/u);
+  assert.match(source, /cwd:\s*packRoot/u);
+  assert.doesNotMatch(source, /cwd:\s*(?:probeRoot|ocrRoot|temporaryRoot|shardRoot)/u);
 });
 
 test("accepts the staging-relative chained media handoff and rejects escaping inputs", async (context) => {
@@ -80,6 +88,30 @@ test("builds fixed local-only decode and SenseVoice commands", () => {
   assert.deepEqual(buildSenseVoiceBatchArguments("model", "tokens", ["a.wav", "b.wav"], "cpu", 2).slice(-2), [
     "a.wav", "b.wav",
   ]);
+  assert.ok(buildSenseVoiceBatchArguments("model", "tokens", ["a.wav"], "cpu", 2, "zh")
+    .includes("--sense-voice-language=zh"));
+  assert.throws(
+    () => buildSenseVoiceBatchArguments("model", "tokens", ["a.wav"], "cpu", 2, "--inject"),
+    /IMPORT_ASR_INVALID_REQUEST/u,
+  );
+});
+
+test("uses Windows extended paths for every absolute native-tool argument", () => {
+  const drivePath = String.raw`C:\deep\input.wav`;
+  const uncPath = String.raw`\\server\share\input.wav`;
+  assert.equal(nativeToolPath(drivePath, "win32"), String.raw`\\?\C:\deep\input.wav`);
+  assert.equal(nativeToolPath(uncPath, "win32"), String.raw`\\?\UNC\server\share\input.wav`);
+  assert.equal(nativeToolPath("//server/share/input.wav", "win32"), String.raw`\\?\UNC\server\share\input.wav`);
+  assert.equal(
+    nativeToolPath(String.raw`\\server\share\..\other\input.wav`, "win32"),
+    String.raw`\\?\UNC\server\share\other\input.wav`,
+  );
+  assert.equal(nativeToolPath(String.raw`\\?\C:\deep\input.wav`, "win32"), String.raw`\\?\C:\deep\input.wav`);
+  assert.equal(nativeToolPath(String.raw`\\.\pipe\runner`, "win32"), String.raw`\\.\pipe\runner`);
+  assert.equal(nativeToolPath(String.raw`\root-relative.wav`, "win32"), String.raw`\root-relative.wav`);
+  assert.equal(nativeToolPath(String.raw`C:drive-relative.wav`, "win32"), String.raw`C:drive-relative.wav`);
+  assert.equal(nativeToolPath(drivePath, "linux"), drivePath);
+  assert.equal(nativeToolPath("relative.wav", "win32"), "relative.wav");
 });
 
 test("parses and renders embedded subtitle cues before ASR fallback", () => {
@@ -98,9 +130,18 @@ test("parses and renders embedded subtitle cues before ASR fallback", () => {
     { startMs: 2100, text: "第二句" },
   ]);
   const markdown = renderEmbeddedTranscript(transcript, "视频.mp4");
-  assert.match(markdown, /provenance: authorized-local-embedded-subtitle/u);
-  assert.match(markdown, /\[00:00:00\.720\] 第一句/u);
+  assert.match(markdown, /provenance: local-embedded-subtitle/u);
+  assert.match(markdown, /## \[00:00:00\.720\]\n\n第一句/u);
   assert.doesNotMatch(markdown, /SenseVoice/u);
+});
+
+test("recognizes ffmpeg no-audio failures without treating ordinary decode errors as no speech", () => {
+  assert.equal(isNoAudioExecutionError({
+    cause: { stderr: "Stream map '0:a:0' matches no streams." },
+  }), true);
+  assert.equal(isNoAudioExecutionError({
+    stderr: "Invalid data found when processing input",
+  }), false);
 });
 
 test("parses the single structured sherpa result without inventing end timestamps", () => {
@@ -114,7 +155,7 @@ test("parses the single structured sherpa result without inventing end timestamp
   assert.deepEqual(result.tokenTimings, [{ startMs: 720, token: "开" }, { startMs: 960, token: "放" }]);
   const markdown = renderTranscript(result, "中文 输入.wav", "cpu");
   assert.match(markdown, /timing: token_start/);
-  assert.match(markdown, /\[00:00:00\.720\] 开放时间/);
+  assert.match(markdown, /## \[00:00:00\.720\]\n\n开放时间/u);
   assert.doesNotMatch(markdown, /-->/);
 });
 
@@ -139,11 +180,44 @@ test("merges bounded SenseVoice batches onto the original media timeline", () =>
     { startMs: 720, token: "第" },
     { startMs: 40_500, token: "第" },
   ]);
-  assert.match(renderTranscript(merged, "long.mp4", "cpu"), /\[00:00:40\.500\] 第三段/u);
+  assert.match(renderTranscript(merged, "long.mp4", "cpu"), /第一段\n\n第三段/u);
   assert.throws(
     () => parseSenseVoiceBatchStdout('{"text":"only one"}', [0, 20_000]),
     /IMPORT_ASR_OUTPUT_INVALID/u,
   );
+});
+
+test("renders sparse 30-60 second anchors without invented AI sections", () => {
+  const markdown = renderTranscript({
+    language: "zh",
+    emotion: "neutral",
+    event: "speech",
+    text: "first middle later",
+    tokenTimings: [],
+    segments: [
+      { startMs: 0, text: "first" },
+      { startMs: 30_000, text: "middle" },
+      { startMs: 60_000, text: "later" },
+    ],
+  }, "mixed-language.mp4", "cpu");
+  assert.match(markdown, /## \[00:00:00\.000\]/u);
+  assert.match(markdown, /## \[00:01:00\.000\]/u);
+  assert.doesNotMatch(markdown, /## (?:Summary|Key points|Topics|摘要|要点)/iu);
+});
+
+test("video fallback performs a lightweight stable-frame probe before explicit OCR frames", () => {
+  const width = 16;
+  const height = 16;
+  const pixels = Buffer.alloc(width * height, 240);
+  for (let y = 0; y < height; y += 1) pixels[y * width + 4] = 20;
+  const pgm = Buffer.concat([Buffer.from(`P5\n${width} ${height}\n255\n`, "ascii"), pixels]);
+  assert.deepEqual(selectStableTextFrameIndexes([pgm, Buffer.from(pgm)]), [1]);
+  assert.deepEqual(buildVideoTextProbeArguments("clip.mp4", "probe-%03d.pgm").slice(-2), [
+    "180", "probe-%03d.pgm",
+  ]);
+  assert.deepEqual(buildVideoOcrFrameArguments("clip.mp4", 10, "frame.png").slice(-3), [
+    "-vf", "scale='min(1920,iw)':-2:flags=lanczos", "frame.png",
+  ]);
 });
 
 test("tries the platform accelerator first and falls back to CPU", async () => {

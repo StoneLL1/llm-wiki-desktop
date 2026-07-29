@@ -185,11 +185,21 @@ function collectBilibiliSubtitleCandidates(value, baseUrl, directOnly = false) {
           .filter(Boolean)
           .map((name) => Number(candidate[name]))
           .find((flag) => Number.isFinite(flag) && flag !== 0);
+        const numericTranslationFlag = ["ai_type", "type"]
+          .map((name) => Object.keys(candidate).find((key) => key.toLowerCase() === name))
+          .filter(Boolean)
+          .map((name) => Number(candidate[name]))
+          .find((flag) => Number.isFinite(flag) && flag >= 2);
+        const label = firstDirectString(candidate, ["lan_doc", "label", "languageLabel"]);
+        const explicitTranslation = numericTranslationFlag !== undefined ||
+          Boolean(candidate.is_translate ?? candidate.isTranslate) ||
+          isTranslationLabel(label);
         output.push({
           url: normalized.request,
           automatic: numericFlag !== undefined,
+          kind: explicitTranslation ? "machine_translation" : "author_original",
           language: firstDirectString(candidate, ["lan", "language", "lang"]),
-          label: firstDirectString(candidate, ["lan_doc", "label", "languageLabel"]),
+          label,
         });
         if (output.length >= 20) return;
       }
@@ -206,14 +216,36 @@ function collectBilibiliSubtitleCandidates(value, baseUrl, directOnly = false) {
   } else {
     walk(value, collect);
   }
+  const originalLanguage =
+    output.find((subtitle) => subtitle.kind !== "machine_translation" && !subtitle.automatic)?.language ||
+    output.find((subtitle) => subtitle.kind !== "machine_translation")?.language;
+  for (const subtitle of output) {
+    if (subtitle.kind === "machine_translation") continue;
+    const originalTrack = !originalLanguage || !subtitle.language ||
+      String(subtitle.language).toLowerCase() === String(originalLanguage).toLowerCase();
+    subtitle.kind = originalTrack
+      ? (subtitle.automatic ? "platform_auto_original" : "author_original")
+      : (subtitle.automatic ? "machine_translation" : "author_other");
+  }
   output.sort((left, right) => {
-    const automatic = Number(left.automatic) - Number(right.automatic);
-    if (automatic !== 0) return automatic;
-    const leftChinese = String(left.language || "").toLowerCase().startsWith("zh");
-    const rightChinese = String(right.language || "").toLowerCase().startsWith("zh");
-    return Number(rightChinese) - Number(leftChinese);
+    return subtitleKindRank(left.kind) - subtitleKindRank(right.kind);
   });
   return output;
+}
+
+function isTranslationLabel(value) {
+  const label = String(value || "").toLowerCase();
+  return label.includes("translation") || label.includes("translated") ||
+    label.includes("翻译") || label.includes("机翻") || label.includes("译制");
+}
+
+function subtitleKindRank(kind) {
+  return {
+    author_original: 0,
+    platform_auto_original: 1,
+    author_other: 2,
+    machine_translation: 3,
+  }[kind] ?? 3;
 }
 
 function firstStreamUrl(streams, baseUrl) {
@@ -349,11 +381,7 @@ export function mergeBilibiliPlayerEvidence(payload, evidenceValues) {
     }
   }
   merged.subtitleCandidates.sort((left, right) => {
-    const automatic = Number(left.automatic) - Number(right.automatic);
-    if (automatic !== 0) return automatic;
-    const leftChinese = String(left.language || "").toLowerCase().startsWith("zh");
-    const rightChinese = String(right.language || "").toLowerCase().startsWith("zh");
-    return Number(rightChinese) - Number(leftChinese);
+    return subtitleKindRank(left.kind) - subtitleKindRank(right.kind);
   });
   merged.subtitles = merged.subtitleCandidates.length
     ? merged.subtitleCandidates.map((subtitle) => subtitle.url)
@@ -427,6 +455,23 @@ function normalizedAssetUrl(raw, baseUrl) {
   }
 }
 
+function normalizedXhsAssetUrl(raw, baseUrl) {
+  const normalized = normalizedAssetUrl(raw, baseUrl);
+  if (!normalized) return null;
+  const request = new URL(normalized.request);
+  const host = request.hostname.toLowerCase();
+  const trustedCdn = host === "xhscdn.com"
+    || host.endsWith(".xhscdn.com")
+    || host === "xhscdn.net"
+    || host.endsWith(".xhscdn.net");
+  if (request.protocol === "http:" && trustedCdn && (!request.port || request.port === "80")) {
+    request.protocol = "https:";
+    request.port = "";
+    return normalizedAssetUrl(request.href, baseUrl);
+  }
+  return normalized;
+}
+
 function preferredXhsImageUrl(image) {
   if (typeof image === "string") return image;
   if (!image || typeof image !== "object") return null;
@@ -453,12 +498,16 @@ function collectXhsImages(value, baseUrl, limit) {
     if (key && Array.isArray(candidate[key])) selected = candidate[key];
   });
   if (!selected) {
-    return collectKeyUrls(value, ["urlDefault", "url_default", "images"], baseUrl, limit);
+    return collectKeyUrls(value, ["urlDefault", "url_default", "images"], baseUrl, limit)
+      .flatMap((raw) => {
+        const normalized = normalizedXhsAssetUrl(raw, baseUrl);
+        return normalized ? [normalized.request] : [];
+      });
   }
   const output = [];
   const seen = new Set();
   for (const image of selected) {
-    const normalized = normalizedAssetUrl(preferredXhsImageUrl(image), baseUrl);
+    const normalized = normalizedXhsAssetUrl(preferredXhsImageUrl(image), baseUrl);
     if (!normalized || seen.has(normalized.identity)) continue;
     seen.add(normalized.identity);
     output.push(normalized.request);
@@ -508,6 +557,109 @@ function collectXhsTags(value, limit = 100) {
     }
   });
   return result;
+}
+
+function collectXhsSubtitleCandidates(value, baseUrl, limit = 20) {
+  const MAX_MEDIA_V2_BYTES = 2 * 1024 * 1024;
+  const embedded = [];
+  walk(value, (candidate) => {
+    if (embedded.length >= 8 || Array.isArray(candidate)) return;
+    for (const [key, child] of Object.entries(candidate)) {
+      if (!["mediav2", "media_v2"].includes(key.toLowerCase())) continue;
+      if (child && typeof child === "object") {
+        embedded.push(child);
+      } else if (typeof child === "string" && child.length <= MAX_MEDIA_V2_BYTES) {
+        try {
+          const parsed = JSON.parse(child);
+          if (parsed && typeof parsed === "object") embedded.push(parsed);
+        } catch {
+          // A malformed optional mediaV2 string is ignored; the caller can
+          // still use direct subtitle fields or local ASR.
+        }
+      }
+    }
+  });
+
+  const output = [];
+  const seen = new Set();
+  const addEntry = (entry, label) => {
+    if (output.length >= limit || !entry || typeof entry !== "object" || Array.isArray(entry)) return;
+    const raw = firstDirectString(entry, ["url", "subtitleUrl", "subtitle_url"]);
+    if (!raw) {
+      for (const child of Object.values(entry)) {
+        if (Array.isArray(child)) {
+          for (const nested of child) addEntry(nested, label);
+        } else if (child && typeof child === "object") {
+          addEntry(child, label);
+        }
+      }
+      return;
+    }
+    const normalized = normalizedXhsAssetUrl(raw, baseUrl);
+    if (!normalized || seen.has(normalized.request)) return;
+    seen.add(normalized.request);
+    const language = firstDirectString(entry, ["language", "languageCode", "language_code", "lang"])
+      || (String(label).toLowerCase() === "source" ? null : String(label));
+    const automaticKey = Object.keys(entry)
+      .find((key) => ["automatic", "isauto", "is_auto"].includes(key.toLowerCase()));
+    const automatic = automaticKey ? Boolean(entry[automaticKey]) : true;
+    const sourceTrack = String(label).toLowerCase() === "source";
+    output.push({
+      url: normalized.request,
+      automatic,
+      kind: sourceTrack
+        ? (automatic ? "platform_auto_original" : "author_original")
+        : (automatic ? "machine_translation" : "author_other"),
+      language,
+      label: String(label),
+    });
+  };
+
+  for (const media of embedded) {
+    walk(media, (candidate) => {
+      if (output.length >= limit || Array.isArray(candidate)) return;
+      const key = Object.keys(candidate).find((name) => name.toLowerCase() === "subtitles");
+      const subtitles = key ? candidate[key] : null;
+      if (!subtitles || typeof subtitles !== "object" || Array.isArray(subtitles)) return;
+      for (const [label, entries] of Object.entries(subtitles)) {
+        for (const entry of Array.isArray(entries) ? entries : [entries]) addEntry(entry, label);
+      }
+    });
+  }
+
+  for (const raw of collectKeyUrls(
+    value,
+    ["subtitles", "subtitle", "captions", "caption_url", "captionUrl", "subtitle_url", "subtitleUrl"],
+    baseUrl,
+    limit,
+  )) {
+    if (output.length >= limit) break;
+    const normalized = normalizedXhsAssetUrl(raw, baseUrl);
+    if (!normalized || seen.has(normalized.request)) continue;
+    seen.add(normalized.request);
+    output.push({
+      url: normalized.request,
+      automatic: false,
+      kind: "author_original",
+      language: null,
+      label: null,
+    });
+  }
+
+  output.sort((left, right) => {
+    const kind = subtitleKindRank(left.kind) - subtitleKindRank(right.kind);
+    if (kind !== 0) return kind;
+    const priority = (subtitle) => {
+      const label = String(subtitle.label || "").toLowerCase();
+      const language = String(subtitle.language || "").toLowerCase();
+      if (label === "source") return 0;
+      if (label === "zh-cn" || language === "zh-cn") return 1;
+      if (label.startsWith("zh") || language.startsWith("zh")) return 2;
+      return 3;
+    };
+    return priority(left) - priority(right);
+  });
+  return output.slice(0, limit);
 }
 
 function normalizePublishedAt(value) {
@@ -636,9 +788,12 @@ export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
   const images = platform === "xiaohongshu"
     ? collectXhsImages(scope, baseUrl, 100)
     : collectKeyUrls(scope, imageKeys, baseUrl, 100);
-  const mediaUrl = bilibiliPlayerEvidence?.mediaUrl
+  const rawMediaUrl = bilibiliPlayerEvidence?.mediaUrl
     || collectKeyUrls(scope, mediaKeys, baseUrl, 1)[0]
     || null;
+  const mediaUrl = platform === "xiaohongshu" && rawMediaUrl
+    ? normalizedXhsAssetUrl(rawMediaUrl, baseUrl)?.request || null
+    : rawMediaUrl;
   const declaredVideo = (platform === "bilibili" && Boolean(expectedId))
     || (platform === "xiaohongshu"
       && String(firstString(scope, ["type", "noteType", "note_type"]) || "").toLowerCase() === "video");
@@ -646,6 +801,9 @@ export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
   if (platform === "xiaohongshu") {
     for (const tag of collectXhsTags(scope)) if (!hashtags.includes(tag)) hashtags.push(tag);
   }
+  const xhsSubtitleCandidates = platform === "xiaohongshu"
+    ? collectXhsSubtitleCandidates(scope, baseUrl)
+    : [];
   return {
     title,
     titleSource: explicitTitle ? "platform" : "inferred",
@@ -654,17 +812,24 @@ export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
     publishedAt,
     platformId: expectedId,
     targetAliases,
-    contentType: declaredVideo || mediaUrl ? "video" : images.length ? "image_post" : "article",
+    contentType: declaredVideo || mediaUrl
+      ? "video"
+      : platform === "xiaohongshu" || images.length
+        ? "image_post"
+        : "article",
     images,
     mediaUrl,
     asrMediaUrl: bilibiliPlayerEvidence?.asrMediaUrl || mediaUrl,
-    subtitleCandidates: bilibiliPlayerEvidence?.subtitleCandidates || [],
-    subtitles: bilibiliPlayerEvidence?.subtitles || collectKeyUrls(
-      scope,
-      ["subtitles", "subtitle", "captions", "caption_url", "captionUrl", "subtitle_url", "subtitleUrl"],
-      baseUrl,
-      20,
-    ),
+    subtitleCandidates: bilibiliPlayerEvidence?.subtitleCandidates || xhsSubtitleCandidates,
+    subtitles: bilibiliPlayerEvidence?.subtitles
+      || (platform === "xiaohongshu"
+        ? xhsSubtitleCandidates.map((subtitle) => subtitle.url)
+        : collectKeyUrls(
+          scope,
+          ["subtitles", "subtitle", "captions", "caption_url", "captionUrl", "subtitle_url", "subtitleUrl"],
+          baseUrl,
+          20,
+        )),
     hashtags,
   };
 }
@@ -768,4 +933,16 @@ export function classifyRemoteImageKind(platform, hasPlayableMedia, localOcrAuth
   if (hasPlayableMedia) return mediaSaveMode === "preserve_original" ? "image" : null;
   if (localOcrAuthorized) return "temporary_image";
   return mediaSaveMode === "preserve_original" ? "image" : null;
+}
+
+export function platformHasVideoEvidence(payload, mediaUrl, asrMediaUrl) {
+  return payload?.contentType === "video" || Boolean(mediaUrl || asrMediaUrl);
+}
+
+export function xiaohongshuImageOcrRequired(payload, localOcrAuthorized) {
+  return payload?.contentType === "image_post" && !localOcrAuthorized;
+}
+
+export function xiaohongshuImageEvidenceReady(payload, localizedImageCount) {
+  return payload?.contentType !== "image_post" || localizedImageCount > 0;
 }

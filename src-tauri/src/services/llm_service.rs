@@ -212,6 +212,32 @@ impl LlmService {
         Ok(ProviderHttpRequest { url, headers, body })
     }
 
+    /// Build a streaming request for a bounded JSON candidate. Providers with
+    /// a stable JSON-output switch receive it in addition to the textual
+    /// contract; Anthropic keeps the prompt-only contract because this endpoint
+    /// has no equivalent portable response-format field.
+    pub fn build_structured_streaming_request(
+        config: &LlmProviderConfig,
+        secret: Option<&str>,
+        prompt: &str,
+    ) -> Result<ProviderHttpRequest, BackendError> {
+        let mut request = Self::build_streaming_request(config, secret, prompt)?;
+        match config.provider {
+            LlmProviderKind::OpenAi | LlmProviderKind::Custom => {
+                request.body["response_format"] = serde_json::json!({ "type": "json_object" });
+            }
+            LlmProviderKind::Google => {
+                request.body["generationConfig"] =
+                    serde_json::json!({ "responseMimeType": "application/json" });
+            }
+            LlmProviderKind::Ollama => {
+                request.body["format"] = serde_json::json!("json");
+            }
+            LlmProviderKind::Anthropic => {}
+        }
+        Ok(request)
+    }
+
     pub async fn complete(
         &self,
         config: &LlmProviderConfig,
@@ -287,6 +313,61 @@ impl LlmService {
         secret: Option<&str>,
         prompt: &str,
         is_cancelled: C,
+        on_delta: D,
+    ) -> Result<String, BackendError>
+    where
+        C: Fn() -> bool + Send + Sync,
+        D: FnMut(&str) + Send,
+    {
+        self.complete_streaming_with_timeout(
+            config,
+            secret,
+            prompt,
+            std::time::Duration::from_secs(120),
+            false,
+            is_cancelled,
+            on_delta,
+        )
+        .await
+    }
+
+    /// Stream a completion for a user-visible background task whose output may
+    /// legitimately take longer than an interactive chat response. Source AI
+    /// uses this path so an OpenAI-compatible provider cannot fail merely
+    /// because it buffered a long candidate near the interactive 120-second
+    /// boundary.
+    pub async fn complete_structured_long_running_streaming<C, D>(
+        &self,
+        config: &LlmProviderConfig,
+        secret: Option<&str>,
+        prompt: &str,
+        is_cancelled: C,
+        on_delta: D,
+    ) -> Result<String, BackendError>
+    where
+        C: Fn() -> bool + Send + Sync,
+        D: FnMut(&str) + Send,
+    {
+        self.complete_streaming_with_timeout(
+            config,
+            secret,
+            prompt,
+            std::time::Duration::from_secs(10 * 60),
+            true,
+            is_cancelled,
+            on_delta,
+        )
+        .await
+    }
+
+    async fn complete_streaming_with_timeout<C, D>(
+        &self,
+        config: &LlmProviderConfig,
+        secret: Option<&str>,
+        prompt: &str,
+        timeout: std::time::Duration,
+        structured_json: bool,
+        is_cancelled: C,
         mut on_delta: D,
     ) -> Result<String, BackendError>
     where
@@ -296,9 +377,13 @@ impl LlmService {
         if is_cancelled() {
             return Err(llm_cancelled_error());
         }
-        let request = Self::build_streaming_request(config, secret, prompt)?;
+        let request = if structured_json {
+            Self::build_structured_streaming_request(config, secret, prompt)?
+        } else {
+            Self::build_streaming_request(config, secret, prompt)?
+        };
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(timeout)
             .build()
             .map_err(|error| {
                 BackendError::new("LLM_CLIENT_FAILED", error.to_string(), true, false)
@@ -350,6 +435,7 @@ impl LlmService {
         let mut full = String::new();
         let mut buf = String::new();
         let mut utf8_pending = Vec::new();
+        let mut raw_response = Vec::new();
         loop {
             let next = stream.next();
             tokio::pin!(next);
@@ -374,6 +460,7 @@ impl LlmService {
                     false,
                 )
             })?;
+            raw_response.extend_from_slice(&chunk);
             append_utf8_chunk(&mut utf8_pending, &chunk, &mut buf);
             // Process every complete line now in the buffer; keep any trailing
             // partial line for the next chunk.
@@ -398,6 +485,12 @@ impl LlmService {
             }
         }
         if full.trim().is_empty() {
+            if let Some(buffered) = extract_buffered_response(provider, &raw_response) {
+                if !buffered.is_empty() {
+                    on_delta(&buffered);
+                    return Ok(buffered);
+                }
+            }
             return Err(BackendError::new(
                 "LLM_RESPONSE_INVALID",
                 "Provider stream produced no text.",
@@ -407,6 +500,11 @@ impl LlmService {
         }
         Ok(full)
     }
+}
+
+fn extract_buffered_response(provider: LlmProviderKind, response: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(response).ok()?;
+    extract_text(provider, &value)
 }
 
 fn llm_cancelled_error() -> BackendError {
@@ -553,6 +651,20 @@ mod tests {
     }
 
     #[test]
+    fn extracts_openai_compatible_non_streaming_fallback() {
+        let response = br#"{"choices":[{"message":{"content":"{\"overview\":\"ok\"}"}}]}"#;
+        assert_eq!(
+            extract_buffered_response(LlmProviderKind::Custom, response).as_deref(),
+            Some("{\"overview\":\"ok\"}")
+        );
+        let response_with_newline = b"{\"choices\":[{\"message\":{\"content\":\"candidate\"}}]}\n";
+        assert_eq!(
+            extract_buffered_response(LlmProviderKind::OpenAi, response_with_newline).as_deref(),
+            Some("candidate")
+        );
+    }
+
+    #[test]
     fn builds_provider_specific_requests_without_leaking_secret_into_body() {
         let openai = LlmService::build_request(
             &config(LlmProviderKind::OpenAi, "https://api.openai.com"),
@@ -645,6 +757,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ollama.body["stream"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn structured_streaming_request_uses_provider_json_output_contracts() {
+        let custom = LlmService::build_structured_streaming_request(
+            &config(LlmProviderKind::Custom, "https://api.deepseek.com"),
+            Some("secret"),
+            "Return JSON.",
+        )
+        .unwrap();
+        assert_eq!(
+            custom.body["response_format"],
+            serde_json::json!({ "type": "json_object" })
+        );
+        assert_eq!(custom.body["stream"], serde_json::json!(true));
+
+        let google = LlmService::build_structured_streaming_request(
+            &config(
+                LlmProviderKind::Google,
+                "https://generativelanguage.googleapis.com",
+            ),
+            Some("secret"),
+            "Return JSON.",
+        )
+        .unwrap();
+        assert_eq!(
+            google.body["generationConfig"]["responseMimeType"],
+            serde_json::json!("application/json")
+        );
+
+        let ollama = LlmService::build_structured_streaming_request(
+            &config(LlmProviderKind::Ollama, "http://localhost:11434"),
+            None,
+            "Return JSON.",
+        )
+        .unwrap();
+        assert_eq!(ollama.body["format"], serde_json::json!("json"));
     }
 
     #[test]

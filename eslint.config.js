@@ -33,10 +33,6 @@ export default tseslint.config(
     languageOptions: {
       ecmaVersion: 2022,
       globals: globals.browser,
-      parserOptions: {
-        project: ["./tsconfig.app.json", "./tsconfig.node.json"],
-        tsconfigRootDir: import.meta.dirname,
-      },
     },
     rules: {
       "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_" }]

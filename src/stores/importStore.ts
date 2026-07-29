@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { ImportItem, ImportSession } from "../types/importV2";
+import type { ImportCompletion, ImportItem, ImportSession } from "../types/importV2";
 
 export type ImportQueueFilter =
   | "all"
@@ -16,17 +16,22 @@ export const importProjectKey = (projectId: string, rootPath: string): string =>
 interface ImportState {
   projectKey: string | null;
   session: ImportSession | null;
+  completion: ImportCompletion | null;
   selectedItemId: string | null;
   filter: ImportQueueFilter;
   mutationKeys: ReadonlySet<string>;
   sessionEpoch: number;
   previewItemId: string | null;
-  byokItemId: string | null;
   capabilityItemId: string | null;
   loginItemId: string | null;
-  migrationDialogOpen: boolean;
+  actionRequest: { itemId: string; action: string; requestId: number } | null;
   isConfirming: boolean;
   setIsConfirming: (confirming: boolean) => void;
+  setCompletion: (
+    projectKey: string,
+    completion: ImportCompletion | null,
+    epoch?: number,
+  ) => boolean;
   attachSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
   replaceSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
   replaceItem: (projectKey: string, item: ImportItem, epoch?: number) => boolean;
@@ -38,13 +43,12 @@ interface ImportState {
   endMutation: (key: string) => void;
   openPreview: (itemId: string) => void;
   closePreview: () => void;
-  openByok: (itemId: string) => void;
-  closeByok: () => void;
   openCapability: (itemId: string) => void;
   closeCapability: () => void;
   openLogin: (itemId: string) => void;
   closeLogin: () => void;
-  setMigrationDialogOpen: (open: boolean) => void;
+  requestAction: (itemId: string, action: string) => void;
+  clearActionRequest: (requestId: number) => void;
   reset: () => void;
 }
 
@@ -65,31 +69,41 @@ function scopeAccepts(state: ImportState, projectKey: string, epoch?: number): b
 function clearDialogs() {
   return {
     previewItemId: null,
-    byokItemId: null,
     capabilityItemId: null,
     loginItemId: null,
-    migrationDialogOpen: false,
   };
 }
 
 export const useImportStore = create<ImportState>((set, get) => ({
   projectKey: null,
   session: null,
+  completion: null,
   selectedItemId: null,
   filter: "all",
   mutationKeys: new Set<string>(),
   sessionEpoch: 0,
   previewItemId: null,
-  byokItemId: null,
   capabilityItemId: null,
   loginItemId: null,
-  migrationDialogOpen: false,
+  actionRequest: null,
   isConfirming: false,
   setIsConfirming: (isConfirming) => set({ isConfirming }),
+  setCompletion: (projectKey, completion, epoch) => {
+    const state = get();
+    if (!scopeAccepts(state, projectKey, epoch)) return false;
+    set({ completion });
+    return true;
+  },
   attachSession: (projectKey, session, epoch) => {
     const state = get();
     if (!scopeAccepts(state, projectKey, epoch)) return false;
-    set({ projectKey, session, selectedItemId: selectedItemIdFor(session, state.selectedItemId) });
+    set({
+      projectKey,
+      session,
+      completion:
+        state.session?.sessionId === session.sessionId ? state.completion : null,
+      selectedItemId: selectedItemIdFor(session, state.selectedItemId),
+    });
     return true;
   },
   replaceSession: (projectKey, session, epoch) => {
@@ -115,12 +129,14 @@ export const useImportStore = create<ImportState>((set, get) => ({
     set((state) => ({
       projectKey,
       session: null,
+      completion: null,
       selectedItemId: null,
       filter: "all",
       isConfirming: false,
       mutationKeys: new Set<string>(),
       sessionEpoch: state.sessionEpoch + 1,
       ...clearDialogs(),
+      actionRequest: null,
     })),
   beginSessionEpoch: (projectKey) => {
     const state = get();
@@ -146,22 +162,31 @@ export const useImportStore = create<ImportState>((set, get) => ({
     }),
   openPreview: (previewItemId) => set({ previewItemId, selectedItemId: previewItemId }),
   closePreview: () => set({ previewItemId: null }),
-  openByok: (byokItemId) => set({ byokItemId, selectedItemId: byokItemId }),
-  closeByok: () => set({ byokItemId: null }),
   openCapability: (capabilityItemId) => set({ capabilityItemId, selectedItemId: capabilityItemId }),
   closeCapability: () => set({ capabilityItemId: null }),
   openLogin: (loginItemId) => set({ loginItemId, selectedItemId: loginItemId }),
   closeLogin: () => set({ loginItemId: null }),
-  setMigrationDialogOpen: (migrationDialogOpen) => set({ migrationDialogOpen }),
+  requestAction: (itemId, action) =>
+    set((state) => ({
+      actionRequest: {
+        itemId,
+        action,
+        requestId: (state.actionRequest?.requestId ?? 0) + 1,
+      },
+    })),
+  clearActionRequest: (requestId) =>
+    set((state) => state.actionRequest?.requestId === requestId ? { actionRequest: null } : {}),
   reset: () =>
     set({
       projectKey: null,
       session: null,
+      completion: null,
       selectedItemId: null,
       filter: "all",
       mutationKeys: new Set<string>(),
       sessionEpoch: 0,
       ...clearDialogs(),
+      actionRequest: null,
       isConfirming: false,
     }),
 }));

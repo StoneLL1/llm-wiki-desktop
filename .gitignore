@@ -7,8 +7,16 @@ src-tauri/target/
 .vscode/
 .idea/
 *.log
+__pycache__/
+*.py[cod]
 .DS_Store
 __MACOSX/
 ._*
 wiki/wiki/raw/GitHubDaily/
+wiki/wiki/.app/
 .dev-capabilities/
+target-codex-*/
+.impeccable/
+.superpowers/
+UI-Frontend-design/import-v2-reference.html
+UI-Frontend-design/import-workbench.html

@@ -4,11 +4,8 @@ use llm_wiki_desktop_lib::models::{
 };
 
 #[test]
-fn balanced_policy_never_auto_invokes_cloud_or_low_quality_success() {
-    let policy = AgentAssistancePolicy::balanced(true);
-    assert!(policy.auto_local_on_hard_failure);
-    assert!(!policy.auto_local_on_quality_warning);
-    assert!(!policy.auto_byok);
+fn balanced_policy_only_defines_the_explicit_attempt_budget() {
+    let policy = AgentAssistancePolicy::balanced();
     assert_eq!(policy.max_attempts_per_item, 1);
 }
 
@@ -43,7 +40,7 @@ fn agent_recovery_action_wire_names_are_stable() {
         "invoke_local_agent"
     );
     assert_eq!(
-        serde_json::to_value(AgentRecoveryAction::RequestByok).unwrap(),
-        "request_byok"
+        serde_json::to_value(AgentRecoveryAction::CompareCandidate).unwrap(),
+        "compare_candidate"
     );
 }

@@ -13,6 +13,7 @@ vi.mock("react-i18next", () => ({
         "agent.activity.toolFailed": "Tool failed",
         "agent.activity.done": "Done",
         "agent.activity.active": "Active",
+        "agent.activity.phase.sourceAiProvider": "AI provider response",
       })[key] ?? key,
   }),
 }));
@@ -34,5 +35,40 @@ describe("AgentActivityTimeline", () => {
     expect(screen.getByText("Read")).toBeInTheDocument();
     expect(screen.getByText("wiki/page.md")).toBeInTheDocument();
     expect(screen.queryByText("hidden")).not.toBeInTheDocument();
+  });
+
+  it("pairs Source AI phases without hiding activities emitted between them", () => {
+    render(
+      <AgentActivityTimeline
+        taskStatus="succeeded"
+        activities={[
+          {
+            kind: "phase",
+            name: "source-ai-provider",
+            status: "started",
+          },
+          {
+            kind: "tool_call",
+            callId: "read-1",
+            name: "Read",
+            detail: "input.json",
+          },
+          {
+            kind: "tool_result",
+            callId: "read-1",
+            success: true,
+          },
+          {
+            kind: "phase",
+            name: "source-ai-provider",
+            status: "completed",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByText("AI provider response")).toHaveLength(1);
+    expect(screen.getByText("Read")).toBeInTheDocument();
+    expect(screen.getAllByText("Done")).toHaveLength(1);
   });
 });

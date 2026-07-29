@@ -36,7 +36,7 @@ beforeEach(async () => {
 });
 
 describe("ImportMigrationDialog", () => {
-  it("shows dry-run evidence, untouched content, checkpoint and rollback facts", () => {
+  it("shows a user-language summary and keeps paths in technical details", () => {
     render(
       <ImportMigrationDialog
         open
@@ -53,15 +53,16 @@ describe("ImportMigrationDialog", () => {
       />,
     );
 
-    expect(screen.getByText(/automatic links/i)).toBeInTheDocument();
-    expect(screen.getByText(/proposed records/i)).toBeInTheDocument();
-    expect(screen.getByText(/conflicts/i)).toBeInTheDocument();
+    expect(screen.getByText(/matched automatically: 1/i)).toBeInTheDocument();
+    expect(screen.getByText(/ready to update: 1/i)).toBeInTheDocument();
+    expect(screen.getByText(/needs review: 1/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/technical details/i));
     expect(screen.getByText(/raw\//i)).toBeInTheDocument();
-    expect(screen.getByText(/Git checkpoint/i)).toBeInTheDocument();
+    expect(screen.getByText(/saved restore point/i)).toBeInTheDocument();
     expect(screen.getByText(/Rollback uses/i)).toBeInTheDocument();
   });
 
-  it("keeps Apply disabled until the report fingerprint is explicitly confirmed", async () => {
+  it("keeps the update disabled until the preview and missing restore point are confirmed", async () => {
     const onApply = vi.fn().mockResolvedValue(undefined);
     render(
       <ImportMigrationDialog
@@ -79,15 +80,15 @@ describe("ImportMigrationDialog", () => {
       />,
     );
 
-    const apply = screen.getByRole("button", { name: /apply migration/i });
+    const apply = screen.getByRole("button", { name: /update compatibility data/i });
     expect(apply).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: /confirm.*report fingerprint/i }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /no Git rollback/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed this exact change preview/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /no saved restore point/i }));
     fireEvent.click(apply);
     await waitFor(() => expect(onApply).toHaveBeenCalledWith(plan, { ...confirmation, acknowledgeNoGitRollback: true }));
   });
 
-  it("offers resume for an interrupted migration without cancelling on close", () => {
+  it("offers a continuation for an interrupted update without cancelling on close", () => {
     const onResume = vi.fn();
     const onClose = vi.fn();
     render(
@@ -107,9 +108,9 @@ describe("ImportMigrationDialog", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /confirm.*report fingerprint/i }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /no Git rollback/i }));
-    fireEvent.click(screen.getByRole("button", { name: /resume migration/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed this exact change preview/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /no saved restore point/i }));
+    fireEvent.click(screen.getByRole("button", { name: /continue update/i }));
     fireEvent.click(screen.getAllByRole("button", { name: /close/i })[1]);
     expect(onResume).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();

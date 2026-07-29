@@ -1,5 +1,8 @@
 # LLM Wiki Desktop 应用流程说明
 
+> 导入、来源库、文件与媒体处理、OCR / ASR、登录态和 AI 整理的完整流程见 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文件中的旧式 Import 概览已按该决策收敛；导入确认不得自动触发编译。
+> 兼容迁移只能从设置中的独立入口进入；正常 Import 工作台不挂载迁移提示、迁移对话框或旧来源操作入口。
+
 ## 1. 文档目的
 
 本文面向后续开发 Agent / Claude Code，用来说明 LLM Wiki Desktop 的应用流程、状态变化、文件读写边界和用户确认规则。
@@ -20,16 +23,17 @@ LLM Wiki Desktop 是一个本地优先的跨平台桌面知识库应用。它的
 
 ```text
 Raw Sources
-  -> Extracted Markdown
-  -> Wiki
+  -> Sources（可读来源）
+  -> Wiki（独立编译的派生页面）
   -> Graph / Chat / HTML Reports
 ```
 
 含义如下：
 
 - `raw/sources/` 保存原始资料，默认不可变。
-- `raw/extracted/` 保存从原始资料中提取出来的 Markdown、文本和元数据。
-- `wiki/` 保存 LLM / Agent 编译后的结构化 Markdown 页面。
+- `raw/extracted/` 仅兼容读取旧项目数据；新 staging、预览和候选不得写入该目录。
+- `wiki/sources/` 保存导入确认后的忠实 Source Markdown。
+- `wiki/` 其他目录保存 LLM / Agent 独立编译后的结构化知识页面。
 - `.app/` 保存应用状态、任务、缓存、聊天记录、设置等 JSON 数据。
 - `exports/html/` 保存 HTML、知识卡片和项目报告输出。
 - Git 用于检查点、恢复和冲突保护，普通用户不需要理解 Git。
@@ -57,7 +61,7 @@ Raw Sources
 
 本节记录已经落地的 orchestration 事实，不替代下文的产品流程、安全确认、持久化或审计要求：
 
-- 导入确认链路：`Import preview -> confirm_import_preview -> wikiStore.scan -> optional start_wiki_compile`。确认成功后先刷新当前项目 Wiki；只有用户选择导入后编译时，才继续启动 Wiki 编译任务。
+- 导入确认链路：`ImportSession -> SourceCandidate -> commit source -> wikiStore.scan sources`。确认成功后只刷新来源库；编译由用户在完成摘要或历史中另行启动，不属于导入确认链路。
 - 任务启动链路：`Task launch -> backend task -> taskStore upsert -> current-project drawer open`。后端返回的任务始终写入全局任务状态；仅当请求所属项目仍是当前项目时，才自动打开并选中任务抽屉。
 - 高风险确认链路：`PendingAction -> ProjectConfirmationController -> backend revalidation/checkpoint -> result task/update`。`ProjectConfirmationController` 统一承接项目 PendingAction 和编译冲突；后端在真正执行前重新验证项目、目标状态和既有执行计划，并按操作要求创建或确认 Git checkpoint，随后返回任务或项目/文件状态更新。
 - 项目切换链路：`Project switch -> project key/epoch invalidation -> stale UI commits and toasts suppressed`。异步 workflow 在提交视图状态、打开抽屉、切换视图或发送 toast 前校验项目 key / epoch，旧项目结果不得覆盖新项目 UI。
@@ -146,20 +150,16 @@ project-root/
 3. 如果是已有项目，直接打开并扫描。
 4. 如果是普通文件夹，展示“初始化为项目”的确认说明。
 5. 用户确认后，应用创建项目结构。
-6. 按文件类型迁入原始资料。
-7. 记录冲突、重命名和失败。
-8. 初始化 Git 检查点。
-9. 进入导入解析预览。
+6. 应用创建统一导入会话并发现其中的受支持内容。
+7. 经过提取、必要的 OCR / ASR、质量检查后展示候选 Source。
+8. 用户确认“导入到来源库”后，才以 `sourceId` 为原子边界写入 raw 与 `wiki/sources/`。
+9. 不支持、失败和未确认文件不得留下占位 Source。
 
 ### 6.2 文件归档规则
 
-- PDF 进入 `raw/sources/pdfs/`
-- DOCX 等文档进入 `raw/sources/docs/`
-- PPTX 进入 `raw/sources/slides/`
-- XLSX / CSV 进入 `raw/sources/sheets/`
-- MD / TXT 进入 `raw/sources/markdown/`
-- 图片进入 `raw/assets/`
-- 其他文件进入 `raw/sources/other/`
+- raw 证据按本地来源、网页 / 平台证据和资源职责保存，不以媒体类型作为用户心智模型。
+- `wiki/sources/` 按稳定来源渠道组织，例如 `local/`、`web/<host>/`。
+- 媒体类型、平台和原相对路径写入 Source 元数据。
 
 ### 6.3 冲突规则
 
@@ -176,32 +176,54 @@ project-root/
 ### 7.1 用户路径
 
 1. 用户点击“导入”或拖拽文件 / 文件夹。
-2. 应用让用户选择导入到当前项目。
-3. 应用复制资料到当前项目的 `raw/sources/` 或 `raw/assets/`。
-4. 应用提取文本、图片和元数据到 `raw/extracted/`。
-5. 展示解析预览。
-6. 用户确认后，才触发 Wiki 编译。
+2. 用户也可以粘贴 URL、文本或 Markdown；应用创建或恢复当前项目的活动导入会话。
+3. 应用自动执行安全扫描、类型识别、轻量抓取、确定性提取、字幕发现和质量检查。
+4. 缺少必要正文时，任务聚合显示需要的登录、OCR、ASR、能力安装或 Agent 修复操作。
+5. 应用展示最终 Source Markdown 预览、资源状态、目标路径和质量信息；来源更新展示 Diff。
+6. 所有可提交项默认勾选，用户点击“导入到来源库”。
+7. 后端写入不可变 raw 证据、来源版本记录和 `wiki/sources/` 当前页面。
+8. 完成摘要提供“查看已导入来源”和“用这些来源更新 Wiki”；只有后一个操作进入独立编译流程。
 
-### 7.2 解析预览必须包含
+### 7.2 候选预览必须包含
 
-- 文件名
-- 文件类型
-- 文件大小
-- 解析状态
-- 错误原因
-- 提取文本预览
-- 页数、字数或其他可用元数据
+- 来源名称、类型和定位信息
+- 用户可读状态、阶段和真实进度
+- 最终 Source Markdown 快速预览与完整预览
+- 本地化资源状态
+- 目标 `wiki/sources/` 路径
+- 页数、字数、时长或其他可用元数据
+- 质量警告和可定位的问题区间
+- 更新项的新旧 Diff
+- 折叠的技术错误和日志
 
 ### 7.3 导入层边界
 
-导入层只负责无损保留和标准化提取：
+导入层负责把输入变成经过确认的可阅读 Source：
 
-- 保存原文件。
-- 提取文本。
-- 提取图片。
-- 提取来源元数据。
+- `raw/` 无损保留不可变原文件、页面证据、图片、字幕、OCR / ASR 原始输出和版本证据。
+- `wiki/sources/` 保存忠实、规范化、可阅读和可编辑的当前 Source。
+- `.app/` 保存会话、来源身份、版本、别名、编辑基线、质量报告和处理尝试。
+- 完全重复项不创建新 Source；更新同一来源时使用版本、Diff 和三方合并。
+- 失败项不创建占位 Markdown。
 
-OCR 和视觉理解交给后续编译 Agent / Skill，不在导入层阻塞判断图片价值。
+OCR 和 ASR 在导入阶段按正文缺口启用，并且必须由用户主动授权。BYOK 不参与解析恢复；本地 Agent 只能在用户主动触发后生成 staging 候选。图片视觉理解不在首版范围。
+
+### 7.4 会话与待办
+
+- 每个项目同一时间只有一个活动导入会话。
+- 已提交项进入完成摘要与历史，未解决项继续留在会话。
+- 页面切换和最小化不停止后台任务。
+- 应用重启后耗时下载、OCR、ASR 显示“已暂停，可继续”，由用户恢复。
+- 批次状态区聚合登录、OCR、ASR 和能力安装待办，不连续弹出模态框。
+- 未解决项只阻断自身，其他可确认项可以部分提交。
+
+### 7.5 导入完成
+
+完成摘要显示已导入、已更新、重复和仍待处理数量。
+
+- “查看已导入来源”打开现有 Wiki 阅读器中的 Source。
+- “用这些来源更新 Wiki”携带本次成功版本的 `sourceId + versionId` change set，进入第 8 节的独立编译流程。
+- 编译不得写入 `wiki/sources/`。
 
 ## 8. Wiki 编译流程
 
@@ -213,13 +235,13 @@ BYOK API 是后备路径，也允许用户在设置或任务启动时手动选�
 
 ### 8.2 用户路径
 
-1. 用户在导入预览页确认编译，或手动触发重新编译。
+1. 用户在导入完成摘要点击“用这些来源更新 Wiki”，从历史重新选择 Source 版本，或手动触发重新编译。
 2. 应用创建 Git 检查点。
 3. 应用选择执行路径：Agent CLI 或 BYOK API。
 4. 编译器读取：
    - `purpose.md`
    - `schema.md`
-   - `raw/extracted/`
+   - 用户选择的 `wiki/sources/` 版本及其 `sourceId + versionId` change set
    - 现有 `wiki/`
 5. 生成或更新：
    - Wiki 页面
@@ -230,6 +252,7 @@ BYOK API 是后备路径，也允许用户在设置或任务启动时手动选�
 7. 无冲突时自动合并。
 8. 有冲突时展示 Markdown Diff。
 9. 成功后提交 Git 结果并刷新 UI、搜索和图谱缓存。
+10. 编译器不得写入或删除 `wiki/sources/`。
 
 ### 8.3 冲突处理
 
@@ -245,7 +268,8 @@ BYOK API 是后备路径，也允许用户在设置或任务启动时手动选�
 
 - 编译失败不能破坏已有 Wiki。
 - 批量覆盖、删除、重写必须有检查点。
-- `raw/sources/` 默认不可变。替换或删除原始资料必须明确确认。
+- `raw/` 默认不可变。来源更新写入新版本并保护当前 Source 的人工编辑。
+- 永久删除来源必须进入专用二次确认页，并按整个来源包处理；派生 Wiki 页面不自动删除。
 
 ## 9. 文章阅读与编辑流程
 
@@ -282,6 +306,16 @@ Markdown 渲染必须支持：
 - 块引用面板。
 - 图谱拖线编辑。
 - 独立反向链接面板。
+
+### 9.4 Source 专属流程
+
+- Sources 仍位于现有 Wiki 文件树和阅读器中，不增加顶层应用。
+- 顶部工具栏只新增 `AI 整理`。
+- 忠实原稿、来源信息、版本时间线、重新 OCR / ASR、换字幕和刷新来源位于可开关右侧面板。
+- AI 整理在可拖动、可调整尺寸、可最小化的非模态浮动工作台中运行；工作台固定绑定启动时的项目、Source 和任务，切页不改绑，切项目时隐藏；关闭工作台不取消任务，显式取消需二次确认。
+- AI 整理生成候选稿，并在标题后生成或替换唯一的 `## 内容概览`；完成后默认显示只读最终稿，Diff 与过程按需查看。
+- 候选必须经过用户明确确认和必要的 Git 检查点后更新当前 Source；Diff 始终可用但不强制先查看。
+- Source 在生成期间变化时，使用 `sourceId + versionId + Markdown hash` 重新 Diff 或三方合并。
 
 ## 10. 知识图谱流程
 
@@ -383,8 +417,8 @@ Markdown 渲染必须支持：
 
 - 删除页面。
 - 覆盖页面。
-- 删除原始资料。
-- 替换原始资料。
+- 永久删除整个来源包。
+- 以新版本替换或合并当前来源。
 - 批量重写。
 - 冲突合并。
 
@@ -460,6 +494,8 @@ API Key 必须存系统钥匙串或凭据管理器，不能明文写入项目文
 
 关闭主窗口时默认最小化到系统托盘，任务继续运行。用户可以在设置中改为关闭时询问或终止任务。
 
+页面切换、项目内导航和窗口最小化不停止导入任务。应用真正退出或进程中断后，下载、OCR 和 ASR 保存阶段与已完成分片；再次打开项目时显示“已暂停，可继续”，由用户明确恢复，不自动启动耗时工作。用户主动取消才清理临时媒体和中间分片。
+
 系统通知用于：
 
 - 任务完成。
@@ -478,6 +514,10 @@ API Key 必须存系统钥匙串或凭据管理器，不能明文写入项目文
 | `wiki/index.md` | Wiki 编译、索引刷新 | 内容目录和 LLM 导航入口 |
 | `wiki/overview.md` | Wiki 编译 | 全局摘要 |
 | `wiki/log.md` | 编译、修复、重要操作 | 操作历史记录 |
+| `wiki/sources/` | 确认导入、来源更新、AI 整理确认或版本恢复 | 当前可阅读、可编辑的来源库 |
+| `.app/import/` | 导入会话、任务、处理尝试和待办变化 | 可恢复的 Import V2 状态 |
+| `.app/sources/` | 来源提交、更新、编辑基线和时间线变化 | sourceId、versionId、别名、hash、质量与版本 |
+| `.app/compile/` | 用户启动独立编译及其完成时 | Source change set 与已消费版本 |
 | `.app/settings.json` | 设置变化 | 项目级应用设置 |
 | `.app/agent-config.json` | Agent 配置变化 | Agent 检测与默认绑定 |
 | `.app/graph-cache.json` | 图谱构建后 | 布局缓存 |
@@ -509,10 +549,11 @@ API Key 必须存系统钥匙串或凭据管理器，不能明文写入项目文
 - 不要引入数据库保存项目内容。
 - 不要把 API Key 写入项目文件。
 - 不要让普通搜索自动调用模型。
-- 不要把 Agent 作为唯一可用路径；BYOK API 需要支撑核心流程。
+- 不要把 Agent 作为 Wiki 编译、AI 整理、Chat 的唯一可用路径；BYOK API 在 Source 已存在后支撑这些核心流程。
+- 不要让 BYOK 参与导入解析或失败恢复。
 - 不要让 BYOK API 替代所有高级 Agent Skill 能力。
 - 不要静默安装 Agent。
 - 不要静默覆盖用户手动编辑。
-- 不要在导入层做复杂 OCR / 视觉判断。
+- OCR / ASR 属于导入阶段的按内容缺口能力，必须由用户主动启用；图片视觉理解不在首版范围。
 - 不要把 HTML 模板和 Wiki schema 混在一起。
 - 不要把路由命名当成本文规定的接口。

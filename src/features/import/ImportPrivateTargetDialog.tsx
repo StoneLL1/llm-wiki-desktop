@@ -33,7 +33,7 @@ export function ImportPrivateTargetDialog({ open, itemId, target, addressCategor
         <header className="flex min-h-[52px] items-center gap-3 border-b border-[var(--border)] px-4">
           <ShieldAlert size={17} className="text-[var(--warning-text)]" aria-hidden="true" />
           <h2 id="import-private-title" className="m-0 flex-1 text-[15px] font-semibold">{t("importV2.private.title")}</h2>
-          <button type="button" className="icon-button" aria-label={t("importV2.private.cancel")} onClick={onCancel}><X size={16} aria-hidden="true" /></button>
+          <button type="button" className="icon-button" aria-label={t("importV2.private.cancel")} title={t("importV2.private.cancel")} onClick={onCancel}><X size={16} aria-hidden="true" /></button>
         </header>
         <div className="space-y-3 px-4 py-4 text-[12px]">
           <dl className="grid grid-cols-[130px_1fr] gap-x-4 gap-y-1.5">

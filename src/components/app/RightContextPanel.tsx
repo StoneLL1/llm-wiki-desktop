@@ -4,6 +4,7 @@ import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
 import { AgentRightPanel } from "../../features/agent/AgentRightPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
+import { SourceRightPanel } from "../../features/wiki/SourceRightPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -267,6 +268,38 @@ export function RightContextPanel() {
   }
 
   if (activeView === "wiki") {
+    if (
+      wikiPage?.pageType === "source" &&
+      wikiPage.sourceBinding?.sourceId &&
+      wikiPage.sourceBinding.sourceId === wikiPage.sourceId
+    ) {
+      return (
+        <aside
+          id="right-context-panel"
+          aria-label={t("source.panel.title")}
+          className="right-panel"
+        >
+          <RightPanelHeader title={t("source.panel.title")} />
+          <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto">
+            <SourceRightPanel
+              projectId={currentProject.projectId}
+              rootPath={currentProject.rootPath}
+              sourceId={wikiPage.sourceBinding.sourceId}
+              onOpenPage={openPage}
+              onMutation={(path) => {
+                void useWikiStore
+                  .getState()
+                  .reload(currentProject.projectId, currentProject.rootPath)
+                  .then(() => {
+                    if (path) openPage(path);
+                  });
+              }}
+            />
+          </div>
+        </aside>
+      );
+    }
+
     if (rightPanelMode === "wikiAssistant") {
       return (
         <aside
@@ -366,7 +399,17 @@ export function RightContextPanel() {
 
   if (activeView === "import") {
     const selectedItem = importSession?.items.find((item) => item.itemId === importSelectedItemId) ?? null;
-    return <ImportRightPanel selectedItem={selectedItem} onPreviewMarkdown={(itemId) => useImportStore.getState().openPreview(itemId)} />;
+    return (
+      <ImportRightPanel
+        selectedItem={selectedItem}
+        sessionId={importSession?.sessionId ?? null}
+        projectId={currentProject.projectId}
+        projectRootPath={currentProject.rootPath}
+        onPreviewMarkdown={(itemId) => useImportStore.getState().openPreview(itemId)}
+        onPrimaryAction={(action, itemId) =>
+          useImportStore.getState().requestAction(itemId, action)}
+      />
+    );
   }
 
   if (activeView === "agent") {

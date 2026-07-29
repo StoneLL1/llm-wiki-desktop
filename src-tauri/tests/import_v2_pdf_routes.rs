@@ -1,8 +1,18 @@
 use llm_wiki_desktop_lib::services::import_v2::pdf_router::{
-    inspect_pdf, plan_pdf_pages, PdfInspection, PdfInspectionError, PdfPageRoute,
-    PdfRouteCapabilities,
+    inspect_pdf, plan_pdf_pages, prepare_selective_ocr, PdfInspection, PdfInspectionError,
+    PdfPageRoute, PdfRouteCapabilities,
+};
+use llm_wiki_desktop_lib::{
+    models::{
+        import_v2::{ImportInput, ImportInputKind, ImportResourceMode, SourceIdentity},
+        paths::ProjectContext,
+        task::TaskType,
+    },
+    services::{import_v2::ImportV2Service, FileStore, SecretService},
+    tasks::TaskService,
 };
 use lopdf::{dictionary, Document, Object};
+use sha2::{Digest, Sha256};
 
 fn inspection(characters: &[u32]) -> PdfInspection {
     PdfInspection {
@@ -166,4 +176,128 @@ fn document_layout_pack_is_pinned_cross_platform_and_cannot_install_at_runtime()
             .unwrap();
     assert!(runner.contains("waiting_capability"));
     assert!(!runner.contains("pip install"));
+}
+
+fn batch3_pdf(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/fixtures/import-v2/local/batch3")
+        .join(name)
+}
+
+#[test]
+fn real_mixed_pdf_routes_only_the_scanned_page_to_ocr() {
+    let report = inspect_pdf(&batch3_pdf("mixed-text-scan.pdf"), None).unwrap();
+    assert_eq!(report.page_count, 2);
+    assert!(report.text_characters_per_page[0] > 500);
+    assert_eq!(report.text_characters_per_page[1], 0);
+    let plan = plan_pdf_pages(
+        &report,
+        PdfRouteCapabilities {
+            document_layout: false,
+            ocr: true,
+            agent: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(plan[0].route, PdfPageRoute::TextLayer);
+    assert_eq!(plan[1].route, PdfPageRoute::SelectiveOcr);
+}
+
+#[test]
+fn selective_pdf_ocr_stages_only_planned_scan_pages_in_original_order() {
+    let pdf = batch3_pdf("mixed-text-scan.pdf");
+    let report = inspect_pdf(&pdf, None).unwrap();
+    let plan = plan_pdf_pages(
+        &report,
+        PdfRouteCapabilities {
+            document_layout: false,
+            ocr: true,
+            agent: false,
+        },
+    )
+    .unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let prepared = prepare_selective_ocr(&pdf, staging.path(), &plan).unwrap();
+    assert_eq!(prepared.temporary_input_paths.len(), 1);
+    assert!(prepared.temporary_input_paths[0].ends_with("page-002.png"));
+    assert!(staging
+        .path()
+        .join(&prepared.temporary_input_paths[0])
+        .is_file());
+    let first = prepared.markdown.find("## Page 1").unwrap();
+    let second = prepared.markdown.find("## Page 2").unwrap();
+    assert!(first < second);
+    assert!(prepared.markdown.contains("<!-- OCR_PAGE_002 -->"));
+    assert!(!prepared.markdown.contains("<!-- OCR_PAGE_001 -->"));
+}
+
+#[test]
+fn encrypted_real_pdf_fails_before_any_raw_or_source_write() {
+    assert!(matches!(
+        inspect_pdf(&batch3_pdf("encrypted.pdf"), None),
+        Err(PdfInspectionError::PasswordRequired { .. })
+    ));
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".app")).unwrap();
+    let input = root.path().join("inputs/encrypted.pdf");
+    std::fs::create_dir_all(input.parent().unwrap()).unwrap();
+    std::fs::copy(batch3_pdf("encrypted.pdf"), &input).unwrap();
+    let bytes = std::fs::read(&input).unwrap();
+    let canonical = input.canonicalize().unwrap();
+    let context = ProjectContext::new("encrypted-pdf", root.path().to_path_buf());
+    let files = FileStore;
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let session = service
+        .add_inputs(
+            &context,
+            &files,
+            &session.session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::File,
+                display_name: "encrypted.pdf".into(),
+                locator: input.to_string_lossy().into_owned(),
+                normalized_locator: Some(format!(
+                    "file:{}",
+                    input.to_string_lossy().replace('\\', "/")
+                )),
+                source_identity: Some(SourceIdentity {
+                    canonical_path: canonical.to_string_lossy().into_owned(),
+                    size_bytes: bytes.len() as u64,
+                    modified_nanos: None,
+                    file_id: None,
+                    sha256: format!("{:x}", Sha256::digest(&bytes)),
+                    magic: format!("{:x}", Sha256::digest(&bytes[..bytes.len().min(8192)])),
+                }),
+                media_save_mode: Default::default(),
+            }],
+        )
+        .unwrap();
+    let tasks = TaskService::default();
+    let task = tasks
+        .create_project_task(
+            TaskType::Import,
+            context.project_id.clone(),
+            root.path().to_path_buf(),
+            "encrypted PDF".into(),
+            true,
+        )
+        .unwrap();
+    let error = service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &session.items[0].item_id,
+            &task.id,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "IMPORT_PDF_ENCRYPTED_UNSUPPORTED");
+    assert!(!root.path().join("raw").exists());
+    assert!(!root.path().join("wiki").exists());
+    assert!(!root.path().join(".app/sources").exists());
 }

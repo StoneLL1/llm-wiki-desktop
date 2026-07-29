@@ -1,15 +1,18 @@
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::errors::{
-    BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_STATE_INVALID,
+    BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_PANICKED, IMPORT_V2_ITEM_NOT_FOUND,
+    IMPORT_V2_STATE_INVALID,
 };
 use crate::models::import_v2::{
-    AttemptOutcome, AttemptRecord, ImportInput, ImportInputKind, ImportIssue, ImportItem,
-    ImportItemStatus, ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionStatus,
-    ImportStage, SourceIdentity,
+    AttemptOutcome, AttemptRecord, ImportAsrProfile, ImportInput, ImportInputKind, ImportIssue,
+    ImportItem, ImportItemStatus, ImportMediaAuthorization, ImportMediaAuthorizationKind,
+    ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
+    SourceIdentity,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_agent::AgentCandidate;
@@ -18,6 +21,7 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
 use crate::services::import_v2::engine::{
+    describe_engine, engine_panicked_error, execute_engine, execute_engine_with_progress,
     validate_engine_result, EngineContinuation, EngineOperation, EngineProgress, EngineRegistry,
     EngineRequest, EngineResult, ImportEngine,
 };
@@ -25,8 +29,11 @@ use crate::services::import_v2::file_router::{
     AttemptOutcome as RouteOutcome, CapabilitySnapshot, FileRoutePlanner, QualityFloor,
 };
 use crate::services::import_v2::generic_web_engine::GenericWebEngine;
+use crate::services::import_v2::local_media_engine::{
+    NativeMediaCompanionEngine, NativeSubtitleEngine,
+};
 use crate::services::import_v2::native_file_engine::{
-    NativeFileEngine, NativeStructuredFileEngine,
+    NativeCsvPackageEngine, NativeFileEngine, NativeStructuredFileEngine,
 };
 use crate::services::import_v2::pack_engine::PackProcessEngine;
 use crate::services::import_v2::quality_gate::QualityGate;
@@ -39,15 +46,47 @@ use crate::services::SecretService;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 use sha2::{Digest, Sha256};
-use unicode_normalization::UnicodeNormalization;
 
 pub struct ImportV2Service {
     pub(super) sessions: SessionStore,
-    engines: EngineRegistry,
+    pub(super) engines: EngineRegistry,
     quality: QualityGate,
     pub(super) mutation_lock: Mutex<()>,
-    web_targets: Arc<WebTargetStore>,
+    agent_candidate_action_lock: Mutex<()>,
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    source_ai_active: Mutex<HashSet<String>>,
+    pub(super) web_targets: Arc<WebTargetStore>,
     connector_profiles_root: Arc<RwLock<Option<PathBuf>>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct NewSourceReservationFingerprint {
+    input: ImportInput,
+    title: String,
+    markdown: crate::models::import_v2::ImportArtifact,
+    source_snapshot: crate::models::import_v2::ImportArtifact,
+    assets: Vec<crate::models::import_v2::ImportArtifact>,
+}
+
+fn new_source_reservation_fingerprint(
+    item: &ImportItem,
+) -> Option<NewSourceReservationFingerprint> {
+    let preview = item.preview.as_ref()?;
+    if !item.selected
+        || item.status != ImportItemStatus::PreviewReady
+        || !preview.resolution.as_ref().is_some_and(|resolution| {
+            resolution.kind == crate::models::import_v2::ImportResolutionKind::NewSource
+        })
+    {
+        return None;
+    }
+    Some(NewSourceReservationFingerprint {
+        input: item.input.clone(),
+        title: preview.title.clone(),
+        markdown: preview.markdown.clone(),
+        source_snapshot: preview.source_snapshot.clone(),
+        assets: preview.assets.clone(),
+    })
 }
 
 impl Default for ImportV2Service {
@@ -57,6 +96,69 @@ impl Default for ImportV2Service {
 }
 
 impl ImportV2Service {
+    pub fn authorize_media_for_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        kind: ImportMediaAuthorizationKind,
+        asr_profile: Option<ImportAsrProfile>,
+        language: Option<String>,
+    ) -> Result<(), BackendError> {
+        let language = language
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if language.as_ref().is_some_and(|value| {
+            value.len() > 32
+                || !value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        }) {
+            return Err(BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Recognition language must be a short language tag.",
+                false,
+                true,
+            ));
+        }
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        let item = session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .ok_or_else(item_not_found)?;
+        if !matches!(
+            item.status,
+            ImportItemStatus::WaitingAuthorization
+                | ImportItemStatus::WaitingCapability
+                | ImportItemStatus::Failed
+        ) {
+            return Err(BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Media recognition can be authorized only while this import item is waiting.",
+                false,
+                true,
+            ));
+        }
+        session
+            .media_authorizations
+            .retain(|authorization| authorization.item_id != item_id || authorization.kind != kind);
+        session.media_authorizations.push(ImportMediaAuthorization {
+            item_id: item_id.to_string(),
+            kind: kind.clone(),
+            authorized_at: chrono::Utc::now().to_rfc3339(),
+            asr_profile: (kind == ImportMediaAuthorizationKind::Asr)
+                .then_some(asr_profile.unwrap_or_default()),
+            language: (kind == ImportMediaAuthorizationKind::Asr)
+                .then_some(language)
+                .flatten(),
+        });
+        persist_derived(&self.sessions, context, files, session)
+    }
+
     pub fn find_unfinished_session(
         &self,
         context: &ProjectContext,
@@ -115,7 +217,7 @@ impl ImportV2Service {
             .collect::<Vec<_>>();
         ids.sort();
         for id in ids {
-            let session = match self.load_session(context, files, &id) {
+            let session = match self.sessions.load(context, files, &id) {
                 Ok(session) => session,
                 // A stale or partially written session is evidence to leave
                 // untouched, not a reason to make every new V2 import
@@ -136,8 +238,7 @@ impl ImportV2Service {
             if !matches!(
                 session.status,
                 ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
-            ) && (!session.items.is_empty() || session.discovery_task_id.is_some())
-            {
+            ) {
                 return Ok(Some(id));
             }
         }
@@ -151,6 +252,15 @@ impl ImportV2Service {
         engines
             .register(Arc::new(NativeFileEngine::default()))
             .expect("the built-in native file engine identifier is unique");
+        engines
+            .register(Arc::new(NativeCsvPackageEngine))
+            .expect("the built-in CSV package engine identifier is unique");
+        engines
+            .register(Arc::new(NativeSubtitleEngine))
+            .expect("the built-in local subtitle engine identifier is unique");
+        engines
+            .register(Arc::new(NativeMediaCompanionEngine))
+            .expect("the built-in local media companion engine identifier is unique");
         for (engine_id, route) in [
             ("builtin.pdf-text", "pdf.text"),
             ("builtin.office-docx", "office.modern.docx"),
@@ -183,6 +293,8 @@ impl ImportV2Service {
             engines,
             quality: QualityGate::default(),
             mutation_lock: Mutex::new(()),
+            agent_candidate_action_lock: Mutex::new(()),
+            source_ai_active: Mutex::new(HashSet::new()),
             web_targets,
             connector_profiles_root,
         }
@@ -213,6 +325,62 @@ impl ImportV2Service {
     ) -> Result<crate::services::import_v2::url_policy::SessionWebTarget, BackendError> {
         self.web_targets.resolve(locator, public)
     }
+    pub fn store_web_collection(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        source_url: String,
+        platform: String,
+        title: String,
+        items: Vec<(
+            String,
+            crate::services::import_v2::url_policy::SessionWebTarget,
+            String,
+        )>,
+    ) -> Result<
+        (
+            String,
+            crate::services::import_v2::web_target_store::CollectionPage,
+        ),
+        BackendError,
+    > {
+        self.web_targets
+            .store_collection(project_id, session_id, source_url, platform, title, items)
+    }
+    pub fn load_web_collection_page(
+        &self,
+        collection_ref: &str,
+        project_id: &str,
+        session_id: &str,
+        cursor: &str,
+        load_all: bool,
+    ) -> Result<crate::services::import_v2::web_target_store::CollectionPage, BackendError> {
+        self.web_targets.load_collection_page(
+            collection_ref,
+            project_id,
+            session_id,
+            cursor,
+            load_all,
+        )
+    }
+    pub fn resolve_web_collection_selection(
+        &self,
+        collection_ref: &str,
+        project_id: &str,
+        session_id: &str,
+        selected_item_refs: &[String],
+    ) -> Result<crate::services::import_v2::web_target_store::CollectionSelection, BackendError>
+    {
+        self.web_targets.resolve_collection_selection(
+            collection_ref,
+            project_id,
+            session_id,
+            selected_item_refs,
+        )
+    }
+    pub fn delete_web_collection(&self, collection_ref: &str) -> Result<(), BackendError> {
+        self.web_targets.delete_collection(collection_ref)
+    }
     pub fn authorize_private_target(
         &self,
         grant: crate::services::import_v2::url_policy::PrivateTargetGrant,
@@ -236,17 +404,28 @@ impl ImportV2Service {
         self.web_targets
             .take_bilibili_asr(project_id, session_id, item_id, expected_request_url)
     }
-    pub fn bind_authenticated_profile(
+    pub fn bind_authenticated_profiles(
         &self,
         project_id: &str,
         session_id: &str,
-        item_id: &str,
-        profile: std::path::PathBuf,
+        item_ids: &[String],
+        profile: &std::path::Path,
     ) -> Result<(), BackendError> {
         self.web_targets
-            .bind_authenticated_profile(project_id, session_id, item_id, profile)
+            .bind_authenticated_profiles(project_id, session_id, item_ids, profile)
     }
-    pub fn release_item_after_login(
+
+    pub fn unbind_authenticated_profiles(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<(), BackendError> {
+        self.web_targets
+            .unbind_authenticated_profiles(project_id, session_id, item_ids)
+    }
+
+    pub fn enable_remote_media_retention(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -254,19 +433,104 @@ impl ImportV2Service {
         item_id: &str,
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
-            if item.status != ImportItemStatus::WaitingLogin {
+            if item.input.kind != ImportInputKind::Url
+                || matches!(
+                    item.status,
+                    ImportItemStatus::Inspecting
+                        | ImportItemStatus::Extracting
+                        | ImportItemStatus::Validating
+                        | ImportItemStatus::Committing
+                        | ImportItemStatus::Completed
+                )
+            {
                 return Err(BackendError::new(
                     crate::errors::IMPORT_V2_STATE_INVALID,
-                    "Only a waiting-login item can be released.",
+                    "Remote media retention is unavailable in the current item state.",
                     false,
                     true,
                 ));
             }
-            transition_item(item, ImportItemStatus::Failed)?;
-            item.task_id = None;
+            item.input.media_save_mode = crate::models::import_v2::MediaSaveMode::PreserveOriginal;
             item.issue = None;
             Ok(())
         })
+    }
+
+    pub fn mark_authenticated_login_group(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_ids: &[String],
+        account_summary: Option<&str>,
+    ) -> Result<ImportSession, BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        if item_ids.is_empty() {
+            return Err(BackendError::new(
+                crate::errors::IMPORT_V2_STATE_INVALID,
+                "An authenticated login group cannot be empty.",
+                false,
+                true,
+            ));
+        }
+        let summary = account_summary
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        for item_id in item_ids {
+            let item = session
+                .items
+                .iter_mut()
+                .find(|item| item.item_id == *item_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        crate::errors::IMPORT_V2_STATE_INVALID,
+                        "An authenticated login group item was not found.",
+                        false,
+                        true,
+                    )
+                })?;
+            if item.status != ImportItemStatus::WaitingLogin
+                || item.input.kind != ImportInputKind::Url
+            {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_STATE_INVALID,
+                    "Only waiting-login URL items can join an authenticated login group.",
+                    false,
+                    true,
+                ));
+            }
+            item.authenticated_retry = true;
+            item.authenticated_identity_summary.clone_from(&summary);
+        }
+        session.updated_at = chrono::Utc::now().to_rfc3339();
+        self.sessions.save(context, files, &session)?;
+        Ok(session)
+    }
+
+    pub fn clear_authenticated_login_group(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<ImportSession, BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        for item in session
+            .items
+            .iter_mut()
+            .filter(|item| item_ids.contains(&item.item_id))
+        {
+            item.authenticated_retry = false;
+            item.authenticated_identity_summary = None;
+        }
+        session.updated_at = chrono::Utc::now().to_rfc3339();
+        self.sessions.save(context, files, &session)?;
+        Ok(session)
     }
 
     pub fn cancel_queued_item(
@@ -336,8 +600,19 @@ impl ImportV2Service {
         item.progress = None;
         item.preview = None;
         item.issue = None;
-        let item = item.clone();
+        crate::services::import_v2::commit::refresh_new_source_wiki_targets(
+            context,
+            files,
+            &mut session,
+        )?;
+        let item = session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .cloned()
+            .ok_or_else(item_not_found)?;
         persist_derived(&self.sessions, context, files, session)?;
+        remove_clipboard_session_input(context, session_id, &item.input);
         Ok(item)
     }
     pub fn create_session(
@@ -348,6 +623,9 @@ impl ImportV2Service {
     ) -> Result<ImportSession, BackendError> {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
+        if let Some(session_id) = self.find_unfinished_session(context, files)? {
+            return self.sessions.load(context, files, &session_id);
+        }
         self.sessions.create(context, files, mode)
     }
     pub fn add_inputs(
@@ -362,10 +640,38 @@ impl ImportV2Service {
         self.sessions.add_inputs(context, files, session_id, inputs)
     }
 
+    pub fn completed_collection_fingerprints(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        source_url: &str,
+        platform: &str,
+    ) -> std::collections::HashMap<String, String> {
+        self.sessions
+            .completed_collection_fingerprints(context, files, source_url, platform)
+    }
+
+    pub fn add_collection_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<crate::services::import_v2::session_store::CollectionImportInput>,
+        source_url: String,
+        platform: String,
+        title: String,
+    ) -> Result<ImportSession, BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        self.sessions.add_collection_inputs(
+            context, files, session_id, inputs, source_url, platform, title,
+        )
+    }
+
     /// Stage user-provided text inside the V2 session workspace and register
-    /// it as a normal immutable file input. This keeps clipboard imports out
-    /// of `raw/` and gives the native engine the same identity/CAS checks as a
-    /// discovered file.
+    /// it as a normal immutable file input. The session copy is deleted on
+    /// cancel/skip/commit; a confirmed import retains only the normal raw
+    /// Source evidence and its content-addressed clipboard origin.
     pub fn add_text_input(
         &self,
         context: &ProjectContext,
@@ -376,6 +682,8 @@ impl ImportV2Service {
     ) -> Result<ImportSession, BackendError> {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
+        let session = self.sessions.load(context, files, session_id)?;
+        SessionStore::ensure_accepts_new_items(&session)?;
         let name = if display_name.trim().is_empty() {
             "text-import.md"
         } else {
@@ -419,23 +727,17 @@ impl ImportV2Service {
                 .map(|duration| duration.as_nanos())
         });
         let digest = Sha256::digest(bytes);
+        let content_locator = format!("clipboard:sha256:{digest:x}");
         let magic = Sha256::digest(&bytes[..bytes.len().min(8192)]);
         self.sessions.add_inputs(
             context,
             files,
             session_id,
             vec![ImportInput {
-                kind: ImportInputKind::File,
+                kind: ImportInputKind::ClipboardText,
                 display_name: name.to_string(),
                 locator: relative.clone(),
-                normalized_locator: Some(
-                    canonical_path
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .nfc()
-                        .collect::<String>()
-                        .to_lowercase(),
-                ),
+                normalized_locator: Some(content_locator),
                 source_identity: Some(SourceIdentity {
                     canonical_path: canonical_path.to_string_lossy().into_owned(),
                     size_bytes: metadata.len(),
@@ -456,7 +758,27 @@ impl ImportV2Service {
     ) -> Result<ImportSession, BackendError> {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
-        self.sessions.load(context, files, session_id)
+        let mut session = self.sessions.load(context, files, session_id)?;
+        if crate::services::import_v2::commit::backfill_missing_new_source_wiki_targets(
+            context,
+            files,
+            &mut session,
+        )? {
+            self.sessions.save(context, files, &session)?;
+        }
+        Ok(session)
+    }
+
+    pub fn ensure_session_accepts_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+    ) -> Result<(), BackendError> {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let session = self.sessions.load(context, files, session_id)?;
+        SessionStore::ensure_accepts_new_items(&session)
     }
 
     pub fn set_discovery_task_id(
@@ -469,6 +791,9 @@ impl ImportV2Service {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
+        if task_id.is_some() {
+            SessionStore::ensure_accepts_new_items(&session)?;
+        }
         session.discovery_task_id = task_id;
         session.updated_at = chrono::Utc::now().to_rfc3339();
         self.sessions.save(context, files, &session)?;
@@ -496,6 +821,7 @@ impl ImportV2Service {
                 ImportItemStatus::Queued
                     | ImportItemStatus::Failed
                     | ImportItemStatus::WaitingCapability
+                    | ImportItemStatus::WaitingLogin
                     | ImportItemStatus::WaitingAuthorization
                     | ImportItemStatus::Cancelled
                     | ImportItemStatus::Skipped
@@ -539,10 +865,7 @@ impl ImportV2Service {
             let agent_attempts = item
                 .attempts
                 .iter()
-                .filter(|attempt| {
-                    attempt.route.starts_with("agent_assistance/")
-                        || attempt.route.starts_with("byok_assistance/")
-                })
+                .filter(|attempt| attempt.route.starts_with("agent_assistance/"))
                 .collect::<Vec<_>>();
             if agent_attempts.len() >= usize::from(max_attempts) {
                 return Err(task_error(
@@ -558,13 +881,6 @@ impl ImportV2Service {
                 ));
             }
             match trigger {
-                AgentAssistanceTrigger::DeterministicHardFailure
-                    if item.status != ImportItemStatus::Failed =>
-                {
-                    return Err(task_error(
-                        "Automatic Agent assistance requires a deterministic hard failure.",
-                    ));
-                }
                 AgentAssistanceTrigger::QualityOptimization
                     if item.status != ImportItemStatus::PreviewReady =>
                 {
@@ -599,62 +915,6 @@ impl ImportV2Service {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn begin_byok_assistance(
-        &self,
-        context: &ProjectContext,
-        files: &FileStore,
-        session_id: &str,
-        item_id: &str,
-        task_id: &str,
-        trigger: AgentAssistanceTrigger,
-        provider: crate::models::llm::LlmProviderKind,
-        max_attempts: u8,
-    ) -> Result<ImportItem, BackendError> {
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            let attempts = item
-                .attempts
-                .iter()
-                .filter(|attempt| {
-                    attempt.route.starts_with("agent_assistance/")
-                        || attempt.route.starts_with("byok_assistance/")
-                })
-                .collect::<Vec<_>>();
-            if attempts.len() >= usize::from(max_attempts)
-                || attempts
-                    .iter()
-                    .any(|attempt| attempt.completed_at.is_none())
-            {
-                return Err(task_error(
-                    "The Agent assistance attempt budget is exhausted or active.",
-                ));
-            }
-            if !matches!(
-                item.status,
-                ImportItemStatus::Failed | ImportItemStatus::PreviewReady
-            ) {
-                return Err(task_error(
-                    "BYOK assistance requires a failed item or preview.",
-                ));
-            }
-            item.task_id = Some(task_id.to_string());
-            item.attempts.push(AttemptRecord {
-                route: format!("byok_assistance/{task_id}"),
-                engine_id: serde_json::to_value(provider)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "byok".into()),
-                engine_version: "configured-provider".into(),
-                stage: ImportStage::Extract,
-                started_at: chrono::Utc::now().to_rfc3339(),
-                completed_at: None,
-                outcome: AttemptOutcome::Failed,
-                warnings: vec![format!("trigger={trigger:?}")],
-            });
-            Ok(())
-        })
-    }
-
     pub fn finish_agent_assistance_attempt(
         &self,
         context: &ProjectContext,
@@ -667,12 +927,11 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
             let local_route = format!("agent_assistance/{task_id}");
-            let byok_route = format!("byok_assistance/{task_id}");
             let attempt = item
                 .attempts
                 .iter_mut()
                 .rev()
-                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
+                .find(|attempt| attempt.route == local_route)
                 .ok_or_else(|| task_error("Agent assistance attempt was not found."))?;
             attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
             attempt.outcome = outcome;
@@ -778,12 +1037,11 @@ impl ImportV2Service {
                 ));
             }
             let local_route = format!("agent_assistance/{task_id}");
-            let byok_route = format!("byok_assistance/{task_id}");
             let attempt = item
                 .attempts
                 .iter_mut()
                 .rev()
-                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
+                .find(|attempt| attempt.route == local_route)
                 .ok_or_else(|| task_error("Agent assistance attempt was not found."))?;
             if !attempt
                 .warnings
@@ -791,14 +1049,6 @@ impl ImportV2Service {
                 .any(|warning| warning == "AGENT_CANDIDATE_REJECTED")
             {
                 attempt.warnings.push("AGENT_CANDIDATE_REJECTED".into());
-            }
-            if attempt.route == byok_route
-                && !attempt
-                    .warnings
-                    .iter()
-                    .any(|warning| warning == "BYOK_CHARGE_STATUS_UNKNOWN")
-            {
-                attempt.warnings.push("BYOK_CHARGE_STATUS_UNKNOWN".into());
             }
             Ok(())
         })
@@ -825,12 +1075,11 @@ impl ImportV2Service {
                 _ => ImportItemStatus::Failed,
             };
             let local_route = format!("agent_assistance/{task_id}");
-            let byok_route = format!("byok_assistance/{task_id}");
             let attempt = item
                 .attempts
                 .iter_mut()
                 .rev()
-                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
+                .find(|attempt| attempt.route == local_route)
                 .ok_or_else(|| task_error("Agent assistance attempt was not found."))?;
             if !attempt
                 .warnings
@@ -838,14 +1087,6 @@ impl ImportV2Service {
                 .any(|warning| warning == "AGENT_CANDIDATE_REJECTED")
             {
                 attempt.warnings.push("AGENT_CANDIDATE_REJECTED".into());
-            }
-            if attempt.route == byok_route
-                && !attempt
-                    .warnings
-                    .iter()
-                    .any(|warning| warning == "BYOK_CHARGE_STATUS_UNKNOWN")
-            {
-                attempt.warnings.push("BYOK_CHARGE_STATUS_UNKNOWN".into());
             }
             Ok(())
         })
@@ -859,22 +1100,90 @@ impl ImportV2Service {
         item_id: &str,
         task_id: &str,
         preview: crate::models::import_v2::ImportPreviewArtifact,
-        needs_three_way_merge: bool,
+        explicit_merge_current_hash: Option<&str>,
     ) -> Result<ImportItem, BackendError> {
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error(
-                    "Agent candidate selection is not bound to this item task.",
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        let item_position = session
+            .items
+            .iter()
+            .position(|item| item.item_id == item_id)
+            .ok_or_else(item_not_found)?;
+        ensure_agent_candidate_item_is_mutable(&session, &session.items[item_position])?;
+        if session.items[item_position].task_id.as_deref() != Some(task_id) {
+            return Err(task_error(
+                "Agent candidate selection is not bound to this item task.",
+            ));
+        }
+
+        let mut resolution_item = session.items[item_position].clone();
+        resolution_item.preview = Some(preview.clone());
+        let mut resolution =
+            self.derive_resolution_context(context, files, session_id, &resolution_item)?;
+        if let Some(expected_current_hash) = explicit_merge_current_hash {
+            let current_hash = resolution
+                .binding
+                .as_ref()
+                .map(|binding| binding.current_hash.as_str());
+            if current_hash != Some(expected_current_hash) {
+                return Err(BackendError::new(
+                    "IMPORT_AGENT_MERGE_STALE",
+                    "Current Wiki changed after the Agent merge was reviewed.",
+                    false,
+                    true,
                 ));
             }
-            item.preview = Some(preview);
-            item.status = if needs_three_way_merge {
-                ImportItemStatus::NeedsMerge
-            } else {
-                ImportItemStatus::PreviewReady
-            };
-            Ok(())
-        })
+        }
+        let needs_unresolved_merge = resolution.kind
+            == crate::models::import_v2::ImportResolutionKind::NeedsThreeWayMerge
+            && explicit_merge_current_hash.is_none();
+        resolution_item
+            .preview
+            .as_mut()
+            .expect("preview was installed")
+            .resolution = Some(resolution.clone());
+        session.items[item_position] = resolution_item;
+        if resolution.kind == crate::models::import_v2::ImportResolutionKind::NewSource {
+            resolution.target_wiki_path =
+                crate::services::import_v2::commit::planned_new_source_wiki_path(
+                    context, files, &session, item_id,
+                )?;
+        } else if resolution.kind
+            == crate::models::import_v2::ImportResolutionKind::NeedsThreeWayMerge
+            && explicit_merge_current_hash.is_some()
+        {
+            let binding = resolution
+                .binding
+                .as_ref()
+                .ok_or_else(|| task_error("Selected Agent merge is missing its Source binding."))?;
+            resolution.default_resolution = Some(
+                crate::models::import_v2::ImportItemResolution::ApplyImportCandidate {
+                    source_id: binding.source_id.clone(),
+                    candidate_hash: binding.candidate_hash.clone(),
+                    current_hash: binding.current_hash.clone(),
+                    target_version_id: binding.target_version_id.clone(),
+                },
+            );
+        }
+
+        let mut preview = preview;
+        preview.resolution = Some(resolution);
+        let item = &mut session.items[item_position];
+        item.preview = Some(preview);
+        item.status = if needs_unresolved_merge {
+            ImportItemStatus::NeedsMerge
+        } else {
+            ImportItemStatus::PreviewReady
+        };
+        crate::services::import_v2::commit::refresh_new_source_wiki_targets(
+            context,
+            files,
+            &mut session,
+        )?;
+        let item = session.items[item_position].clone();
+        persist_derived(&self.sessions, context, files, session)?;
+        Ok(item)
     }
 
     pub fn discard_agent_candidate(
@@ -886,36 +1195,50 @@ impl ImportV2Service {
         task_id: &str,
         deterministic_preview: Option<crate::models::import_v2::ImportPreviewArtifact>,
     ) -> Result<ImportItem, BackendError> {
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            if item.task_id.as_deref() != Some(task_id) {
-                return Err(task_error(
-                    "Agent candidate discard is not bound to this item task.",
-                ));
-            }
-            item.preview = deterministic_preview;
-            item.status = if item.preview.is_some() {
-                ImportItemStatus::PreviewReady
-            } else {
-                ImportItemStatus::Failed
-            };
-            let local_route = format!("agent_assistance/{task_id}");
-            let byok_route = format!("byok_assistance/{task_id}");
-            if let Some(attempt) = item
-                .attempts
-                .iter_mut()
-                .rev()
-                .find(|attempt| attempt.route == local_route || attempt.route == byok_route)
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        let item_position = session
+            .items
+            .iter()
+            .position(|item| item.item_id == item_id)
+            .ok_or_else(item_not_found)?;
+        ensure_agent_candidate_item_is_mutable(&session, &session.items[item_position])?;
+        let item = &mut session.items[item_position];
+        if item.task_id.as_deref() != Some(task_id) {
+            return Err(task_error(
+                "Agent candidate discard is not bound to this item task.",
+            ));
+        }
+        item.preview = deterministic_preview;
+        item.status = if item.preview.is_some() {
+            ImportItemStatus::PreviewReady
+        } else {
+            ImportItemStatus::Failed
+        };
+        let local_route = format!("agent_assistance/{task_id}");
+        if let Some(attempt) = item
+            .attempts
+            .iter_mut()
+            .rev()
+            .find(|attempt| attempt.route == local_route)
+        {
+            if !attempt
+                .warnings
+                .iter()
+                .any(|warning| warning == "AGENT_CANDIDATE_DISCARDED")
             {
-                if !attempt
-                    .warnings
-                    .iter()
-                    .any(|warning| warning == "AGENT_CANDIDATE_DISCARDED")
-                {
-                    attempt.warnings.push("AGENT_CANDIDATE_DISCARDED".into());
-                }
+                attempt.warnings.push("AGENT_CANDIDATE_DISCARDED".into());
             }
-            Ok(())
-        })
+        }
+        crate::services::import_v2::commit::refresh_new_source_wiki_targets(
+            context,
+            files,
+            &mut session,
+        )?;
+        let item = session.items[item_position].clone();
+        persist_derived(&self.sessions, context, files, session)?;
+        Ok(item)
     }
     pub fn recover_session(
         &self,
@@ -929,34 +1252,15 @@ impl ImportV2Service {
         let mut session = self.sessions.load(context, files, session_id)?;
         for item in &mut session.items {
             for attempt in &mut item.attempts {
-                let is_byok = attempt.route.starts_with("byok_assistance/");
                 let Some(task_id) = attempt
                     .route
                     .strip_prefix("agent_assistance/")
-                    .or_else(|| attempt.route.strip_prefix("byok_assistance/"))
                     .filter(|_| attempt.completed_at.is_none())
                     .map(str::to_owned)
                 else {
                     continue;
                 };
                 let task_status = tasks.get_task(&task_id).map(|task| task.status);
-                let charge_unknown = if is_byok {
-                    let audit_path = format!(
-                        ".app/import-sessions/{session_id}/items/{}/agent-audit/{task_id}.json",
-                        item.item_id
-                    );
-                    files
-                        .read_json::<crate::models::import_v2_agent::AgentAuditRecord>(
-                            context,
-                            &audit_path,
-                        )
-                        .ok()
-                        .is_some_and(|audit| {
-                            matches!(audit.outcome.as_str(), "send_started" | "outcome_unknown")
-                        })
-                } else {
-                    false
-                };
                 if matches!(
                     task_status,
                     Some(
@@ -982,11 +1286,8 @@ impl ImportV2Service {
                     }
                     _ => {
                         attempt.outcome = AttemptOutcome::Failed;
-                        attempt.warnings = if charge_unknown {
-                            vec!["BYOK_CHARGE_STATUS_UNKNOWN".into()]
-                        } else {
-                            vec!["Interrupted Agent assistance was closed during recovery.".into()]
-                        };
+                        attempt.warnings =
+                            vec!["Interrupted Agent assistance was closed during recovery.".into()];
                     }
                 }
             }
@@ -1027,21 +1328,22 @@ impl ImportV2Service {
                         item.progress = None;
                     }
                     Some(TaskStatus::Failed) | None => {
-                        transition_item(item, ImportItemStatus::Failed)?;
                         item.task_id = None;
                         item.progress = None;
                         if item.issue.is_none() {
                             item.issue = Some(ImportIssue {
                                 code: "TASK_RECOVERY".into(),
-                                message: "Import was interrupted and can be retried.".into(),
+                                message: "This import is still waiting for the requested action."
+                                    .into(),
                                 stage: ImportStage::Route,
                                 retryable: true,
-                                user_action_required: false,
+                                user_action_required: true,
                                 recovery_actions: vec![
                                     crate::models::import_v2::ImportRecoveryAction::Retry,
                                     crate::models::import_v2::ImportRecoveryAction::ViewLog,
                                 ],
                                 available_actions: Vec::new(),
+                                subtitle_candidates: Vec::new(),
                             });
                         }
                     }
@@ -1088,12 +1390,12 @@ impl ImportV2Service {
                     crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
                         &staging,
                     )?;
-                    transition_item(item, ImportItemStatus::Failed)?;
+                    transition_item(item, ImportItemStatus::Paused)?;
                     item.task_id = None;
                     item.progress = None;
                     item.issue = Some(ImportIssue {
-                        code: "TASK_RECOVERY".into(),
-                        message: "Import was interrupted and can be retried.".into(),
+                        code: "TASK_PAUSED".into(),
+                        message: "Import was paused after the app stopped and can continue.".into(),
                         stage: ImportStage::Extract,
                         retryable: true,
                         user_action_required: false,
@@ -1102,6 +1404,7 @@ impl ImportV2Service {
                             crate::models::import_v2::ImportRecoveryAction::ViewLog,
                         ],
                         available_actions: Vec::new(),
+                        subtitle_candidates: Vec::new(),
                     });
                 }
             }
@@ -1165,8 +1468,70 @@ impl ImportV2Service {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
+        find_item_mut(&mut session, item_id)?.selected = selected;
+        crate::services::import_v2::commit::refresh_new_source_wiki_targets(
+            context,
+            files,
+            &mut session,
+        )?;
+        let item = session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .cloned()
+            .ok_or_else(item_not_found)?;
+        persist_derived(&self.sessions, context, files, session)?;
+        Ok(item)
+    }
+
+    pub fn select_subtitle_for_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        file_name: &str,
+    ) -> Result<ImportItem, BackendError> {
+        let file_name = file_name.trim();
+        if file_name.is_empty()
+            || file_name.len() > 255
+            || matches!(file_name, "." | "..")
+            || file_name.contains(['/', '\\'])
+        {
+            return Err(BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Subtitle selection is invalid.",
+                false,
+                true,
+            ));
+        }
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
         let item = find_item_mut(&mut session, item_id)?;
-        item.selected = selected;
+        let issue = item.issue.as_ref().ok_or_else(|| {
+            BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Subtitle selection is not currently required.",
+                false,
+                true,
+            )
+        })?;
+        if item.status != ImportItemStatus::WaitingAuthorization
+            || issue.code != "IMPORT_FILE_SUBTITLE_AMBIGUOUS"
+            || !issue
+                .subtitle_candidates
+                .iter()
+                .any(|candidate| candidate == file_name)
+        {
+            return Err(BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Subtitle selection does not match the current import item.",
+                false,
+                true,
+            ));
+        }
+        item.selected_subtitle = Some(file_name.to_string());
         let item = item.clone();
         persist_derived(&self.sessions, context, files, session)?;
         Ok(item)
@@ -1194,6 +1559,38 @@ impl ImportV2Service {
         task_id: &str,
         recovery_action: Option<&ImportRecoveryAction>,
     ) -> Result<ImportItem, BackendError> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run_item_with_recovery_inner(
+                context,
+                files,
+                tasks,
+                session_id,
+                item_id,
+                task_id,
+                recovery_action,
+            )
+        }))
+        .unwrap_or_else(|_| Err(engine_panicked_error()));
+        if let Err(error) = &result {
+            if error.code == IMPORT_V2_ENGINE_PANICKED {
+                self.terminalize_in_flight_worker_error(
+                    context, files, tasks, session_id, item_id, task_id, error,
+                );
+            }
+        }
+        result
+    }
+
+    fn run_item_with_recovery_inner(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        recovery_action: Option<&ImportRecoveryAction>,
+    ) -> Result<ImportItem, BackendError> {
         let task = tasks
             .get_task(task_id)
             .ok_or_else(|| task_error("Import task was not found."))?;
@@ -1206,7 +1603,7 @@ impl ImportV2Service {
         let pre_cancelled = tasks.is_cancelled(task_id);
         self.claim_item_for_run(context, files, session_id, item_id, task_id, pre_cancelled)?;
         if pre_cancelled {
-            return Err(cancelled_error());
+            return self.finish_cancelled(context, files, tasks, session_id, item_id, task_id);
         }
         self.start_claimed_task(context, files, tasks, session_id, item_id, task_id)?;
         task_call(tasks.update_progress(task_id, 0, Some(100), Some("Inspecting input".into())))?;
@@ -1236,31 +1633,43 @@ impl ImportV2Service {
                 ImportStage::Extract,
             );
         }
-        let planned_routes = self.planned_routes(&input, recovery_action)?;
-        let engines = planned_routes
-            .iter()
-            .filter_map(|attempt| {
-                let route_input = route_resolution_input(attempt.0, &input);
-                self.engines
-                    .resolve_route(attempt.0, &route_input)
-                    .ok()
-                    .map(|engine| (attempt, engine))
-            })
-            .collect::<Vec<_>>();
+        let planned_routes = self.planned_routes(context, &input, recovery_action)?;
+        let mut engines = Vec::with_capacity(planned_routes.len());
+        for attempt in &planned_routes {
+            let route_input = route_resolution_input(attempt.0, &input);
+            match self.engines.resolve_route(attempt.0, &route_input) {
+                Ok(engine) => engines.push((attempt, engine)),
+                Err(error) if error.code == IMPORT_V2_ENGINE_PANICKED => return Err(error),
+                Err(_) => {}
+            }
+        }
         if engines.is_empty() {
+            let x_capability_missing = planned_routes
+                .iter()
+                .any(|(route, _)| *route == "web.x.post");
             let error = BackendError::new(
-                crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE,
-                "No planned import route is installed.",
+                if x_capability_missing {
+                    "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING"
+                } else {
+                    crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE
+                },
+                if x_capability_missing {
+                    "The X/Twitter import capability is not installed."
+                } else {
+                    "No planned import route is installed."
+                },
                 true,
                 true,
             );
             self.mutate_item(context, files, session_id, item_id, |item| {
                 transition_item(item, ImportItemStatus::WaitingCapability)?;
-                item.issue = Some(issue_from_engine_error_for_input(
-                    &error,
-                    ImportStage::Route,
-                    &item.input.kind,
-                ));
+                let mut issue =
+                    issue_from_engine_error_for_input(&error, ImportStage::Route, &item.input.kind);
+                if x_capability_missing {
+                    issue.available_actions =
+                        vec![crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent];
+                }
+                item.issue = Some(issue);
                 Ok(())
             })?;
             task_call(tasks.append_log(
@@ -1276,25 +1685,28 @@ impl ImportV2Service {
         })?;
         task_call(tasks.update_progress(task_id, 5, Some(100), Some("Extracting source".into())))?;
         let staging_root = format!(".app/import-sessions/{session_id}/items/{item_id}/staging");
-        let local_asr_authorized = if input
-            .normalized_locator
-            .as_deref()
-            .is_some_and(is_supported_media_platform_url)
-        {
-            let exact = self
-                .web_targets
-                .resolve(&input.locator, input.normalized_locator.as_deref())?;
-            self.web_targets.has_bilibili_asr(
-                &context.project_id,
-                session_id,
-                item_id,
-                exact.request_url.as_str(),
-            )?
-        } else {
-            false
-        };
-        let local_ocr_authorized =
-            should_authorize_local_ocr(&input, recovery_action, &self.engines.registered_routes()?);
+        let authorization_session = self.sessions.load(context, files, session_id)?;
+        let asr_authorization =
+            authorization_session
+                .media_authorizations
+                .iter()
+                .find(|authorization| {
+                    authorization.item_id == item_id
+                        && authorization.kind == ImportMediaAuthorizationKind::Asr
+                });
+        let local_asr_authorized = asr_authorization.is_some();
+        let local_ocr_authorized = authorization_session
+            .has_media_authorization(item_id, ImportMediaAuthorizationKind::Ocr);
+        let selected_subtitle = authorization_session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .and_then(|item| item.selected_subtitle.clone());
+        let authenticated_retry = authorization_session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .is_some_and(|item| item.authenticated_retry);
         let media_save_mode = input.media_save_mode.clone();
         let request = EngineRequest {
             protocol_version: "2".into(),
@@ -1309,11 +1721,11 @@ impl ImportV2Service {
             staging_root: staging_root.clone(),
             chained_input: None,
             local_asr_authorized,
+            asr_probe_only: false,
+            asr_profile: asr_authorization.and_then(|value| value.asr_profile.clone()),
+            recognition_language: asr_authorization.and_then(|value| value.language.clone()),
+            selected_subtitle,
             local_ocr_authorized,
-            allow_missing_transcript: matches!(
-                recovery_action,
-                Some(ImportRecoveryAction::PreviewWithoutTranscript)
-            ),
             media_save_mode,
         };
         let token = tasks
@@ -1326,7 +1738,21 @@ impl ImportV2Service {
         let mut request = request;
         let max_task_progress = Cell::new(5_u64);
         for ((_, quality_floor), engine) in engines {
-            let descriptor = engine.descriptor();
+            let descriptor = describe_engine(engine.as_ref())?;
+            if matches!(descriptor.route.as_str(), "ocr.cjk-accurate" | "ocr.basic")
+                && !request.local_ocr_authorized
+            {
+                return self.finish_waiting_local_ocr(
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    item_id,
+                    task_id,
+                    ocr_unavailable(),
+                    ImportStage::Extract,
+                );
+            }
             if is_capability_route(&descriptor.route)
                 && !descriptor.engine_id.starts_with("builtin.")
                 && request.input.source_identity.is_some()
@@ -1344,64 +1770,34 @@ impl ImportV2Service {
                 task_call(tasks.update_progress(task_id, mapped, Some(100), Some(progress.label)))
                     .map(|_| ())
             };
-            let mut candidate =
-                match engine.execute_with_progress(&request, &token, &report_engine_progress) {
-                    Ok(result) if !token.is_cancelled() => result,
-                    Ok(_) => {
-                        return self
-                            .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
-                    }
-                    Err(_) if token.is_cancelled() => {
-                        return self
-                            .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
-                    }
-                    Err(error) => {
-                        self.record_attempt(
-                            context,
-                            files,
-                            session_id,
-                            item_id,
-                            &descriptor,
-                            started_at,
-                            crate::models::import_v2::AttemptOutcome::Failed,
-                            Vec::new(),
-                        )?;
-                        if is_web_user_wait(&error) {
-                            return self.finish_waiting_login(
-                                context,
-                                files,
-                                tasks,
-                                session_id,
-                                item_id,
-                                task_id,
-                                error,
-                                ImportStage::Extract,
-                            );
-                        }
-                        if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
-                            && !is_bilibili_import_input(&request.input)
-                        {
-                            return self.finish_waiting_local_asr(
-                                context,
-                                files,
-                                tasks,
-                                session_id,
-                                item_id,
-                                task_id,
-                                error,
-                                ImportStage::Extract,
-                            );
-                        }
-                        if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE" {
-                            recovery_error.get_or_insert_with(|| error.clone());
-                        }
-                        if error.code == "IMPORT_WEB_CONTENT_REMOVED"
-                            && is_bilibili_import_input(&request.input)
-                        {
-                            terminal_web_error.get_or_insert(error);
-                            continue;
-                        }
-                        if is_non_fallback_error(&error) {
+            let mut candidate = match execute_engine_with_progress(
+                engine.as_ref(),
+                &request,
+                &token,
+                &report_engine_progress,
+            ) {
+                Ok(result) if !token.is_cancelled() => result,
+                Ok(_) => {
+                    return self
+                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                }
+                Err(_) if token.is_cancelled() => {
+                    return self
+                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                }
+                Err(error) => {
+                    self.record_attempt(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        &descriptor,
+                        started_at,
+                        crate::models::import_v2::AttemptOutcome::Failed,
+                        Vec::new(),
+                    )?;
+                    if is_web_user_wait(&error) {
+                        if authenticated_retry {
                             return self.finish_failed(
                                 context,
                                 files,
@@ -1409,21 +1805,124 @@ impl ImportV2Service {
                                 session_id,
                                 item_id,
                                 task_id,
-                                error,
+                                BackendError::new(
+                                    "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED",
+                                    "The current account cannot access this content.",
+                                    false,
+                                    true,
+                                ),
                                 ImportStage::Extract,
                             );
                         }
-                        let route_record = FileRoutePlanner::record(
-                            descriptor.route.clone(),
-                            RouteOutcome::Failed(classify_route_failure(&error)),
+                        return self.finish_waiting_login(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
                         );
-                        last_error = Some(error);
-                        if route_record.allows_fallback() {
-                            continue;
-                        }
-                        break;
                     }
-                };
+                    if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
+                        && !is_bilibili_import_input(&request.input)
+                    {
+                        return self.finish_waiting_local_asr(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
+                        );
+                    }
+                    if error.code == "IMPORT_LOCAL_SUBTITLE_AMBIGUOUS" {
+                        return self.finish_waiting_subtitle_selection(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
+                        );
+                    }
+                    if error.code == "IMPORT_WEB_OCR_UNAVAILABLE" {
+                        return self.finish_waiting_local_ocr(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
+                        );
+                    }
+                    if error.code == "IMPORT_WEB_SUBTITLE_UNAVAILABLE" {
+                        recovery_error.get_or_insert_with(|| error.clone());
+                    }
+                    if error.code == "IMPORT_WEB_CONTENT_REMOVED"
+                        && is_bilibili_import_input(&request.input)
+                    {
+                        terminal_web_error.get_or_insert(error);
+                        continue;
+                    }
+                    if is_non_fallback_error(&error) {
+                        return self.finish_failed(
+                            context,
+                            files,
+                            tasks,
+                            session_id,
+                            item_id,
+                            task_id,
+                            error,
+                            ImportStage::Extract,
+                        );
+                    }
+                    let route_record = FileRoutePlanner::record(
+                        descriptor.route.clone(),
+                        RouteOutcome::Failed(classify_route_failure(&error)),
+                    );
+                    last_error = Some(error);
+                    if route_record.allows_fallback() {
+                        continue;
+                    }
+                    break;
+                }
+            };
+            if matches!(descriptor.route.as_str(), "ocr.cjk-accurate" | "ocr.basic") {
+                if candidate.text_coverage.unwrap_or_default() <= 0.0
+                    || candidate
+                        .warnings
+                        .iter()
+                        .any(|warning| warning == "IMPORT_OCR_NO_TEXT")
+                {
+                    return self.finish_failed(
+                        context,
+                        files,
+                        tasks,
+                        session_id,
+                        item_id,
+                        task_id,
+                        ocr_no_text(),
+                        ImportStage::Extract,
+                    );
+                }
+                let authorized_prefix = format!("{staging_root}/");
+                if let Some(source_snapshot_path) = request
+                    .input
+                    .normalized_locator
+                    .as_deref()
+                    .and_then(|path| path.strip_prefix(&authorized_prefix))
+                {
+                    candidate.source_snapshot_path = source_snapshot_path.to_string();
+                }
+            }
             if let Err(error) = validate_engine_result(&staging_root, &candidate) {
                 self.record_attempt(
                     context,
@@ -1439,6 +1938,7 @@ impl ImportV2Service {
                 continue;
             }
             if candidate.continuation.is_some() {
+                let continuation = candidate.continuation.clone();
                 candidate = match self.execute_local_continuation(
                     context,
                     files,
@@ -1458,6 +1958,53 @@ impl ImportV2Service {
                         {
                             return self.finish_cancelled(
                                 context, files, tasks, session_id, item_id, task_id,
+                            );
+                        }
+                        if requires_explicit_video_frame_ocr(&error.code) {
+                            return self.finish_waiting_local_ocr(
+                                context,
+                                files,
+                                tasks,
+                                session_id,
+                                item_id,
+                                task_id,
+                                error,
+                                ImportStage::Extract,
+                            );
+                        }
+                        if matches!(
+                            error.code.as_str(),
+                            "IMPORT_WEB_OCR_UNAVAILABLE"
+                                | crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE
+                        ) && matches!(&continuation, Some(EngineContinuation::LocalOcr { .. }))
+                        {
+                            return self.finish_waiting_local_ocr(
+                                context,
+                                files,
+                                tasks,
+                                session_id,
+                                item_id,
+                                task_id,
+                                error,
+                                ImportStage::Extract,
+                            );
+                        }
+                        if matches!(
+                            error.code.as_str(),
+                            "IMPORT_WEB_SUBTITLE_UNAVAILABLE"
+                                | "IMPORT_ASR_ENGINE_UNAVAILABLE"
+                                | crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE
+                        ) && matches!(&continuation, Some(EngineContinuation::LocalAsr { .. }))
+                        {
+                            return self.finish_waiting_local_asr(
+                                context,
+                                files,
+                                tasks,
+                                session_id,
+                                item_id,
+                                task_id,
+                                error,
+                                ImportStage::Extract,
                             );
                         }
                         return self.finish_failed(
@@ -1523,6 +2070,16 @@ impl ImportV2Service {
                     .iter()
                     .find(|path| path.starts_with("converted/"))
                 {
+                    self.record_attempt(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        &descriptor,
+                        started_at,
+                        crate::models::import_v2::AttemptOutcome::Succeeded,
+                        candidate.warnings.clone(),
+                    )?;
                     request.chained_input = Some(converted.clone());
                     continue;
                 }
@@ -1582,7 +2139,7 @@ impl ImportV2Service {
             Some(100),
             Some("Validating preview".into()),
         ))?;
-        let preview = match self
+        let mut preview = match self
             .quality
             .evaluate(&context.root.join(Path::new(&staging_root)), &result)
         {
@@ -1600,10 +2157,54 @@ impl ImportV2Service {
                 )
             }
         };
-        let item = self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::PreviewReady)?;
+        let mut resolution_session = self.load_session(context, files, session_id)?;
+        let resolution_position = resolution_session
+            .items
+            .iter()
+            .position(|item| item.item_id == item_id)
+            .ok_or_else(item_not_found)?;
+        let mut resolution_item = resolution_session.items[resolution_position].clone();
+        resolution_item.preview = Some(preview.clone());
+        let mut resolution =
+            self.derive_resolution_context(context, files, session_id, &resolution_item)?;
+        let needs_merge =
+            resolution.kind == crate::models::import_v2::ImportResolutionKind::NeedsThreeWayMerge;
+        resolution_item
+            .preview
+            .as_mut()
+            .expect("preview was installed")
+            .resolution = Some(resolution.clone());
+        resolution_session.items[resolution_position] = resolution_item;
+        if resolution.kind == crate::models::import_v2::ImportResolutionKind::NewSource {
+            resolution.target_wiki_path =
+                crate::services::import_v2::commit::planned_new_source_wiki_path(
+                    context,
+                    files,
+                    &resolution_session,
+                    item_id,
+                )?;
+        }
+        preview.resolution = Some(resolution);
+        let restricted_content = web_result_marks_restricted_content(
+            &context.root.join(Path::new(&staging_root)),
+            result.metadata_path.as_deref(),
+        );
+        let item = self.mutate_preview_item(context, files, session_id, item_id, |item| {
+            transition_item(
+                item,
+                if needs_merge {
+                    ImportItemStatus::NeedsMerge
+                } else {
+                    ImportItemStatus::PreviewReady
+                },
+            )?;
             item.preview = Some(preview);
             item.issue = None;
+            if restricted_content {
+                item.restricted_content = true;
+                item.restricted_identity_summary
+                    .clone_from(&item.authenticated_identity_summary);
+            }
             item.attempts.push(crate::models::import_v2::AttemptRecord {
                 route: descriptor.route.clone(),
                 engine_id: descriptor.engine_id.clone(),
@@ -1648,7 +2249,42 @@ impl ImportV2Service {
         max_task_progress: &Cell<u64>,
     ) -> Result<EngineResult, BackendError> {
         match web_result.continuation.as_ref() {
-            Some(EngineContinuation::LocalAsr { .. }) => self.execute_local_asr_continuation(
+            Some(EngineContinuation::LocalAsr { .. }) => {
+                let result = self.execute_local_asr_continuation(
+                    context,
+                    files,
+                    session_id,
+                    item_id,
+                    staging_root,
+                    request,
+                    web_result,
+                    token,
+                    tasks,
+                    task_id,
+                    max_task_progress,
+                )?;
+                if matches!(
+                    &result.continuation,
+                    Some(EngineContinuation::LocalOcr { .. })
+                ) {
+                    self.execute_local_ocr_continuation(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        staging_root,
+                        request,
+                        result,
+                        token,
+                        tasks,
+                        task_id,
+                        max_task_progress,
+                    )
+                } else {
+                    Ok(result)
+                }
+            }
+            Some(EngineContinuation::LocalOcr { .. }) => self.execute_local_ocr_continuation(
                 context,
                 files,
                 session_id,
@@ -1660,16 +2296,6 @@ impl ImportV2Service {
                 tasks,
                 task_id,
                 max_task_progress,
-            ),
-            Some(EngineContinuation::LocalOcr { .. }) => self.execute_local_ocr_continuation(
-                context,
-                files,
-                session_id,
-                item_id,
-                staging_root,
-                request,
-                web_result,
-                token,
             ),
             None => Ok(web_result),
         }
@@ -1730,25 +2356,24 @@ impl ImportV2Service {
             source_identity: None,
             media_save_mode: Default::default(),
         };
-        let engine = self.engines.resolve_route("media.asr", &asr_input)?;
-        let exact = self.web_targets.resolve(
-            &request.input.locator,
-            request.input.normalized_locator.as_deref(),
-        )?;
-        if !request.local_asr_authorized
-            || self
-                .web_targets
-                .take_bilibili_asr(
-                    &request.project_id,
-                    &request.session_id,
-                    &request.item_id,
-                    exact.request_url.as_str(),
-                )?
-                .is_none()
+        let probe_embedded = request.input.kind == ImportInputKind::File;
+        let companion_fallback = staging.join("transcripts/companion-fallback.md");
+        let engine = match self
+            .engines
+            .resolve_media_asr(&asr_input, request.asr_profile.as_ref())
         {
+            Ok(engine) => engine,
+            Err(_) if companion_fallback.is_file() => {
+                return apply_companion_transcript_fallback(&staging, web_result)
+            }
+            Err(error) => return Err(error),
+        };
+        if !request.local_asr_authorized && !probe_embedded {
             return Err(asr_unavailable());
         }
-        let descriptor = engine.descriptor();
+        let descriptor = describe_engine(engine.as_ref())?;
+        let shard_key = asr_shard_key(&canonical_media, &descriptor)?;
+        let shard_root = staging.join("asr-shards");
         let started_at = chrono::Utc::now().to_rfc3339();
         let mut asr_request = request.clone();
         asr_request.request_id = uuid::Uuid::new_v4().to_string();
@@ -1759,6 +2384,50 @@ impl ImportV2Service {
         // rejects with IMPORT_ASR_POLICY_BLOCKED.
         asr_request.chained_input = Some(temporary_input_path);
         let outcome = (|| -> Result<(EngineResult, Vec<String>), BackendError> {
+            if let Some(cached) = load_completed_asr_shard(
+                &shard_root,
+                &shard_key,
+                &descriptor,
+                &staging,
+                request.local_asr_authorized,
+            )? {
+                let base_path = staging.join(&web_result.markdown_path);
+                let mut base =
+                    std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
+                let transcript_root = staging.join("transcripts");
+                std::fs::create_dir_all(&transcript_root).map_err(|_| asr_unavailable())?;
+                std::fs::write(
+                    transcript_root.join("local-asr.md"),
+                    cached.transcript.as_bytes(),
+                )
+                .map_err(|_| asr_unavailable())?;
+                web_result
+                    .asset_paths
+                    .push("transcripts/local-asr.md".into());
+                if let Some(metadata) = cached.metadata {
+                    std::fs::write(transcript_root.join("local-asr.metadata.json"), metadata)
+                        .map_err(|_| asr_unavailable())?;
+                    web_result
+                        .asset_paths
+                        .push("transcripts/local-asr.metadata.json".into());
+                }
+                base.push_str(if cached.continuation.is_some() {
+                    "\n\n## Video text probe\n\n"
+                } else {
+                    "\n\n## Local ASR Transcript\n\n"
+                });
+                base.push_str(&cached.transcript);
+                std::fs::write(&base_path, base).map_err(|_| asr_unavailable())?;
+                web_result.warnings.push(format!(
+                    "local_asr:{}:{}",
+                    descriptor.engine_id, descriptor.engine_version
+                ));
+                web_result
+                    .warnings
+                    .push("local_asr:reused-complete-shard".into());
+                web_result.continuation = cached.continuation;
+                return Ok((web_result, cached.warnings));
+            }
             let report_asr_progress = |progress: EngineProgress| {
                 let mapped = engine_progress_on_task_scale(&progress);
                 if mapped < max_task_progress.get() {
@@ -1768,9 +2437,58 @@ impl ImportV2Service {
                 task_call(tasks.update_progress(task_id, mapped, Some(100), Some(progress.label)))
                     .map(|_| ())
             };
-            let asr_result =
-                engine.execute_with_progress(&asr_request, token, &report_asr_progress)?;
+            let (mut asr_result, authorization_required) = if probe_embedded {
+                asr_request.asr_probe_only = true;
+                match execute_engine_with_progress(
+                    engine.as_ref(),
+                    &asr_request,
+                    token,
+                    &report_asr_progress,
+                ) {
+                    Ok(result) => (result, false),
+                    Err(error) if error.code == "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE" => {
+                        if companion_fallback.is_file() {
+                            return apply_companion_transcript_fallback(&staging, web_result).map(
+                                |result| {
+                                    (result, vec!["IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE".into()])
+                                },
+                            );
+                        }
+                        if !request.local_asr_authorized {
+                            return Err(asr_unavailable());
+                        }
+                        asr_request.asr_probe_only = false;
+                        (
+                            execute_engine_with_progress(
+                                engine.as_ref(),
+                                &asr_request,
+                                token,
+                                &report_asr_progress,
+                            )?,
+                            true,
+                        )
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                asr_request.asr_probe_only = false;
+                (
+                    execute_engine_with_progress(
+                        engine.as_ref(),
+                        &asr_request,
+                        token,
+                        &report_asr_progress,
+                    )?,
+                    true,
+                )
+            };
             validate_engine_result(staging_root, &asr_result)?;
+            let chained_continuation = asr_result.continuation.take();
+            if chained_continuation.as_ref().is_some_and(|continuation| {
+                !matches!(continuation, EngineContinuation::LocalOcr { .. })
+            }) {
+                return Err(asr_unavailable());
+            }
             let output_path = staging
                 .join(&asr_result.markdown_path)
                 .canonicalize()
@@ -1790,8 +2508,7 @@ impl ImportV2Service {
                 crate::services::import_v2::media_router::TemporaryMediaWorkspace::adopt_existing(
                     output_workspace,
                 )?;
-            if asr_result.continuation.is_some()
-                || asr_result.markdown_path == web_result.markdown_path
+            if asr_result.markdown_path == web_result.markdown_path
                 || asr_result.source_snapshot_path == web_result.source_snapshot_path
             {
                 return Err(asr_unavailable());
@@ -1801,6 +2518,21 @@ impl ImportV2Service {
             let mut base = std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
             let transcript =
                 std::fs::read_to_string(&transcript_path).map_err(|_| asr_unavailable())?;
+            let transcript_metadata = if let Some(metadata_path) = &asr_result.metadata_path {
+                Some(std::fs::read(staging.join(metadata_path)).map_err(|_| asr_unavailable())?)
+            } else {
+                None
+            };
+            store_completed_asr_shard(
+                &shard_root,
+                &shard_key,
+                &descriptor,
+                &transcript,
+                transcript_metadata.as_deref(),
+                &asr_result.warnings,
+                chained_continuation.as_ref(),
+                authorization_required,
+            )?;
             let transcript_root = staging.join("transcripts");
             std::fs::create_dir_all(&transcript_root).map_err(|_| asr_unavailable())?;
             let durable_transcript = transcript_root.join("local-asr.md");
@@ -1809,16 +2541,18 @@ impl ImportV2Service {
             web_result
                 .asset_paths
                 .push("transcripts/local-asr.md".into());
-            if let Some(metadata_path) = &asr_result.metadata_path {
-                let metadata =
-                    std::fs::read(staging.join(metadata_path)).map_err(|_| asr_unavailable())?;
+            if let Some(metadata) = transcript_metadata {
                 std::fs::write(transcript_root.join("local-asr.metadata.json"), metadata)
                     .map_err(|_| asr_unavailable())?;
                 web_result
                     .asset_paths
                     .push("transcripts/local-asr.metadata.json".into());
             }
-            base.push_str("\n\n## Local ASR Transcript\n\n");
+            base.push_str(if chained_continuation.is_some() {
+                "\n\n## Video text probe\n\n"
+            } else {
+                "\n\n## Local ASR Transcript\n\n"
+            });
             base.push_str(&transcript);
             std::fs::write(&base_path, base).map_err(|_| asr_unavailable())?;
             for relative in std::iter::once(&asr_result.markdown_path)
@@ -1832,6 +2566,7 @@ impl ImportV2Service {
                 "local_asr:{}:{}",
                 descriptor.engine_id, descriptor.engine_version
             ));
+            web_result.continuation = chained_continuation;
             Ok((web_result, asr_result.warnings))
         })();
         let (outcome_kind, warnings) = match &outcome {
@@ -1864,6 +2599,9 @@ impl ImportV2Service {
         request: &EngineRequest,
         mut web_result: EngineResult,
         token: &crate::tasks::task_model::CancellationToken,
+        tasks: &TaskService,
+        task_id: &str,
+        max_task_progress: &Cell<u64>,
     ) -> Result<EngineResult, BackendError> {
         let Some(EngineContinuation::LocalOcr {
             temporary_input_paths,
@@ -1876,15 +2614,31 @@ impl ImportV2Service {
         }
         let staging = context.root.join(staging_root);
         let canonical_staging = staging.canonicalize().map_err(|_| ocr_unavailable())?;
+        let canonical_project_root = context.root.canonicalize().map_err(|_| ocr_unavailable())?;
         let base_path = staging.join(&web_result.markdown_path);
         let mut base = std::fs::read_to_string(&base_path).map_err(|_| ocr_unavailable())?;
         let durable_root = staging.join("ocr");
         std::fs::create_dir_all(&durable_root).map_err(|_| ocr_unavailable())?;
 
+        let image_total = temporary_input_paths.len() as u64;
+        let mut successful_ocr = 0usize;
+        let mut first_ocr_error = None;
+        let mut protected_workspaces = HashSet::new();
+        let mut cleanup_guards = Vec::new();
         for (index, temporary_input_path) in temporary_input_paths.iter().enumerate() {
             if token.is_cancelled() {
                 return Err(cancelled_error());
             }
+            update_continuation_progress(
+                tasks,
+                task_id,
+                max_task_progress,
+                EngineProgress {
+                    current: index as u64,
+                    total: Some(image_total),
+                    label: "ocr.recognizing".into(),
+                },
+            )?;
             let input_path = staging.join(temporary_input_path);
             let input_metadata =
                 std::fs::symlink_metadata(&input_path).map_err(|_| ocr_unavailable())?;
@@ -1892,6 +2646,7 @@ impl ImportV2Service {
                 return Err(ocr_unavailable());
             }
             let canonical_input = input_path.canonicalize().map_err(|_| ocr_unavailable())?;
+            let source_image_number = ocr_source_image_number(&canonical_input, index);
             let workspace = canonical_input.parent().ok_or_else(ocr_unavailable)?;
             if !canonical_input.starts_with(&canonical_staging)
                 || workspace.parent() != Some(canonical_staging.as_path())
@@ -1901,10 +2656,13 @@ impl ImportV2Service {
             {
                 return Err(ocr_unavailable());
             }
-            let _cleanup =
-                crate::services::import_v2::media_router::TemporaryMediaWorkspace::adopt_existing(
-                    workspace,
-                )?;
+            if protected_workspaces.insert(workspace.to_path_buf()) {
+                cleanup_guards.push(
+                    crate::services::import_v2::media_router::TemporaryMediaWorkspace::adopt_existing(
+                        workspace,
+                    )?,
+                );
+            }
             let ocr_input = ImportInput {
                 kind: crate::models::import_v2::ImportInputKind::File,
                 display_name: canonical_input
@@ -1921,10 +2679,12 @@ impl ImportV2Service {
                 .engines
                 .resolve_route("ocr.cjk-accurate", &ocr_input)
                 .or_else(|_| self.engines.resolve_route("ocr.basic", &ocr_input))?;
-            let descriptor = engine.descriptor();
+            let descriptor = describe_engine(engine.as_ref())?;
             let started_at = chrono::Utc::now().to_rfc3339();
+            let shard_key = ocr_shard_key(&canonical_input, &descriptor)?;
+            let shard_root = staging.join("ocr-shards");
             let workspace_relative = workspace
-                .strip_prefix(&context.root)
+                .strip_prefix(&canonical_project_root)
                 .map_err(|_| ocr_unavailable())?
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -1935,7 +2695,54 @@ impl ImportV2Service {
             ocr_request.chained_input = None;
             ocr_request.local_ocr_authorized = false;
             let outcome = (|| -> Result<(String, EngineResult), BackendError> {
-                let result = engine.execute(&ocr_request, token)?;
+                if let Some((markdown, metadata)) =
+                    load_completed_ocr_shard(&shard_root, &shard_key, &descriptor)?
+                {
+                    std::fs::write(workspace.join("reused-candidate.md"), markdown.as_bytes())
+                        .and_then(|_| {
+                            std::fs::write(
+                                workspace.join("reused-source.json"),
+                                br#"{"provenance":"reused-complete-ocr-shard"}"#,
+                            )
+                        })
+                        .map_err(|_| ocr_unavailable())?;
+                    let metadata_path = if let Some(ref metadata) = metadata {
+                        std::fs::write(workspace.join("reused-metadata.json"), metadata)
+                            .map_err(|_| ocr_unavailable())?;
+                        Some("reused-metadata.json".into())
+                    } else {
+                        None
+                    };
+                    let confidence_warnings = if descriptor.route == "ocr.cjk-accurate" {
+                        validate_ocr_confidence_metadata(
+                            metadata.as_deref().ok_or_else(ocr_low_confidence)?,
+                            source_image_number,
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    let result = EngineResult {
+                        source_snapshot_path: "reused-source.json".into(),
+                        markdown_path: "reused-candidate.md".into(),
+                        asset_paths: Vec::new(),
+                        metadata_path,
+                        title: format!("OCR image {source_image_number}"),
+                        text_coverage: Some(1.0),
+                        table_cell_accuracy: None,
+                        sheet_count_exact: None,
+                        slide_count_exact: None,
+                        non_empty_cell_coverage: None,
+                        formula_value_pairs: None,
+                        meaningful_image_coverage: None,
+                        continuation: None,
+                        warnings: std::iter::once("IMPORT_OCR_REUSED_COMPLETE_SHARD".into())
+                            .chain(confidence_warnings)
+                            .collect(),
+                    };
+                    validate_engine_result(&workspace_relative, &result)?;
+                    return Ok((markdown, result));
+                }
+                let mut result = execute_engine(engine.as_ref(), &ocr_request, token)?;
                 validate_engine_result(&workspace_relative, &result)?;
                 if result.continuation.is_some() {
                     return Err(ocr_unavailable());
@@ -1949,9 +2756,35 @@ impl ImportV2Service {
                 }
                 let markdown =
                     std::fs::read_to_string(output_path).map_err(|_| ocr_unavailable())?;
-                if markdown.trim().is_empty() {
-                    return Err(ocr_unavailable());
+                if markdown.trim().is_empty()
+                    || result.text_coverage.unwrap_or_default() <= 0.0
+                    || result
+                        .warnings
+                        .iter()
+                        .any(|warning| warning == "IMPORT_OCR_NO_TEXT")
+                {
+                    return Err(ocr_no_text());
                 }
+                let metadata = result
+                    .metadata_path
+                    .as_ref()
+                    .map(|path| std::fs::read(workspace.join(path)))
+                    .transpose()
+                    .map_err(|_| ocr_unavailable())?;
+                if descriptor.route == "ocr.cjk-accurate" {
+                    let confidence_warnings = validate_ocr_confidence_metadata(
+                        metadata.as_deref().ok_or_else(ocr_low_confidence)?,
+                        source_image_number,
+                    )?;
+                    result.warnings.extend(confidence_warnings);
+                }
+                store_completed_ocr_shard(
+                    &shard_root,
+                    &shard_key,
+                    &descriptor,
+                    &markdown,
+                    metadata.as_deref(),
+                )?;
                 Ok((markdown, result))
             })();
             let (ocr_markdown, ocr_result) = match outcome {
@@ -1979,27 +2812,61 @@ impl ImportV2Service {
                         crate::models::import_v2::AttemptOutcome::Failed,
                         Vec::new(),
                     )?;
-                    return Err(error);
+                    first_ocr_error.get_or_insert_with(|| error.clone());
+                    web_result.warnings.push(format!(
+                        "Local OCR failed for source image {source_image_number}: {}",
+                        error.code
+                    ));
+                    continue;
                 }
             };
-            let durable_markdown = format!("ocr/image-{index}.md");
+            successful_ocr += 1;
+            let durable_markdown = format!("ocr/image-{source_image_number:03}.md");
             std::fs::write(staging.join(&durable_markdown), ocr_markdown.as_bytes())
                 .map_err(|_| ocr_unavailable())?;
             web_result.asset_paths.push(durable_markdown);
             if let Some(metadata_path) = &ocr_result.metadata_path {
                 let metadata =
                     std::fs::read(workspace.join(metadata_path)).map_err(|_| ocr_unavailable())?;
-                let durable_metadata = format!("ocr/image-{index}.metadata.json");
+                let durable_metadata = format!("ocr/image-{source_image_number:03}.metadata.json");
                 std::fs::write(staging.join(&durable_metadata), metadata)
                     .map_err(|_| ocr_unavailable())?;
                 web_result.asset_paths.push(durable_metadata);
             }
-            base.push_str(&format!("\n\n## Local OCR — Image {}\n\n", index + 1));
-            base.push_str(&ocr_markdown);
+            let pdf_placeholder = format!("<!-- OCR_PAGE_{source_image_number:03} -->");
+            if base.contains(&pdf_placeholder) {
+                base = base.replace(
+                    &pdf_placeholder,
+                    &format!(
+                        "> 本页文字由本地 OCR {} {} 提取。\n\n{}",
+                        descriptor.engine_id, descriptor.engine_version, ocr_markdown
+                    ),
+                );
+            } else {
+                base.push_str(&format!(
+                    "\n\n## 图片文字 / OCR — 第 {source_image_number} 张\n\n\
+                     > 来源：本地 OCR · {} {}\n\n",
+                    descriptor.engine_id, descriptor.engine_version
+                ));
+                base.push_str(&ocr_markdown);
+            }
             web_result.warnings.push(format!(
                 "local_ocr:{}:{}",
                 descriptor.engine_id, descriptor.engine_version
             ));
+        }
+        update_continuation_progress(
+            tasks,
+            task_id,
+            max_task_progress,
+            EngineProgress {
+                current: image_total,
+                total: Some(image_total),
+                label: "ocr.recognizing".into(),
+            },
+        )?;
+        if successful_ocr != temporary_input_paths.len() || base.contains("<!-- OCR_PAGE_") {
+            return Err(first_ocr_error.unwrap_or_else(ocr_unavailable));
         }
         std::fs::write(base_path, base).map_err(|_| ocr_unavailable())?;
         web_result.text_coverage = Some(1.0);
@@ -2008,24 +2875,11 @@ impl ImportV2Service {
 
     fn planned_routes(
         &self,
+        context: &ProjectContext,
         input: &ImportInput,
         recovery_action: Option<&ImportRecoveryAction>,
     ) -> Result<Vec<(&'static str, QualityFloor)>, BackendError> {
-        let extension = Path::new(&input.locator)
-            .extension()
-            .and_then(|v| v.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let format = match extension.as_str() {
-            "doc" => Some(FileFormat::Doc),
-            "docx" => Some(FileFormat::Docx),
-            "xls" => Some(FileFormat::Xls),
-            "xlsx" => Some(FileFormat::Xlsx),
-            "ppt" => Some(FileFormat::Ppt),
-            "pptx" => Some(FileFormat::Pptx),
-            _ => None,
-        };
-        let Some(format) = format else {
+        let Some(format) = detect_input_format(context, input)? else {
             return Ok(reorder_routes(
                 explicit_routes(input)
                     .into_iter()
@@ -2040,6 +2894,29 @@ impl ImportV2Service {
                 recovery_action,
             ));
         };
+        if !matches!(
+            format,
+            FileFormat::Doc
+                | FileFormat::Docx
+                | FileFormat::Xls
+                | FileFormat::Xlsx
+                | FileFormat::Ppt
+                | FileFormat::Pptx
+        ) {
+            return Ok(reorder_routes(
+                routes_for_format(format)
+                    .into_iter()
+                    .map(|route| {
+                        let floor = match route {
+                            "pdf.text" | "pdf.layout" => QualityFloor::DeterministicDocument,
+                            _ => QualityFloor::ComparisonFallback,
+                        };
+                        (route, floor)
+                    })
+                    .collect(),
+                recovery_action,
+            ));
+        }
         let routes = self.engines.registered_routes()?;
         let has = |route: &str| routes.iter().any(|registered| registered == route);
         let capabilities = CapabilitySnapshot {
@@ -2052,18 +2929,26 @@ impl ImportV2Service {
         Ok(reorder_routes(
             FileRoutePlanner::plan(format, capabilities)
                 .into_iter()
-                .map(|attempt| {
+                .map(|attempt| -> Result<_, BackendError> {
                     let route = attempt.route;
-                    let floor = self
+                    let floor = match self
                         .engines
                         .resolve_route(route, &route_resolution_input(route, input))
-                        .ok()
-                        .filter(|engine| engine.descriptor().engine_id.starts_with("builtin."))
-                        .map(|_| QualityFloor::DeterministicDocument)
-                        .unwrap_or(attempt.quality_floor);
-                    (route, floor)
+                    {
+                        Ok(engine)
+                            if describe_engine(engine.as_ref())?
+                                .engine_id
+                                .starts_with("builtin.") =>
+                        {
+                            QualityFloor::DeterministicDocument
+                        }
+                        Ok(_) => attempt.quality_floor,
+                        Err(error) if error.code == IMPORT_V2_ENGINE_PANICKED => return Err(error),
+                        Err(_) => attempt.quality_floor,
+                    };
+                    Ok((route, floor))
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
             recovery_action,
         ))
     }
@@ -2109,6 +2994,7 @@ impl ImportV2Service {
                 ImportItemStatus::Queued
                     | ImportItemStatus::Failed
                     | ImportItemStatus::WaitingCapability
+                    | ImportItemStatus::WaitingLogin
                     | ImportItemStatus::WaitingAuthorization
                     | ImportItemStatus::Cancelled
                     | ImportItemStatus::Skipped
@@ -2118,6 +3004,7 @@ impl ImportV2Service {
                 item.status,
                 ImportItemStatus::Failed
                     | ImportItemStatus::WaitingCapability
+                    | ImportItemStatus::WaitingLogin
                     | ImportItemStatus::WaitingAuthorization
             ) && item
                 .task_id
@@ -2198,10 +3085,17 @@ impl ImportV2Service {
         let staging = context.root.join(format!(
             ".app/import-sessions/{session_id}/items/{item_id}/staging"
         ));
-        let _ = crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
-            &staging,
-        );
-        self.mutate_item(context, files, session_id, item_id, |item| {
+        if let Err(error) = cleanup_terminal_item_staging(&staging) {
+            task_call(tasks.append_log(
+                task_id,
+                LogLevel::Warn,
+                format!(
+                    "Import cancellation could not fully remove temporary media: {}",
+                    error.code
+                ),
+            ))?;
+        }
+        let item = self.mutate_item(context, files, session_id, item_id, |item| {
             if item.status == ImportItemStatus::Skipped {
                 return Ok(());
             }
@@ -2212,6 +3106,7 @@ impl ImportV2Service {
             item.progress = None;
             Ok(())
         })?;
+        remove_clipboard_session_input(context, session_id, &item.input);
         if tasks
             .get_task(task_id)
             .is_some_and(|task| task.status != TaskStatus::Cancelled)
@@ -2220,6 +3115,67 @@ impl ImportV2Service {
         }
         Err(cancelled_error())
     }
+
+    fn terminalize_in_flight_worker_error(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        error: &BackendError,
+    ) {
+        let item = self
+            .load_session(context, files, session_id)
+            .ok()
+            .and_then(|session| {
+                session
+                    .items
+                    .into_iter()
+                    .find(|item| item.item_id == item_id)
+            });
+        let Some(item) = item else {
+            return;
+        };
+        if item.task_id.as_deref() != Some(task_id) {
+            return;
+        }
+        if matches!(
+            item.status,
+            ImportItemStatus::Inspecting
+                | ImportItemStatus::Extracting
+                | ImportItemStatus::Validating
+        ) {
+            if tasks.is_cancelled(task_id) || error.code == IMPORT_V2_CANCELLED {
+                let _ = self.finish_cancelled(context, files, tasks, session_id, item_id, task_id);
+            } else {
+                let _ = self.finish_failed(
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    item_id,
+                    task_id,
+                    error.clone(),
+                    ImportStage::Extract,
+                );
+            }
+        } else if item.status == ImportItemStatus::Failed
+            && tasks.get_task(task_id).is_some_and(|task| {
+                !matches!(
+                    task.status,
+                    TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                )
+            })
+        {
+            // A panic can occur after the item mutation but before the task
+            // transition. Repair that half-written terminal state here.
+            let _ = tasks.set_error(task_id, issue_safe_error(error));
+            let _ = tasks.transition_status(task_id, TaskStatus::Failed);
+        }
+    }
+
     fn finish_failed(
         &self,
         context: &ProjectContext,
@@ -2234,17 +3190,22 @@ impl ImportV2Service {
         let staging = context.root.join(format!(
             ".app/import-sessions/{session_id}/items/{item_id}/staging"
         ));
-        let _ = crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
-            &staging,
-        );
+        if let Err(cleanup_error) = cleanup_terminal_item_staging(&staging) {
+            task_call(tasks.append_log(
+                task_id,
+                LogLevel::Warn,
+                format!(
+                    "Import failure could not fully remove temporary media: {}",
+                    cleanup_error.code
+                ),
+            ))?;
+        }
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Failed)?;
             let mut issue = issue_from_engine_error_for_input(&error, stage, &item.input.kind);
             if is_agent_eligible_failure(&error.code, &issue) {
-                issue.available_actions = vec![
-                    crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent,
-                    crate::models::import_v2_agent::AgentRecoveryAction::RequestByok,
-                ];
+                issue.available_actions =
+                    vec![crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent];
             }
             item.issue = Some(issue);
             Ok(())
@@ -2328,6 +3289,87 @@ impl ImportV2Service {
         Ok(item)
     }
 
+    fn finish_waiting_subtitle_selection(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        error: BackendError,
+        stage: ImportStage,
+    ) -> Result<ImportItem, BackendError> {
+        let item = self.mutate_item(context, files, session_id, item_id, |item| {
+            transition_item(item, ImportItemStatus::WaitingAuthorization)?;
+            item.selected_subtitle = None;
+            item.issue = Some(issue_from_engine_error(&error, stage));
+            Ok(())
+        })?;
+        task_call(tasks.append_log(
+            task_id,
+            LogLevel::Warn,
+            "Media import is waiting for an explicit subtitle selection.".into(),
+        ))?;
+        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        Ok(item)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_waiting_local_ocr(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        error: BackendError,
+        stage: ImportStage,
+    ) -> Result<ImportItem, BackendError> {
+        let ocr_available = self
+            .engines
+            .registered_routes()?
+            .iter()
+            .any(|route| route == "ocr.cjk-accurate" || route == "ocr.basic");
+        let item = self.mutate_item(context, files, session_id, item_id, |item| {
+            transition_item(
+                item,
+                if ocr_available {
+                    ImportItemStatus::WaitingAuthorization
+                } else {
+                    ImportItemStatus::WaitingCapability
+                },
+            )?;
+            let mut issue = ImportIssue::for_web_code(&error.code, stage);
+            issue.recovery_actions.retain(|action| {
+                if ocr_available {
+                    !matches!(action, ImportRecoveryAction::InstallOcrCapability)
+                } else {
+                    !matches!(action, ImportRecoveryAction::EnableOcr)
+                }
+            });
+            if ocr_available
+                && !issue
+                    .recovery_actions
+                    .contains(&ImportRecoveryAction::EnableOcr)
+            {
+                issue
+                    .recovery_actions
+                    .insert(0, ImportRecoveryAction::EnableOcr);
+            }
+            item.issue = Some(issue);
+            Ok(())
+        })?;
+        task_call(tasks.append_log(
+            task_id,
+            LogLevel::Warn,
+            "The import is waiting for the local OCR capability.".into(),
+        ))?;
+        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        Ok(item)
+    }
+
     fn mutate_item<F>(
         &self,
         context: &ProjectContext,
@@ -2342,9 +3384,55 @@ impl ImportV2Service {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
-        let item = find_item_mut(&mut session, item_id)?;
-        mutation(item)?;
-        let item = item.clone();
+        let should_refresh_targets = {
+            let item = find_item_mut(&mut session, item_id)?;
+            let before = new_source_reservation_fingerprint(item);
+            mutation(item)?;
+            before != new_source_reservation_fingerprint(item)
+        };
+        if should_refresh_targets {
+            crate::services::import_v2::commit::refresh_new_source_wiki_targets(
+                context,
+                files,
+                &mut session,
+            )?;
+        }
+        let item = session
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .cloned()
+            .ok_or_else(item_not_found)?;
+        persist_derived(&self.sessions, context, files, session)?;
+        Ok(item)
+    }
+
+    fn mutate_preview_item<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        mutation: F,
+    ) -> Result<ImportItem, BackendError>
+    where
+        F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
+    {
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        let item_position = session
+            .items
+            .iter()
+            .position(|item| item.item_id == item_id)
+            .ok_or_else(item_not_found)?;
+        mutation(&mut session.items[item_position])?;
+        crate::services::import_v2::commit::refresh_new_source_wiki_targets(
+            context,
+            files,
+            &mut session,
+        )?;
+        let item = session.items[item_position].clone();
         persist_derived(&self.sessions, context, files, session)?;
         Ok(item)
     }
@@ -2352,6 +3440,48 @@ impl ImportV2Service {
         self.mutation_lock
             .lock()
             .map_err(|_| task_error("Import session mutation lock is unavailable."))
+    }
+
+    pub(crate) fn with_agent_candidate_action_lock<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let _guard = self
+            .agent_candidate_action_lock
+            .lock()
+            .map_err(|_| task_error("Agent candidate action lock is unavailable."))?;
+        action()
+    }
+
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub(crate) fn reserve_source_ai(&self, key: String) -> Result<(), BackendError> {
+        let mut active = self
+            .source_ai_active
+            .lock()
+            .map_err(|_| task_error("Source AI task registry is unavailable."))?;
+        if !active.insert(key) {
+            return Err(BackendError::new(
+                "SOURCE_AI_ALREADY_RUNNING",
+                "An AI organization task is already active for this Source.",
+                true,
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub(crate) fn release_source_ai(&self, key: &str) {
+        if let Ok(mut active) = self.source_ai_active.lock() {
+            active.remove(key);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_source_ai_reservation(&self, key: &str) -> bool {
+        self.source_ai_active
+            .lock()
+            .is_ok_and(|active| active.contains(key))
     }
 
     fn preflight_locked(&self, context: &ProjectContext) -> Result<(), BackendError> {
@@ -2403,18 +3533,6 @@ fn is_agent_eligible_failure(original_code: &str, issue: &ImportIssue) -> bool {
         )
 }
 
-fn should_authorize_local_ocr(
-    input: &ImportInput,
-    recovery_action: Option<&ImportRecoveryAction>,
-    registered_routes: &[String],
-) -> bool {
-    input.kind == crate::models::import_v2::ImportInputKind::Url
-        && matches!(recovery_action, Some(ImportRecoveryAction::EnableOcr))
-        && registered_routes
-            .iter()
-            .any(|route| route == "ocr.cjk-accurate" || route == "ocr.basic")
-}
-
 fn reorder_routes(
     mut routes: Vec<(&'static str, QualityFloor)>,
     recovery_action: Option<&ImportRecoveryAction>,
@@ -2438,6 +3556,102 @@ fn reorder_routes(
     routes
 }
 
+fn detect_input_format(
+    context: &ProjectContext,
+    input: &ImportInput,
+) -> Result<Option<FileFormat>, BackendError> {
+    if input.kind == ImportInputKind::Url {
+        return Ok(None);
+    }
+    let locator = Path::new(&input.locator);
+    let path = if locator.is_absolute() {
+        locator.to_path_buf()
+    } else {
+        context.root.join(locator)
+    };
+    let prefix = std::fs::File::open(&path)
+        .and_then(|file| {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take(8192).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+        .map_err(|error| {
+            BackendError::new(
+                "IMPORT_FILE_IO",
+                format!("The selected source could not be inspected: {error}"),
+                true,
+                true,
+            )
+        })?;
+    crate::services::import_v2::file_discovery::identify_file(&path, &prefix)
+        .map(|(format, _)| Some(format))
+}
+
+/// Canonical Batch 3 route contract. Discovery and contract tests share this
+/// function so adding a supported local format cannot silently diverge from
+/// the production orchestrator.
+pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
+    match format {
+        FileFormat::Markdown | FileFormat::Text | FileFormat::Html => vec!["file.native"],
+        FileFormat::Csv => vec!["file.csv-package"],
+        FileFormat::Docx => vec![
+            "office.modern.docx",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
+        FileFormat::Xlsx => vec![
+            "office.modern.xlsx",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
+        FileFormat::Pptx => vec![
+            "office.modern.pptx",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
+        FileFormat::Doc | FileFormat::Xls | FileFormat::Ppt => {
+            vec!["pack.office-legacy", "pack.office-oxide", "agent.office"]
+        }
+        FileFormat::Pdf => vec![
+            "pdf.text",
+            "pdf.layout",
+            "ocr.cjk-accurate",
+            "ocr.basic",
+            "agent.pdf",
+        ],
+        FileFormat::Srt | FileFormat::Vtt | FileFormat::Ass | FileFormat::Lrc => {
+            vec!["media.subtitle"]
+        }
+        FileFormat::Mp3
+        | FileFormat::Wav
+        | FileFormat::M4a
+        | FileFormat::Aac
+        | FileFormat::Flac
+        | FileFormat::Ogg
+        | FileFormat::Opus
+        | FileFormat::Wma
+        | FileFormat::Mp4
+        | FileFormat::Mov
+        | FileFormat::Mkv
+        | FileFormat::Webm
+        | FileFormat::Avi
+        | FileFormat::M4v
+        | FileFormat::Wmv
+        | FileFormat::AnimatedGif => vec!["media.companion", "media.asr"],
+        FileFormat::Png
+        | FileFormat::Jpeg
+        | FileFormat::Webp
+        | FileFormat::Bmp
+        | FileFormat::Tiff
+        | FileFormat::Heic
+        | FileFormat::Heif => vec!["ocr.cjk-accurate", "ocr.basic"],
+    }
+}
+
 fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
     if input.kind == crate::models::import_v2::ImportInputKind::Url {
         let host = url::Url::parse(
@@ -2453,6 +3667,8 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
             || host.ends_with(".xiaohongshu.com")
             || host == "xhslink.com"
             || host.ends_with(".xhslink.com")
+            || host == "xhslink.cn"
+            || host.ends_with(".xhslink.cn")
         {
             return vec![
                 "web.generic.browser",
@@ -2476,7 +3692,7 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
             || host == "twitter.com"
             || host.ends_with(".twitter.com")
         {
-            return Vec::new();
+            return vec!["web.x.post"];
         }
         if host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv" {
             return vec![
@@ -2502,7 +3718,8 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "md" | "markdown" | "txt" | "csv" | "html" | "htm" => vec!["file.native"],
+        "md" | "markdown" | "txt" | "html" | "htm" => vec!["file.native"],
+        "csv" => vec!["file.csv-package"],
         "docx" => vec![
             "office.modern.docx",
             "pack.markitdown",
@@ -2530,7 +3747,13 @@ fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
             "agent.pdf",
         ],
         "srt" | "vtt" | "lrc" | "ass" | "ssa" => vec!["media.subtitle"],
-        "mp3" | "wav" | "m4a" | "mp4" | "mov" | "mkv" => vec!["media.asr"],
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma" | "mp4" | "mov" | "mkv"
+        | "webm" | "avi" | "m4v" | "wmv" | "gif" => {
+            vec!["media.companion", "media.asr"]
+        }
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif" => {
+            vec!["ocr.cjk-accurate", "ocr.basic"]
+        }
         _ => Vec::new(),
     }
 }
@@ -2552,25 +3775,6 @@ fn is_bilibili_import_input(input: &ImportInput) -> bool {
     })
 }
 
-fn is_supported_media_platform_url(value: &str) -> bool {
-    url::Url::parse(value)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| {
-            host == "b23.tv"
-                || host == "bilibili.com"
-                || host.ends_with(".bilibili.com")
-                || host == "xiaohongshu.com"
-                || host.ends_with(".xiaohongshu.com")
-                || host == "xhslink.com"
-                || host.ends_with(".xhslink.com")
-                || host == "douyin.com"
-                || host.ends_with(".douyin.com")
-                || host == "iesdouyin.com"
-                || host.ends_with(".iesdouyin.com")
-        })
-}
-
 fn asr_unavailable() -> BackendError {
     BackendError::new(
         "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
@@ -2578,6 +3782,48 @@ fn asr_unavailable() -> BackendError {
         true,
         true,
     )
+}
+
+fn cleanup_terminal_item_staging(staging: &Path) -> Result<(), BackendError> {
+    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(staging)?;
+    if staging.exists() {
+        std::fs::remove_dir_all(staging).map_err(|_| {
+            BackendError::new(
+                "IMPORT_MEDIA_CLEANUP_FAILED",
+                "Temporary import media could not be fully removed.",
+                true,
+                false,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_companion_transcript_fallback(
+    staging: &Path,
+    mut result: EngineResult,
+) -> Result<EngineResult, BackendError> {
+    let relative = "transcripts/companion-fallback.md";
+    let transcript =
+        std::fs::read_to_string(staging.join(relative)).map_err(|_| asr_unavailable())?;
+    if transcript.trim().is_empty() {
+        return Err(asr_unavailable());
+    }
+    let base_path = staging.join(&result.markdown_path);
+    let mut base = std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
+    base.push_str("\n\n## Companion transcript\n\n");
+    base.push_str(transcript.trim());
+    base.push('\n');
+    std::fs::write(base_path, base).map_err(|_| asr_unavailable())?;
+    if !result.asset_paths.iter().any(|path| path == relative) {
+        result.asset_paths.push(relative.into());
+    }
+    result.text_coverage = Some(1.0);
+    result.continuation = None;
+    result
+        .warnings
+        .push("IMPORT_COMPANION_TRANSCRIPT_SELECTED_AFTER_EMBEDDED_PROBE".into());
+    Ok(result)
 }
 
 fn is_allowed_local_asr_output_workspace(staging: &Path, workspace: &Path) -> bool {
@@ -2598,6 +3844,396 @@ fn ocr_unavailable() -> BackendError {
     )
 }
 
+fn ocr_no_text() -> BackendError {
+    BackendError::new(
+        "IMPORT_OCR_NO_TEXT",
+        "Local OCR completed but did not find readable text.",
+        false,
+        true,
+    )
+}
+
+fn ocr_low_confidence() -> BackendError {
+    BackendError::new(
+        "IMPORT_OCR_LOW_CONFIDENCE",
+        "Local OCR completed, but the recognized text was below the minimum confidence threshold.",
+        true,
+        true,
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrConfidenceMetadata {
+    confidence: f64,
+    blocks: Vec<OcrConfidenceBlock>,
+}
+
+#[derive(serde::Deserialize)]
+struct OcrConfidenceBlock {
+    confidence: f64,
+    #[serde(default)]
+    coordinates: Option<OcrConfidenceCoordinates>,
+}
+
+#[derive(serde::Deserialize)]
+struct OcrConfidenceCoordinates {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn validate_ocr_confidence_metadata(
+    bytes: &[u8],
+    source_image_number: usize,
+) -> Result<Vec<String>, BackendError> {
+    const MINIMUM_MEAN_CONFIDENCE: f64 = 0.75;
+    const MINIMUM_READABLE_BLOCK_CONFIDENCE: f64 = 0.50;
+
+    let metadata: OcrConfidenceMetadata =
+        serde_json::from_slice(bytes).map_err(|_| ocr_low_confidence())?;
+    if metadata.blocks.is_empty()
+        || !metadata.confidence.is_finite()
+        || !(0.0..=1.0).contains(&metadata.confidence)
+        || metadata.confidence < MINIMUM_MEAN_CONFIDENCE
+        || !metadata.blocks.iter().any(|block| {
+            block.confidence.is_finite()
+                && block.confidence >= MINIMUM_READABLE_BLOCK_CONFIDENCE
+                && block.confidence <= 1.0
+        })
+    {
+        return Err(ocr_low_confidence());
+    }
+    let warnings = metadata
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| {
+            !block.confidence.is_finite()
+                || block.confidence < MINIMUM_MEAN_CONFIDENCE
+                || block.confidence > 1.0
+        })
+        .map(|(index, block)| {
+            let location = block
+                .coordinates
+                .as_ref()
+                .map(|coordinates| {
+                    format!(
+                        ":x{}:y{}:w{}:h{}",
+                        coordinates.x, coordinates.y, coordinates.width, coordinates.height
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "IMPORT_OCR_LOW_CONFIDENCE_BLOCK:image-{source_image_number}:block-{}{}",
+                index + 1,
+                location
+            )
+        })
+        .collect();
+    Ok(warnings)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletedAsrShard {
+    schema_version: u32,
+    complete: bool,
+    engine_id: String,
+    engine_version: String,
+    transcript_sha256: String,
+    metadata_sha256: Option<String>,
+    warnings: Vec<String>,
+    continuation: Option<EngineContinuation>,
+    authorization_required: bool,
+}
+
+struct CachedAsrShard {
+    transcript: String,
+    metadata: Option<Vec<u8>>,
+    warnings: Vec<String>,
+    continuation: Option<EngineContinuation>,
+}
+
+fn asr_shard_key(
+    input: &Path,
+    descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+) -> Result<String, BackendError> {
+    let bytes = std::fs::read(input).map_err(|_| asr_unavailable())?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"asr-shard-v1\0");
+    hasher.update(descriptor.engine_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(descriptor.engine_version.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn load_completed_asr_shard(
+    root: &Path,
+    key: &str,
+    descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+    staging: &Path,
+    local_asr_authorized: bool,
+) -> Result<Option<CachedAsrShard>, BackendError> {
+    let marker_bytes = match std::fs::read(root.join(format!("{key}.complete.json"))) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(asr_unavailable()),
+    };
+    let marker: CompletedAsrShard = match serde_json::from_slice(&marker_bytes) {
+        Ok(marker) => marker,
+        Err(_) => return Ok(None),
+    };
+    if marker.schema_version != 1
+        || !marker.complete
+        || marker.engine_id != descriptor.engine_id
+        || marker.engine_version != descriptor.engine_version
+        || (marker.authorization_required && !local_asr_authorized)
+    {
+        return Ok(None);
+    }
+    if let Some(EngineContinuation::LocalOcr {
+        temporary_input_paths,
+    }) = &marker.continuation
+    {
+        let canonical_staging = staging.canonicalize().map_err(|_| asr_unavailable())?;
+        for relative in temporary_input_paths {
+            let relative_path = Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Ok(None);
+            }
+            let candidate = staging.join(relative_path);
+            let metadata = match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) => metadata,
+                Err(_) => return Ok(None),
+            };
+            let canonical = match candidate.canonicalize() {
+                Ok(canonical) => canonical,
+                Err(_) => return Ok(None),
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || !canonical.starts_with(&canonical_staging)
+            {
+                return Ok(None);
+            }
+        }
+    }
+    let transcript_bytes = match std::fs::read(root.join(format!("{key}.md"))) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    if format!("{:x}", Sha256::digest(&transcript_bytes)) != marker.transcript_sha256 {
+        return Ok(None);
+    }
+    let metadata = if let Some(expected) = marker.metadata_sha256 {
+        let bytes = match std::fs::read(root.join(format!("{key}.metadata.json"))) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(None),
+        };
+        if format!("{:x}", Sha256::digest(&bytes)) != expected {
+            return Ok(None);
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+    let transcript = String::from_utf8(transcript_bytes).map_err(|_| asr_unavailable())?;
+    Ok(Some(CachedAsrShard {
+        transcript,
+        metadata,
+        warnings: marker.warnings,
+        continuation: marker.continuation,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_completed_asr_shard(
+    root: &Path,
+    key: &str,
+    descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+    transcript: &str,
+    metadata: Option<&[u8]>,
+    warnings: &[String],
+    continuation: Option<&EngineContinuation>,
+    authorization_required: bool,
+) -> Result<(), BackendError> {
+    std::fs::create_dir_all(root).map_err(|_| asr_unavailable())?;
+    let nonce = uuid::Uuid::new_v4();
+    let transcript_temporary = root.join(format!(".{key}.{nonce}.md.tmp"));
+    let metadata_temporary = root.join(format!(".{key}.{nonce}.metadata.tmp"));
+    let marker_temporary = root.join(format!(".{key}.{nonce}.complete.tmp"));
+    std::fs::write(&transcript_temporary, transcript.as_bytes()).map_err(|_| asr_unavailable())?;
+    if let Some(metadata) = metadata {
+        std::fs::write(&metadata_temporary, metadata).map_err(|_| asr_unavailable())?;
+    }
+    let marker = CompletedAsrShard {
+        schema_version: 1,
+        complete: true,
+        engine_id: descriptor.engine_id.clone(),
+        engine_version: descriptor.engine_version.clone(),
+        transcript_sha256: format!("{:x}", Sha256::digest(transcript.as_bytes())),
+        metadata_sha256: metadata.map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+        warnings: warnings.to_vec(),
+        continuation: continuation.cloned(),
+        authorization_required,
+    };
+    std::fs::write(
+        &marker_temporary,
+        serde_json::to_vec(&marker).map_err(|_| asr_unavailable())?,
+    )
+    .map_err(|_| asr_unavailable())?;
+    replace_asr_shard_file(&transcript_temporary, &root.join(format!("{key}.md")))?;
+    if metadata.is_some() {
+        replace_asr_shard_file(
+            &metadata_temporary,
+            &root.join(format!("{key}.metadata.json")),
+        )?;
+    }
+    replace_asr_shard_file(
+        &marker_temporary,
+        &root.join(format!("{key}.complete.json")),
+    )
+}
+
+fn replace_asr_shard_file(source: &Path, destination: &Path) -> Result<(), BackendError> {
+    if destination.exists() {
+        std::fs::remove_file(destination).map_err(|_| asr_unavailable())?;
+    }
+    std::fs::rename(source, destination).map_err(|_| asr_unavailable())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletedOcrShard {
+    schema_version: u32,
+    complete: bool,
+    engine_id: String,
+    engine_version: String,
+    markdown_sha256: String,
+    metadata_sha256: Option<String>,
+}
+
+fn ocr_shard_key(
+    input: &Path,
+    descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+) -> Result<String, BackendError> {
+    let bytes = std::fs::read(input).map_err(|_| ocr_unavailable())?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ocr-shard-v1\0");
+    hasher.update(descriptor.engine_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(descriptor.engine_version.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn load_completed_ocr_shard(
+    root: &Path,
+    key: &str,
+    descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+) -> Result<Option<(String, Option<Vec<u8>>)>, BackendError> {
+    let marker_bytes = match std::fs::read(root.join(format!("{key}.complete.json"))) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ocr_unavailable()),
+    };
+    let marker: CompletedOcrShard = match serde_json::from_slice(&marker_bytes) {
+        Ok(marker) => marker,
+        Err(_) => return Ok(None),
+    };
+    if marker.schema_version != 1
+        || !marker.complete
+        || marker.engine_id != descriptor.engine_id
+        || marker.engine_version != descriptor.engine_version
+    {
+        return Ok(None);
+    }
+    let markdown_bytes = match std::fs::read(root.join(format!("{key}.md"))) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    if format!("{:x}", Sha256::digest(&markdown_bytes)) != marker.markdown_sha256 {
+        return Ok(None);
+    }
+    let metadata = if let Some(expected) = marker.metadata_sha256 {
+        let bytes = match std::fs::read(root.join(format!("{key}.metadata.json"))) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(None),
+        };
+        if format!("{:x}", Sha256::digest(&bytes)) != expected {
+            return Ok(None);
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+    let markdown = String::from_utf8(markdown_bytes).map_err(|_| ocr_unavailable())?;
+    Ok(Some((markdown, metadata)))
+}
+
+fn store_completed_ocr_shard(
+    root: &Path,
+    key: &str,
+    descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+    markdown: &str,
+    metadata: Option<&[u8]>,
+) -> Result<(), BackendError> {
+    std::fs::create_dir_all(root).map_err(|_| ocr_unavailable())?;
+    let nonce = uuid::Uuid::new_v4();
+    let markdown_temporary = root.join(format!(".{key}.{nonce}.md.tmp"));
+    let metadata_temporary = root.join(format!(".{key}.{nonce}.metadata.tmp"));
+    let marker_temporary = root.join(format!(".{key}.{nonce}.complete.tmp"));
+    std::fs::write(&markdown_temporary, markdown.as_bytes()).map_err(|_| ocr_unavailable())?;
+    if let Some(metadata) = metadata {
+        std::fs::write(&metadata_temporary, metadata).map_err(|_| ocr_unavailable())?;
+    }
+    let marker = CompletedOcrShard {
+        schema_version: 1,
+        complete: true,
+        engine_id: descriptor.engine_id.clone(),
+        engine_version: descriptor.engine_version.clone(),
+        markdown_sha256: format!("{:x}", Sha256::digest(markdown.as_bytes())),
+        metadata_sha256: metadata.map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+    };
+    std::fs::write(
+        &marker_temporary,
+        serde_json::to_vec(&marker).map_err(|_| ocr_unavailable())?,
+    )
+    .map_err(|_| ocr_unavailable())?;
+    replace_shard_file(&markdown_temporary, &root.join(format!("{key}.md")))?;
+    if metadata.is_some() {
+        replace_shard_file(
+            &metadata_temporary,
+            &root.join(format!("{key}.metadata.json")),
+        )?;
+    }
+    replace_shard_file(
+        &marker_temporary,
+        &root.join(format!("{key}.complete.json")),
+    )
+}
+
+fn replace_shard_file(source: &Path, destination: &Path) -> Result<(), BackendError> {
+    if destination.exists() {
+        std::fs::remove_file(destination).map_err(|_| ocr_unavailable())?;
+    }
+    std::fs::rename(source, destination).map_err(|_| ocr_unavailable())
+}
+
 fn is_capability_route(route: &str) -> bool {
     route.starts_with("pack.")
         || route.starts_with("pdf.")
@@ -2607,10 +4243,13 @@ fn is_capability_route(route: &str) -> bool {
 
 fn is_non_fallback_error(error: &BackendError) -> bool {
     error.code == crate::errors::IMPORT_V2_CANCELLED
+        || error.code == "IMPORT_PDF_ENCRYPTED_UNSUPPORTED"
+        || error.code == "IMPORT_PDF_ACTIVE_CONTENT_REJECTED"
         || error.code.contains("PASSWORD")
         || error.code.contains("LOGIN")
         || error.code.contains("CAPTCHA")
         || error.code == "IMPORT_WEB_CONTENT_REMOVED"
+        || error.code == "IMPORT_LOCAL_SUBTITLE_AMBIGUOUS"
 }
 fn is_web_user_wait(error: &BackendError) -> bool {
     matches!(
@@ -2793,9 +4432,12 @@ fn route_resolution_input(route: &str, input: &ImportInput) -> ImportInput {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let extension = match route {
+        "pdf.text" | "pdf.layout" => Some("pdf"),
         "office.modern.docx" => Some("docx"),
         "office.modern.xlsx" => Some("xlsx"),
         "office.modern.pptx" => Some("pptx"),
+        "file.csv-package" => Some("csv"),
+        "ocr.cjk-accurate" | "ocr.basic" => Some("png"),
         "pack.markitdown" => match original_extension.as_str() {
             "doc" => Some("docx"),
             "xls" => Some("xlsx"),
@@ -2844,6 +4486,24 @@ fn item_not_found() -> BackendError {
 fn task_error(message: &str) -> BackendError {
     BackendError::new(IMPORT_V2_STATE_INVALID, message, true, false)
 }
+
+fn ensure_agent_candidate_item_is_mutable(
+    session: &ImportSession,
+    item: &ImportItem,
+) -> Result<(), BackendError> {
+    if matches!(
+        session.status,
+        ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
+    ) || !matches!(
+        item.status,
+        ImportItemStatus::Failed | ImportItemStatus::PreviewReady | ImportItemStatus::NeedsMerge
+    ) {
+        return Err(task_error(
+            "Agent candidate action is stale for the current Import item state.",
+        ));
+    }
+    Ok(())
+}
 fn engine_progress_on_task_scale(progress: &EngineProgress) -> u64 {
     let normalized = progress
         .total
@@ -2852,6 +4512,10 @@ fn engine_progress_on_task_scale(progress: &EngineProgress) -> u64 {
         .unwrap_or(0);
     let (start, end) = if progress.label == "media.downloading" {
         (5_u64, 20_u64)
+    } else if progress.label == "images.downloading" {
+        (5_u64, 60_u64)
+    } else if progress.label.starts_with("ocr.") {
+        (60_u64, 90_u64)
     } else if progress.label.starts_with("asr.") {
         (20_u64, 90_u64)
     } else {
@@ -2859,11 +4523,56 @@ fn engine_progress_on_task_scale(progress: &EngineProgress) -> u64 {
     };
     start + normalized.saturating_mul(end - start) / 10_000
 }
+fn update_continuation_progress(
+    tasks: &TaskService,
+    task_id: &str,
+    max_task_progress: &Cell<u64>,
+    progress: EngineProgress,
+) -> Result<(), BackendError> {
+    let mapped = engine_progress_on_task_scale(&progress);
+    if mapped < max_task_progress.get() {
+        return Ok(());
+    }
+    max_task_progress.set(mapped);
+    task_call(tasks.update_progress(task_id, mapped, Some(100), Some(progress.label))).map(|_| ())
+}
+fn ocr_source_image_number(path: &Path, fallback_index: usize) -> usize {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .and_then(|value| {
+            value
+                .strip_prefix("image-")
+                .or_else(|| value.strip_prefix("page-"))
+        })
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback_index + 1)
+}
 fn task_call<T>(result: Result<T, String>) -> Result<T, BackendError> {
     result.map_err(|_| task_error("Import task state could not be updated."))
 }
+
+fn web_result_marks_restricted_content(staging: &Path, metadata_path: Option<&str>) -> bool {
+    let Some(metadata_path) = metadata_path else {
+        return false;
+    };
+    std::fs::read(staging.join(metadata_path))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("restrictedContent")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
 fn cancelled_error() -> BackendError {
     BackendError::new(IMPORT_V2_CANCELLED, "Import was cancelled.", true, false)
+}
+
+fn requires_explicit_video_frame_ocr(error_code: &str) -> bool {
+    error_code == "IMPORT_VIDEO_FRAME_OCR_REQUIRED"
 }
 fn issue_safe_error(error: &BackendError) -> BackendError {
     BackendError::new(
@@ -2900,7 +4609,20 @@ fn issue_from_engine_error(error: &BackendError, stage: ImportStage) -> ImportIs
         return ImportIssue::for_web_code(&error.code, stage);
     }
     let code = stable_file_error_code(&error.code);
-    ImportIssue::for_file_code(code, stage)
+    let mut issue = ImportIssue::for_file_code(code, stage);
+    if code == "IMPORT_FILE_SUBTITLE_AMBIGUOUS" {
+        issue.subtitle_candidates = error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("subtitleCandidates"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
+    issue
 }
 
 fn issue_from_engine_error_for_input(
@@ -2926,6 +4648,7 @@ fn stable_file_error_code(code: &str) -> &'static str {
         crate::errors::IMPORT_V2_CANCELLED => "IMPORT_FILE_CANCELLED",
         crate::errors::IMPORT_V2_QUALITY_FAILED => "IMPORT_FILE_QUALITY_FAILED",
         crate::errors::IMPORT_V2_ENGINE_OUTPUT_INVALID => "IMPORT_FILE_PARSE_FAILED",
+        "IMPORT_LOCAL_SUBTITLE_AMBIGUOUS" => "IMPORT_FILE_SUBTITLE_AMBIGUOUS",
         _ if code.contains("PASSWORD") => "IMPORT_FILE_PASSWORD_REQUIRED",
         _ if code.contains("CORRUPT") => "IMPORT_FILE_CORRUPT",
         _ if code.contains("RESOURCE") || code.contains("LIMIT") => "IMPORT_FILE_RESOURCE_LIMIT",
@@ -2933,6 +4656,24 @@ fn stable_file_error_code(code: &str) -> &'static str {
         _ => "IMPORT_FILE_PARSE_FAILED",
     }
 }
+
+fn remove_clipboard_session_input(context: &ProjectContext, session_id: &str, input: &ImportInput) {
+    if input.kind != ImportInputKind::ClipboardText {
+        return;
+    }
+    let expected_prefix = format!(".app/import-sessions/{session_id}/inputs/");
+    if !input
+        .locator
+        .replace('\\', "/")
+        .starts_with(&expected_prefix)
+    {
+        return;
+    }
+    if let Ok(path) = context.resolve_project_path(&input.locator) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub(super) fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus {
     use ImportItemStatus::*;
     let has =
@@ -2941,10 +4682,11 @@ pub(super) fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus
         ImportSessionStatus::Processing
     } else if has(&[Completed]) && has(&[Failed, Cancelled]) {
         ImportSessionStatus::PartiallyCommitted
-    } else if has(&[Completed])
+    } else if !items.is_empty()
         && items
             .iter()
-            .all(|item| matches!(item.status, Completed | Skipped))
+            .all(|item| matches!(item.status, Completed | Skipped | Cancelled))
+        && has(&[Completed, Skipped])
     {
         ImportSessionStatus::Completed
     } else if !items.is_empty() && items.iter().all(|item| item.status == Cancelled) {
@@ -2966,22 +4708,28 @@ pub(super) fn derive_session_status(items: &[ImportItem]) -> ImportSessionStatus
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    };
 
     use crate::errors::{
-        BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_UNAVAILABLE, IMPORT_V2_STATE_INVALID,
+        BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_PANICKED, IMPORT_V2_ENGINE_UNAVAILABLE,
+        IMPORT_V2_STATE_INVALID,
     };
     use crate::models::import_v2::{
-        ImportInput, ImportItem, ImportItemStatus, ImportResourceMode, ImportSession,
-        ImportSessionStatus, ImportStage,
+        CommitImportSessionRequest, CommitItemDecision, ImportInput, ImportItem,
+        ImportItemResolution, ImportItemStatus, ImportResolutionKind, ImportResourceMode,
+        ImportSession, ImportSessionStatus, ImportStage,
     };
     use crate::models::paths::ProjectContext;
     use crate::models::task::{BackendTask, TaskStatus, TaskType};
     use crate::services::import_v2::engine::{
         EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
     };
+    use crate::services::import_v2::source_registry::{SourceIndex, SourcePointer};
     use crate::services::import_v2::test_support::{test_context, test_file_input};
-    use crate::services::FileStore;
+    use crate::services::{FileStore, GitService};
     use crate::tasks::task_model::CancellationToken;
     use crate::tasks::TaskService;
 
@@ -3035,6 +4783,14 @@ mod tests {
                 ],
             ),
             (
+                "http://xhslink.cn/o/abc",
+                vec![
+                    "web.generic.browser",
+                    "web.xiaohongshu.note",
+                    "web.generic.readability",
+                ],
+            ),
+            (
                 "https://www.douyin.com/video/123",
                 vec![
                     "web.generic.browser",
@@ -3050,10 +4806,65 @@ mod tests {
                     "web.generic.browser",
                 ],
             ),
+            ("https://x.com/alice/status/123", vec!["web.x.post"]),
         ] {
             assert_eq!(explicit_routes(&url_input(url)), expected, "{url}");
-            assert!(is_supported_media_platform_url(url), "{url}");
         }
+    }
+
+    #[test]
+    fn one_authenticated_platform_retries_the_waiting_group_without_marking_public_content_restricted(
+    ) {
+        let (context, root) = test_context("restricted-login-group");
+        let files = FileStore::default();
+        let service = ImportV2Service::default();
+        let session = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = service
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![
+                    url_input("https://www.bilibili.com/video/BV1first"),
+                    url_input("https://www.bilibili.com/video/BV2second"),
+                ],
+            )
+            .unwrap();
+        let item_ids = session
+            .items
+            .iter()
+            .map(|item| item.item_id.clone())
+            .collect::<Vec<_>>();
+        for item_id in &item_ids {
+            service
+                .mutate_item(&context, &files, &session.session_id, item_id, |item| {
+                    item.status = ImportItemStatus::WaitingLogin;
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        let marked = service
+            .mark_authenticated_login_group(
+                &context,
+                &files,
+                &session.session_id,
+                &item_ids,
+                Some("Reader — @reader"),
+            )
+            .unwrap();
+        assert!(marked.items.iter().all(|item| {
+            item.authenticated_retry
+                && !item.restricted_content
+                && item.authenticated_identity_summary.as_deref() == Some("Reader — @reader")
+                && item.restricted_identity_summary.is_none()
+        }));
+        let persisted = serde_json::to_string(&marked).unwrap();
+        assert!(!persisted.to_ascii_lowercase().contains("cookie"));
+        assert!(!persisted.to_ascii_lowercase().contains("profilepath"));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -3124,6 +4935,27 @@ mod tests {
             service.find_unfinished_session(&context, &files).unwrap(),
             Some(session.session_id)
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn create_session_reuses_the_single_active_session() {
+        let (context, root) = test_context("single-active-session");
+        let files = FileStore::default();
+        let service = ImportV2Service::default();
+        let first = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let second = service
+            .create_session(&context, &files, ImportResourceMode::Saver)
+            .unwrap();
+
+        assert_eq!(second.session_id, first.session_id);
+        assert_eq!(second.resource_mode, ImportResourceMode::Balanced);
+        let session_dirs = std::fs::read_dir(context.app_dir.join("import-sessions"))
+            .unwrap()
+            .count();
+        assert_eq!(session_dirs, 1);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3216,12 +5048,109 @@ mod tests {
         sabotage_task_store: bool,
     }
 
+    struct PanickingEngine;
+
     struct RouteFixtureEngine {
         root: PathBuf,
         id: &'static str,
         route: &'static str,
         coverage: f64,
     }
+
+    struct PoorVideoAsrFixtureEngine;
+
+    struct CountingAsrShardFixtureEngine {
+        root: PathBuf,
+        executions: Arc<AtomicUsize>,
+    }
+
+    impl ImportEngine for CountingAsrShardFixtureEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "sensevoice-asr-shard.fixture".into(),
+                engine_version: "1.0.0".into(),
+                route: "media.asr".into(),
+            }
+        }
+
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            request: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            let staging = self.root.join(
+                request
+                    .staging_root
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            );
+            let workspace = staging.join(".sensevoice-output-fixture");
+            std::fs::create_dir_all(&workspace).unwrap();
+            std::fs::write(workspace.join("source.bin"), b"asr-source").unwrap();
+            std::fs::write(
+                workspace.join("transcript.md"),
+                "# Stable transcript\n\nASR shard reuse text.\n",
+            )
+            .unwrap();
+            Ok(EngineResult {
+                source_snapshot_path: ".sensevoice-output-fixture/source.bin".into(),
+                markdown_path: ".sensevoice-output-fixture/transcript.md".into(),
+                asset_paths: Vec::new(),
+                metadata_path: None,
+                title: "Stable transcript".into(),
+                text_coverage: Some(1.0),
+                table_cell_accuracy: None,
+                sheet_count_exact: None,
+                slide_count_exact: None,
+                non_empty_cell_coverage: None,
+                formula_value_pairs: None,
+                meaningful_image_coverage: None,
+                continuation: None,
+                warnings: vec!["fixture-asr-warning".into()],
+            })
+        }
+    }
+
+    impl ImportEngine for PoorVideoAsrFixtureEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "poor-video-asr.fixture".into(),
+                engine_version: "1".into(),
+                route: "media.asr".into(),
+            }
+        }
+
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            request: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            if request.asr_probe_only {
+                return Err(BackendError::new(
+                    "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE",
+                    "The fixture has no embedded subtitle.",
+                    true,
+                    true,
+                ));
+            }
+            assert!(request.local_asr_authorized);
+            Err(BackendError::new(
+                "IMPORT_VIDEO_FRAME_OCR_REQUIRED",
+                "The transcript is too poor; frame OCR requires separate authorization.",
+                true,
+                true,
+            ))
+        }
+    }
+
     impl ImportEngine for RouteFixtureEngine {
         fn descriptor(&self) -> EngineDescriptor {
             EngineDescriptor {
@@ -3253,6 +5182,160 @@ mod tests {
                 metadata_path: None,
                 title: self.id.into(),
                 text_coverage: Some(self.coverage),
+                table_cell_accuracy: None,
+                sheet_count_exact: None,
+                slide_count_exact: None,
+                non_empty_cell_coverage: None,
+                formula_value_pairs: None,
+                meaningful_image_coverage: None,
+                continuation: None,
+                warnings: vec![],
+            })
+        }
+    }
+
+    struct MultiOcrFixtureEngine {
+        root: PathBuf,
+        empty_second: bool,
+        low_confidence_second: bool,
+    }
+
+    struct EmbeddedSubtitleProbeFixtureEngine {
+        root: PathBuf,
+        probe_seen: Arc<std::sync::atomic::AtomicBool>,
+        embedded_available: bool,
+    }
+
+    impl ImportEngine for EmbeddedSubtitleProbeFixtureEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "embedded-subtitle-probe.fixture".into(),
+                engine_version: "1".into(),
+                route: "media.asr".into(),
+            }
+        }
+
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            request: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            if !request.asr_probe_only || request.local_asr_authorized {
+                return Err(BackendError::new(
+                    "IMPORT_TEST_UNEXPECTED_ASR",
+                    "The fixture must only perform a pre-authorization embedded subtitle probe.",
+                    false,
+                    false,
+                ));
+            }
+            self.probe_seen
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if !self.embedded_available {
+                return Err(BackendError::new(
+                    "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE",
+                    "The fixture has no embedded subtitle track.",
+                    true,
+                    true,
+                ));
+            }
+            let staging = self.root.join(
+                request
+                    .staging_root
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            );
+            let output = staging.join(".sensevoice-output-fixture");
+            std::fs::create_dir_all(&output).unwrap();
+            std::fs::write(
+                output.join("candidate.md"),
+                "# Transcript\n\n## [00:00:00.000]\n\nembedded subtitle text\n",
+            )
+            .unwrap();
+            std::fs::write(
+                output.join("source.json"),
+                br#"{"provenance":"local-embedded-subtitle"}"#,
+            )
+            .unwrap();
+            Ok(EngineResult {
+                source_snapshot_path: ".sensevoice-output-fixture/source.json".into(),
+                markdown_path: ".sensevoice-output-fixture/candidate.md".into(),
+                asset_paths: vec![],
+                metadata_path: None,
+                title: "Embedded transcript".into(),
+                text_coverage: Some(1.0),
+                table_cell_accuracy: None,
+                sheet_count_exact: None,
+                slide_count_exact: None,
+                non_empty_cell_coverage: None,
+                formula_value_pairs: None,
+                meaningful_image_coverage: None,
+                continuation: None,
+                warnings: vec![],
+            })
+        }
+    }
+
+    impl ImportEngine for MultiOcrFixtureEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "ocr.cjk-accurate.fixture".into(),
+                engine_version: "1".into(),
+                route: "ocr.cjk-accurate".into(),
+            }
+        }
+
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            request: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            let staging = self.root.join(
+                request
+                    .staging_root
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            );
+            std::fs::create_dir_all(&staging).unwrap();
+            let second = request.input.display_name.contains("002");
+            let markdown = if second && self.empty_second {
+                " \n"
+            } else if second {
+                "# OCR 2\n\nsecond recognized page"
+            } else {
+                "# OCR 1\n\nfirst recognized page"
+            };
+            let confidence = if second && self.low_confidence_second {
+                0.20
+            } else {
+                0.98
+            };
+            std::fs::write(staging.join("source.json"), br#"{"kind":"ocr"}"#).unwrap();
+            std::fs::write(staging.join("candidate.md"), markdown).unwrap();
+            std::fs::write(
+                staging.join("metadata.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "confidence": confidence,
+                    "blocks": [{
+                        "confidence": confidence,
+                        "coordinates": { "x": 1, "y": 2, "width": 30, "height": 12 }
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            Ok(EngineResult {
+                source_snapshot_path: "source.json".into(),
+                markdown_path: "candidate.md".into(),
+                asset_paths: vec![],
+                metadata_path: Some("metadata.json".into()),
+                title: request.input.display_name.clone(),
+                text_coverage: Some(if markdown.trim().is_empty() { 0.0 } else { 1.0 }),
                 table_cell_accuracy: None,
                 sheet_count_exact: None,
                 slide_count_exact: None,
@@ -3382,6 +5465,57 @@ mod tests {
         }
     }
 
+    impl ImportEngine for PanickingEngine {
+        fn descriptor(&self) -> EngineDescriptor {
+            EngineDescriptor {
+                engine_id: "panicking".into(),
+                engine_version: "1".into(),
+                route: "pdf.text".into(),
+            }
+        }
+
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            panic!("injected engine panic");
+        }
+    }
+
+    struct DescriptorPanicsAfterRegistration {
+        calls: AtomicUsize,
+    }
+
+    impl ImportEngine for DescriptorPanicsAfterRegistration {
+        fn descriptor(&self) -> EngineDescriptor {
+            if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                panic!("injected descriptor panic");
+            }
+            EngineDescriptor {
+                engine_id: "panicking-descriptor".into(),
+                engine_version: "1".into(),
+                route: "pdf.text".into(),
+            }
+        }
+
+        fn supports(&self, _: &ImportInput) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _: &EngineRequest,
+            _: &CancellationToken,
+        ) -> Result<EngineResult, BackendError> {
+            unreachable!("metadata panic must stop the import before execution")
+        }
+    }
+
     struct OrchestratorFixture {
         root: PathBuf,
         context: ProjectContext,
@@ -3407,18 +5541,53 @@ mod tests {
             &self,
             source_name: &str,
         ) -> (ImportSession, ImportItem, BackendTask) {
+            let source_path = self.root.join("fixtures").join(source_name);
+            std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+            let fixture_bytes: &[u8] = match Path::new(source_name)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "pdf" => include_bytes!(
+                    "../../../../tests/fixtures/import-v2/local/batch3/text-only.pdf"
+                ),
+                "png" => include_bytes!(
+                    "../../../../tests/fixtures/import-v2/local/batch3/image-no-text.png"
+                ),
+                "doc" => b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1orchestrator fixture",
+                "mp4" => b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2",
+                _ => b"orchestrator fixture",
+            };
+            std::fs::write(&source_path, fixture_bytes).unwrap();
+            let source_path = source_path.canonicalize().unwrap();
+            let mut input = test_file_input(source_name);
+            input.locator = source_path.to_string_lossy().into_owned();
+            input.normalized_locator = Some(
+                source_path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_lowercase(),
+            );
+            input.source_identity = Some(SourceIdentity {
+                canonical_path: source_path.to_string_lossy().into_owned(),
+                size_bytes: fixture_bytes.len() as u64,
+                modified_nanos: None,
+                file_id: None,
+                sha256: format!("{:x}", Sha256::digest(fixture_bytes)),
+                magic: format!(
+                    "{:x}",
+                    Sha256::digest(&fixture_bytes[..fixture_bytes.len().min(8192)])
+                ),
+            });
             let session = self
                 .service
                 .create_session(&self.context, &self.files, ImportResourceMode::Balanced)
                 .unwrap();
             let session = self
                 .service
-                .add_inputs(
-                    &self.context,
-                    &self.files,
-                    &session.session_id,
-                    vec![test_file_input(source_name)],
-                )
+                .add_inputs(&self.context, &self.files, &session.session_id, vec![input])
                 .unwrap();
             let item = session.items[0].clone();
             let task = self
@@ -3485,6 +5654,541 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_attempt_metadata_does_not_rebind_a_preview_target() {
+        let fixture = OrchestratorFixture::new("stable-preview-target");
+        let engine = FixtureEngine::success(fixture.root.clone());
+        let descriptor = engine.descriptor();
+        fixture.service.register_engine(Arc::new(engine)).unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let result = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        let target = result
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.resolution.as_ref())
+            .and_then(|resolution| resolution.target_wiki_path.clone())
+            .expect("preview target");
+        let occupied = fixture.root.join(&target);
+        std::fs::create_dir_all(occupied.parent().unwrap()).unwrap();
+        std::fs::write(&occupied, "external content").unwrap();
+
+        fixture
+            .service
+            .record_attempt(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &descriptor,
+                "2026-07-27T00:00:00Z".into(),
+                AttemptOutcome::Succeeded,
+                vec!["metadata-only warning".into()],
+            )
+            .unwrap();
+
+        let reopened = fixture.reopen();
+        assert_eq!(
+            reopened.items[0]
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.resolution.as_ref())
+                .and_then(|resolution| resolution.target_wiki_path.as_deref()),
+            Some(target.as_str())
+        );
+    }
+
+    #[test]
+    fn selected_agent_candidate_binds_a_new_source_target_and_rejects_external_collision() {
+        let fixture = OrchestratorFixture::new("agent-candidate-target");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let original = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        let mut candidate = original.preview.expect("deterministic preview");
+        candidate.resolution = None;
+        let selected = fixture
+            .service
+            .select_agent_candidate(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                candidate,
+                None,
+            )
+            .unwrap();
+        let resolution = selected
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.resolution.as_ref())
+            .expect("selected candidate resolution");
+        assert_eq!(resolution.kind, ImportResolutionKind::NewSource);
+        let target = resolution
+            .target_wiki_path
+            .as_ref()
+            .expect("selected candidate target")
+            .clone();
+
+        let occupied = fixture.root.join(&target);
+        std::fs::create_dir_all(occupied.parent().unwrap()).unwrap();
+        std::fs::write(&occupied, "external content").unwrap();
+        let git = GitService;
+        git.initialize_repository(&fixture.context, "Initial fixture")
+            .unwrap();
+        let result = fixture
+            .service
+            .commit_items(
+                &fixture.context,
+                &fixture.files,
+                &git,
+                &CommitImportSessionRequest {
+                    project_id: fixture.context.project_id.clone(),
+                    project_root_path: fixture.root.to_string_lossy().into_owned(),
+                    session_id: session.session_id,
+                    batch_task_id: None,
+                    acknowledge_restricted_content: false,
+                    decisions: vec![CommitItemDecision {
+                        item_id: item.item_id,
+                        resolution: Some(ImportItemResolution::NewSource),
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(result.committed_count, 0);
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(
+            result.items[0].error_code.as_deref(),
+            Some(crate::errors::IMPORT_V2_COMMIT_CONFLICT)
+        );
+        assert_eq!(
+            std::fs::read_to_string(occupied).unwrap(),
+            "external content"
+        );
+    }
+
+    #[test]
+    fn selected_agent_candidate_fails_closed_when_current_wiki_changed_after_review() {
+        let fixture = OrchestratorFixture::new("agent-candidate-stale-current");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let original = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        let mut candidate = original.preview.expect("deterministic preview");
+        candidate.resolution = None;
+
+        let baseline = "# Baseline\n";
+        let current = "# Edited after Agent review\n";
+        let baseline_hash = format!("{:x}", Sha256::digest(baseline.as_bytes()));
+        let old_source = b"old source";
+        let old_content_hash = format!("{:x}", Sha256::digest(old_source));
+        let wiki_path = "wiki/sources/local/a.md";
+        let baseline_path = ".app/source-artifacts/source-old/version-old/baseline.md";
+        let raw_path = "raw/sources/source-old/version-old/original.bin";
+        for path in [wiki_path, baseline_path, raw_path] {
+            let absolute = fixture.root.join(path);
+            std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        }
+        std::fs::write(fixture.root.join(wiki_path), current).unwrap();
+        std::fs::write(fixture.root.join(baseline_path), baseline).unwrap();
+        std::fs::write(fixture.root.join(raw_path), old_source).unwrap();
+        let pointer = SourcePointer {
+            source_id: "source-old".into(),
+            version_id: "version-old".into(),
+        };
+        let mut index = SourceIndex::default_v2();
+        index.by_locator.insert(
+            item.input.normalized_locator.clone().unwrap(),
+            pointer.clone(),
+        );
+        index
+            .by_content_hash
+            .insert(old_content_hash.clone(), pointer);
+        fixture
+            .files
+            .write_json_atomic(&fixture.context, ".app/source-index-v2.json", &index)
+            .unwrap();
+        fixture
+            .files
+            .write_json_atomic(
+                &fixture.context,
+                ".app/sources/source-old.json",
+                &serde_json::json!({
+                    "schemaVersion": 3,
+                    "sourceId": "source-old",
+                    "sourceKind": "local_document",
+                    "currentVersionId": "version-old",
+                    "wikiPath": wiki_path,
+                    "origins": [item.input.normalized_locator.clone().unwrap()],
+                    "title": "a",
+                    "importedAt": chrono::Utc::now().to_rfc3339(),
+                    "versions": [{
+                        "versionId": "version-old",
+                        "contentHash": old_content_hash.clone(),
+                        "rawEvidence": [{
+                            "path": raw_path,
+                            "sha256": old_content_hash.clone(),
+                            "sizeBytes": old_source.len(),
+                            "kind": "source_snapshot"
+                        }],
+                        "assets": [],
+                        "baselinePath": baseline_path,
+                        "candidate": {
+                            "markdownHash": baseline_hash.clone(),
+                            "title": "a",
+                            "sourceKind": "local_document"
+                        },
+                        "provenance": {
+                            "locator": item.input.normalized_locator.clone().unwrap(),
+                            "route": "native",
+                            "engineId": "fixture",
+                            "engineVersion": "1"
+                        },
+                        "quality": {
+                            "level": "pass",
+                            "metrics": [],
+                            "warnings": []
+                        },
+                        "createdAt": chrono::Utc::now().to_rfc3339(),
+                        "humanEditHash": baseline_hash.clone()
+                    }]
+                }),
+            )
+            .unwrap();
+
+        let stale = fixture
+            .service
+            .select_agent_candidate(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                candidate.clone(),
+                Some(&baseline_hash),
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, "IMPORT_AGENT_MERGE_STALE");
+
+        let selected = fixture
+            .service
+            .select_agent_candidate(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                candidate,
+                None,
+            )
+            .unwrap();
+        assert_eq!(selected.status, ImportItemStatus::NeedsMerge);
+        let resolution = selected
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.resolution.as_ref())
+            .expect("stale candidate resolution");
+        assert_eq!(resolution.kind, ImportResolutionKind::NeedsThreeWayMerge);
+        assert!(resolution.default_resolution.is_none());
+        assert_eq!(resolution.target_wiki_path.as_deref(), Some(wiki_path));
+    }
+
+    #[test]
+    fn committed_item_rejects_stale_agent_candidate_select_and_discard() {
+        let fixture = OrchestratorFixture::new("agent-candidate-commit-wins");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let preview = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap()
+            .preview
+            .expect("deterministic preview");
+        let mut completed = fixture.reopen();
+        completed.items[0].status = ImportItemStatus::Completed;
+        completed.status = ImportSessionStatus::Completed;
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &completed)
+            .unwrap();
+
+        let select_error = fixture
+            .service
+            .select_agent_candidate(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                preview.clone(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(select_error.code, IMPORT_V2_STATE_INVALID);
+        let discard_error = fixture
+            .service
+            .discard_agent_candidate(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                Some(preview),
+            )
+            .unwrap_err();
+        assert_eq!(discard_error.code, IMPORT_V2_STATE_INVALID);
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.status, ImportSessionStatus::Completed);
+        assert_eq!(reopened.items[0].status, ImportItemStatus::Completed);
+    }
+
+    #[test]
+    fn agent_candidate_action_lock_serializes_select_finalize_and_discard() {
+        let service = Arc::new(ImportV2Service::default());
+        let (first_entered_tx, first_entered_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let first_service = Arc::clone(&service);
+        let first = std::thread::spawn(move || {
+            first_service
+                .with_agent_candidate_action_lock(|| {
+                    first_entered_tx.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        first_entered_rx.recv().unwrap();
+
+        let (second_attempted_tx, second_attempted_rx) = std::sync::mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = std::sync::mpsc::channel();
+        let second_service = Arc::clone(&service);
+        let second = std::thread::spawn(move || {
+            second_attempted_tx.send(()).unwrap();
+            second_service
+                .with_agent_candidate_action_lock(|| {
+                    second_entered_tx.send(()).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        second_attempted_rx.recv().unwrap();
+        assert!(second_entered_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+
+        release_first_tx.send(()).unwrap();
+        second_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+    }
+
+    #[test]
+    fn selected_agent_exact_duplicate_is_finalized_with_alias_history_and_completion() {
+        let fixture = OrchestratorFixture::new("agent-candidate-exact-duplicate");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let original = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        let mut candidate = original.preview.expect("deterministic preview");
+        candidate.resolution = None;
+
+        let baseline = "# Existing Source\n";
+        let old_source = b"old source";
+        let old_content_hash = format!("{:x}", Sha256::digest(old_source));
+        let wiki_path = "wiki/sources/local/existing.md";
+        let baseline_path = ".app/source-artifacts/source-old/version-old/baseline.md";
+        let raw_path = "raw/sources/source-old/version-old/original.bin";
+        for path in [wiki_path, baseline_path, raw_path] {
+            let absolute = fixture.root.join(path);
+            std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        }
+        std::fs::write(fixture.root.join(wiki_path), baseline).unwrap();
+        std::fs::write(fixture.root.join(baseline_path), baseline).unwrap();
+        std::fs::write(fixture.root.join(raw_path), old_source).unwrap();
+        let pointer = SourcePointer {
+            source_id: "source-old".into(),
+            version_id: "version-old".into(),
+        };
+        let locator = item.input.normalized_locator.clone().unwrap();
+        let mut index = SourceIndex::default_v2();
+        index.by_locator.insert(locator.clone(), pointer.clone());
+        index
+            .by_content_hash
+            .insert(old_content_hash.clone(), pointer.clone());
+        fixture
+            .files
+            .write_json_atomic(&fixture.context, ".app/source-index-v2.json", &index)
+            .unwrap();
+        fixture
+            .files
+            .write_json_atomic(
+                &fixture.context,
+                ".app/sources/source-old.json",
+                &serde_json::json!({
+                    "schemaVersion": 2,
+                    "sourceId": "source-old",
+                    "origins": ["https://legacy.example/source-old"],
+                    "versions": [{
+                        "versionId": "version-old",
+                        "contentHash": old_content_hash.clone(),
+                        "rawPath": raw_path,
+                        "extractedPath": "",
+                        "baselinePath": baseline_path,
+                        "createdAt": chrono::Utc::now().to_rfc3339(),
+                        "route": "native",
+                        "engineId": "fixture",
+                        "engineVersion": "1",
+                        "quality": {
+                            "level": "pass",
+                            "metrics": [],
+                            "warnings": []
+                        }
+                    }],
+                    "currentVersionId": "version-old",
+                    "wikiPath": wiki_path
+                }),
+            )
+            .unwrap();
+
+        let mut resolution_item = item.clone();
+        resolution_item.preview = Some(candidate.clone());
+        let candidate_hash = fixture
+            .service
+            .derive_resolution_context(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &resolution_item,
+            )
+            .unwrap()
+            .binding
+            .expect("temporary locator binding")
+            .candidate_hash;
+        index.by_locator.clear();
+        index
+            .by_content_hash
+            .insert(candidate_hash, pointer.clone());
+        fixture
+            .files
+            .write_json_atomic(&fixture.context, ".app/source-index-v2.json", &index)
+            .unwrap();
+
+        let selected = fixture
+            .service
+            .select_agent_candidate(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                candidate,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            selected
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.resolution.as_ref())
+                .map(|resolution| resolution.kind),
+            Some(ImportResolutionKind::ExactDuplicate)
+        );
+        let git = GitService;
+        git.initialize_repository(&fixture.context, "Initial fixture")
+            .unwrap();
+        let batch = fixture
+            .service
+            .finalize_exact_duplicate(
+                &fixture.context,
+                &fixture.files,
+                &git,
+                &session.session_id,
+                &item.item_id,
+                false,
+                || Ok(()),
+            )
+            .unwrap()
+            .expect("exact duplicate batch");
+        assert_eq!(batch.committed_count, 1);
+        let completion = batch.completion.as_ref().expect("duplicate completion");
+        assert_eq!(completion.duplicate_skips.len(), 1);
+        assert_eq!(completion.duplicate_skips[0].source_id, "source-old");
+        let history = batch.history_snapshot.as_ref().expect("history snapshot");
+        assert_eq!(history.items[0].status, ImportItemStatus::Completed);
+        assert!(fixture
+            .root
+            .join(format!(".app/import-history/{}.json", batch.batch_id))
+            .is_file());
+        let manifest: serde_json::Value = fixture
+            .files
+            .read_json(&fixture.context, ".app/sources/source-old.json")
+            .unwrap();
+        assert!(manifest["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|origin| origin.as_str() == Some(locator.as_str())));
+    }
+
+    #[test]
     fn run_item_records_engine_unavailable_without_losing_session() {
         let fixture = OrchestratorFixture::new("no-engine");
         let (session, item, task) = fixture.seed_one_item_named("a.doc");
@@ -3538,11 +6242,98 @@ mod tests {
     }
 
     #[test]
+    fn queued_item_cancellation_prevents_a_later_worker_from_executing() {
+        let fixture = OrchestratorFixture::new("queued-cancelled");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        fixture.tasks.cancel_task(&task.id).unwrap();
+        fixture
+            .service
+            .cancel_queued_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+
+        let error = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, IMPORT_V2_CANCELLED);
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.items[0].status, ImportItemStatus::Cancelled);
+        assert!(reopened.items[0].attempts.is_empty());
+        assert_eq!(
+            fixture.tasks.get_task(&task.id).unwrap().status,
+            TaskStatus::Cancelled
+        );
+    }
+
+    #[test]
     fn transition_helper_rejects_preview_to_completed() {
         let mut item = ImportItem::queued("item-1", test_file_input("a.pdf"));
         item.status = ImportItemStatus::PreviewReady;
         let error = transition_item(&mut item, ImportItemStatus::Completed).unwrap_err();
         assert_eq!(error.code, IMPORT_V2_STATE_INVALID);
+    }
+
+    #[test]
+    fn ended_session_rejects_text_and_discovery_before_any_side_effect() {
+        let (context, root) = test_context("ended-session-add-preflight");
+        let files = FileStore::default();
+        let service = ImportV2Service::default();
+        let mut session = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        session.status = ImportSessionStatus::Completed;
+        service.sessions.save(&context, &files, &session).unwrap();
+
+        let text_error = service
+            .add_text_input(
+                &context,
+                &files,
+                &session.session_id,
+                "ended.md",
+                "# must not stage",
+            )
+            .unwrap_err();
+        assert_eq!(text_error.code, IMPORT_V2_STATE_INVALID);
+        assert!(!root
+            .join(format!(
+                ".app/import-sessions/{}/inputs",
+                session.session_id
+            ))
+            .exists());
+
+        let discovery_error = service
+            .set_discovery_task_id(
+                &context,
+                &files,
+                &session.session_id,
+                Some("must-not-bind".into()),
+            )
+            .unwrap_err();
+        assert_eq!(discovery_error.code, IMPORT_V2_STATE_INVALID);
+        assert!(service
+            .sessions
+            .load(&context, &files, &session.session_id)
+            .unwrap()
+            .discovery_task_id
+            .is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3568,22 +6359,99 @@ mod tests {
     }
 
     #[test]
-    fn url_ocr_requires_an_explicit_recovery_action_even_when_installed() {
-        let input = url_input("https://www.xiaohongshu.com/explore/note-1");
-        let routes = vec!["ocr.cjk-accurate".to_string()];
-        assert!(!should_authorize_local_ocr(&input, None, &routes));
-        assert!(should_authorize_local_ocr(
-            &input,
-            Some(&ImportRecoveryAction::EnableOcr),
-            &routes,
-        ));
-        assert!(!should_authorize_local_ocr(
-            &input,
-            Some(&ImportRecoveryAction::EnableOcr),
-            &[],
-        ));
+    fn media_ocr_authorization_is_explicit_and_scoped_to_one_session_item() {
+        let mut session =
+            ImportSession::new("session-1", "project-1", ImportResourceMode::Balanced);
+        assert!(!session.has_media_authorization("item-1", ImportMediaAuthorizationKind::Ocr));
+        session.media_authorizations.push(ImportMediaAuthorization {
+            item_id: "item-1".into(),
+            kind: ImportMediaAuthorizationKind::Ocr,
+            authorized_at: "2026-07-26T00:00:00Z".into(),
+            asr_profile: None,
+            language: None,
+        });
+        assert!(session.has_media_authorization("item-1", ImportMediaAuthorizationKind::Ocr));
+        assert!(!session.has_media_authorization("item-2", ImportMediaAuthorizationKind::Ocr));
     }
 
+    #[test]
+    fn poor_video_asr_stops_the_production_pipeline_for_explicit_frame_ocr_authorization() {
+        assert!(requires_explicit_video_frame_ocr(
+            "IMPORT_VIDEO_FRAME_OCR_REQUIRED"
+        ));
+        assert!(!requires_explicit_video_frame_ocr(
+            "IMPORT_ASR_OUTPUT_INVALID"
+        ));
+
+        let fixture = OrchestratorFixture::new("poor-video-asr");
+        fixture
+            .service
+            .register_engine(Arc::new(PoorVideoAsrFixtureEngine))
+            .unwrap();
+        fixture
+            .service
+            .register_engine(Arc::new(RouteFixtureEngine {
+                root: fixture.root.clone(),
+                id: "frame-ocr.fixture",
+                route: "ocr.basic",
+                coverage: 1.0,
+            }))
+            .unwrap();
+        let (session, item, first_task) = fixture.seed_one_item_named("poor-asr.mp4");
+        let waiting_asr = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &first_task.id,
+            )
+            .unwrap();
+        assert_eq!(waiting_asr.status, ImportItemStatus::WaitingAuthorization);
+        fixture
+            .service
+            .authorize_media_for_session(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                ImportMediaAuthorizationKind::Asr,
+                Some(crate::models::import_v2::ImportAsrProfile::Balanced),
+                None,
+            )
+            .unwrap();
+        let second_task = fixture
+            .tasks
+            .create_project_task(
+                TaskType::Import,
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                "Authorized poor ASR".into(),
+                true,
+            )
+            .unwrap();
+        let waiting_ocr = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &second_task.id,
+            )
+            .unwrap();
+        assert_eq!(waiting_ocr.status, ImportItemStatus::WaitingAuthorization);
+        assert_eq!(
+            waiting_ocr.issue.as_ref().map(|issue| issue.code.as_str()),
+            Some("IMPORT_VIDEO_FRAME_OCR_REQUIRED")
+        );
+        let reopened = fixture.reopen();
+        assert!(reopened.has_media_authorization(&item.item_id, ImportMediaAuthorizationKind::Asr));
+        assert!(!reopened.has_media_authorization(&item.item_id, ImportMediaAuthorizationKind::Ocr));
+    }
     #[test]
     fn engine_error_is_reduced_to_a_secret_free_issue() {
         let error = BackendError::new("ENGINE_FAILED", "Authorization: Bearer secret", true, false)
@@ -3605,6 +6473,7 @@ mod tests {
                 ImportSessionStatus::PartiallyCommitted,
             ),
             (vec![Completed, Skipped], ImportSessionStatus::Completed),
+            (vec![Skipped, Skipped], ImportSessionStatus::Completed),
             (vec![Cancelled, Cancelled], ImportSessionStatus::Cancelled),
             (
                 vec![PreviewReady, Queued],
@@ -3784,6 +6653,21 @@ mod tests {
                 .sessions
                 .save(&fixture.context, &fixture.files, &persisted)
                 .unwrap();
+            let staging = fixture.root.join(format!(
+                ".app/import-sessions/{}/items/{}/staging",
+                session.session_id, item.item_id
+            ));
+            std::fs::create_dir_all(staging.join("media-download")).unwrap();
+            std::fs::write(staging.join("media-download/payload.bin"), b"downloaded").unwrap();
+            std::fs::write(staging.join("media-download/complete.json"), b"{}").unwrap();
+            std::fs::create_dir_all(staging.join("asr-shards")).unwrap();
+            std::fs::write(staging.join("asr-shards/0001.json"), b"{}").unwrap();
+            std::fs::create_dir_all(staging.join(".asr-input-interrupted")).unwrap();
+            std::fs::write(
+                staging.join(".asr-input-interrupted/temporary.wav"),
+                b"temporary",
+            )
+            .unwrap();
             let recovered_tasks = TaskService::default();
             recovered_tasks.recover_tasks(&fixture.root).unwrap();
             assert_eq!(
@@ -3799,11 +6683,15 @@ mod tests {
                     &session.session_id,
                 )
                 .unwrap();
-            assert_eq!(reconciled.items[0].status, ImportItemStatus::Failed);
+            assert_eq!(reconciled.items[0].status, ImportItemStatus::Paused);
             assert_eq!(
                 reconciled.items[0].issue.as_ref().unwrap().code,
-                "TASK_RECOVERY"
+                "TASK_PAUSED"
             );
+            assert!(staging.join("media-download/payload.bin").is_file());
+            assert!(staging.join("media-download/complete.json").is_file());
+            assert!(staging.join("asr-shards/0001.json").is_file());
+            assert!(!staging.join(".asr-input-interrupted").exists());
             restarted
                 .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
                 .unwrap();
@@ -3839,16 +6727,32 @@ mod tests {
         let files = Arc::new(FileStore::default());
         let tasks = Arc::new(TaskService::default());
         let service = Arc::new(ImportV2Service::default());
+        let source_path = root.join("concurrent.pdf");
+        let source_bytes =
+            include_bytes!("../../../../tests/fixtures/import-v2/local/batch3/text-only.pdf");
+        std::fs::write(&source_path, source_bytes).unwrap();
+        let source_path = source_path.canonicalize().unwrap();
+        let mut input = test_file_input("a.pdf");
+        input.locator = source_path.to_string_lossy().into_owned();
+        input.normalized_locator = Some(
+            source_path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_lowercase(),
+        );
+        input.source_identity = Some(SourceIdentity {
+            canonical_path: source_path.to_string_lossy().into_owned(),
+            size_bytes: source_bytes.len() as u64,
+            modified_nanos: None,
+            file_id: None,
+            sha256: format!("{:x}", Sha256::digest(source_bytes)),
+            magic: format!("{:x}", Sha256::digest(source_bytes)),
+        });
         let session = service
             .create_session(&context, &files, ImportResourceMode::Balanced)
             .unwrap();
         let session = service
-            .add_inputs(
-                &context,
-                &files,
-                &session.session_id,
-                vec![test_file_input("a.pdf")],
-            )
+            .add_inputs(&context, &files, &session.session_id, vec![input])
             .unwrap();
         let item_id = session.items[0].item_id.clone();
         let first = tasks
@@ -4076,6 +6980,68 @@ mod tests {
     }
 
     #[test]
+    fn engine_panic_terminalizes_the_item_and_task() {
+        let fixture = OrchestratorFixture::new("engine-panic");
+        fixture
+            .service
+            .register_engine(Arc::new(PanickingEngine))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+
+        let error = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, IMPORT_V2_ENGINE_PANICKED);
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.items[0].status, ImportItemStatus::Failed);
+        assert_eq!(reopened.items[0].attempts.len(), 1);
+        let failed_task = fixture.tasks.get_task(&task.id).unwrap();
+        assert_eq!(failed_task.status, TaskStatus::Failed);
+        assert_eq!(failed_task.error.unwrap().code, IMPORT_V2_ENGINE_PANICKED);
+    }
+
+    #[test]
+    fn engine_descriptor_panic_terminalizes_the_item_and_task() {
+        let fixture = OrchestratorFixture::new("engine-descriptor-panic");
+        fixture
+            .service
+            .register_engine(Arc::new(DescriptorPanicsAfterRegistration {
+                calls: AtomicUsize::new(0),
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+
+        let error = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, IMPORT_V2_ENGINE_PANICKED);
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.items[0].status, ImportItemStatus::Failed);
+        assert!(reopened.items[0].attempts.is_empty());
+        let failed_task = fixture.tasks.get_task(&task.id).unwrap();
+        assert_eq!(failed_task.status, TaskStatus::Failed);
+        assert_eq!(failed_task.error.unwrap().code, IMPORT_V2_ENGINE_PANICKED);
+    }
+
+    #[test]
     fn restart_reconciles_in_flight_item_with_cancelled_task() {
         let fixture = OrchestratorFixture::new("recover-cancelled");
         let (session, _, task) = fixture.seed_one_item();
@@ -4253,10 +7219,552 @@ mod tests {
         assert_eq!(
             engine_progress_on_task_scale(&EngineProgress {
                 current: 50,
+                total: Some(100),
+                label: "images.downloading".into(),
+            }),
+            32
+        );
+        assert_eq!(
+            engine_progress_on_task_scale(&EngineProgress {
+                current: 50,
+                total: Some(100),
+                label: "ocr.recognizing".into(),
+            }),
+            75
+        );
+        assert_eq!(
+            engine_progress_on_task_scale(&EngineProgress {
+                current: 50,
                 total: None,
                 label: "media.downloading".into(),
             }),
             5
         );
+    }
+
+    #[test]
+    fn ocr_sections_keep_the_original_image_number() {
+        assert_eq!(
+            ocr_source_image_number(Path::new(".ocr-input-a/image-007.png"), 1),
+            7
+        );
+        assert_eq!(
+            ocr_source_image_number(Path::new(".ocr-input-a/input.png"), 1),
+            2
+        );
+    }
+
+    #[test]
+    fn completed_ocr_shards_are_reused_only_with_valid_atomic_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = EngineDescriptor {
+            engine_id: "ocr.fixture".into(),
+            engine_version: "1.0.0".into(),
+            route: "ocr.basic".into(),
+        };
+        store_completed_ocr_shard(
+            root.path(),
+            "fixture-key",
+            &descriptor,
+            "# OCR text\n",
+            Some(br#"{"page":1}"#),
+        )
+        .unwrap();
+        let reused = load_completed_ocr_shard(root.path(), "fixture-key", &descriptor).unwrap();
+        assert_eq!(
+            reused,
+            Some(("# OCR text\n".into(), Some(br#"{"page":1}"#.to_vec())))
+        );
+
+        std::fs::write(root.path().join("fixture-key.md"), "# partial\n").unwrap();
+        assert_eq!(
+            load_completed_ocr_shard(root.path(), "fixture-key", &descriptor).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn completed_asr_shards_are_reused_only_with_valid_atomic_markers() {
+        let fixture = OrchestratorFixture::new("asr-shard-reuse");
+        let executions = Arc::new(AtomicUsize::new(0));
+        fixture
+            .service
+            .register_engine(Arc::new(CountingAsrShardFixtureEngine {
+                root: fixture.root.clone(),
+                executions: Arc::clone(&executions),
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item_named("reuse.mp4");
+        fixture
+            .tasks
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        let staging_root = format!(
+            ".app/import-sessions/{}/items/{}/staging",
+            session.session_id, item.item_id
+        );
+        let staging = fixture.root.join(&staging_root);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("source.bin"), b"web-source").unwrap();
+        let media_relative = ".asr-input-cache/input.wav";
+        let media_path = staging.join(media_relative);
+        std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+        std::fs::write(&media_path, b"stable-media-bytes").unwrap();
+        let descriptor = EngineDescriptor {
+            engine_id: "sensevoice-asr-shard.fixture".into(),
+            engine_version: "1.0.0".into(),
+            route: "media.asr".into(),
+        };
+        let shard_key = asr_shard_key(&media_path, &descriptor).unwrap();
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            project_id: fixture.context.project_id.clone(),
+            session_id: session.session_id.clone(),
+            item_id: item.item_id.clone(),
+            task_id: task.id.clone(),
+            operation: EngineOperation::Extract,
+            input: url_input("https://example.com/media"),
+            project_root: fixture.root.to_string_lossy().into_owned(),
+            staging_root: staging_root.clone(),
+            chained_input: None,
+            local_asr_authorized: true,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
+            local_ocr_authorized: false,
+            media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
+        };
+        let web_result = || EngineResult {
+            source_snapshot_path: "source.bin".into(),
+            markdown_path: "candidate.md".into(),
+            asset_paths: Vec::new(),
+            metadata_path: None,
+            title: "Base media".into(),
+            text_coverage: Some(0.0),
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: Some(EngineContinuation::LocalAsr {
+                temporary_input_path: media_relative.into(),
+                media_kind: "audio".into(),
+            }),
+            warnings: Vec::new(),
+        };
+        let token = fixture.tasks.get_cancellation_token(&task.id).unwrap();
+
+        std::fs::write(staging.join("candidate.md"), "# Base media\n").unwrap();
+        let first = fixture
+            .service
+            .execute_local_asr_continuation(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &staging_root,
+                &request,
+                web_result(),
+                &token,
+                &fixture.tasks,
+                &task.id,
+                &Cell::new(0),
+            )
+            .unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(first
+            .asset_paths
+            .contains(&"transcripts/local-asr.md".into()));
+        assert!(staging
+            .join(format!("asr-shards/{shard_key}.complete.json"))
+            .is_file());
+
+        std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+        std::fs::write(&media_path, b"stable-media-bytes").unwrap();
+        std::fs::write(staging.join("candidate.md"), "# Base media\n").unwrap();
+        let reused = fixture
+            .service
+            .execute_local_asr_continuation(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &staging_root,
+                &request,
+                web_result(),
+                &token,
+                &fixture.tasks,
+                &task.id,
+                &Cell::new(0),
+            )
+            .unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(reused
+            .warnings
+            .contains(&"local_asr:reused-complete-shard".into()));
+
+        std::fs::write(
+            staging.join(format!("asr-shards/{shard_key}.md")),
+            "# corrupted transcript\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+        std::fs::write(&media_path, b"stable-media-bytes").unwrap();
+        std::fs::write(staging.join("candidate.md"), "# Base media\n").unwrap();
+        fixture
+            .service
+            .execute_local_asr_continuation(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &staging_root,
+                &request,
+                web_result(),
+                &token,
+                &fixture.tasks,
+                &task.id,
+                &Cell::new(0),
+            )
+            .unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn local_media_uses_embedded_subtitles_before_companion_and_without_asr_authorization() {
+        let fixture = OrchestratorFixture::new("embedded-before-companion");
+        let probe_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        fixture
+            .service
+            .register_engine(Arc::new(EmbeddedSubtitleProbeFixtureEngine {
+                root: fixture.root.clone(),
+                probe_seen: Arc::clone(&probe_seen),
+                embedded_available: true,
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item_named("interview.mp4");
+        std::fs::write(
+            fixture.root.join("fixtures/interview.srt"),
+            "1\n00:00:00,000 --> 00:00:02,000\ncompanion subtitle text\n",
+        )
+        .unwrap();
+        let result = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        assert_eq!(result.status, ImportItemStatus::PreviewReady);
+        assert!(probe_seen.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!session.has_media_authorization(&item.item_id, ImportMediaAuthorizationKind::Asr));
+        let preview = result.preview.unwrap();
+        let staging = fixture.root.join(format!(
+            ".app/import-sessions/{}/items/{}/staging",
+            session.session_id, item.item_id
+        ));
+        let markdown =
+            std::fs::read_to_string(staging.join(preview.markdown.relative_path)).unwrap();
+        assert!(markdown.contains("embedded subtitle text"));
+        assert!(!markdown.contains("companion subtitle text"));
+    }
+
+    #[test]
+    fn local_media_uses_companion_before_asr_when_embedded_probe_is_empty() {
+        let fixture = OrchestratorFixture::new("companion-before-asr");
+        let probe_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        fixture
+            .service
+            .register_engine(Arc::new(EmbeddedSubtitleProbeFixtureEngine {
+                root: fixture.root.clone(),
+                probe_seen: Arc::clone(&probe_seen),
+                embedded_available: false,
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item_named("interview.mp4");
+        std::fs::write(
+            fixture.root.join("fixtures/interview.srt"),
+            "1\n00:00:00,000 --> 00:00:02,000\ncompanion subtitle text\n",
+        )
+        .unwrap();
+        let result = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        assert_eq!(result.status, ImportItemStatus::PreviewReady);
+        assert!(probe_seen.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!session.has_media_authorization(&item.item_id, ImportMediaAuthorizationKind::Asr));
+        let preview = result.preview.unwrap();
+        let staging = fixture.root.join(format!(
+            ".app/import-sessions/{}/items/{}/staging",
+            session.session_id, item.item_id
+        ));
+        let markdown =
+            std::fs::read_to_string(staging.join(preview.markdown.relative_path)).unwrap();
+        assert!(markdown.contains("## Companion transcript"));
+        assert!(markdown.contains("companion subtitle text"));
+        assert!(!markdown.contains("## Local ASR Transcript"));
+    }
+
+    fn execute_two_image_ocr(
+        fixture: &OrchestratorFixture,
+        empty_second: bool,
+        low_confidence_second: bool,
+    ) -> Result<EngineResult, BackendError> {
+        fixture
+            .service
+            .register_engine(Arc::new(MultiOcrFixtureEngine {
+                root: fixture.root.clone(),
+                empty_second,
+                low_confidence_second,
+            }))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item_named("two-images.png");
+        fixture
+            .tasks
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        let staging_root = format!(
+            ".app/import-sessions/{}/items/{}/staging",
+            session.session_id, item.item_id
+        );
+        let staging = fixture.root.join(&staging_root);
+        let workspace = staging.join(".ocr-input-shared");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("image-001.png"), b"first").unwrap();
+        std::fs::write(workspace.join("image-002.png"), b"second").unwrap();
+        std::fs::write(staging.join("source.bin"), b"source").unwrap();
+        std::fs::write(staging.join("candidate.md"), "# Base\n").unwrap();
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            project_id: fixture.context.project_id.clone(),
+            session_id: session.session_id.clone(),
+            item_id: item.item_id.clone(),
+            task_id: task.id.clone(),
+            operation: EngineOperation::Extract,
+            input: item.input.clone(),
+            project_root: fixture.root.to_string_lossy().into_owned(),
+            staging_root: staging_root.clone(),
+            chained_input: None,
+            local_asr_authorized: false,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
+            local_ocr_authorized: true,
+            media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
+        };
+        let result = EngineResult {
+            source_snapshot_path: "source.bin".into(),
+            markdown_path: "candidate.md".into(),
+            asset_paths: vec![],
+            metadata_path: None,
+            title: "Two images".into(),
+            text_coverage: Some(0.0),
+            table_cell_accuracy: None,
+            sheet_count_exact: None,
+            slide_count_exact: None,
+            non_empty_cell_coverage: None,
+            formula_value_pairs: None,
+            meaningful_image_coverage: None,
+            continuation: Some(EngineContinuation::LocalOcr {
+                temporary_input_paths: vec![
+                    ".ocr-input-shared/image-001.png".into(),
+                    ".ocr-input-shared/image-002.png".into(),
+                ],
+            }),
+            warnings: vec![],
+        };
+        let token = fixture.tasks.get_cancellation_token(&task.id).unwrap();
+        fixture.service.execute_local_ocr_continuation(
+            &fixture.context,
+            &fixture.files,
+            &session.session_id,
+            &item.item_id,
+            &staging_root,
+            &request,
+            result,
+            &token,
+            &fixture.tasks,
+            &task.id,
+            &Cell::new(0),
+        )
+    }
+
+    #[test]
+    fn multi_image_ocr_keeps_shared_workspace_until_every_input_completes() {
+        let fixture = OrchestratorFixture::new("ocr-shared-workspace");
+        let result = execute_two_image_ocr(&fixture, false, false).unwrap();
+        let staging = fixture
+            .root
+            .join(".app/import-sessions")
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .next()
+            .unwrap()
+            .path()
+            .join("items")
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .next()
+            .unwrap()
+            .path()
+            .join("staging");
+        let markdown = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
+        let first_boundary = markdown
+            .find("## 图片文字 / OCR — 第 1 张")
+            .expect("first image OCR boundary must be retained");
+        let first_text = markdown
+            .find("first recognized page")
+            .expect("first image OCR text must be retained");
+        let second_boundary = markdown
+            .find("## 图片文字 / OCR — 第 2 张")
+            .expect("second image OCR boundary must be retained");
+        let second_text = markdown
+            .find("second recognized page")
+            .expect("second image OCR text must be retained");
+        assert!(
+            first_boundary < first_text
+                && first_text < second_boundary
+                && second_boundary < second_text,
+            "image OCR sections must preserve source order and per-image boundaries"
+        );
+        assert!(result
+            .asset_paths
+            .iter()
+            .any(|path| path == "ocr/image-001.md"));
+        assert!(result
+            .asset_paths
+            .iter()
+            .any(|path| path == "ocr/image-002.md"));
+        assert_eq!(
+            result
+                .asset_paths
+                .iter()
+                .filter(|path| path.ends_with(".md"))
+                .count(),
+            2
+        );
+        assert!(!staging.join(".ocr-input-shared").exists());
+    }
+
+    #[test]
+    fn partial_multi_image_ocr_failure_never_promotes_a_partial_candidate() {
+        let fixture = OrchestratorFixture::new("ocr-partial-failure");
+        let error = execute_two_image_ocr(&fixture, true, false).unwrap_err();
+        assert_eq!(error.code, "IMPORT_OCR_NO_TEXT");
+        assert!(!fixture.root.join("raw").exists());
+        assert!(!fixture.root.join("wiki").exists());
+    }
+
+    #[test]
+    fn accurate_ocr_rejects_nonempty_text_below_the_confidence_floor() {
+        let fixture = OrchestratorFixture::new("ocr-low-confidence");
+        let error = execute_two_image_ocr(&fixture, false, true).unwrap_err();
+        assert_eq!(error.code, "IMPORT_OCR_LOW_CONFIDENCE");
+        assert!(!fixture.root.join("raw").exists());
+        assert!(!fixture.root.join("wiki").exists());
+    }
+
+    #[test]
+    fn accurate_ocr_accepts_the_exact_mean_and_readable_block_boundaries() {
+        let warnings = validate_ocr_confidence_metadata(
+            br#"{"confidence":0.75,"blocks":[{"confidence":0.50},{"confidence":0.75}]}"#,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            warnings,
+            vec!["IMPORT_OCR_LOW_CONFIDENCE_BLOCK:image-1:block-1"]
+        );
+    }
+
+    #[test]
+    fn ocr_source_number_preserves_pdf_page_and_ordered_image_bindings() {
+        assert_eq!(ocr_source_image_number(Path::new("page-002.png"), 0), 2);
+        assert_eq!(ocr_source_image_number(Path::new("image-007.png"), 0), 7);
+        assert_eq!(ocr_source_image_number(Path::new("unlabeled.png"), 4), 5);
+    }
+
+    #[test]
+    fn standalone_image_with_no_ocr_text_fails_without_creating_source_or_raw() {
+        let fixture = OrchestratorFixture::new("ocr-no-text");
+        fixture
+            .service
+            .register_engine(Arc::new(RouteFixtureEngine {
+                root: fixture.root.clone(),
+                id: "ocr-empty",
+                route: "ocr.basic",
+                coverage: 0.0,
+            }))
+            .unwrap();
+        let (session, item, first_task) = fixture.seed_one_item_named("image-no-text.png");
+        let waiting = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &first_task.id,
+            )
+            .unwrap();
+        assert_eq!(waiting.status, ImportItemStatus::WaitingAuthorization);
+        fixture
+            .service
+            .authorize_media_for_session(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                ImportMediaAuthorizationKind::Ocr,
+                None,
+                None,
+            )
+            .unwrap();
+        let second_task = fixture
+            .tasks
+            .create_project_task(
+                TaskType::Import,
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                "Authorized OCR".into(),
+                true,
+            )
+            .unwrap();
+        let error = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &second_task.id,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "IMPORT_OCR_NO_TEXT");
+        assert_eq!(fixture.reopen().items[0].status, ImportItemStatus::Failed);
+        assert!(!fixture.root.join("raw").exists());
+        assert!(!fixture.root.join("wiki").exists());
+        assert!(!fixture.root.join(".app/sources").exists());
     }
 }

@@ -52,19 +52,25 @@ beforeEach(() => {
 });
 
 describe("useTaskLauncher", () => {
-  it("tracks a stale project task without opening it over the current project", async () => {
-    let resolveTask!: (value: BackendTask) => void;
-    invokeMock.mockReturnValue(new Promise<BackendTask>((resolve) => { resolveTask = resolve; }));
+  it("does not start compile after source discovery returns to a different project", async () => {
+    let resolveSources!: (value: Array<{ sourceId: string; versionId: string; contentHash: string }>) => void;
+    invokeMock.mockReturnValue(new Promise((resolve) => { resolveSources = resolve; }));
     const projectB = { ...project, projectId: "p2", rootPath: "/wiki/p2" };
     const { result, rerender } = renderHook(({ current }) => useTaskLauncher(current), {
       initialProps: { current: project },
     });
     const pending = result.current.startCompile();
     rerender({ current: projectB });
-    resolveTask(task);
-    await act(async () => pending);
+    resolveSources([{ sourceId: "source-a", versionId: "version-a", contentHash: "a".repeat(64) }]);
+    await act(async () => {
+      await expect(pending).rejects.toThrow(/active project changed/i);
+    });
 
-    expect(useTaskStore.getState().tasks).toContainEqual(task);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("list_compile_source_versions", {
+      request: { projectId: "p1", projectRootPath: "/wiki/p1" },
+    });
+    expect(useTaskStore.getState().tasks).toEqual([]);
     expect(useTaskStore.getState()).toMatchObject({ drawerOpen: false, selectedTaskId: null });
   });
 
@@ -90,20 +96,27 @@ describe("useTaskLauncher", () => {
   });
 
   it("starts compile tasks and tracks them in the shared drawer", async () => {
-    invokeMock.mockResolvedValue(task);
+    const sourceVersions = [
+      { sourceId: "source-a", versionId: "version-a", contentHash: "a".repeat(64) },
+    ];
+    invokeMock.mockResolvedValueOnce(sourceVersions).mockResolvedValueOnce(task);
     const { result } = renderHook(() => useTaskLauncher(project));
 
     await act(async () => {
       await expect(result.current.startCompile()).resolves.toEqual(task);
     });
 
-    expect(invokeMock).toHaveBeenCalledWith("start_wiki_compile", {
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "list_compile_source_versions", {
+      request: { projectId: "p1", projectRootPath: "/wiki/p1" },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "start_wiki_compile", {
       request: {
         projectId: "p1",
         projectRootPath: "/wiki/p1",
         route: "auto",
         agent: null,
         provider: null,
+        sourceVersions,
       },
     });
     expect(useTaskStore.getState().tasks).toContainEqual(task);

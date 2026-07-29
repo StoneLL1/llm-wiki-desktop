@@ -1,5 +1,7 @@
 # 全界面 UI Polish 设计
 
+> 历史视觉设计：全局桌面壳和可访问性原则仍可参考；Import 连续队列、能力矩阵、聚合待办、固定确认栏和 Source 右栏以 [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md) 为准。
+
 **日期：** 2026-06-24  
 **范围：** 启动页、全局桌面壳、Dashboard、Wiki、Chat、Graph、Agent、Import、Lint、Exports、Settings、右侧上下文栏、抽屉与弹窗。  
 **设计依据：** `UI-Frontend-design/` 全目录、`SPEC/FRONTEND_GUIDELINES.md`、`SPEC/DESIGN.md`、`SPEC/APP_flow.md`。

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { cancelTaskRequest, useTaskStore } from "../stores/taskStore";
 import { useToastStore } from "../stores/toastStore";
 import type { AgentKind } from "../types/agent";
+import type { SourceVersionRef } from "../types/compile";
 import type { ExportType } from "../types/export";
 import type { LlmProviderKind } from "../types/llm";
 import type { ProjectSummary } from "../types/project";
@@ -22,7 +23,9 @@ export interface TaskCancelOptions {
 
 export interface TaskLauncher {
   startCompile: (
-    options?: Partial<TaskLaunchOptions>,
+    options?: Partial<TaskLaunchOptions> & {
+      sourceVersions?: SourceVersionRef[];
+    },
   ) => Promise<BackendTask>;
   startDeepLint: (options: TaskLaunchOptions) => Promise<BackendTask>;
   startExport: (
@@ -71,13 +74,30 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
   );
 
   const startCompile = useCallback(
-    async (options: Partial<TaskLaunchOptions> = {}) => {
+    async (
+      options: Partial<TaskLaunchOptions> & {
+        sourceVersions?: SourceVersionRef[];
+      } = {},
+    ) => {
+      const requestKey = projectKey;
+      const sourceVersions =
+        options.sourceVersions ??
+        (await invoke<SourceVersionRef[]>("list_compile_source_versions", {
+          request: {
+            projectId,
+            projectRootPath: rootPath,
+          },
+        }));
+      if (latestProjectKey.current !== requestKey) {
+        throw new Error("The active project changed before Compile could start.");
+      }
       const task = await invoke<BackendTask>("start_wiki_compile", {
         request: {
           projectId,
           projectRootPath: rootPath,
           ...defaultLaunchOptions,
           ...options,
+          sourceVersions,
         },
       });
       return track(task, projectKey);

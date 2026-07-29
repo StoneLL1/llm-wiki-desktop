@@ -1,101 +1,67 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useImportStore } from "../../stores/importStore";
 import type { ImportItem } from "../../types/importV2";
-import type { AgentCandidateView as AgentCandidateViewType, AgentSendScope } from "../../types/importV2Agent";
-import type { ConnectorSessionRef, ImportCapabilityRequirement, ImportFrontendReadiness } from "../../types/importV2Presentation";
-import type { LegacyInventory, MigrationPlan, MigrationReport } from "../../types/importV2Migration";
+import type { AgentCandidateView as AgentCandidateViewType } from "../../types/importV2Agent";
+import type { ConnectorSessionRef, ImportAsrEnablementPlan, ImportCapabilityRequirement } from "../../types/importV2Presentation";
 import type { WebAuthState } from "../../types/importV2Web";
-import type { LlmProviderKind } from "../../types/llm";
-import { ImportByokApprovalDialog } from "./ImportByokApprovalDialog";
 import { ImportCandidateDiffDialog, type ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
 import { ImportCapabilityDialog } from "./ImportCapabilityDialog";
+import { ImportAsrDialog } from "./ImportAsrDialog";
+import { ImportSubtitleDialog } from "./ImportSubtitleDialog";
 import { ImportLoginDialog } from "./ImportLoginDialog";
+import { ImportCollectionDialog } from "./ImportCollectionDialog";
+import { ImportRemoteMediaDialog } from "./ImportRemoteMediaDialog";
+import { ImportRestrictedContentDialog } from "./ImportRestrictedContentDialog";
 import { ImportMarkdownPreviewDialog } from "./ImportMarkdownPreviewDialog";
-import { ImportMigrationDialog, type ImportMigrationUiStatus } from "./ImportMigrationDialog";
 import { ImportPrivateTargetDialog } from "./ImportPrivateTargetDialog";
 import { displayHostForImportLocator, importPlatformForLocator } from "./importLocator";
 import type { ImportWorkflow } from "./useImportWorkflow";
 
 export interface ImportV2DialogsProps {
   workflow: ImportWorkflow;
-  capabilities: AiCapabilitiesWorkflow;
-  readiness: ImportFrontendReadiness | null;
   privateItem: ImportItem | null;
-  migrationOpen: boolean;
-  onCloseMigration: () => void;
+  asrItem: ImportItem | null;
+  asrItemIds?: readonly string[];
+  subtitleItem: ImportItem | null;
   candidateView: AgentCandidateViewType | null;
   onCloseCandidate: () => void;
   onCandidateIntent: (intent: ImportCandidateDiffIntent) => void;
   onClosePrivate: () => void;
+  onCloseAsr: () => void;
+  onCloseSubtitle: () => void;
 }
 
-function migrationStatus(readiness: ImportFrontendReadiness | null): ImportMigrationUiStatus {
-  if (!readiness) return "not_scanned";
-  if (readiness.active && readiness.migrationStatus === "applied") return "activated";
-  if (!readiness.active && readiness.migrationStatus === "applied") return "not_activated";
-  return readiness.migrationStatus;
-}
-
-function providerFor(capabilities: AiCapabilitiesWorkflow) {
-  return capabilities.providers.find((provider) => provider.config.enabled && (provider.hasSecret || provider.config.provider === "ollama"))?.config.provider ?? null;
-}
-
-export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem, migrationOpen, onCloseMigration, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate }: ImportV2DialogsProps) {
+export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [], subtitleItem, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate, onCloseAsr, onCloseSubtitle }: ImportV2DialogsProps) {
   const { t } = useTranslation();
   const session = useImportStore((state) => state.session);
   const previewItemId = useImportStore((state) => state.previewItemId);
-  const byokItemId = useImportStore((state) => state.byokItemId);
   const capabilityItemId = useImportStore((state) => state.capabilityItemId);
   const loginItemId = useImportStore((state) => state.loginItemId);
   const closePreview = useImportStore((state) => state.closePreview);
-  const closeByok = useImportStore((state) => state.closeByok);
   const closeCapability = useImportStore((state) => state.closeCapability);
   const closeLogin = useImportStore((state) => state.closeLogin);
+  const asrItemId = asrItem?.itemId ?? null;
 
   const previewItem = session?.items.find((item) => item.itemId === previewItemId) ?? null;
   const previewIdentity = session && previewItem ? { sessionId: session.sessionId, itemId: previewItem.itemId, candidateId: null } : null;
   const capabilityItem = session?.items.find((item) => item.itemId === capabilityItemId) ?? null;
   const loginItem = session?.items.find((item) => item.itemId === loginItemId) ?? null;
 
-  const [scope, setScope] = useState<AgentSendScope | null>(null);
   const [capability, setCapability] = useState<ImportCapabilityRequirement | null>(null);
+  const [asrPlan, setAsrPlan] = useState<ImportAsrEnablementPlan | null>(null);
+  const [asrPlanLoading, setAsrPlanLoading] = useState(false);
   const [connector, setConnector] = useState<ConnectorSessionRef | null>(null);
-  const [migrationState, setMigrationState] = useState<ImportMigrationUiStatus>(() => migrationStatus(readiness));
-  const [inventory, setInventory] = useState<LegacyInventory | null>(null);
-  const [plan, setPlan] = useState<MigrationPlan | null>(null);
-  const [report, setReport] = useState<MigrationReport | null>(null);
   const activeProjectKeyRef = useRef(workflow.projectKey);
   activeProjectKeyRef.current = workflow.projectKey;
 
-  const provider = useMemo(() => providerFor(capabilities), [capabilities]);
-
   useEffect(() => {
-    setScope(null);
     setCapability(null);
+    setAsrPlan(null);
+    setAsrPlanLoading(false);
     setConnector(null);
-    setMigrationState(migrationStatus(readiness));
-    setInventory(null);
-    setPlan(null);
-    setReport(null);
-  }, [readiness, workflow.projectKey]);
-
-  useEffect(() => {
-    if (!byokItemId || !provider) {
-      setScope(null);
-      return;
-    }
-    let current = true;
-    setScope(null);
-    void workflow.previewByokScope(byokItemId, "manual", provider).then((next) => {
-      if (current) setScope(next);
-    }).catch(() => {
-      if (current) setScope(null);
-    });
-    return () => { current = false; };
-  }, [byokItemId, provider, workflow.previewByokScope]);
+  }, [workflow.projectKey]);
 
   useEffect(() => {
     if (!capabilityItemId) {
@@ -113,52 +79,27 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
   }, [capabilityItemId, workflow.getCapabilityRequirement]);
 
   useEffect(() => {
-    if (!loginItemId) setConnector(null);
-  }, [loginItemId]);
+    if (!asrItemId) {
+      setAsrPlan(null);
+      setAsrPlanLoading(false);
+      return;
+    }
+    let current = true;
+    setAsrPlan(null);
+    setAsrPlanLoading(true);
+    void workflow.getAsrEnablementPlan(asrItemId).then((next) => {
+      if (current) setAsrPlan(next);
+    }).catch(() => {
+      if (current) setAsrPlan(null);
+    }).finally(() => {
+      if (current) setAsrPlanLoading(false);
+    });
+    return () => { current = false; };
+  }, [asrItemId, workflow.getAsrEnablementPlan]);
 
   useEffect(() => {
-    if (!migrationOpen) return;
-    const requestProjectKey = workflow.projectKey;
-    let current = true;
-    setMigrationState(migrationStatus(readiness));
-    void workflow.getMigrationStatus().then((snapshot) => {
-      if (!current || activeProjectKeyRef.current !== requestProjectKey || !snapshot) return;
-      setMigrationState(snapshot.status);
-      setReport(snapshot.report ?? null);
-    }).catch(() => undefined);
-    return () => { current = false; };
-  }, [migrationOpen, readiness, workflow.getMigrationStatus, workflow.projectKey]);
-
-  async function scanMigration() {
-    const requestProjectKey = workflow.projectKey;
-    setMigrationState("scanning");
-    const next = await workflow.scanMigration();
-    if (activeProjectKeyRef.current !== requestProjectKey) return;
-    if (!next) {
-      setMigrationState(migrationStatus(readiness));
-      return;
-    }
-    setInventory(next);
-    setPlan(null);
-    setReport(null);
-    setMigrationState("dry_run_ready");
-  }
-
-  async function buildPlan(nextInventory: LegacyInventory) {
-    const requestProjectKey = workflow.projectKey;
-    setMigrationState("scanning");
-    const nextPlan = await workflow.planMigration(nextInventory);
-    if (activeProjectKeyRef.current !== requestProjectKey) return;
-    if (!nextPlan) {
-      setMigrationState(migrationStatus(readiness));
-      return;
-    }
-    setPlan(nextPlan);
-    const snapshot = await workflow.getMigrationStatus();
-    if (activeProjectKeyRef.current !== requestProjectKey) return;
-    setReport(snapshot?.report ?? null);
-    setMigrationState(snapshot?.status ?? "awaiting_confirmation");
-  }
+    if (!loginItemId) setConnector(null);
+  }, [loginItemId]);
 
   const loginLocator = loginItem?.input.kind === "url" ? loginItem.input.normalizedLocator ?? loginItem.input.locator : "";
   const loginDomain = loginLocator ? displayHostForImportLocator(loginLocator) : "connector";
@@ -168,16 +109,23 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
 
   return (
     <>
-      <ImportMarkdownPreviewDialog open={Boolean(previewIdentity)} identity={previewIdentity} loadContent={workflow.loadPreview} onClose={closePreview} />
-      <ImportByokApprovalDialog
-        open={Boolean(byokItemId && scope)}
-        scope={scope}
-        onCancel={closeByok}
-        onConfirm={async (nextScope, acknowledge) => {
-          await workflow.approveByokAssistance({ itemId: nextScope.itemId, trigger: "manual", provider: nextScope.provider as LlmProviderKind, model: nextScope.model, approvalId: nextScope.approvalId, scopeSha256: nextScope.scopeSha256, acknowledgePossibleDuplicateCharge: acknowledge });
-          closeByok();
-        }}
+      <ImportCollectionDialog
+        preview={workflow.collectionPreview}
+        onLoadMore={workflow.loadCollectionPage}
+        onConfirm={workflow.confirmCollection}
+        onCancel={workflow.dismissCollection}
       />
+      <ImportRemoteMediaDialog
+        plan={workflow.remoteMediaRetentionPlan}
+        onConfirm={workflow.confirmRemoteMediaRetention}
+        onCancel={workflow.dismissRemoteMediaRetention}
+      />
+      <ImportRestrictedContentDialog
+        open={workflow.restrictedCommitPending}
+        onConfirm={workflow.confirmRestrictedContent}
+        onCancel={workflow.dismissRestrictedContent}
+      />
+      <ImportMarkdownPreviewDialog open={Boolean(previewIdentity)} identity={previewIdentity} loadContent={workflow.loadPreview} onClose={closePreview} />
       <ImportCapabilityDialog
         open={Boolean(capabilityItemId && capability)}
         requirement={capability}
@@ -185,6 +133,39 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
         onInstall={async (capabilityId) => {
           if (capabilityItem) await workflow.installCapability(capabilityItem.itemId, capabilityId);
           closeCapability();
+        }}
+      />
+      <ImportAsrDialog
+        open={Boolean(asrItem)}
+        plan={asrPlan}
+        loading={asrPlanLoading}
+        onCancel={onCloseAsr}
+        onConfirm={async (options) => {
+          if (!asrItem) return;
+          const itemIds = asrItemIds.length > 0 ? asrItemIds : [asrItem.itemId];
+          if (workflow.authorizeLocalAsrGroup) {
+            await workflow.authorizeLocalAsrGroup(itemIds, options);
+          } else {
+            for (const itemId of itemIds) {
+              await workflow.authorizeLocalAsr(itemId, options);
+            }
+          }
+          onCloseAsr();
+        }}
+        onInstall={async (capabilityId) => {
+          if (!asrItem) return;
+          await workflow.installCapability(asrItem.itemId, capabilityId);
+          onCloseAsr();
+        }}
+      />
+      <ImportSubtitleDialog
+        open={Boolean(subtitleItem)}
+        candidates={subtitleItem?.issue?.subtitleCandidates ?? []}
+        onCancel={onCloseSubtitle}
+        onConfirm={async (fileName) => {
+          if (!subtitleItem) return;
+          await workflow.selectSubtitle(subtitleItem.itemId, fileName);
+          onCloseSubtitle();
         }}
       />
       <ImportLoginDialog
@@ -224,21 +205,6 @@ export function ImportV2Dialogs({ workflow, capabilities, readiness, privateItem
         onCancel={onClosePrivate}
       />
       <ImportCandidateDiffDialog open={Boolean(candidateView)} view={candidateView} onClose={onCloseCandidate} onAction={onCandidateIntent} />
-      <ImportMigrationDialog
-        open={migrationOpen}
-        status={migrationState}
-        inventory={inventory}
-        plan={plan}
-        report={report}
-        confirmation={null}
-        checkpoint={null}
-        resumable={migrationState === "interrupted" || migrationState === "resumable" || migrationState === "applying"}
-        onScan={() => void scanMigration()}
-        onPlan={(next) => void buildPlan(next)}
-        onApply={async (nextPlan, nextConfirmation) => { setMigrationState("applying"); await workflow.applyMigration(nextPlan, nextConfirmation); }}
-        onResume={async (nextPlan, nextConfirmation) => { setMigrationState("applying"); await workflow.resumeMigration(nextPlan, nextConfirmation); }}
-        onClose={onCloseMigration}
-      />
     </>
   );
 }

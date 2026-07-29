@@ -1,4 +1,5 @@
 import { CircleAlert, CircleCheck, CircleX } from "lucide-react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type { QualityReport } from "../../types/importV2";
@@ -9,6 +10,18 @@ interface ImportQualitySummaryProps {
 
 function percentage(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+function qualityFact(value: string, t: TFunction): string {
+  if (!/^[A-Z0-9_.-]+$/.test(value)) return value;
+  const fallback = value
+    .split(/[_.-]+/)
+    .filter(Boolean)
+    .map((part, index) => index === 0
+      ? part[0]?.toLocaleUpperCase() + part.slice(1).toLocaleLowerCase()
+      : part.toLocaleLowerCase())
+    .join(" ");
+  return t(`importV2.qualityFact.${value}`, { defaultValue: fallback });
 }
 
 export function ImportQualitySummary({ quality }: ImportQualitySummaryProps) {
@@ -40,7 +53,7 @@ export function ImportQualitySummary({ quality }: ImportQualitySummaryProps) {
         <dl className="m-0 space-y-1.5 text-[11.5px]">
           {quality.metrics.map((metric) => (
             <div key={metric.code} className="flex items-center justify-between gap-3">
-              <dt className="font-mono text-[var(--text-muted)]">{metric.code}</dt>
+              <dt className="text-[var(--text-muted)]">{qualityFact(metric.code, t)}</dt>
               <dd className={metric.passed ? "m-0 text-[var(--text-secondary)]" : "m-0 text-[var(--danger)]"}>
                 {percentage(metric.actual)} / {percentage(metric.minimum)}
               </dd>
@@ -51,7 +64,7 @@ export function ImportQualitySummary({ quality }: ImportQualitySummaryProps) {
 
       {quality.warnings.length > 0 ? (
         <ul className="mt-2 space-y-1 pl-4 text-[11.5px] text-[var(--warning-text)]">
-          {quality.warnings.map((warning) => <li key={warning} className="font-mono">{warning}</li>)}
+          {quality.warnings.map((warning) => <li key={warning}>{qualityFact(warning, t)}</li>)}
         </ul>
       ) : null}
     </section>

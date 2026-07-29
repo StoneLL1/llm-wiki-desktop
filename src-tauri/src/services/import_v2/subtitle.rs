@@ -13,19 +13,6 @@ pub struct TranscriptSegment {
     pub text: String,
 }
 
-pub fn append_missing_transcript_notice(markdown: &mut String) {
-    const NOTICE: &str = "> 未获取到可用的平台字幕；当前结果仅包含视频元数据与简介，不代表完整视频内容。可在本地语音转写能力可用后授权重试。";
-    if markdown.contains(NOTICE) {
-        return;
-    }
-    while markdown.ends_with('\n') {
-        markdown.pop();
-    }
-    markdown.push_str("\n\n## 字幕 / 转写\n\n");
-    markdown.push_str(NOTICE);
-    markdown.push('\n');
-}
-
 /// Render the subtitle formats emitted by the supported platform providers.
 ///
 /// A subtitle URL is not evidence that a usable transcript exists. Callers
@@ -48,6 +35,7 @@ pub fn parse_subtitle_segments(bytes: &[u8], extension: &str) -> Option<Vec<Tran
     let segments = match extension.to_ascii_lowercase().as_str() {
         "vtt" | "srt" => parse_timed_text(&bytes)?,
         "ass" | "ssa" => parse_ass(&bytes)?,
+        "lrc" => parse_lrc(&bytes)?,
         "json" => parse_json(&bytes)?,
         _ => return None,
     };
@@ -158,6 +146,60 @@ fn parse_ass(bytes: &[u8]) -> Option<Vec<TranscriptSegment>> {
     Some(output)
 }
 
+fn parse_lrc(bytes: &[u8]) -> Option<Vec<TranscriptSegment>> {
+    let text = std::str::from_utf8(bytes)
+        .ok()?
+        .trim_start_matches('\u{feff}');
+    let mut output = Vec::new();
+    for line in text.lines().map(str::trim) {
+        let mut rest = line;
+        let mut timestamps = Vec::new();
+        while let Some(value) = rest.strip_prefix('[') {
+            let Some((timestamp, suffix)) = value.split_once(']') else {
+                break;
+            };
+            let Some(start_ms) = parse_lrc_clock_ms(timestamp) else {
+                break;
+            };
+            timestamps.push(start_ms);
+            rest = suffix;
+        }
+        let lyric = rest.trim();
+        if lyric.is_empty() {
+            continue;
+        }
+        output.extend(timestamps.into_iter().map(|start_ms| TranscriptSegment {
+            start_ms: Some(start_ms),
+            text: lyric.to_string(),
+        }));
+        if output.len() >= 100_000 {
+            break;
+        }
+    }
+    output.sort_by_key(|segment| segment.start_ms);
+    Some(output)
+}
+
+fn parse_lrc_clock_ms(value: &str) -> Option<u64> {
+    let (minutes, seconds) = value.trim().split_once(':')?;
+    let minutes = minutes.parse::<u64>().ok()?;
+    let (seconds, fraction) = seconds.split_once('.').unwrap_or((seconds, "0"));
+    let seconds = seconds.parse::<u64>().ok()?;
+    let fraction_text = fraction.chars().take(3).collect::<String>();
+    let fraction = fraction_text.parse::<u64>().unwrap_or(0);
+    let millis = match fraction_text.len() {
+        1 => fraction * 100,
+        2 => fraction * 10,
+        _ => fraction,
+    };
+    Some(
+        minutes
+            .saturating_mul(60_000)
+            .saturating_add(seconds.saturating_mul(1_000))
+            .saturating_add(millis),
+    )
+}
+
 fn parse_json(bytes: &[u8]) -> Option<Vec<TranscriptSegment>> {
     let value = serde_json::from_slice::<Value>(bytes).ok()?;
     let mut segments = Vec::new();
@@ -215,11 +257,23 @@ fn append_segment(output: &mut String, last_line: &mut Option<String>, segment: 
     if clean.trim().is_empty() || last_line.as_deref() == Some(clean.as_str()) {
         return;
     }
-    if let Some(start_ms) = segment.start_ms {
-        output.push_str(&format!("- [{}] {}\n", format_timestamp(start_ms), clean));
-    } else {
-        output.push_str(&format!("- {}\n", clean));
+    let needs_anchor = segment.start_ms.is_some_and(|start_ms| {
+        let last_anchor = output
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("### ["))
+            .and_then(|line| line.strip_suffix(']'))
+            .and_then(parse_clock_ms);
+        last_anchor.is_none_or(|anchor| start_ms.saturating_sub(anchor) >= 45_000)
+    });
+    if needs_anchor {
+        output.push_str(&format!(
+            "\n### [{}]\n\n",
+            format_timestamp(segment.start_ms.unwrap_or_default())
+        ));
     }
+    output.push_str(&clean.replace('\n', " "));
+    output.push('\n');
     *last_line = Some(clean);
 }
 
@@ -327,7 +381,7 @@ fn format_timestamp(milliseconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_missing_transcript_notice, render_subtitle_markdown};
+    use super::render_subtitle_markdown;
     use std::io::Write;
 
     #[test]
@@ -338,7 +392,17 @@ mod tests {
             .unwrap();
         let compressed = encoder.finish().unwrap();
         let markdown = render_subtitle_markdown(&compressed, "json").unwrap();
-        assert!(markdown.contains("[00:00:01.250] hello"));
+        assert!(markdown.contains("### [00:00:01.250]\n\nhello"));
+    }
+
+    #[test]
+    fn renders_lrc_with_sparse_time_anchors() {
+        let markdown =
+            render_subtitle_markdown(b"[00:01.00]first\n[00:12.50]second\n[00:48.00]third", "lrc")
+                .unwrap();
+        assert!(markdown.contains("### [00:00:01.000]"));
+        assert!(markdown.contains("### [00:00:48.000]"));
+        assert_eq!(markdown.matches("### [").count(), 2);
     }
 
     #[test]
@@ -348,7 +412,7 @@ mod tests {
             "vtt",
         )
         .unwrap();
-        assert!(markdown.contains("[00:00:01.000] Hello &lt;script&gt;"));
+        assert!(markdown.contains("### [00:00:01.000]\n\nHello &lt;script&gt;"));
         assert!(!markdown.contains("<script>"));
     }
 
@@ -359,7 +423,7 @@ mod tests {
             "vtt",
         )
         .unwrap();
-        assert!(markdown.contains("First line\nSecond line"));
+        assert!(markdown.contains("First line Second line"));
     }
 
     #[test]
@@ -369,8 +433,7 @@ mod tests {
             "ass",
         )
         .unwrap();
-        assert!(markdown.contains("[00:00:01.000] Hello"));
-        assert!(markdown.contains("world"));
+        assert!(markdown.contains("### [00:00:01.000]\n\nHello world"));
         assert!(!markdown.contains("\\i1"));
     }
 
@@ -381,7 +444,7 @@ mod tests {
             "json",
         )
         .unwrap();
-        assert!(markdown.contains("[00:00:01.250] hello"));
+        assert!(markdown.contains("### [00:00:01.250]\n\nhello"));
     }
 
     #[test]
@@ -392,15 +455,5 @@ mod tests {
     #[test]
     fn rejects_plain_error_text_without_a_valid_timeline() {
         assert!(render_subtitle_markdown(b"login required\ntry again\n", "srt").is_none());
-    }
-
-    #[test]
-    fn metadata_only_video_markdown_states_that_the_transcript_is_missing() {
-        let mut markdown = "# Video\n\n## 原始描述\n\nDescription\n".to_string();
-        append_missing_transcript_notice(&mut markdown);
-        append_missing_transcript_notice(&mut markdown);
-        assert!(markdown.contains("## 字幕 / 转写"));
-        assert!(markdown.contains("仅包含视频元数据与简介"));
-        assert_eq!(markdown.matches("## 字幕 / 转写").count(), 1);
     }
 }

@@ -26,7 +26,7 @@ describe("Import V2 migration API", () => {
     expect(invoke).toHaveBeenLastCalledWith("plan_import_v2_migration", { request: planRequest });
   });
 
-  it("keeps confirmation only on apply and exposes resumable task results", async () => {
+  it("passes backend-issued confirmation from planning into apply and resume", async () => {
     const request = {
       projectId: "project-1",
       projectRootPath: "D:/Wiki/项目",

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { CreateWikiPageInput, WikiPageType } from "../../types/wiki";
-import { WIKI_PAGE_TYPES } from "../../types/wiki";
+import { CREATABLE_WIKI_PAGE_TYPES } from "../../types/wiki";
 import { useModalDialog } from "../../hooks/useModalDialog";
 
 interface WikiPageFormDialogProps {
@@ -15,7 +15,6 @@ interface WikiPageFormDialogProps {
 const WIKI_FOLDER_TYPES: Record<string, WikiPageType> = {
   entities: "entity",
   concepts: "concept",
-  sources: "source",
   synthesis: "synthesis",
   comparisons: "comparison",
   queries: "query",
@@ -48,7 +47,11 @@ export function WikiPageFormDialog({
     inferPageType(initialPath),
   );
   const normalizedPath = useMemo(() => normalizeWikiPath(path), [path]);
-  const valid = normalizedPath.startsWith("wiki/") && normalizedPath !== "wiki/.md";
+  const valid =
+    normalizedPath.startsWith("wiki/") &&
+    normalizedPath !== "wiki/.md" &&
+    !normalizedPath.startsWith("wiki/sources/") &&
+    pageType !== "source";
 
   return (
     <div
@@ -107,7 +110,7 @@ export function WikiPageFormDialog({
                   className="h-[32px] w-full rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] px-2 text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
                 >
                   <option value="">{t("wiki.pageForm.template.blank")}</option>
-                  {WIKI_PAGE_TYPES.map((type) => (
+                  {CREATABLE_WIKI_PAGE_TYPES.map((type) => (
                     <option value={type} key={type}>{t(`wiki.type.${type}`)}</option>
                   ))}
                 </select>

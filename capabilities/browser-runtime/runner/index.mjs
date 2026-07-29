@@ -9,8 +9,8 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
-import { hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
-import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractPlatformPayloadFromValue, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence } from "./platform-extract.mjs";
+import { extractAccountSummary, hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
+import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractPlatformPayloadFromValue, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, platformHasVideoEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence, xiaohongshuImageEvidenceReady, xiaohongshuImageOcrRequired } from "./platform-extract.mjs";
 import { isLoginChallengeState, redactJsonValue, redactSensitiveText, sanitizePublicUrl } from "./snapshot-policy.mjs";
 import { assertLinuxBrowserDependencies } from "./linux-deps.mjs";
 
@@ -156,7 +156,8 @@ if (rpc.method === "browser.login") {
       await page.waitForTimeout(1000);
     }
     const cookies = authenticated ? await context.cookies() : [];
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { authenticated, cookies: sanitizeCookieBackup(platform, cookies) }, error: null })}\n`);
+    const summary = authenticated ? await extractAccountSummary(page, platform) : null;
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { authenticated, cookies: sanitizeCookieBackup(platform, cookies), ...(summary ? { accountSummary: summary } : {}) }, error: null })}\n`);
   } finally { await context.close(); }
   process.exit(0);
 }
@@ -165,14 +166,36 @@ function platformForHost(hostname) {
   const host = hostname.toLowerCase();
   if (host === "mp.weixin.qq.com") return "wechat";
   if (host === "b23.tv" || host === "bilibili.com" || host.endsWith(".bilibili.com")) return "bilibili";
-  if (host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com") || host === "xhslink.com" || host.endsWith(".xhslink.com")) return "xiaohongshu";
+  if (host === "xiaohongshu.com"
+    || host.endsWith(".xiaohongshu.com")
+    || host === "xhslink.com"
+    || host.endsWith(".xhslink.com")
+    || host === "xhslink.cn"
+    || host.endsWith(".xhslink.cn")) return "xiaohongshu";
   if (host === "douyin.com" || host.endsWith(".douyin.com") || host === "iesdouyin.com" || host.endsWith(".iesdouyin.com")) return "douyin";
   return "generic";
+}
+
+function normalizePlatformAssetUrl(platform, raw, baseUrl) {
+  const candidate = new URL(raw, baseUrl);
+  const host = candidate.hostname.toLowerCase();
+  const xhsCdn = host === "xhscdn.com"
+    || host.endsWith(".xhscdn.com")
+    || host === "xhscdn.net"
+    || host.endsWith(".xhscdn.net");
+  if (platform === "xiaohongshu"
+    && candidate.protocol === "http:"
+    && xhsCdn
+    && (!candidate.port || candidate.port === "80")) {
+    candidate.protocol = "https:";
+    candidate.port = "";
+  }
+  return candidate;
 }
 const requestUrl = params.input.locator;
 const publicUrl = params.input.normalizedLocator || requestUrl;
 const target = new URL(requestUrl);
-const platform = platformForHost(target.hostname);
+let platform = platformForHost(target.hostname);
 const stagingRoot = path.resolve(params.projectRoot, params.stagingRoot);
 const retainedProfile = Boolean(process.env.LLM_WIKI_CONNECTOR_PROFILE);
 const profile = retainedProfile
@@ -229,6 +252,8 @@ try {
   await page.waitForTimeout(750);
   await Promise.allSettled([...pendingApiCaptures]);
   const finalUrl = page.url();
+  const finalPlatform = platformForHost(new URL(finalUrl).hostname);
+  if (finalPlatform !== "generic") platform = finalPlatform;
   const bodyText = await page.locator("body").innerText().catch(() => "");
   const html = await page.content();
   const capturedApiCandidates = [...bilibiliPlayerCandidates, ...apiCandidates];
@@ -255,17 +280,65 @@ try {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The requested Xiaohongshu note payload was not found", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
       throw new RpcHandled();
     }
-    let verifiedSubtitle = false;
-    let subtitleIndex = 0;
-    const subtitleUrls = new Map();
-    for (const raw of platformPayload?.subtitles || []) {
-      try { const subtitleUrl = new URL(raw, finalUrl); subtitleUrls.set(subtitleUrl.href, subtitleUrl); } catch { /* ignored */ }
+    if (platform === "xiaohongshu"
+      && xiaohongshuImageOcrRequired(platformPayload, params.localOcrAuthorized)) {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "Xiaohongshu image posts require verified local OCR before preview", data: { code: "IMPORT_WEB_OCR_UNAVAILABLE" } } })}\n`);
+      throw new RpcHandled();
     }
-    for (const subtitleUrl of subtitleCandidates(dom.window.document, finalUrl)) subtitleUrls.set(subtitleUrl.href, subtitleUrl);
-    for (const subtitleUrl of subtitleUrls.values()) {
+    let subtitleCandidateEmitted = false;
+    let subtitleIndex = 0;
+    const subtitleAssets = new Map();
+    for (const candidate of platformPayload?.subtitleCandidates || []) {
+      try {
+        const subtitleUrl = normalizePlatformAssetUrl(platform, candidate.url, finalUrl);
+        subtitleAssets.set(subtitleUrl.href, {
+          url: subtitleUrl,
+          automatic: Boolean(candidate.automatic),
+          language: candidate.language || null,
+          label: candidate.label || null,
+        });
+      } catch { /* ignored */ }
+    }
+    for (const raw of platformPayload?.subtitles || []) {
+      try {
+        const subtitleUrl = normalizePlatformAssetUrl(platform, raw, finalUrl);
+        if (!subtitleAssets.has(subtitleUrl.href)) {
+          subtitleAssets.set(subtitleUrl.href, {
+            url: subtitleUrl,
+            automatic: null,
+            language: null,
+            label: null,
+          });
+        }
+      } catch { /* ignored */ }
+    }
+    for (const raw of subtitleCandidates(dom.window.document, finalUrl)) {
+      const subtitleUrl = normalizePlatformAssetUrl(platform, raw.href, finalUrl);
+      if (!subtitleAssets.has(subtitleUrl.href)) {
+        subtitleAssets.set(subtitleUrl.href, {
+          url: subtitleUrl,
+          automatic: null,
+          language: null,
+          label: null,
+        });
+      }
+    }
+    for (const subtitle of subtitleAssets.values()) {
+      const subtitleUrl = subtitle.url;
       if (!(await isAllowedAssetUrl(platform, target, subtitleUrl))) continue;
-      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: `platform-subtitle-${subtitleIndex++}`, url: subtitleUrl.href, kind: "subtitle" } })}\n`);
-      verifiedSubtitle = true;
+      process.stdout.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        method: "import.remoteAsset",
+        params: {
+          placeholder: `platform-subtitle-${subtitleIndex++}`,
+          url: subtitleUrl.href,
+          kind: "subtitle",
+          automatic: subtitle.automatic,
+          language: subtitle.language,
+          label: subtitle.label,
+        },
+      })}\n`);
+      subtitleCandidateEmitted = true;
       if (subtitleIndex >= 4) break;
     }
     const mediaRaw = platformPayload?.mediaUrl
@@ -274,7 +347,10 @@ try {
     const asrMediaRaw = platform === "bilibili"
       ? platformPayload?.asrMediaUrl || mediaRaw
       : mediaRaw;
-    if (platform === "xiaohongshu" && platformPayload?.contentType === "video" && !mediaRaw) {
+    if (platform === "xiaohongshu"
+      && platformPayload?.contentType === "video"
+      && !mediaRaw
+      && !subtitleCandidateEmitted) {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The Xiaohongshu video did not expose a playable media stream", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
       throw new RpcHandled();
     }
@@ -283,7 +359,7 @@ try {
         { mediaUrl: mediaRaw, asrMediaUrl: asrMediaRaw },
         {
           mediaSaveMode: params.mediaSaveMode,
-          hasSubtitle: verifiedSubtitle,
+          hasSubtitle: subtitleCandidateEmitted,
           localAsrAuthorized: Boolean(params.localAsrAuthorized),
           allowMissingTranscript: Boolean(params.allowMissingTranscript),
         },
@@ -299,14 +375,14 @@ try {
     if (platform !== "bilibili"
       && (mediaRaw || asrMediaRaw)
       && !params.localAsrAuthorized
-      && !verifiedSubtitle
-      && !params.allowMissingTranscript) {
+      && !subtitleCandidateEmitted
+      && (!params.allowMissingTranscript || platform === "xiaohongshu")) {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "A verified subtitle or local ASR capability is required", data: { code: "IMPORT_WEB_SUBTITLE_UNAVAILABLE" } } })}\n`);
       throw new RpcHandled();
     }
     let originalMediaPlaceholder = false;
     if (mediaRaw) {
-      const mediaUrl = new URL(mediaRaw, finalUrl);
+      const mediaUrl = normalizePlatformAssetUrl(platform, mediaRaw, finalUrl);
       if (await isAllowedAssetUrl(platform, target, mediaUrl)) {
         // Always report the durable media candidate. Rust drops it in
         // extraction-only mode and preserves it only when explicitly requested.
@@ -319,9 +395,12 @@ try {
     }
     const authorizedAsrMediaRaw = platform === "bilibili"
       ? bilibiliPolicy?.asrMediaUrl
-      : params.localAsrAuthorized && !params.allowMissingTranscript ? asrMediaRaw : null;
+      : params.localAsrAuthorized
+        && (!params.allowMissingTranscript || platform === "xiaohongshu")
+        ? asrMediaRaw
+        : null;
     if (authorizedAsrMediaRaw) {
-      const asrMediaUrl = new URL(authorizedAsrMediaRaw, finalUrl);
+      const asrMediaUrl = normalizePlatformAssetUrl(platform, authorizedAsrMediaRaw, finalUrl);
       if (await isAllowedAssetUrl(platform, target, asrMediaUrl)) {
         process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder: "temporary-media", url: asrMediaUrl.href, kind: "temporary_media" } })}\n`);
       } else if (platform !== "generic") {
@@ -351,7 +430,7 @@ try {
       image.removeAttribute("srcset"); image.removeAttribute("data-src");
       if (!raw) { image.remove(); continue; }
       let resolved;
-      try { resolved = new URL(raw, finalUrl); } catch { image.remove(); continue; }
+      try { resolved = normalizePlatformAssetUrl(platform, raw, finalUrl); } catch { image.remove(); continue; }
       if (seenImages.has(resolved.href)) { image.remove(); continue; }
       seenImages.add(resolved.href);
       if (!(await isAllowedAssetUrl(platform, target, resolved))) {
@@ -361,7 +440,12 @@ try {
         }
         continue;
       }
-      const kind = classifyRemoteImageKind(platform, Boolean(mediaRaw || asrMediaRaw), Boolean(params.localOcrAuthorized), params.mediaSaveMode);
+      const kind = classifyRemoteImageKind(
+        platform,
+        platformHasVideoEvidence(platformPayload, mediaRaw, asrMediaRaw),
+        Boolean(params.localOcrAuthorized),
+        params.mediaSaveMode,
+      );
       if (!kind) { image.remove(); continue; }
       const placeholder = `webasset-${assetIndex++}`;
       image.setAttribute("src", `asset://${placeholder}`);
@@ -369,11 +453,8 @@ try {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "import.remoteAsset", params: { placeholder, url: resolved.href, kind } })}\n`);
     }
     if (platform === "xiaohongshu"
-      && platformPayload?.contentType === "image_post"
-      && !String(platformPayload.description || "").trim()
-      && assetIndex === 0
-      && params.mediaSaveMode !== "extract_only") {
-      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The Xiaohongshu image post had no text and no retainable image", data: { code: "IMPORT_WEB_MEDIA_UNAVAILABLE" } } })}\n`);
+      && !xiaohongshuImageEvidenceReady(platformPayload, assetIndex)) {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "No Xiaohongshu note image was available for required OCR", data: { code: "IMPORT_WEB_MEDIA_UNAVAILABLE" } } })}\n`);
       throw new RpcHandled();
     }
     if (platform !== "generic"

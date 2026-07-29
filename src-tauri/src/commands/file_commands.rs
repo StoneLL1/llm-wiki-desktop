@@ -6,7 +6,9 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus, ConfirmedAction};
-use crate::services::import_v2::activation::ImportV2ActivationService;
+use crate::services::import_v2::source_lifecycle::{
+    reject_generic_source_create, reject_generic_source_path,
+};
 use crate::services::WriteMode;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +70,8 @@ pub fn write_markdown_file(
     request: WriteMarkdownRequest,
 ) -> Result<FileHashResponse, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    reject_generic_source_path(&context, &state.file_store, &request.relative_path)?;
+    reject_generic_source_create(&request.relative_path, None, Some(&request.contents))?;
     state.file_store.write_markdown_checked(
         &context,
         &request.relative_path,
@@ -129,26 +133,6 @@ pub fn confirm_pending_action(
         .confirm(&request.action_id, request.status.clone())?;
 
     if request.status == ConfirmationStatus::Cancelled {
-        if let Some(ConfirmationExecution::ReplaceSource {
-            project_id,
-            root_path,
-            old_artifacts,
-            new_artifacts,
-            ..
-        }) = stored.execution.as_ref()
-        {
-            if let Ok(context) = state.resolve_project_context(project_id, root_path) {
-                if let Ok(_guard) = state.import_v2_service.acquire_migration_lock() {
-                    if ImportV2ActivationService::legacy_mutation_guard(&context).is_ok() {
-                        state.import_service.cleanup_replacement_artifacts(
-                            &context,
-                            old_artifacts,
-                            new_artifacts,
-                        );
-                    }
-                }
-            }
-        }
         return Ok(ConfirmedAction {
             action: stored.action,
             status: ConfirmationStatus::Cancelled,
@@ -197,21 +181,6 @@ pub fn confirm_pending_action(
             true,
             true,
         )),
-        Some(ConfirmationExecution::DeleteSource {
-            project_id,
-            root_path,
-            target_path,
-            target_hash,
-            artifacts,
-        }) => execute_source_delete(
-            &state,
-            stored.action,
-            &project_id,
-            &root_path,
-            &target_path,
-            &target_hash,
-            &artifacts,
-        ),
         Some(ConfirmationExecution::DeleteWikiPage {
             project_id,
             root_path,
@@ -225,27 +194,6 @@ pub fn confirm_pending_action(
             &target_path,
             &target_hash,
         ),
-        Some(ConfirmationExecution::ReplaceSource {
-            project_id,
-            root_path,
-            target_path,
-            target_hash,
-            replacement_path,
-            replacement_hash,
-            old_artifacts,
-            new_artifacts,
-        }) => execute_source_replace(
-            &state,
-            stored.action,
-            &project_id,
-            &root_path,
-            &target_path,
-            &target_hash,
-            &replacement_path,
-            &replacement_hash,
-            &old_artifacts,
-            &new_artifacts,
-        ),
         None => Err(BackendError::new(
             "CONFIRMATION_EXECUTION_MISSING",
             "The pending action has no backend execution plan.",
@@ -254,34 +202,6 @@ pub fn confirm_pending_action(
         )
         .with_details(serde_json::json!({ "actionId": request.action_id }))),
     }
-}
-
-fn execute_source_delete(
-    state: &AppState,
-    action: crate::models::confirmation::PendingAction,
-    project_id: &str,
-    root_path: &str,
-    target_path: &str,
-    target_hash: &str,
-    artifacts: &[String],
-) -> Result<ConfirmedAction, BackendError> {
-    let context = state.resolve_project_context(project_id, root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    ImportV2ActivationService::legacy_mutation_guard(&context)?;
-    let checkpoint_exists = state.import_service.apply_source_delete(
-        &context,
-        &state.file_store,
-        &state.git_service,
-        target_path,
-        target_hash,
-        artifacts,
-    )?;
-    Ok(ConfirmedAction {
-        action,
-        status: ConfirmationStatus::Confirmed,
-        checkpoint_exists,
-        project_summary: Some(state.project_service.scan_project(&context, None)),
-    })
 }
 
 /// Execute a confirmed wiki page deletion: resolve the project context and
@@ -306,53 +226,6 @@ fn execute_wiki_page_delete(
         target_path,
         target_hash,
     )?;
-    Ok(ConfirmedAction {
-        action,
-        status: ConfirmationStatus::Confirmed,
-        checkpoint_exists,
-        project_summary: Some(state.project_service.scan_project(&context, None)),
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_source_replace(
-    state: &AppState,
-    action: crate::models::confirmation::PendingAction,
-    project_id: &str,
-    root_path: &str,
-    target_path: &str,
-    target_hash: &str,
-    replacement_path: &str,
-    replacement_hash: &str,
-    old_artifacts: &[String],
-    new_artifacts: &[String],
-) -> Result<ConfirmedAction, BackendError> {
-    let context = state.resolve_project_context(project_id, root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    ImportV2ActivationService::legacy_mutation_guard(&context)?;
-    let replacement = PathBuf::from(replacement_path);
-    let result = state.import_service.apply_source_replace(
-        &context,
-        &state.file_store,
-        &state.git_service,
-        target_path,
-        target_hash,
-        &replacement,
-        replacement_hash,
-        old_artifacts,
-        new_artifacts,
-    );
-    let checkpoint_exists = match result {
-        Ok(checkpoint_exists) => checkpoint_exists,
-        Err(error) => {
-            state.import_service.cleanup_replacement_artifacts(
-                &context,
-                old_artifacts,
-                new_artifacts,
-            );
-            return Err(error);
-        }
-    };
     Ok(ConfirmedAction {
         action,
         status: ConfirmationStatus::Confirmed,

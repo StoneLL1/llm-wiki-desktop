@@ -8,6 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { MODEL_ID } from "./core.mjs";
+
 // This file is executed only by release CI against the fully staged payload.
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -83,8 +85,20 @@ try {
     }), { encoding: "utf8", flag: "wx" });
     createdQualificationManifest = true;
   }
-  const staging = path.join(root, "staging");
-  await fs.mkdir(staging);
+  const shallowStaging = path.join(root, "staging");
+  const representativeShard = path.join(
+    shallowStaging,
+    "asr-shards",
+    `${"a".repeat(64)}-${MODEL_ID}`,
+    "decoded-0000.wav",
+  );
+  const staging = process.platform === "win32"
+    ? path.join(
+      shallowStaging,
+      "p".repeat(Math.max(1, 280 - representativeShard.length - 1)),
+    )
+    : shallowStaging;
+  await fs.mkdir(staging, { recursive: true });
   await fs.copyFile(path.join(packRoot, "qualification", "zh.wav"), path.join(staging, "zh.wav"));
   const ffmpegPath = path.join(packRoot, required[0]);
   await runTool(ffmpegPath, [

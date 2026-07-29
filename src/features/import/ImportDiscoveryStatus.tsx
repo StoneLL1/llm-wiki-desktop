@@ -10,7 +10,9 @@ export interface ImportDiscoveryStatusProps {
   unavailable?: boolean;
   onCancel: () => void;
   onDismiss: () => void;
+  onConfirmLargeData?: (paths: string[]) => void | Promise<unknown>;
   cancelling?: boolean;
+  confirmingLargeData?: boolean;
 }
 
 function parseDiscoverySummary(summary: string | undefined): { added: number; skipped: number } | null {
@@ -19,8 +21,17 @@ function parseDiscoverySummary(summary: string | undefined): { added: number; sk
   return match ? { added: Number(match[1]), skipped: Number(match[2]) } : null;
 }
 
-export function ImportDiscoveryStatus({ task, scan = null, unavailable = false, onCancel, onDismiss, cancelling = false }: ImportDiscoveryStatusProps) {
-  const { t } = useTranslation();
+export function ImportDiscoveryStatus({
+  task,
+  scan = null,
+  unavailable = false,
+  onCancel,
+  onDismiss,
+  onConfirmLargeData,
+  cancelling = false,
+  confirmingLargeData = false,
+}: ImportDiscoveryStatusProps) {
+  const { t, i18n } = useTranslation();
   if (!task) {
     if (!unavailable) return null;
     return (
@@ -38,6 +49,12 @@ export function ImportDiscoveryStatus({ task, scan = null, unavailable = false, 
   const resultSummary = parseDiscoverySummary(task.result?.summary);
   const liveSummary = resultSummary ?? { added: discovered, skipped: 0 };
   const skipped = scan?.skipped ?? [];
+  const pendingLargePaths = skipped
+    .filter((entry) => entry.reason === "large_data_confirmation_required")
+    .map((entry) => entry.sourcePath);
+  const pendingLarge = (scan?.files ?? []).filter((file) => pendingLargePaths.includes(file.sourcePath));
+  const mismatches = (scan?.files ?? []).filter((file) => file.identity.extensionMismatch);
+  const number = new Intl.NumberFormat(i18n.language);
 
   const skippedDetails = skipped.length > 0 ? (
     <details className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2 text-[11px]">
@@ -58,6 +75,56 @@ export function ImportDiscoveryStatus({ task, scan = null, unavailable = false, 
       </ul>
       {skipped.length > 50 ? <p className="m-0 mt-1 text-[10.5px] text-[var(--text-muted)]">{t("importV2.discovery.skippedMore", { count: skipped.length - 50 })}</p> : null}
     </details>
+  ) : null;
+  const formatDetails = mismatches.length > 0 ? (
+    <details className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2 text-[11px]">
+      <summary className="cursor-pointer text-[var(--text-secondary)]">
+        {t("importV2.discovery.detectedFormats", { count: mismatches.length })}
+      </summary>
+      <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto pl-4">
+        {mismatches.map((file) => (
+          <li key={file.sourcePath} className="flex min-w-0 gap-2">
+            <span className="min-w-0 flex-1 truncate font-mono text-[10.5px]" title={file.relativePath}>{file.relativePath}</span>
+            <span className="shrink-0 text-[var(--text-muted)]">
+              {t("importV2.discovery.detectedFormat", {
+                extension: file.identity.extension || t("importV2.discovery.noExtension"),
+                format: file.format.toUpperCase(),
+              })}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  ) : null;
+  const largeDataConfirmation = pendingLarge.length > 0 ? (
+    <section className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2" aria-label={t("importV2.discovery.largeDataTitle")}>
+      <div className="flex min-w-0 flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="m-0 font-medium text-[var(--text-primary)]">{t("importV2.discovery.largeDataTitle")}</p>
+          {pendingLarge.map((file) => (
+            <p key={file.sourcePath} className="m-0 mt-1 break-words text-[10.5px] text-[var(--text-muted)]">
+              <span className="font-mono text-[var(--text-secondary)]">{file.relativePath}</span>
+              {" · "}
+              {t("importV2.discovery.largeDataEstimate", {
+                rows: number.format(file.largeData?.rowCount ?? 0),
+                files: number.format(file.largeData?.estimatedOutputFiles ?? 0),
+                bytes: number.format(file.largeData?.totalBytes ?? file.sizeBytes),
+              })}
+            </p>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="btn btn--sm btn--primary"
+          disabled={!onConfirmLargeData || confirmingLargeData}
+          aria-busy={confirmingLargeData}
+          onClick={() => void onConfirmLargeData?.(pendingLargePaths)}
+        >
+          {confirmingLargeData ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" /> : null}
+          {t(confirmingLargeData ? "importV2.discovery.largeDataConfirming" : "importV2.discovery.largeDataConfirm")}
+        </button>
+      </div>
+    </section>
   ) : null;
 
   if (isActive) {
@@ -91,6 +158,8 @@ export function ImportDiscoveryStatus({ task, scan = null, unavailable = false, 
           {resultSummary ? ` · ${t("importV2.discovery.added", { count: resultSummary.added })} · ${t("importV2.discovery.skipped", { count: resultSummary.skipped })}` : ""}
         </span>
         <button type="button" className="icon-button" aria-label={t("importV2.discovery.dismiss")} title={t("importV2.discovery.dismiss")} onClick={onDismiss}><X size={14} aria-hidden="true" /></button>
+        {largeDataConfirmation}
+        {formatDetails}
         {skippedDetails}
       </section>
     );

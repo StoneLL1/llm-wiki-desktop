@@ -4,14 +4,22 @@ use std::{
 };
 
 use llm_wiki_desktop_lib::models::{
-    import_v2::ImportInputKind,
+    import_v2::{ImportInput, ImportInputKind, ImportResourceMode, SourceIdentity},
     import_v2_file::{FileFormat, FileScanPolicy},
     paths::ProjectContext,
+    task::TaskType,
 };
 use llm_wiki_desktop_lib::services::import_v2::{
+    engine::{EngineOperation, EngineRequest, ImportEngine},
     file_discovery::FileDiscoveryService,
     file_router::{CapabilitySnapshot, FileRoutePlanner},
+    native_file_engine::NativeCsvPackageEngine,
+    ImportV2Service,
 };
+use llm_wiki_desktop_lib::services::{FileStore, SecretService};
+use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
+use llm_wiki_desktop_lib::tasks::TaskService;
+use sha2::{Digest, Sha256};
 
 const RELEASE_REPORT: &str = include_str!("../../docs/qa/import-v2-file-ingestion.md");
 
@@ -151,4 +159,126 @@ fn report_is_a_fail_closed_evidence_matrix_not_a_release_claim() {
     assert!(RELEASE_REPORT.contains("actual package size: unavailable"));
     assert!(!RELEASE_REPORT.contains("READY TO RELEASE"));
     let _: ImportInputKind = ImportInputKind::File;
+}
+
+#[test]
+fn real_large_csv_cancellation_leaves_no_partial_package() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let input = root.join("inputs/large.csv");
+    fs::create_dir_all(input.parent().unwrap()).unwrap();
+    fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/import-v2/local/batch3/large.csv"),
+        &input,
+    )
+    .unwrap();
+    let bytes = fs::read(&input).unwrap();
+    let request = EngineRequest {
+        protocol_version: "2.0".into(),
+        request_id: "cancel-request".into(),
+        project_id: "cancel-large-csv".into(),
+        project_root: root.to_string_lossy().into_owned(),
+        session_id: "session".into(),
+        item_id: "item".into(),
+        task_id: "task".into(),
+        operation: EngineOperation::Extract,
+        staging_root: ".app/staging/cancelled".into(),
+        input: ImportInput {
+            kind: ImportInputKind::File,
+            display_name: "large.csv".into(),
+            locator: input.to_string_lossy().into_owned(),
+            normalized_locator: Some(format!(
+                "file:{}",
+                input.to_string_lossy().replace('\\', "/")
+            )),
+            source_identity: Some(SourceIdentity {
+                canonical_path: input.canonicalize().unwrap().to_string_lossy().into_owned(),
+                size_bytes: bytes.len() as u64,
+                modified_nanos: None,
+                file_id: None,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                magic: format!("{:x}", Sha256::digest(&bytes[..bytes.len().min(8192)])),
+            }),
+            media_save_mode: Default::default(),
+        },
+        chained_input: None,
+        local_asr_authorized: false,
+        asr_probe_only: false,
+        asr_profile: None,
+        recognition_language: None,
+        selected_subtitle: None,
+        local_ocr_authorized: false,
+        media_save_mode: Default::default(),
+    };
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = NativeCsvPackageEngine
+        .execute(&request, &cancellation)
+        .unwrap_err();
+    assert_eq!(error.code, "IMPORT_V2_CANCELLED");
+    assert!(!root.join(".app/staging/cancelled").exists());
+}
+
+#[test]
+fn clipboard_session_copy_is_removed_on_skip_and_cancel() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    fs::create_dir_all(root.join(".app")).unwrap();
+    let context = ProjectContext::new("clipboard-retention", root.clone());
+    let files = FileStore;
+    let tasks = TaskService::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
+
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let session = service
+        .add_text_input(&context, &files, &session.session_id, "skip.md", "# skip")
+        .unwrap();
+    let item = &session.items[0];
+    let skip_path = context.resolve_project_path(&item.input.locator).unwrap();
+    assert!(skip_path.is_file());
+    service
+        .skip_item(&context, &files, &tasks, &session.session_id, &item.item_id)
+        .unwrap();
+    assert!(!skip_path.exists());
+
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let session = service
+        .add_text_input(
+            &context,
+            &files,
+            &session.session_id,
+            "cancel.md",
+            "# cancel",
+        )
+        .unwrap();
+    let item = &session.items[0];
+    let cancel_path = context.resolve_project_path(&item.input.locator).unwrap();
+    let task = tasks
+        .create_project_task(
+            TaskType::Import,
+            context.project_id.clone(),
+            root,
+            "cancel clipboard fixture".into(),
+            true,
+        )
+        .unwrap();
+    tasks.cancel_task(&task.id).unwrap();
+    assert!(cancel_path.is_file());
+    let error = service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item.item_id,
+            &task.id,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "IMPORT_V2_CANCELLED");
+    assert!(!cancel_path.exists());
 }

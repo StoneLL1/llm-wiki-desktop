@@ -22,7 +22,13 @@ pub struct XiaohongshuDocument {
 /// must redact them before persisting provider evidence.
 pub fn extract_page(html: &str, request_url: &str) -> Result<PlatformDocument, ConnectorFailure> {
     if let Some(document) = extract_platform_document(Platform::Xiaohongshu, html, request_url) {
-        if document.content_type == "video" && document.media_url.is_none() {
+        if document.content_type == "video"
+            && document.media_url.is_none()
+            && document.subtitles.is_empty()
+        {
+            return Err(ConnectorFailure::StructureChanged);
+        }
+        if document.content_type == "image_post" && document.images.is_empty() {
             return Err(ConnectorFailure::StructureChanged);
         }
         if document

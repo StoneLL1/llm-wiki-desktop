@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::services::import_v2::url_policy::UrlPolicy;
@@ -25,6 +26,8 @@ impl Platform {
             || host.ends_with(".xiaohongshu.com")
             || host == "xhslink.com"
             || host.ends_with(".xhslink.com")
+            || host == "xhslink.cn"
+            || host.ends_with(".xhslink.cn")
         {
             Some(Self::Xiaohongshu)
         } else if host == "douyin.com"
@@ -48,10 +51,42 @@ impl Platform {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformSubtitleKind {
+    AuthorOriginal,
+    PlatformAutoOriginal,
+    AuthorOther,
+    MachineTranslation,
+}
+
+impl Default for PlatformSubtitleKind {
+    fn default() -> Self {
+        Self::AuthorOriginal
+    }
+}
+
+impl PlatformSubtitleKind {
+    pub fn is_reliable_source(&self) -> bool {
+        !matches!(self, Self::MachineTranslation)
+    }
+
+    pub fn rank(&self) -> u8 {
+        match self {
+            Self::AuthorOriginal => 0,
+            Self::PlatformAutoOriginal => 1,
+            Self::AuthorOther => 2,
+            Self::MachineTranslation => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformSubtitle {
     pub url: String,
     pub automatic: bool,
+    #[serde(default)]
+    pub kind: PlatformSubtitleKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,9 +108,317 @@ pub struct PlatformDocument {
     pub hashtags: Vec<String>,
     pub images: Vec<String>,
     pub media_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_size_bytes: Option<u64>,
     pub cover_url: Option<String>,
     pub subtitles: Vec<PlatformSubtitle>,
     pub chapters: Vec<String>,
+    #[serde(default)]
+    pub restricted_content: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformCollectionItem {
+    pub title: String,
+    pub url: String,
+    pub duration_seconds: Option<u64>,
+    pub estimated_login_required: bool,
+    pub estimated_asr_required: bool,
+    pub discovery_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformCollection {
+    pub platform: String,
+    pub title: String,
+    pub items: Vec<PlatformCollectionItem>,
+}
+
+pub fn looks_like_collection_url(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    let path = url.path().to_ascii_lowercase();
+    match Platform::from_url(value) {
+        Some(Platform::Bilibili) => {
+            url.host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case("space.bilibili.com"))
+                || path.contains("/medialist/")
+                || path.contains("/list/")
+                || path.contains("/favlist")
+                || path.contains("/channel/collectiondetail")
+        }
+        Some(Platform::Xiaohongshu) => {
+            path.contains("/board/")
+                || path.contains("/collection/")
+                || path.contains("/user/profile/")
+        }
+        Some(Platform::Douyin) => {
+            path.contains("/collection/") || path.contains("/user/") || path.contains("/channel/")
+        }
+        None => false,
+    }
+}
+
+pub fn extract_platform_collection(
+    platform: Platform,
+    html: &str,
+    base_url: &str,
+) -> Option<PlatformCollection> {
+    let values = collect_json_values(html);
+    let mut best: Vec<PlatformCollectionItem> = Vec::new();
+    let mut title = None;
+    for value in &values {
+        find_collection_arrays(value, &mut |owner, array| {
+            let items = collection_items_from_array(platform, array, base_url);
+            if items.len() > best.len() {
+                title = first_string(
+                    owner,
+                    &[
+                        "title",
+                        "name",
+                        "collectionTitle",
+                        "collection_title",
+                        "listName",
+                    ],
+                );
+                best = items;
+            }
+        });
+    }
+    if best.len() < 2 {
+        return None;
+    }
+    Some(PlatformCollection {
+        platform: platform.id().into(),
+        title: title.unwrap_or_else(|| format!("{} collection", platform.id())),
+        items: best,
+    })
+}
+
+fn find_collection_arrays<F>(value: &serde_json::Value, visit: &mut F)
+where
+    F: FnMut(&serde_json::Value, &[serde_json::Value]),
+{
+    if let Some(object) = value.as_object() {
+        for (key, child) in object {
+            if matches!(
+                key.to_ascii_lowercase().as_str(),
+                "episodes"
+                    | "archives"
+                    | "medias"
+                    | "items"
+                    | "videolist"
+                    | "video_list"
+                    | "notelist"
+                    | "note_list"
+                    | "awemelist"
+                    | "aweme_list"
+            ) {
+                if let Some(array) = child.as_array() {
+                    visit(value, array);
+                }
+            }
+            find_collection_arrays(child, visit);
+        }
+    } else if let Some(array) = value.as_array() {
+        for child in array {
+            find_collection_arrays(child, visit);
+        }
+    }
+}
+
+fn collection_items_from_array(
+    platform: Platform,
+    values: &[serde_json::Value],
+    base_url: &str,
+) -> Vec<PlatformCollectionItem> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    for value in values.iter().take(5_000) {
+        let title =
+            first_direct_string(value, &["title", "name", "desc", "description", "caption"])
+                .unwrap_or_else(|| format!("Item {}", result.len() + 1));
+        let direct = first_direct_string(
+            value,
+            &["url", "shareUrl", "share_url", "shortLink", "link"],
+        );
+        let derived = match platform {
+            Platform::Bilibili => first_direct_string(value, &["bvid", "bvId", "bv_id"])
+                .map(|id| format!("https://www.bilibili.com/video/{id}")),
+            Platform::Xiaohongshu => first_direct_string(value, &["noteId", "note_id", "id"])
+                .map(|id| format!("https://www.xiaohongshu.com/explore/{id}")),
+            Platform::Douyin => first_direct_string(value, &["awemeId", "aweme_id", "id"])
+                .map(|id| format!("https://www.douyin.com/video/{id}")),
+        };
+        let Some(raw_url) = direct.or(derived) else {
+            continue;
+        };
+        let Ok(base) = Url::parse(base_url) else {
+            continue;
+        };
+        let Ok(url) = base.join(&raw_url).or_else(|_| Url::parse(&raw_url)) else {
+            continue;
+        };
+        let Ok(target) = UrlPolicy.normalize_for_session(url.as_str()) else {
+            continue;
+        };
+        if Platform::from_url(&target.public.public_url) != Some(platform)
+            || !seen.insert(target.public.public_url.clone())
+        {
+            continue;
+        }
+        let duration_seconds = collection_item_duration_seconds(platform, value);
+        let estimated_login_required = has_truthy_key(
+            value,
+            &[
+                "isPrivate",
+                "is_private",
+                "needLogin",
+                "need_login",
+                "loginRequired",
+                "login_required",
+                "isPay",
+                "is_pay",
+            ],
+        );
+        let estimated_asr_required = collection_item_estimates_asr(platform, value);
+        let updated_marker = first_direct_string(
+            value,
+            &[
+                "updatedAt",
+                "updated_at",
+                "pubdate",
+                "publishTime",
+                "publish_time",
+                "mtime",
+                "version",
+            ],
+        )
+        .unwrap_or_default();
+        let discovery_fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{}\n{}\n{:?}\n{}\n{}\n{}",
+                    title,
+                    target.public.public_url,
+                    duration_seconds,
+                    estimated_login_required,
+                    estimated_asr_required,
+                    updated_marker
+                )
+                .as_bytes()
+            )
+        );
+        result.push(PlatformCollectionItem {
+            title: title.chars().take(160).collect(),
+            url: target.request_url.to_string(),
+            duration_seconds,
+            estimated_login_required,
+            estimated_asr_required,
+            discovery_fingerprint,
+        });
+    }
+    result
+}
+
+fn collection_item_duration_seconds(platform: Platform, value: &serde_json::Value) -> Option<u64> {
+    let duration = first_u64(
+        value,
+        &["duration", "durationSeconds", "duration_seconds", "length"],
+    )?;
+    Some(if platform == Platform::Douyin && duration > 24 * 60 * 60 {
+        duration / 1_000
+    } else {
+        duration
+    })
+}
+
+fn collection_item_estimates_asr(platform: Platform, value: &serde_json::Value) -> bool {
+    let video_like = matches!(platform, Platform::Bilibili | Platform::Douyin)
+        || has_non_empty_key(
+            value,
+            &["video", "videoUrl", "video_url", "playAddr", "play_addr"],
+        );
+    video_like
+        && !has_non_empty_key(
+            value,
+            &[
+                "subtitles",
+                "subtitle",
+                "subtitleList",
+                "subtitle_list",
+                "captions",
+            ],
+        )
+}
+
+fn first_direct_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_as_string))
+}
+
+fn first_u64(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    let object = value.as_object()?;
+    keys.iter().find_map(|key| {
+        let value = object.get(*key)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
+            .or_else(|| value.as_str()?.parse().ok())
+    })
+}
+
+fn has_truthy_key(value: &serde_json::Value, keys: &[&str]) -> bool {
+    if let Some(object) = value.as_object() {
+        for (key, child) in object {
+            if keys.iter().any(|candidate| candidate == key)
+                && (child.as_bool() == Some(true)
+                    || child.as_u64().is_some_and(|number| number > 0)
+                    || child.as_str().is_some_and(|text| {
+                        matches!(
+                            text.trim().to_ascii_lowercase().as_str(),
+                            "true" | "yes" | "required" | "private" | "paid"
+                        )
+                    }))
+            {
+                return true;
+            }
+            if has_truthy_key(child, keys) {
+                return true;
+            }
+        }
+    } else if let Some(array) = value.as_array() {
+        return array.iter().any(|child| has_truthy_key(child, keys));
+    }
+    false
+}
+
+fn has_non_empty_key(value: &serde_json::Value, keys: &[&str]) -> bool {
+    if let Some(object) = value.as_object() {
+        for (key, child) in object {
+            if keys.iter().any(|candidate| candidate == key)
+                && match child {
+                    serde_json::Value::Null => false,
+                    serde_json::Value::Bool(value) => *value,
+                    serde_json::Value::String(value) => !value.trim().is_empty(),
+                    serde_json::Value::Array(value) => !value.is_empty(),
+                    serde_json::Value::Object(value) => !value.is_empty(),
+                    serde_json::Value::Number(_) => true,
+                }
+            {
+                return true;
+            }
+            if has_non_empty_key(child, keys) {
+                return true;
+            }
+        }
+    } else if let Some(array) = value.as_array() {
+        return array.iter().any(|child| has_non_empty_key(child, keys));
+    }
+    false
 }
 
 pub fn extract_platform_document(
@@ -163,6 +506,9 @@ pub fn extract_platform_document(
     };
     let images = if platform == Platform::Xiaohongshu {
         collect_xiaohongshu_images(value, base_url, 100)
+            .into_iter()
+            .map(upgrade_xiaohongshu_cdn_url)
+            .collect()
     } else {
         collect_key_urls(value, image_keys, base_url, 100)
     };
@@ -191,7 +537,14 @@ pub fn extract_platform_document(
     };
     let media_url = collect_key_urls(value, media_keys, base_url, 1)
         .into_iter()
-        .next();
+        .next()
+        .map(|url| {
+            if platform == Platform::Xiaohongshu {
+                upgrade_xiaohongshu_cdn_url(url)
+            } else {
+                url
+            }
+        });
     let cover_url = images.first().cloned();
     let subtitle_keys = &[
         "subtitles",
@@ -200,15 +553,20 @@ pub fn extract_platform_document(
         "captionUrl",
         "subtitleUrl",
     ][..];
-    let subtitles = collect_key_urls(value, subtitle_keys, base_url, 20)
-        .into_iter()
-        .map(|url| PlatformSubtitle {
-            url,
-            automatic: false,
-            language: None,
-            label: None,
-        })
-        .collect::<Vec<_>>();
+    let subtitles = if platform == Platform::Xiaohongshu {
+        collect_xiaohongshu_subtitles(value, subtitle_keys, base_url, 20)
+    } else {
+        collect_key_urls(value, subtitle_keys, base_url, 20)
+            .into_iter()
+            .map(|url| PlatformSubtitle {
+                url,
+                automatic: false,
+                kind: PlatformSubtitleKind::AuthorOriginal,
+                language: None,
+                label: None,
+            })
+            .collect::<Vec<_>>()
+    };
     let chapters = collect_key_strings(value, &["chapters", "pages", "part"][..], 100);
     let mut hashtags = extract_hashtags(&description);
     if platform == Platform::Xiaohongshu {
@@ -224,11 +582,41 @@ pub fn extract_platform_document(
             .is_some_and(|value| value.eq_ignore_ascii_case("video"));
     let content_type = if declared_video || media_url.is_some() {
         "video"
-    } else if !images.is_empty() {
+    } else if platform == Platform::Xiaohongshu || !images.is_empty() {
         "image_post"
     } else {
         "article"
     };
+    let restricted_content = has_truthy_key(
+        value,
+        &[
+            "isPrivate",
+            "is_private",
+            "isPay",
+            "is_pay",
+            "isPaid",
+            "is_paid",
+            "membersOnly",
+            "members_only",
+            "subscriberOnly",
+            "subscriber_only",
+            "vipOnly",
+            "vip_only",
+        ],
+    );
+    let media_size_bytes = first_u64(
+        value,
+        &[
+            "mediaSizeBytes",
+            "media_size_bytes",
+            "fileSize",
+            "file_size",
+            "filesize",
+            "contentLength",
+            "content_length",
+        ],
+    )
+    .filter(|size| *size > 0);
     Some(PlatformDocument {
         platform: platform.id().into(),
         platform_id,
@@ -242,9 +630,11 @@ pub fn extract_platform_document(
         hashtags,
         images,
         media_url,
+        media_size_bytes,
         cover_url,
         subtitles,
         chapters,
+        restricted_content,
     })
 }
 
@@ -382,6 +772,180 @@ fn collect_xiaohongshu_images(
     } else {
         result
     }
+}
+
+fn collect_xiaohongshu_subtitles(
+    value: &serde_json::Value,
+    fallback_keys: &[&str],
+    base_url: &str,
+    limit: usize,
+) -> Vec<PlatformSubtitle> {
+    const MAX_MEDIA_V2_BYTES: usize = 2 * 1024 * 1024;
+
+    let mut candidates = Vec::new();
+    collect_key_values(value, &["mediaV2", "media_v2"], &mut |candidate| {
+        let parsed = match candidate {
+            serde_json::Value::String(raw) if raw.len() <= MAX_MEDIA_V2_BYTES => {
+                serde_json::from_str::<serde_json::Value>(raw).ok()
+            }
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) => Some(candidate.clone()),
+            _ => None,
+        };
+        let Some(parsed) = parsed else {
+            return;
+        };
+        collect_key_values(&parsed, &["subtitles"], &mut |container| {
+            let Some(languages) = container.as_object() else {
+                return;
+            };
+            for (label, entries) in languages {
+                collect_xiaohongshu_subtitle_entries(
+                    entries,
+                    label,
+                    base_url,
+                    limit,
+                    &mut candidates,
+                );
+            }
+        });
+    });
+
+    for url in collect_key_urls(value, fallback_keys, base_url, limit) {
+        if candidates.len() >= limit {
+            break;
+        }
+        candidates.push(PlatformSubtitle {
+            url: upgrade_xiaohongshu_cdn_url(url),
+            automatic: false,
+            kind: PlatformSubtitleKind::AuthorOriginal,
+            language: None,
+            label: None,
+        });
+    }
+
+    candidates.sort_by_key(|subtitle| {
+        let language = subtitle
+            .language
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let label = subtitle
+            .label
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let language_priority = if label == "source" {
+            0
+        } else if language == "zh-cn" || label == "zh-cn" {
+            1
+        } else if language.starts_with("zh") || label.starts_with("zh") {
+            2
+        } else {
+            3
+        };
+        (subtitle.kind.rank(), language_priority)
+    });
+    let mut seen = HashSet::new();
+    candidates.retain(|subtitle| seen.insert(subtitle.url.clone()));
+    candidates.truncate(limit);
+    candidates
+}
+
+fn collect_xiaohongshu_subtitle_entries(
+    value: &serde_json::Value,
+    label: &str,
+    base_url: &str,
+    limit: usize,
+    output: &mut Vec<PlatformSubtitle>,
+) {
+    if output.len() >= limit {
+        return;
+    }
+    if let Some(entries) = value.as_array() {
+        for entry in entries {
+            collect_xiaohongshu_subtitle_entries(entry, label, base_url, limit, output);
+        }
+        return;
+    }
+    let Some(entry) = value.as_object() else {
+        return;
+    };
+    let Some(raw_url) = direct_string(entry, &["url", "subtitleUrl", "subtitle_url"]) else {
+        for child in entry.values() {
+            collect_xiaohongshu_subtitle_entries(child, label, base_url, limit, output);
+        }
+        return;
+    };
+    let Ok(base) = Url::parse(base_url) else {
+        return;
+    };
+    let Ok(url) = base.join(&raw_url).or_else(|_| Url::parse(&raw_url)) else {
+        return;
+    };
+    let Ok(target) = UrlPolicy.normalize_for_session(url.as_str()) else {
+        return;
+    };
+    let language = direct_string(
+        entry,
+        &["language", "languageCode", "language_code", "lang"],
+    )
+    .or_else(|| (!label.eq_ignore_ascii_case("source")).then(|| label.to_string()));
+    let automatic = direct_bool(entry, &["automatic", "isAuto", "is_auto"]).unwrap_or(true);
+    let source_track = label.eq_ignore_ascii_case("source");
+    output.push(PlatformSubtitle {
+        url: upgrade_xiaohongshu_cdn_url(target.request_url.to_string()),
+        automatic,
+        kind: match (source_track, automatic) {
+            (true, false) => PlatformSubtitleKind::AuthorOriginal,
+            (true, true) => PlatformSubtitleKind::PlatformAutoOriginal,
+            (false, false) => PlatformSubtitleKind::AuthorOther,
+            (false, true) => PlatformSubtitleKind::MachineTranslation,
+        },
+        language,
+        label: Some(label.to_string()),
+    });
+}
+
+fn direct_string(
+    value: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    value.iter().find_map(|(key, value)| {
+        keys.iter()
+            .any(|candidate| key.eq_ignore_ascii_case(candidate))
+            .then(|| value_as_string(value))
+            .flatten()
+    })
+}
+
+fn direct_bool(value: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<bool> {
+    value.iter().find_map(|(key, value)| {
+        if keys
+            .iter()
+            .any(|candidate| key.eq_ignore_ascii_case(candidate))
+        {
+            value.as_bool()
+        } else {
+            None
+        }
+    })
+}
+
+fn upgrade_xiaohongshu_cdn_url(value: String) -> String {
+    let Ok(mut url) = Url::parse(&value) else {
+        return value;
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let trusted_cdn = host == "xhscdn.com"
+        || host.ends_with(".xhscdn.com")
+        || host == "xhscdn.net"
+        || host.ends_with(".xhscdn.net");
+    if url.scheme() == "http" && trusted_cdn && url.port().is_none_or(|port| port == 80) {
+        let _ = url.set_scheme("https");
+        let _ = url.set_port(None);
+        return url.to_string();
+    }
+    value
 }
 
 fn preferred_xiaohongshu_image_urls(value: &serde_json::Value) -> Vec<String> {
@@ -790,7 +1354,49 @@ fn extract_platform_id(platform: Platform, value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_platform_document, Platform};
+    use super::{
+        extract_platform_collection, extract_platform_document, looks_like_collection_url,
+        upgrade_xiaohongshu_cdn_url, Platform,
+    };
+
+    #[test]
+    fn discovers_bilibili_collection_children_in_source_order_from_real_fixture() {
+        let html = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/import-v2/web/bilibili/collection.html"
+        ));
+        let collection = extract_platform_collection(
+            Platform::Bilibili,
+            html,
+            "https://www.bilibili.com/medialist/play/123",
+        )
+        .unwrap();
+        assert_eq!(collection.title, "课程合集");
+        assert_eq!(
+            collection
+                .items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            ["第一讲", "第二讲", "第三讲"]
+        );
+        assert!(collection.items[1].url.ends_with("/video/BV2second"));
+        assert_eq!(collection.items[0].duration_seconds, Some(120));
+        assert!(collection.items[0].estimated_login_required);
+        assert!(collection.items[0].estimated_asr_required);
+        assert!(!collection.items[1].estimated_asr_required);
+    }
+
+    #[test]
+    fn ordinary_platform_item_does_not_enter_collection_discovery() {
+        assert!(!looks_like_collection_url(
+            "https://www.bilibili.com/video/BV1single"
+        ));
+        assert!(looks_like_collection_url(
+            "https://www.bilibili.com/medialist/play/123"
+        ));
+        assert!(looks_like_collection_url("https://space.bilibili.com/42"));
+    }
 
     #[test]
     fn extracts_bilibili_embedded_json_metadata_and_media() {
@@ -810,6 +1416,19 @@ mod tests {
     }
 
     #[test]
+    fn explicit_provider_metadata_marks_restricted_content() {
+        let html = r#"<script type="application/json">{"data":{"title":"Private lesson","bvid":"BV1private","isPrivate":true}}</script>"#;
+        let document = extract_platform_document(
+            Platform::Bilibili,
+            html,
+            "https://www.bilibili.com/video/BV1private",
+        )
+        .unwrap();
+
+        assert!(document.restricted_content);
+    }
+
+    #[test]
     fn extracts_douyin_image_post_and_hashtags() {
         let html = r##"<script type="application/json">{"aweme_detail":{"awemeId":"123","desc":"正文 #知识库","author":{"nickname":"作者"},"images":[{"url_list":["https://cdn.example/1.jpg"]}]}}</script>"##;
         let document =
@@ -822,9 +1441,28 @@ mod tests {
 
     #[test]
     fn recognizes_xhs_short_link_platform() {
+        for url in ["https://xhslink.com/a/abc", "http://xhslink.cn/o/abc"] {
+            assert_eq!(Platform::from_url(url), Some(Platform::Xiaohongshu));
+        }
+    }
+
+    #[test]
+    fn upgrades_only_exact_trusted_xhs_cdn_http_hosts() {
         assert_eq!(
-            Platform::from_url("https://xhslink.com/a/abc"),
-            Some(Platform::Xiaohongshu)
+            upgrade_xiaohongshu_cdn_url("http://sns-video-v6.xhscdn.com/video.mp4".to_string()),
+            "https://sns-video-v6.xhscdn.com/video.mp4"
+        );
+        assert_eq!(
+            upgrade_xiaohongshu_cdn_url(
+                "http://sns-video-v6.xhscdn.com.evil.example/video.mp4".to_string()
+            ),
+            "http://sns-video-v6.xhscdn.com.evil.example/video.mp4"
+        );
+        assert_eq!(
+            upgrade_xiaohongshu_cdn_url(
+                "http://sns-video-v6.xhscdn.com:8080/video.mp4".to_string()
+            ),
+            "http://sns-video-v6.xhscdn.com:8080/video.mp4"
         );
     }
 

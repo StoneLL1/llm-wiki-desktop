@@ -54,7 +54,9 @@ export function ImportItemStatus({ item, presentation = presentImportItem(item) 
           {presentation.progressValue !== null ? <span className="font-mono text-[10.5px]">{presentation.progressValue}%</span> : null}
         </div>
       ) : null}
-      {presentation.progressLabel ? <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">{progressLabel}</span> : null}
+      <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">
+        {presentation.progressLabel ? progressLabel : t(presentation.detailLabelKey)}
+      </span>
     </div>
   );
 }

@@ -1,5 +1,7 @@
 # Import 板块落差与实施计划
 
+> 历史 roadmap：下方完成状态与代码位置可用于追溯，但“导入后触发编译”“OCR 交给编译”等旧目标已失效。当前唯一产品基线为 [`../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。
+
 > 对照源：UI-Frontend-design/import.html + assets/app.css + SPEC/PRD.md
 > 当前实现：src/features/import/、src/lib/readability.ts、src/types/import.ts
 > 后端实现：src-tauri/src/services/import_service/、extraction_service.rs、commands/import_commands.rs

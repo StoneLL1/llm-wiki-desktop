@@ -1,12 +1,13 @@
 import { lazy, type CSSProperties, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Book, Edit2, FileOutput, LoaderCircle, MessageSquareText, Star } from "lucide-react";
+import { Book, Edit2, FileOutput, LoaderCircle, MessageSquareText, Sparkles, Star } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { ViewErrorBoundary } from "../../components/app/ViewErrorBoundary";
 import { ViewFallback } from "../../components/app/ViewFallback";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
+import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -14,6 +15,7 @@ import { useTaskStore } from "../../stores/taskStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
 import type { ExportRecord, ExportType } from "../../types/export";
+import type { SourceAiOrganizeBinding } from "../../types/source";
 import { isTerminalStatus, type BackendTask } from "../../types/task";
 import type { CreateWikiPageInput, WikiPageContent, WikiPageMeta } from "../../types/wiki";
 import { MarkdownReader } from "./MarkdownReader";
@@ -23,6 +25,9 @@ import { HtmlPreviewPane } from "./HtmlPreviewPane";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
 import { useWikiStore } from "./wikiStore";
+import { useSourceStore } from "./sourceStore";
+import { SourceLifecycleDialogs, SourceMovePathDialog } from "./SourceLifecycleDialogs";
+import { SourceAiOrganizeDialog } from "./SourceAiOrganizeDialog";
 
 // Milkdown + ProseMirror is the heaviest wiki dependency and is only needed
 // when the user enters edit mode. Read/preview modes never load it.
@@ -46,7 +51,22 @@ export function selectWikiPreviewRecord(
   );
 }
 
-export function WikiView() {
+interface WikiViewProps {
+  capabilities: Pick<AiCapabilitiesWorkflow, "agents" | "providers">;
+}
+
+interface SourceAiWorkbenchScope {
+  projectId: string;
+  projectRootPath: string;
+  sourceId: string;
+  sourceTitle: string;
+  pagePath: string;
+  binding: SourceAiOrganizeBinding;
+  initialTaskId: string | null;
+  initialCandidateId: string | null;
+}
+
+export function WikiView({ capabilities }: WikiViewProps) {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
   const paneSizes = useNavigationStore((state) => state.paneSizes);
@@ -66,6 +86,9 @@ export function WikiView() {
   const [htmlDialogOpen, setHtmlDialogOpen] = useState(false);
   const [htmlTemplate, setHtmlTemplate] = useState<ExportType>("beautiful_read");
   const [conflictDialogOpen, setConflictDialogOpen] = useState(true);
+  const [sourceMovePath, setSourceMovePath] = useState<string | null>(null);
+  const [sourceAiWorkbench, setSourceAiWorkbench] =
+    useState<SourceAiWorkbenchScope | null>(null);
 
   const tree = useWikiStore((state) => state.tree);
   const loadingTree = useWikiStore((state) => state.loadingTree);
@@ -94,6 +117,18 @@ export function WikiView() {
   const cancelPendingAction = useWikiStore((state) => state.cancelPendingAction);
   const requestedExportType = useWikiStore((state) => state.requestedExportType);
   const consumeExportRequest = useWikiStore((state) => state.consumeExportRequest);
+  const loadSourceDetail = useSourceStore((state) => state.loadDetail);
+  const previewSourceMove = useSourceStore((state) => state.previewMove);
+  const previewSourceDelete = useSourceStore((state) => state.previewDelete);
+  const sourceErrors = useSourceStore((state) => state.errorsBySourceId);
+  const sourceMutating = useSourceStore((state) => state.mutating);
+  const sourceUpdatePreview = useSourceStore((state) => state.updatePreview);
+  const aiOrganizeStarting = useSourceStore((state) => state.aiOrganizeStarting);
+  const startSourceAiOrganize = useSourceStore((state) => state.startAiOrganize);
+  const retrySourceAiOrganize = useSourceStore((state) => state.retryAiOrganize);
+  const previewSourceCandidate = useSourceStore((state) => state.previewCandidate);
+  const applySourceCandidate = useSourceStore((state) => state.applyCandidate);
+  const discardSourceCandidate = useSourceStore((state) => state.discardCandidate);
 
   const exportRecords = useExportStore((state) => state.records);
   const runningExportTaskId = useExportStore((state) => state.runningTaskId);
@@ -113,6 +148,16 @@ export function WikiView() {
   const layoutStyle = {
     "--wiki-tree-w-current": `${paneSizes.wikiTree}px`,
   } as CSSProperties;
+
+  useEffect(() => {
+    setSourceAiWorkbench((current) =>
+      current &&
+      (current.projectId !== projectId ||
+        !sameProjectRoot(current.projectRootPath, rootPath))
+        ? null
+        : current,
+    );
+  }, [projectId, rootPath]);
 
   useEffect(() => {
     void scan(projectId, rootPath);
@@ -142,6 +187,69 @@ export function WikiView() {
   const runningExportTask = runningExportTaskId
     ? tasks.find((task) => task.id === runningExportTaskId) ?? null
     : null;
+  const selectedSourceId = page?.meta.sourceBinding?.sourceId ?? null;
+  const selectedSourceAiTasks = selectedSourceId
+    ? tasks.filter(
+        (task) =>
+          task.taskType === "source_ai_organize" &&
+          task.projectId === projectId &&
+          task.result?.reference?.type === "source_ai_organize" &&
+          sameProjectRoot(task.result.reference.projectRootPath, rootPath) &&
+          task.result.reference.sourceId === selectedSourceId,
+      )
+    : [];
+  const orderedSourceAiTasks = [...selectedSourceAiTasks].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
+  const latestSourceAiTask = orderedSourceAiTasks[0] ?? null;
+  const activeSourceAiTask =
+    latestSourceAiTask && !isTerminalStatus(latestSourceAiTask.status)
+      ? latestSourceAiTask
+      : null;
+  const completedSourceAiTask =
+    orderedSourceAiTasks.find(
+      (task) =>
+        task.status === "succeeded" &&
+        task.result?.reference?.type === "source_ai_organize" &&
+        Boolean(task.result.reference.candidateId),
+    ) ?? null;
+  const completedSourceAiTaskId = completedSourceAiTask?.id ?? null;
+  const completedSourceAiCandidateId =
+    completedSourceAiTask?.result?.reference?.type === "source_ai_organize"
+      ? completedSourceAiTask.result.reference.candidateId ?? null
+      : null;
+  const sourceAiWorkbenchTask = sourceAiWorkbench?.initialTaskId
+    ? tasks.find((task) => task.id === sourceAiWorkbench.initialTaskId) ?? null
+    : null;
+  const sourceAiWorkbenchFailedTask =
+    sourceAiWorkbenchTask?.status === "failed" ||
+    sourceAiWorkbenchTask?.status === "cancelled"
+      ? sourceAiWorkbenchTask
+      : null;
+  const scopedSourcePreview =
+    sourceAiWorkbench &&
+    sourceUpdatePreview?.sourceId === sourceAiWorkbench.sourceId &&
+    sourceUpdatePreview.candidateId === sourceAiWorkbench.initialCandidateId
+      ? sourceUpdatePreview
+      : null;
+
+  useEffect(() => {
+    if (
+      !selectedSourceId ||
+      !completedSourceAiTaskId ||
+      !completedSourceAiCandidateId
+    ) {
+      return;
+    }
+    void loadSourceDetail(projectId, rootPath, selectedSourceId);
+  }, [
+    completedSourceAiCandidateId,
+    completedSourceAiTaskId,
+    loadSourceDetail,
+    projectId,
+    rootPath,
+    selectedSourceId,
+  ]);
 
   useEffect(() => {
     if (!runningExportTask || !isTerminalStatus(runningExportTask.status)) return;
@@ -252,6 +360,18 @@ export function WikiView() {
     });
   };
 
+  const handleSourceMoveRequest = (sourceId: string, path: string) => {
+    void loadSourceDetail(projectId, rootPath, sourceId).then(() => {
+      setSourceMovePath(path);
+    });
+  };
+
+  const handleSourceDeleteRequest = (sourceId: string) => {
+    void loadSourceDetail(projectId, rootPath, sourceId).then(() => {
+      void previewSourceDelete(projectId, rootPath);
+    });
+  };
+
   const handleLifecycleCancel = () => {
     const pending = pendingLifecycle;
     setPendingLifecycle(null);
@@ -283,6 +403,8 @@ export function WikiView() {
           onCreate={() => setPageForm({ mode: "create", path: "wiki/" })}
           onRename={(path) => setPageForm({ mode: "rename", path })}
           onDelete={handleDeleteRequest}
+          onSourceRename={handleSourceMoveRequest}
+          onSourceDelete={handleSourceDeleteRequest}
         />
       ) : (
         <div className="wiki-tree items-center justify-center text-[12px] text-[var(--text-muted)]">
@@ -394,18 +516,78 @@ export function WikiView() {
               <FileOutput size={13} />
               {t("wiki.html.generate")}
             </button>
-            <button
-              type="button"
-              disabled={!page}
-              onClick={() => {
-                if (page) openWikiAssistant(page.meta.path);
-              }}
-              title={t("wiki.actions.askAi")}
-              aria-label={t("wiki.actions.askAi")}
-              className="grid h-[28px] w-[28px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
-            >
-              <MessageSquareText size={14} />
-            </button>
+            {page?.meta.pageType === "source" && page.meta.sourceBinding ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const sourceId = page.meta.sourceBinding!.sourceId;
+                  const pagePath = page.meta.path;
+                  const pageTitle = page.meta.title;
+                  void loadSourceDetail(projectId, rootPath, sourceId).then(() => {
+                    const currentPage = useWikiStore.getState().page;
+                    const detail = useSourceStore.getState().detail;
+                    if (
+                      currentPage?.meta.sourceBinding?.sourceId !== sourceId ||
+                      detail?.sourceId !== sourceId
+                    ) return;
+                    const candidateId =
+                      detail.candidate?.kind === "ai_organize"
+                        ? detail.candidate.candidateId
+                        : null;
+                    const initialTask = selectSourceAiWorkbenchTask(
+                      useTaskStore.getState().tasks,
+                      projectId,
+                      rootPath,
+                      sourceId,
+                      detail.versionId,
+                      detail.currentMarkdownHash,
+                      candidateId,
+                    );
+                    setSourceAiWorkbench({
+                      projectId,
+                      projectRootPath: rootPath,
+                      sourceId,
+                      sourceTitle: detail.title || pageTitle,
+                      pagePath,
+                      binding: {
+                        sourceId,
+                        versionId: detail.versionId,
+                        markdownHash: detail.currentMarkdownHash,
+                      },
+                      initialTaskId: initialTask?.id ?? null,
+                      initialCandidateId: candidateId,
+                    });
+                  });
+                }}
+                title={
+                  activeSourceAiTask
+                    ? t("source.aiOrganize.running")
+                    : t("source.aiOrganize.description")
+                }
+                aria-label={t("source.aiOrganize.label")}
+                className="inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] px-2.5 text-[11.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+              >
+                {activeSourceAiTask ? (
+                  <LoaderCircle size={13} className="animate-spin" />
+                ) : (
+                  <Sparkles size={13} />
+                )}
+                {t("source.aiOrganize.label")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={!page}
+                onClick={() => {
+                  if (page) openWikiAssistant(page.meta.path);
+                }}
+                title={t("wiki.actions.askAi")}
+                aria-label={t("wiki.actions.askAi")}
+                className="grid h-[28px] w-[28px] place-items-center rounded-[var(--radius-sm)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+              >
+                <MessageSquareText size={14} />
+              </button>
+            )}
             <button
               type="button"
               disabled={!page}
@@ -457,6 +639,7 @@ export function WikiView() {
                     onCancel={cancelEdit}
                     onReload={() => void reload(projectId, rootPath)}
                     onReviewConflict={() => setConflictDialogOpen(true)}
+                    disabled={sourceMutating && page.meta.pageType === "source"}
                   />
                 </Suspense>
               </ViewErrorBoundary>
@@ -499,6 +682,160 @@ export function WikiView() {
           onCancel={() => setPageForm(null)}
           onSubmit={handlePageFormSubmit}
         />
+      ) : null}
+
+      {sourceMovePath ? (
+        <SourceMovePathDialog
+          currentPath={sourceMovePath}
+          onCancel={() => setSourceMovePath(null)}
+          onPreview={(path) => {
+            setSourceMovePath(null);
+            void previewSourceMove(projectId, rootPath, path);
+          }}
+        />
+      ) : null}
+
+      <SourceLifecycleDialogs
+        projectId={projectId}
+        rootPath={rootPath}
+        onMoved={(path) => {
+          void reload(projectId, rootPath).then(() => {
+            void openPage(projectId, rootPath, path);
+          });
+        }}
+        onDeleted={() => {
+          useWikiStore.setState({
+            selectedPath: null,
+            page: null,
+            draft: "",
+            mode: "read",
+          });
+          void scan(projectId, rootPath);
+        }}
+      />
+      {sourceAiWorkbench ? (
+        <SourceAiOrganizeDialog
+        open
+        sourceTitle={sourceAiWorkbench.sourceTitle}
+        unsavedEdits={
+          mode === "edit" &&
+          page?.meta.sourceBinding?.sourceId === sourceAiWorkbench.sourceId &&
+          draft !== page.rawMarkdown
+        }
+        busy={aiOrganizeStarting}
+        running={Boolean(
+          sourceAiWorkbenchTask &&
+            !isTerminalStatus(sourceAiWorkbenchTask.status),
+        )}
+        agents={capabilities.agents}
+        providers={capabilities.providers}
+        failedTask={sourceAiWorkbenchFailedTask}
+        task={sourceAiWorkbenchTask}
+        preview={scopedSourcePreview}
+        candidateId={sourceAiWorkbench.initialCandidateId}
+        mutating={sourceMutating}
+        projectId={sourceAiWorkbench.projectId}
+        projectRootPath={sourceAiWorkbench.projectRootPath}
+        pagePath={sourceAiWorkbench.pagePath}
+        error={
+          sourceErrors[sourceAiWorkbench.sourceId] ?? null
+        }
+        onClose={() => setSourceAiWorkbench(null)}
+        onOpenTask={(taskId) => {
+          setSourceAiWorkbench(null);
+          openTaskDrawer(taskId);
+        }}
+        onStart={(input) =>
+          isWorkbenchProjectCurrent(sourceAiWorkbench)
+            ? startSourceAiOrganize(
+                sourceAiWorkbench.projectId,
+                sourceAiWorkbench.projectRootPath,
+                input,
+                sourceAiWorkbench.binding,
+              )
+            : Promise.resolve(null)
+        }
+        onRetry={(taskId) =>
+          isWorkbenchProjectCurrent(sourceAiWorkbench)
+            ? retrySourceAiOrganize(
+                sourceAiWorkbench.projectId,
+                sourceAiWorkbench.projectRootPath,
+                taskId,
+              )
+            : Promise.resolve(null)
+        }
+        onPreviewCandidate={(candidateId) =>
+          isWorkbenchProjectCurrent(sourceAiWorkbench)
+            ? previewSourceCandidate(
+                sourceAiWorkbench.projectId,
+                sourceAiWorkbench.projectRootPath,
+                candidateId,
+                sourceAiWorkbench.sourceId,
+              )
+            : Promise.resolve(null)
+        }
+        onApply={async (candidatePreview) => {
+          if (!isWorkbenchProjectCurrent(sourceAiWorkbench)) return false;
+          const draftAtStart = useWikiStore.getState().draft;
+          const result = await applySourceCandidate(
+            sourceAiWorkbench.projectId,
+            sourceAiWorkbench.projectRootPath,
+            undefined,
+            candidatePreview,
+          );
+          if (!result) return false;
+          if (!isWorkbenchProjectCurrent(sourceAiWorkbench)) return true;
+          const wikiAfterApply = useWikiStore.getState();
+          const draftChangedDuringApply =
+            wikiAfterApply.mode === "edit" &&
+            wikiAfterApply.page?.meta.sourceBinding?.sourceId ===
+              sourceAiWorkbench.sourceId &&
+            wikiAfterApply.draft !== draftAtStart;
+          if (draftChangedDuringApply) {
+            useSourceStore.setState({
+              error: t("source.candidate.draftChangedDuringApply"),
+              errorSourceId: sourceAiWorkbench.sourceId,
+              errorsBySourceId: {
+                ...useSourceStore.getState().errorsBySourceId,
+                [sourceAiWorkbench.sourceId]: t(
+                  "source.candidate.draftChangedDuringApply",
+                ),
+              },
+            });
+            return true;
+          }
+          if (
+            wikiAfterApply.page?.meta.sourceBinding?.sourceId ===
+            sourceAiWorkbench.sourceId
+          ) {
+            await reload(
+              sourceAiWorkbench.projectId,
+              sourceAiWorkbench.projectRootPath,
+            );
+            await openPage(
+              sourceAiWorkbench.projectId,
+              sourceAiWorkbench.projectRootPath,
+              result.wikiPath,
+            );
+          } else {
+            await scan(
+              sourceAiWorkbench.projectId,
+              sourceAiWorkbench.projectRootPath,
+            );
+          }
+          return true;
+        }}
+        onDiscard={(candidateId) =>
+          isWorkbenchProjectCurrent(sourceAiWorkbench)
+            ? discardSourceCandidate(
+                sourceAiWorkbench.projectId,
+                sourceAiWorkbench.projectRootPath,
+                sourceAiWorkbench.sourceId,
+                candidateId,
+              )
+            : Promise.resolve(false)
+        }
+      />
       ) : null}
       {pendingLifecycle ? (
         <ConfirmationDialog
@@ -587,5 +924,68 @@ function ModeButton({
       {icon}
       {label}
     </button>
+  );
+}
+
+export function sameProjectRoot(
+  stored: string | null | undefined,
+  current: string,
+): boolean {
+  if (!stored) return false;
+  const normalize = (value: string) => {
+    const normalized = value.replaceAll("\\", "/").replace(/\/+$/, "");
+    return /^[a-z]:\//i.test(normalized) || normalized.startsWith("//")
+      ? normalized.toLocaleLowerCase("en-US")
+      : normalized;
+  };
+  return normalize(stored) === normalize(current);
+}
+
+export function selectSourceAiWorkbenchTask(
+  tasks: BackendTask[],
+  projectId: string,
+  projectRootPath: string,
+  sourceId: string,
+  currentVersionId: string,
+  currentMarkdownHash: string,
+  candidateId: string | null,
+): BackendTask | null {
+  const matchingTasks = tasks
+    .filter(
+      (task) =>
+        task.taskType === "source_ai_organize" &&
+        task.projectId === projectId &&
+        task.result?.reference?.type === "source_ai_organize" &&
+        sameProjectRoot(
+          task.result.reference.projectRootPath,
+          projectRootPath,
+        ) &&
+        task.result.reference.sourceId === sourceId,
+    )
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return (
+    matchingTasks.find((task) => !isTerminalStatus(task.status)) ??
+    matchingTasks.find(
+      (task) =>
+        (task.status === "failed" || task.status === "cancelled") &&
+        task.result?.reference?.type === "source_ai_organize" &&
+        task.result.reference.baseVersionId === currentVersionId &&
+        task.result.reference.baseMarkdownHash === currentMarkdownHash,
+    ) ??
+    matchingTasks.find(
+      (task) =>
+        task.status === "succeeded" &&
+        task.result?.reference?.type === "source_ai_organize" &&
+        task.result.reference.candidateId === candidateId,
+    ) ??
+    null
+  );
+}
+
+function isWorkbenchProjectCurrent(scope: SourceAiWorkbenchScope): boolean {
+  const current = useProjectStore.getState().currentProject;
+  return (
+    current.projectId === scope.projectId &&
+    sameProjectRoot(current.rootPath, scope.projectRootPath)
   );
 }

@@ -1,5 +1,7 @@
 # Import V2 Agent Assistance Implementation Plan
 
+> Historical implementation plan. Import recovery is now local-Agent-only, user-triggered, staging-only, and has no BYOK route; see [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add safe local-Agent assistance for deterministic hard failures and user-requested optimization, with an explicit “失败自动调用 Agent 辅助” policy, manual invocation actions, BYOK approval, structured tools, candidate Diff, and full auditability.

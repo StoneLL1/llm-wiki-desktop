@@ -1,7 +1,9 @@
 # Design: Sources as Extracted Originals (Karpathy-aligned)
 
+> 历史基础设计：本文关于 `wiki/sources/` 作为可浏览提取原稿、编译保护和引用边界的原则继续有效。去重、版本、人工编辑保护、媒体流程、AI 整理与删除规则已由 [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md) 扩展并取代冲突细节。
+
 - **Date:** 2026-06-24
-- **Status:** Approved (pending spec review)
+- **Status:** Historical foundation / partially superseded
 - **Owner:** Aletta
 - **Depends on:** existing import/extract/compile pipeline
 - **Reference projects:**

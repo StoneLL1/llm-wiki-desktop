@@ -1,0 +1,150 @@
+{
+  "inputKinds": [
+    "file",
+    "folder",
+    "url",
+    "clipboard_text"
+  ],
+  "userStates": [
+    "discovering",
+    "processing",
+    "needs_action",
+    "ready",
+    "committing",
+    "committed",
+    "failed"
+  ],
+  "primaryActions": [
+    "retry",
+    "sign_in",
+    "authorize",
+    "install_capability",
+    "enable_ocr",
+    "authorize_local_asr",
+    "invoke_local_agent",
+    "review",
+    "resolve",
+    "resume"
+  ],
+  "resolutions": [
+    {
+      "kind": "new_source"
+    },
+    {
+      "kind": "exact_duplicate_skip",
+      "sourceId": "src_a",
+      "candidateHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "currentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "targetVersionId": "ver_b"
+    },
+    {
+      "kind": "same_source_new_version",
+      "sourceId": "src_a",
+      "candidateHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "currentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "targetVersionId": "ver_b"
+    },
+    {
+      "kind": "keep_current_source",
+      "sourceId": "src_a",
+      "candidateHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "currentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "targetVersionId": "ver_b"
+    },
+    {
+      "kind": "apply_import_candidate",
+      "sourceId": "src_a",
+      "candidateHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "currentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "targetVersionId": "ver_b"
+    },
+    {
+      "kind": "manual_merge",
+      "sourceId": "src_a",
+      "candidateHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "currentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "targetVersionId": "ver_b",
+      "mergedHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "completion": {
+    "sessionId": "session-a",
+    "batchId": "batch-a",
+    "newSources": [
+      {
+        "sourceId": "src_a",
+        "versionId": "ver_a",
+        "wikiPath": "wiki/sources/local/资料.md",
+        "contentHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ],
+    "updatedSources": [
+      {
+        "sourceId": "src_b",
+        "versionId": "ver_b",
+        "wikiPath": "wiki/sources/web/example.com/访谈.md",
+        "contentHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "duplicateSkips": [
+      {
+        "itemId": "item-duplicate",
+        "sourceId": "src_a",
+        "versionId": "ver_a",
+        "contentHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ],
+    "warnings": [
+      {
+        "code": "IMPORT_QUALITY_WARNING",
+        "title": "部分内容需要复核",
+        "dataSafety": "原始资料和已导入来源均未被覆盖。",
+        "primaryAction": "review",
+        "detail": {
+          "technicalCode": "IMPORT_QUALITY_WARNING",
+          "route": "file.native",
+          "engineId": "native-file",
+          "contentHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      }
+    ],
+    "failures": [
+      {
+        "itemId": "item-failed",
+        "inputLabel": "录音.m4a",
+        "issue": {
+          "code": "IMPORT_ASR_ENGINE_UNAVAILABLE",
+          "title": "暂时无法生成文字稿",
+          "dataSafety": "没有写入原始资料或来源页。",
+          "primaryAction": "authorize_local_asr"
+        }
+      }
+    ]
+  },
+  "sourceFrontmatter": {
+    "type": "source",
+    "sourceId": "src_a",
+    "versionId": "ver_a",
+    "sourceKind": "web_media",
+    "title": "研发访谈",
+    "importedAt": "2026-07-25T00:00:00Z",
+    "contentHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "platform": "example",
+    "canonicalUrl": "https://example.com/watch/1",
+    "platformContentId": "1",
+    "author": "Aletta",
+    "publishedAt": "2026-07-24T00:00:00Z",
+    "language": "zh-CN",
+    "quality": {
+      "level": "pass",
+      "metrics": [],
+      "warnings": [],
+      "sheetCountExact": 1.0,
+      "slideCountExact": 1.0,
+      "nonEmptyCellCoverage": 1.0,
+      "formulaValuePairs": 1.0,
+      "meaningfulImageCoverage": 1.0
+    },
+    "restricted": false
+  }
+}

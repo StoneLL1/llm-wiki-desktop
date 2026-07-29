@@ -84,4 +84,95 @@ describe("ImportDiscoveryStatus", () => {
     expect(screen.getByText("wiki/internal.md")).toBeInTheDocument();
     expect(screen.getByText(/inside the current Wiki project/i)).toBeInTheDocument();
   });
+
+  it("shows content-detected extension mismatches", () => {
+    const scan: FileScanResult = {
+      files: [{
+        sourcePath: "D:/sources/report.txt",
+        relativePath: "nested/report.txt",
+        displayName: "report.txt",
+        format: "pdf",
+        contentKind: "document",
+        sizeBytes: 128,
+        identity: {
+          extension: "txt",
+          magic: "pdf",
+          mime: "application/pdf",
+          detectionMethod: "magic",
+          extensionMismatch: true,
+        },
+        sourceIdentity: {
+          canonicalPath: "D:/sources/report.txt",
+          sizeBytes: 128,
+          modifiedNanos: null,
+          fileId: null,
+          sha256: "a".repeat(64),
+          magic: "b".repeat(64),
+        },
+      }],
+      skipped: [],
+      truncated: false,
+    };
+
+    render(<ImportDiscoveryStatus task={task("succeeded")} scan={scan} onCancel={vi.fn()} onDismiss={vi.fn()} />);
+    fireEvent.click(screen.getByText(/different detected format/i));
+
+    expect(screen.getByText("nested/report.txt")).toBeInTheDocument();
+    expect(screen.getByText(".txt detected as PDF")).toBeInTheDocument();
+  });
+
+  it("requires explicit confirmation before adding every row of a large CSV", () => {
+    const onConfirmLargeData = vi.fn();
+    const sourcePath = "D:/sources/large.csv";
+    const scan: FileScanResult = {
+      files: [{
+        sourcePath,
+        relativePath: "large.csv",
+        displayName: "large.csv",
+        format: "csv",
+        contentKind: "document",
+        sizeBytes: 9_000_000,
+        identity: {
+          extension: "csv",
+          magic: "delimited-text",
+          mime: "text/csv",
+          detectionMethod: "structured_text",
+          extensionMismatch: false,
+        },
+        sourceIdentity: {
+          canonicalPath: sourcePath,
+          sizeBytes: 9_000_000,
+          modifiedNanos: null,
+          fileId: null,
+          sha256: "a".repeat(64),
+          magic: "b".repeat(64),
+        },
+        largeData: {
+          rowCount: 12_345,
+          estimatedOutputFiles: 4,
+          totalBytes: 9_000_000,
+          requiresConfirmation: true,
+        },
+      }],
+      skipped: [{
+        sourcePath,
+        relativePath: "large.csv",
+        reason: "large_data_confirmation_required",
+      }],
+      truncated: false,
+    };
+
+    render(
+      <ImportDiscoveryStatus
+        task={task("succeeded")}
+        scan={scan}
+        onCancel={vi.fn()}
+        onDismiss={vi.fn()}
+        onConfirmLargeData={onConfirmLargeData}
+      />,
+    );
+    expect(screen.getByText(/12,345 rows/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /continue with all rows/i }));
+    expect(onConfirmLargeData).toHaveBeenCalledWith([sourcePath]);
+  });
 });

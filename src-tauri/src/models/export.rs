@@ -136,6 +136,25 @@ pub struct StartExportRequest {
     pub template: Option<String>,
     #[serde(default)]
     pub options: ExportContentOptions,
+    #[serde(default)]
+    pub acknowledge_restricted_content: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetExportRestrictedContentStatusRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub export_type: ExportType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRestrictedContentStatus {
+    pub contains_restricted_content: bool,
+    pub restricted_source_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +199,8 @@ pub struct RegenerateExportRequest {
     pub template: Option<String>,
     #[serde(default)]
     pub options: ExportContentOptions,
+    #[serde(default)]
+    pub acknowledge_restricted_content: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

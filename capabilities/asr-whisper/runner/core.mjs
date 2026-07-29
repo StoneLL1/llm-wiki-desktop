@@ -18,9 +18,11 @@ const MEDIA_EXTENSIONS = new Set([
 ]);
 
 export const FIXED_ARGUMENTS = Object.freeze([
-  "--language", "auto",
   "--output-json",
   "--no-prints",
+]);
+const VIDEO_EXTENSIONS = new Set([
+  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm",
 ]);
 
 function asError(code) {
@@ -34,6 +36,20 @@ function isContained(root, candidate) {
 
 export function currentRuntimeKey(platform = process.platform, arch = process.arch) {
   return `${platform}-${arch}`;
+}
+
+export function ffmpegRelativePath(platform = process.platform) {
+  return platform === "win32" ? "bin/ffmpeg.exe" : "bin/ffmpeg";
+}
+
+export function nativeToolPath(value, platform = process.platform) {
+  if (platform !== "win32" || typeof value !== "string") return value;
+  const normalized = value.replaceAll("/", "\\");
+  if (normalized.startsWith("\\\\?\\") || normalized.startsWith("\\\\.\\")) return normalized;
+  if (/^\\\\[^\\]+\\[^\\]+(?:\\|$)/u.test(normalized)) {
+    return `\\\\?\\UNC\\${path.win32.normalize(normalized).slice(2)}`;
+  }
+  return /^[A-Za-z]:\\/u.test(normalized) ? `\\\\?\\${path.win32.normalize(normalized)}` : value;
 }
 
 export async function resolveStagingMedia(projectRootValue, stagingRootValue, locatorValue) {
@@ -71,6 +87,14 @@ export function classifyExecutionError(error) {
   return "IMPORT_ASR_ENGINE_FAILED";
 }
 
+export function isNoAudioExecutionError(error) {
+  const details = [error?.message, error?.stderr, error?.stdout]
+    .filter((value) => typeof value === "string")
+    .join("\n");
+  return /(?:does not contain any audio stream|no audio stream|audio stream.*not found|failed to find.*audio|failed to load audio)/iu
+    .test(details);
+}
+
 export async function verifyArtifact(packRoot, declaration, expectedFile) {
   if (!declaration || typeof declaration.file !== "string" || declaration.file !== expectedFile ||
       typeof declaration.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(declaration.sha256) || /^0+$/.test(declaration.sha256)) {
@@ -87,13 +111,107 @@ export async function verifyArtifact(packRoot, declaration, expectedFile) {
   return resolved;
 }
 
-export function buildArguments(modelPath, mediaPath, outputPrefix) {
+export function buildArguments(modelPath, mediaPath, outputPrefix, language = "auto") {
+  if (typeof language !== "string" || !/^(auto|[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?)$/iu.test(language)) {
+    throw asError("IMPORT_ASR_INVALID_REQUEST");
+  }
   return [
-    "--model", modelPath,
-    "--file", mediaPath,
-    "--output-file", outputPrefix,
+    "--model", nativeToolPath(modelPath),
+    "--file", nativeToolPath(mediaPath),
+    "--output-file", nativeToolPath(outputPrefix),
+    "--language", language.toLowerCase().replace("_", "-"),
     ...FIXED_ARGUMENTS,
   ];
+}
+
+export function isVideoMedia(mediaPath) {
+  return VIDEO_EXTENSIONS.has(path.extname(mediaPath).toLowerCase());
+}
+
+export function buildEmbeddedSubtitleArguments(mediaPath, subtitlePath) {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", nativeToolPath(mediaPath),
+    "-map", "0:s:0", "-vn", "-an", "-dn", "-c:s", "srt", "-f", "srt",
+    nativeToolPath(subtitlePath),
+  ];
+}
+
+export function buildVideoTextProbeArguments(mediaPath, outputPattern) {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", nativeToolPath(mediaPath),
+    "-an", "-sn", "-dn", "-t", "1800",
+    "-vf", "fps=1/10,scale=480:-2:flags=area,format=gray",
+    "-frames:v", "180", nativeToolPath(outputPattern),
+  ];
+}
+
+export function buildVideoOcrFrameArguments(mediaPath, seconds, outputPath) {
+  if (!Number.isFinite(seconds) || seconds < 0) throw asError("IMPORT_ASR_INVALID_REQUEST");
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-ss", seconds.toFixed(3), "-i", nativeToolPath(mediaPath),
+    "-an", "-sn", "-dn", "-frames:v", "1",
+    "-vf", "scale='min(1920,iw)':-2:flags=lanczos",
+    nativeToolPath(outputPath),
+  ];
+}
+
+function parsePortableGraymap(value) {
+  if (!Buffer.isBuffer(value) || value.length < 16) throw asError("IMPORT_ASR_VIDEO_PROBE_FAILED");
+  let offset = 0;
+  const tokens = [];
+  while (tokens.length < 4 && offset < value.length) {
+    while (offset < value.length && /\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+    if (value[offset] === 0x23) {
+      while (offset < value.length && value[offset] !== 0x0a) offset += 1;
+      continue;
+    }
+    const start = offset;
+    while (offset < value.length && !/\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+    tokens.push(value.subarray(start, offset).toString("ascii"));
+  }
+  while (offset < value.length && /\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+  const [magic, widthValue, heightValue, maximumValue] = tokens;
+  const width = Number(widthValue);
+  const height = Number(heightValue);
+  if (magic !== "P5" || !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+      width <= 0 || height <= 0 || maximumValue !== "255" || value.length - offset !== width * height) {
+    throw asError("IMPORT_ASR_VIDEO_PROBE_FAILED");
+  }
+  return { width, height, pixels: value.subarray(offset) };
+}
+
+export function selectStableTextFrameIndexes(frames) {
+  if (!Array.isArray(frames) || frames.length < 2 || frames.length > 180) return [];
+  const parsed = frames.map(parsePortableGraymap);
+  const selected = [];
+  for (let index = 1; index < parsed.length && selected.length < 12; index += 1) {
+    const current = parsed[index];
+    const previous = parsed[index - 1];
+    if (current.width !== previous.width || current.height !== previous.height) continue;
+    let edges = 0;
+    let difference = 0;
+    let samples = 0;
+    for (let y = 1; y < current.height; y += 2) {
+      for (let x = 1; x < current.width; x += 2) {
+        const position = y * current.width + x;
+        const pixel = current.pixels[position];
+        if (Math.abs(pixel - current.pixels[position - 1]) > 36 ||
+            Math.abs(pixel - current.pixels[position - current.width]) > 36) edges += 1;
+        difference += Math.abs(pixel - previous.pixels[position]);
+        samples += 1;
+      }
+    }
+    const edgeDensity = samples === 0 ? 0 : edges / samples;
+    const meanDifference = samples === 0 ? 255 : difference / samples;
+    if (edgeDensity >= 0.035 && edgeDensity <= 0.45 && meanDifference <= 12) selected.push(index);
+  }
+  return selected;
 }
 
 function timestamp(milliseconds) {
@@ -177,7 +295,7 @@ export function parseTimedText(value) {
   return { segments, language: "unknown", languageConfidence: null };
 }
 
-export function renderTranscript(result, sourceName) {
+export function renderTranscript(result, sourceName, provenance = "authorized-local-asr") {
   const confidence = result.languageConfidence == null ? "unknown" : result.languageConfidence.toFixed(3);
   const safeSource = cleanText(sourceName).replace(/[\r\n]/g, " ").slice(0, 500);
   const lines = [
@@ -187,14 +305,19 @@ export function renderTranscript(result, sourceName) {
     `language: ${JSON.stringify(result.language)}`,
     `languageConfidence: ${confidence}`,
     `source: ${JSON.stringify(safeSource)}`,
-    "provenance: authorized-local-asr",
+    `provenance: ${provenance}`,
     "---",
     "",
     "# Transcript",
     "",
   ];
+  let anchorMs = null;
   for (const segment of result.segments) {
-    lines.push(`- [${timestamp(segment.startMs)} --> ${timestamp(segment.endMs)}] ${markdownText(segment.text)}`);
+    if (anchorMs == null || segment.startMs - anchorMs >= 45_000) {
+      anchorMs = segment.startMs;
+      lines.push(`## [${timestamp(segment.startMs)}]`, "");
+    }
+    lines.push(markdownText(segment.text), "");
   }
   return `${lines.join("\n")}\n`;
 }

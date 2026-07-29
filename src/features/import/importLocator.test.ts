@@ -4,7 +4,6 @@ import type { ImportItem } from "../../types/importV2";
 import {
   displayHostForImportLocator,
   importPlatformForLocator,
-  isMediaCandidateUrl,
   isSupportedMediaPlatformUrl,
   isUnsupportedImportUrl,
   isValidPublicHttpImportUrl,
@@ -31,6 +30,7 @@ describe("import locator policy", () => {
     ["https://www.zhihu.com/question/1", "zhihu"],
     ["https://b23.tv/abc", "bilibili"],
     ["https://xhslink.com/a/abc", "xiaohongshu"],
+    ["http://xhslink.cn/o/abc", "xiaohongshu"],
     ["https://v.douyin.com/abc", "douyin"],
     ["https://twitter.com/openai", "x"],
     ["https://example.com/post", "connector"],
@@ -38,10 +38,8 @@ describe("import locator policy", () => {
     expect(importPlatformForLocator(locator)).toBe(platform);
   });
 
-  it("uses one media policy for platforms and direct media URLs", () => {
+  it("recognizes supported media platforms without adding a pre-queue policy step", () => {
     expect(isSupportedMediaPlatformUrl("https://www.bilibili.com/video/BV1xx")).toBe(true);
-    expect(isMediaCandidateUrl("https://example.com/media/video.mp4?download=1")).toBe(true);
-    expect(isMediaCandidateUrl("https://example.com/article")).toBe(false);
   });
 
   it.each(["file:///tmp/a.md", "data:text/plain,a", "javascript:alert(1)", "http://localhost:3000/a", "http://127.0.0.1/a", "http://[::1]/a"])(
@@ -55,6 +53,7 @@ describe("import locator policy", () => {
   it("keeps host display and route fallback separate", () => {
     expect(displayHostForImportLocator("https://example.com:8443/post")).toBe("example.com:8443");
     expect(routeForImportItem(item("https://xhslink.com/a/abc"))).toBe("xiaohongshu");
+    expect(routeForImportItem(item("http://xhslink.cn/o/abc"))).toBe("xiaohongshu");
     expect(routeForImportItem(item("https://example.com/post", "authenticated_http"))).toBe("authenticated_http");
   });
 });

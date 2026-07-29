@@ -5,21 +5,29 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::import_v2::{
-    ImportBatchResult, ImportItem, ImportItemStatus, ImportRecoveryAction, ImportSession,
+    ArtifactKind, ImportAsrProfile, ImportBatchResult, ImportInputKind, ImportItem,
+    ImportItemStatus, ImportRecoveryAction, ImportResolutionKind, ImportResourceMode,
+    ImportSession,
 };
 use crate::models::import_v2_file::CapabilityRequirement;
 use crate::models::import_v2_migration::{LegacyHistoryView, MigrationStatus};
 use crate::models::import_v2_presentation::{
-    GetImportCapabilityRequirementV2Request, GetImportFrontendReadinessV2Request,
-    GetImportPreviewContentV2Request, ImportCapabilityReadiness, ImportCapabilityRequirement,
-    ImportFeatureReadiness, ImportFrontendReadiness, ImportHistoryAction, ImportHistoryEntry,
-    ImportHistoryPage, ImportPlatformReadiness, ImportPreviewContent,
-    InstallImportCapabilityV2Request, ListImportHistoryV2Request, IMPORT_V2_PREVIEW_MAX_BYTES,
+    GetImportAsrEnablementPlanV2Request, GetImportCapabilityRequirementV2Request,
+    GetImportFrontendReadinessV2Request, GetImportPreviewContentV2Request, ImportAsrDependency,
+    ImportAsrDependencyKind, ImportAsrEnablementPlan, ImportAsrProfilePlan,
+    ImportCapabilityReadiness, ImportCapabilityRequirement, ImportFeatureReadiness,
+    ImportFrontendReadiness, ImportHistoryAction, ImportHistoryEntry, ImportHistoryPage,
+    ImportPlatformReadiness, ImportPreviewComparison, ImportPreviewContent, ImportPreviewResource,
+    ImportPreviewTarget, ImportWorkbenchPreferences, ImportWorkbenchPreferencesRequest,
+    InstallImportCapabilityV2Request, ListImportHistoryV2Request,
+    SaveImportWorkbenchPreferencesRequest, IMPORT_V2_PREVIEW_MAX_BYTES,
+    IMPORT_V2_WORKBENCH_PREFERENCES_PATH,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
@@ -29,6 +37,57 @@ use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
 };
+
+#[tauri::command]
+pub fn get_import_workbench_preferences_v2(
+    state: State<'_, AppState>,
+    request: ImportWorkbenchPreferencesRequest,
+) -> Result<ImportWorkbenchPreferences, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if !state
+        .file_store
+        .exists(&context, IMPORT_V2_WORKBENCH_PREFERENCES_PATH)
+    {
+        return Ok(ImportWorkbenchPreferences::default());
+    }
+    let preferences: ImportWorkbenchPreferences = state
+        .file_store
+        .read_json(&context, IMPORT_V2_WORKBENCH_PREFERENCES_PATH)?;
+    validate_workbench_preferences(&preferences)?;
+    Ok(preferences)
+}
+
+#[tauri::command]
+pub fn save_import_workbench_preferences_v2(
+    state: State<'_, AppState>,
+    request: SaveImportWorkbenchPreferencesRequest,
+) -> Result<ImportWorkbenchPreferences, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    validate_workbench_preferences(&request.preferences)?;
+    state.file_store.write_json_atomic(
+        &context,
+        IMPORT_V2_WORKBENCH_PREFERENCES_PATH,
+        &request.preferences,
+    )?;
+    Ok(request.preferences)
+}
+
+fn validate_workbench_preferences(
+    preferences: &ImportWorkbenchPreferences,
+) -> Result<(), BackendError> {
+    const MAX_SCROLL_TOP: u32 = 10_000_000;
+    if preferences.schema_version != 1
+        || preferences.workbench_scroll_top > MAX_SCROLL_TOP
+        || preferences.capabilities_scroll_top > MAX_SCROLL_TOP
+        || preferences.history_scroll_top > MAX_SCROLL_TOP
+    {
+        return Err(presentation_error(
+            "IMPORT_V2_WORKBENCH_PREFERENCES_INVALID",
+            "Import workbench preferences are invalid.",
+        ));
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub fn get_import_preview_content_v2(
@@ -62,6 +121,21 @@ pub fn get_import_preview_content_v2(
         .ok_or_else(|| {
             presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
         })?;
+    let preview_details = item.preview.as_ref().ok_or_else(|| {
+        presentation_error(
+            "IMPORT_V2_PREVIEW_NOT_FOUND",
+            "The import item has no Markdown preview.",
+        )
+    })?;
+    let resources = read_preview_resources(
+        &context,
+        &request.session_id,
+        &request.item_id,
+        preview_details,
+    )?;
+    let target = preview_target(&context, &state.file_store, &session, item, preview_details)?;
+    let quality = preview_details.quality.clone();
+    let raw_label = item.input.display_name.clone();
 
     let (relative_path, title, expected_hash) =
         if let Some(candidate_id) = request.candidate_id.as_deref() {
@@ -130,6 +204,11 @@ pub fn get_import_preview_content_v2(
                         .map(|metadata| metadata.len())
                         .unwrap_or_default(),
                     sha256: expected_hash,
+                    target,
+                    quality,
+                    raw_label,
+                    resources,
+                    comparison: None,
                 });
             }
         }
@@ -142,6 +221,17 @@ pub fn get_import_preview_content_v2(
         &relative_path,
         &expected_hash,
     )?;
+    let comparison = if request.history_batch_id.is_none() {
+        preview_comparison(
+            &context,
+            &state.file_store,
+            &request.session_id,
+            &request.item_id,
+            preview_details,
+        )?
+    } else {
+        None
+    };
     Ok(ImportPreviewContent {
         session_id: request.session_id,
         item_id: request.item_id,
@@ -151,7 +241,217 @@ pub fn get_import_preview_content_v2(
         truncated,
         total_bytes,
         sha256: expected_hash,
+        target,
+        quality,
+        raw_label,
+        resources,
+        comparison,
     })
+}
+
+fn preview_comparison(
+    context: &ProjectContext,
+    files: &crate::services::FileStore,
+    session_id: &str,
+    item_id: &str,
+    preview: &crate::models::import_v2::ImportPreviewArtifact,
+) -> Result<Option<ImportPreviewComparison>, BackendError> {
+    let Some(resolution) = preview.resolution.as_ref() else {
+        return Ok(None);
+    };
+    if !matches!(
+        resolution.kind,
+        ImportResolutionKind::SameSourceNewVersion | ImportResolutionKind::NeedsThreeWayMerge
+    ) {
+        return Ok(None);
+    }
+    let Some(binding) = resolution.binding.as_ref() else {
+        return Ok(None);
+    };
+    let manifest = crate::services::import_v2::source_registry::SourceRegistry::read_manifest(
+        context,
+        files,
+        &format!(".app/sources/{}.json", binding.source_id),
+    )?;
+    let current_path = safe_project_path(&context.root, &manifest.wiki_path)?;
+    let current_bytes = fs::read(current_path).map_err(|_| {
+        presentation_error(
+            "IMPORT_V2_PREVIEW_COMPARISON_READ_FAILED",
+            "The existing Source could not be read for comparison.",
+        )
+    })?;
+    if !sha256(&current_bytes).eq_ignore_ascii_case(&binding.current_hash) {
+        return Err(presentation_error(
+            "IMPORT_V2_PREVIEW_COMPARISON_CHANGED",
+            "The existing Source changed before the comparison was opened.",
+        ));
+    }
+    let current_markdown = bounded_preview_markdown(current_bytes)?;
+    let merged_markdown = preview
+        .manual_merge
+        .as_ref()
+        .map(|artifact| {
+            read_staging_markdown(
+                context,
+                session_id,
+                item_id,
+                &artifact.relative_path,
+                &artifact.sha256,
+            )
+            .map(|(markdown, _, _)| markdown)
+        })
+        .transpose()?;
+    Ok(Some(ImportPreviewComparison {
+        current_markdown,
+        merged_markdown,
+    }))
+}
+
+fn bounded_preview_markdown(bytes: Vec<u8>) -> Result<String, BackendError> {
+    let mut markdown = String::from_utf8(bytes).map_err(|_| {
+        presentation_error(
+            "IMPORT_V2_PREVIEW_INVALID",
+            "Markdown preview is not valid UTF-8.",
+        )
+    })?;
+    if markdown.len() > IMPORT_V2_PREVIEW_MAX_BYTES as usize {
+        let mut end = IMPORT_V2_PREVIEW_MAX_BYTES as usize;
+        while !markdown.is_char_boundary(end) {
+            end -= 1;
+        }
+        markdown.truncate(end);
+    }
+    Ok(markdown)
+}
+
+fn preview_target(
+    context: &ProjectContext,
+    files: &crate::services::FileStore,
+    session: &ImportSession,
+    item: &ImportItem,
+    preview: &crate::models::import_v2::ImportPreviewArtifact,
+) -> Result<ImportPreviewTarget, BackendError> {
+    let resolution = preview.resolution.as_ref();
+    let binding = resolution.and_then(|value| value.binding.as_ref());
+    let wiki_path = if let Some(path) = resolution.and_then(|value| value.target_wiki_path.clone())
+    {
+        Some(path)
+    } else if let Some(binding) = binding {
+        crate::services::import_v2::source_registry::SourceRegistry::read_manifest(
+            context,
+            files,
+            &format!(".app/sources/{}.json", binding.source_id),
+        )
+        .ok()
+        .map(|manifest| manifest.wiki_path)
+    } else {
+        crate::services::import_v2::commit::planned_new_source_wiki_path(
+            context,
+            files,
+            session,
+            &item.item_id,
+        )?
+    };
+    let disposition = match resolution.map(|value| &value.kind) {
+        Some(ImportResolutionKind::ExactDuplicate) => "duplicate",
+        Some(ImportResolutionKind::SameSourceNewVersion) => "update",
+        Some(ImportResolutionKind::NeedsThreeWayMerge) => "merge",
+        _ => "new_source",
+    };
+    Ok(ImportPreviewTarget {
+        disposition: disposition.into(),
+        source_id: binding.map(|value| value.source_id.clone()),
+        version_id: binding.map(|value| value.target_version_id.clone()),
+        wiki_path,
+    })
+}
+
+fn read_preview_resources(
+    context: &ProjectContext,
+    session_id: &str,
+    item_id: &str,
+    preview: &crate::models::import_v2::ImportPreviewArtifact,
+) -> Result<Vec<ImportPreviewResource>, BackendError> {
+    const MAX_INLINE_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+    validate_identifier(session_id)?;
+    validate_identifier(item_id)?;
+    preview
+        .assets
+        .iter()
+        .map(|artifact| {
+            let source = normalize_relative(&artifact.relative_path)?;
+            let name = Path::new(&source)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("resource")
+                .to_string();
+            let kind = match artifact.kind {
+                ArtifactKind::Image => "image",
+                ArtifactKind::Attachment => "attachment",
+                ArtifactKind::Subtitle => "subtitle",
+                ArtifactKind::Transcript => "transcript",
+                ArtifactKind::Metadata => "metadata",
+                ArtifactKind::SourceEvidence => "source_evidence",
+                ArtifactKind::SourceSnapshot => "source_snapshot",
+                ArtifactKind::Markdown => "markdown",
+            }
+            .to_string();
+            let data_url = if artifact.kind == ArtifactKind::Image
+                && artifact.size_bytes <= MAX_INLINE_IMAGE_BYTES
+            {
+                let relative =
+                    format!(".app/import-sessions/{session_id}/items/{item_id}/staging/{source}");
+                let path = safe_project_path(&context.root, &relative)?;
+                let bytes = fs::read(path).map_err(|_| {
+                    presentation_error(
+                        "IMPORT_V2_PREVIEW_RESOURCE_READ_FAILED",
+                        "A preview resource could not be read.",
+                    )
+                })?;
+                if sha256(&bytes).eq_ignore_ascii_case(&artifact.sha256) {
+                    image_mime(&name, &bytes).map(|mime| {
+                        format!(
+                            "data:{mime};base64,{}",
+                            base64::engine::general_purpose::STANDARD.encode(bytes)
+                        )
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            Ok(ImportPreviewResource {
+                source,
+                name,
+                kind,
+                size_bytes: artifact.size_bytes,
+                data_url,
+            })
+        })
+        .collect()
+}
+
+fn image_mime(name: &str, bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        match Path::new(name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("svg") => None,
+            _ => None,
+        }
+    }
 }
 
 fn read_history_markdown(path: &Path, expected_hash: &str) -> Result<String, BackendError> {
@@ -237,26 +537,54 @@ fn file_readiness(
         }
     };
     vec![
+        route("doc", &["pack.office-legacy", "pack.markitdown"]),
         route(
             "docx",
             &["office.modern.docx", "pack.markitdown", "pack.office-oxide"],
         ),
+        route("xls", &["pack.office-legacy", "pack.markitdown"]),
         route("pdf", &["pdf.text", "pdf.layout", "pack.markitdown"]),
         route(
             "xlsx",
             &["office.modern.xlsx", "pack.markitdown", "pack.office-oxide"],
         ),
-        route(
-            "ppt",
-            &[
-                "office.modern.pptx",
-                "pack.office-legacy",
-                "pack.markitdown",
-            ],
-        ),
+        route("pptx", &["office.modern.pptx", "pack.markitdown"]),
+        route("ppt", &["pack.office-legacy", "pack.markitdown"]),
         route("md", &["file.native"]),
         route("txt", &["file.native"]),
-        route("csv", &["file.native"]),
+        route("html", &["file.native"]),
+        route("csv", &["file.csv-package"]),
+        route("png", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("jpeg", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("webp", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("bmp", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("tiff", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("heic", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("heif", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("gif", &["ocr.cjk-accurate", "ocr.basic"]),
+        route("mp3", &["media.companion", "media.asr"]),
+        route("wav", &["media.companion", "media.asr"]),
+        route("m4a", &["media.companion", "media.asr"]),
+        route("aac", &["media.companion", "media.asr"]),
+        route("flac", &["media.companion", "media.asr"]),
+        route("ogg", &["media.companion", "media.asr"]),
+        route("opus", &["media.companion", "media.asr"]),
+        route("wma", &["media.companion", "media.asr"]),
+        route("mp4", &["media.companion", "media.asr"]),
+        route("mov", &["media.companion", "media.asr"]),
+        route("mkv", &["media.companion", "media.asr"]),
+        route("webm", &["media.companion", "media.asr"]),
+        route("avi", &["media.companion", "media.asr"]),
+        route("m4v", &["media.companion", "media.asr"]),
+        route("wmv", &["media.companion", "media.asr"]),
+        route("srt", &["media.subtitle"]),
+        route("vtt", &["media.subtitle"]),
+        route("ass", &["media.subtitle"]),
+        ImportFeatureReadiness {
+            id: "lrc".into(),
+            available: false,
+            reason_code: Some("batch_four".into()),
+        },
     ]
 }
 
@@ -610,6 +938,11 @@ fn read_v2_history(
         if view_logs {
             available_actions.push(ImportHistoryAction::ViewLogs);
         }
+        if batch.completion.as_ref().is_some_and(|completion| {
+            !completion.new_sources.is_empty() || !completion.updated_sources.is_empty()
+        }) {
+            available_actions.push(ImportHistoryAction::UpdateWiki);
+        }
         let modified_millis = parse_timestamp_millis(&batch.created_at)
             .unwrap_or_else(|| file_modified_millis(&path));
         let updated_at = fs::metadata(&path)
@@ -795,6 +1128,97 @@ pub fn get_import_capability_requirement_v2(
 }
 
 #[tauri::command]
+pub fn get_import_asr_enablement_plan_v2(
+    state: State<'_, AppState>,
+    request: GetImportAsrEnablementPlanV2Request,
+) -> Result<ImportAsrEnablementPlan, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| {
+            presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
+        })?;
+    if !item.issue.as_ref().is_some_and(|issue| {
+        issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+            || issue
+                .recovery_actions
+                .contains(&ImportRecoveryAction::InstallMediaCapability)
+    }) {
+        return Err(presentation_error(
+            "IMPORT_V2_ASR_NOT_REQUIRED",
+            "This import item does not currently require local speech recognition.",
+        ));
+    }
+
+    let install_root = state.import_capability_runtime.install_root();
+    let available_memory_bytes = available_memory_bytes();
+    let disk_probe_root = install_root.as_deref().unwrap_or(&context.root);
+    let available_disk_bytes = available_disk_bytes(disk_probe_root);
+    let media_duration_seconds = local_wav_duration_seconds(item);
+    let statuses = state.import_capability_runtime.statuses();
+    let target = target_triple();
+    let profiles = [
+        AsrProfileSpec {
+            profile: ImportAsrProfile::Fast,
+            capability_id: "asr-sensevoice-small",
+            engine_name: "sherpa-onnx SenseVoiceSmall",
+            model_name: "SenseVoiceSmall int8",
+            source: "https://github.com/k2-fsa/sherpa-onnx",
+            license: "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+            speed_numerator: 1,
+            speed_denominator: 2,
+        },
+        AsrProfileSpec {
+            profile: ImportAsrProfile::Balanced,
+            capability_id: "asr-sensevoice-small",
+            engine_name: "sherpa-onnx SenseVoiceSmall",
+            model_name: "SenseVoiceSmall int8",
+            source: "https://github.com/k2-fsa/sherpa-onnx",
+            license: "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+            speed_numerator: 3,
+            speed_denominator: 4,
+        },
+        AsrProfileSpec {
+            profile: ImportAsrProfile::Accurate,
+            capability_id: "asr-whisper",
+            engine_name: "whisper.cpp",
+            model_name: "Whisper small",
+            source: "https://github.com/ggml-org/whisper.cpp",
+            license: "MIT AND LGPL-2.1-or-later",
+            speed_numerator: 5,
+            speed_denominator: 4,
+        },
+    ]
+    .into_iter()
+    .map(|spec| build_asr_profile_plan(spec, &statuses, &target, media_duration_seconds))
+    .collect::<Vec<_>>();
+    let recommended_profile = recommend_asr_profile(
+        &profiles,
+        &session.resource_mode,
+        available_memory_bytes,
+        available_disk_bytes,
+    );
+
+    Ok(ImportAsrEnablementPlan {
+        recommended_profile,
+        available_memory_bytes,
+        available_disk_bytes,
+        media_duration_seconds,
+        install_location: install_root.map(|path| path.to_string_lossy().into_owned()),
+        local_only: true,
+        profiles,
+    })
+}
+
+#[tauri::command]
 pub fn install_import_capability_v2(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -812,13 +1236,28 @@ pub fn install_import_capability_v2(
         .ok_or_else(|| {
             presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
         })?;
-    let (expected_capability_id, _, _) = capability_for_item(item).ok_or_else(|| {
-        presentation_error(
+    let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
+        issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+            || issue
+                .recovery_actions
+                .contains(&ImportRecoveryAction::InstallMediaCapability)
+    }) && matches!(
+        request.capability_id.as_str(),
+        "asr-sensevoice-small" | "asr-whisper"
+    );
+    let required_capability = capability_for_item(item);
+    if required_capability.is_none() && !asr_choice_allowed {
+        return Err(presentation_error(
             "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
             "This import item does not currently require a capability pack.",
-        )
-    })?;
-    if request.capability_id != expected_capability_id {
+        ));
+    }
+    if required_capability.is_some_and(|(expected_capability_id, _, _)| {
+        request.capability_id != expected_capability_id
+    }) && !asr_choice_allowed
+    {
         return Err(presentation_error(
             "IMPORT_V2_CAPABILITY_MISMATCH",
             "The requested capability does not match this import item.",
@@ -831,7 +1270,7 @@ pub fn install_import_capability_v2(
         ));
     }
     let target = target_triple();
-    let entry = catalog_entry(expected_capability_id, &target).ok_or_else(|| {
+    let entry = catalog_entry(&request.capability_id, &target).ok_or_else(|| {
         presentation_error(
             "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
             "No signed capability release is available for this target.",
@@ -911,58 +1350,99 @@ pub fn install_import_capability_v2(
                 return;
             }
         };
-        let resume_task = match state.task_service.create_project_task(
-            TaskType::Import,
-            project_id.clone(),
-            context.root.clone(),
-            "Resume import after capability install".into(),
-            true,
-        ) {
-            Ok(task) => task,
-            Err(error) => {
-                finish_capability_install_error(
-                    &state,
-                    &task_id,
-                    presentation_error("IMPORT_V2_TASK_FAILED", &error),
-                );
-                return;
+        let loaded_session =
+            match state
+                .import_v2_service
+                .load_session(&context, &state.file_store, &session_id)
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    finish_capability_install_error(&state, &task_id, error);
+                    return;
+                }
+            };
+        let asr_capability = matches!(
+            entry.capability_id.as_str(),
+            "asr-sensevoice-small" | "asr-whisper"
+        );
+        let mut resume_item_ids = loaded_session
+            .items
+            .iter()
+            .filter(|candidate| {
+                capability_for_item(candidate).is_some_and(|(capability_id, _, _)| {
+                    capability_id == entry.capability_id.as_str()
+                }) || (asr_capability
+                    && candidate.issue.as_ref().is_some_and(|issue| {
+                        issue
+                            .recovery_actions
+                            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+                            || issue
+                                .recovery_actions
+                                .contains(&ImportRecoveryAction::InstallMediaCapability)
+                    }))
+            })
+            .map(|candidate| candidate.item_id.clone())
+            .collect::<Vec<_>>();
+        if resume_item_ids.is_empty() {
+            resume_item_ids.push(item_id.clone());
+        }
+        let replaced_waiting_task_ids = loaded_session
+            .items
+            .iter()
+            .filter(|candidate| resume_item_ids.contains(&candidate.item_id))
+            .filter_map(|candidate| candidate.task_id.clone())
+            .collect::<Vec<_>>();
+        let mut resume_tasks = Vec::with_capacity(resume_item_ids.len());
+        for resume_item_id in &resume_item_ids {
+            match state.task_service.create_project_task(
+                TaskType::Import,
+                project_id.clone(),
+                context.root.clone(),
+                format!("Resume {}", resume_item_id),
+                true,
+            ) {
+                Ok(task) => resume_tasks.push(task),
+                Err(error) => {
+                    let ids = resume_tasks
+                        .iter()
+                        .map(|task: &BackendTask| task.id.clone())
+                        .collect::<Vec<_>>();
+                    let _ = state.task_service.discard_unstarted_tasks(&ids);
+                    finish_capability_install_error(
+                        &state,
+                        &task_id,
+                        presentation_error("IMPORT_V2_TASK_FAILED", &error),
+                    );
+                    return;
+                }
             }
-        };
-        let replaced_waiting_task_id = state
-            .import_v2_service
-            .load_session(&context, &state.file_store, &session_id)
-            .ok()
-            .and_then(|session| {
-                session
-                    .items
-                    .into_iter()
-                    .find(|item| item.item_id == item_id)
-                    .and_then(|item| item.task_id)
-            });
+        }
+        let bindings = resume_item_ids
+            .iter()
+            .zip(&resume_tasks)
+            .map(|(resume_item_id, task)| (resume_item_id.clone(), task.id.clone()))
+            .collect::<Vec<_>>();
         if state
             .import_v2_service
-            .bind_item_task_ids(
-                &context,
-                &state.file_store,
-                &session_id,
-                &[(item_id.clone(), resume_task.id.clone())],
-            )
+            .bind_item_task_ids(&context, &state.file_store, &session_id, &bindings)
             .is_err()
         {
-            let _ = state
-                .task_service
-                .discard_unstarted_tasks(std::slice::from_ref(&resume_task.id));
+            let ids = resume_tasks
+                .iter()
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>();
+            let _ = state.task_service.discard_unstarted_tasks(&ids);
             finish_capability_install_error(
                 &state,
                 &task_id,
                 presentation_error(
                     "IMPORT_V2_CAPABILITY_RESUME_FAILED",
-                    "The capability was installed, but the import item could not be bound to its automatic resume task.",
+                    "The capability was installed, but matching import items could not be bound to their automatic resume tasks.",
                 ),
             );
             return;
         }
-        if let Some(replaced_task_id) = replaced_waiting_task_id {
+        for replaced_task_id in replaced_waiting_task_ids {
             if state
                 .task_service
                 .get_task(&replaced_task_id)
@@ -977,8 +1457,9 @@ pub fn install_import_capability_v2(
                 &task_id,
                 TaskResult {
                     summary: format!(
-                        "Installed {} and created the automatic resume task.",
-                        entry.capability_id
+                        "Installed {} and created {} automatic resume tasks.",
+                        entry.capability_id,
+                        resume_tasks.len()
                     ),
                     affected_paths: Vec::new(),
                     reference: None,
@@ -987,15 +1468,21 @@ pub fn install_import_capability_v2(
             )
             .is_err()
         {
+            let rollback = resume_item_ids
+                .iter()
+                .map(|resume_item_id| (resume_item_id.clone(), task_id.clone()))
+                .collect::<Vec<_>>();
             let _ = state.import_v2_service.bind_item_task_ids(
                 &context,
                 &state.file_store,
                 &session_id,
-                &[(item_id.clone(), task_id.clone())],
+                &rollback,
             );
-            let _ = state
-                .task_service
-                .discard_unstarted_tasks(std::slice::from_ref(&resume_task.id));
+            let ids = resume_tasks
+                .iter()
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>();
+            let _ = state.task_service.discard_unstarted_tasks(&ids);
             finish_capability_install_error(
                 &state,
                 &task_id,
@@ -1008,16 +1495,46 @@ pub fn install_import_capability_v2(
         }
         let resume_action =
             (entry.capability_id == "ocr-cjk-accurate").then_some(ImportRecoveryAction::EnableOcr);
-        if let Err(error) = state.import_v2_service.run_item_with_recovery(
-            &context,
-            &state.file_store,
-            &state.task_service,
-            &session_id,
-            &item_id,
-            &resume_task.id,
-            resume_action.as_ref(),
-        ) {
-            finish_capability_install_error(&state, &resume_task.id, error);
+        for (resume_item_id, resume_task) in resume_item_ids.iter().zip(resume_tasks) {
+            let resume_app = app.clone();
+            let resume_context = context.clone();
+            let resume_session_id = session_id.clone();
+            let resume_item_id = resume_item_id.clone();
+            let resume_task_id = resume_task.id.clone();
+            let resume_action = resume_action.clone();
+            // Capability installation is asynchronous, but ImportEngine is a
+            // synchronous filesystem/process boundary. Resume it on Tokio's
+            // blocking pool so a web engine can never nest its runtime on an
+            // async worker.
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let state = resume_app.state::<AppState>();
+                state.import_v2_service.run_item_with_recovery(
+                    &resume_context,
+                    &state.file_store,
+                    &state.task_service,
+                    &resume_session_id,
+                    &resume_item_id,
+                    &resume_task_id,
+                    resume_action.as_ref(),
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    finish_capability_install_error(&state, &resume_task.id, error);
+                }
+                Err(_) => {
+                    finish_capability_install_error(
+                        &state,
+                        &resume_task.id,
+                        presentation_error(
+                            "IMPORT_V2_CAPABILITY_RESUME_FAILED",
+                            "The capability was installed, but its import worker stopped unexpectedly.",
+                        ),
+                    );
+                }
+            }
         }
     });
     Ok(task)
@@ -1193,6 +1710,245 @@ fn capability_for_item(item: &ImportItem) -> Option<(&'static str, &'static str,
     }
 }
 
+#[derive(Clone)]
+struct AsrProfileSpec {
+    profile: ImportAsrProfile,
+    capability_id: &'static str,
+    engine_name: &'static str,
+    model_name: &'static str,
+    source: &'static str,
+    license: &'static str,
+    speed_numerator: u64,
+    speed_denominator: u64,
+}
+
+fn build_asr_profile_plan(
+    spec: AsrProfileSpec,
+    statuses: &[CapabilityRuntimeStatus],
+    target: &str,
+    media_duration_seconds: Option<u64>,
+) -> ImportAsrProfilePlan {
+    let runtime = statuses
+        .iter()
+        .find(|status| status.capability_id == spec.capability_id && status.route == "media.asr");
+    let available = runtime.is_some_and(|status| status.available);
+    let catalog = catalog_entry(spec.capability_id, target);
+    let installable = !available && catalog.is_some();
+    let component_available = available;
+    let dependency = |kind, name: &str, source: &str, license: &str| ImportAsrDependency {
+        kind,
+        name: name.into(),
+        available: component_available,
+        bundled_with_capability: true,
+        source: source.into(),
+        license: license.into(),
+    };
+    let dependencies = vec![
+        dependency(
+            ImportAsrDependencyKind::MediaRuntime,
+            "FFmpeg local media runtime",
+            "https://ffmpeg.org/",
+            "LGPL-2.1-or-later",
+        ),
+        dependency(
+            ImportAsrDependencyKind::Engine,
+            spec.engine_name,
+            spec.source,
+            spec.license,
+        ),
+        dependency(
+            ImportAsrDependencyKind::Model,
+            spec.model_name,
+            spec.source,
+            spec.license,
+        ),
+        dependency(
+            ImportAsrDependencyKind::LanguageSupport,
+            "Multilingual recognition support",
+            spec.source,
+            spec.license,
+        ),
+    ];
+    let estimated_seconds = media_duration_seconds.map(|duration| {
+        duration
+            .saturating_mul(spec.speed_numerator)
+            .div_ceil(spec.speed_denominator)
+            .max(1)
+    });
+    let unavailable_reason_code = (!available).then(|| {
+        if installable {
+            "not_installed".into()
+        } else {
+            runtime
+                .and_then(|status| status.reason.clone())
+                .unwrap_or_else(|| "signed_release_unavailable".into())
+        }
+    });
+    ImportAsrProfilePlan {
+        profile: spec.profile,
+        capability_id: spec.capability_id.into(),
+        engine_name: spec.engine_name.into(),
+        model_name: spec.model_name.into(),
+        available,
+        installable,
+        download_bytes: (!available)
+            .then(|| catalog.as_ref().map(|entry| entry.compressed_bytes))
+            .flatten(),
+        installed_bytes: catalog.as_ref().map(|entry| entry.installed_bytes),
+        model_bytes: catalog.as_ref().and_then(|entry| entry.model_bytes),
+        device: "cpu".into(),
+        estimated_seconds,
+        unavailable_reason_code,
+        dependencies,
+    }
+}
+
+fn recommend_asr_profile(
+    profiles: &[ImportAsrProfilePlan],
+    resource_mode: &ImportResourceMode,
+    available_memory: Option<u64>,
+    available_disk: Option<u64>,
+) -> ImportAsrProfile {
+    let usable = |profile: &ImportAsrProfile| {
+        profiles
+            .iter()
+            .find(|plan| &plan.profile == profile)
+            .is_some_and(|plan| {
+                (plan.available || plan.installable)
+                    && available_disk.is_none_or(|free| {
+                        plan.installed_bytes
+                            .is_none_or(|required| free >= required.saturating_mul(2))
+                    })
+            })
+    };
+    let low_memory = available_memory.is_some_and(|bytes| bytes < 6 * 1024 * 1024 * 1024);
+    let high_memory = available_memory.is_none_or(|bytes| bytes >= 12 * 1024 * 1024 * 1024);
+    if (*resource_mode == ImportResourceMode::Saver || low_memory)
+        && usable(&ImportAsrProfile::Fast)
+    {
+        ImportAsrProfile::Fast
+    } else if *resource_mode == ImportResourceMode::Performance
+        && high_memory
+        && usable(&ImportAsrProfile::Accurate)
+    {
+        ImportAsrProfile::Accurate
+    } else if usable(&ImportAsrProfile::Balanced) {
+        ImportAsrProfile::Balanced
+    } else if usable(&ImportAsrProfile::Fast) {
+        ImportAsrProfile::Fast
+    } else if usable(&ImportAsrProfile::Accurate) {
+        ImportAsrProfile::Accurate
+    } else {
+        ImportAsrProfile::Balanced
+    }
+}
+
+fn local_wav_duration_seconds(item: &ImportItem) -> Option<u64> {
+    if item.input.kind != ImportInputKind::File {
+        return None;
+    }
+    let path = Path::new(&item.input.locator);
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("wav"))
+    {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let mut bytes = vec![0_u8; 1024 * 1024];
+    let read = file.read(&mut bytes).ok()?;
+    bytes.truncate(read);
+    wav_duration_seconds(&bytes)
+}
+
+fn wav_duration_seconds(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut offset: usize = 12;
+    let mut bytes_per_second = None;
+    let mut data_bytes = None;
+    while offset.checked_add(8)? <= bytes.len() {
+        let chunk = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
+        let payload = offset.checked_add(8)?;
+        if chunk == b"fmt " && size >= 12 && payload.checked_add(12)? <= bytes.len() {
+            bytes_per_second =
+                Some(u32::from_le_bytes(bytes[payload + 8..payload + 12].try_into().ok()?) as u64);
+        } else if chunk == b"data" {
+            data_bytes = Some(size as u64);
+        }
+        if bytes_per_second.is_some() && data_bytes.is_some() {
+            break;
+        }
+        offset = payload.checked_add(size)?.checked_add(size % 2)?;
+    }
+    let rate = bytes_per_second.filter(|rate| *rate > 0)?;
+    Some(data_bytes?.div_ceil(rate).max(1))
+}
+
+#[cfg(windows)]
+fn available_memory_bytes() -> Option<u64> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status: MEMORYSTATUSEX = unsafe { zeroed() };
+    status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.ullAvailPhys)
+}
+
+#[cfg(unix)]
+fn available_memory_bytes() -> Option<u64> {
+    let pages = unsafe { libc::sysconf(libc::_SC_AVPHYS_PAGES) };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    (pages > 0 && page_size > 0).then(|| (pages as u64).saturating_mul(page_size as u64))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn available_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(windows)]
+fn available_disk_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut available = 0_u64;
+    (unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } != 0)
+        .then_some(available)
+}
+
+#[cfg(unix)]
+fn available_disk_bytes(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::mem::zeroed;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { zeroed() };
+    (unsafe { libc::statvfs(path.as_ptr(), &mut stats) } == 0)
+        .then(|| (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn available_disk_bytes(_: &Path) -> Option<u64> {
+    None
+}
+
 fn target_triple() -> String {
     match (std::env::consts::ARCH, std::env::consts::OS) {
         ("x86_64", "windows") => "x86_64-pc-windows-msvc",
@@ -1229,6 +1985,53 @@ mod tests {
     use super::*;
     use crate::models::import_v2::ImportItemCommitResult;
 
+    #[test]
+    fn workbench_preferences_are_versioned_and_bounded() {
+        let preferences = ImportWorkbenchPreferences {
+            active_section: crate::models::import_v2_presentation::ImportWorkbenchSection::History,
+            queue_filter: crate::models::import_v2_presentation::ImportQueuePreference::NeedsAction,
+            workbench_scroll_top: 10,
+            capabilities_scroll_top: 20,
+            history_scroll_top: 30,
+            source_methods_expanded: false,
+            ..ImportWorkbenchPreferences::default()
+        };
+        validate_workbench_preferences(&preferences).unwrap();
+        let value = serde_json::to_value(&preferences).unwrap();
+        assert_eq!(value["activeSection"], "history");
+        assert_eq!(value["queueFilter"], "needs_action");
+        assert_eq!(value["sourceMethodsExpanded"], false);
+
+        let invalid_version = ImportWorkbenchPreferences {
+            schema_version: 2,
+            ..preferences.clone()
+        };
+        assert_eq!(
+            validate_workbench_preferences(&invalid_version)
+                .unwrap_err()
+                .code,
+            "IMPORT_V2_WORKBENCH_PREFERENCES_INVALID"
+        );
+        let invalid_scroll = ImportWorkbenchPreferences {
+            history_scroll_top: 10_000_001,
+            ..preferences
+        };
+        assert_eq!(
+            validate_workbench_preferences(&invalid_scroll)
+                .unwrap_err()
+                .code,
+            "IMPORT_V2_WORKBENCH_PREFERENCES_INVALID"
+        );
+    }
+
+    #[test]
+    fn bounded_preview_markdown_preserves_a_cjk_character_boundary() {
+        let repeated = "界".repeat((IMPORT_V2_PREVIEW_MAX_BYTES as usize / 3) + 2);
+        let bounded = bounded_preview_markdown(repeated.into_bytes()).unwrap();
+        assert!(bounded.len() <= IMPORT_V2_PREVIEW_MAX_BYTES as usize);
+        assert!(bounded.ends_with('界'));
+    }
+
     fn batch(items: Vec<ImportItemCommitResult>) -> ImportBatchResult {
         let committed_count = items.iter().filter(|item| item.committed).count() as u32;
         ImportBatchResult {
@@ -1240,6 +2043,7 @@ mod tests {
             failed_count: items.len() as u32 - committed_count,
             items,
             history_snapshot: None,
+            completion: None,
         }
     }
 
@@ -1249,9 +2053,83 @@ mod tests {
             source_id: committed.then(|| "source-1".into()),
             version_id: committed.then(|| "version-1".into()),
             wiki_path: committed.then(|| "wiki/item.md".into()),
+            content_hash: None,
+            disposition: None,
+            warnings: Vec::new(),
             committed,
             error_code: error_code.map(str::to_string),
         }
+    }
+
+    fn asr_profile_plan(
+        profile: ImportAsrProfile,
+        available: bool,
+        installable: bool,
+        installed_bytes: Option<u64>,
+    ) -> ImportAsrProfilePlan {
+        ImportAsrProfilePlan {
+            profile,
+            capability_id: "asr-fixture".into(),
+            engine_name: "fixture".into(),
+            model_name: "fixture".into(),
+            available,
+            installable,
+            download_bytes: None,
+            installed_bytes,
+            model_bytes: None,
+            device: "cpu".into(),
+            estimated_seconds: None,
+            unavailable_reason_code: None,
+            dependencies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn wav_duration_uses_declared_byte_rate_and_rounds_up() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&32036_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&8_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&32_000_u32.to_le_bytes());
+        wav.resize(wav.len() + 32_000, 0);
+
+        assert_eq!(wav_duration_seconds(&wav), Some(2));
+        assert_eq!(wav_duration_seconds(b"not-wave"), None);
+    }
+
+    #[test]
+    fn asr_recommendation_respects_resources_and_real_profile_usability() {
+        let profiles = vec![
+            asr_profile_plan(ImportAsrProfile::Fast, true, false, Some(1)),
+            asr_profile_plan(ImportAsrProfile::Balanced, true, false, Some(1)),
+            asr_profile_plan(ImportAsrProfile::Accurate, true, false, Some(1)),
+        ];
+        assert_eq!(
+            recommend_asr_profile(
+                &profiles,
+                &ImportResourceMode::Performance,
+                Some(4 * 1024 * 1024 * 1024),
+                Some(1024),
+            ),
+            ImportAsrProfile::Fast
+        );
+        assert_eq!(
+            recommend_asr_profile(
+                &profiles,
+                &ImportResourceMode::Performance,
+                Some(16 * 1024 * 1024 * 1024),
+                Some(1024),
+            ),
+            ImportAsrProfile::Accurate
+        );
     }
 
     #[test]
@@ -1379,5 +2257,54 @@ mod tests {
             .unwrap();
         assert!(!keyframes.available);
         assert_eq!(keyframes.reason_code.as_deref(), Some("phase_two"));
+    }
+
+    #[test]
+    fn file_readiness_exposes_the_complete_batch_three_format_matrix() {
+        let routes = vec![
+            "file.native".into(),
+            "file.csv-package".into(),
+            "office.modern.docx".into(),
+            "office.modern.xlsx".into(),
+            "office.modern.pptx".into(),
+            "pdf.text".into(),
+            "media.companion".into(),
+            "media.subtitle".into(),
+        ];
+        let files = file_readiness(&routes, &[]);
+        let ids = files
+            .iter()
+            .map(|file| file.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        for expected in [
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "md", "txt", "html", "csv", "png",
+            "jpeg", "webp", "bmp", "tiff", "heic", "heif", "gif", "mp3", "wav", "m4a", "aac",
+            "flac", "ogg", "opus", "wma", "mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv", "srt",
+            "vtt", "ass", "lrc",
+        ] {
+            assert!(ids.contains(expected), "missing readiness row: {expected}");
+        }
+        assert!(
+            files
+                .iter()
+                .find(|file| file.id == "csv")
+                .unwrap()
+                .available
+        );
+        assert!(
+            !files
+                .iter()
+                .find(|file| file.id == "lrc")
+                .unwrap()
+                .available
+        );
+        assert!(
+            !files
+                .iter()
+                .find(|file| file.id == "png")
+                .unwrap()
+                .available
+        );
     }
 }

@@ -1,5 +1,7 @@
 # Import V2 migration matching
 
+> Historical internal matching record. It is not a current product workflow; see [`superpowers/specs/2026-07-24-import-source-media-flow-design.md`](superpowers/specs/2026-07-24-import-source-media-flow-design.md).
+
 Migration links are intentionally conservative. The planner never treats a
 title, filename, timestamp, or fuzzy text similarity as identity evidence.
 

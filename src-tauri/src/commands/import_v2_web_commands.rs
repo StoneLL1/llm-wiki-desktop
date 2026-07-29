@@ -1,19 +1,34 @@
 use crate::{
     app_state::AppState,
+    commands::import_v2_commands::{start_import_items_for_state, StartImportItemsV2Request},
     errors::BackendError,
     models::{
-        import_v2::{ImportInput, ImportInputKind, ImportItem, ImportItemStatus, ImportSession},
-        import_v2_web::{
-            AddImportUrlV2Request, AuthorizeBilibiliAsrV2Request, AuthorizeLocalAsrV2Request,
+        import_v2::{
+            ImportInput, ImportInputKind, ImportItem, ImportItemStatus,
+            ImportMediaAuthorizationKind, ImportSession,
         },
+        import_v2_web::{
+            AddImportCollectionItemsV2Request, AddImportUrlV2Request,
+            AuthorizeBilibiliAsrV2Request, AuthorizeLocalAsrV2Request, AuthorizeLocalOcrV2Request,
+            ConfirmRemoteMediaRetentionV2Request, DiscoverImportCollectionV2Request,
+            ImportCollectionItemPreview, ImportCollectionPage, ImportCollectionPreview,
+            LoadImportCollectionPageV2Request, RemoteMediaRetentionPlan,
+            RemoteMediaRetentionRequest,
+        },
+        task::BackendTask,
     },
     services::import_v2::{
         connector_session::ConnectorSessionRef,
+        platform_provider::{extract_platform_collection, looks_like_collection_url, Platform},
+        remote_media_retention::build_remote_media_retention_plan,
+        session_store::CollectionImportInput,
         url_policy::{PrivateTargetGrant, UrlPolicy},
+        web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService},
         web_target_store::{asr_target_sha256, BilibiliAsrGrant},
     },
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tauri::{AppHandle, Manager, State};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +53,13 @@ pub struct CompleteLoginRequest {
     pub import_session_id: String,
     pub item_id: String,
     pub connector_session_id: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteLoginResult {
+    pub connector_session: ConnectorSessionRef,
+    pub resumed_item_ids: Vec<String>,
+    pub tasks: Vec<BackendTask>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +96,321 @@ pub fn add_import_url_v2(
     }
     result
 }
+
+#[tauri::command]
+pub async fn discover_import_collection_v2(
+    state: State<'_, AppState>,
+    request: DiscoverImportCollectionV2Request,
+) -> Result<Option<ImportCollectionPreview>, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)?;
+    let target = UrlPolicy.normalize_for_session(&request.url)?;
+    if !looks_like_collection_url(&target.public.public_url) {
+        return Ok(None);
+    }
+    let artifact = WebFetchService
+        .fetch(
+            target.clone(),
+            &UrlPolicy,
+            &WebFetchPolicy {
+                max_response_bytes: 8 * 1024 * 1024,
+                max_attempts_per_route: 1,
+                total_timeout_ms: 30_000,
+                content: WebFetchContent::Page,
+                ..WebFetchPolicy::default()
+            },
+            None,
+            "collection-discovery",
+            |_| {},
+            || false,
+        )
+        .await?;
+    let platform = Platform::from_url(&artifact.final_public_url).ok_or_else(|| {
+        BackendError::new(
+            "IMPORT_WEB_COLLECTION_UNSUPPORTED",
+            "This collection platform is not supported.",
+            false,
+            true,
+        )
+    })?;
+    let html = String::from_utf8_lossy(&artifact.bytes);
+    let Some(collection) = extract_platform_collection(platform, &html, &artifact.final_public_url)
+    else {
+        return Ok(None);
+    };
+    let known = state.import_v2_service.completed_collection_fingerprints(
+        &context,
+        &state.file_store,
+        &target.public.public_url,
+        &collection.platform,
+    );
+    let mut pending_items = Vec::with_capacity(collection.items.len());
+    let mut total_duration_seconds: Option<u64> = None;
+    let mut estimated_login_count = 0;
+    let mut estimated_asr_count = 0;
+    for item in collection.items {
+        let child = UrlPolicy.normalize_for_session(&item.url)?;
+        if known
+            .get(&child.public.public_url)
+            .is_some_and(|fingerprint| fingerprint == &item.discovery_fingerprint)
+        {
+            continue;
+        }
+        if let Some(duration) = item.duration_seconds {
+            total_duration_seconds = Some(
+                total_duration_seconds
+                    .unwrap_or_default()
+                    .saturating_add(duration),
+            );
+        }
+        estimated_login_count += usize::from(item.estimated_login_required);
+        estimated_asr_count += usize::from(item.estimated_asr_required);
+        pending_items.push((item.title, child, item.discovery_fingerprint));
+    }
+    let (collection_ref, page) = state.import_v2_service.store_web_collection(
+        &request.project_id,
+        &request.session_id,
+        target.public.public_url.clone(),
+        collection.platform.clone(),
+        collection.title.clone(),
+        pending_items,
+    )?;
+    let items = page
+        .items
+        .into_iter()
+        .map(|item| ImportCollectionItemPreview {
+            item_ref: item.item_ref,
+            title: item.title,
+            public_url: item.public_url,
+        })
+        .collect();
+    Ok(Some(ImportCollectionPreview {
+        collection_ref,
+        source_url: target.public.public_url,
+        platform: collection.platform,
+        title: collection.title,
+        total_duration_seconds,
+        estimated_login_count,
+        estimated_asr_count,
+        discovered_total: page.discovered_total,
+        loaded_count: page.loaded_count,
+        has_more: page.has_more,
+        next_cursor: page.next_cursor,
+        items,
+    }))
+}
+
+#[tauri::command]
+pub fn load_import_collection_page_v2(
+    state: State<'_, AppState>,
+    request: LoadImportCollectionPageV2Request,
+) -> Result<ImportCollectionPage, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)?;
+    let page = state.import_v2_service.load_web_collection_page(
+        &request.collection_ref,
+        &request.project_id,
+        &request.session_id,
+        &request.cursor,
+        request.load_all,
+    )?;
+    Ok(ImportCollectionPage {
+        items: page
+            .items
+            .into_iter()
+            .map(|item| ImportCollectionItemPreview {
+                item_ref: item.item_ref,
+                title: item.title,
+                public_url: item.public_url,
+            })
+            .collect(),
+        discovered_total: page.discovered_total,
+        loaded_count: page.loaded_count,
+        has_more: page.has_more,
+        next_cursor: page.next_cursor,
+    })
+}
+
+#[tauri::command]
+pub fn add_import_collection_items_v2(
+    state: State<'_, AppState>,
+    request: AddImportCollectionItemsV2Request,
+) -> Result<ImportSession, BackendError> {
+    if request.item_refs.is_empty() || request.item_refs.len() > 5_000 {
+        return Err(BackendError::new(
+            "IMPORT_WEB_COLLECTION_SELECTION_INVALID",
+            "Select between 1 and 5000 collection items.",
+            false,
+            true,
+        ));
+    }
+    let unique = request.item_refs.iter().collect::<HashSet<_>>();
+    if unique.len() != request.item_refs.len() {
+        return Err(BackendError::new(
+            "IMPORT_WEB_COLLECTION_SELECTION_INVALID",
+            "Collection item selections must be unique.",
+            false,
+            true,
+        ));
+    }
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)?;
+    let selection = state.import_v2_service.resolve_web_collection_selection(
+        &request.collection_ref,
+        &request.project_id,
+        &request.session_id,
+        &request.item_refs,
+    )?;
+    let mut stored_refs = Vec::with_capacity(selection.targets.len());
+    let mut inputs = Vec::with_capacity(selection.targets.len());
+    for selected in selection.targets {
+        let target = selected.target;
+        match state.import_v2_service.store_web_target(&target) {
+            Ok(item_ref) => {
+                stored_refs.push(item_ref.clone());
+                inputs.push(CollectionImportInput {
+                    input: ImportInput {
+                        kind: ImportInputKind::Url,
+                        display_name: target.public.host,
+                        locator: item_ref,
+                        normalized_locator: Some(target.public.public_url),
+                        source_identity: None,
+                        media_save_mode: request.media_save_mode.clone(),
+                    },
+                    discovery_fingerprint: selected.discovery_fingerprint,
+                });
+            }
+            Err(error) => {
+                for item_ref in stored_refs {
+                    let _ = state.import_v2_service.delete_web_target(&item_ref);
+                }
+                return Err(error);
+            }
+        }
+    }
+    let result = state.import_v2_service.add_collection_inputs(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        inputs,
+        selection.source_url,
+        selection.platform,
+        selection.title,
+    );
+    let session = match result {
+        Ok(session) => session,
+        Err(error) => {
+            for item_ref in stored_refs {
+                let _ = state.import_v2_service.delete_web_target(&item_ref);
+            }
+            return Err(error);
+        }
+    };
+    let used_refs = session
+        .items
+        .iter()
+        .map(|item| item.input.locator.as_str())
+        .collect::<HashSet<_>>();
+    for item_ref in stored_refs {
+        if !used_refs.contains(item_ref.as_str()) {
+            let _ = state.import_v2_service.delete_web_target(&item_ref);
+        }
+    }
+    state
+        .import_v2_service
+        .delete_web_collection(&request.collection_ref)?;
+    Ok(session)
+}
+
+#[tauri::command]
+pub fn get_remote_media_retention_plan_v2(
+    state: State<'_, AppState>,
+    request: RemoteMediaRetentionRequest,
+) -> Result<RemoteMediaRetentionPlan, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "IMPORT_V2_ITEM_NOT_FOUND",
+                "Import item was not found.",
+                false,
+                true,
+            )
+        })?;
+    if item.input.kind != ImportInputKind::Url {
+        return Err(BackendError::new(
+            "IMPORT_WEB_MEDIA_RETENTION_UNAVAILABLE",
+            "Remote media retention is available only for URL imports.",
+            false,
+            true,
+        ));
+    }
+    build_remote_media_retention_plan(&context, &request.session_id, item)
+}
+
+#[tauri::command]
+pub fn confirm_remote_media_retention_v2(
+    state: State<'_, AppState>,
+    request: ConfirmRemoteMediaRetentionV2Request,
+) -> Result<ImportSession, BackendError> {
+    if !request.acknowledge_size_and_disk {
+        return Err(BackendError::new(
+            "IMPORT_WEB_MEDIA_RETENTION_CONFIRMATION_REQUIRED",
+            "Remote media retention requires explicit size and disk confirmation.",
+            false,
+            true,
+        ));
+    }
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "IMPORT_V2_ITEM_NOT_FOUND",
+                "Import item was not found.",
+                false,
+                true,
+            )
+        })?;
+    let plan = build_remote_media_retention_plan(&context, &request.session_id, item)?;
+    if plan.enough_disk != Some(true) {
+        return Err(BackendError::new(
+            "IMPORT_WEB_MEDIA_RETENTION_DISK_INSUFFICIENT",
+            "Remote media cannot be retained because verified free disk space is insufficient.",
+            true,
+            true,
+        ));
+    }
+    state.import_v2_service.enable_remote_media_retention(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+    )?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)
+}
+
 #[tauri::command]
 pub fn begin_import_login_v2(
     app: AppHandle,
@@ -178,9 +515,10 @@ pub fn revoke_import_login_v2(
 }
 #[tauri::command]
 pub fn complete_import_login_v2(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: CompleteLoginRequest,
-) -> Result<ConnectorSessionRef, BackendError> {
+) -> Result<CompleteLoginResult, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let session = state.import_v2_service.load_session(
         &context,
@@ -203,15 +541,9 @@ pub fn complete_import_login_v2(
         &item.input.locator,
         item.input.normalized_locator.as_deref(),
     )?;
-    let (reference, profile) = state
+    let reference = state
         .connector_session_service
-        .take_authenticated_profile_bound(
-            &request.connector_session_id,
-            &request.project_id,
-            &request.import_session_id,
-            &request.item_id,
-            target.request_url.as_str(),
-        )?;
+        .resume(&request.connector_session_id)?;
     if !platform_matches_host(&reference.platform, &target.public.host) {
         return Err(BackendError::new(
             "IMPORT_V2_BROWSER_SESSION_FAILED",
@@ -220,19 +552,90 @@ pub fn complete_import_login_v2(
             true,
         ));
     }
-    state.import_v2_service.bind_authenticated_profile(
+    let mut resumed_item_ids = Vec::new();
+    for waiting_item in &session.items {
+        if waiting_item.status != ImportItemStatus::WaitingLogin
+            || waiting_item.input.kind != ImportInputKind::Url
+        {
+            continue;
+        }
+        let waiting_target = state.import_v2_service.resolve_web_target(
+            &waiting_item.input.locator,
+            waiting_item.input.normalized_locator.as_deref(),
+        )?;
+        if platform_matches_host(&reference.platform, &waiting_target.public.host) {
+            resumed_item_ids.push(waiting_item.item_id.clone());
+        }
+    }
+    if resumed_item_ids.is_empty() {
+        return Err(BackendError::new(
+            "IMPORT_V2_BROWSER_SESSION_FAILED",
+            "No waiting import items match the authenticated platform.",
+            false,
+            true,
+        ));
+    }
+    let (reference, profile) = state
+        .connector_session_service
+        .authenticated_profile_bound(
+            &request.connector_session_id,
+            &request.project_id,
+            &request.import_session_id,
+            &request.item_id,
+            target.request_url.as_str(),
+        )?;
+    state.import_v2_service.bind_authenticated_profiles(
         &request.project_id,
         &request.import_session_id,
-        &request.item_id,
-        profile,
+        &resumed_item_ids,
+        &profile,
     )?;
-    state.import_v2_service.release_item_after_login(
+    if let Err(error) = state.import_v2_service.mark_authenticated_login_group(
         &context,
         &state.file_store,
         &request.import_session_id,
-        &request.item_id,
-    )?;
-    Ok(reference)
+        &resumed_item_ids,
+        reference.account_summary.as_deref(),
+    ) {
+        let _ = state.import_v2_service.unbind_authenticated_profiles(
+            &request.project_id,
+            &request.import_session_id,
+            &resumed_item_ids,
+        );
+        return Err(error);
+    }
+    let tasks = match start_import_items_for_state(
+        app,
+        &state,
+        StartImportItemsV2Request {
+            project_id: request.project_id.clone(),
+            project_root_path: request.project_root_path.clone(),
+            session_id: request.import_session_id.clone(),
+            item_ids: resumed_item_ids.clone(),
+            recovery_action: None,
+        },
+    ) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            let _ = state.import_v2_service.unbind_authenticated_profiles(
+                &request.project_id,
+                &request.import_session_id,
+                &resumed_item_ids,
+            );
+            let _ = state.import_v2_service.clear_authenticated_login_group(
+                &context,
+                &state.file_store,
+                &request.import_session_id,
+                &resumed_item_ids,
+            );
+            return Err(error);
+        }
+    };
+    Ok(CompleteLoginResult {
+        connector_session: reference,
+        resumed_item_ids,
+        tasks,
+    })
 }
 #[tauri::command]
 pub async fn authorize_import_private_target_v2(
@@ -312,6 +715,23 @@ pub fn authorize_local_asr_v2(
 }
 
 #[tauri::command]
+pub fn authorize_local_ocr_v2(
+    state: State<'_, AppState>,
+    request: AuthorizeLocalOcrV2Request,
+) -> Result<(), BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.authorize_media_for_session(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+        ImportMediaAuthorizationKind::Ocr,
+        None,
+        None,
+    )
+}
+
+#[tauri::command]
 pub fn authorize_bilibili_asr_v2(
     state: State<'_, AppState>,
     request: AuthorizeBilibiliAsrV2Request,
@@ -341,34 +761,43 @@ fn authorize_local_asr(
             )
         })?;
     validate_local_asr_item(item)?;
-    let target = state.import_v2_service.resolve_web_target(
-        &item.input.locator,
-        item.input.normalized_locator.as_deref(),
-    )?;
-    validate_local_asr_host(&target.public.host)?;
-    state
-        .import_v2_service
-        .authorize_bilibili_asr(BilibiliAsrGrant {
-            project_id: request.project_id,
-            session_id: request.session_id,
-            item_id: request.item_id,
-            target_sha256: asr_target_sha256(target.request_url.as_str()),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-        })
+    if item.input.kind == ImportInputKind::Url {
+        let target = state.import_v2_service.resolve_web_target(
+            &item.input.locator,
+            item.input.normalized_locator.as_deref(),
+        )?;
+        validate_local_asr_host(&target.public.host)?;
+        state
+            .import_v2_service
+            .authorize_bilibili_asr(BilibiliAsrGrant {
+                project_id: request.project_id.clone(),
+                session_id: request.session_id.clone(),
+                item_id: request.item_id.clone(),
+                target_sha256: asr_target_sha256(target.request_url.as_str()),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            })?;
+    }
+    state.import_v2_service.authorize_media_for_session(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &request.item_id,
+        ImportMediaAuthorizationKind::Asr,
+        Some(request.profile),
+        request.language,
+    )
 }
 
 fn validate_local_asr_item(item: &ImportItem) -> Result<(), BackendError> {
-    if item.input.kind != ImportInputKind::Url
-        || !matches!(
-            item.status,
-            ImportItemStatus::WaitingAuthorization | ImportItemStatus::Failed
-        )
-        || item.issue.as_ref().map(|issue| issue.code.as_str())
-            != Some("IMPORT_WEB_SUBTITLE_UNAVAILABLE")
-    {
+    if !matches!(
+        item.status,
+        ImportItemStatus::WaitingAuthorization
+            | ImportItemStatus::WaitingCapability
+            | ImportItemStatus::Failed
+    ) {
         return Err(BackendError::new(
             "IMPORT_V2_STATE_INVALID",
-            "Local ASR can be authorized only for a supported-media item currently waiting because subtitles are unavailable.",
+            "Local ASR can be authorized only for a media item currently waiting for recognition.",
             false,
             true,
         ));
@@ -401,6 +830,8 @@ fn platform_matches_host(platform: &str, host: &str) -> bool {
                 || host.ends_with(".xiaohongshu.com")
                 || host == "xhslink.com"
                 || host.ends_with(".xhslink.com")
+                || host == "xhslink.cn"
+                || host.ends_with(".xhslink.cn")
         }
         "douyin" => {
             host == "douyin.com"

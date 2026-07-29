@@ -1,5 +1,7 @@
 # Import V2 实现 Review（2026-07-15）
 
+> 历史实现审查证据，不构成 2026-07-24 后的产品验收门禁。当前 Import / Source 行为以 [`../superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。
+
 ## 结论
 
 当前实现不建议进入发布或切换窗口。基础工程质量不错，后端 Import V2 的协议、暂存、产物校验、事务恢复和测试覆盖已经形成骨架；但仍有一个 P0 安全阻断，以及多条会让用户无法完成导入、无法恢复或看不见真实结果的 P1 闭环问题。

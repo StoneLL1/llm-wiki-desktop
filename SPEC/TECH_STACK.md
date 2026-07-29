@@ -1,5 +1,8 @@
 # LLM Wiki Desktop 技术栈与架构边界
 
+> Import V2 的产品与跨层技术不变量见 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文描述技术边界；任何实现建议不得恢复“导入后自动编译”、URL 不写 Source 或 OCR / ASR 后移到编译阶段的旧行为。
+> 全量门禁先运行只读 `check:import-source-media`，验证证据 ID、可执行测试声明、被测试实际消费的真实夹具、禁止项和设置专属迁移入口，再运行前后端测试、构建与静态检查。
+
 ## 1. 文档目的
 
 本文面向后续开发 Agent / Claude Code，用来说明 LLM Wiki Desktop 已确定的技术栈、当前已实现架构分层、模块职责和实现边界。
@@ -12,7 +15,7 @@
 - 文件透明：知识库内容使用 Markdown、JSON 和普通文件。
 - 无数据库：项目内容不引入数据库。
 - Git 可恢复：批量修改、Agent 修改和高风险操作前创建检查点。
-- Agent 增强：Agent CLI 提供高级能力，但 BYOK API 必须支撑核心流程。
+- Agent 增强：Agent CLI 提供高级能力；Source 已形成后，BYOK API 支撑 AI 整理、Wiki 编译和 Chat，不参与 Import 解析恢复。
 - 跨平台：Windows、macOS、Linux 都是目标平台。
 - CJK 安全：必须正确处理 Unicode 和中文文件名。
 - 安全存密钥：API Key 存系统钥匙串或凭据管理器，不进项目文件。
@@ -139,8 +142,9 @@ Rust 后端是本地能力核心，负责文件系统、Git、Agent 进程、密
 
 - `ProjectService`
 - `FileStore`
-- `ImportService`
-- `ExtractionService`
+- `ImportV2Service`
+- `ImportCapabilityRuntime`
+- `ConnectorSessionService`
 - `GitService`
 - `AgentService`
 - `BookmarkService`
@@ -158,6 +162,8 @@ Rust 后端是本地能力核心，负责文件系统、Git、Agent 进程、密
 - `ConfirmationRegistry`
 
 commands 和 `AppState` 只依赖稳定 facade 类型；聚焦用例可以拆到 facade 子模块，但不把私有子模块暴露为跨 crate 依赖。模块间通过清晰数据结构通信，不让一个服务吞掉所有职责。
+
+Import V2 可以在稳定 facade 后组合 `ImportSessionService`、`CapabilityResolver`、`LoginSessionService`、`SourceCandidateService`、`SourceCommitService` 和 `SourceVersionService`。`CompileService` 保持独立，不进入导入提交事务。
 
 ## 9. ProjectService
 
@@ -195,36 +201,45 @@ commands 和 `AppState` 只依赖稳定 facade 类型；聚焦用例可以拆到
 - 任何来自 UI 的路径都必须校验是否在当前项目范围内。
 - 不要允许任意路径写入绕过项目边界。
 
-## 11. ImportService 与 ExtractionService
+## 11. Import V2 编排与确定性提取器
 
-### 11.1 ImportService
+### 11.1 ImportV2Service
 
-负责导入和归档：
+负责导入会话、来源身份、候选与提交：
 
-- 文件选择和拖拽输入的后端处理。
-- 文件夹导入。
-- 普通文件夹初始化为项目。
-- 原文件复制或迁移到 `raw/sources/` / `raw/assets/`。
-- 同名和重复文件处理。
-- 写入 `.app/import-conflicts.json`。
+- 文件、文件夹、URL、平台内容和剪贴板输入的后端处理。
+- 持久化一个项目级活动 `ImportSession` 及其任务、尝试和待办。
+- 统一规范 URL、来源 ID、内容 hash 和别名，完成去重与更新识别。
+- 将确定性提取、登录、能力、OCR、ASR、Agent 修复和质量检查编排为 `SourceCandidate`。
+- 提交时以 `sourceId` 为原子单元写入 `raw/`、`.app/` 和 `wiki/sources/`。
+- 保护人工编辑，更新时执行 Diff 或三方合并。
+- 只在覆盖、合并、替换和删除等高风险操作前创建 Git 检查点。
+- 导入完成后生成 `CompileChangeSet` 候选，但不自动启动编译。
 
-### 11.2 ExtractionService
+### 11.2 Import V2 确定性提取器
 
 负责标准化提取：
 
-- 从支持格式中提取文本。
-- 提取图片。
-- 提取元数据。
-- 生成 `raw/extracted/` 内容。
-- 为导入预览提供状态和文本摘要。
+- 从文档、图片、音视频、网页和平台内容中提取确定性文本、字幕、资源和元数据。
+- 原生文本优先，按内容缺口提出 OCR / ASR 能力需求。
+- 通过媒体能力包完成解码、音轨和关键帧处理。
+- 生成可验证的中间产物和质量报告，不直接写当前 Source。
+- 为候选预览提供最终 Markdown、资源、问题区间和目标路径。
 
 ### 11.3 解析器策略
 
-当前规格只确定支持格式，没有确定 PDF、DOCX、PPTX、XLSX 等具体解析库。实现时应先定义解析器接口，再选择具体库。
+解析器、平台适配器、OCR、ASR 和媒体处理均通过 typed capability / extractor 接口接入。React 只发送用户意图，不拥有进程、路径、登录秘密或能力安装逻辑。
 
-已确认：URL / 网页正文提取使用 Readability.js。
+普通网页先走轻量正文提取；正文壳或 JavaScript 页面自动升级到隔离浏览器。平台专用适配器、可安装能力和本地 Agent 修复按已确认优先级接续。
 
-不要在导入层做复杂 OCR 或视觉理解判断。OCR 和视觉理解交给后续 Agent / Skill。
+OCR 和 ASR 属于导入层的显式用户授权能力。图片视觉理解不在首版范围。BYOK 不参与导入解析或恢复；本地 Agent 只在隔离 staging 工作区生成候选。
+
+### 11.4 SourceService 与 CompileService 边界
+
+- `SourceService` 管理 `sourceId`、版本、别名、基线、当前 `wiki/sources/` 页面和整包删除。
+- `CompileService` 只在用户点击“用这些来源更新 Wiki”后读取 `sourceId + versionId` change set。
+- 编译可以读取现有 Sources 与 Wiki 关系，但不得写入 `wiki/sources/`。
+- 当前 Source Registry / manifest v3 是唯一写入主模型。仅当项目不存在 V2 Source Registry 时，`CompileLegacyAdapter` 才可只读解析旧 `.app/source-index.json`；兼容读取不得回写旧索引、不得写入 `wiki/sources/`，也不得把旧记录并入 V2 主模型。
 
 ## 12. GitService
 
@@ -266,8 +281,8 @@ Git 是用户数据安全边界，不是可选增强。
 默认策略：
 
 - 配置可用 Agent 时，Agent CLI 是默认优先路径。
-- 用户可以在设置或任务启动时手动选择 BYOK API。
-- 未配置 Agent 时，BYOK API 必须能跑通核心流程。
+- 用户可以在 Source 已形成后的 AI 整理、Wiki 编译或 Chat 任务启动时选择 BYOK API。
+- 未配置 Agent 时，BYOK API 必须能跑通这些文本流程，但不能替代 Import recovery。
 
 安全边界：
 
@@ -275,6 +290,13 @@ Git 是用户数据安全边界，不是可选增强。
 - 不静默执行安装命令。
 - Agent 执行继承 CLI 自身权限与沙箱机制。
 - 高风险文件修改仍由应用的 Git 和确认流程保护。
+
+导入恢复使用独立 `import-recovery` Skill：
+
+- 只允许本地 Agent，并且必须由用户主动触发。
+- 可在当前授权任务工作区使用现有浏览器、媒体、OCR / ASR 和脚本工具。
+- 只能写 staging 候选，不得直接写 `raw/`、`wiki/` 或 Git。
+- 不得安装软件、执行未知下载二进制、接触原始 Cookie / API Key 或绕过访问控制。
 
 ## 14. LlmService
 
@@ -297,9 +319,11 @@ Git 是用户数据安全边界，不是可选增强。
 
 API Key 不得写入项目文件，必须交给 `SecretService`。
 
+BYOK 只在 Source 已经形成后用于 AI 整理、Wiki 编译、Chat 和引用生成，不参与文件、网页、平台或媒体解析恢复。
+
 ## 15. SecretService
 
-负责密钥存储：
+负责密钥与平台登录秘密存储：
 
 - Windows Credential Manager。
 - macOS Keychain。
@@ -310,6 +334,8 @@ API Key 不得写入项目文件，必须交给 `SecretService`。
 - 项目文件中不能明文保存 API Key。
 - 导出项目或复制项目文件夹时不能泄漏密钥。
 - UI 只能显示密钥是否已配置，不默认回显完整密钥。
+- 平台 Cookie、token 和隔离 profile 引用不得进入 React、项目、日志或导出。
+- UI 只接收平台、账号摘要、有效 / 过期状态和最近验证时间。
 
 ## 16. SearchService
 
@@ -406,12 +432,16 @@ Agent 深度 Lint：
 后台任务包括：
 
 - 导入解析。
+- 媒体下载、OCR、ASR 与能力安装。
+- Source AI 整理和来源重处理。
 - Wiki 编译。
 - 图谱构建。
 - Agent 深度 Lint。
 - HTML / 报告生成。
 
 长任务不能阻塞 UI。关闭主窗口时默认最小化到托盘并继续任务。
+
+应用重启后，耗时下载、OCR 和 ASR 恢复为暂停状态，由用户明确继续；已完成分片可复用。用户主动取消时清理临时数据，后续重试从头开始。
 
 ## 21. SettingsService
 
@@ -452,6 +482,10 @@ project-root/
 - 不引入数据库。
 - 不把密钥写入项目文件。
 - 用户可以用外部编辑器修改 Markdown。
+- `wiki/sources/` 保存当前可阅读 Source，编译器不得写入。
+- `.app/import/` 保存活动会话、任务、尝试和能力需求。
+- `.app/sources/` 保存来源身份、版本、别名、编辑基线和时间线。
+- `.app/compile/` 保存 Source change set 与已消费版本。
 
 ## 23. 国际化
 

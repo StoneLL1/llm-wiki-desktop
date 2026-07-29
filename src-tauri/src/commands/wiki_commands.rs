@@ -13,6 +13,10 @@ use crate::models::wiki::{
     RenameWikiPageRequest, RenameWikiPageResponse, SaveWikiPageRequest, SaveWikiPageResponse,
     ToggleBookmarkRequest, ToggleBookmarkResponse, WikiAssetContent, WikiPageContent, WikiTree,
 };
+use crate::services::import_v2::source_lifecycle::{
+    apply_validated_page_binding, apply_validated_source_bindings, reject_generic_source_create,
+    reject_generic_source_path,
+};
 use crate::services::import_v2::source_registry::SourceRegistry;
 
 const MAX_WIKI_ASSET_BYTES: usize = 16 * 1024 * 1024;
@@ -31,7 +35,9 @@ pub fn scan_wiki(
 ) -> Result<WikiTree, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
-    state.search_service.scan_wiki(&context, &bookmark_paths)
+    let mut tree = state.search_service.scan_wiki(&context, &bookmark_paths)?;
+    apply_validated_source_bindings(&context, &state.file_store, &mut tree)?;
+    Ok(tree)
 }
 
 #[tauri::command]
@@ -41,9 +47,12 @@ pub fn read_wiki_page(
 ) -> Result<WikiPageContent, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
-    state
-        .search_service
-        .read_page(&context, &request.relative_path, &bookmark_paths)
+    let mut page =
+        state
+            .search_service
+            .read_page(&context, &request.relative_path, &bookmark_paths)?;
+    apply_validated_page_binding(&context, &state.file_store, &mut page)?;
+    Ok(page)
 }
 
 /// Read an imported Wiki image through a project-scoped backend command.
@@ -111,6 +120,9 @@ pub fn save_wiki_page(
     request: SaveWikiPageRequest,
 ) -> Result<SaveWikiPageResponse, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if request.expected_hash.is_none() {
+        reject_generic_source_create(&request.relative_path, None, Some(&request.contents))?;
+    }
     state.search_service.save_page(
         &context,
         &request.relative_path,
@@ -142,6 +154,7 @@ pub fn create_wiki_page(
     request: CreateWikiPageRequest,
 ) -> Result<SaveWikiPageResponse, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    reject_generic_source_create(&request.relative_path, request.page_type.as_deref(), None)?;
     state.search_service.create_page(&context, &request)
 }
 
@@ -156,6 +169,8 @@ pub fn rename_wiki_page(
     request: RenameWikiPageRequest,
 ) -> Result<RenameWikiPageResponse, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    reject_generic_source_path(&context, &state.file_store, &request.relative_path)?;
+    reject_generic_source_create(&request.new_relative_path, None, None)?;
     state.git_service.create_checkpoint(
         &context,
         CheckpointPurpose::HighRiskOperation,
@@ -177,6 +192,7 @@ pub fn request_delete_wiki_page(
     request: DeleteWikiPageRequest,
 ) -> Result<PendingAction, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    reject_generic_source_path(&context, &state.file_store, &request.relative_path)?;
     let absolute = context.resolve_project_path(&request.relative_path)?;
     if absolute.strip_prefix(&context.wiki_dir).is_err() {
         return Err(BackendError::new(

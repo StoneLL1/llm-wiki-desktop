@@ -68,7 +68,7 @@ describe("projectStore bootstrap", () => {
     const confirmation = new Promise<import("../types/backend").ConfirmedAction>((resolve) => {
       resolveConfirmation = resolve;
     });
-    const actionA = { id: "a", actionType: "delete_source" as const, title: "A", message: "A", riskLevel: "destructive" as const, affectedPaths: [], preview: null, expiresAt: null };
+    const actionA = { id: "a", actionType: "delete_file" as const, title: "A", message: "A", riskLevel: "destructive" as const, affectedPaths: [], preview: null, expiresAt: null };
     const actionB = { ...actionA, id: "b", title: "B" };
     const projectB = { ...summary, projectId: "project-b", rootPath: "D:/wiki/project-b" };
     useProjectStore.setState({ currentProject: summary, pendingAction: actionA });

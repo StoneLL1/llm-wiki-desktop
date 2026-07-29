@@ -11,6 +11,7 @@ import type {
   ProviderTestResult,
 } from "../../types/llm";
 import type { ProjectSummary } from "../../types/project";
+import type { ImportWorkflow } from "../import/importWorkflow";
 
 // Settings is a secondary control surface, not a workspace destination, so it
 // loads on demand: the chunk only fetches when the dialog first opens.
@@ -29,6 +30,7 @@ interface SettingsDialogProps {
   onSaveSecret: (provider: LlmProviderKind, secret: string) => Promise<unknown> | unknown;
   onDeleteSecret: (provider: LlmProviderKind) => Promise<unknown> | unknown;
   onTestProvider: (config: LlmProviderConfig) => Promise<ProviderTestResult>;
+  importWorkflow?: ImportWorkflow;
 }
 
 export function SettingsDialog({ open, onClose, ...settingsProps }: SettingsDialogProps) {

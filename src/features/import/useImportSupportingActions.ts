@@ -6,19 +6,15 @@ import { useImportStore } from "../../stores/importStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AgentKind } from "../../types/agent";
-import type { LlmProviderKind } from "../../types/llm";
-import type { AgentAssistancePolicy, AgentAssistanceTrigger } from "../../types/importV2Agent";
+import type { AgentAssistanceTrigger } from "../../types/importV2Agent";
 import type { LegacyInventory, MigrationConfirmation, MigrationPlan } from "../../types/importV2Migration";
+import { useWikiStore } from "../wiki/wikiStore";
 import type { ImportWorkflow } from "./importWorkflow";
 import type { ImportTaskCoordinator } from "./useImportTaskCoordinator";
 import { importWorkflowErrorMessage } from "./useImportSessionScope";
 
 type SupportingActions = Pick<ImportWorkflow,
-  | "getAgentPolicy"
-  | "setAgentPolicy"
   | "invokeLocalAgent"
-  | "previewByokScope"
-  | "approveByokAssistance"
   | "acceptAgentCandidate"
   | "selectAgentCandidate"
   | "discardAgentCandidate"
@@ -27,6 +23,7 @@ type SupportingActions = Pick<ImportWorkflow,
   | "revokeLogin"
   | "authorizePrivateTarget"
   | "getCapabilityRequirement"
+  | "getAsrEnablementPlan"
   | "installCapability"
   | "scanMigration"
   | "planMigration"
@@ -43,7 +40,7 @@ interface ImportSupportingActionsOptions {
   isProjectCurrent: (requestKey: string) => boolean;
   isScopeCurrent: (requestKey: string, epoch: number, expectedSessionId?: string) => boolean;
   refreshForScope: (requestKey: string, epoch: number, expectedSessionId?: string) => Promise<void>;
-  startItems: ImportWorkflow["startItems"];
+  trackStartedItems: ImportTaskCoordinator["trackStartedItems"];
   trackCapabilityTask: ImportTaskCoordinator["trackCapabilityTask"];
 }
 
@@ -54,7 +51,7 @@ export function useImportSupportingActions({
   isProjectCurrent,
   isScopeCurrent,
   refreshForScope,
-  startItems,
+  trackStartedItems,
   trackCapabilityTask,
 }: ImportSupportingActionsOptions): SupportingActions {
   const { t } = useTranslation();
@@ -64,34 +61,6 @@ export function useImportSupportingActions({
   const showError = useCallback((error: unknown) => {
     pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
   }, [pushToast, t]);
-
-  const getAgentPolicy = useCallback(async () => {
-    try {
-      const result = await importV2Api.getAgentPolicy({ projectId, projectRootPath: rootPath });
-      return isProjectCurrent(projectKey) ? result : null;
-    } catch (error) {
-      if (isProjectCurrent(projectKey)) showError(error);
-      return null;
-    }
-  }, [isProjectCurrent, projectId, projectKey, rootPath, showError]);
-
-  const setAgentPolicy = useCallback(async (
-    policy: AgentAssistancePolicy,
-    localAgentKind: AgentKind | null,
-  ) => {
-    try {
-      const result = await importV2Api.setAgentPolicy({
-        projectId,
-        projectRootPath: rootPath,
-        policy,
-        localAgentKind,
-      });
-      return isProjectCurrent(projectKey) ? result : null;
-    } catch (error) {
-      if (isProjectCurrent(projectKey)) showError(error);
-      throw error;
-    }
-  }, [isProjectCurrent, projectId, projectKey, rootPath, showError]);
 
   const invokeLocalAgent = useCallback(async (
     itemId: string,
@@ -110,61 +79,6 @@ export function useImportSupportingActions({
         itemId,
         trigger,
         agentKind,
-      });
-      selectedTaskUpsert(task);
-      if (!isScopeCurrent(projectKey, epoch)) return null;
-      openTaskDrawer(task.id);
-      return task;
-    } catch (error) {
-      if (isScopeCurrent(projectKey, epoch)) showError(error);
-      throw error;
-    }
-  }, [isScopeCurrent, openTaskDrawer, projectId, projectKey, rootPath, selectedTaskUpsert, showError]);
-
-  const previewByokScope = useCallback(async (
-    itemId: string,
-    trigger: AgentAssistanceTrigger,
-    provider: LlmProviderKind,
-  ) => {
-    const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
-    const epoch = current.sessionEpoch;
-    try {
-      const scope = await importV2Api.previewByokScope({
-        projectId,
-        projectRootPath: rootPath,
-        sessionId: current.session.sessionId,
-        itemId,
-        trigger,
-        provider,
-      });
-      return isScopeCurrent(projectKey, epoch) ? scope : null;
-    } catch (error) {
-      if (isScopeCurrent(projectKey, epoch)) showError(error);
-      throw error;
-    }
-  }, [isScopeCurrent, projectId, projectKey, rootPath, showError]);
-
-  const approveByokAssistance = useCallback(async (request: {
-    itemId: string;
-    trigger: AgentAssistanceTrigger;
-    provider: LlmProviderKind;
-    model: string;
-    approvalId: string;
-    scopeSha256: string;
-    acknowledgePossibleDuplicateCharge: boolean;
-  }) => {
-    const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === request.itemId)) return null;
-    const epoch = current.sessionEpoch;
-    try {
-      const task = await importV2Api.approveByokAssistance({
-        projectId,
-        projectRootPath: rootPath,
-        sessionId: current.session.sessionId,
-        ...request,
       });
       selectedTaskUpsert(task);
       if (!isScopeCurrent(projectKey, epoch)) return null;
@@ -215,6 +129,10 @@ export function useImportSupportingActions({
       });
       if (isScopeCurrent(projectKey, epoch)) {
         useImportStore.getState().replaceItem(projectKey, result.item, epoch);
+        if (result.completion) {
+          useImportStore.getState().setCompletion(projectKey, result.completion, epoch);
+          void useWikiStore.getState().scan(projectId, rootPath);
+        }
         return result;
       }
       return null;
@@ -282,14 +200,20 @@ export function useImportSupportingActions({
         connectorSessionId,
       });
       if (!isScopeCurrent(projectKey, epoch)) return null;
+      trackStartedItems(
+        result.tasks,
+        result.resumedItemIds,
+        projectKey,
+        epoch,
+        current.session.sessionId,
+      );
       await refreshForScope(projectKey, epoch);
-      await startItems([itemId]);
-      return result;
+      return result.connectorSession;
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) showError(error);
       throw error;
     }
-  }, [isScopeCurrent, projectId, projectKey, refreshForScope, rootPath, showError, startItems]);
+  }, [isScopeCurrent, projectId, projectKey, refreshForScope, rootPath, showError, trackStartedItems]);
 
   const revokeLogin = useCallback(async (connectorSessionId: string, platform: string | null = null) => {
     if (!isProjectCurrent(projectKey)) return false;
@@ -329,6 +253,25 @@ export function useImportSupportingActions({
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.getCapabilityRequirement({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId: current.session.sessionId,
+        itemId,
+      });
+      return isScopeCurrent(projectKey, epoch) ? result : null;
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch)) showError(error);
+      throw error;
+    }
+  }, [isScopeCurrent, projectId, projectKey, rootPath, showError]);
+
+  const getAsrEnablementPlan = useCallback(async (itemId: string) => {
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey
+      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+    const epoch = current.sessionEpoch;
+    try {
+      const result = await importV2Api.getAsrEnablementPlan({
         projectId,
         projectRootPath: rootPath,
         sessionId: current.session.sessionId,
@@ -457,11 +400,7 @@ export function useImportSupportingActions({
   }, [isProjectCurrent, projectId, projectKey, rootPath, showError]);
 
   return {
-    getAgentPolicy,
-    setAgentPolicy,
     invokeLocalAgent,
-    previewByokScope,
-    approveByokAssistance,
     acceptAgentCandidate,
     selectAgentCandidate,
     discardAgentCandidate,
@@ -470,6 +409,7 @@ export function useImportSupportingActions({
     revokeLogin,
     authorizePrivateTarget,
     getCapabilityRequirement,
+    getAsrEnablementPlan,
     installCapability,
     scanMigration,
     planMigration,

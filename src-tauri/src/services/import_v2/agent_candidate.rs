@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::errors::BackendError;
-use crate::models::import_v2::{ArtifactKind, ImportArtifact, ImportItem, ImportPreviewArtifact};
+use crate::models::import_v2::{
+    ArtifactKind, ImportArtifact, ImportBatchResult, ImportItem, ImportPreviewArtifact,
+};
 use crate::models::import_v2_agent::{
     AgentAuditRecord, AgentCandidate, AgentCandidateDiff, AgentCandidateManifest,
 };
@@ -16,7 +18,7 @@ use crate::models::task::{TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::agent_workspace::AgentTaskBundle;
 use crate::services::import_v2::engine::EngineResult;
 use crate::services::import_v2::quality_gate::QualityGate;
-use crate::services::import_v2::source_registry::{SourceIndex, SourceManifest};
+use crate::services::import_v2::source_registry::{SourceIndex, SourceRegistry};
 use crate::services::import_v2::ImportV2Service;
 use crate::services::{FileStore, GitService};
 use crate::tasks::TaskService;
@@ -392,6 +394,67 @@ impl<'a> AgentCandidateService<'a> {
         merged_markdown: Option<&str>,
         expected_current_wiki_sha256: Option<&str>,
     ) -> Result<ImportItem, BackendError> {
+        self.imports.with_agent_candidate_action_lock(|| {
+            self.select_candidate_locked(
+                context,
+                session_id,
+                item_id,
+                candidate_id,
+                merged_markdown,
+                expected_current_wiki_sha256,
+            )
+        })
+    }
+
+    pub fn select_candidate_and_finalize_exact_duplicate(
+        &self,
+        context: &ProjectContext,
+        git_service: &GitService,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+        merged_markdown: Option<&str>,
+        expected_current_wiki_sha256: Option<&str>,
+        restricted_content_acknowledged: bool,
+    ) -> Result<(ImportItem, Option<ImportBatchResult>), BackendError> {
+        self.imports.with_agent_candidate_action_lock(|| {
+            self.select_candidate_locked(
+                context,
+                session_id,
+                item_id,
+                candidate_id,
+                merged_markdown,
+                expected_current_wiki_sha256,
+            )?;
+            let batch = self.imports.finalize_exact_duplicate(
+                context,
+                self.files,
+                git_service,
+                session_id,
+                item_id,
+                restricted_content_acknowledged,
+                || Ok(()),
+            )?;
+            let item = self
+                .imports
+                .load_session(context, self.files, session_id)?
+                .items
+                .into_iter()
+                .find(|item| item.item_id == item_id)
+                .ok_or_else(|| candidate_error("Import item was not found after selection."))?;
+            Ok((item, batch))
+        })
+    }
+
+    fn select_candidate_locked(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+        merged_markdown: Option<&str>,
+        expected_current_wiki_sha256: Option<&str>,
+    ) -> Result<ImportItem, BackendError> {
         let stored = self.load_stored(context, session_id, item_id, candidate_id)?;
         let expected_candidate_id = hash_bytes(
             format!(
@@ -443,7 +506,7 @@ impl<'a> AgentCandidateService<'a> {
         }
         let mut selected_markdown = stored.candidate.markdown.clone();
         let mut selected_quality = stored.candidate.quality.clone();
-        if stored.diff.needs_three_way_merge {
+        let explicit_merge_current_hash = if stored.diff.needs_three_way_merge {
             let merged = merged_markdown.ok_or_else(|| {
                 candidate_error("A three-way merge requires explicit merged Markdown.")
             })?;
@@ -500,11 +563,14 @@ impl<'a> AgentCandidateService<'a> {
             selected_markdown = merged_preview.markdown;
             prefix_artifact(&mut selected_markdown, &artifact_prefix);
             selected_quality = merged_preview.quality;
+            Some(expected.to_string())
         } else if merged_markdown.is_some() || expected_current_wiki_sha256.is_some() {
             return Err(candidate_error(
                 "Merge content is accepted only for a three-way candidate.",
             ));
-        }
+        } else {
+            None
+        };
         let source = ImportArtifact {
             kind: ArtifactKind::SourceSnapshot,
             relative_path: format!("{artifact_prefix}/source.bin"),
@@ -517,6 +583,8 @@ impl<'a> AgentCandidateService<'a> {
             source_snapshot: source,
             quality: selected_quality,
             title: format!("AI-assisted: {}", item.input.display_name),
+            resolution: None,
+            manual_merge: None,
         };
         let selected = self.imports.select_agent_candidate(
             context,
@@ -525,13 +593,25 @@ impl<'a> AgentCandidateService<'a> {
             item_id,
             &stored.candidate.task_id,
             preview,
-            false,
+            explicit_merge_current_hash.as_deref(),
         )?;
         self.cleanup_task_workspace(context, session_id, item_id, &stored.candidate.task_id)?;
         Ok(selected)
     }
 
     pub fn discard_candidate(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.imports.with_agent_candidate_action_lock(|| {
+            self.discard_candidate_locked(context, session_id, item_id, candidate_id)
+        })
+    }
+
+    fn discard_candidate_locked(
         &self,
         context: &ProjectContext,
         session_id: &str,
@@ -585,8 +665,7 @@ impl<'a> AgentCandidateService<'a> {
                         if bound_session == session_id && bound_item == &item.item_id
                 );
                 let exact_attempt = item.attempts.iter().any(|attempt| {
-                    (attempt.route == format!("agent_assistance/{task_id}")
-                        || attempt.route == format!("byok_assistance/{task_id}"))
+                    attempt.route == format!("agent_assistance/{task_id}")
                         && attempt.outcome == crate::models::import_v2::AttemptOutcome::Succeeded
                         && !attempt
                             .warnings
@@ -612,8 +691,7 @@ impl<'a> AgentCandidateService<'a> {
                     .find(|item| item.item_id == item_id)
                     .is_some_and(|item| {
                         item.attempts.iter().any(|attempt| {
-                            (attempt.route == format!("agent_assistance/{task_id}")
-                                || attempt.route == format!("byok_assistance/{task_id}"))
+                            attempt.route == format!("agent_assistance/{task_id}")
                                 && attempt
                                     .warnings
                                     .iter()
@@ -627,10 +705,10 @@ impl<'a> AgentCandidateService<'a> {
         }
         let latest = self.imports.load_session(context, self.files, session_id)?;
         for item in &latest.items {
-            let has_agent_attempt = item.attempts.iter().any(|attempt| {
-                attempt.route.starts_with("agent_assistance/")
-                    || attempt.route.starts_with("byok_assistance/")
-            });
+            let has_agent_attempt = item
+                .attempts
+                .iter()
+                .any(|attempt| attempt.route.starts_with("agent_assistance/"));
             let registered_candidate = matches!(
                 item.status,
                 crate::models::import_v2::ImportItemStatus::PreviewReady
@@ -726,37 +804,11 @@ fn validate_candidate_audit(
         audit
             .agent_kind
             .is_some_and(|kind| kind.command() == command)
-            && audit.prompt_template_version == "wiki-ingest-assist/local-v1"
+            && audit.prompt_template_version == "import-recovery/local-v1"
             && audit.approved_cost_micros.is_none()
             && audit.approved_scope_sha256.is_none()
-            && audit.byok_provider.is_none()
-            && audit.byok_destination.is_none()
             && audit.input_hashes == bundle.input_hashes
             && audit.granted_tools == bundle.allowed_tools
-    } else if audit.route.starts_with("byok/") {
-        audit
-            .byok_provider
-            .as_ref()
-            .is_some_and(|provider| !provider.trim().is_empty())
-            && audit
-                .byok_destination
-                .as_ref()
-                .is_some_and(|destination| !destination.trim().is_empty())
-            && audit.route
-                == format!(
-                    "byok/{}/{}/{}",
-                    audit.byok_provider.as_deref().unwrap_or_default(),
-                    audit.agent_version,
-                    audit.byok_destination.as_deref().unwrap_or_default()
-                )
-            && audit.agent_kind.is_none()
-            && audit.prompt_template_version == "wiki-ingest-assist/byok-v1"
-            && audit
-                .approved_scope_sha256
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-            && audit.approved_cost_micros.is_some()
-            && audit.granted_tools.is_empty()
     } else {
         false
     };
@@ -829,7 +881,6 @@ fn validate_manifest(manifest: &AgentCandidateManifest) -> Result<(), BackendErr
     }
     let allowed_tools = [
         "tool-free-local-agent",
-        "byok-model",
         "inspect_source",
         "run_deterministic_route",
         "run_ocr",
@@ -981,12 +1032,8 @@ fn registry_markdown_views(
     if !files.exists(context, &manifest_path) {
         return Ok((None, None));
     }
-    let manifest: SourceManifest = serde_json::from_slice(&read_project_file(
-        context,
-        &manifest_path,
-        MAX_OUTPUT_BYTES,
-    )?)
-    .map_err(|_| candidate_error("Source Registry manifest is malformed."))?;
+    let manifest = SourceRegistry::read_manifest(context, files, &manifest_path)
+        .map_err(|_| candidate_error("Source Registry manifest is malformed."))?;
     if manifest.source_id != pointer.source_id {
         return Err(candidate_error(
             "Source Registry pointer and manifest do not match.",
@@ -1289,12 +1336,10 @@ mod tests {
             route: "local/claude".into(),
             agent_kind: Some(AgentKind::Claude),
             agent_version: "1.0".into(),
-            prompt_template_version: "wiki-ingest-assist/local-v1".into(),
+            prompt_template_version: "import-recovery/local-v1".into(),
             approved_cost_micros: None,
             tool_calls: Vec::new(),
             approved_scope_sha256: None,
-            byok_provider: None,
-            byok_destination: None,
             workspace_relative_path:
                 ".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a".into(),
             granted_tools: bundle.allowed_tools.clone(),
@@ -1435,6 +1480,8 @@ mod tests {
                 meaningful_image_coverage: None,
             },
             title: "Example".into(),
+            resolution: None,
+            manual_merge: None,
         });
         let bundle = AgentTaskBundle {
             schema_version: 1,

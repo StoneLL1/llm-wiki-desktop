@@ -1,5 +1,7 @@
 # Import V2 Web Ingestion release evidence
 
+> Historical QA evidence. Future release validation must additionally prove every successful URL creates a Source and never auto-compiles, as required by [`../superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../superpowers/specs/2026-07-24-import-source-media-flow-design.md).
+
 ## Local automated gate (2026-07-12, Windows x86_64)
 
 - Frozen fixtures: generic contract, WeChat challenge/article, Zhihu article/auth/drift, Bilibili metadata/subtitle/no-subtitle, Xiaohongshu signed note, X same-author thread.

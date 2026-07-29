@@ -26,8 +26,11 @@ use std::{
 pub struct ConnectorSessionRef {
     pub session_id: String,
     pub platform: String,
-    pub profile_ref: String,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_at: Option<String>,
 }
 struct ManagedChild {
     child: Child,
@@ -114,8 +117,9 @@ impl ConnectorSessionService {
         let r = ConnectorSessionRef {
             session_id: id.clone(),
             platform: platform.into(),
-            profile_ref: format!("connector-profile:{platform}"),
             state: "waiting_login".into(),
+            account_summary: None,
+            last_verified_at: None,
         };
         sessions.insert(
             id,
@@ -139,13 +143,30 @@ impl ConnectorSessionService {
         item_id: &str,
     ) -> Result<ConnectorSessionRef, BackendError> {
         validate_entrypoint_unchanged(pack)?;
-        let reference = self.create(platform, profiles_root)?;
         let binding = ConnectorSessionBinding {
             project_id: project_id.to_string(),
             import_session_id: import_session_id.to_string(),
             item_id: item_id.to_string(),
             target_sha256: format!("{:x}", Sha256::digest(url.as_bytes())),
         };
+        if let Some(reference) = self
+            .sessions
+            .lock()
+            .map_err(|_| e("Connector sessions are unavailable."))?
+            .values_mut()
+            .find_map(|entry| {
+                (entry.reference.platform == platform
+                    && entry.reference.state == "authenticated"
+                    && profile_is_unchanged(&entry.path))
+                .then(|| {
+                    entry.binding = Some(binding.clone());
+                    entry.reference.clone()
+                })
+            })
+        {
+            return Ok(reference);
+        }
+        let reference = self.create(platform, profiles_root)?;
         let profile = self
             .sessions
             .lock()
@@ -263,8 +284,13 @@ impl ConnectorSessionService {
                 .and_then(|r| r.get("authenticated"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let account_summary = login_result.as_ref().and_then(sanitized_account_summary);
+            let verified_at = authenticated.then(|| chrono::Utc::now().to_rfc3339());
             if authenticated {
-                if let Some(cookies) = login_result.and_then(|r| r.get("cookies").cloned()) {
+                if let Some(cookies) = login_result
+                    .as_ref()
+                    .and_then(|r| r.get("cookies").cloned())
+                {
                     if cookies.is_array()
                         && serde_json::to_vec(&cookies).is_ok_and(|v| v.len() <= 64 * 1024)
                     {
@@ -285,6 +311,8 @@ impl ConnectorSessionService {
                     } else {
                         "failed".into()
                     };
+                    entry.reference.account_summary = account_summary;
+                    entry.reference.last_verified_at = verified_at;
                     entry.child = None;
                 }
             }
@@ -317,7 +345,7 @@ impl ConnectorSessionService {
         }
         Ok(entry.path.clone())
     }
-    pub fn take_authenticated_profile_bound(
+    pub fn authenticated_profile_bound(
         &self,
         id: &str,
         project_id: &str,
@@ -331,7 +359,7 @@ impl ConnectorSessionService {
             item_id: item_id.to_string(),
             target_sha256: format!("{:x}", Sha256::digest(target_url.as_bytes())),
         };
-        let mut sessions = self
+        let sessions = self
             .sessions
             .lock()
             .map_err(|_| e("Connector sessions are unavailable."))?;
@@ -346,10 +374,7 @@ impl ConnectorSessionService {
                 "The authenticated connector is not bound to this import item.",
             ));
         }
-        let entry = sessions
-            .remove(id)
-            .ok_or_else(|| e("Connector session was not found."))?;
-        Ok((entry.reference, entry.path))
+        Ok((entry.reference.clone(), entry.path.clone()))
     }
     pub fn revoke(&self, id: &str) -> Result<(), BackendError> {
         if let Some(entry) = self
@@ -486,6 +511,35 @@ impl ConnectorSessionService {
     }
 }
 
+fn sanitized_account_summary(result: &serde_json::Value) -> Option<String> {
+    let value = result.get("accountSummary")?;
+    let raw = value.as_str().map(str::to_string).or_else(|| {
+        let display_name = value
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let handle = value
+            .get("handle")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        match (display_name.is_empty(), handle.is_empty()) {
+            (false, false) => Some(format!("{display_name} — {handle}")),
+            (false, true) => Some(display_name.to_string()),
+            (true, false) => Some(handle.to_string()),
+            (true, true) => None,
+        }
+    })?;
+    let normalized = raw
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(120)
+        .collect::<String>();
+    let normalized = normalized.trim();
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
 fn prepare_profiles_root(path: &Path) -> Result<PathBuf, BackendError> {
     if path.exists() {
         let path = validate_profile_directory(path)?;
@@ -589,7 +643,7 @@ mod binding_tests {
     use super::*;
 
     #[test]
-    fn authenticated_profile_is_exactly_bound_and_single_use() {
+    fn authenticated_profile_is_exactly_bound_and_reusable() {
         let service = ConnectorSessionService::default();
         let root = tempfile::tempdir().unwrap();
         let profile = root.path().join("profile");
@@ -603,8 +657,9 @@ mod binding_tests {
                 reference: ConnectorSessionRef {
                     session_id: id.clone(),
                     platform: "bilibili".into(),
-                    profile_ref: "connector-profile:connector-a".into(),
                     state: "authenticated".into(),
+                    account_summary: Some("Reader — @reader".into()),
+                    last_verified_at: Some("2026-07-27T00:00:00Z".into()),
                 },
                 path: profile.clone(),
                 child: None,
@@ -617,16 +672,16 @@ mod binding_tests {
             },
         );
         assert!(service
-            .take_authenticated_profile_bound(&id, "project-b", "session-a", "item-a", target)
+            .authenticated_profile_bound(&id, "project-b", "session-a", "item-a", target)
             .is_err());
         assert!(service.resume(&id).is_ok());
         let (_, taken) = service
-            .take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target)
+            .authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target)
             .unwrap();
         assert_eq!(taken, profile);
         assert!(service
-            .take_authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target)
-            .is_err());
+            .authenticated_profile_bound(&id, "project-a", "session-a", "item-a", target)
+            .is_ok());
     }
 
     #[test]

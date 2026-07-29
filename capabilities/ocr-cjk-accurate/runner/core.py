@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import math
+import ntpath
 import os
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,21 @@ def is_contained(root: Path, candidate: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def native_tool_path(value: Path, platform: str | None = None) -> str:
+    path_value = str(value)
+    if (platform or os.name) != "nt":
+        return path_value
+    normalized = path_value.replace("/", "\\")
+    if normalized.startswith(("\\\\?\\", "\\\\.\\")):
+        return normalized
+    parts = normalized[2:].split("\\") if normalized.startswith("\\\\") else []
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        return "\\\\?\\UNC\\" + ntpath.normpath(normalized)[2:]
+    if len(normalized) >= 3 and normalized[0].isalpha() and normalized[1:3] == ":\\":
+        return "\\\\?\\" + ntpath.normpath(normalized)
+    return path_value
 
 
 def resolve_staging_image(

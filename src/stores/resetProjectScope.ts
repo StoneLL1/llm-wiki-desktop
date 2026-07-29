@@ -1,4 +1,5 @@
 import { useWikiStore } from "../features/wiki/wikiStore";
+import { useSourceStore } from "../features/wiki/sourceStore";
 import { useChatStore } from "./chatStore";
 import { useExportStore } from "./exportStore";
 import { useGraphStore } from "./graphStore";
@@ -15,6 +16,7 @@ export function resetProjectScopedStores(): void {
   void useLintStore.getState().cancelPendingActions();
   useImportStore.getState().resetProjectPresentation("");
   useWikiStore.getState().reset();
+  useSourceStore.getState().reset();
   useChatStore.getState().reset();
   useExportStore.getState().reset();
   useGraphStore.getState().reset();

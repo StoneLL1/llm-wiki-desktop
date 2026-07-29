@@ -75,10 +75,8 @@ describe("Import V2 session store", () => {
       selectedItemId: null,
       isConfirming: false,
       previewItemId: null,
-      byokItemId: null,
       capabilityItemId: null,
       loginItemId: null,
-      migrationDialogOpen: false,
     });
   });
 
@@ -93,20 +91,16 @@ describe("Import V2 session store", () => {
   });
 
   it.each<ImportQueueFilter>(["all", "active", "ready", "needs_action", "failed", "completed"])(
-    "stores queue filter %s and dialog identities",
+    "stores queue filter %s and item-scoped dialog identities",
     (filter) => {
       useImportStore.getState().setFilter(filter);
-      useImportStore.getState().openByok("one");
       useImportStore.getState().openCapability("one");
       useImportStore.getState().openLogin("one");
-      useImportStore.getState().setMigrationDialogOpen(true);
 
       expect(useImportStore.getState()).toMatchObject({
         filter,
-        byokItemId: "one",
         capabilityItemId: "one",
         loginItemId: "one",
-        migrationDialogOpen: true,
       });
     },
   );

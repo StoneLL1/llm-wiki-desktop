@@ -48,6 +48,7 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
   return {
     projectKey: "project-integration\0D:/wiki/project-integration",
     session: current,
+    completion: null,
     readiness: { backendVersion: "2.0.0", active: true, migrationStatus: "applied", unfinishedSessionId: current.sessionId, legacyHistoryAvailable: false },
     bootstrapState: "ready",
     visibleItems: items,
@@ -56,6 +57,15 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     selectedItemId: null,
     filter: "all",
     addPaths: vi.fn(),
+    addText: vi.fn(),
+    collectionPreview: null,
+    loadCollectionPage: vi.fn(),
+    confirmCollection: vi.fn(),
+    dismissCollection: vi.fn(),
+    remoteMediaRetentionPlan: null,
+    planRemoteMediaRetention: vi.fn(),
+    confirmRemoteMediaRetention: vi.fn(),
+    dismissRemoteMediaRetention: vi.fn(),
     addUrl: vi.fn(),
     setItemSelected: vi.fn(),
     startItems: vi.fn(),
@@ -63,17 +73,24 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     cancelItem: vi.fn(),
     skipItem: vi.fn(),
     authorizeLocalAsr: vi.fn(),
+    authorizeLocalOcr: vi.fn(),
+    selectSubtitle: vi.fn(),
     confirm: vi.fn(),
+    restrictedCommitPending: false,
+    confirmRestrictedContent: vi.fn(),
+    dismissRestrictedContent: vi.fn(),
+    viewImportedSources: vi.fn(),
+    updateWiki: vi.fn(),
     refreshSession: vi.fn(),
     selectItem: vi.fn(),
     setFilter: vi.fn(),
     loadPreview: vi.fn(),
+    loadMergeContext: vi.fn(),
+    setItemResolution: vi.fn(),
+    stageManualMerge: vi.fn(),
     loadSession: vi.fn(),
-    getAgentPolicy: vi.fn().mockResolvedValue(null),
-    setAgentPolicy: vi.fn(),
+    loadCompletion: vi.fn(),
     invokeLocalAgent: vi.fn(),
-    previewByokScope: vi.fn(),
-    approveByokAssistance: vi.fn(),
     acceptAgentCandidate: vi.fn(),
     selectAgentCandidate: vi.fn(),
     discardAgentCandidate: vi.fn(),
@@ -82,6 +99,7 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     revokeLogin: vi.fn(),
     authorizePrivateTarget: vi.fn(),
     getCapabilityRequirement: vi.fn(),
+    getAsrEnablementPlan: vi.fn(),
     installCapability: vi.fn(),
     scanMigration: vi.fn(),
     planMigration: vi.fn(),
@@ -107,20 +125,27 @@ describe("Import V2 end-to-end presentation boundary", () => {
     ]);
     render(<ImportView workflow={workflow} />);
 
-    expect(screen.getByRole("button", { name: /confirm import/i })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: /confirm import/i }));
+    expect(screen.getByRole("button", { name: /import to source library/i })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /import to source library/i }));
     expect(workflow.confirm).toHaveBeenCalledWith([
-      { itemId: "notes.md", conflictAction: "create_new", expectedWikiHash: null },
+      { itemId: "notes.md", resolution: null },
     ]);
 
-    fireEvent.click(screen.getByRole("button", { name: /retry failed\.docx/i }));
-    fireEvent.click(screen.getByRole("button", { name: /cancel processing\.pdf/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "More actions for processing.pdf" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Cancel" }));
     expect(workflow.retryItem).toHaveBeenCalledWith("failed.docx");
     expect(workflow.cancelItem).toHaveBeenCalledWith("processing.pdf");
-    expect(screen.getAllByRole("status").some((element) => /0\/3 processed/i.test(element.textContent ?? ""))).toBe(true);
+    expect(
+      screen.getByText("Queue updated: 3 items, 1 need action, 1 ready.", {
+        selector: '[aria-live="polite"]',
+      }),
+    ).toHaveTextContent(
+      "Queue updated: 3 items, 1 need action, 1 ready.",
+    );
   });
 
-  it("keeps V2 entry points available while migration activation is pending", () => {
+  it("keeps compatibility engineering UI out of the normal workbench", () => {
     const workflow = makeWorkflow([]);
     workflow.bootstrapState = "ready";
     workflow.readiness = { backendVersion: "2.0.0", active: false, migrationStatus: "awaiting_confirmation", unfinishedSessionId: null, legacyHistoryAvailable: true };
@@ -128,10 +153,11 @@ describe("Import V2 end-to-end presentation boundary", () => {
     workflow.progress = { completed: 0, total: 0, active: 0 };
     render(<ImportView workflow={workflow} />);
 
-    expect(screen.getByRole("button", { name: /review migration/i })).toBeInTheDocument();
+    expect(screen.queryByText(/migration|fingerprint|dry-run/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /review migration/i })).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /add files|choose files/i }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /switch to v1|legacy write/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /confirm import/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /import to source library/i })).toBeDisabled();
   });
 
   it("bounds a large queue and exposes incremental loading", () => {

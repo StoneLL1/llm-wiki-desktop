@@ -1,9 +1,72 @@
 use serde::{Deserialize, Serialize};
 
+use super::import_v2::{ImportAsrProfile, QualityReport};
 use super::import_v2_file::CapabilityRequirement;
 use super::import_v2_migration::{LegacyHistoryEntry, LegacyHistoryWarning, MigrationStatus};
 
 pub const IMPORT_V2_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub const IMPORT_V2_WORKBENCH_PREFERENCES_PATH: &str = ".app/import-workbench.json";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportWorkbenchSection {
+    #[default]
+    Workbench,
+    Capabilities,
+    History,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportQueuePreference {
+    #[default]
+    All,
+    Active,
+    Ready,
+    NeedsAction,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportWorkbenchPreferences {
+    pub schema_version: u32,
+    pub active_section: ImportWorkbenchSection,
+    pub queue_filter: ImportQueuePreference,
+    pub workbench_scroll_top: u32,
+    pub capabilities_scroll_top: u32,
+    pub history_scroll_top: u32,
+    pub source_methods_expanded: bool,
+}
+
+impl Default for ImportWorkbenchPreferences {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            active_section: ImportWorkbenchSection::Workbench,
+            queue_filter: ImportQueuePreference::All,
+            workbench_scroll_top: 0,
+            capabilities_scroll_top: 0,
+            history_scroll_top: 0,
+            source_methods_expanded: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportWorkbenchPreferencesRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveImportWorkbenchPreferencesRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub preferences: ImportWorkbenchPreferences,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -17,7 +80,7 @@ pub struct GetImportPreviewContentV2Request {
     pub history_batch_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreviewContent {
     pub session_id: String,
@@ -28,6 +91,40 @@ pub struct ImportPreviewContent {
     pub truncated: bool,
     pub total_bytes: u64,
     pub sha256: String,
+    pub target: ImportPreviewTarget,
+    pub quality: QualityReport,
+    pub raw_label: String,
+    #[serde(default)]
+    pub resources: Vec<ImportPreviewResource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<ImportPreviewComparison>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreviewComparison {
+    pub current_markdown: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_markdown: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreviewTarget {
+    pub disposition: String,
+    pub source_id: Option<String>,
+    pub version_id: Option<String>,
+    pub wiki_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreviewResource {
+    pub source: String,
+    pub name: String,
+    pub kind: String,
+    pub size_bytes: u64,
+    pub data_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,6 +195,7 @@ pub enum ImportHistoryAction {
     OpenDetail,
     OpenResult,
     ViewLogs,
+    UpdateWiki,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,4 +260,63 @@ pub struct InstallImportCapabilityV2Request {
     pub item_id: String,
     pub capability_id: String,
     pub acknowledge_install: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetImportAsrEnablementPlanV2Request {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportAsrDependencyKind {
+    MediaRuntime,
+    Engine,
+    Model,
+    LanguageSupport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAsrDependency {
+    pub kind: ImportAsrDependencyKind,
+    pub name: String,
+    pub available: bool,
+    pub bundled_with_capability: bool,
+    pub source: String,
+    pub license: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAsrProfilePlan {
+    pub profile: ImportAsrProfile,
+    pub capability_id: String,
+    pub engine_name: String,
+    pub model_name: String,
+    pub available: bool,
+    pub installable: bool,
+    pub download_bytes: Option<u64>,
+    pub installed_bytes: Option<u64>,
+    pub model_bytes: Option<u64>,
+    pub device: String,
+    pub estimated_seconds: Option<u64>,
+    pub unavailable_reason_code: Option<String>,
+    pub dependencies: Vec<ImportAsrDependency>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAsrEnablementPlan {
+    pub recommended_profile: ImportAsrProfile,
+    pub available_memory_bytes: Option<u64>,
+    pub available_disk_bytes: Option<u64>,
+    pub media_duration_seconds: Option<u64>,
+    pub install_location: Option<String>,
+    pub local_only: bool,
+    pub profiles: Vec<ImportAsrProfilePlan>,
 }

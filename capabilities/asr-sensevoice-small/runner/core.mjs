@@ -19,6 +19,9 @@ const MEDIA_EXTENSIONS = new Set([
   ".aac", ".flac", ".m4a", ".mka", ".mp3", ".ogg", ".opus", ".wav",
   ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm",
 ]);
+const VIDEO_EXTENSIONS = new Set([
+  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm",
+]);
 
 function asError(code) {
   return new Error(code);
@@ -92,6 +95,16 @@ export function sherpaRelativePath(platform = process.platform) {
     : "runtime/sherpa/bin/sherpa-onnx-offline";
 }
 
+export function nativeToolPath(value, platform = process.platform) {
+  if (platform !== "win32" || typeof value !== "string") return value;
+  const normalized = value.replaceAll("/", "\\");
+  if (normalized.startsWith("\\\\?\\") || normalized.startsWith("\\\\.\\")) return normalized;
+  if (/^\\\\[^\\]+\\[^\\]+(?:\\|$)/u.test(normalized)) {
+    return `\\\\?\\UNC\\${path.win32.normalize(normalized).slice(2)}`;
+  }
+  return /^[A-Za-z]:\\/u.test(normalized) ? `\\\\?\\${path.win32.normalize(normalized)}` : value;
+}
+
 export function preferredProviders(platform = process.platform) {
   if (platform === "darwin") return ["coreml", "cpu"];
   if (platform === "win32" || platform === "linux") return ["cuda", "cpu"];
@@ -102,10 +115,10 @@ export function buildFfmpegArguments(mediaPath, wavPath) {
   return [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe",
-    "-i", mediaPath,
+    "-i", nativeToolPath(mediaPath),
     "-map", "0:a:0", "-vn", "-sn", "-dn",
     "-t", "7200", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-    wavPath,
+    nativeToolPath(wavPath),
   ];
 }
 
@@ -113,12 +126,12 @@ export function buildChunkedFfmpegArguments(mediaPath, wavPattern) {
   return [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe",
-    "-i", mediaPath,
+    "-i", nativeToolPath(mediaPath),
     "-map", "0:a:0", "-vn", "-sn", "-dn",
     "-t", "7200", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     "-f", "segment", "-segment_time", String(SENSEVOICE_CHUNK_SECONDS),
     "-reset_timestamps", "1",
-    wavPattern,
+    nativeToolPath(wavPattern),
   ];
 }
 
@@ -126,33 +139,116 @@ export function buildEmbeddedSubtitleArguments(mediaPath, subtitlePath) {
   return [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe",
-    "-i", mediaPath,
+    "-i", nativeToolPath(mediaPath),
     "-map", "0:s:0", "-vn", "-an", "-dn", "-c:s", "srt", "-f", "srt",
-    subtitlePath,
+    nativeToolPath(subtitlePath),
   ];
+}
+
+export function isVideoMedia(mediaPath) {
+  return VIDEO_EXTENSIONS.has(path.extname(mediaPath).toLowerCase());
+}
+
+export function buildVideoTextProbeArguments(mediaPath, outputPattern) {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", nativeToolPath(mediaPath),
+    "-an", "-sn", "-dn", "-t", "1800",
+    "-vf", "fps=1/10,scale=480:-2:flags=area,format=gray",
+    "-frames:v", "180", nativeToolPath(outputPattern),
+  ];
+}
+
+export function buildVideoOcrFrameArguments(mediaPath, seconds, outputPath) {
+  if (!Number.isFinite(seconds) || seconds < 0) throw asError("IMPORT_ASR_INVALID_REQUEST");
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-ss", seconds.toFixed(3), "-i", nativeToolPath(mediaPath),
+    "-an", "-sn", "-dn", "-frames:v", "1",
+    "-vf", "scale='min(1920,iw)':-2:flags=lanczos",
+    nativeToolPath(outputPath),
+  ];
+}
+
+function parsePortableGraymap(value) {
+  if (!Buffer.isBuffer(value) || value.length < 16) throw asError("IMPORT_ASR_VIDEO_PROBE_FAILED");
+  let offset = 0;
+  const tokens = [];
+  while (tokens.length < 4 && offset < value.length) {
+    while (offset < value.length && /\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+    if (value[offset] === 0x23) {
+      while (offset < value.length && value[offset] !== 0x0a) offset += 1;
+      continue;
+    }
+    const start = offset;
+    while (offset < value.length && !/\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+    tokens.push(value.subarray(start, offset).toString("ascii"));
+  }
+  while (offset < value.length && /\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+  const [magic, widthValue, heightValue, maximumValue] = tokens;
+  const width = Number(widthValue);
+  const height = Number(heightValue);
+  if (magic !== "P5" || !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+      width <= 0 || height <= 0 || maximumValue !== "255" || value.length - offset !== width * height) {
+    throw asError("IMPORT_ASR_VIDEO_PROBE_FAILED");
+  }
+  return { width, height, pixels: value.subarray(offset) };
+}
+
+export function selectStableTextFrameIndexes(frames) {
+  if (!Array.isArray(frames) || frames.length < 2 || frames.length > 180) return [];
+  const parsed = frames.map(parsePortableGraymap);
+  const selected = [];
+  for (let index = 1; index < parsed.length && selected.length < 12; index += 1) {
+    const current = parsed[index];
+    const previous = parsed[index - 1];
+    if (current.width !== previous.width || current.height !== previous.height) continue;
+    let edges = 0;
+    let difference = 0;
+    let samples = 0;
+    for (let y = 1; y < current.height; y += 2) {
+      for (let x = 1; x < current.width; x += 2) {
+        const position = y * current.width + x;
+        const pixel = current.pixels[position];
+        if (Math.abs(pixel - current.pixels[position - 1]) > 36 ||
+            Math.abs(pixel - current.pixels[position - current.width]) > 36) edges += 1;
+        difference += Math.abs(pixel - previous.pixels[position]);
+        samples += 1;
+      }
+    }
+    const edgeDensity = samples === 0 ? 0 : edges / samples;
+    const meanDifference = samples === 0 ? 255 : difference / samples;
+    if (edgeDensity >= 0.035 && edgeDensity <= 0.45 && meanDifference <= 12) selected.push(index);
+  }
+  return selected;
 }
 
 export function buildSenseVoiceArguments(modelPath, tokensPath, wavPath, provider, threads) {
   return buildSenseVoiceBatchArguments(modelPath, tokensPath, [wavPath], provider, threads);
 }
 
-export function buildSenseVoiceBatchArguments(modelPath, tokensPath, wavPaths, provider, threads) {
+export function buildSenseVoiceBatchArguments(modelPath, tokensPath, wavPaths, provider, threads, language = "auto") {
   if (!new Set(["cpu", "cuda", "coreml"]).has(provider)) throw asError("IMPORT_ASR_INVALID_REQUEST");
+  if (typeof language !== "string" || !/^(auto|[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?)$/iu.test(language)) {
+    throw asError("IMPORT_ASR_INVALID_REQUEST");
+  }
   if (!Array.isArray(wavPaths) || wavPaths.length === 0 || wavPaths.length > MAX_SENSEVOICE_BATCH_CHUNKS ||
       wavPaths.some((value) => typeof value !== "string" || value.length === 0)) {
     throw asError("IMPORT_ASR_INVALID_REQUEST");
   }
   const safeThreads = Math.min(8, Math.max(1, Number.isSafeInteger(threads) ? threads : 1));
   return [
-    `--tokens=${tokensPath}`,
-    `--sense-voice-model=${modelPath}`,
-    "--sense-voice-language=auto",
+    `--tokens=${nativeToolPath(tokensPath)}`,
+    `--sense-voice-model=${nativeToolPath(modelPath)}`,
+    `--sense-voice-language=${language.toLowerCase().replace("_", "-")}`,
     "--sense-voice-use-itn=true",
     `--provider=${provider}`,
     `--num-threads=${safeThreads}`,
     "--debug=false",
     "--print-args=false",
-    ...wavPaths,
+    ...wavPaths.map((wavPath) => nativeToolPath(wavPath)),
   ];
 }
 
@@ -318,9 +414,7 @@ export function renderTranscript(result, sourceName, provider) {
   const transcriptSegments = Array.isArray(result.segments) && result.segments.length > 0
     ? result.segments
     : [{ startMs: result.tokenTimings[0]?.startMs ?? null, text: result.text }];
-  const transcriptLines = transcriptSegments.map((segment) => segment.startMs == null
-    ? markdownText(cleanText(segment.text))
-    : `[${timestamp(segment.startMs)}] ${markdownText(cleanText(segment.text))}`).join("\n\n");
+  const transcriptLines = renderAnchoredSegments(transcriptSegments);
   return `${[
     "---",
     `engine: ${JSON.stringify(ENGINE_VERSION)}`,
@@ -341,18 +435,30 @@ export function renderTranscript(result, sourceName, provider) {
   ].join("\n")}`;
 }
 
+function renderAnchoredSegments(segments) {
+  const lines = [];
+  let anchorMs = null;
+  for (const segment of segments) {
+    const startMs = Number.isSafeInteger(segment.startMs) ? segment.startMs : null;
+    if (startMs != null && (anchorMs == null || startMs - anchorMs >= 45_000)) {
+      anchorMs = startMs;
+      lines.push(`## [${timestamp(startMs)}]`, "");
+    }
+    lines.push(markdownText(cleanText(segment.text)), "");
+  }
+  return lines.join("\n").trim();
+}
+
 export function renderEmbeddedTranscript(result, sourceName) {
   const source = cleanText(sourceName).slice(0, 500);
-  const transcriptLines = result.segments
-    .map((segment) => `[${timestamp(segment.startMs)}] ${markdownText(segment.text)}`)
-    .join("\n\n");
+  const transcriptLines = renderAnchoredSegments(result.segments);
   return `${[
     "---",
     'engine: "ffmpeg"',
     'provider: "embedded_subtitle"',
     `source: ${JSON.stringify(source)}`,
     "timing: cue_start",
-    "provenance: authorized-local-embedded-subtitle",
+    "provenance: local-embedded-subtitle",
     "---",
     "",
     "# Transcript",
@@ -409,4 +515,17 @@ export function restrictedEnvironment(packRoot, temporaryRoot, platform = proces
 export function classifyExecutionError(error, stage) {
   if (error?.killed || error?.code === "ETIMEDOUT" || error?.signal === "SIGKILL") return "IMPORT_ASR_TIMEOUT";
   return stage === "decode" ? "IMPORT_ASR_DECODE_FAILED" : "IMPORT_ASR_ENGINE_FAILED";
+}
+
+export function isNoAudioExecutionError(error) {
+  const details = [];
+  let current = error;
+  for (let depth = 0; current && depth < 3; depth += 1) {
+    for (const value of [current.message, current.stderr, current.stdout]) {
+      if (typeof value === "string") details.push(value);
+    }
+    current = current.cause;
+  }
+  return /(?:stream map.*0:a:0.*matches no streams|does not contain any audio stream|no audio stream|audio stream.*not found|failed to find.*audio)/iu
+    .test(details.join("\n"));
 }

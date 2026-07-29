@@ -5,10 +5,18 @@ use llm_wiki_desktop_lib::models::import_v2::{ArtifactKind, ImportInput, ImportI
 use llm_wiki_desktop_lib::services::import_v2::engine::{
     EngineOperation, EngineRequest, ImportEngine,
 };
-use llm_wiki_desktop_lib::services::import_v2::native_file_engine::NativeFileEngine;
+use llm_wiki_desktop_lib::services::import_v2::generic_web_engine::WebArtifactSource;
+use llm_wiki_desktop_lib::services::import_v2::native_file_engine::{
+    NativeCsvPackageEngine, NativeFileEngine, NativeStructuredFileEngine,
+};
 use llm_wiki_desktop_lib::services::import_v2::quality_gate::QualityGate;
+use llm_wiki_desktop_lib::services::import_v2::url_policy::SessionWebTarget;
+use llm_wiki_desktop_lib::services::import_v2::web_fetch::{WebFetchArtifact, WebFetchPolicy};
 use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::io::{Cursor, Write};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 fn request(root: &TempDir, name: &str) -> EngineRequest {
@@ -44,8 +52,11 @@ fn request(root: &TempDir, name: &str) -> EngineRequest {
         staging_root: "staging".into(),
         chained_input: None,
         local_asr_authorized: false,
+        asr_probe_only: false,
+        asr_profile: None,
+        recognition_language: None,
+        selected_subtitle: None,
         local_ocr_authorized: false,
-        allow_missing_transcript: false,
         media_save_mode: Default::default(),
     }
 }
@@ -78,12 +89,12 @@ fn descriptor_and_supported_extensions_are_stable() {
         "a.mdx",
         "a.mkd",
         "a.txt",
-        "a.csv",
         "a.html",
         "a.htm",
     ] {
         assert!(engine.supports(&request(&TempDir::new().unwrap(), name).input));
     }
+    assert!(!engine.supports(&request(&TempDir::new().unwrap(), "a.csv").input));
     assert!(!engine.supports(&request(&TempDir::new().unwrap(), "a.docx").input));
 }
 
@@ -102,7 +113,7 @@ fn markdown_snapshot_is_byte_exact_while_candidate_is_utf8_lf() {
     assert!(!markdown.contains('\r'));
     assert!(markdown.starts_with("---\ntitle: 资料\n---\n"));
     assert!(markdown.contains("| A | B |"));
-    assert!(markdown.contains("![relative](images/a.png)"));
+    assert!(markdown.contains("![relative](assets/images/a.png)"));
     assert_eq!(result.metadata_path.as_deref(), Some("metadata.json"));
     let preview = QualityGate::default()
         .evaluate(&root.path().join("staging"), &result)
@@ -124,9 +135,36 @@ fn markdown_normalizes_dot_image_paths_and_keeps_escaping_links_non_fatal() {
         b"![local](./images/a.png)\n![external](../images/outside.png)\n",
     );
 
-    assert!(markdown.contains("![local](./images/a.png)"));
+    assert!(markdown.contains("![local](assets/images/a.png)"));
     assert!(markdown.contains("![external](../images/outside.png)"));
-    assert_eq!(result.asset_paths, vec!["images/a.png"]);
+    assert_eq!(result.asset_paths, vec!["assets/images/a.png"]);
+}
+
+#[test]
+fn markdown_copies_inline_and_reference_style_attachments() {
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("files")).unwrap();
+    fs::write(root.path().join("files/appendix.pdf"), b"%PDF-attachment").unwrap();
+    fs::write(root.path().join("files/data.csv"), b"name\nvalue\n").unwrap();
+    let (result, markdown) = run(
+        &root,
+        "attachments.md",
+        b"[Appendix](files/appendix.pdf)\n[Data][data]\n\n[data]: files/data.csv\n",
+    );
+
+    assert!(markdown.contains("[Appendix](assets/files/appendix.pdf)"));
+    assert!(markdown.contains("[data]: assets/files/data.csv"));
+    assert_eq!(
+        result.asset_paths,
+        vec![
+            "assets/files/appendix.pdf".to_string(),
+            "assets/files/data.csv".to_string(),
+        ]
+    );
+    assert_eq!(
+        fs::read(root.path().join("staging/assets/files/data.csv")).unwrap(),
+        b"name\nvalue\n"
+    );
 }
 
 #[test]
@@ -144,11 +182,15 @@ fn markdown_accepts_gb18030_and_utf16_sources() {
 #[test]
 fn csv_quotes_newlines_and_pipes_as_gfm_without_silent_loss() {
     let root = TempDir::new().unwrap();
-    let (_, markdown) = run(
-        &root,
-        "table.csv",
+    fs::write(
+        root.path().join("table.csv"),
         b"name,note\r\nAlice,\"line 1\nline 2\"\r\nBob,\"a|b\"\r\n",
-    );
+    )
+    .unwrap();
+    NativeCsvPackageEngine
+        .execute(&request(&root, "table.csv"), &CancellationToken::new())
+        .unwrap();
+    let markdown = fs::read_to_string(root.path().join("staging/document.md")).unwrap();
     assert!(markdown.contains("| name | note |"));
     assert!(markdown.contains("line 1<br>line 2"));
     assert!(markdown.contains("a\\|b"));
@@ -184,6 +226,93 @@ fn local_html_removes_executable_content_and_emits_typed_warnings() {
     assert!(!preview.quality.warnings.is_empty());
 }
 
+struct FixtureImageSource {
+    image: Vec<u8>,
+    cancel: bool,
+}
+
+impl WebArtifactSource for FixtureImageSource {
+    fn fetch(
+        &self,
+        target: SessionWebTarget,
+        _policy: WebFetchPolicy,
+        _item_id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<WebFetchArtifact, llm_wiki_desktop_lib::errors::BackendError> {
+        if self.cancel {
+            cancellation.cancel();
+            return Err(llm_wiki_desktop_lib::errors::BackendError::new(
+                IMPORT_V2_CANCELLED,
+                "cancelled by fixture",
+                true,
+                false,
+            ));
+        }
+        Ok(WebFetchArtifact {
+            bytes: self.image.clone(),
+            byte_len: self.image.len() as u64,
+            final_public_url: target.public.public_url.clone(),
+            final_session_target: target,
+            content_type: "image/png".into(),
+            sanitized_headers: BTreeMap::new(),
+            redirects: Vec::new(),
+            elapsed_ms: 0,
+        })
+    }
+}
+
+#[test]
+fn local_html_archives_meaningful_remote_images_without_third_party_links() {
+    let root = TempDir::new().unwrap();
+    fs::write(
+        root.path().join("remote.html"),
+        br#"<html><body><h1>Article</h1><img alt="diagram" src="https://cdn.example.test/diagram.png"></body></html>"#,
+    )
+    .unwrap();
+    let image =
+        include_bytes!("../../tests/fixtures/import-v2/local/batch3/matrix/image.png").to_vec();
+    let engine = NativeFileEngine::new_with_artifact_source(Arc::new(FixtureImageSource {
+        image,
+        cancel: false,
+    }));
+
+    let result = engine
+        .execute(&request(&root, "remote.html"), &CancellationToken::new())
+        .unwrap();
+    let markdown = fs::read_to_string(root.path().join("staging/document.md")).unwrap();
+
+    assert!(!markdown.contains("cdn.example.test"));
+    assert_eq!(result.asset_paths.len(), 1);
+    assert!(result.asset_paths[0].starts_with("assets/remote/"));
+    assert!(root
+        .path()
+        .join("staging")
+        .join(&result.asset_paths[0])
+        .is_file());
+}
+
+#[test]
+fn cancellation_during_remote_resource_fetch_removes_partial_staging() {
+    let root = TempDir::new().unwrap();
+    fs::write(
+        root.path().join("cancel-remote.html"),
+        br#"<html><body><h1>Article</h1><img alt="diagram" src="https://cdn.example.test/diagram.png"></body></html>"#,
+    )
+    .unwrap();
+    let engine = NativeFileEngine::new_with_artifact_source(Arc::new(FixtureImageSource {
+        image: Vec::new(),
+        cancel: true,
+    }));
+    let token = CancellationToken::new();
+
+    let error = engine
+        .execute(&request(&root, "cancel-remote.html"), &token)
+        .unwrap_err();
+
+    assert_eq!(error.code, IMPORT_V2_CANCELLED);
+    assert!(!root.path().join("staging").exists());
+}
+
 #[test]
 fn invalid_utf8_and_pre_cancel_leave_no_staging_artifacts() {
     let root = TempDir::new().unwrap();
@@ -205,6 +334,26 @@ fn invalid_utf8_and_pre_cancel_leave_no_staging_artifacts() {
 }
 
 #[test]
+fn mid_write_failure_removes_partial_staging_tree() {
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("files")).unwrap();
+    fs::write(root.path().join("files/appendix.pdf"), b"%PDF-attachment").unwrap();
+    fs::write(
+        root.path().join("partial.md"),
+        b"[Appendix](files/appendix.pdf)\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("staging")).unwrap();
+    fs::write(root.path().join("staging/assets"), b"directory collision").unwrap();
+
+    NativeFileEngine::default()
+        .execute(&request(&root, "partial.md"), &CancellationToken::new())
+        .unwrap_err();
+
+    assert!(!root.path().join("staging").exists());
+}
+
+#[test]
 fn rejects_same_length_source_swap_after_discovery() {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("swap.md"), b"# trusted\n").unwrap();
@@ -215,6 +364,57 @@ fn rejects_same_length_source_swap_after_discovery() {
         .unwrap_err();
     assert_eq!(error.code, "IMPORT_FILE_SOURCE_CHANGED");
     assert!(!root.path().join("staging").exists());
+}
+
+#[test]
+fn pptx_total_image_loss_is_reported_by_engine_and_quality_gate() {
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, xml) in [
+        (
+            "ppt/presentation.xml",
+            r#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId id="512" r:id="rIdB"/></p:sldIdLst></p:presentation>"#,
+        ),
+        (
+            "ppt/_rels/presentation.xml.rels",
+            r#"<Relationships><Relationship Id="rIdB" Type="x/slide" Target="slides/slide7.xml"/></Relationships>"#,
+        ),
+        (
+            "ppt/slides/slide7.xml",
+            r#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><a:p><a:r><a:t>Readable slide text</a:t></a:r></a:p><a:blip r:embed="rIdMissing"/></p:sld>"#,
+        ),
+        (
+            "ppt/slides/_rels/slide7.xml.rels",
+            r#"<Relationships><Relationship Id="rIdMissing" Type="x/image" Target="../media/missing.png"/></Relationships>"#,
+        ),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(xml.as_bytes()).unwrap();
+    }
+    let bytes = archive.finish().unwrap().into_inner();
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("missing-image.pptx"), bytes).unwrap();
+
+    let result = NativeStructuredFileEngine::new("builtin.office-pptx", "office.modern.pptx")
+        .execute(
+            &request(&root, "missing-image.pptx"),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(result.meaningful_image_coverage, Some(0.0));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning == "PRESENTATION_IMAGE_PRESERVATION_INCOMPLETE"));
+    let preview = QualityGate::default()
+        .evaluate(&root.path().join("staging"), &result)
+        .unwrap();
+    assert!(preview
+        .quality
+        .warnings
+        .iter()
+        .any(|warning| warning == "LOW_MEANINGFUL_IMAGE_COVERAGE"));
 }
 
 #[cfg(unix)]

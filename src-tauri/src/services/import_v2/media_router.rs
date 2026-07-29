@@ -124,9 +124,10 @@ impl MediaRouter {
 
 fn subtitle_rank(kind: SubtitleKind) -> u8 {
     match kind {
-        SubtitleKind::HumanPlatform | SubtitleKind::HumanLocal => 0,
-        SubtitleKind::Automatic => 1,
-        SubtitleKind::Embedded => 2,
+        SubtitleKind::HumanPlatform => 0,
+        SubtitleKind::Embedded => 1,
+        SubtitleKind::HumanLocal => 2,
+        SubtitleKind::Automatic => 3,
     }
 }
 

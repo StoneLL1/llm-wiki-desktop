@@ -6,7 +6,8 @@ use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::agent::AgentDetectionState;
 use crate::models::compile::{
-    CompileManifest, CompilePlan, CompileRequest, CompileRoute, CompileRoutePreference,
+    CompileConsumptionRecord, CompileManifest, CompilePlan, CompileRequest, CompileResult,
+    CompileRoute, CompileRoutePreference, SourceVersionRef,
 };
 use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
@@ -14,8 +15,9 @@ use crate::models::confirmation::{
 use crate::models::git::CheckpointPurpose;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
-use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
-use crate::services::{AgentService, CompileService, LlmService};
+use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
+use crate::services::import_v2::source_registry::SourceRegistry;
+use crate::services::{AgentService, CompileService, LlmService, ResolvedCompileSource};
 use crate::tasks::task_model::LogLevel;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -46,6 +48,22 @@ pub struct ResolveCompileConflictRequest {
     pub resolution: crate::models::compile::CompileConflictResolution,
     #[serde(default)]
     pub manual_files: Vec<crate::models::compile::CompileFile>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListCompileSourceVersionsRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+}
+
+#[tauri::command]
+pub fn list_compile_source_versions(
+    state: State<'_, AppState>,
+    request: ListCompileSourceVersionsRequest,
+) -> Result<Vec<SourceVersionRef>, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    CompileService::list_source_versions(&context)
 }
 
 #[tauri::command]
@@ -104,10 +122,17 @@ async fn run_compile(
         .append_log(
             task_id,
             LogLevel::Info,
-            "Validating extracted Markdown".into(),
+            "Resolving selected Source versions".into(),
         )
         .map_err(task_error)?;
-    CompileService::extracted_markdown_files(context)?;
+    let resolved = CompileService::resolve_source_versions(context, &request.source_versions)?;
+    let selected_sources = resolved
+        .into_iter()
+        .filter(|source| !source.already_consumed)
+        .collect::<Vec<_>>();
+    if selected_sources.is_empty() {
+        return finish_duplicate_compile(state, request, task_id);
+    }
     state
         .task_service
         .append_log(task_id, LogLevel::Info, "Creating Git checkpoint".into())
@@ -118,13 +143,38 @@ async fn run_compile(
         "Before wiki compile",
     )?;
     let baseline = CompileService::snapshot_wiki(context)?;
-    let workspace = CompileService::create_workspace(context, task_id)?;
+    let workspace =
+        CompileService::create_workspace_for_sources(context, task_id, &selected_sources)?;
+    let protected_sources = CompileService::snapshot_workspace_sources(&workspace)?;
     let outcome = async {
         let (route, plan, manifest) =
-            generate_manifest(state, request, context, &workspace, task_id, &baseline).await?;
+            generate_manifest(
+                state,
+                request,
+                context,
+                &workspace,
+                task_id,
+                &baseline,
+                &selected_sources,
+                &protected_sources,
+            )
+            .await?;
         ensure_checkpoint_head(state, context, checkpoint.commit_hash.as_deref())?;
         if state.task_service.is_cancelled(task_id) {
             return Err(BackendError::new("COMPILE_CANCELLED", "Wiki compile was cancelled.", true, false));
+        }
+        let source_versions = selected_sources
+            .iter()
+            .map(|source| source.reference.clone())
+            .collect::<Vec<_>>();
+        let revalidated = CompileService::resolve_source_versions(context, &source_versions)?;
+        if revalidated.iter().any(|source| source.already_consumed) {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_VERSION_STALE",
+                "A selected Source version was consumed while Compile was running.",
+                true,
+                true,
+            ));
         }
         let backup = CompileService::backup_outputs(context, &manifest)?;
         let applied = match CompileService::apply_manifest(context, &manifest, Some(&plan), &baseline) {
@@ -152,18 +202,29 @@ async fn run_compile(
             };
             state.confirmation_registry.register_with_execution(action.clone(), Some(ConfirmationExecution::CompileMerge {
                 project_id: request.project_id.clone(), root_path: request.project_root_path.clone(), task_id: task_id.into(), route,
-                plan, manifest, current_hashes, checkpoint_hash: checkpoint.commit_hash.clone(),
+                plan, manifest, source_versions,
+                current_hashes, checkpoint_hash: checkpoint.commit_hash.clone(),
             }))?;
             state.task_service.set_result(task_id, TaskResult { summary: "Compile requires conflict confirmation.".into(), affected_paths: applied.affected_paths, reference: None, pending_action: Some(action) }).map_err(task_error)?;
             state.task_service.transition_status(task_id, TaskStatus::WaitingForConfirmation).map_err(task_error)?;
             return Ok(());
         }
-        if let Err(error) = finish_compile(state, context, task_id, route, applied.affected_paths, checkpoint.commit_hash) {
-            let _ = state
-                .git_service
-                .unstage_paths(context, &compile_output_paths(&manifest));
-            CompileService::restore_outputs(context, &backup)?;
-            return Err(error);
+        if let Err(failure) = finish_compile(
+            state,
+            context,
+            task_id,
+            route,
+            applied.affected_paths,
+            checkpoint.commit_hash,
+            &source_versions,
+        ) {
+            if !failure.durable {
+                let _ = state
+                    .git_service
+                    .unstage_paths(context, &compile_output_paths(&manifest));
+                CompileService::restore_outputs(context, &backup)?;
+            }
+            return Err(failure.error);
         }
         Ok(())
     }.await;
@@ -178,6 +239,8 @@ async fn generate_manifest(
     workspace: &std::path::Path,
     task_id: &str,
     baseline: &HashMap<String, String>,
+    sources: &[ResolvedCompileSource],
+    protected_sources: &HashMap<String, String>,
 ) -> Result<(CompileRoute, CompilePlan, CompileManifest), BackendError> {
     let agent_config = AgentService::load_config(context)?;
     let providers = LlmService::list_providers(context)?;
@@ -228,9 +291,13 @@ async fn generate_manifest(
                 .agent_service
                 .run_task_streaming(&invocation, &state.task_service, task_id)?;
             let plan = read_agent_compile_plan(workspace)?;
-            validate_compile_plan(context, &plan, baseline)?;
-            let manifest = CompileService::manifest_from_workspace(workspace, baseline)?;
-            let known_sources = CompileService::known_source_refs(context)?;
+            validate_compile_plan(context, &plan, baseline, sources)?;
+            let manifest = CompileService::manifest_from_workspace_protected(
+                workspace,
+                baseline,
+                protected_sources,
+            )?;
+            let known_sources = CompileService::known_source_refs_for_sources(sources);
             CompileService::validate_manifest_semantics(
                 context,
                 &manifest,
@@ -248,7 +315,7 @@ async fn generate_manifest(
                 .files
                 .iter()
                 .any(|file| !SCAFFOLD.contains(&file.path.as_str()));
-            if !has_content && !CompileService::extracted_markdown_files(context)?.is_empty() {
+            if !has_content && !sources.is_empty() {
                 return Err(BackendError::new(
                     "COMPILE_EMPTY_OUTPUT",
                     "Agent finished but wrote no wiki pages. This usually means the agent lacked write permission or hit an upstream API error.",
@@ -295,7 +362,7 @@ async fn generate_manifest(
                 )
             })??;
             let plan = CompileService::parse_plan(&raw_plan)?;
-            validate_compile_plan(context, &plan, baseline)?;
+            validate_compile_plan(context, &plan, baseline, sources)?;
             state
                 .task_service
                 .append_log(
@@ -324,7 +391,7 @@ async fn generate_manifest(
                 )
             })??;
             let manifest = CompileService::parse_manifest(&raw_manifest)?;
-            let known_sources = CompileService::known_source_refs(context)?;
+            let known_sources = CompileService::known_source_refs_for_sources(sources);
             CompileService::validate_manifest_semantics(
                 context,
                 &manifest,
@@ -356,8 +423,9 @@ fn validate_compile_plan(
     context: &ProjectContext,
     plan: &CompilePlan,
     baseline: &HashMap<String, String>,
+    sources: &[ResolvedCompileSource],
 ) -> Result<(), BackendError> {
-    let known_sources = CompileService::known_source_refs(context)?;
+    let known_sources = CompileService::known_source_refs_for_sources(sources);
     let existing_pages: Vec<String> = baseline.keys().cloned().collect();
     CompileService::validate_plan(context, plan, &existing_pages, &known_sources)
 }
@@ -398,6 +466,49 @@ fn select_provider(
     Ok(None)
 }
 
+struct FinishCompileFailure {
+    error: BackendError,
+    durable: bool,
+}
+
+impl FinishCompileFailure {
+    fn reversible(error: BackendError) -> Self {
+        Self {
+            error,
+            durable: false,
+        }
+    }
+
+    fn durable(error: BackendError) -> Self {
+        Self {
+            error,
+            durable: true,
+        }
+    }
+}
+
+fn compile_success_result(
+    route: CompileRoute,
+    result_paths: &[String],
+    checkpoint: Option<String>,
+    consumed_versions: &[SourceVersionRef],
+) -> TaskResult {
+    TaskResult {
+        summary: format!("Wiki compiled through {:?}.", route),
+        affected_paths: result_paths.to_vec(),
+        reference: Some(TaskResultReference::Compile {
+            result: CompileResult {
+                route,
+                affected_paths: result_paths.to_vec(),
+                conflicts: Vec::new(),
+                checkpoint,
+                consumed_versions: consumed_versions.to_vec(),
+            },
+        }),
+        pending_action: None,
+    }
+}
+
 fn finish_compile(
     state: &AppState,
     context: &ProjectContext,
@@ -405,49 +516,143 @@ fn finish_compile(
     route: CompileRoute,
     affected_paths: Vec<String>,
     initial_checkpoint: Option<String>,
-) -> Result<(), BackendError> {
-    let graph_path = context.app_dir.join("graph-cache.json");
-    let mut graph_cache = if graph_path.exists() {
-        state
-            .file_store
-            .read_json_file::<serde_json::Value>(&graph_path)?
-    } else {
-        serde_json::json!({})
-    };
-    let graph_object = graph_cache.as_object_mut().ok_or_else(|| {
-        BackendError::new(
-            "GRAPH_CACHE_INVALID",
-            "Graph cache must be a JSON object.",
-            true,
-            false,
-        )
-    })?;
-    graph_object.insert("status".into(), serde_json::Value::String("stale".into()));
-    state
-        .file_store
-        .write_json_atomic(context, ".app/graph-cache.json", &graph_cache)?;
-    let bookmark_paths = state.bookmark_service.wiki_page_paths(context)?;
-    state.search_service.scan_wiki(context, &bookmark_paths)?;
-    let mut checkpoint_paths = affected_paths.clone();
-    checkpoint_paths.push(".app/graph-cache.json".into());
-    let result_checkpoint = state.git_service.create_scoped_checkpoint(
-        context,
-        CheckpointPurpose::FinalResult,
-        "Compile wiki",
-        &checkpoint_paths,
-    )?;
+    source_versions: &[SourceVersionRef],
+) -> Result<(), FinishCompileFailure> {
+    let compile_record_path = format!(".app/compile/{task_id}.json");
+    let mut result_paths = affected_paths.clone();
+    result_paths.push(compile_record_path.clone());
     state
         .task_service
         .set_result(
             task_id,
-            TaskResult {
-                summary: format!("Wiki compiled through {:?}.", route),
-                affected_paths,
-                reference: None,
-                pending_action: None,
-            },
+            compile_success_result(
+                route,
+                &result_paths,
+                initial_checkpoint.clone(),
+                source_versions,
+            ),
         )
-        .map_err(task_error)?;
+        .map_err(task_error)
+        .map_err(FinishCompileFailure::reversible)?;
+
+    let consumed_at = chrono::Utc::now().to_rfc3339();
+    let consumed_versions = SourceRegistry::record_compile_consumption(
+        context,
+        &state.file_store,
+        &CompileConsumptionRecord {
+            schema_version: 1,
+            compile_task_id: task_id.into(),
+            route,
+            consumed_at,
+            source_versions: source_versions.to_vec(),
+            affected_paths: affected_paths.clone(),
+            checkpoint: initial_checkpoint.clone(),
+        },
+    )
+    .map_err(FinishCompileFailure::reversible)?;
+
+    // The Compile output and its exact consumed versions are now a coherent
+    // durable result. Cache refresh and the final-result checkpoint are
+    // best-effort follow-up metadata: a failure must never roll the pages back
+    // while leaving consumption recorded.
+    let graph_path = context.app_dir.join("graph-cache.json");
+    let mut graph_cache = if graph_path.exists() {
+        state
+            .file_store
+            .read_json_file::<serde_json::Value>(&graph_path)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !graph_cache.is_object() {
+        graph_cache = serde_json::json!({});
+    }
+    let graph_object = graph_cache.as_object_mut().expect("object normalized");
+    graph_object.insert("status".into(), serde_json::Value::String("stale".into()));
+    if let Err(error) =
+        state
+            .file_store
+            .write_json_atomic(context, ".app/graph-cache.json", &graph_cache)
+    {
+        let _ = state.task_service.append_log(
+            task_id,
+            LogLevel::Warn,
+            format!(
+                "Compile completed, but the graph cache could not be marked stale: {}",
+                error.message
+            ),
+        );
+    }
+    match state.bookmark_service.wiki_page_paths(context) {
+        Ok(bookmark_paths) => {
+            if let Err(error) = state.search_service.scan_wiki(context, &bookmark_paths) {
+                let _ = state.task_service.append_log(
+                    task_id,
+                    LogLevel::Warn,
+                    format!(
+                        "Compile completed, but the search cache refresh failed: {}",
+                        error.message
+                    ),
+                );
+            }
+        }
+        Err(error) => {
+            let _ = state.task_service.append_log(
+                task_id,
+                LogLevel::Warn,
+                format!(
+                    "Compile completed, but bookmarks could not be loaded for search refresh: {}",
+                    error.message
+                ),
+            );
+        }
+    }
+    let mut checkpoint_paths = affected_paths.clone();
+    checkpoint_paths.push(".app/graph-cache.json".into());
+    checkpoint_paths.push(compile_record_path);
+    checkpoint_paths.extend(
+        source_versions
+            .iter()
+            .filter(|reference| !reference.source_id.starts_with("legacy-"))
+            .map(|reference| format!(".app/sources/{}.json", reference.source_id)),
+    );
+    checkpoint_paths.sort();
+    checkpoint_paths.dedup();
+    let result_checkpoint = match state.git_service.create_scoped_checkpoint(
+        context,
+        CheckpointPurpose::FinalResult,
+        "Compile wiki",
+        &checkpoint_paths,
+    ) {
+        Ok(checkpoint) => checkpoint
+            .commit_hash
+            .or_else(|| initial_checkpoint.clone()),
+        Err(error) => {
+            let _ = state.git_service.unstage_paths(context, &checkpoint_paths);
+            let _ = state.task_service.append_log(
+                task_id,
+                LogLevel::Warn,
+                format!(
+                    "Compile completed, but the final result checkpoint could not be created: {}",
+                    error.message
+                ),
+            );
+            initial_checkpoint.clone()
+        }
+    };
+    state
+        .task_service
+        .set_result(
+            task_id,
+            compile_success_result(
+                route,
+                &result_paths,
+                result_checkpoint.clone(),
+                &consumed_versions,
+            ),
+        )
+        .map_err(task_error)
+        .map_err(FinishCompileFailure::durable)?;
     state
         .task_service
         .append_log(
@@ -455,15 +660,61 @@ fn finish_compile(
             LogLevel::Info,
             format!(
                 "Compile complete. Checkpoints: {:?}, {:?}",
-                initial_checkpoint, result_checkpoint.commit_hash
+                initial_checkpoint, result_checkpoint
             ),
+        )
+        .map_err(task_error)
+        .map_err(FinishCompileFailure::durable)?;
+    state
+        .task_service
+        .transition_status(task_id, TaskStatus::Succeeded)
+        .map_err(task_error)
+        .map_err(FinishCompileFailure::durable)?;
+    Ok(())
+}
+
+fn finish_duplicate_compile(
+    state: &AppState,
+    request: &CompileRequest,
+    task_id: &str,
+) -> Result<(), BackendError> {
+    let route = match request.route {
+        CompileRoutePreference::Agent => CompileRoute::Agent,
+        CompileRoutePreference::Auto | CompileRoutePreference::Byok => CompileRoute::Byok,
+    };
+    state
+        .task_service
+        .append_log(
+            task_id,
+            LogLevel::Info,
+            "All selected Source versions were already consumed; no Wiki update was run.".into(),
+        )
+        .map_err(task_error)?;
+    state
+        .task_service
+        .set_result(
+            task_id,
+            TaskResult {
+                summary: "Selected Source versions were already used to update the Wiki.".into(),
+                affected_paths: Vec::new(),
+                reference: Some(TaskResultReference::Compile {
+                    result: CompileResult {
+                        route,
+                        affected_paths: Vec::new(),
+                        conflicts: Vec::new(),
+                        checkpoint: None,
+                        consumed_versions: Vec::new(),
+                    },
+                }),
+                pending_action: None,
+            },
         )
         .map_err(task_error)?;
     state
         .task_service
         .transition_status(task_id, TaskStatus::Succeeded)
-        .map_err(task_error)?;
-    Ok(())
+        .map(|_| ())
+        .map_err(task_error)
 }
 
 #[tauri::command]
@@ -536,6 +787,7 @@ pub fn resolve_compile_conflict(
         route,
         plan,
         manifest,
+        source_versions,
         current_hashes,
         checkpoint_hash,
     } = stored.execution.ok_or_else(|| {
@@ -566,6 +818,15 @@ pub fn resolve_compile_conflict(
         ));
     }
     let context = state.resolve_project_context(&project_id, &root_path)?;
+    let revalidated = CompileService::resolve_source_versions(&context, &source_versions)?;
+    if revalidated.iter().any(|source| source.already_consumed) {
+        return Err(BackendError::new(
+            "COMPILE_SOURCE_VERSION_STALE",
+            "A selected Source version was consumed while conflict review was open.",
+            true,
+            true,
+        ));
+    }
     ensure_checkpoint_head(&state, &context, checkpoint_hash.as_deref())?;
     let resolved_manifest = CompileService::resolve_conflict_manifest(
         &manifest,
@@ -598,11 +859,22 @@ pub fn resolve_compile_conflict(
             return Err(error);
         }
     };
-    if let Err(error) = finish_compile(&state, &context, &task_id, route, affected_paths, None) {
-        let _ = state
-            .git_service
-            .unstage_paths(&context, &compile_output_paths(&resolved_manifest));
-        CompileService::restore_outputs(&context, &backup)?;
+    if let Err(failure) = finish_compile(
+        &state,
+        &context,
+        &task_id,
+        route,
+        affected_paths,
+        checkpoint_hash,
+        &source_versions,
+    ) {
+        if !failure.durable {
+            let _ = state
+                .git_service
+                .unstage_paths(&context, &compile_output_paths(&resolved_manifest));
+            CompileService::restore_outputs(&context, &backup)?;
+        }
+        let error = failure.error;
         let _ = state.task_service.set_error(&task_id, error.clone());
         let _ = state
             .task_service
@@ -636,6 +908,7 @@ pub fn confirm_compile_action(
         route,
         plan,
         manifest,
+        source_versions,
         current_hashes,
         checkpoint_hash,
     } = stored.execution.ok_or_else(|| {
@@ -679,6 +952,15 @@ pub fn confirm_compile_action(
         .transition_status(&task_id, TaskStatus::Running)
         .map_err(task_error)?;
     let context = state.resolve_project_context(&project_id, &root_path)?;
+    let revalidated = CompileService::resolve_source_versions(&context, &source_versions)?;
+    if revalidated.iter().any(|source| source.already_consumed) {
+        return Err(BackendError::new(
+            "COMPILE_SOURCE_VERSION_STALE",
+            "A selected Source version was consumed while confirmation was open.",
+            true,
+            true,
+        ));
+    }
     if let Err(error) = ensure_checkpoint_head(&state, &context, checkpoint_hash.as_deref()) {
         let _ = state.task_service.set_error(&task_id, error.clone());
         let _ = state
@@ -700,11 +982,22 @@ pub fn confirm_compile_action(
                 return Err(error);
             }
         };
-    if let Err(error) = finish_compile(&state, &context, &task_id, route, affected_paths, None) {
-        let _ = state
-            .git_service
-            .unstage_paths(&context, &compile_output_paths(&manifest));
-        CompileService::restore_outputs(&context, &backup)?;
+    if let Err(failure) = finish_compile(
+        &state,
+        &context,
+        &task_id,
+        route,
+        affected_paths,
+        checkpoint_hash,
+        &source_versions,
+    ) {
+        if !failure.durable {
+            let _ = state
+                .git_service
+                .unstage_paths(&context, &compile_output_paths(&manifest));
+            CompileService::restore_outputs(&context, &backup)?;
+        }
+        let error = failure.error;
         let _ = state.task_service.set_error(&task_id, error.clone());
         let _ = state
             .task_service

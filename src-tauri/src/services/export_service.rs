@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::errors::BackendError;
+use crate::models::compile::CompileConsumptionRecord;
 use crate::models::export::{
     ExportContentOptions, ExportRecord, ExportRoute, ExportStatus, ExportType,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
+use crate::services::import_v2::source_registry::SourceManifest;
 use crate::services::SearchService;
 use crate::utils::path_utils::normalize_project_path;
 use crate::utils::time_utils::now_rfc3339;
@@ -66,6 +68,75 @@ pub struct ExportService {
 }
 
 impl ExportService {
+    pub fn restricted_source_count(
+        &self,
+        context: &ProjectContext,
+        export_type: ExportType,
+        source_path: Option<&str>,
+    ) -> Result<usize, BackendError> {
+        let directory = context.resolve_project_path(".app/sources")?;
+        if !directory.exists() {
+            return Ok(0);
+        }
+        let requested_path = source_path.map(normalize_project_path);
+        let include_project = export_type == ExportType::ProjectReport;
+        let contributing_source_ids = if include_project {
+            HashSet::new()
+        } else if let Some(requested) = requested_path.as_deref() {
+            compile_sources_for_path(context, requested)?
+        } else {
+            HashSet::new()
+        };
+        let mut count = 0;
+        for entry in std::fs::read_dir(&directory).map_err(|error| {
+            BackendError::new(
+                "EXPORT_RESTRICTED_STATUS_FAILED",
+                error.to_string(),
+                true,
+                false,
+            )
+        })? {
+            let path = entry
+                .map_err(|error| {
+                    BackendError::new(
+                        "EXPORT_RESTRICTED_STATUS_FAILED",
+                        error.to_string(),
+                        true,
+                        false,
+                    )
+                })?
+                .path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path).map_err(|error| {
+                BackendError::new(
+                    "EXPORT_RESTRICTED_STATUS_FAILED",
+                    error.to_string(),
+                    true,
+                    false,
+                )
+            })?;
+            let manifest: SourceManifest = serde_json::from_str(&raw).map_err(|error| {
+                BackendError::new(
+                    "EXPORT_RESTRICTED_STATUS_FAILED",
+                    error.to_string(),
+                    true,
+                    false,
+                )
+            })?;
+            let selected = include_project
+                || requested_path.as_deref().is_some_and(|requested| {
+                    normalize_project_path(&manifest.wiki_path) == requested
+                })
+                || contributing_source_ids.contains(&manifest.source_id);
+            if selected && manifest.restricted_content {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Assemble the prompt for the matching `skills/html-*` Skill. Single-page
     /// jobs embed the source page body; project jobs embed purpose + page
     /// summaries. No secret or API key is ever placed in the prompt.
@@ -440,6 +511,48 @@ impl ExportService {
     }
 }
 
+fn compile_sources_for_path(
+    context: &ProjectContext,
+    requested_path: &str,
+) -> Result<HashSet<String>, BackendError> {
+    let directory = context.resolve_project_path(".app/compile")?;
+    let mut source_ids = HashSet::new();
+    if !directory.exists() {
+        return Ok(source_ids);
+    }
+    for entry in std::fs::read_dir(directory).map_err(export_restricted_error)? {
+        let path = entry.map_err(export_restricted_error)?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let record: CompileConsumptionRecord =
+            serde_json::from_slice(&std::fs::read(path).map_err(export_restricted_error)?)
+                .map_err(export_restricted_error)?;
+        if record
+            .affected_paths
+            .iter()
+            .any(|path| normalize_project_path(path) == requested_path)
+        {
+            source_ids.extend(
+                record
+                    .source_versions
+                    .into_iter()
+                    .map(|source| source.source_id),
+            );
+        }
+    }
+    Ok(source_ids)
+}
+
+fn export_restricted_error(error: impl std::fmt::Display) -> BackendError {
+    BackendError::new(
+        "EXPORT_RESTRICTED_STATUS_FAILED",
+        error.to_string(),
+        true,
+        false,
+    )
+}
+
 fn slug_from_source(source: &str) -> String {
     let normalized = source.replace('\\', "/");
     let file_name = normalized
@@ -516,6 +629,106 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&path, body).unwrap();
+    }
+
+    #[test]
+    fn restricted_source_status_covers_single_and_project_exports() {
+        let (context, root) = tmp_context("restricted-status");
+        write_file(
+            &context,
+            ".app/sources/restricted.json",
+            r#"{
+                "schemaVersion": 3,
+                "sourceId": "restricted",
+                "sourceKind": "web_page",
+                "currentVersionId": "version-1",
+                "wikiPath": "wiki/sources/restricted.md",
+                "aliases": [],
+                "origins": ["https://example.com/restricted"],
+                "title": "Restricted",
+                "importedAt": "2026-07-27T00:00:00Z",
+                "versions": [],
+                "compiledConsumptions": [],
+                "restrictedContent": true,
+                "restrictedIdentitySummary": "Reader — @reader",
+                "timeline": []
+            }"#,
+        );
+        write_file(
+            &context,
+            ".app/sources/public.json",
+            r#"{
+                "schemaVersion": 3,
+                "sourceId": "public",
+                "sourceKind": "web_page",
+                "currentVersionId": "version-1",
+                "wikiPath": "wiki/sources/public.md",
+                "aliases": [],
+                "origins": ["https://example.com/public"],
+                "title": "Public",
+                "importedAt": "2026-07-27T00:00:00Z",
+                "versions": [],
+                "compiledConsumptions": [],
+                "restrictedContent": false,
+                "timeline": []
+            }"#,
+        );
+
+        let service = ExportService::default();
+        assert_eq!(
+            service
+                .restricted_source_count(
+                    &context,
+                    ExportType::BeautifulRead,
+                    Some("wiki/sources/restricted.md"),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            service
+                .restricted_source_count(
+                    &context,
+                    ExportType::BeautifulRead,
+                    Some("wiki/sources/public.md"),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            service
+                .restricted_source_count(&context, ExportType::ProjectReport, None)
+                .unwrap(),
+            1
+        );
+        write_file(
+            &context,
+            ".app/compile/task-derived.json",
+            r#"{
+                "schemaVersion": 1,
+                "compileTaskId": "task-derived",
+                "route": "agent",
+                "consumedAt": "2026-07-27T00:10:00Z",
+                "sourceVersions": [{
+                    "sourceId": "restricted",
+                    "versionId": "version-1",
+                    "contentHash": "hash-1"
+                }],
+                "affectedPaths": ["wiki/concepts/derived.md"],
+                "checkpoint": null
+            }"#,
+        );
+        assert_eq!(
+            service
+                .restricted_source_count(
+                    &context,
+                    ExportType::BeautifulRead,
+                    Some("wiki/concepts/derived.md"),
+                )
+                .unwrap(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

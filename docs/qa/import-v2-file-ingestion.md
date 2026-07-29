@@ -1,5 +1,7 @@
 # Import V2 File Ingestion Release-Gate Evidence
 
+> Historical QA evidence; it does not cover the current Source, image, audio, video, OCR / ASR and independent compile contract. Current gate: [`../superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../superpowers/specs/2026-07-24-import-source-media-flow-design.md).
+
 Date: 2026-07-12
 Baseline: `3bd282c6a86a5baa2d16660d1387b617e88a35a7`
 Evidence candidate: `codex/import-v2-file-ingestion`

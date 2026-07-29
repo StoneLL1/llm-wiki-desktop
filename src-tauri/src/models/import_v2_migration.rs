@@ -126,6 +126,14 @@ pub struct MigrationPlan {
     pub summary: MigrationSummary,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationPreparation {
+    pub plan: MigrationPlan,
+    pub report: MigrationReport,
+    pub confirmation: MigrationConfirmation,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationStatus {

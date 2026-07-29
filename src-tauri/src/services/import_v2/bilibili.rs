@@ -13,7 +13,7 @@ use crate::models::import_v2::MediaSaveMode;
 use crate::services::import_v2::engine::EngineRequest;
 use crate::services::import_v2::markdown_normalizer::decode_text;
 use crate::services::import_v2::platform_provider::{
-    extract_platform_document, Platform, PlatformDocument, PlatformSubtitle,
+    extract_platform_document, Platform, PlatformDocument, PlatformSubtitle, PlatformSubtitleKind,
 };
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
@@ -183,30 +183,77 @@ fn extract_player_subtitles(value: &Value) -> Vec<PlatformSubtitle> {
                     .get("type")
                     .and_then(Value::as_i64)
                     .is_some_and(|kind| kind != 0);
-            Some(PlatformSubtitle {
-                url,
-                automatic,
-                language: subtitle
-                    .get("lan")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                label: subtitle
+            let machine_translation = subtitle
+                .get("is_translate")
+                .or_else(|| subtitle.get("isTranslate"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || subtitle
+                    .get("ai_type")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|kind| kind >= 2)
+                || subtitle
+                    .get("type")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|kind| kind >= 2)
+                || subtitle
                     .get("lan_doc")
                     .and_then(Value::as_str)
-                    .map(str::to_owned),
-            })
+                    .is_some_and(is_translation_label);
+            Some((
+                PlatformSubtitle {
+                    url,
+                    automatic,
+                    kind: PlatformSubtitleKind::AuthorOriginal,
+                    language: subtitle
+                        .get("lan")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    label: subtitle
+                        .get("lan_doc")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                },
+                machine_translation,
+            ))
         })
         .collect::<Vec<_>>();
-    subtitles.sort_by_key(|subtitle| {
-        (
-            subtitle.automatic,
-            !subtitle
-                .language
-                .as_deref()
-                .is_some_and(|language| language.starts_with("zh")),
-        )
-    });
+    // Bilibili usually returns the primary-language track first, except that
+    // some responses contain only an explicitly marked machine translation.
+    // Never infer an explicitly translated track to be the source language.
+    let original_language = subtitles
+        .iter()
+        .find(|(_, machine_translation)| !machine_translation)
+        .and_then(|(subtitle, _)| subtitle.language.clone());
+    for (subtitle, machine_translation) in &mut subtitles {
+        let original_track = match (original_language.as_deref(), subtitle.language.as_deref()) {
+            (Some(original), Some(language)) => language.eq_ignore_ascii_case(original),
+            _ => !*machine_translation,
+        };
+        subtitle.kind = if *machine_translation || (subtitle.automatic && !original_track) {
+            PlatformSubtitleKind::MachineTranslation
+        } else if original_track && subtitle.automatic {
+            PlatformSubtitleKind::PlatformAutoOriginal
+        } else if original_track {
+            PlatformSubtitleKind::AuthorOriginal
+        } else {
+            PlatformSubtitleKind::AuthorOther
+        };
+    }
+    subtitles.sort_by_key(|(subtitle, _)| subtitle.kind.rank());
     subtitles
+        .into_iter()
+        .map(|(subtitle, _)| subtitle)
+        .collect()
+}
+
+fn is_translation_label(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("translation")
+        || lower.contains("translated")
+        || value.contains("翻译")
+        || value.contains("机翻")
+        || value.contains("译制")
 }
 
 fn fetch_play_url(
@@ -516,6 +563,7 @@ mod tests {
         extract_player_subtitles, extract_video_ref, select_media_url, wbi_mixin_key,
     };
     use crate::services::import_v2::platform_provider::Platform;
+    use crate::services::import_v2::platform_provider::PlatformSubtitleKind;
     use crate::services::import_v2::{
         engine::{EngineOperation, EngineRequest},
         subtitle::render_subtitle_markdown,
@@ -610,8 +658,8 @@ mod tests {
     fn extracts_and_prioritizes_human_bilibili_subtitles() {
         let value = json!({
             "data": {"subtitle": {"subtitles": [
-                {"lan": "en", "lan_doc": "English (AI)", "subtitle_url": "//aisub.example/en.json", "ai_status": 1},
-                {"lan": "zh-CN", "lan_doc": "中文", "subtitle_url": "https://sub.example/zh.json", "ai_status": 0}
+                {"lan": "zh-CN", "lan_doc": "中文", "subtitle_url": "https://sub.example/zh.json", "ai_status": 0},
+                {"lan": "en", "lan_doc": "English (AI)", "subtitle_url": "//aisub.example/en.json", "ai_status": 1}
             ]}}
         });
         let subtitles = extract_player_subtitles(&value);
@@ -620,6 +668,60 @@ mod tests {
         assert!(!subtitles[0].automatic);
         assert_eq!(subtitles[1].url, "https://aisub.example/en.json");
         assert!(subtitles[1].automatic);
+    }
+
+    #[test]
+    fn original_language_auto_subtitle_precedes_human_translation() {
+        let value = json!({
+            "data": {"subtitle": {"subtitles": [
+                {"lan": "zh-CN", "lan_doc": "中文（自动生成）", "subtitle_url": "https://sub.example/zh-auto.json", "ai_status": 1},
+                {"lan": "en", "lan_doc": "English", "subtitle_url": "https://sub.example/en-human.json", "ai_status": 0}
+            ]}}
+        });
+        let subtitles = extract_player_subtitles(&value);
+        assert_eq!(subtitles[0].language.as_deref(), Some("zh-CN"));
+        assert!(subtitles[0].automatic);
+        assert_eq!(subtitles[1].language.as_deref(), Some("en"));
+        assert!(!subtitles[1].automatic);
+    }
+
+    #[test]
+    fn subtitle_track_order_is_original_human_auto_then_other_languages() {
+        let value = json!({
+            "data": {"subtitle": {"subtitles": [
+                {"lan": "zh-CN", "subtitle_url": "https://sub.example/zh-human.json", "ai_status": 0},
+                {"lan": "en", "subtitle_url": "https://sub.example/en-auto.json", "ai_status": 1},
+                {"lan": "ja", "subtitle_url": "https://sub.example/ja-human.json", "ai_status": 0},
+                {"lan": "zh-CN", "subtitle_url": "https://sub.example/zh-auto.json", "ai_status": 1}
+            ]}}
+        });
+        let subtitles = extract_player_subtitles(&value);
+        assert_eq!(
+            subtitles
+                .iter()
+                .map(|subtitle| (subtitle.language.as_deref().unwrap(), subtitle.automatic))
+                .collect::<Vec<_>>(),
+            vec![
+                ("zh-CN", false),
+                ("zh-CN", true),
+                ("ja", false),
+                ("en", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_machine_translated_subtitle_is_not_a_reliable_source_transcript() {
+        let value = json!({
+            "data": {"subtitle": {"subtitles": [
+                {"lan": "en", "lan_doc": "English translation", "subtitle_url": "https://sub.example/en-auto.json", "ai_status": 1, "ai_type": 2}
+            ]}}
+        });
+        let subtitles = extract_player_subtitles(&value);
+        assert_eq!(subtitles.len(), 1);
+        assert!(subtitles[0].automatic);
+        assert_eq!(subtitles[0].kind, PlatformSubtitleKind::MachineTranslation);
+        assert!(!subtitles[0].kind.is_reliable_source());
     }
 
     #[test]
@@ -647,8 +749,11 @@ mod tests {
             staging_root: String::new(),
             chained_input: None,
             local_asr_authorized: true,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
             local_ocr_authorized: false,
-            allow_missing_transcript: false,
             media_save_mode: MediaSaveMode::ExtractOnly,
         };
         let token = CancellationToken::new();

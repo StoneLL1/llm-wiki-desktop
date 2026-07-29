@@ -17,6 +17,7 @@ from core import (
     MODEL_VERSION,
     OcrPolicyError,
     mean_confidence,
+    native_tool_path,
     normalize_blocks,
     render_markdown,
     resolve_staging_image,
@@ -130,7 +131,7 @@ try:
 
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     try:
-        with Image.open(image_path) as image_probe:
+        with Image.open(native_tool_path(image_path)) as image_probe:
             validate_image_geometry(
                 image_probe.width,
                 image_probe.height,
@@ -146,7 +147,7 @@ try:
     threads = min(8, max(1, os.cpu_count() or 1))
     engine = RapidOCR(params={
         "Global.log_level": "critical",
-        "Global.model_root_dir": str(PACK_ROOT / "models"),
+        "Global.model_root_dir": native_tool_path(PACK_ROOT / "models"),
         "Global.return_word_box": False,
         "EngineConfig.onnxruntime.intra_op_num_threads": threads,
         "EngineConfig.onnxruntime.inter_op_num_threads": 1,
@@ -155,14 +156,14 @@ try:
         "EngineConfig.onnxruntime.use_dml": False,
         "EngineConfig.onnxruntime.use_coreml": False,
         "Det.ocr_version": OCRVersion.PPOCRV5,
-        "Det.model_path": str(model_paths["models/ch_PP-OCRv5_det_mobile.onnx"]),
+        "Det.model_path": native_tool_path(model_paths["models/ch_PP-OCRv5_det_mobile.onnx"]),
         "Cls.ocr_version": OCRVersion.PPOCRV5,
-        "Cls.model_path": str(model_paths["models/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"]),
+        "Cls.model_path": native_tool_path(model_paths["models/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"]),
         "Rec.ocr_version": OCRVersion.PPOCRV5,
-        "Rec.model_path": str(model_paths["models/ch_PP-OCRv5_rec_mobile.onnx"]),
-        "Rec.rec_keys_path": str(dictionary),
+        "Rec.model_path": native_tool_path(model_paths["models/ch_PP-OCRv5_rec_mobile.onnx"]),
+        "Rec.rec_keys_path": native_tool_path(dictionary),
     })
-    output = engine(image_path)
+    output = engine(native_tool_path(image_path))
     if output.img is None or getattr(output.img, "ndim", 0) < 2:
         raise OcrPolicyError("IMPORT_OCR_OUTPUT_INVALID")
     image_height, image_width = (int(output.img.shape[0]), int(output.img.shape[1]))
