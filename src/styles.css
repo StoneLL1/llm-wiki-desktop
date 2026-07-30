@@ -4140,12 +4140,12 @@ select:focus-visible {
 .import-v2-queue__row.is-selected { background: var(--surface-muted); }
 .import-v2-queue__row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .import-v2-action-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
+  position: fixed;
   z-index: 14;
   display: flex;
   min-width: 178px;
+  max-width: calc(100vw - 16px);
+  overflow-y: auto;
   flex-direction: column;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

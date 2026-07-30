@@ -191,6 +191,52 @@ describe("ImportQueue", () => {
     expect(onCopyLocator).toHaveBeenCalledWith("C:\\sources\\very-long-source-name.md");
   });
 
+  it("portals the overflow menu outside the clipped queue and flips it above the viewport edge", () => {
+    render(
+      <ImportQueue
+        items={[item("bottom-row", "failed")]}
+        counts={{ all: 1, active: 0, ready: 0, needsAction: 0, failed: 1, completed: 0 }}
+        progress={{ completed: 0, total: 1, active: 0 }}
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={vi.fn()}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+        onCopyLocator={vi.fn()}
+      />,
+    );
+
+    const more = screen.getByRole("button", { name: "More actions for bottom-row.md" });
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function rect(this: HTMLElement) {
+        const values = this === more
+          ? { top: 730, right: 1000, bottom: 760, left: 970, width: 30, height: 30 }
+          : this.getAttribute("role") === "menu"
+            ? { top: 0, right: 178, bottom: 120, left: 0, width: 178, height: 120 }
+            : { top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 };
+        return {
+          ...values,
+          x: values.left,
+          y: values.top,
+          toJSON: () => values,
+        } as DOMRect;
+      });
+
+    fireEvent.click(more);
+
+    const menu = screen.getByRole("menu", { name: "More actions for bottom-row.md" });
+    expect(document.querySelector(".import-v2-queue__list")).not.toContainElement(menu);
+    expect(menu).toHaveAttribute("data-side", "top");
+    expect(menu).toHaveStyle({ top: "606px", left: "822px" });
+    expect(screen.getByRole("menuitem", { name: "Copy original location" })).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(more).toHaveFocus();
+    rectSpy.mockRestore();
+  });
+
   it("labels the short interval between task completion and session refresh", () => {
     render(
       <ImportQueue
