@@ -1,6 +1,6 @@
 use std::fs;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
@@ -29,30 +29,39 @@ pub struct ScanWikiRequest {
 }
 
 #[tauri::command]
-pub fn scan_wiki(
-    state: State<'_, AppState>,
-    request: ScanWikiRequest,
-) -> Result<WikiTree, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
-    let mut tree = state.search_service.scan_wiki(&context, &bookmark_paths)?;
-    apply_validated_source_bindings(&context, &state.file_store, &mut tree)?;
-    Ok(tree)
+pub async fn scan_wiki(app: AppHandle, request: ScanWikiRequest) -> Result<WikiTree, BackendError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
+        let mut tree = state.search_service.scan_wiki(&context, &bookmark_paths)?;
+        apply_validated_source_bindings(&context, &state.file_store, &mut tree)?;
+        Ok(tree)
+    })
+    .await
+    .map_err(wiki_io_worker_failed)?
 }
 
 #[tauri::command]
-pub fn read_wiki_page(
-    state: State<'_, AppState>,
+pub async fn read_wiki_page(
+    app: AppHandle,
     request: ReadWikiPageRequest,
 ) -> Result<WikiPageContent, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
-    let mut page =
-        state
-            .search_service
-            .read_page(&context, &request.relative_path, &bookmark_paths)?;
-    apply_validated_page_binding(&context, &state.file_store, &mut page)?;
-    Ok(page)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
+        let mut page =
+            state
+                .search_service
+                .read_page(&context, &request.relative_path, &bookmark_paths)?;
+        apply_validated_page_binding(&context, &state.file_store, &mut page)?;
+        Ok(page)
+    })
+    .await
+    .map_err(wiki_io_worker_failed)?
 }
 
 /// Read an imported Wiki image through a project-scoped backend command.
@@ -62,38 +71,65 @@ pub fn read_wiki_page(
 /// Returning bytes keeps arbitrary filesystem paths out of the renderer and
 /// gives the command one place to enforce the asset size and path boundary.
 #[tauri::command]
-pub fn read_wiki_asset(
-    state: State<'_, AppState>,
+pub async fn read_wiki_asset(
+    app: AppHandle,
     request: ReadWikiAssetRequest,
 ) -> Result<WikiAssetContent, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let path = SourceRegistry::resolve_wiki_asset_path(
-        &context,
-        &state.file_store,
-        &request.page_path,
-        &request.asset_path,
-    )?;
-    let bytes = fs::read(&path).map_err(|error| {
-        BackendError::new("WIKI_ASSET_READ_FAILED", error.to_string(), true, false)
-            .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
-    })?;
-    if bytes.len() > MAX_WIKI_ASSET_BYTES {
-        return Err(BackendError::new(
-            "WIKI_ASSET_TOO_LARGE",
-            "The Wiki image asset is larger than the reader limit.",
-            false,
-            true,
-        )
-        .with_details(serde_json::json!({
-            "size": bytes.len(),
-            "limit": MAX_WIKI_ASSET_BYTES,
-        })));
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        let path = SourceRegistry::resolve_wiki_asset_path(
+            &context,
+            &state.file_store,
+            &request.page_path,
+            &request.asset_path,
+        )?;
+        let size = fs::metadata(&path)
+            .map_err(|error| wiki_asset_read_failed(&path, error))?
+            .len();
+        if size > MAX_WIKI_ASSET_BYTES as u64 {
+            return Err(wiki_asset_too_large(size));
+        }
+        let bytes = fs::read(&path).map_err(|error| wiki_asset_read_failed(&path, error))?;
+        if bytes.len() > MAX_WIKI_ASSET_BYTES {
+            return Err(wiki_asset_too_large(bytes.len() as u64));
+        }
 
-    Ok(WikiAssetContent {
-        content_type: wiki_asset_content_type(&path),
-        bytes,
+        Ok(WikiAssetContent {
+            content_type: wiki_asset_content_type(&path),
+            bytes,
+        })
     })
+    .await
+    .map_err(wiki_io_worker_failed)?
+}
+
+fn wiki_asset_read_failed(path: &std::path::Path, error: std::io::Error) -> BackendError {
+    BackendError::new("WIKI_ASSET_READ_FAILED", error.to_string(), true, false)
+        .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
+}
+
+fn wiki_asset_too_large(size: u64) -> BackendError {
+    BackendError::new(
+        "WIKI_ASSET_TOO_LARGE",
+        "The Wiki image asset is larger than the reader limit.",
+        false,
+        true,
+    )
+    .with_details(serde_json::json!({
+        "size": size,
+        "limit": MAX_WIKI_ASSET_BYTES,
+    }))
+}
+
+fn wiki_io_worker_failed(error: impl std::fmt::Display) -> BackendError {
+    BackendError::new(
+        "WIKI_IO_WORKER_FAILED",
+        format!("The Wiki I/O worker stopped unexpectedly: {error}"),
+        true,
+        false,
+    )
 }
 
 fn wiki_asset_content_type(path: &std::path::Path) -> String {

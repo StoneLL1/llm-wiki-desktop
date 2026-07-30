@@ -57,6 +57,8 @@ impl SearchService {
     ) -> Result<crate::models::wiki::WikiPageContent, BackendError> {
         let contents = self.file_store.read_markdown(context, relative_path)?;
         let absolute = context.resolve_project_path(relative_path)?;
+        let file_size = contents.len() as u64;
+        let hash = self.file_store.content_hash(contents.as_bytes());
         let split = split_frontmatter(&contents);
         let frontmatter = split
             .frontmatter
@@ -64,12 +66,13 @@ impl SearchService {
             .map(parse_frontmatter)
             .unwrap_or_default();
         let meta = self.build_meta(
-            context,
             relative_path,
             &absolute,
             &split,
             &frontmatter,
             bookmark_paths,
+            file_size,
+            hash,
         )?;
 
         Ok(crate::models::wiki::WikiPageContent {
@@ -83,12 +86,13 @@ impl SearchService {
     #[allow(clippy::too_many_arguments)]
     fn build_meta(
         &self,
-        context: &ProjectContext,
         project_relative: &str,
         absolute: &Path,
         split: &FrontmatterSplit,
         frontmatter: &Frontmatter,
         bookmarks: &HashSet<String>,
+        file_size: u64,
+        hash: String,
     ) -> Result<WikiPageMeta, BackendError> {
         let file_name = absolute
             .file_name()
@@ -108,11 +112,7 @@ impl SearchService {
             .unwrap_or(false);
         let bookmarked = bookmarks.contains(project_relative);
 
-        let file_size = std::fs::metadata(absolute)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
         let modified_time = mtime_rfc3339(absolute);
-        let hash = self.file_store.file_hash(context, project_relative)?;
 
         Ok(WikiPageMeta {
             path: project_relative.to_string(),
@@ -390,6 +390,13 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("type: concept"));
+        assert_eq!(
+            page.meta.hash,
+            service
+                .file_store
+                .content_hash(page.raw_markdown.as_bytes())
+        );
+        assert_eq!(page.meta.file_size, page.raw_markdown.len() as u64);
 
         std::fs::remove_dir_all(root).unwrap();
     }

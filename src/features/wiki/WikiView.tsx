@@ -1,4 +1,12 @@
-import { lazy, type CSSProperties, Suspense, useEffect, useState } from "react";
+import {
+  lazy,
+  memo,
+  type CSSProperties,
+  Suspense,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { Book, Edit2, FileOutput, LoaderCircle, MessageSquareText, Sparkles, Star } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -241,7 +249,12 @@ export function WikiView({ capabilities }: WikiViewProps) {
     ) {
       return;
     }
-    void loadSourceDetail(projectId, rootPath, selectedSourceId);
+    void loadSourceDetail(
+      projectId,
+      rootPath,
+      selectedSourceId,
+      `${completedSourceAiTaskId}:${completedSourceAiCandidateId}`,
+    );
   }, [
     completedSourceAiCandidateId,
     completedSourceAiTaskId,
@@ -281,9 +294,9 @@ export function WikiView({ capabilities }: WikiViewProps) {
     loadPreview,
   ]);
 
-  const handleOpen = (path: string) => {
+  const handleOpen = useCallback((path: string) => {
     void openPage(projectId, rootPath, path);
-  };
+  }, [openPage, projectId, rootPath]);
 
   const breadcrumbs = selectedPath ? selectedPath.split("/") : [];
   const previewRecord = selectWikiPreviewRecord(exportRecords, previewId, selectedPath);
@@ -868,7 +881,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   );
 }
 
-function ReadingPane({
+const ReadingPane = memo(function ReadingPane({
   page,
   pages,
   onOpenPage,
@@ -896,7 +909,7 @@ function ReadingPane({
       </div>
     </div>
   );
-}
+});
 
 function ModeButton({
   active,

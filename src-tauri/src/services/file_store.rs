@@ -51,6 +51,10 @@ impl FileStore {
         fs::read_to_string(&path).map_err(|err| io_error("FILE_READ_FAILED", err, &path))
     }
 
+    pub(crate) fn content_hash(&self, bytes: &[u8]) -> String {
+        hash_bytes(bytes)
+    }
+
     pub fn write_markdown(
         &self,
         context: &ProjectContext,

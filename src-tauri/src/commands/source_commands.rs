@@ -23,14 +23,29 @@ use crate::services::{AgentService, LlmService};
 use crate::tasks::task_model::LogLevel;
 
 #[tauri::command]
-pub fn get_source_detail(
-    state: State<'_, AppState>,
+pub async fn get_source_detail(
+    app: AppHandle,
     request: GetSourceDetailRequest,
 ) -> Result<SourceDetail, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .import_v2_service
-        .get_source_detail(&context, &state.file_store, &request.source_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        state
+            .import_v2_service
+            .get_source_detail(&context, &state.file_store, &request.source_id)
+    })
+    .await
+    .map_err(source_io_worker_failed)?
+}
+
+fn source_io_worker_failed(error: impl std::fmt::Display) -> BackendError {
+    BackendError::new(
+        "SOURCE_IO_WORKER_FAILED",
+        format!("The Source I/O worker stopped unexpectedly: {error}"),
+        true,
+        false,
+    )
 }
 
 #[tauri::command]

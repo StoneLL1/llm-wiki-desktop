@@ -1,6 +1,16 @@
-import { useEffect, useMemo, useState, type ImgHTMLAttributes } from "react";
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ImgHTMLAttributes,
+} from "react";
 import { useTranslation } from "react-i18next";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type Components,
+} from "react-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
@@ -26,6 +36,11 @@ interface WikiAssetContent {
 
 const WIKILINK_SCHEME = "wikilink://";
 const CITATION_SCHEME = "citation://";
+const REMARK_PLUGINS = [remarkGfm, remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex, rehypeHighlight];
+// React StrictMode replays mount effects in development. Share only active
+// requests so replay and duplicate images do not duplicate backend I/O.
+const wikiAssetRequests = new Map<string, Promise<WikiAssetContent>>();
 
 interface FrontmatterRow {
   key: string;
@@ -105,46 +120,98 @@ function isLocalWikiAsset(src: string): boolean {
   return path.startsWith("assets/");
 }
 
-function WikiImage({
+function wikiUrlTransform(url: string): string {
+  return url.startsWith(WIKILINK_SCHEME) || url.startsWith(CITATION_SCHEME)
+    ? url
+    : defaultUrlTransform(url);
+}
+
+function loadWikiAsset(
+  projectId: string,
+  projectRootPath: string,
+  pagePath: string,
+  assetPath: string,
+): Promise<WikiAssetContent> {
+  const key = JSON.stringify([projectId, projectRootPath, pagePath, assetPath]);
+  const existing = wikiAssetRequests.get(key);
+  if (existing) return existing;
+
+  const request = invoke<WikiAssetContent>("read_wiki_asset", {
+    request: {
+      projectId,
+      projectRootPath,
+      pagePath,
+      assetPath,
+    },
+  });
+  wikiAssetRequests.set(key, request);
+  const clear = () => {
+    if (wikiAssetRequests.get(key) === request) {
+      wikiAssetRequests.delete(key);
+    }
+  };
+  void request.then(clear, clear);
+  return request;
+}
+
+type WikiImageProps = ImgHTMLAttributes<HTMLImageElement> & {
+  projectId?: string;
+  projectRootPath?: string;
+  pagePath?: string;
+};
+type LocalWikiImageProps = Omit<
+  WikiImageProps,
+  "pagePath" | "projectId" | "projectRootPath" | "src"
+> & {
+  src: string;
+  projectId: string;
+  projectRootPath: string;
+  pagePath: string;
+};
+
+function LocalWikiImage({
   src,
   alt,
   projectId,
   projectRootPath,
   pagePath,
   ...props
-}: ImgHTMLAttributes<HTMLImageElement> & {
-  projectId?: string;
-  projectRootPath?: string;
-  pagePath?: string;
-}) {
+}: LocalWikiImageProps) {
+  const imageRef = useRef<HTMLImageElement>(null);
+  const [loadRequested, setLoadRequested] = useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
   const [resolvedSrc, setResolvedSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (loadRequested) return;
+    const image = imageRef.current;
+    if (!image) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setLoadRequested(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "600px" },
+    );
+    observer.observe(image);
+    return () => observer.disconnect();
+  }, [loadRequested]);
 
   useEffect(() => {
     let disposed = false;
     let objectUrl: string | null = null;
     setResolvedSrc(null);
-
-    if (
-      !src ||
-      !isLocalWikiAsset(src) ||
-      !projectId ||
-      !projectRootPath ||
-      !pagePath
-    ) {
-      setResolvedSrc(src ?? null);
+    if (!loadRequested) {
       return () => {
         disposed = true;
       };
     }
 
-    void invoke<WikiAssetContent>("read_wiki_asset", {
-      request: {
-        projectId,
-        projectRootPath,
-        pagePath,
-        assetPath: src,
-      },
-    })
+    void loadWikiAsset(projectId, projectRootPath, pagePath, src)
       .then((asset) => {
         if (disposed) return;
         const blob = new Blob([new Uint8Array(asset.bytes)], {
@@ -161,19 +228,60 @@ function WikiImage({
       disposed = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [pagePath, projectId, projectRootPath, src]);
+  }, [loadRequested, pagePath, projectId, projectRootPath, src]);
 
   return (
     <img
       {...props}
+      ref={imageRef}
       src={resolvedSrc ?? undefined}
       alt={alt ?? ""}
+      loading={props.loading ?? "lazy"}
+      decoding={props.decoding ?? "async"}
       data-wiki-asset-state={resolvedSrc ? "ready" : "loading"}
     />
   );
 }
 
-export function MarkdownReader({
+function WikiImage({
+  src,
+  alt,
+  projectId,
+  projectRootPath,
+  pagePath,
+  ...props
+}: WikiImageProps) {
+  if (
+    src &&
+    isLocalWikiAsset(src) &&
+    projectId &&
+    projectRootPath &&
+    pagePath
+  ) {
+    return (
+      <LocalWikiImage
+        {...props}
+        src={src}
+        alt={alt}
+        projectId={projectId}
+        projectRootPath={projectRootPath}
+        pagePath={pagePath}
+      />
+    );
+  }
+
+  return (
+    <img
+      {...props}
+      src={src}
+      alt={alt ?? ""}
+      loading={props.loading ?? "lazy"}
+      decoding={props.decoding ?? "async"}
+    />
+  );
+}
+
+export const MarkdownReader = memo(function MarkdownReader({
   bodyMarkdown,
   frontmatterYaml,
   pages,
@@ -192,6 +300,73 @@ export function MarkdownReader({
     () => (frontmatterYaml ? parseFrontmatterRows(frontmatterYaml) : []),
     [frontmatterYaml],
   );
+  const components = useMemo<Components>(
+    () => ({
+      a({ href, children, ...props }) {
+        if (href?.startsWith(CITATION_SCHEME)) {
+          const index = href.slice(CITATION_SCHEME.length);
+          return (
+            <a
+              href={`#citation-${index}`}
+              className="citation-ref"
+              aria-label={t("wiki.reader.citation", { index })}
+              onClick={(event) => {
+                event.preventDefault();
+                document.getElementById(`citation-${index}`)?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "center",
+                });
+              }}
+            >
+              {index}
+            </a>
+          );
+        }
+        if (href && href.startsWith(WIKILINK_SCHEME)) {
+          const target = decodeURIComponent(href.slice(WIKILINK_SCHEME.length));
+          const resolved = resolver.get(target.toLowerCase());
+          return (
+            <a
+              href="#"
+              onClick={(event) => {
+                event.preventDefault();
+                if (resolved) onOpenPage(resolved);
+              }}
+              className={resolved ? "wikilink" : "wikilink wikilink--missing"}
+              title={resolved ?? t("wiki.reader.missingLink")}
+            >
+              {children}
+            </a>
+          );
+        }
+        return (
+          <a href={href} target="_blank" rel="noreferrer" {...props}>
+            {children}
+          </a>
+        );
+      },
+      img({ src, alt, ...props }) {
+        return (
+          <WikiImage
+            {...props}
+            src={src}
+            alt={alt}
+            projectId={projectId}
+            projectRootPath={projectRootPath}
+            pagePath={pagePath}
+          />
+        );
+      },
+    }),
+    [
+      onOpenPage,
+      pagePath,
+      projectId,
+      projectRootPath,
+      resolver,
+      t,
+    ],
+  );
 
   return (
     <article className="wiki-prose" role="article">
@@ -206,73 +381,13 @@ export function MarkdownReader({
         </div>
       ) : null}
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex, rehypeHighlight]}
-        urlTransform={(url) =>
-          url.startsWith(WIKILINK_SCHEME) || url.startsWith(CITATION_SCHEME)
-            ? url
-            : defaultUrlTransform(url)
-        }
-        components={{
-          a({ href, children, ...props }) {
-            if (href?.startsWith(CITATION_SCHEME)) {
-              const index = href.slice(CITATION_SCHEME.length);
-              return (
-                <a
-                  href={`#citation-${index}`}
-                  className="citation-ref"
-                  aria-label={t("wiki.reader.citation", { index })}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    document.getElementById(`citation-${index}`)?.scrollIntoView({
-                      behavior: "smooth",
-                      block: "center",
-                    });
-                  }}
-                >
-                  {index}
-                </a>
-              );
-            }
-            if (href && href.startsWith(WIKILINK_SCHEME)) {
-              const target = decodeURIComponent(href.slice(WIKILINK_SCHEME.length));
-              const resolved = resolver.get(target.toLowerCase());
-              return (
-                <a
-                  href="#"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    if (resolved) onOpenPage(resolved);
-                  }}
-                  className={resolved ? "wikilink" : "wikilink wikilink--missing"}
-                  title={resolved ?? t("wiki.reader.missingLink")}
-                >
-                  {children}
-                </a>
-              );
-            }
-            return (
-              <a href={href} target="_blank" rel="noreferrer" {...props}>
-                {children}
-              </a>
-            );
-          },
-          img({ src, alt, ...props }) {
-            return (
-              <WikiImage
-                {...props}
-                src={src}
-                alt={alt}
-                projectId={projectId}
-                projectRootPath={projectRootPath}
-                pagePath={pagePath}
-              />
-            );
-          },
-        }}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        urlTransform={wikiUrlTransform}
+        components={components}
       >
         {processed}
       </ReactMarkdown>
     </article>
   );
-}
+});

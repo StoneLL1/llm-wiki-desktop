@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
@@ -214,6 +215,73 @@ describe("Source reader and lifecycle boundaries", () => {
     );
     expect(sameProjectRoot("/Users/Aletta/Wiki", "/users/aletta/wiki")).toBe(
       false,
+    );
+  });
+
+  it("deduplicates StrictMode Source detail effect replay", async () => {
+    invokeMock.mockResolvedValue(sourceDetail());
+
+    render(
+      <StrictMode>
+        <SourceRightPanel
+          projectId="project-1"
+          rootPath="D:/knowledge"
+          sourceId="source-1"
+          onOpenPage={vi.fn()}
+          onMutation={vi.fn()}
+        />
+      </StrictMode>,
+    );
+
+    await waitFor(() => expect(useSourceStore.getState().detail).not.toBeNull());
+    const calls = invokeMock.mock.calls.filter(
+      ([command]) => command === "get_source_detail",
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("starts a fresh detail snapshot when a completed candidate supersedes an active read", async () => {
+    let resolveOld!: (detail: SourceDetail) => void;
+    const oldSnapshot = new Promise<SourceDetail>((resolve) => {
+      resolveOld = resolve;
+    });
+    const freshSnapshot = sourceDetail();
+    freshSnapshot.candidate = {
+      candidateId: "candidate-fresh",
+      kind: "ai_organize",
+      createdAt: "2026-07-30T01:00:00Z",
+      baseVersionId: "version-1",
+      baseMarkdownHash: "a".repeat(64),
+      candidateMarkdownHash: "b".repeat(64),
+      quality,
+    };
+    let detailReads = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== "get_source_detail") return Promise.resolve(null);
+      detailReads += 1;
+      return detailReads === 1
+        ? oldSnapshot
+        : Promise.resolve(freshSnapshot);
+    });
+
+    const oldLoad = useSourceStore
+      .getState()
+      .loadDetail("project-1", "D:/knowledge", "source-1");
+    const freshLoad = useSourceStore
+      .getState()
+      .loadDetail(
+        "project-1",
+        "D:/knowledge",
+        "source-1",
+        "completed-task:candidate-fresh",
+      );
+
+    expect(detailReads).toBe(2);
+    await freshLoad;
+    resolveOld(sourceDetail());
+    await oldLoad;
+    expect(useSourceStore.getState().detail?.candidate?.candidateId).toBe(
+      "candidate-fresh",
     );
   });
 

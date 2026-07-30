@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::de::{self, MapAccess, Visitor};
@@ -13,7 +13,7 @@ use crate::models::paths::ProjectContext;
 use crate::services::FileStore;
 use crate::utils::path_utils::normalize_project_path;
 
-use super::source_finalization::validate_source_version_binding;
+use super::source_finalization::{parse_final_source, validate_source_version_binding};
 use super::transaction::{is_project_reparse_point, read_project_file_nofollow, FileTransaction};
 
 const SOURCE_INDEX_PATH: &str = ".app/source-index-v2.json";
@@ -647,7 +647,7 @@ impl SourceRegistry {
             || wiki_absolute.strip_prefix(&context.wiki_dir).is_err()
             || !wiki_absolute.is_file()
         {
-            return Err(wiki_asset_not_found(wiki_path, asset_path));
+            return Err(wiki_asset_not_found(&wiki_path, asset_path));
         }
 
         let asset_path = asset_path
@@ -664,11 +664,55 @@ impl SourceRegistry {
                 .iter()
                 .any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains(':'))
         {
-            return Err(wiki_asset_not_found(wiki_path, asset_path));
+            return Err(wiki_asset_not_found(&wiki_path, asset_path));
         }
         let asset_relative = asset_parts[1..].join("/");
 
         let index = Self::read_index(context, files)?;
+        let wiki_bytes = read_project_file_nofollow(&context.root, &wiki_absolute)
+            .map_err(|_| wiki_asset_not_found(&wiki_path, asset_path))?;
+        if let Ok(wiki_markdown) = std::str::from_utf8(&wiki_bytes) {
+            if let Ok((frontmatter, _)) = parse_final_source(wiki_markdown) {
+                if !is_safe_id(&frontmatter.source_id)
+                    || !is_safe_id(&frontmatter.version_id)
+                    || !index
+                        .by_content_hash
+                        .get(&frontmatter.content_hash)
+                        .is_some_and(|pointer| {
+                            pointer.source_id == frontmatter.source_id
+                                && pointer.version_id == frontmatter.version_id
+                        })
+                {
+                    return Err(wiki_asset_not_found(&wiki_path, asset_path));
+                }
+
+                let manifest_path = format!(".app/sources/{}.json", frontmatter.source_id);
+                let manifest = Self::read_manifest(context, files, &manifest_path)
+                    .map_err(|_| wiki_asset_not_found(&wiki_path, asset_path))?;
+                let version = manifest
+                    .versions
+                    .iter()
+                    .find(|version| version.version_id == manifest.current_version_id);
+                if manifest.source_id != frontmatter.source_id
+                    || manifest.current_version_id != frontmatter.version_id
+                    || normalize_project_path(&manifest.wiki_path) != wiki_path
+                    || version.is_none_or(|version| {
+                        validate_source_version_binding(&wiki_bytes, &manifest, version).is_err()
+                    })
+                {
+                    return Err(wiki_asset_not_found(&wiki_path, asset_path));
+                }
+
+                return resolve_manifest_asset_path(context, &manifest, &asset_relative)?
+                    .ok_or_else(|| wiki_asset_not_found(&wiki_path, asset_path));
+            }
+        }
+
+        // V2 projects did not put a Source identity in Wiki frontmatter. Keep
+        // their read-only compatibility path after the transactional V3 JSON
+        // migration, but accept only an exact Wiki path whose current version
+        // carries the migration marker. Modern malformed Source pages never
+        // gain that marker and therefore still fail closed.
         let mut source_ids = std::collections::BTreeSet::new();
         source_ids.extend(
             index
@@ -685,34 +729,26 @@ impl SourceRegistry {
 
         for source_id in source_ids {
             let manifest_path = format!(".app/sources/{source_id}.json");
-            let manifest = Self::read_manifest(context, files, &manifest_path)?;
-            if manifest.wiki_path != wiki_path {
+            let persisted_schema = match persisted_registry_schema(context, &manifest_path) {
+                Ok(schema) => schema,
+                Err(_) => continue,
+            };
+            let manifest = match Self::read_manifest(context, files, &manifest_path) {
+                Ok(manifest) => manifest,
+                Err(_) => continue,
+            };
+            if normalize_project_path(&manifest.wiki_path) != wiki_path
+                || (persisted_schema != Some(LEGACY_SOURCE_REGISTRY_SCHEMA_VERSION)
+                    && !current_version_has_legacy_migration_marker(&manifest))
+            {
                 continue;
             }
 
-            let raw_asset_path = format!(
-                "raw/assets/{}/{}/{asset_relative}",
-                manifest.source_id, manifest.current_version_id
-            );
-            let resolved = context.resolve_project_path(&raw_asset_path)?;
-            if resolved.is_file() {
-                return Ok(resolved);
-            }
-            // Import V2 originally nested assets below raw/sources. Keep this
-            // read-only fallback so existing projects remain renderable after
-            // new imports move to the canonical raw/assets tree.
-            let legacy_asset_path = format!(
-                "raw/sources/{}/{}/assets/{asset_relative}",
-                manifest.source_id, manifest.current_version_id
-            );
-            let legacy_resolved = context.resolve_project_path(&legacy_asset_path)?;
-            if legacy_resolved.is_file() {
-                return Ok(legacy_resolved);
-            }
-            return Err(wiki_asset_not_found(wiki_path, asset_path));
+            return resolve_manifest_asset_path(context, &manifest, &asset_relative)?
+                .ok_or_else(|| wiki_asset_not_found(&wiki_path, asset_path));
         }
 
-        Err(wiki_asset_not_found(wiki_path, asset_path))
+        Err(wiki_asset_not_found(&wiki_path, asset_path))
     }
 
     pub fn resolve(
@@ -1262,7 +1298,61 @@ fn artifact_records_under(
     Ok(records)
 }
 
-fn wiki_asset_not_found(wiki_path: String, asset_path: &str) -> BackendError {
+fn resolve_manifest_asset_path(
+    context: &ProjectContext,
+    manifest: &SourceManifest,
+    asset_relative: &str,
+) -> Result<Option<PathBuf>, BackendError> {
+    let raw_asset_path = format!(
+        "raw/assets/{}/{}/{asset_relative}",
+        manifest.source_id, manifest.current_version_id
+    );
+    let resolved = context.resolve_project_path(&raw_asset_path)?;
+    if resolved.is_file() {
+        return Ok(Some(resolved));
+    }
+
+    // Import V2 originally nested assets below raw/sources. Keep this
+    // read-only fallback so existing projects remain renderable after new
+    // imports move to the canonical raw/assets tree.
+    let legacy_asset_path = format!(
+        "raw/sources/{}/{}/assets/{asset_relative}",
+        manifest.source_id, manifest.current_version_id
+    );
+    let legacy_resolved = context.resolve_project_path(&legacy_asset_path)?;
+    Ok(legacy_resolved.is_file().then_some(legacy_resolved))
+}
+
+fn persisted_registry_schema(
+    context: &ProjectContext,
+    relative_path: &str,
+) -> Result<Option<u32>, BackendError> {
+    let absolute = context.resolve_project_path(relative_path)?;
+    if !absolute.is_file() {
+        return Ok(None);
+    }
+    let bytes =
+        read_project_file_nofollow(&context.root, &absolute).map_err(|_| invalid_index())?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid_index())?;
+    let version = value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(invalid_index)?;
+    Ok(Some(version))
+}
+
+fn current_version_has_legacy_migration_marker(manifest: &SourceManifest) -> bool {
+    let current_version_id = manifest.current_version_id.as_str();
+    let expected_event_id = format!("legacy-import-{current_version_id}");
+    manifest.timeline.iter().any(|event| {
+        event.event_id == expected_event_id
+            && event.kind == "imported"
+            && event.version_id.as_deref() == Some(current_version_id)
+    })
+}
+
+fn wiki_asset_not_found(wiki_path: &str, asset_path: &str) -> BackendError {
     BackendError::new(
         "WIKI_ASSET_NOT_FOUND",
         "The Wiki image asset could not be resolved for this page.",
@@ -1276,6 +1366,11 @@ fn wiki_asset_not_found(wiki_path: String, asset_path: &str) -> BackendError {
 }
 
 fn validate_index(index: &SourceIndex) -> Result<(), BackendError> {
+    let known_pointers: HashSet<(&str, &str)> = index
+        .by_content_hash
+        .values()
+        .map(|pointer| (pointer.source_id.as_str(), pointer.version_id.as_str()))
+        .collect();
     if index.schema_version != SOURCE_REGISTRY_SCHEMA_VERSION
         || index
             .by_content_hash
@@ -1285,7 +1380,8 @@ fn validate_index(index: &SourceIndex) -> Result<(), BackendError> {
             locator.trim().is_empty()
                 || normalize_locator(locator) != *locator
                 || invalid_pointer(pointer)
-                || !index.by_content_hash.values().any(|known| known == pointer)
+                || !known_pointers
+                    .contains(&(pointer.source_id.as_str(), pointer.version_id.as_str()))
         })
     {
         return Err(invalid_index());
@@ -1663,9 +1759,11 @@ mod tests {
     use super::*;
     use crate::errors::IMPORT_V2_SOURCE_INDEX_INVALID;
     use crate::models::compile::{CompileConsumptionRecord, CompileRoute, SourceVersionRef};
-    use crate::models::import_v2::{ImportInputKind, QualityLevel, QualityReport};
+    use crate::models::import_v2::{
+        ImportInputKind, QualityLevel, QualityReport, SourceFrontmatter, SourcePageType,
+    };
     use crate::services::import_v2::source_finalization::{
-        finalize_source, CandidateMetadata, FinalizationInput,
+        finalize_source, render_source_markdown, CandidateMetadata, FinalizationInput,
     };
     use crate::services::FileStore;
     use std::collections::BTreeMap;
@@ -2290,6 +2388,48 @@ mod tests {
     }
 
     #[test]
+    fn index_validation_joins_many_locators_to_content_pointers_in_one_lookup_set() {
+        let pointers: BTreeMap<String, SourcePointer> = (0..256)
+            .map(|index| {
+                (
+                    format!("hash-{index}"),
+                    SourcePointer {
+                        source_id: format!("source-{index}"),
+                        version_id: format!("version-{index}"),
+                    },
+                )
+            })
+            .collect();
+        let locators: BTreeMap<String, SourcePointer> = (0..1_024)
+            .map(|index| {
+                (
+                    format!("file:/source-{index}.md"),
+                    pointers[&format!("hash-{}", index % pointers.len())].clone(),
+                )
+            })
+            .collect();
+        let mut index = SourceIndex {
+            schema_version: SOURCE_REGISTRY_SCHEMA_VERSION,
+            by_content_hash: pointers,
+            by_locator: locators,
+        };
+
+        validate_index(&index).unwrap();
+
+        index.by_locator.insert(
+            "file:/orphan.md".into(),
+            SourcePointer {
+                source_id: "source-orphan".into(),
+                version_id: "version-orphan".into(),
+            },
+        );
+        assert_eq!(
+            validate_index(&index).unwrap_err().code,
+            IMPORT_V2_SOURCE_INDEX_INVALID
+        );
+    }
+
+    #[test]
     fn corrupt_existing_manifest_is_rejected_before_paths_are_returned() {
         let existing = SourceManifest {
             schema_version: 1,
@@ -2522,38 +2662,34 @@ mod tests {
     }
 
     #[test]
-    fn wiki_asset_resolution_keeps_legacy_fallback_read_only_and_prefers_canonical_assets() {
+    fn wiki_asset_resolution_keeps_legacy_fallback_before_and_after_v3_migration() {
         let (context, root) = super::super::test_support::test_context("wiki-asset");
         let files = FileStore;
-        let manifest = SourceManifest {
-            source_id: "source-1".into(),
-            source_kind: "web_page".into(),
-            origins: vec!["https://example.com/article".into()],
-            versions: vec![fixture_version("version-1", "hash-a")],
-            current_version_id: "version-1".into(),
-            wiki_path: "wiki/sources/web/example.com/article.md".into(),
-            canonical_url: Some("https://example.com/article".into()),
-            ..fixture_manifest()
-        };
+        let wiki_path = "wiki/sources/files/legacy.md";
+        let manifest_path = ".app/sources/source-legacy.json";
         let pointer = SourcePointer {
-            source_id: "source-1".into(),
-            version_id: "version-1".into(),
+            source_id: "source-legacy".into(),
+            version_id: "version-legacy".into(),
         };
         let index = SourceIndex {
-            schema_version: 2,
-            by_content_hash: BTreeMap::from([("hash-a".into(), pointer.clone())]),
-            by_locator: BTreeMap::from([("https://example.com/article".into(), pointer)]),
+            schema_version: LEGACY_SOURCE_REGISTRY_SCHEMA_VERSION,
+            by_content_hash: BTreeMap::from([("a".repeat(64), pointer.clone())]),
+            by_locator: BTreeMap::from([("file:/fixtures/legacy.md".into(), pointer)]),
         };
         files
-            .write_json_atomic(&context, ".app/source-index-v2.json", &index)
+            .write_json_atomic(&context, SOURCE_INDEX_PATH, &index)
             .unwrap();
         files
-            .write_json_atomic(&context, ".app/sources/source-1.json", &manifest)
+            .write_markdown(
+                &context,
+                manifest_path,
+                include_str!("../../../../tests/fixtures/import-v2/legacy-source-manifest-v2.json"),
+            )
             .unwrap();
         files
-            .write_markdown(&context, &manifest.wiki_path, "![cover](assets/cover.jpg)")
+            .write_markdown(&context, wiki_path, "![cover](assets/cover.jpg)")
             .unwrap();
-        let legacy_asset = root.join("raw/sources/source-1/version-1/assets/cover.jpg");
+        let legacy_asset = root.join("raw/sources/source-legacy/version-legacy/assets/cover.jpg");
         std::fs::create_dir_all(legacy_asset.parent().unwrap()).unwrap();
         std::fs::write(&legacy_asset, b"legacy-image").unwrap();
         let legacy_before = std::fs::read(&legacy_asset).unwrap();
@@ -2561,13 +2697,13 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        let index_before = std::fs::read(root.join(".app/source-index-v2.json")).unwrap();
-        let manifest_before = std::fs::read(root.join(".app/sources/source-1.json")).unwrap();
+        let index_before = std::fs::read(root.join(SOURCE_INDEX_PATH)).unwrap();
+        let manifest_before = std::fs::read(root.join(manifest_path)).unwrap();
 
         let resolved = SourceRegistry::resolve_wiki_asset_path(
             &context,
             &files,
-            &manifest.wiki_path,
+            wiki_path,
             "assets/cover.jpg",
         )
         .unwrap();
@@ -2581,21 +2717,21 @@ mod tests {
             legacy_modified_before
         );
         assert_eq!(
-            std::fs::read(root.join(".app/source-index-v2.json")).unwrap(),
+            std::fs::read(root.join(SOURCE_INDEX_PATH)).unwrap(),
             index_before
         );
         assert_eq!(
-            std::fs::read(root.join(".app/sources/source-1.json")).unwrap(),
+            std::fs::read(root.join(manifest_path)).unwrap(),
             manifest_before
         );
 
-        let canonical_asset = root.join("raw/assets/source-1/version-1/cover.jpg");
+        let canonical_asset = root.join("raw/assets/source-legacy/version-legacy/cover.jpg");
         std::fs::create_dir_all(canonical_asset.parent().unwrap()).unwrap();
         std::fs::write(&canonical_asset, b"canonical-image").unwrap();
         let canonical_resolved = SourceRegistry::resolve_wiki_asset_path(
             &context,
             &files,
-            &manifest.wiki_path,
+            wiki_path,
             "assets/cover.jpg?download=1#preview",
         )
         .unwrap();
@@ -2604,11 +2740,148 @@ mod tests {
         let traversal = SourceRegistry::resolve_wiki_asset_path(
             &context,
             &files,
-            &manifest.wiki_path,
+            wiki_path,
             "assets/../secret.jpg",
         )
         .unwrap_err();
         assert_eq!(traversal.code, "WIKI_ASSET_NOT_FOUND");
+
+        std::fs::remove_file(&canonical_asset).unwrap();
+        assert!(SourceRegistry::migrate_project_v3(&context, &files).unwrap());
+        let migrated_index: serde_json::Value =
+            files.read_json(&context, SOURCE_INDEX_PATH).unwrap();
+        let migrated_manifest: serde_json::Value =
+            files.read_json(&context, manifest_path).unwrap();
+        assert_eq!(
+            migrated_index["schemaVersion"],
+            SOURCE_REGISTRY_SCHEMA_VERSION
+        );
+        assert_eq!(
+            migrated_manifest["schemaVersion"],
+            SOURCE_REGISTRY_SCHEMA_VERSION
+        );
+        let migrated_resolved = SourceRegistry::resolve_wiki_asset_path(
+            &context,
+            &files,
+            wiki_path,
+            "assets/cover.jpg",
+        )
+        .unwrap();
+        assert_eq!(migrated_resolved, legacy_asset);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wiki_asset_resolution_uses_exact_frontmatter_manifest_and_rejects_forgery() {
+        let (context, root) =
+            super::super::test_support::test_context("wiki-asset-direct-manifest");
+        let files = FileStore;
+        let manifest = fixture_manifest();
+        let version = manifest.versions.first().unwrap();
+        let frontmatter = SourceFrontmatter {
+            page_type: SourcePageType::Source,
+            source_id: manifest.source_id.clone(),
+            version_id: version.version_id.clone(),
+            source_kind: version.candidate.source_kind.clone(),
+            title: version.candidate.title.clone(),
+            imported_at: version.created_at.clone(),
+            content_hash: version.content_hash.clone(),
+            platform: version.candidate.platform.clone(),
+            canonical_url: version.candidate.canonical_url.clone(),
+            platform_content_id: version.candidate.platform_content_id.clone(),
+            author: version.candidate.author.clone(),
+            published_at: version.candidate.published_at.clone(),
+            language: version.candidate.language.clone(),
+            quality: version.quality.clone(),
+            restricted: manifest.restricted_content,
+        };
+        let markdown =
+            render_source_markdown(&frontmatter, "# Fixture\n\n![cover](assets/cover.jpg)\n")
+                .unwrap();
+        let target_pointer = SourcePointer {
+            source_id: manifest.source_id.clone(),
+            version_id: version.version_id.clone(),
+        };
+        let unrelated_pointer = SourcePointer {
+            source_id: "source-0".into(),
+            version_id: "version-0".into(),
+        };
+        let index = SourceIndex {
+            schema_version: SOURCE_REGISTRY_SCHEMA_VERSION,
+            by_content_hash: BTreeMap::from([
+                ("unrelated-hash".into(), unrelated_pointer.clone()),
+                (version.content_hash.clone(), target_pointer.clone()),
+            ]),
+            by_locator: BTreeMap::from([
+                ("file:/unrelated.docx".into(), unrelated_pointer),
+                ("file:/fixture.docx".into(), target_pointer),
+            ]),
+        };
+        files
+            .write_json_atomic(&context, SOURCE_INDEX_PATH, &index)
+            .unwrap();
+        files
+            .write_json_atomic(&context, ".app/sources/source-1.json", &manifest)
+            .unwrap();
+        files
+            .write_markdown(&context, ".app/sources/source-0.json", "{")
+            .unwrap();
+        files
+            .write_markdown(&context, &manifest.wiki_path, &markdown)
+            .unwrap();
+        let canonical_asset = root.join("raw/assets/source-1/version-1/cover.jpg");
+        std::fs::create_dir_all(canonical_asset.parent().unwrap()).unwrap();
+        std::fs::write(&canonical_asset, b"canonical-image").unwrap();
+
+        let resolved = SourceRegistry::resolve_wiki_asset_path(
+            &context,
+            &files,
+            &manifest.wiki_path,
+            "assets/cover.jpg",
+        )
+        .unwrap();
+        assert_eq!(resolved, canonical_asset);
+
+        let forged = markdown.replacen("sourceId: \"source-1\"", "sourceId: \"source-0\"", 1);
+        files
+            .write_markdown(&context, &manifest.wiki_path, &forged)
+            .unwrap();
+        assert_eq!(
+            SourceRegistry::resolve_wiki_asset_path(
+                &context,
+                &files,
+                &manifest.wiki_path,
+                "assets/cover.jpg",
+            )
+            .unwrap_err()
+            .code,
+            "WIKI_ASSET_NOT_FOUND"
+        );
+
+        let invalid_pages: [(&str, &[u8]); 3] = [
+            ("missing", b"# Fixture\n\n![cover](assets/cover.jpg)\n"),
+            (
+                "malformed",
+                b"---\ntype: source\nsourceId: [\n---\n\n![cover](assets/cover.jpg)\n",
+            ),
+            ("non-utf8", b"\xff\xfe![cover](assets/cover.jpg)\n"),
+        ];
+        let wiki_absolute = context.resolve_project_path(&manifest.wiki_path).unwrap();
+        for (case, bytes) in invalid_pages {
+            std::fs::write(&wiki_absolute, bytes).unwrap();
+            let error = SourceRegistry::resolve_wiki_asset_path(
+                &context,
+                &files,
+                &manifest.wiki_path,
+                "assets/cover.jpg",
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code, "WIKI_ASSET_NOT_FOUND",
+                "current schema must not downgrade {case} frontmatter into legacy scanning"
+            );
+        }
 
         std::fs::remove_dir_all(root).unwrap();
     }
