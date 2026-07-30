@@ -138,8 +138,9 @@ impl ImportV2Service {
                 size_bytes: artifact.size_bytes,
             })
             .collect();
-        let versions = version_summaries(context, files, &loaded.manifest);
-        let timeline = timeline_summaries(context, files, &loaded.manifest);
+        let restorability = version_restorability(context, files, &loaded.manifest);
+        let versions = version_summaries(&loaded.manifest, &restorability);
+        let timeline = timeline_summaries(&loaded.manifest, &restorability);
         let related_wiki_paths =
             pages_referencing_source(context, &loaded.manifest, loaded.package.as_ref())?;
         Ok(SourceDetail {
@@ -179,7 +180,8 @@ impl ImportV2Service {
         source_id: &str,
     ) -> Result<Vec<SourceVersionSummary>, BackendError> {
         let loaded = load_source(context, files, source_id)?;
-        Ok(version_summaries(context, files, &loaded.manifest))
+        let restorability = version_restorability(context, files, &loaded.manifest);
+        Ok(version_summaries(&loaded.manifest, &restorability))
     }
 
     pub fn reprocess_source(
@@ -1280,7 +1282,12 @@ pub fn apply_validated_source_bindings(
             page.source_binding = Some(binding.clone());
         }
     }
-    apply_tree_binding_types(&mut tree.root, &tree.pages);
+    let page_types: BTreeMap<String, WikiPageType> = tree
+        .pages
+        .iter()
+        .map(|page| (page.path.clone(), page.page_type))
+        .collect();
+    apply_tree_binding_types(&mut tree.root, &page_types);
     Ok(())
 }
 
@@ -1293,13 +1300,13 @@ pub fn apply_validated_page_binding(
         return Ok(());
     }
     if let Some(binding) =
-        validated_source_bindings(context, files)?.get(&normalize_project_path(&page.meta.path))
+        validated_source_binding_for_page(context, files, &page.meta.path, &page.raw_markdown)?
     {
         page.meta.source_id = Some(binding.source_id.clone());
         page.meta.version_id = Some(binding.version_id.clone());
         page.meta.source_status = Some(binding.status);
         page.meta.quality = Some(binding.quality.clone());
-        page.meta.source_binding = Some(binding.clone());
+        page.meta.source_binding = Some(binding);
     }
     Ok(())
 }
@@ -1359,7 +1366,7 @@ fn validated_source_bindings(
     let index = SourceRegistry::read_index(context, files)?;
     let mut bindings = BTreeMap::new();
     for source_id in source_ids(&index) {
-        let loaded = match load_source(context, files, &source_id) {
+        let loaded = match load_source_with_index(context, files, &index, &source_id) {
             Ok(loaded) => loaded,
             // A broken entry does not promote an arbitrary Markdown file to
             // Source mode. Other valid Sources remain readable.
@@ -1383,21 +1390,88 @@ fn validated_source_bindings(
     Ok(bindings)
 }
 
-fn apply_tree_binding_types(node: &mut WikiTreeNode, pages: &[crate::models::wiki::WikiPageMeta]) {
+fn validated_source_binding_for_page(
+    context: &ProjectContext,
+    files: &FileStore,
+    page_path: &str,
+    raw_markdown: &str,
+) -> Result<Option<SourceBinding>, BackendError> {
+    let (frontmatter, _) = match parse_final_source(raw_markdown) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(None),
+    };
+    if !safe_id(&frontmatter.source_id) || !safe_id(&frontmatter.version_id) {
+        return Ok(None);
+    }
+
+    let index = SourceRegistry::read_index(context, files)?;
+    let Some(pointer) = index.by_content_hash.get(&frontmatter.content_hash) else {
+        return Ok(None);
+    };
+    if pointer.source_id != frontmatter.source_id || pointer.version_id != frontmatter.version_id {
+        return Ok(None);
+    }
+
+    let manifest =
+        match SourceRegistry::read_manifest(context, files, &manifest_path(&frontmatter.source_id))
+        {
+            Ok(manifest) => manifest,
+            Err(_) => return Ok(None),
+        };
+    if manifest.source_id != frontmatter.source_id
+        || manifest.current_version_id != frontmatter.version_id
+        || normalize_project_path(&manifest.wiki_path) != normalize_project_path(page_path)
+    {
+        return Ok(None);
+    }
+    let version = match current_version(&manifest) {
+        Ok(version) => version,
+        Err(_) => return Ok(None),
+    };
+    if validate_source_version_binding(raw_markdown.as_bytes(), &manifest, version).is_err() {
+        return Ok(None);
+    }
+    if load_package_for_version(context, files, &manifest, version).is_err() {
+        return Ok(None);
+    }
+
+    let candidate_ready = latest_candidate(context, files, &manifest.source_id)
+        .ok()
+        .flatten()
+        .is_some();
+    Ok(Some(SourceBinding {
+        source_id: manifest.source_id.clone(),
+        version_id: version.version_id.clone(),
+        status: source_status(version, candidate_ready),
+        quality: version.quality.clone(),
+    }))
+}
+
+fn apply_tree_binding_types(node: &mut WikiTreeNode, page_types: &BTreeMap<String, WikiPageType>) {
     if node.kind == crate::models::wiki::WikiTreeNodeKind::File {
-        if let Some(page) = pages.iter().find(|page| page.path == node.path) {
-            node.page_type = Some(page.page_type);
+        if let Some(page_type) = page_types.get(&node.path) {
+            node.page_type = Some(*page_type);
         }
         return;
     }
     for child in &mut node.children {
-        apply_tree_binding_types(child, pages);
+        apply_tree_binding_types(child, page_types);
     }
 }
 
 fn load_source(
     context: &ProjectContext,
     files: &FileStore,
+    source_id: &str,
+) -> Result<LoadedSource, BackendError> {
+    let index = SourceRegistry::read_index(context, files)?;
+    load_source_with_index(context, files, &index, source_id)
+}
+
+fn load_source_with_index(
+    context: &ProjectContext,
+    files: &FileStore,
+    index: &SourceIndex,
     source_id: &str,
 ) -> Result<LoadedSource, BackendError> {
     if !safe_id(source_id) {
@@ -1408,19 +1482,16 @@ fn load_source(
     if manifest.source_id != source_id {
         return Err(source_not_found());
     }
-    let index = SourceRegistry::read_index(context, files)?;
+    let version = current_version(&manifest)?.clone();
     let indexed = index
         .by_content_hash
-        .values()
-        .chain(index.by_locator.values())
-        .any(|pointer| {
-            pointer.source_id == manifest.source_id
-                && pointer.version_id == manifest.current_version_id
+        .get(&version.content_hash)
+        .is_some_and(|pointer| {
+            pointer.source_id == manifest.source_id && pointer.version_id == version.version_id
         });
     if !indexed {
         return Err(source_invalid());
     }
-    let version = current_version(&manifest)?.clone();
     let current_path = context.resolve_project_path(&manifest.wiki_path)?;
     let current_markdown =
         read_project_file_nofollow(&context.root, &current_path).map_err(|_| source_invalid())?;
@@ -1918,10 +1989,26 @@ fn source_status(version: &SourceVersion, candidate_ready: bool) -> SourceStatus
     }
 }
 
-fn version_summaries(
+fn version_restorability(
     context: &ProjectContext,
     files: &FileStore,
     manifest: &SourceManifest,
+) -> BTreeMap<String, bool> {
+    manifest
+        .versions
+        .iter()
+        .map(|version| {
+            (
+                version.version_id.clone(),
+                version_is_restorable(context, files, manifest, version),
+            )
+        })
+        .collect()
+}
+
+fn version_summaries(
+    manifest: &SourceManifest,
+    restorability: &BTreeMap<String, bool>,
 ) -> Vec<SourceVersionSummary> {
     manifest
         .versions
@@ -1933,16 +2020,18 @@ fn version_summaries(
             event_kind: timeline_kind_for_version(manifest, &version.version_id),
             quality: version.quality.clone(),
             current: version.version_id == manifest.current_version_id,
-            restorable: version_is_restorable(context, files, manifest, version),
+            restorable: restorability
+                .get(&version.version_id)
+                .copied()
+                .unwrap_or(false),
             checkpoint: version.checkpoint.clone(),
         })
         .collect()
 }
 
 fn timeline_summaries(
-    context: &ProjectContext,
-    files: &FileStore,
     manifest: &SourceManifest,
+    restorability: &BTreeMap<String, bool>,
 ) -> Vec<SourceTimelineItem> {
     manifest
         .timeline
@@ -1952,13 +2041,9 @@ fn timeline_summaries(
             let restorable = event
                 .version_id
                 .as_deref()
-                .and_then(|version_id| {
-                    manifest
-                        .versions
-                        .iter()
-                        .find(|version| version.version_id == version_id)
-                })
-                .is_some_and(|version| version_is_restorable(context, files, manifest, version));
+                .and_then(|version_id| restorability.get(version_id))
+                .copied()
+                .unwrap_or(false);
             Some(SourceTimelineItem {
                 event_id: event.event_id.clone(),
                 kind: kind.into(),
@@ -2508,6 +2593,7 @@ fn build_delete_preview(
         &loaded.manifest_hash,
         &inventory,
     );
+    let restorability = version_restorability(context, files, &loaded.manifest);
     Ok(DeleteSourcePreview {
         source_id: loaded.manifest.source_id.clone(),
         title: loaded.manifest.title.clone(),
@@ -2519,7 +2605,7 @@ fn build_delete_preview(
                 size_bytes: entry.size_bytes,
             })
             .collect(),
-        versions: version_summaries(context, files, &loaded.manifest),
+        versions: version_summaries(&loaded.manifest, &restorability),
         reference_count: referenced_by.len(),
         referenced_by,
         expected_freed_bytes: inventory.iter().map(|entry| entry.size_bytes).sum(),

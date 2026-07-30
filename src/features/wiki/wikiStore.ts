@@ -44,6 +44,9 @@ function isConflictError(error: unknown): boolean {
 }
 
 const RECENT_PAGE_LIMIT = 8;
+// Project scope rejects cross-project work; this serial also rejects older
+// requests inside the same project, including A -> B -> A navigation.
+let pageRequestEpoch = 0;
 
 interface WikiState {
   tree: WikiTree | null;
@@ -155,12 +158,13 @@ export const useWikiStore = create<WikiState>((set, get) => ({
   },
   openPage: async (projectId, rootPath, path) => {
     const scope = captureProjectScope();
+    const requestEpoch = ++pageRequestEpoch;
     set({ loadingPage: true, selectedPath: path, mode: "read", saveState: "idle", conflict: null, error: null });
     try {
       const page = await invoke<WikiPageContent>("read_wiki_page", {
         request: { projectId, projectRootPath: rootPath, relativePath: path },
       });
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== pageRequestEpoch) return;
       set((state) => {
         const entry: RecentPageEntry = { path: page.meta.path, title: page.meta.title };
         const rest = state.recentPages.filter((p) => p.path !== entry.path);
@@ -172,7 +176,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
         };
       });
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== pageRequestEpoch) return;
       set({ loadingPage: false, error: errorMessage(error) });
     }
   },
@@ -477,7 +481,10 @@ export const useWikiStore = create<WikiState>((set, get) => ({
   },
   requestExport: (requestedExportType) => set({ requestedExportType }),
   consumeExportRequest: () => set({ requestedExportType: null }),
-  reset: () => set({ ...initial }),
+  reset: () => {
+    pageRequestEpoch += 1;
+    set({ ...initial });
+  },
 }));
 
 function errorMessage(error: unknown): string {

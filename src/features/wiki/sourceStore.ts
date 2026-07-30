@@ -35,6 +35,7 @@ interface SourceState {
     projectId: string,
     rootPath: string,
     sourceId: string,
+    refreshToken?: string,
   ) => Promise<void>;
   reprocess: (
     projectId: string,
@@ -117,10 +118,53 @@ const nextAiOrganizeStartToken = () => {
   aiOrganizeStartSerial += 1;
   return aiOrganizeStartSerial;
 };
+// Keep the existing epoch semantics for stale responses while coalescing
+// StrictMode's duplicate mount effects into one backend detail read.
+interface ActiveSourceDetailRequest {
+  promise: Promise<SourceDetail>;
+  refreshToken: string | null;
+}
+
+const sourceDetailRequests = new Map<string, ActiveSourceDetailRequest>();
+
+function requestSourceDetail(
+  projectId: string,
+  rootPath: string,
+  sourceId: string,
+  refreshToken?: string,
+): Promise<SourceDetail> {
+  const key = JSON.stringify([projectId, rootPath, sourceId]);
+  const existing = sourceDetailRequests.get(key);
+  // A completion token represents a newer backend snapshot. It replaces an
+  // older active read, while StrictMode replays carrying the same token still
+  // share one request. Ordinary callers always join the newest active read.
+  if (
+    existing &&
+    (refreshToken === undefined || existing.refreshToken === refreshToken)
+  ) {
+    return existing.promise;
+  }
+
+  const request = invoke<SourceDetail>("get_source_detail", {
+    request: { projectId, projectRootPath: rootPath, sourceId },
+  });
+  const active = {
+    promise: request,
+    refreshToken: refreshToken ?? null,
+  };
+  sourceDetailRequests.set(key, active);
+  const clear = () => {
+    if (sourceDetailRequests.get(key) === active) {
+      sourceDetailRequests.delete(key);
+    }
+  };
+  void request.then(clear, clear);
+  return request;
+}
 
 export const useSourceStore = create<SourceState>((set, get) => ({
   ...initial,
-  loadDetail: async (projectId, rootPath, sourceId) => {
+  loadDetail: async (projectId, rootPath, sourceId, refreshToken) => {
     const scope = captureProjectScope();
     const epoch = get().requestEpoch + 1;
     set({
@@ -133,9 +177,12 @@ export const useSourceStore = create<SourceState>((set, get) => ({
       deletePreview: null,
     });
     try {
-      const detail = await invoke<SourceDetail>("get_source_detail", {
-        request: { projectId, projectRootPath: rootPath, sourceId },
-      });
+      const detail = await requestSourceDetail(
+        projectId,
+        rootPath,
+        sourceId,
+        refreshToken,
+      );
       if (!isProjectScopeCurrent(scope) || get().requestEpoch !== epoch) return;
       set({ detail, loading: false });
     } catch (error) {
@@ -602,11 +649,13 @@ export const useSourceStore = create<SourceState>((set, get) => ({
   clearUpdatePreview: () => set({ updatePreview: null }),
   clearMovePreview: () => set({ movePreview: null }),
   clearDeletePreview: () => set({ deletePreview: null }),
-  reset: () =>
+  reset: () => {
+    sourceDetailRequests.clear();
     set((state) => ({
       ...initial,
       requestEpoch: state.requestEpoch + 1,
-    })),
+    }));
+  },
 }));
 
 function errorMessage(error: unknown): string {

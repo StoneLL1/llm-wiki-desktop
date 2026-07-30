@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import type {
@@ -63,10 +64,12 @@ function pageContent(overrides: Partial<WikiPageContent> = {}): WikiPageContent 
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 beforeEach(() => {
@@ -229,6 +232,113 @@ describe("wikiStore", () => {
 
     expect(useWikiStore.getState().page).toBeNull();
     expect(useWikiStore.getState().selectedPath).toBeNull();
+  });
+
+  it("keeps the latest page when same-project responses arrive out of order", async () => {
+    const first = deferred<WikiPageContent>();
+    const second = deferred<WikiPageContent>();
+    invokeMock
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const openingFirst = useWikiStore
+      .getState()
+      .openPage("proj-1", "D:/wiki", "wiki/a.md");
+    const openingSecond = useWikiStore
+      .getState()
+      .openPage("proj-1", "D:/wiki", "wiki/b.md");
+    const secondPage = pageContent({
+      meta: pageMeta({ path: "wiki/b.md", title: "B" }),
+      rawMarkdown: "# B",
+      bodyMarkdown: "# B",
+    });
+    second.resolve(secondPage);
+    await openingSecond;
+
+    first.resolve(
+      pageContent({
+        meta: pageMeta({ path: "wiki/a.md", title: "A" }),
+        rawMarkdown: "# A",
+        bodyMarkdown: "# A",
+      }),
+    );
+    await openingFirst;
+
+    const state = useWikiStore.getState();
+    expect(state.selectedPath).toBe("wiki/b.md");
+    expect(state.page).toEqual(secondPage);
+    expect(state.draft).toBe("# B");
+    expect(state.loadingPage).toBe(false);
+    expect(state.error).toBeNull();
+  });
+
+  it("ignores stale same-project failures without clearing the latest page state", async () => {
+    const first = deferred<WikiPageContent>();
+    const second = deferred<WikiPageContent>();
+    invokeMock
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const openingFirst = useWikiStore
+      .getState()
+      .openPage("proj-1", "D:/wiki", "wiki/a.md");
+    const openingSecond = useWikiStore
+      .getState()
+      .openPage("proj-1", "D:/wiki", "wiki/b.md");
+    const secondPage = pageContent({
+      meta: pageMeta({ path: "wiki/b.md", title: "B" }),
+      rawMarkdown: "# B",
+      bodyMarkdown: "# B",
+    });
+    second.resolve(secondPage);
+    await openingSecond;
+    first.reject(new Error("stale A failed"));
+    await openingFirst;
+
+    const state = useWikiStore.getState();
+    expect(state.selectedPath).toBe("wiki/b.md");
+    expect(state.page).toEqual(secondPage);
+    expect(state.loadingPage).toBe(false);
+    expect(state.error).toBeNull();
+  });
+
+  it("distinguishes repeated paths in an A-B-A request sequence", async () => {
+    const firstA = deferred<WikiPageContent>();
+    const middleB = deferred<WikiPageContent>();
+    const finalA = deferred<WikiPageContent>();
+    invokeMock
+      .mockReturnValueOnce(firstA.promise)
+      .mockReturnValueOnce(middleB.promise)
+      .mockReturnValueOnce(finalA.promise);
+
+    const openingFirstA = useWikiStore
+      .getState()
+      .openPage("proj-1", "D:/wiki", "wiki/a.md");
+    const openingB = useWikiStore
+      .getState()
+      .openPage("proj-1", "D:/wiki", "wiki/b.md");
+    const openingFinalA = useWikiStore
+      .getState()
+      .openPage("proj-1", "D:/wiki", "wiki/a.md");
+    const latestPage = pageContent({
+      meta: pageMeta({ path: "wiki/a.md", title: "Latest A", hash: "hash-latest" }),
+      rawMarkdown: "# Latest A",
+      bodyMarkdown: "# Latest A",
+    });
+    finalA.resolve(latestPage);
+    await openingFinalA;
+    middleB.resolve(
+      pageContent({ meta: pageMeta({ path: "wiki/b.md", title: "B" }) }),
+    );
+    firstA.resolve(
+      pageContent({ meta: pageMeta({ path: "wiki/a.md", title: "Stale A" }) }),
+    );
+    await Promise.all([openingFirstA, openingB]);
+
+    const state = useWikiStore.getState();
+    expect(state.page).toEqual(latestPage);
+    expect(state.draft).toBe("# Latest A");
+    expect(state.recentPages.map((entry) => entry.title)).toEqual(["Latest A"]);
   });
 
   it("scans the tree and opens the first page by default", async () => {
@@ -639,6 +749,125 @@ describe("MarkdownReader", () => {
         },
       }),
     );
+  });
+
+  it("renders remote images immediately with native lazy loading and no IPC", () => {
+    render(
+      <MarkdownReader
+        bodyMarkdown="![remote cover](https://example.com/cover.jpg)"
+        frontmatterYaml={null}
+        pages={[]}
+        onOpenPage={vi.fn()}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "remote cover" });
+    expect(image).toHaveAttribute("src", "https://example.com/cover.jpg");
+    expect(image).toHaveAttribute("loading", "lazy");
+    expect(image).toHaveAttribute("decoding", "async");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("defers local asset IPC until the image is near the viewport", async () => {
+    let reveal!: () => void;
+    class MockIntersectionObserver implements IntersectionObserver {
+      readonly root = null;
+      readonly rootMargin = "600px";
+      readonly thresholds = [0];
+      readonly disconnect = vi.fn();
+      readonly observe = vi.fn();
+      readonly unobserve = vi.fn();
+
+      constructor(callback: IntersectionObserverCallback) {
+        reveal = () =>
+          callback(
+            [{ isIntersecting: true } as IntersectionObserverEntry],
+            this,
+          );
+      }
+
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    }
+    vi.stubGlobal("IntersectionObserver", MockIntersectionObserver);
+    invokeMock.mockResolvedValue({
+      contentType: "image/png",
+      bytes: [137, 80, 78, 71],
+    });
+
+    try {
+      render(
+        <MarkdownReader
+          bodyMarkdown="![cover](assets/cover.png)"
+          frontmatterYaml={null}
+          pages={[]}
+          onOpenPage={vi.fn()}
+          projectId="proj-1"
+          projectRootPath="D:/wiki"
+          pagePath="wiki/sources/local/article.md"
+        />,
+      );
+
+      expect(invokeMock).not.toHaveBeenCalled();
+      act(() => reveal());
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith("read_wiki_asset", {
+          request: {
+            projectId: "proj-1",
+            projectRootPath: "D:/wiki",
+            pagePath: "wiki/sources/local/article.md",
+            assetPath: "assets/cover.png",
+          },
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("deduplicates a local image request across StrictMode effect replay", async () => {
+    invokeMock.mockResolvedValue({
+      contentType: "image/png",
+      bytes: [137, 80, 78, 71],
+    });
+    const onOpenPage = vi.fn();
+    const pages: WikiPageMeta[] = [];
+    const reader = () => (
+      <StrictMode>
+        <MarkdownReader
+          bodyMarkdown="![cover](assets/cover.png)"
+          frontmatterYaml={null}
+          pages={pages}
+          onOpenPage={onOpenPage}
+          projectId="proj-1"
+          projectRootPath="D:/wiki"
+          pagePath="wiki/sources/local/article.md"
+        />
+      </StrictMode>
+    );
+
+    const { rerender } = render(reader());
+
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(
+        ([command]) => command === "read_wiki_asset",
+      );
+      expect(calls).toHaveLength(1);
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("img", { name: "cover" })).toHaveAttribute(
+        "data-wiki-asset-state",
+        "ready",
+      ),
+    );
+
+    rerender(reader());
+    await act(async () => undefined);
+    const calls = invokeMock.mock.calls.filter(
+      ([command]) => command === "read_wiki_asset",
+    );
+    expect(calls).toHaveLength(1);
   });
 
   it("renders an existing wikilink as clickable and invokes onOpenPage", async () => {

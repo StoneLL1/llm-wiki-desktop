@@ -6,7 +6,7 @@ use crate::models::source::{
     SourceAiOrganizeCandidateMeta, SourceAiOrganizeRoute,
 };
 use crate::models::source_package::{SourcePackageMember, SOURCE_PACKAGE_SCHEMA_VERSION};
-use crate::models::wiki::{WikiPageMeta, WikiTreeNodeKind};
+use crate::models::wiki::{WikiPageContent, WikiPageMeta, WikiTreeNodeKind};
 use crate::services::import_v2::engine::{
     EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
 };
@@ -409,6 +409,90 @@ fn source_mode_requires_source_type_and_a_valid_registry_binding() {
     );
     assert!(tree.pages[1].source_binding.is_none());
     fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn page_binding_uses_the_returned_markdown_snapshot_and_only_its_exact_source() {
+    let fixture = package_fixture("page-binding-snapshot");
+    let (_, body) = parse_final_source(&fixture.markdown).unwrap();
+    let mut page = WikiPageContent {
+        meta: page_meta(&fixture.wiki_path),
+        raw_markdown: fixture.markdown.clone(),
+        body_markdown: body,
+        frontmatter_yaml: None,
+    };
+
+    apply_validated_page_binding(&fixture.context, &FileStore, &mut page).unwrap();
+    assert_eq!(
+        page.meta.source_id.as_deref(),
+        Some(fixture.source_id.as_str())
+    );
+
+    page.meta = page_meta(&fixture.wiki_path);
+    page.raw_markdown = fixture.markdown.replacen(
+        &format!("sourceId: \"{}\"", fixture.source_id),
+        "sourceId: \"source-forged\"",
+        1,
+    );
+    apply_validated_page_binding(&fixture.context, &FileStore, &mut page).unwrap();
+    assert!(
+        page.meta.source_binding.is_none(),
+        "a valid on-disk Source must not promote a different returned snapshot"
+    );
+
+    fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn page_and_tree_binding_both_reject_missing_or_corrupt_package_manifests() {
+    for case in ["missing", "corrupt"] {
+        let fixture = package_fixture(&format!("binding-package-{case}"));
+        let package_path = fixture.root.join(format!(
+            "raw/sources/{}/{}/derived/source-package.json",
+            fixture.source_id, fixture.version_id
+        ));
+        if case == "missing" {
+            fs::remove_file(&package_path).unwrap();
+        } else {
+            fs::write(&package_path, b"{}").unwrap();
+        }
+
+        let mut tree = WikiTree {
+            root: WikiTreeNode {
+                name: "wiki".into(),
+                kind: WikiTreeNodeKind::Folder,
+                path: "wiki".into(),
+                page_type: None,
+                title: None,
+                starred: false,
+                bookmarked: false,
+                file_count: 1,
+                children: Vec::new(),
+            },
+            pages: vec![page_meta(&fixture.wiki_path)],
+            total_pages: 1,
+        };
+        apply_validated_source_bindings(&fixture.context, &FileStore, &mut tree).unwrap();
+        assert!(
+            tree.pages[0].source_binding.is_none(),
+            "tree binding must reject a {case} package manifest"
+        );
+
+        let (_, body) = parse_final_source(&fixture.markdown).unwrap();
+        let mut page = WikiPageContent {
+            meta: page_meta(&fixture.wiki_path),
+            raw_markdown: fixture.markdown.clone(),
+            body_markdown: body,
+            frontmatter_yaml: None,
+        };
+        apply_validated_page_binding(&fixture.context, &FileStore, &mut page).unwrap();
+        assert!(
+            page.meta.source_binding.is_none(),
+            "targeted binding must match tree behavior for a {case} package manifest"
+        );
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
 }
 
 #[test]
@@ -1223,6 +1307,10 @@ fn product_timeline_exposes_only_the_six_meaningful_categories() {
         .unwrap();
     assert_eq!(detail.timeline.len(), 1);
     assert_eq!(detail.timeline[0].kind, "source_imported");
+    assert_eq!(
+        detail.timeline[0].restorable, detail.versions[0].restorable,
+        "the timeline and version list must reuse one restorability decision"
+    );
     for raw in [
         "imported",
         "ocr_reprocessed",
