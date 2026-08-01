@@ -6,6 +6,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("react-i18next", () => ({
+  initReactI18next: { type: "3rdParty", init: vi.fn() },
   useTranslation: () => ({
     t: (key: string, values?: Record<string, string>) =>
       key === "task.cancelError" ? `Could not cancel task: ${values?.message}` :

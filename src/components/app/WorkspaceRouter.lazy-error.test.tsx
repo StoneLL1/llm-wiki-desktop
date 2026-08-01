@@ -105,6 +105,7 @@ const agentWorkflow: AgentWorkflow = {
 const workflowsController: WorkflowsController = {
   refresh: vi.fn(), prepare: vi.fn(), startPrepared: vi.fn(), cancel: vi.fn(),
   undoCancel: vi.fn(), reorder: vi.fn(), retry: vi.fn(), confirm: vi.fn(),
+  adjustAndPrepare: vi.fn(), openRun: vi.fn(), openResult: vi.fn(),
   discard: vi.fn(), continueQueue: vi.fn(), loadHistoryMore: vi.fn(), handlePrerequisite: vi.fn(), backToOverview: vi.fn(),
 };
 

@@ -16,6 +16,10 @@ import {
 } from "../../services/workflowApi";
 import { useWorkflowStore } from "../../stores/workflowStore";
 import { useNavigationStore } from "../../stores/navigationStore";
+import {
+  hydrateAndSelectWorkflowRun,
+  openWorkflowResult,
+} from "../../services/workflowNavigation";
 import type { ProjectSummary } from "../../types/project";
 import type {
   WorkflowKind,
@@ -45,6 +49,9 @@ export interface WorkflowsController {
   undoCancel: (taskId: string) => Promise<void>;
   reorder: (taskId: string, beforeTaskId: string | null) => Promise<void>;
   retry: (taskId: string) => Promise<void>;
+  adjustAndPrepare: (run: WorkflowRun, openSettingsAfter?: boolean) => Promise<void>;
+  openRun: (taskId: string) => Promise<void>;
+  openResult: (run: WorkflowRun) => Promise<void>;
   confirm: (taskId: string, actionId: string) => Promise<void>;
   discard: (taskId: string) => Promise<void>;
   continueQueue: () => Promise<void>;
@@ -249,6 +256,34 @@ export function useWorkflowsController(
       reorder: (taskId, beforeTaskId) =>
         perform(() => reorderQueuedWorkflow({ ...request(), taskId, beforeTaskId })),
       retry: (taskId) => perform(() => retryWorkflow({ ...request(), taskId })),
+      adjustAndPrepare: async (run, openSettingsAfter = false) => {
+        const routeSelection =
+          run.route?.kind === "agent"
+            ? { kind: "agent" as const, agent: run.route.agent }
+            : run.route?.kind === "byok"
+              ? { kind: "byok" as const, provider: run.route.provider }
+              : null;
+        await prepareKind(run.kind, run.scope, routeSelection);
+        if (openSettingsAfter) openSettings();
+      },
+      openRun: async (taskId) => {
+        const state = useWorkflowStore.getState();
+        try {
+          await hydrateAndSelectWorkflowRun(
+            { projectId: project.projectId, rootPath: project.rootPath },
+            taskId,
+          );
+        } catch (error) {
+          if (useWorkflowStore.getState().projectKey === state.projectKey) {
+            useWorkflowStore.getState().setError(messageOf(error));
+          }
+        }
+      },
+      openResult: (run) =>
+        openWorkflowResult(
+          { projectId: project.projectId, rootPath: project.rootPath },
+          run,
+        ),
       confirm: (taskId, actionId) =>
         perform(() => confirmWorkflowAction({ ...request(), taskId, actionId })),
       discard: (taskId) => perform(() => discardWorkflowResult({ ...request(), taskId })),

@@ -1543,27 +1543,34 @@ describe("useImportWorkflow", () => {
     }
   });
 
-  it("starts Compile only from the explicit action with exact changed Source versions", async () => {
+  it("prepares Update Wiki only from the explicit action with exact changed Source versions", async () => {
     const taskLauncher = launcher();
-    vi.mocked(taskLauncher.startCompile).mockResolvedValue(task("compile-task", projectA.projectId));
+    useNavigationStore.setState({ workflowLaunchIntent: null, activeView: "import" });
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", taskLauncher));
     await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
 
     await act(async () => result.current.updateWiki(completion));
 
-    expect(taskLauncher.startCompile).toHaveBeenCalledWith({
-      sourceVersions: [
+    expect(taskLauncher.startCompile).not.toHaveBeenCalled();
+    expect(useNavigationStore.getState().workflowLaunchIntent).toEqual({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      kind: "update_wiki",
+      origin: "import",
+      scopePreset: {
+        kind: "update_wiki",
+        mode: "changed_sources",
+        sourceVersions: [
         {
           sourceId: "source-new",
           versionId: "version-new",
-          contentHash: "a".repeat(64),
         },
         {
           sourceId: "source-updated",
           versionId: "version-updated",
-          contentHash: "b".repeat(64),
         },
       ],
+      },
     });
   });
 });

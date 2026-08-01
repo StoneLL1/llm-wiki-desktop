@@ -4490,6 +4490,14 @@ select:focus-visible {
 .workflow-execution-details dt { color: var(--text-muted); }
 .workflow-execution-details dd { margin: 0; line-height: 1.5; }
 .workflow-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: var(--sp-4); }
+.workflow-file-diff { margin-top: var(--sp-2); border-top: 1px solid var(--border-subtle); padding-top: var(--sp-2); }
+.workflow-file-diff summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.workflow-retry-menu { position: absolute; z-index: 10; display: grid; min-width: 210px; margin-top: var(--sp-1); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--sp-1); background: var(--surface-raised); box-shadow: var(--shadow-md); }
+.workflow-retry-menu button { border: 0; border-radius: var(--radius-sm); padding: 6px 8px; background: transparent; color: var(--text-primary); text-align: left; font-size: 12px; }
+.workflow-retry-menu button:hover,
+.workflow-retry-menu button:focus-visible { background: var(--surface-muted); }
+.workflow-actions > div:has(.workflow-retry-menu) { position: relative; }
+.workflow-detail > .workflow-actions .btn--danger { border-color: var(--danger); background: var(--danger); color: var(--text-inverse); }
 .workflow-detail__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); margin-bottom: var(--sp-5); }
 .workflow-attention,
 .workflow-error { margin: 0 0 var(--sp-5); border: 1px solid var(--border-strong); border-radius: var(--radius-md); padding: var(--sp-3); background: var(--surface-raised); }

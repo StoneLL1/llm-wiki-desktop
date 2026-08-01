@@ -215,6 +215,34 @@ pub struct WorkflowPendingAction {
     pub checkpoint_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDecisionCounts {
+    pub created: u32,
+    pub modified: u32,
+    pub overwritten: u32,
+    pub deleted: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowFileDiff {
+    pub path: String,
+    pub diff: String,
+}
+
+/// Read-only review data hydrated from the backend-owned confirmation
+/// registry. It is deliberately absent from persisted workflow execution
+/// state so frontend detail reads cannot become a continuation payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDecisionReview {
+    pub reason: String,
+    pub counts: WorkflowDecisionCounts,
+    pub user_edits_detected: bool,
+    pub file_diffs: Vec<WorkflowFileDiff>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowStage {
@@ -419,6 +447,8 @@ pub struct WorkflowRun {
     #[serde(default)]
     pub pending_action: Option<WorkflowPendingAction>,
     #[serde(default)]
+    pub decision_review: Option<WorkflowDecisionReview>,
+    #[serde(default)]
     pub result: Option<WorkflowResult>,
     #[serde(default)]
     pub error: Option<WorkflowErrorSummary>,
@@ -532,6 +562,7 @@ impl WorkflowExecutionState {
             continuation_required: self.continuation_required,
             retry: self.retry.clone(),
             pending_action: self.pending_action.clone(),
+            decision_review: None,
             result: self.result.clone(),
             error: self.error.clone(),
             started_at: task.started_at.clone(),

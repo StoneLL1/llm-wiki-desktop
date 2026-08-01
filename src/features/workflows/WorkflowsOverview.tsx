@@ -9,11 +9,13 @@ export function WorkflowsOverviewView({
   runs,
   onPrepare,
   onOpenRun,
+  onContinueQueue,
 }: {
   overview: WorkflowsOverview | null;
   runs: WorkflowRun[];
   onPrepare: (kind: WorkflowKind) => void;
   onOpenRun: (taskId: string) => void;
+  onContinueQueue: () => void;
 }) {
   const { t } = useTranslation();
   if (!overview) {
@@ -30,6 +32,14 @@ export function WorkflowsOverviewView({
         <h2>{t("workflows.overview.title")}</h2>
         <p>{t("workflows.overview.description")}</p>
       </div>
+      {runs.some((run) => run.displayStatus === "queued" && run.continuationRequired) ? (
+        <div className="workflow-attention">
+          <p>{t("workflows.recovery.queuedDescription")}</p>
+          <button className="btn btn--primary" type="button" onClick={onContinueQueue}>
+            {t("workflows.action.continueQueue")}
+          </button>
+        </div>
+      ) : null}
       <div className="workflow-list" role="list">
         {WORKFLOW_KINDS.map((kind) => {
           const row = overview.rows.find((candidate) => candidate.kind === kind);

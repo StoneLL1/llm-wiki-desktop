@@ -26,8 +26,10 @@ export function WorkspaceController() {
   );
   const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
   const settingsOpen = useNavigationStore((state) => state.settingsOpen);
-  const agentRunPreset = useNavigationStore((state) => state.agentRunPreset);
-  const clearAgentRunRequest = useNavigationStore((state) => state.clearAgentRunRequest);
+  const workflowLaunchIntent = useNavigationStore((state) => state.workflowLaunchIntent);
+  const clearWorkflowLaunchIntent = useNavigationStore(
+    (state) => state.clearWorkflowLaunchIntent,
+  );
   const closeSettings = useNavigationStore((state) => state.closeSettings);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const tasks = useTaskStore((state) => state.tasks);
@@ -58,10 +60,28 @@ export function WorkspaceController() {
   );
 
   useEffect(() => {
-    if (!agentRunPreset || activeView !== "agent") return;
-    clearAgentRunRequest();
-    agentWorkflow.openRunDialog(agentRunPreset);
-  }, [activeView, agentRunPreset, agentWorkflow.openRunDialog, clearAgentRunRequest]);
+    if (!workflowLaunchIntent) return;
+    if (
+      workflowLaunchIntent.projectId !== currentProject.projectId ||
+      workflowLaunchIntent.projectRootPath !== currentProject.rootPath
+    ) {
+      clearWorkflowLaunchIntent();
+      return;
+    }
+    if (activeView !== "workflows") return;
+    clearWorkflowLaunchIntent();
+    void workflowsController.prepare(
+      workflowLaunchIntent.kind,
+      workflowLaunchIntent.scopePreset,
+    );
+  }, [
+    activeView,
+    clearWorkflowLaunchIntent,
+    currentProject.projectId,
+    currentProject.rootPath,
+    workflowLaunchIntent,
+    workflowsController,
+  ]);
 
   const workspaceClass =
     activeView === "wiki" ||

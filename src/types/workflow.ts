@@ -87,6 +87,13 @@ export type WorkflowScope =
       outputPath: string | null;
     };
 
+/**
+ * A launch entry may prefill a complete structured scope, but it never owns
+ * preparation validity or task creation. The backend normalizes and validates
+ * this value again through `prepare_workflow`.
+ */
+export type WorkflowScopePreset = WorkflowScope;
+
 export type WorkflowStageStatus =
   | "pending"
   | "running"
@@ -239,6 +246,18 @@ export interface WorkflowRetryLink {
   attemptNumber: number;
 }
 
+export interface WorkflowDecisionReview {
+  reason: string;
+  counts: {
+    created: number;
+    modified: number;
+    overwritten: number;
+    deleted: number;
+  };
+  userEditsDetected: boolean;
+  fileDiffs: Array<{ path: string; diff: string }>;
+}
+
 export interface WorkflowRun {
   schemaVersion: number;
   taskId: string;
@@ -257,6 +276,7 @@ export interface WorkflowRun {
   continuationRequired: boolean;
   retry: WorkflowRetryLink | null;
   pendingAction: WorkflowPendingAction | null;
+  decisionReview?: WorkflowDecisionReview | null;
   result: WorkflowResult | null;
   error: WorkflowErrorSummary | null;
   startedAt: string;

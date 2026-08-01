@@ -70,7 +70,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       return {
         runs: sortRuns([
           ...state.runs.filter((candidate) => candidate.taskId !== run.taskId),
-          run,
+          preserveHydratedDecisionReview(previous, run),
         ]),
       };
     }),
@@ -94,10 +94,18 @@ function mergeRunSnapshots(current: WorkflowRun[], incoming: WorkflowRun[]): Wor
   for (const run of incoming) {
     const previous = merged.get(run.taskId);
     if (!previous || Date.parse(run.updatedAt) >= Date.parse(previous.updatedAt)) {
-      merged.set(run.taskId, run);
+      merged.set(run.taskId, preserveHydratedDecisionReview(previous, run));
     }
   }
   return [...merged.values()];
+}
+
+function preserveHydratedDecisionReview(
+  previous: WorkflowRun | undefined,
+  incoming: WorkflowRun,
+): WorkflowRun {
+  if (incoming.decisionReview || !previous?.decisionReview) return incoming;
+  return { ...incoming, decisionReview: previous.decisionReview };
 }
 
 export function selectWorkflowRun(taskId: string | null): WorkflowRun | null {

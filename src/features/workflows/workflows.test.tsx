@@ -30,7 +30,7 @@ const overview: WorkflowsOverview = {
 describe("Workflows overview", () => {
   it("renders exactly the three fixed workflows and a single recommendation", () => {
     const prepare = vi.fn();
-    render(<WorkflowsOverviewView overview={overview} runs={[]} onPrepare={prepare} onOpenRun={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={overview} runs={[]} onPrepare={prepare} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
     expect(screen.getAllByText("workflows.recommended")).toHaveLength(1);
     fireEvent.click(screen.getAllByRole("button", { name: "workflows.action.prepare" })[1]!);
@@ -83,13 +83,13 @@ describe("Workflows overview", () => {
   });
 
   it("renders the no-project state without inventing a workflow", () => {
-    render(<WorkflowsOverviewView overview={null} runs={[]} onPrepare={vi.fn()} onOpenRun={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={null} runs={[]} onPrepare={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getByRole("heading", { name: "workflows.noProject.title" })).toBeInTheDocument();
     expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
   });
 
   it("shows complete confirmation evidence and valid queue actions", () => {
-    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const waiting: WorkflowRun = {
       schemaVersion: 1, taskId: "waiting-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b",
@@ -102,6 +102,21 @@ describe("Workflows overview", () => {
     expect(screen.getByText("wiki/甲.md")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.applyChanges" }));
     expect(controller.confirm).toHaveBeenCalledWith("waiting-a", "action-a");
+  });
+
+  it("prepares a recommended next workflow without starting it", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const completed = {
+      schemaVersion: 1, taskId: "completed-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "completed",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b",
+      stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null,
+      result: { kind: "update_wiki", created: 1, updated: 0, skipped: 0, deleted: 0, conflicted: 0, checkpointHash: "abc", finalCommit: "def", affectedPaths: ["wiki/a.md"] }, error: null,
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
+    } satisfies WorkflowRun;
+    render(<WorkflowTaskDetail run={completed} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.prepareNext" }));
+    expect(controller.prepare).toHaveBeenCalledWith("health_check");
+    expect(controller.startPrepared).not.toHaveBeenCalled();
   });
 
   it("groups retries under their original attempt", () => {

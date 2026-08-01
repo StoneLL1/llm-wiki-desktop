@@ -15,9 +15,9 @@ use crate::models::git::CheckpointPurpose;
 use crate::models::paths::ProjectContext;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
-    UpdateWikiMode, WorkflowCandidateReference, WorkflowErrorSummary, WorkflowKind,
-    WorkflowPendingAction, WorkflowPrerequisiteAction, WorkflowResult, WorkflowRoute, WorkflowRun,
-    WorkflowScope,
+    UpdateWikiMode, WorkflowCandidateReference, WorkflowDecisionCounts, WorkflowDecisionReview,
+    WorkflowErrorSummary, WorkflowFileDiff, WorkflowKind, WorkflowPendingAction,
+    WorkflowPrerequisiteAction, WorkflowResult, WorkflowRoute, WorkflowRun, WorkflowScope,
 };
 use crate::services::import_v2::source_registry::SourceRegistry;
 use crate::services::{
@@ -1552,6 +1552,62 @@ pub(crate) fn committed_update_wiki_result(
         .join(format!("{task_id}.json"))
         .is_file()
         .then_some(result)
+}
+
+pub fn update_wiki_decision_review(
+    task_id: &str,
+    project_root: &std::path::Path,
+) -> Option<WorkflowDecisionReview> {
+    let descriptor = load_valid_update_wiki_candidate(task_id, project_root)?;
+    let context = ProjectContext::new("workflow-review", project_root.to_path_buf());
+    let summary = CompileService::classify_workflow_changes(
+        &context,
+        &descriptor.candidate.manifest,
+        &descriptor.candidate.plan,
+        &descriptor.baseline_hashes,
+        false,
+    )
+    .ok()?;
+    let counts = WorkflowDecisionCounts {
+        created: summary.created.len() as u32,
+        modified: summary.updated.len() as u32,
+        overwritten: summary.conflicted.len() as u32,
+        deleted: summary.deleted.len() as u32,
+    };
+    let user_edits_detected = descriptor
+        .current_hashes
+        .iter()
+        .any(|(path, current)| descriptor.baseline_hashes.get(path) != Some(current));
+    let mut file_diffs = descriptor
+        .candidate
+        .manifest
+        .files
+        .iter()
+        .map(|file| WorkflowFileDiff {
+            path: file.path.clone(),
+            diff: CompileService::candidate_diff(&CompileManifest {
+                files: vec![file.clone()],
+                deletions: Vec::new(),
+                summary: descriptor.candidate.manifest.summary.clone(),
+            }),
+        })
+        .collect::<Vec<_>>();
+    file_diffs.extend(descriptor.candidate.manifest.deletions.iter().map(|path| {
+        WorkflowFileDiff {
+            path: path.clone(),
+            diff: CompileService::candidate_diff(&CompileManifest {
+                files: Vec::new(),
+                deletions: vec![path.clone()],
+                summary: descriptor.candidate.manifest.summary.clone(),
+            }),
+        }
+    }));
+    Some(WorkflowDecisionReview {
+        reason: descriptor.candidate.plan.summary,
+        counts,
+        user_edits_detected,
+        file_diffs,
+    })
 }
 
 pub fn update_wiki_candidate_is_valid_for_workflow(

@@ -19,7 +19,23 @@ describe("navigationStore layout preferences", () => {
         exportsList: 360,
         lintDetails: 320,
       },
+      workflowLaunchIntent: null,
     });
+  });
+
+  it("routes a structured workflow intent to preparation without starting work", () => {
+    useNavigationStore.getState().requestWorkflowLaunch({
+      projectId: "project-a",
+      projectRootPath: "D:/wiki-a",
+      kind: "health_check",
+      origin: "lint",
+      scopePreset: { kind: "health_check", mode: "complete" },
+    });
+
+    expect(useNavigationStore.getState().activeView).toBe("workflows");
+    expect(useNavigationStore.getState().workflowLaunchIntent).toEqual(
+      expect.objectContaining({ origin: "lint", kind: "health_check" }),
+    );
   });
 
   it("starts with the default view and right panel mode", () => {

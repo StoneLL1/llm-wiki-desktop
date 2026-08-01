@@ -770,16 +770,19 @@ export function useImportWorkflow(
       ...(selectedCompletion?.newSources ?? []),
       ...(selectedCompletion?.updatedSources ?? []),
     ];
-    if (changes.length === 0 || !isProjectCurrent(projectKey)) return null;
-    const task = await taskLauncher.startCompile({
-      sourceVersions: changes.map(({ sourceId, versionId, contentHash }) => ({
-        sourceId,
-        versionId,
-        contentHash,
-      })),
+    if (changes.length === 0 || !isProjectCurrent(projectKey)) return;
+    useNavigationStore.getState().requestWorkflowLaunch({
+      projectId,
+      projectRootPath: rootPath,
+      kind: "update_wiki",
+      origin: "import",
+      scopePreset: {
+        kind: "update_wiki",
+        mode: "changed_sources",
+        sourceVersions: changes.map(({ sourceId, versionId }) => ({ sourceId, versionId })),
+      },
     });
-    return isProjectCurrent(projectKey) ? task : null;
-  }, [completion, isProjectCurrent, projectKey, taskLauncher]);
+  }, [completion, isProjectCurrent, projectId, projectKey, rootPath]);
 
   const loadPreview = useCallback(async (identity: { sessionId: string; itemId: string; candidateId: string | null; historyBatchId?: string | null }) => {
     const current = useImportStore.getState();

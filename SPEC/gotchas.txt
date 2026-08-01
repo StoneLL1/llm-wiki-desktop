@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Import QA evidence resolves frontend tests by exact declaration text — Root cause: renaming the explicit Import action from legacy Compile wording to Workflows preparation left the JSON evidence anchor pointing at a declaration that no longer existed — How to avoid: update `docs/qa/import-source-media-flow-batch9-evidence.json` whenever an evidenced test is intentionally renamed, and keep the requirement wording aligned with the current product authority.
+
 Explicit queue continuation can create a runner-less `Running` task — Root cause: the coordinator claimed the first recovered item but returned only the refreshed queue, so the command had no claimed run to dispatch — How to avoid: return the claimed run together with queue snapshots, revalidate every recovered queued item before clearing continuation holds, and dispatch exactly the returned claim.
 
 Workflow confirmation cleanup can strand a claimed queue continuation — Root cause: candidate-directory deletion was treated as part of the terminal state transition even after the coordinator had completed/cancelled the current task and claimed the next one — How to avoid: advance the task state first, preserve and dispatch the claimed continuation, and keep temporary candidate cleanup best-effort after terminal transitions.

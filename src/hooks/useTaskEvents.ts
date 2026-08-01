@@ -70,10 +70,11 @@ export function useTaskEvents(): void {
     for (const channel of TASK_EVENT_CHANNELS) {
       listen<BackendEvent>(channel, (evt) => {
         const event = evt.payload as BackendEvent;
+        if (event.eventType === "workflow_updated") void notifyTaskEvent(event);
         if (!isTaskEventForProject(event, currentProject.projectId)) return;
         handleTaskEvent(event);
         notifyTaskEventListeners(event);
-        void notifyTaskEvent(event);
+        if (event.eventType !== "workflow_updated") void notifyTaskEvent(event);
       })
         .then((unlisten) => {
           if (cancelled) {

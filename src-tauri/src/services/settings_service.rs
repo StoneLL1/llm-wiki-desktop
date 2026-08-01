@@ -58,8 +58,10 @@ impl SettingsService {
         store.ensure_absolute_dir(&self.config_dir)?;
         let _guard = self.lock_global_settings()?;
         let mut global = settings.to_global_file();
-        global.chat_convenience_authorizations =
-            self.read_global_settings()?.chat_convenience_authorizations;
+        let existing_global = self.read_global_settings()?;
+        global.chat_convenience_authorizations = existing_global.chat_convenience_authorizations;
+        global.remote_provider_disclosure_revision =
+            existing_global.remote_provider_disclosure_revision;
         store.write_json_atomic_absolute(&self.global_settings_path(), &global)?;
         store.write_json_atomic(context, ".app/settings.json", &settings.to_project_file())?;
         store.write_json_atomic(
@@ -171,6 +173,29 @@ impl SettingsService {
         self.read_global_settings()
             .map(|settings| settings.close_behavior)
             .unwrap_or_default()
+    }
+
+    pub fn is_remote_provider_disclosure_acknowledged(
+        &self,
+        revision: &str,
+    ) -> Result<bool, BackendError> {
+        Ok(self
+            .read_global_settings()?
+            .remote_provider_disclosure_revision
+            .as_deref()
+            == Some(revision))
+    }
+
+    pub fn acknowledge_remote_provider_disclosure(
+        &self,
+        revision: &str,
+    ) -> Result<(), BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        settings.remote_provider_disclosure_revision = Some(revision.to_string());
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
     }
 
     /// Read the user's UI/content language preference from global settings.
@@ -584,6 +609,40 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn remote_provider_disclosure_is_global_versioned_and_survives_ui_saves() {
+        let (context, root, config_dir) = tmp_paths("workflow-remote-disclosure");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        assert!(!service
+            .is_remote_provider_disclosure_acknowledged("workflow-remote-provider-v1")
+            .unwrap());
+        service
+            .acknowledge_remote_provider_disclosure("workflow-remote-provider-v1")
+            .unwrap();
+        assert!(service
+            .is_remote_provider_disclosure_acknowledged("workflow-remote-provider-v1")
+            .unwrap());
+        assert!(!service
+            .is_remote_provider_disclosure_acknowledged("workflow-remote-provider-v2")
+            .unwrap());
+
+        let mut settings = service.read_settings(&context).unwrap();
+        settings.language = "zh-CN".into();
+        service.save_settings(&context, &settings).unwrap();
+        assert!(service
+            .is_remote_provider_disclosure_acknowledged("workflow-remote-provider-v1")
+            .unwrap());
+        let project_settings: serde_json::Value =
+            FileStore.read_json(&context, ".app/settings.json").unwrap();
+        assert!(project_settings
+            .get("remoteProviderDisclosureRevision")
+            .is_none());
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();

@@ -18,7 +18,7 @@ import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { fetchTaskById, useTaskStore } from "../../stores/taskStore";
+import { useTaskStore } from "../../stores/taskStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
 import type { ExportRecord, ExportType } from "../../types/export";
@@ -27,7 +27,6 @@ import { isTerminalStatus, type BackendTask } from "../../types/task";
 import type { CreateWikiPageInput, WikiPageContent, WikiPageMeta } from "../../types/wiki";
 import { MarkdownReader } from "./MarkdownReader";
 import { ConflictDiffDialog } from "./ConflictDiffDialog";
-import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
@@ -81,6 +80,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
   const openWikiAssistant = useNavigationStore((state) => state.openWikiAssistant);
+  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
   const setWikiAssistantPagePath = useNavigationStore((state) => state.setWikiAssistantPagePath);
   const [pageForm, setPageForm] = useState<
     { mode: "create" | "rename"; path: string } | null
@@ -90,8 +90,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
     | { kind: "delete"; action: PendingAction }
     | null
   >(null);
-  const [htmlDialogOpen, setHtmlDialogOpen] = useState(false);
-  const [htmlTemplate, setHtmlTemplate] = useState<ExportType>("beautiful_read");
   const [conflictDialogOpen, setConflictDialogOpen] = useState(true);
   const [sourceMovePath, setSourceMovePath] = useState<string | null>(null);
   const [sourceAiWorkbench, setSourceAiWorkbench] =
@@ -122,8 +120,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const requestDeletePage = useWikiStore((state) => state.requestDeletePage);
   const confirmDeletePage = useWikiStore((state) => state.confirmDeletePage);
   const cancelPendingAction = useWikiStore((state) => state.cancelPendingAction);
-  const requestedExportType = useWikiStore((state) => state.requestedExportType);
-  const consumeExportRequest = useWikiStore((state) => state.consumeExportRequest);
   const loadSourceDetail = useSourceStore((state) => state.loadDetail);
   const previewSourceMove = useSourceStore((state) => state.previewMove);
   const previewSourceDelete = useSourceStore((state) => state.previewDelete);
@@ -142,8 +138,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const previewHtml = useExportStore((state) => state.previewHtml);
   const previewId = useExportStore((state) => state.previewId);
   const loadExports = useExportStore((state) => state.loadExports);
-  const startExport = useExportStore((state) => state.startExport);
-  const regenerateExport = useExportStore((state) => state.regenerateExport);
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
   const loadPreview = useExportStore((state) => state.loadPreview);
   const openFolder = useExportStore((state) => state.openFolder);
@@ -172,13 +166,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
   useEffect(() => {
     void loadExports(projectId, rootPath);
   }, [projectId, rootPath, loadExports]);
-
-  useEffect(() => {
-    if (!requestedExportType) return;
-    setHtmlTemplate(requestedExportType);
-    setHtmlDialogOpen(true);
-    consumeExportRequest();
-  }, [requestedExportType, consumeExportRequest]);
 
   useEffect(() => {
     if (conflict) setConflictDialogOpen(true);
@@ -269,11 +256,8 @@ export function WikiView({ capabilities }: WikiViewProps) {
       if (runningExportTask.status !== "succeeded") return;
       const latest = useExportStore
         .getState()
-        .records.filter((record) => record.exportType === htmlTemplate)
-        .filter((record) =>
-          htmlTemplate === "project_report"
-            ? true
-            : record.sourcePath === useWikiStore.getState().selectedPath,
+        .records.filter(
+          (record) => record.sourcePath === useWikiStore.getState().selectedPath,
         )
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
       if (!latest) return;
@@ -286,7 +270,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
     runningExportTask,
     projectId,
     rootPath,
-    htmlTemplate,
     loadExports,
     clearRunningTask,
     loadPreview,
@@ -300,30 +283,35 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const previewRecord = selectWikiPreviewRecord(exportRecords, previewId, selectedPath);
   const pagePreviewHtml = previewRecord?.id === previewId ? previewHtml : null;
 
-  const showExportTask = (taskId: string) => {
-    void fetchTaskById(taskId);
-    openTaskDrawer(taskId);
-  };
-
   const handleGenerateHtml = (type: ExportType) => {
     if (!page) return;
-    setHtmlTemplate(type);
-    setHtmlDialogOpen(false);
-    setMode("preview");
-    const sourcePath = type === "project_report" ? "" : page.meta.path;
-    void startExport(projectId, rootPath, type, sourcePath).then((taskId) => {
-      if (taskId) showExportTask(taskId);
+    requestWorkflowLaunch({
+      projectId,
+      projectRootPath: rootPath,
+      kind: "generate_content",
+      origin: "wiki",
+      scopePreset: {
+        kind: "generate_content",
+        artifactType: type,
+        pagePaths: type === "project_report" ? [] : [page.meta.path],
+        outputPath: null,
+      },
     });
   };
 
   const handleRegenerateHtml = () => {
-    if (!previewRecord) {
-      setHtmlDialogOpen(true);
-      return;
-    }
-    setHtmlTemplate(previewRecord.exportType);
-    void regenerateExport(projectId, rootPath, previewRecord).then((taskId) => {
-      if (taskId) showExportTask(taskId);
+    if (!page) return;
+    requestWorkflowLaunch({
+      projectId,
+      projectRootPath: rootPath,
+      kind: "generate_content",
+      origin: "wiki",
+      scopePreset: {
+        kind: "generate_content",
+        artifactType: previewRecord?.exportType ?? "beautiful_read",
+        pagePaths: previewRecord?.sourcePath ? [previewRecord.sourcePath] : [page.meta.path],
+        outputPath: previewRecord?.outputPath ?? null,
+      },
     });
   };
 
@@ -508,8 +496,8 @@ export function WikiView({ capabilities }: WikiViewProps) {
                       previewRecord.id,
                     );
                     setMode("preview");
-                  } else {
-                    setHtmlDialogOpen(true);
+                  } else if (page) {
+                    handleGenerateHtml("beautiful_read");
                   }
                 }}
                 icon={<FileOutput size={13} />}
@@ -519,7 +507,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
             <button
               type="button"
               disabled={!page || Boolean(runningExportTaskId)}
-              onClick={() => setHtmlDialogOpen(true)}
+              onClick={() => handleGenerateHtml("beautiful_read")}
               className="inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--foreground)] px-3 text-[11.5px] font-medium text-[var(--text-inverse)] disabled:opacity-40"
             >
               <FileOutput size={13} />
@@ -657,7 +645,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
             <HtmlPreviewPane
               html={pagePreviewHtml}
               outputPath={previewRecord?.outputPath ?? null}
-              templateLabel={t(`wiki.html.template.${previewRecord?.exportType ?? htmlTemplate}.title`)}
+              templateLabel={t(`wiki.html.template.${previewRecord?.exportType ?? "beautiful_read"}.title`)}
               busy={Boolean(runningExportTaskId)}
               onBack={() => setMode("read")}
               onRegenerate={handleRegenerateHtml}
@@ -863,14 +851,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
           onManualMerge={(content) =>
             void resolveConflict(projectId, rootPath, "manual_merge", content)
           }
-        />
-      ) : null}
-      {htmlDialogOpen && page ? (
-        <GenerateHtmlDialog
-          pagePath={page.meta.path}
-          initialType={htmlTemplate}
-          onCancel={() => setHtmlDialogOpen(false)}
-          onGenerate={handleGenerateHtml}
         />
       ) : null}
     </div>

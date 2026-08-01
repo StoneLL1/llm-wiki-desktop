@@ -1,6 +1,5 @@
 import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke } from "@tauri-apps/api/core";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
@@ -8,7 +7,7 @@ import { useTaskLauncher } from "../../hooks/useTaskLauncher";
 import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { cancelTaskRequest, fetchTaskById, useTaskStore } from "../../stores/taskStore";
+import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import type { LintIssue, LintIssueType, LintRoutePreference } from "../../types/lint";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
@@ -35,6 +34,7 @@ export function LintView() {
   const paneSizes = useNavigationStore((state) => state.paneSizes);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
+  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
 
   const localReport = useLintStore((state) => state.localReport);
   const deepReport = useLintStore((state) => state.deepReport);
@@ -61,7 +61,6 @@ export function LintView() {
   const activeHistoryId = useLintStore((state) => state.activeHistoryId);
 
   const runLocalLint = useLintStore((state) => state.runLocalLint);
-  const startDeepLint = useLintStore((state) => state.startDeepLint);
   const clearDeepTask = useLintStore((state) => state.clearDeepTask);
   const loadDeepReport = useLintStore((state) => state.loadDeepReport);
   const selectIssue = useLintStore((state) => state.selectIssue);
@@ -79,7 +78,6 @@ export function LintView() {
   const cancelHighRisk = useLintStore((state) => state.cancelHighRisk);
 
   const tasks = useTaskStore((state) => state.tasks);
-  const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
   const taskLauncher = useTaskLauncher(currentProject);
@@ -199,22 +197,22 @@ export function LintView() {
 
   const handleRunLocal = () => {
     setNotice(null);
-    void runLocalLint(projectId, rootPath);
+    requestWorkflowLaunch({
+      projectId,
+      projectRootPath: rootPath,
+      kind: "health_check",
+      origin: "lint",
+      scopePreset: { kind: "health_check", mode: "local_quick" },
+    });
   };
 
   const handleStartDeep = () => {
-    void startDeepLint(projectId, rootPath, ROUTE_PREFERENCE).then((taskId) => {
-      if (taskId) {
-        void invoke("list_tasks", {
-          request: { projectId, projectRootPath: rootPath, statusFilter: null },
-        }).then((list) => {
-          const found = (list as { id: string }[]).find((task) => task.id === taskId);
-          if (found) {
-            void fetchTaskById(taskId);
-          }
-        });
-        openTaskDrawer(taskId);
-      }
+    requestWorkflowLaunch({
+      projectId,
+      projectRootPath: rootPath,
+      kind: "health_check",
+      origin: "lint",
+      scopePreset: { kind: "health_check", mode: "complete" },
     });
   };
 
