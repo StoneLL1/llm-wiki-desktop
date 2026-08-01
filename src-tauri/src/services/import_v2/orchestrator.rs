@@ -1352,7 +1352,10 @@ impl ImportV2Service {
                         | TaskStatus::Running
                         | TaskStatus::WaitingForConfirmation
                         | TaskStatus::Cancelling
-                        | TaskStatus::Succeeded,
+                        | TaskStatus::Succeeded
+                        // Batch 0 freezes the wire state only. Import V2 does not emit
+                        // Interrupted; workflow recovery semantics land in Batch 1.
+                        | TaskStatus::Interrupted,
                     ) => {}
                 }
             }

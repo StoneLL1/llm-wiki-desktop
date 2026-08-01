@@ -23,3 +23,4 @@ pub mod source;
 pub mod source_package;
 pub mod task;
 pub mod wiki;
+pub mod workflow;
