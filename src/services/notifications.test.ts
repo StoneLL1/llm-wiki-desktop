@@ -15,6 +15,10 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 import { useTaskStore } from "../stores/taskStore";
+import { useSettingsStore } from "../stores/settingsStore";
+import { defaultProject, useProjectStore } from "../stores/projectStore";
+import type { WorkflowRun } from "../types/workflow";
+import type { BackendEvent } from "../types/task";
 import { handleNotificationAction, notifyTaskEvent } from "./notifications";
 
 beforeEach(() => {
@@ -22,6 +26,20 @@ beforeEach(() => {
   showMock.mockReset().mockResolvedValue(undefined);
   focusMock.mockReset().mockResolvedValue(undefined);
   useTaskStore.setState({ drawerOpen: false, selectedTaskId: null });
+  useSettingsStore.setState((state) => ({
+    settings: {
+      ...state.settings,
+      systemNotifications: {
+        onTaskCompleted: true,
+        onTaskFailed: true,
+        onConfirmationNeeded: true,
+        onLongTaskProgress: false,
+      },
+    },
+  }));
+  useProjectStore.setState({
+    currentProject: { ...defaultProject, projectId: "project-1", name: "Project One" },
+  });
 });
 
 describe("task notification routing", () => {
@@ -51,5 +69,54 @@ describe("task notification routing", () => {
     });
     expect(showMock).toHaveBeenCalledOnce();
     expect(focusMock).toHaveBeenCalledOnce();
+  });
+
+  it("notifies workflows only on waiting, completed, and failed transitions", async () => {
+    const run = {
+      schemaVersion: 1,
+      taskId: "workflow-notification-1",
+      projectId: "project-1",
+      canonicalIdentityKey: "identity",
+      identityRevision: "revision",
+      kind: "health_check",
+      displayStatus: "running",
+      scope: { kind: "health_check", mode: "complete" },
+      route: null,
+      fingerprint: "fingerprint",
+      baselineFingerprint: "baseline",
+      stages: [],
+      currentStageId: null,
+      queuePosition: null,
+      continuationRequired: false,
+      retry: null,
+      pendingAction: null,
+      result: null,
+      error: null,
+      startedAt: "2026-08-02T00:00:00Z",
+      updatedAt: "2026-08-02T00:00:00Z",
+      completedAt: null,
+    } satisfies WorkflowRun;
+    const event: BackendEvent<WorkflowRun> = {
+      eventId: "workflow-event-1",
+      eventType: "workflow_updated",
+      taskId: run.taskId,
+      projectId: run.projectId,
+      timestamp: run.updatedAt,
+      payload: run,
+    };
+
+    await notifyTaskEvent(event);
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+
+    await notifyTaskEvent({ ...event, payload: { ...run, displayStatus: "waiting_for_confirmation" as const } });
+    await notifyTaskEvent({ ...event, payload: { ...run, displayStatus: "waiting_for_confirmation" as const } });
+    await notifyTaskEvent({ ...event, payload: { ...run, displayStatus: "completed" as const } });
+    await notifyTaskEvent({ ...event, payload: { ...run, displayStatus: "cancelled" as const } });
+
+    expect(sendNotificationMock).toHaveBeenCalledTimes(2);
+    expect(sendNotificationMock.mock.calls.map(([options]) => options.extra.workflowStatus)).toEqual([
+      "waiting_for_confirmation",
+      "completed",
+    ]);
   });
 });

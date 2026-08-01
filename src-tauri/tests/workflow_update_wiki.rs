@@ -17,10 +17,11 @@ use llm_wiki_desktop_lib::models::workflow::{
 };
 use llm_wiki_desktop_lib::services::{
     confirm_update_wiki_review, persist_update_wiki_review, run_update_wiki,
-    update_wiki_candidate_is_valid, workflow_baseline_for_scope, workflow_stages, AgentInvocation,
-    AgentService, BookmarkService, CompileExecutionServices, CompileService, EnqueueWorkflow,
-    FileStore, GitService, LlmService, ProcessRunner, SearchService, SecretService,
-    SettingsService, UpdateWikiExecutionServices, WorkflowCoordinator, WorkflowStageSink,
+    update_wiki_candidate_is_valid, update_wiki_decision_review, workflow_baseline_for_scope,
+    workflow_stages, AgentInvocation, AgentService, BookmarkService, CompileExecutionServices,
+    CompileService, EnqueueWorkflow, FileStore, GitService, LlmService, ProcessRunner,
+    SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
+    WorkflowCoordinator, WorkflowStageSink,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 
@@ -519,6 +520,7 @@ fn risk_classification_covers_safe_update_delete_broad_rewrite_external_edit_and
 #[test]
 fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() {
     let (context, root) = project("waiting");
+    fs::write(context.wiki_dir.join("concepts/旧名称.md"), "# Old\n").unwrap();
     let (scope, _) = source_scope(&context);
     let checkpoint_hash = GitService
         .initialize_repository(&context, "initial")
@@ -643,6 +645,19 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
         .join("workflow-candidate.json")
         .is_file());
     assert!(update_wiki_candidate_is_valid(&run.task_id, &context.root));
+    let review = update_wiki_decision_review(&run.task_id, &context.root).unwrap();
+    assert_eq!(review.counts.created, 1);
+    assert_eq!(review.counts.deleted, 1);
+    assert_eq!(review.counts.modified, 0);
+    assert!(!review.user_edits_detected);
+    assert!(review
+        .file_diffs
+        .iter()
+        .any(|diff| diff.path == "wiki/concepts/旧名称.md"));
+    assert!(review
+        .file_diffs
+        .iter()
+        .any(|diff| diff.path == "wiki/concepts/新名称.md"));
     fs::remove_dir_all(candidate_workspace).ok();
     fs::remove_dir_all(root).ok();
 }

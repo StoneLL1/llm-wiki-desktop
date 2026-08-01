@@ -1,6 +1,5 @@
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke } from "@tauri-apps/api/core";
 import {
   Code2,
   ExternalLink,
@@ -21,11 +20,9 @@ import { pathBasename } from "../../lib/pathDisplay";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { cancelTaskRequest, fetchTaskById, useTaskStore } from "../../stores/taskStore";
+import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
 import { isTerminalStatus } from "../../types/task";
-import { type ExportRecord, type ExportRestrictedContentStatus, type ExportType } from "../../types/export";
-import { ExportDialog, type ExportDialogResult } from "./ExportDialog";
-import { ExportRestrictedContentDialog } from "./ExportRestrictedContentDialog";
+import { type ExportRecord, type ExportType } from "../../types/export";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
 
 const TYPE_ICON: Record<ExportType, LucideIcon> = {
@@ -47,6 +44,7 @@ export function ExportsView() {
   const paneSizes = useNavigationStore((state) => state.paneSizes);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
+  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
 
   const records = useExportStore((state) => state.records);
   const loading = useExportStore((state) => state.loading);
@@ -57,8 +55,6 @@ export function ExportsView() {
   const error = useExportStore((state) => state.error);
 
   const loadExports = useExportStore((state) => state.loadExports);
-  const startExport = useExportStore((state) => state.startExport);
-  const regenerateExport = useExportStore((state) => state.regenerateExport);
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
   const loadPreview = useExportStore((state) => state.loadPreview);
   const clearPreview = useExportStore((state) => state.clearPreview);
@@ -77,12 +73,6 @@ export function ExportsView() {
   const layoutStyle = {
     "--exports-list-w-current": `${paneSizes.exportsList}px`,
   } as CSSProperties;
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [pendingPreviewTaskId, setPendingPreviewTaskId] = useState<string | null>(null);
-  const [restrictedRegeneration, setRestrictedRegeneration] = useState<{
-    record: ExportRecord;
-    count: number;
-  } | null>(null);
   // Guards the terminal handler against re-running for the same task if the
   // task event stream emits two rapid updates before the running-task id clears.
   const processedTerminalRef = useRef<string | null>(null);
@@ -112,11 +102,10 @@ export function ExportsView() {
     if (processedTerminalRef.current === finishedId) return;
     processedTerminalRef.current = finishedId;
     const succeeded = runningTask.status === "succeeded";
-    const wantPreview = pendingPreviewTaskId === finishedId;
     void loadExports(projectId, rootPath).then(() => {
       // Only auto-preview the exact record this task produced — never fall back
       // to the newest row, which could belong to a different concurrent export.
-      if (wantPreview && succeeded) {
+      if (succeeded) {
         const target = useExportStore
           .getState()
           .records.find((record) => record.taskId === finishedId);
@@ -129,38 +118,14 @@ export function ExportsView() {
       }
     });
     clearRunningTask();
-    if (wantPreview) setPendingPreviewTaskId(null);
   }, [
     runningTask,
     projectId,
     rootPath,
     loadExports,
     clearRunningTask,
-    pendingPreviewTaskId,
     loadPreview,
   ]);
-
-  const handleDialogGenerate = (result: ExportDialogResult) => {
-    setDialogOpen(false);
-    void startExport(projectId, rootPath, result.type, result.sourcePath, {
-      route: result.route,
-      template: result.template,
-      options: result.options,
-      acknowledgeRestrictedContent: result.acknowledgeRestrictedContent,
-    }).then((taskId) => {
-      if (!taskId) return;
-      if (result.openPreview) setPendingPreviewTaskId(taskId);
-      void invoke("list_tasks", {
-        request: { projectId, projectRootPath: rootPath, statusFilter: null },
-      }).then((list) => {
-        const found = (list as { id: string }[]).find((task) => task.id === taskId);
-        if (found) {
-          void fetchTaskById(taskId);
-        }
-      });
-      openTaskDrawer(taskId);
-    });
-  };
 
   const handleCancel = () => {
     if (!runningTaskId) return;
@@ -174,28 +139,18 @@ export function ExportsView() {
     );
   };
 
-  const runRegeneration = (record: ExportRecord, acknowledgeRestrictedContent: boolean) => {
-    void regenerateExport(projectId, rootPath, record, { acknowledgeRestrictedContent }).then((taskId) => {
-      if (!taskId) return;
-      void fetchTaskById(taskId);
-      openTaskDrawer(taskId);
-    });
-  };
-
   const handleRegenerate = (record: ExportRecord) => {
-    void invoke<ExportRestrictedContentStatus>("get_export_restricted_content_status", {
-      request: {
-        projectId,
-        projectRootPath: rootPath,
-        exportType: record.exportType,
-        sourcePath: record.sourcePath ?? null,
+    requestWorkflowLaunch({
+      projectId,
+      projectRootPath: rootPath,
+      kind: "generate_content",
+      origin: "exports",
+      scopePreset: {
+        kind: "generate_content",
+        artifactType: record.exportType,
+        pagePaths: record.sourcePath ? [record.sourcePath] : [],
+        outputPath: record.outputPath,
       },
-    }).then((status) => {
-      if (status.containsRestrictedContent) {
-        setRestrictedRegeneration({ record, count: status.restrictedSourceCount });
-      } else {
-        runRegeneration(record, false);
-      }
     });
   };
 
@@ -264,7 +219,20 @@ export function ExportsView() {
             ) : (
               <button
                 type="button"
-                onClick={() => setDialogOpen(true)}
+                onClick={() =>
+                  requestWorkflowLaunch({
+                    projectId,
+                    projectRootPath: rootPath,
+                    kind: "generate_content",
+                    origin: "exports",
+                    scopePreset: {
+                      kind: "generate_content",
+                      artifactType: "beautiful_read",
+                      pagePaths: [],
+                      outputPath: null,
+                    },
+                  })
+                }
                 className="btn btn--primary btn--sm"
               >
                 <Plus size={12} strokeWidth={2} aria-hidden />
@@ -505,24 +473,6 @@ export function ExportsView() {
         </div>
       </aside>
 
-      <ExportDialog
-        open={dialogOpen}
-        projectId={projectId}
-        rootPath={rootPath}
-        onClose={() => setDialogOpen(false)}
-        onGenerate={handleDialogGenerate}
-      />
-      {restrictedRegeneration ? (
-        <ExportRestrictedContentDialog
-          count={restrictedRegeneration.count}
-          onCancel={() => setRestrictedRegeneration(null)}
-          onConfirm={() => {
-            const record = restrictedRegeneration.record;
-            setRestrictedRegeneration(null);
-            runRegeneration(record, true);
-          }}
-        />
-      ) : null}
     </div>
   );
 }

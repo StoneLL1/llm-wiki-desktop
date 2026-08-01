@@ -181,7 +181,8 @@ describe("Workflows architecture", () => {
     );
 
     expect(navigation).toContain('| "agent"');
-    expect(navigation).toContain("agentRunPreset");
+    expect(navigation).toContain("workflowLaunchIntent");
+    expect(navigation).toContain("requestWorkflowLaunch");
     expect(navigation).toContain('| "workflows"');
     expect(router).toContain('case "agent"');
     expect(router).toContain("features/agent/AgentView");

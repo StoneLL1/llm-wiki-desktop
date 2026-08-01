@@ -89,13 +89,6 @@ afterEach(() => {
 });
 
 describe("wikiStore", () => {
-  it("queues a requested Wiki export for the active view", () => {
-    useWikiStore.getState().requestExport("knowledge_card");
-    expect(useWikiStore.getState().requestedExportType).toBe("knowledge_card");
-    useWikiStore.getState().consumeExportRequest();
-    expect(useWikiStore.getState().requestedExportType).toBeNull();
-  });
-
   it("updates bookmark state in flat pages and recursive tree nodes", async () => {
     const page = pageMeta({ bookmarked: false });
     const tree: WikiTree = {

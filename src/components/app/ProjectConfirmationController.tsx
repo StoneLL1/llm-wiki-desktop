@@ -21,6 +21,7 @@ export function ProjectConfirmationController() {
   const compilePendingAction = tasks.find(
     (task) =>
       task.projectId === currentProject.projectId &&
+      task.taskType === "wiki_compile" &&
       task.status === "waiting_for_confirmation" &&
       task.result?.pendingAction,
   )?.result?.pendingAction;

@@ -52,6 +52,7 @@ export function DashboardView() {
   const graphData = useGraphStore((state) => state.data);
   const graphStatus = useGraphStore((state) => state.status);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
   const tree = useWikiStore((state) => state.tree);
   const loadingTree = useWikiStore((state) => state.loadingTree);
   const scanWiki = useWikiStore((state) => state.scan);
@@ -132,7 +133,15 @@ export function DashboardView() {
             lastCompileTime={lastCompileTime}
             pendingLint={pendingLint}
             onViewLint={() => setActiveView("lint")}
-            onOpenAgent={() => setActiveView("agent")}
+            onUpdateWiki={() =>
+              requestWorkflowLaunch({
+                projectId: project.projectId,
+                projectRootPath: project.rootPath,
+                kind: "update_wiki",
+                origin: "dashboard",
+                scopePreset: null,
+              })
+            }
           />
         </div>
 
@@ -320,13 +329,13 @@ function HealthRow({
   lastCompileTime,
   pendingLint,
   onViewLint,
-  onOpenAgent,
+  onUpdateWiki,
 }: {
   project: ReturnType<typeof useProjectStore.getState>["currentProject"];
   lastCompileTime: string | null;
   pendingLint: number;
   onViewLint: () => void;
-  onOpenAgent: () => void;
+  onUpdateWiki: () => void;
 }) {
   const { t } = useTranslation();
   const healthy = project.health.hasPurpose && project.health.hasSchema && project.wikiPageCount > 0;
@@ -351,8 +360,8 @@ function HealthRow({
       <button type="button" className="btn btn--sm" onClick={onViewLint}>
         {t("dashboard.health.viewLint")}
       </button>
-      <button type="button" className="btn btn--sm" onClick={onOpenAgent}>
-        {t("dashboard.health.openAgent")}
+      <button type="button" className="btn btn--sm" onClick={onUpdateWiki}>
+        {t("dashboard.health.updateWiki")}
       </button>
     </div>
   );

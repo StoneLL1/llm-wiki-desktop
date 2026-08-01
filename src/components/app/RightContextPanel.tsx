@@ -32,7 +32,7 @@ export function RightContextPanel() {
   const activeView = useNavigationStore((state) => state.activeView);
   const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
-  const requestAgentRun = useNavigationStore((state) => state.requestAgentRun);
+  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
   const closeWikiAssistant = useNavigationStore((state) => state.closeWikiAssistant);
   const currentProject = useProjectStore((state) => state.currentProject);
   const pendingAction = useProjectStore((state) => state.pendingAction);
@@ -43,7 +43,6 @@ export function RightContextPanel() {
   const wikiPage = wikiContent?.meta ?? null;
   const wikiTree = useWikiStore((state) => state.tree);
   const openWikiPage = useWikiStore((state) => state.openPage);
-  const requestWikiExport = useWikiStore((state) => state.requestExport);
   const graphData = useGraphStore((state) => state.data);
   const graphStatus = useGraphStore((state) => state.status);
   const graphCached = useGraphStore((state) => state.cached);
@@ -343,8 +342,36 @@ export function RightContextPanel() {
             pages={wikiTree?.pages ?? []}
             onOpenPage={openPage}
             onViewAllBacklinks={viewWikiPageInGraph}
-            onGenerateHtml={() => requestWikiExport("beautiful_read")}
-            onGenerateCard={() => requestWikiExport("knowledge_card")}
+            onGenerateHtml={() => {
+              if (!wikiPage) return;
+              requestWorkflowLaunch({
+                projectId: currentProject.projectId,
+                projectRootPath: currentProject.rootPath,
+                kind: "generate_content",
+                origin: "wiki",
+                scopePreset: {
+                  kind: "generate_content",
+                  artifactType: "beautiful_read",
+                  pagePaths: [wikiPage.path],
+                  outputPath: null,
+                },
+              });
+            }}
+            onGenerateCard={() => {
+              if (!wikiPage) return;
+              requestWorkflowLaunch({
+                projectId: currentProject.projectId,
+                projectRootPath: currentProject.rootPath,
+                kind: "generate_content",
+                origin: "wiki",
+                scopePreset: {
+                  kind: "generate_content",
+                  artifactType: "knowledge_card",
+                  pagePaths: [wikiPage.path],
+                  outputPath: null,
+                },
+              });
+            }}
             onViewInGraph={viewWikiPageInGraph}
             onCopyWikilink={() => {
               if (wikiPage) void navigator.clipboard.writeText(`[[${wikiPage.title}]]`);
@@ -423,7 +450,6 @@ export function RightContextPanel() {
       <AgentRightPanel
         agents={agentsFromStatus}
         onRunIngest={() => {
-          requestAgentRun("wiki-ingest");
           setActiveView("agent");
         }}
       />

@@ -92,6 +92,7 @@ fn sample_run() -> WorkflowRun {
             attempt_number: 2,
         }),
         pending_action: None,
+        decision_review: None,
         result: None,
         error: None,
         started_at: "2026-07-30T00:00:00Z".into(),

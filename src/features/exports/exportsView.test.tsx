@@ -400,19 +400,26 @@ describe("ExportsView", () => {
     expect(screen.queryByRole("button", { name: /Open folder/i })).not.toBeInTheDocument();
   });
 
-  it("opens the new-export dialog with template and route controls", async () => {
+  it("routes new export through structured Workflows preparation", () => {
     useExportStore.getState().reset();
     useProjectStore.setState({ currentProject: PROJECT });
+    useNavigationStore.setState({ workflowLaunchIntent: null, activeView: "exports" });
     render(<ExportsView />);
     fireEvent.click(screen.getByRole("button", { name: /New export/i }));
-    expect(await screen.findByRole("heading", { name: "New export" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Template")).toBeInTheDocument();
-    expect(screen.getByLabelText("Execution path")).toBeInTheDocument();
-    const generateBtn = screen.getByRole("button", { name: /Generate/i });
+    expect(useNavigationStore.getState().activeView).toBe("workflows");
+    expect(useNavigationStore.getState().workflowLaunchIntent).toEqual({
+      projectId: "p",
+      projectRootPath: "/x",
+      kind: "generate_content",
+      origin: "exports",
+      scopePreset: {
+        kind: "generate_content",
+        artifactType: "beautiful_read",
+        pagePaths: [],
+        outputPath: null,
+      },
+    });
     // beautiful_read (default) requires a source page → disabled.
-    expect(generateBtn).toBeDisabled();
     // project_report needs no source → enabled.
-    fireEvent.click(screen.getByRole("radio", { name: "Report" }));
-    expect(generateBtn).toBeEnabled();
   });
 });

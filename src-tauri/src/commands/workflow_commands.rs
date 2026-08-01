@@ -3,12 +3,14 @@ use tauri::State;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus};
+use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus, PendingActionType};
 use crate::models::workflow::{
-    WorkflowDisplayStatus, WorkflowKind, WorkflowPreparation, WorkflowRouteSelection, WorkflowRun,
-    WorkflowRunPage, WorkflowScope, WorkflowStartOutcome, WorkflowsOverview,
+    WorkflowDecisionCounts, WorkflowDecisionReview, WorkflowDisplayStatus, WorkflowFileDiff,
+    WorkflowKind, WorkflowPreparation, WorkflowRouteSelection, WorkflowRun, WorkflowRunPage,
+    WorkflowScope, WorkflowStartOutcome, WorkflowsOverview,
 };
 use crate::services::{
+    restore_generate_content_confirmation, restore_update_wiki_confirmation,
     CompileExecutionServices, GenerateContentExecutionServices, PrepareWorkflowInput,
     UpdateWikiExecutionServices, WorkflowAccessSnapshot, WorkflowPreparationEnvironment,
 };
@@ -209,8 +211,78 @@ pub fn get_workflow_run(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
-    require_workflow_project(&state, &request)?;
-    workflow_run(&state, &request.task_id)
+    let context = require_workflow_project(&state, &request)?;
+    let mut run = workflow_run(&state, &request.task_id)?;
+    if let Some(pending) = run.pending_action.as_ref() {
+        match &run.kind {
+            WorkflowKind::UpdateWiki => restore_update_wiki_confirmation(
+                &context,
+                &run,
+                &state.task_service,
+                &state.confirmation_registry,
+            )?,
+            WorkflowKind::GenerateContent => restore_generate_content_confirmation(
+                &context,
+                &run,
+                &state.task_service,
+                &state.confirmation_registry,
+            )?,
+            WorkflowKind::HealthCheck => {}
+        }
+        let stored = state.confirmation_registry.peek(&pending.id)?;
+        let affected = stored.action.affected_paths.len() as u32;
+        let counts = match stored.action.action_type {
+            PendingActionType::OverwriteFile => WorkflowDecisionCounts {
+                overwritten: affected,
+                ..WorkflowDecisionCounts::default()
+            },
+            PendingActionType::DeleteFile => WorkflowDecisionCounts {
+                deleted: affected,
+                ..WorkflowDecisionCounts::default()
+            },
+            _ => WorkflowDecisionCounts {
+                modified: affected,
+                ..WorkflowDecisionCounts::default()
+            },
+        };
+        let file_diffs = stored
+            .action
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.diff.as_ref())
+            .map(|diff| {
+                vec![WorkflowFileDiff {
+                    path: stored
+                        .action
+                        .affected_paths
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "candidate".into()),
+                    diff: diff.clone(),
+                }]
+            })
+            .unwrap_or_default();
+        let generic_review = WorkflowDecisionReview {
+            reason: stored.action.message,
+            counts,
+            user_edits_detected: stored.action.action_type == PendingActionType::MergeConflict,
+            file_diffs,
+        };
+        run.decision_review = if run.kind == WorkflowKind::UpdateWiki {
+            Some(
+                crate::services::update_wiki_decision_review(&run.task_id, &context.root)
+                    .ok_or_else(|| {
+                        workflow_error(
+                            "WORKFLOW_CANDIDATE_STALE",
+                            "The persisted workflow candidate is no longer valid.",
+                        )
+                    })?,
+            )
+        } else {
+            Some(generic_review)
+        };
+    }
+    Ok(run)
 }
 
 #[tauri::command]

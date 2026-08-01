@@ -42,7 +42,8 @@ pub use runners::health_check::{
 pub use runners::update_wiki::{
     confirm_update_wiki_review, discard_update_wiki_candidate, persist_update_wiki_review,
     restore_update_wiki_confirmation, run_update_wiki, update_wiki_candidate_is_valid,
-    UpdateWikiConfirmationFailure, UpdateWikiExecutionServices, UpdateWikiRunner,
+    update_wiki_decision_review, UpdateWikiConfirmationFailure, UpdateWikiExecutionServices,
+    UpdateWikiRunner,
 };
 pub use stage_sink::WorkflowStageSink;
 
@@ -209,28 +210,15 @@ impl WorkflowService {
                 .execution_options
                 .restricted_content_acknowledgement_revision = required_revision;
         }
-        let remote_revision = if validated.preparation.kind == WorkflowKind::GenerateContent
-            && preparation::route_requires_remote_acknowledgement(
-                context,
-                settings_service,
-                validated.preparation.route.as_ref(),
-            )? {
-            Some(fingerprint::hex_sha256(
-                canonical_json(&validated.preparation.route)
-                    .map_err(|_| {
-                        BackendError::new(
-                            "WORKFLOW_ROUTE_INVALID",
-                            "The prepared remote route could not be acknowledged.",
-                            true,
-                            true,
-                        )
-                    })?
-                    .as_bytes(),
-            ))
-        } else {
-            None
-        };
-        if remote_revision.is_some() && !acknowledge_remote_provider {
+        let remote_route = preparation::route_is_remote_provider(
+            context,
+            settings_service,
+            validated.preparation.route.as_ref(),
+        )?;
+        let disclosure_revision = preparation::REMOTE_PROVIDER_DISCLOSURE_REVISION;
+        let disclosure_acknowledged =
+            settings_service.is_remote_provider_disclosure_acknowledged(disclosure_revision)?;
+        if remote_route && !disclosure_acknowledged && !acknowledge_remote_provider {
             return Err(BackendError::new(
                 "WORKFLOW_REMOTE_PROVIDER_ACKNOWLEDGEMENT_REQUIRED",
                 "This workflow sends selected content to a remote provider and requires a separate acknowledgement.",
@@ -238,6 +226,10 @@ impl WorkflowService {
                 true,
             ));
         }
+        if remote_route && !disclosure_acknowledged {
+            settings_service.acknowledge_remote_provider_disclosure(disclosure_revision)?;
+        }
+        let remote_revision = remote_route.then(|| disclosure_revision.to_string());
         validated
             .execution_options
             .remote_provider_acknowledgement_revision = remote_revision;

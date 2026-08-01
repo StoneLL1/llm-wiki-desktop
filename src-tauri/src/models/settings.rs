@@ -416,6 +416,11 @@ pub struct GlobalSettingsFile {
     pub associate_wiki_folders: bool,
     #[serde(default)]
     pub chat_convenience_authorizations: Vec<ChatConvenienceAuthorization>,
+    /// Version of the last remote-provider data-scope disclosure accepted by
+    /// the user. This is global UI consent metadata; it never belongs in a
+    /// project file and never contains project content.
+    #[serde(default)]
+    pub remote_provider_disclosure_revision: Option<String>,
 }
 
 impl Default for GlobalSettingsFile {
@@ -444,6 +449,7 @@ impl Default for GlobalSettingsFile {
             associate_md_files: settings.associate_md_files,
             associate_wiki_folders: settings.associate_wiki_folders,
             chat_convenience_authorizations: Vec::new(),
+            remote_provider_disclosure_revision: None,
         }
     }
 }
@@ -550,6 +556,7 @@ impl Settings {
             associate_md_files: self.associate_md_files,
             associate_wiki_folders: self.associate_wiki_folders,
             chat_convenience_authorizations: Vec::new(),
+            remote_provider_disclosure_revision: None,
         }
     }
 

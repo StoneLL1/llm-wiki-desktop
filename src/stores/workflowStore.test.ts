@@ -59,4 +59,22 @@ describe("workflowStore", () => {
     expect(useWorkflowStore.getState().runs[0]?.displayStatus).toBe("completed");
     expect(useWorkflowStore.getState().runs[0]?.updatedAt).toBe("2026-08-01T03:00:00Z");
   });
+
+  it("preserves hydrated decision evidence when list and event snapshots omit it", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const decisionReview = {
+      reason: "review",
+      counts: { created: 1, modified: 2, overwritten: 0, deleted: 1 },
+      userEditsDetected: true,
+      fileDiffs: [{ path: "wiki/a.md", diff: "diff" }],
+    };
+    useWorkflowStore.getState().upsertRun({
+      ...run("run-a", "2026-08-01T03:00:00Z"),
+      decisionReview,
+    });
+    useWorkflowStore.getState().replaceRuns([
+      { ...run("run-a", "2026-08-01T04:00:00Z"), displayStatus: "waiting_for_confirmation" },
+    ]);
+    expect(useWorkflowStore.getState().runs[0]?.decisionReview).toEqual(decisionReview);
+  });
 });

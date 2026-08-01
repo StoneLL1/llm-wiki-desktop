@@ -15,6 +15,9 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useTaskStore } from "../../stores/taskStore";
+import { useNavigationStore } from "../../stores/navigationStore";
+import { useProjectStore } from "../../stores/projectStore";
+import { hydrateAndSelectWorkflowRun } from "../../services/workflowNavigation";
 import { fetchTaskActivities, fetchTaskLogs, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { BackendTask, LogLine, TaskStatus } from "../../types/task";
@@ -168,6 +171,7 @@ export function TaskLogDrawer() {
   const drawerOpen = useTaskStore((s) => s.drawerOpen);
   const selectedTaskId = useTaskStore((s) => s.selectedTaskId);
   const closeDrawer = useTaskStore((s) => s.closeDrawer);
+  const setActiveView = useNavigationStore((s) => s.setActiveView);
   const selectTask = useTaskStore((s) => s.selectTask);
   const setLogs = useTaskStore((s) => s.setLogs);
   const pushToast = useToastStore((s) => s.pushToast);
@@ -366,6 +370,21 @@ export function TaskLogDrawer() {
     }
   };
 
+  const openWorkflowRun = async (taskId: string) => {
+    const project = useProjectStore.getState().currentProject;
+    if (!project.projectId || !project.rootPath) return;
+    try {
+      await hydrateAndSelectWorkflowRun(
+        { projectId: project.projectId, rootPath: project.rootPath },
+        taskId,
+      );
+      setActiveView("workflows");
+      closeDrawer();
+    } catch (error) {
+      pushToast("error", String(error));
+    }
+  };
+
   const handleClearLogs = () => {
     if (!selectedTaskId) return;
     setLogs(selectedTaskId, []);
@@ -526,7 +545,7 @@ export function TaskLogDrawer() {
                   <StatusIcon status={task.status} />
                   <span className="truncate flex-1">{task.title}</span>
                 </button>
-                {((!isTerminalStatus(task.status) && task.status !== "waiting_for_confirmation" && task.cancellable) || cancellingTaskIds.has(task.id)) && (
+                {task.taskType !== "workflow" && ((!isTerminalStatus(task.status) && task.status !== "waiting_for_confirmation" && task.cancellable) || cancellingTaskIds.has(task.id)) && (
                   <button
                     onClick={() => handleCancel(task.id)}
                     disabled={cancellingTaskIds.has(task.id) && !isTerminalStatus(task.status)}
@@ -594,7 +613,7 @@ export function TaskLogDrawer() {
                 )}
 
                 {/* Cancel button for active tasks */}
-                {!isTerminalStatus(selectedTask.status) && selectedTask.status !== "waiting_for_confirmation" && selectedTask.cancellable && (
+                {selectedTask.taskType !== "workflow" && !isTerminalStatus(selectedTask.status) && selectedTask.status !== "waiting_for_confirmation" && selectedTask.cancellable && (
                   <button
                     onClick={() => handleCancel(selectedTask.id)}
                     disabled={cancellingTaskIds.has(selectedTask.id)}
@@ -605,6 +624,15 @@ export function TaskLogDrawer() {
                     {t("task.action.cancel")}
                   </button>
                 )}
+                {selectedTask.taskType === "workflow" ? (
+                  <button
+                    onClick={() => void openWorkflowRun(selectedTask.id)}
+                    className="mt-2 rounded border border-[var(--border)] px-3 py-1 text-[12px] transition-colors hover:bg-[var(--surface-muted)]"
+                    type="button"
+                  >
+                    {t("task.action.openWorkflow")}
+                  </button>
+                ) : null}
               </div>
 
               {selectedActivities.length > 0 ? (

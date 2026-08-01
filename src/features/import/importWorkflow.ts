@@ -115,7 +115,7 @@ export interface ImportWorkflow {
     completion?: ImportCompletion | null,
     preferredWikiPath?: string,
   ) => Promise<void>;
-  updateWiki: (completion?: ImportCompletion | null) => Promise<BackendTask | null>;
+  updateWiki: (completion?: ImportCompletion | null) => Promise<void>;
   isConfirming: boolean;
   refreshSession: () => Promise<void>;
   selectItem: (itemId: string | null) => void;

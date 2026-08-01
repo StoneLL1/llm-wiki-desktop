@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AgentSkill } from "../features/agent/RunAgentDialog";
+import type { WorkflowKind, WorkflowScopePreset } from "../types/workflow";
 import {
   type ResizablePaneId,
   PANE_WIDTH_LIMITS,
@@ -24,6 +24,22 @@ export type RightPanelMode = "default" | "wikiAssistant";
 
 export type WorkspaceFocus = "exportPreview";
 
+export type WorkflowLaunchOrigin =
+  | "workflows"
+  | "dashboard"
+  | "import"
+  | "wiki"
+  | "lint"
+  | "exports";
+
+export interface WorkflowLaunchIntent {
+  projectId: string;
+  projectRootPath: string;
+  kind: WorkflowKind;
+  origin: WorkflowLaunchOrigin;
+  scopePreset: WorkflowScopePreset | null;
+}
+
 export interface NavigationState {
   activeView: AppView;
   rightPanelOpen: boolean;
@@ -34,7 +50,7 @@ export interface NavigationState {
   sidebarCollapsed: boolean;
   paneSizes: Record<ResizablePaneId, number>;
   settingsOpen: boolean;
-  agentRunPreset: AgentSkill | null;
+  workflowLaunchIntent: WorkflowLaunchIntent | null;
   setActiveView: (view: AppView) => void;
   setRightPanelOpen: (open: boolean) => void;
   openWikiAssistant: (path: string) => void;
@@ -49,8 +65,8 @@ export interface NavigationState {
   openSettings: () => void;
   closeSettings: () => void;
   toggleSettings: () => void;
-  requestAgentRun: (preset?: AgentSkill) => void;
-  clearAgentRunRequest: () => void;
+  requestWorkflowLaunch: (intent: WorkflowLaunchIntent) => void;
+  clearWorkflowLaunchIntent: () => void;
 }
 
 const initialLayoutPreferences = readLayoutPreferenceSnapshot();
@@ -65,7 +81,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   sidebarCollapsed: initialLayoutPreferences.sidebarCollapsed,
   paneSizes: initialLayoutPreferences.paneSizes,
   settingsOpen: false,
-  agentRunPreset: null,
+  workflowLaunchIntent: null,
   setActiveView: (activeView) =>
     set((state) => {
       if (activeView === "wiki") {
@@ -201,6 +217,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   openSettings: () => set({ settingsOpen: true }),
   closeSettings: () => set({ settingsOpen: false }),
   toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
-  requestAgentRun: (agentRunPreset = "wiki-ingest") => set({ agentRunPreset }),
-  clearAgentRunRequest: () => set({ agentRunPreset: null }),
+  requestWorkflowLaunch: (workflowLaunchIntent) =>
+    set({ workflowLaunchIntent, activeView: "workflows" }),
+  clearWorkflowLaunchIntent: () => set({ workflowLaunchIntent: null }),
 }));

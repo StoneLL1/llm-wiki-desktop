@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   useImportWorkflow: vi.fn(),
   useProviderWorkflow: vi.fn(),
   useAgentWorkflow: vi.fn(),
+  useWorkflowsController: vi.fn(),
   addPaths: vi.fn(),
   runAgent: vi.fn(),
   saveProvider: vi.fn(),
@@ -32,6 +33,9 @@ vi.mock("../../features/settings/useProviderWorkflow", () => ({
 }));
 vi.mock("../../features/agent/useAgentWorkflow", () => ({
   useAgentWorkflow: mocks.useAgentWorkflow,
+}));
+vi.mock("../../features/workflows/useWorkflowsController", () => ({
+  useWorkflowsController: mocks.useWorkflowsController,
 }));
 vi.mock("./WorkspaceRouter", () => ({
   WorkspaceRouter: ({ activeView, importWorkflow }: {
@@ -146,6 +150,13 @@ const agentWorkflow = {
   setDefaultAgent: vi.fn(),
   runAgent: mocks.runAgent,
 };
+const workflowsController = {
+  refresh: vi.fn(), prepare: vi.fn(), startPrepared: vi.fn(), cancel: vi.fn(),
+  undoCancel: vi.fn(), reorder: vi.fn(), retry: vi.fn(), adjustAndPrepare: vi.fn(),
+  openRun: vi.fn(), openResult: vi.fn(), confirm: vi.fn(), discard: vi.fn(),
+  continueQueue: vi.fn(), loadHistoryMore: vi.fn(), handlePrerequisite: vi.fn(),
+  backToOverview: vi.fn(),
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -154,12 +165,14 @@ beforeEach(() => {
   mocks.useImportWorkflow.mockReturnValue(importWorkflow);
   mocks.useProviderWorkflow.mockReturnValue(providerWorkflow);
   mocks.useAgentWorkflow.mockReturnValue(agentWorkflow);
+  mocks.useWorkflowsController.mockReturnValue(workflowsController);
   useProjectStore.setState({ currentProject: project });
   useNavigationStore.setState({
     activeView: "import",
     settingsOpen: true,
     rightPanelOpen: false,
     workspaceFocus: null,
+    workflowLaunchIntent: null,
   });
   useTaskStore.setState({ tasks: [] });
 });
@@ -203,5 +216,49 @@ describe("WorkspaceController", () => {
     expect(screen.getByTestId("workspace-router")).toHaveTextContent("router:agent");
     expect(useProjectStore.getState().currentProject).toBe(project);
     expect(mocks.useAiCapabilities).toHaveBeenLastCalledWith(project, true);
+  });
+
+  it("consumes a matching launch intent through backend preparation only", async () => {
+    useNavigationStore.setState({
+      activeView: "workflows",
+      workflowLaunchIntent: {
+        projectId: project.projectId,
+        projectRootPath: project.rootPath,
+        kind: "generate_content",
+        origin: "wiki",
+        scopePreset: {
+          kind: "generate_content",
+          artifactType: "knowledge_card",
+          pagePaths: ["wiki/中文.md"],
+          outputPath: null,
+        },
+      },
+    });
+
+    render(<WorkspaceController />);
+
+    expect(workflowsController.prepare).toHaveBeenCalledWith(
+      "generate_content",
+      expect.objectContaining({ pagePaths: ["wiki/中文.md"] }),
+    );
+    expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
+  });
+
+  it("clears a launch intent whose project identity no longer matches", () => {
+    useNavigationStore.setState({
+      activeView: "workflows",
+      workflowLaunchIntent: {
+        projectId: "other-project",
+        projectRootPath: "D:/other",
+        kind: "health_check",
+        origin: "lint",
+        scopePreset: { kind: "health_check", mode: "complete" },
+      },
+    });
+
+    render(<WorkspaceController />);
+
+    expect(workflowsController.prepare).not.toHaveBeenCalled();
+    expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
   });
 });

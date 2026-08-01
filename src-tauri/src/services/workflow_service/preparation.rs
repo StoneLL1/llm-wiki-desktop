@@ -1223,7 +1223,9 @@ fn valid_provider_url(value: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://")
 }
 
-pub(crate) fn route_requires_remote_acknowledgement(
+pub(crate) const REMOTE_PROVIDER_DISCLOSURE_REVISION: &str = "workflow-remote-provider-v1";
+
+pub(crate) fn route_is_remote_provider(
     context: &ProjectContext,
     settings_service: &SettingsService,
     route: Option<&WorkflowRoute>,
@@ -1244,6 +1246,16 @@ pub(crate) fn route_requires_remote_acknowledgement(
     Ok(config
         .as_ref()
         .is_none_or(|config| !is_loopback_provider_url(&config.base_url)))
+}
+
+pub(crate) fn route_requires_remote_acknowledgement(
+    context: &ProjectContext,
+    settings_service: &SettingsService,
+    route: Option<&WorkflowRoute>,
+) -> Result<bool, BackendError> {
+    Ok(route_is_remote_provider(context, settings_service, route)?
+        && !settings_service
+            .is_remote_provider_disclosure_acknowledged(REMOTE_PROVIDER_DISCLOSURE_REVISION)?)
 }
 
 fn is_loopback_provider_url(value: &str) -> bool {
