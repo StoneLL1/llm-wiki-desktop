@@ -48,6 +48,10 @@ impl<'a> WorkflowStageSink<'a> {
         self.tasks.complete_workflow_stage(self.task_id, stage_id)
     }
 
+    pub fn skip(&self, stage_id: &str) -> Result<WorkflowRun, String> {
+        self.tasks.skip_workflow_stage(self.task_id, stage_id)
+    }
+
     pub fn fail(
         &self,
         stage_id: &str,

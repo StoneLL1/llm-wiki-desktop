@@ -14,7 +14,7 @@ use crate::models::paths::ProjectContext;
 
 impl GitService {
     pub fn checkpoint_exists(project_root: &Path, checkpoint_hash: &str) -> bool {
-        if !matches!(checkpoint_hash.len(), 40 | 64)
+        if !(7..=64).contains(&checkpoint_hash.len())
             || !checkpoint_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return false;
@@ -22,6 +22,13 @@ impl GitService {
         let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
         let commit = format!("{checkpoint_hash}^{{commit}}");
         run_git(&context, &["rev-parse", "--verify", "--quiet", &commit]).is_ok()
+    }
+
+    pub fn head_subject(context: &ProjectContext) -> Option<String> {
+        run_git(context, &["log", "-1", "--pretty=%s"])
+            .ok()
+            .map(|subject| subject.trim().to_string())
+            .filter(|subject| !subject.is_empty())
     }
 
     /// Render a candidate comparison with Git's existing diff renderer without
@@ -159,6 +166,53 @@ impl GitService {
             message: message.to_string(),
             purpose,
             affected_paths,
+        })
+    }
+
+    /// Capture the current clean HEAD without staging or committing anything.
+    ///
+    /// Workflow preparation already requires a clean worktree. This variant is
+    /// intentionally non-mutating so an external edit racing the check can
+    /// never be absorbed into an application-authored checkpoint commit.
+    pub fn clean_head_checkpoint(
+        &self,
+        context: &ProjectContext,
+        purpose: CheckpointPurpose,
+        message: &str,
+    ) -> Result<GitCheckpoint, BackendError> {
+        let status = self.repository_status(context)?;
+        if !status.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before creating a checkpoint.",
+                true,
+                true,
+            ));
+        }
+        let affected_paths = status_paths(context)?;
+        if !affected_paths.is_empty() {
+            return Err(BackendError::new(
+                "GIT_WORKTREE_DIRTY",
+                "The project changed after preparation. Resolve or checkpoint those edits, then run again.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "affectedPaths": affected_paths })));
+        }
+        let commit_hash = status.head.ok_or_else(|| {
+            BackendError::new(
+                "GIT_HEAD_MISSING",
+                "Git HEAD is unavailable for the required checkpoint.",
+                true,
+                true,
+            )
+        })?;
+        Ok(GitCheckpoint {
+            created: false,
+            commit_hash: Some(commit_hash),
+            message: message.to_string(),
+            purpose,
+            affected_paths: Vec::new(),
         })
     }
 
@@ -796,6 +850,39 @@ mod tests {
             .affected_paths
             .contains(&"wiki/概念.md".to_string()));
 
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn clean_head_checkpoint_never_absorbs_a_dirty_worktree() {
+        let root = unique_temp_dir("clean-only-checkpoint");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
+        let service = GitService;
+        let initial = service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap()
+            .head
+            .unwrap();
+
+        fs::write(root.join("purpose.md"), "# External edit\n").unwrap();
+        let error = service
+            .clean_head_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "Before Update Wiki",
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "GIT_WORKTREE_DIRTY");
+        assert_eq!(
+            service.repository_status(&context).unwrap().head,
+            Some(initial)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("purpose.md")).unwrap(),
+            "# External edit\n"
+        );
         fs::remove_dir_all(root).ok();
     }
 

@@ -64,6 +64,31 @@ pub fn recover_workflow(
     workflow: &mut WorkflowExecutionState,
     project_root: &Path,
 ) {
+    if let Some(result) =
+        super::runners::update_wiki::committed_update_wiki_result(&task.id, project_root)
+    {
+        let now = Utc::now().to_rfc3339();
+        for stage in &mut workflow.stages {
+            if matches!(
+                stage.status,
+                crate::models::workflow::WorkflowStageStatus::Running
+                    | crate::models::workflow::WorkflowStageStatus::Pending
+            ) {
+                stage.status = crate::models::workflow::WorkflowStageStatus::Completed;
+                stage.completed_at = Some(now.clone());
+            }
+        }
+        workflow.current_stage_id = None;
+        workflow.pending_action = None;
+        workflow.result = Some(result);
+        workflow.error = None;
+        workflow.continuation_required = false;
+        task.status = TaskStatus::Succeeded;
+        task.cancellable = false;
+        task.completed_at = Some(now.clone());
+        task.updated_at = now;
+        return;
+    }
     match task.status {
         TaskStatus::Queued => {
             workflow.continuation_required = true;
@@ -129,10 +154,15 @@ pub fn pending_action_is_valid(workflow: &WorkflowExecutionState, project_root: 
     }
     if let Some(candidate) = pending.candidate.as_ref() {
         match candidate {
-            // A task-owned candidate needs a runner-specific registry that is
-            // introduced with the concrete pipelines. Until then it cannot be
-            // reconstructed after restart and must fail closed.
-            WorkflowCandidateReference::TaskOwned { .. } => return false,
+            WorkflowCandidateReference::TaskOwned { candidate_id } => {
+                if !super::runners::update_wiki::update_wiki_candidate_is_valid_for_workflow(
+                    candidate_id,
+                    project_root,
+                    workflow,
+                ) {
+                    return false;
+                }
+            }
             WorkflowCandidateReference::ProjectRelative { path } => {
                 if !safe_relative(path) || !existing_path_is_inside(project_root, path) {
                     return false;

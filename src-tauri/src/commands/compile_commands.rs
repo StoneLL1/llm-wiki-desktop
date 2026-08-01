@@ -4,20 +4,21 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::agent::AgentDetectionState;
 use crate::models::compile::{
-    CompileConsumptionRecord, CompileManifest, CompilePlan, CompileRequest, CompileResult,
-    CompileRoute, CompileRoutePreference, SourceVersionRef,
+    CompileConsumptionRecord, CompileManifest, CompileRequest, CompileResult, CompileRoute,
+    CompileRoutePreference, SourceVersionRef,
 };
 use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
 };
 use crate::models::git::CheckpointPurpose;
-use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::source_registry::SourceRegistry;
-use crate::services::{AgentService, CompileService, LlmService, ResolvedCompileSource};
+use crate::services::{
+    CompileExecutionServices, CompileGenerationPolicy, CompileService,
+    NoopCompileGenerationObserver,
+};
 use crate::tasks::task_model::LogLevel;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -147,18 +148,37 @@ async fn run_compile(
         CompileService::create_workspace_for_sources(context, task_id, &selected_sources)?;
     let protected_sources = CompileService::snapshot_workspace_sources(&workspace)?;
     let outcome = async {
-        let (route, plan, manifest) =
-            generate_manifest(
-                state,
-                request,
-                context,
-                &workspace,
-                task_id,
-                &baseline,
-                &selected_sources,
-                &protected_sources,
-            )
-            .await?;
+        let services = CompileExecutionServices {
+            agent_service: &state.agent_service,
+            llm_service: &state.llm_service,
+            secret_service: &state.secret_service,
+            settings_service: &state.settings_service,
+            task_service: &state.task_service,
+        };
+        let concrete_route = CompileService::resolve_legacy_route(
+            context,
+            request.route,
+            request.agent,
+            request.provider,
+            &services,
+        )?;
+        let mut observer = NoopCompileGenerationObserver;
+        let candidate = CompileService::generate_candidate(
+            context,
+            &workspace,
+            task_id,
+            &baseline,
+            &selected_sources,
+            &protected_sources,
+            concrete_route,
+            CompileGenerationPolicy::LegacyNoDeletes,
+            &services,
+            &mut observer,
+        )
+        .await?;
+        let route = candidate.route.legacy_kind();
+        let plan = candidate.plan;
+        let manifest = candidate.manifest;
         ensure_checkpoint_head(state, context, checkpoint.commit_hash.as_deref())?;
         if state.task_service.is_cancelled(task_id) {
             return Err(BackendError::new("COMPILE_CANCELLED", "Wiki compile was cancelled.", true, false));
@@ -230,240 +250,6 @@ async fn run_compile(
     }.await;
     let _ = std::fs::remove_dir_all(&workspace);
     outcome
-}
-
-async fn generate_manifest(
-    state: &AppState,
-    request: &CompileRequest,
-    context: &ProjectContext,
-    workspace: &std::path::Path,
-    task_id: &str,
-    baseline: &HashMap<String, String>,
-    sources: &[ResolvedCompileSource],
-    protected_sources: &HashMap<String, String>,
-) -> Result<(CompileRoute, CompilePlan, CompileManifest), BackendError> {
-    let agent_config = AgentService::load_config(context)?;
-    let providers = LlmService::list_providers(context)?;
-    let selected_agent = request.agent.or(agent_config.default_agent);
-    let usable_agent = selected_agent.filter(|agent| {
-        state
-            .agent_service
-            .detect_agents(Some(*agent))
-            .iter()
-            .any(|info| info.kind == *agent && info.state == AgentDetectionState::Installed)
-    });
-    let selected_provider = select_provider(request.provider, &providers, &state.secret_service)?;
-    let language = state
-        .settings_service
-        .read_settings(context)
-        .map(|settings| settings.language)
-        .unwrap_or_else(|_| "en".to_string());
-    let route = match request.route {
-        CompileRoutePreference::Agent => CompileRoute::Agent,
-        CompileRoutePreference::Byok => CompileRoute::Byok,
-        CompileRoutePreference::Auto if usable_agent.is_some() => CompileRoute::Agent,
-        CompileRoutePreference::Auto => CompileRoute::Byok,
-    };
-    match route {
-        CompileRoute::Agent => {
-            let agent = usable_agent.ok_or_else(|| {
-                BackendError::new(
-                    "AGENT_UNAVAILABLE",
-                    "Selected Agent is not available.",
-                    true,
-                    true,
-                )
-            })?;
-            state
-                .task_service
-                .append_log(
-                    task_id,
-                    LogLevel::Info,
-                    format!("Running {}", agent.command()),
-                )
-                .map_err(task_error)?;
-            let invocation = AgentService::invocation(
-                agent,
-                workspace,
-                &CompileService::compile_prompt(workspace, &language),
-            )?;
-            state
-                .agent_service
-                .run_task_streaming(&invocation, &state.task_service, task_id)?;
-            let plan = read_agent_compile_plan(workspace)?;
-            validate_compile_plan(context, &plan, baseline, sources)?;
-            let manifest = CompileService::manifest_from_workspace_protected(
-                workspace,
-                baseline,
-                protected_sources,
-            )?;
-            let known_sources = CompileService::known_source_refs_for_sources(sources);
-            CompileService::validate_manifest_semantics(
-                context,
-                &manifest,
-                Some(&plan),
-                &known_sources,
-            )?;
-            // Guard against silent agent failure. The spawned CLI exits 0 even
-            // when permission settings denied every write (e.g. sandbox
-            // unsupported on Windows), so an end_turn looks "successful" while
-            // the workspace holds only the scaffold pages. If extracted sources
-            // existed but the agent produced no content pages, surface a real
-            // error instead of applying a stub wiki the user must debug blind.
-            const SCAFFOLD: [&str; 3] = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
-            let has_content = manifest
-                .files
-                .iter()
-                .any(|file| !SCAFFOLD.contains(&file.path.as_str()));
-            if !has_content && !sources.is_empty() {
-                return Err(BackendError::new(
-                    "COMPILE_EMPTY_OUTPUT",
-                    "Agent finished but wrote no wiki pages. This usually means the agent lacked write permission or hit an upstream API error.",
-                    true,
-                    false,
-                ));
-            }
-            Ok((route, plan, manifest))
-        }
-        CompileRoute::Byok => {
-            let provider = selected_provider.ok_or_else(|| {
-                BackendError::new(
-                    "LLM_PROVIDER_MISSING",
-                    "No enabled BYOK provider is available.",
-                    true,
-                    true,
-                )
-            })?;
-            let secret = state.secret_service.get(provider.provider)?;
-            state
-                .task_service
-                .append_log(
-                    task_id,
-                    LogLevel::Info,
-                    format!("Calling {:?} for compile plan", provider.provider),
-                )
-                .map_err(task_error)?;
-            let plan_prompt = CompileService::provider_plan_prompt(workspace, &language)?;
-            let plan_completion =
-                state
-                    .llm_service
-                    .complete(&provider, secret.as_deref(), &plan_prompt);
-            let raw_plan = crate::tasks::byok_progress::poll_with_progress(
-                &state.task_service,
-                task_id,
-                "Planning",
-                plan_completion,
-            )
-            .await
-            .map_err(|_| {
-                crate::tasks::byok_progress::cancelled_error(
-                    "COMPILE_CANCELLED",
-                    "Wiki compile was cancelled.",
-                )
-            })??;
-            let plan = CompileService::parse_plan(&raw_plan)?;
-            validate_compile_plan(context, &plan, baseline, sources)?;
-            state
-                .task_service
-                .append_log(
-                    task_id,
-                    LogLevel::Info,
-                    format!("Calling {:?} for compile manifest", provider.provider),
-                )
-                .map_err(task_error)?;
-            let manifest_prompt =
-                CompileService::provider_manifest_prompt(workspace, &language, Some(&plan))?;
-            let manifest_completion =
-                state
-                    .llm_service
-                    .complete(&provider, secret.as_deref(), &manifest_prompt);
-            let raw_manifest = crate::tasks::byok_progress::poll_with_progress(
-                &state.task_service,
-                task_id,
-                "Generating",
-                manifest_completion,
-            )
-            .await
-            .map_err(|_| {
-                crate::tasks::byok_progress::cancelled_error(
-                    "COMPILE_CANCELLED",
-                    "Wiki compile was cancelled.",
-                )
-            })??;
-            let manifest = CompileService::parse_manifest(&raw_manifest)?;
-            let known_sources = CompileService::known_source_refs_for_sources(sources);
-            CompileService::validate_manifest_semantics(
-                context,
-                &manifest,
-                Some(&plan),
-                &known_sources,
-            )?;
-            Ok((route, plan, manifest))
-        }
-    }
-}
-
-fn read_agent_compile_plan(workspace: &std::path::Path) -> Result<CompilePlan, BackendError> {
-    let plan_path = workspace.join("compile-plan.json");
-    let raw = std::fs::read_to_string(&plan_path).map_err(|error| {
-        BackendError::new(
-            "COMPILE_PLAN_MISSING",
-            format!(
-                "Agent compile must write compile-plan.json before candidate files are accepted: {error}"
-            ),
-            true,
-            false,
-        )
-        .with_details(serde_json::json!({ "path": plan_path.to_string_lossy() }))
-    })?;
-    CompileService::parse_plan(&raw)
-}
-
-fn validate_compile_plan(
-    context: &ProjectContext,
-    plan: &CompilePlan,
-    baseline: &HashMap<String, String>,
-    sources: &[ResolvedCompileSource],
-) -> Result<(), BackendError> {
-    let known_sources = CompileService::known_source_refs_for_sources(sources);
-    let existing_pages: Vec<String> = baseline.keys().cloned().collect();
-    CompileService::validate_plan(context, plan, &existing_pages, &known_sources)
-}
-
-fn select_provider(
-    explicit: Option<LlmProviderKind>,
-    providers: &[LlmProviderConfig],
-    secrets: &crate::services::SecretService,
-) -> Result<Option<LlmProviderConfig>, BackendError> {
-    if let Some(kind) = explicit {
-        let provider = providers
-            .iter()
-            .find(|provider| provider.enabled && provider.provider == kind)
-            .cloned()
-            .ok_or_else(|| {
-                BackendError::new(
-                    "LLM_PROVIDER_MISSING",
-                    "The selected BYOK provider is not enabled.",
-                    true,
-                    true,
-                )
-            })?;
-        if provider.provider.requires_secret() && secrets.get(provider.provider)?.is_none() {
-            return Err(BackendError::new(
-                "LLM_SECRET_MISSING",
-                "The selected provider has no configured secret.",
-                true,
-                true,
-            ));
-        }
-        return Ok(Some(provider));
-    }
-    for provider in providers.iter().filter(|provider| provider.enabled) {
-        if !provider.provider.requires_secret() || secrets.get(provider.provider)?.is_some() {
-            return Ok(Some(provider.clone()));
-        }
-    }
-    Ok(None)
 }
 
 struct FinishCompileFailure {

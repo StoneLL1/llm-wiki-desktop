@@ -17,6 +17,34 @@ pub enum CompileRoute {
     Byok,
 }
 
+/// A concrete, already-resolved execution route. New Workflows callers must
+/// pass one of these and may not ask Compile to silently fall back.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ResolvedCompileRoute {
+    Agent {
+        agent: AgentKind,
+        model: Option<String>,
+    },
+    Byok {
+        provider: LlmProviderKind,
+        model: String,
+    },
+}
+
+impl ResolvedCompileRoute {
+    pub fn legacy_kind(&self) -> CompileRoute {
+        match self {
+            Self::Agent { .. } => CompileRoute::Agent,
+            Self::Byok { .. } => CompileRoute::Byok,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompileConflictResolution {
@@ -48,6 +76,45 @@ pub struct CompileManifest {
     #[serde(default)]
     pub deletions: Vec<String>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileCandidate {
+    pub route: ResolvedCompileRoute,
+    pub plan: CompilePlan,
+    pub manifest: CompileManifest,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileChangeSummary {
+    pub created: Vec<String>,
+    pub updated: Vec<String>,
+    pub skipped: Vec<String>,
+    pub deleted: Vec<String>,
+    pub conflicted: Vec<String>,
+    pub high_risk: Vec<String>,
+}
+
+impl CompileChangeSummary {
+    pub fn affected_paths(&self) -> Vec<String> {
+        let mut paths = self
+            .created
+            .iter()
+            .chain(self.updated.iter())
+            .chain(self.deleted.iter())
+            .chain(self.conflicted.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    pub fn requires_confirmation(&self) -> bool {
+        !self.deleted.is_empty() || !self.conflicted.is_empty() || !self.high_risk.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

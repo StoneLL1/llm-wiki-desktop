@@ -390,6 +390,14 @@ impl TaskService {
             .unwrap_or(false)
     }
 
+    pub fn project_root_for_task(&self, id: &str) -> Option<PathBuf> {
+        self.task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned()
+    }
+
     pub fn list_workflow_runs(&self) -> Vec<WorkflowRun> {
         let tasks = self.tasks.read().expect("lock poisoned");
         let mut runs = tasks
@@ -629,6 +637,62 @@ impl TaskService {
         })
     }
 
+    pub fn skip_workflow_stage(&self, id: &str, stage_id: &str) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            require_running_workflow(task, cancellation.as_ref(), id)?;
+            if workflow.current_stage_id.is_some() {
+                return Err(format!("Workflow already has an active stage: {id}"));
+            }
+            let target_ordinal = workflow
+                .stages
+                .iter()
+                .find(|stage| stage.id == stage_id)
+                .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?
+                .ordinal;
+            if workflow.stages.iter().any(|stage| {
+                stage.ordinal < target_ordinal
+                    && !matches!(
+                        stage.status,
+                        WorkflowStageStatus::Completed | WorkflowStageStatus::Skipped
+                    )
+            }) {
+                return Err(format!(
+                    "Earlier workflow stages are incomplete: {stage_id}"
+                ));
+            }
+            let now = Utc::now().to_rfc3339();
+            let stage = workflow
+                .stages
+                .iter_mut()
+                .find(|stage| stage.id == stage_id)
+                .expect("workflow stage was resolved above");
+            if stage.status != WorkflowStageStatus::Pending {
+                return Err(format!("Workflow stage is not pending: {stage_id}"));
+            }
+            stage.status = WorkflowStageStatus::Skipped;
+            stage.started_at = Some(now.clone());
+            stage.completed_at = Some(now);
+            stage.current_item = None;
+            stage.progress = None;
+            stage.decision = None;
+            Ok(())
+        })
+    }
+
+    pub fn set_task_cancellable(&self, id: &str, cancellable: bool) -> Result<BackendTask, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, _| {
+            if !cancellable {
+                require_running_workflow(task, cancellation.as_ref(), id)?;
+            }
+            task.cancellable = cancellable;
+            Ok(())
+        })?;
+        self.get_task(id)
+            .ok_or_else(|| format!("Task not found: {id}"))
+    }
+
     pub fn fail_workflow_stage(
         &self,
         id: &str,
@@ -750,12 +814,18 @@ impl TaskService {
         let updated = match run.display_status {
             crate::models::workflow::WorkflowDisplayStatus::Running => {
                 self.mutate_workflow(id, |task, _| {
+                    if !task.cancellable {
+                        return Err(format!("Task is not cancellable: {id}"));
+                    }
                     task.status = TaskStatus::Cancelling;
                     Ok(())
                 })
             }
             crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation => self
                 .mutate_workflow(id, |task, workflow| {
+                    if !task.cancellable {
+                        return Err(format!("Task is not cancellable: {id}"));
+                    }
                     task.status = TaskStatus::Cancelling;
                     workflow.pending_action = None;
                     Ok(())

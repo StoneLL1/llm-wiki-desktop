@@ -86,6 +86,45 @@ pub fn cancel_task(
     request: TaskByIdRequest,
 ) -> Result<BackendTask, BackendError> {
     require_task_project(&state, &request)?;
+    if let Some(run) = state.task_service.get_workflow_run(&request.task_id) {
+        let was_waiting = run.display_status
+            == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation;
+        state
+            .workflow_service
+            .coordinator
+            .cancel(&state.task_service, &request.task_id)
+            .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))?;
+        if was_waiting {
+            if let Some(action) = run.pending_action {
+                let _ = state.confirmation_registry.confirm(
+                    &action.id,
+                    crate::models::confirmation::ConfirmationStatus::Cancelled,
+                );
+            }
+            if let Err(error) = crate::services::discard_update_wiki_candidate(&request.task_id) {
+                let _ = state.task_service.append_log(
+                    &request.task_id,
+                    crate::tasks::task_model::LogLevel::Warn,
+                    format!(
+                        "Workflow was cancelled, but candidate cleanup needs attention: {}",
+                        error.message
+                    ),
+                );
+            }
+            let (_, next) = state
+                .workflow_service
+                .coordinator
+                .finish_cancelled_and_claim_next(&state.task_service, &request.task_id)
+                .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))?;
+            if let Some(next) = next {
+                state.workflow_service.dispatch_claimed_run(&next)?;
+            }
+        }
+        return state
+            .task_service
+            .get_task(&request.task_id)
+            .ok_or_else(|| BackendError::new("TASK_NOT_FOUND", "Task not found.", false, false));
+    }
     let result = if state
         .task_service
         .get_task(&request.task_id)

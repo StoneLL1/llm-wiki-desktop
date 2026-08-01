@@ -26,25 +26,46 @@ pub fn shared_compile_instruction_set() -> CompileInstructionSet {
 }
 
 pub fn render_compile_core_instructions() -> String {
+    render_compile_core_instructions_with_policy(false)
+}
+
+pub fn render_compile_core_instructions_with_policy(allow_reviewable_deletions: bool) -> String {
     let set = shared_compile_instruction_set();
+    let deletion_policy = if allow_reviewable_deletions {
+        "A derived wiki/*.md page may be deleted only when the plan explicitly requires a rename or removal. Never delete wiki/sources/*; every deletion is a review-only candidate requiring explicit confirmation."
+    } else {
+        set.no_delete_policy
+    };
     [
         set.source_protection,
         set.derived_page_policy,
         set.source_traceability,
         set.decision_rules,
         set.structural_files,
-        set.no_delete_policy,
+        deletion_policy,
     ]
     .join("\n")
 }
 
 pub fn render_compile_prompt_header(route: CompilePromptRoute, language: &str) -> String {
+    render_compile_prompt_header_with_policy(route, language, false)
+}
+
+pub fn render_compile_prompt_header_with_policy(
+    route: CompilePromptRoute,
+    language: &str,
+    allow_reviewable_deletions: bool,
+) -> String {
     let route_header = match route {
         CompilePromptRoute::ByokPlan => {
             "Return only CompilePlan JSON matching {summary,items:[{action,targetPath,pageType,sourceIds,affectedExistingPages,reason,riskFlags}],globalRiskFlags}. Do not return Markdown files in this step. You only know the files included in this prompt; you have no filesystem or tool access."
         }
         CompilePromptRoute::ByokManifest => {
-            "Return only CompileManifest JSON matching {files:[{path,content}],deletions:[],summary}. Follow the accepted CompilePlan exactly; do not invent extra file operations. You only know the files included in this prompt; you have no filesystem or tool access."
+            if allow_reviewable_deletions {
+                "Return only CompileManifest JSON matching {files:[{path,content}],deletions:[\"wiki/...md\"],summary}. Follow the accepted CompilePlan exactly; list only planned derived-page removals or renames in deletions. You only know the files included in this prompt; you have no filesystem or tool access."
+            } else {
+                "Return only CompileManifest JSON matching {files:[{path,content}],deletions:[],summary}. Follow the accepted CompilePlan exactly; do not invent extra file operations. You only know the files included in this prompt; you have no filesystem or tool access."
+            }
         }
         CompilePromptRoute::Agent => {
             "Compile this local Markdown wiki inside the supplied compile workspace. First write a validated plan to compile-plan.json, then write candidate Markdown files under wiki/. Work only inside this workspace root."
@@ -52,7 +73,7 @@ pub fn render_compile_prompt_header(route: CompilePromptRoute, language: &str) -
     };
     format!(
         "{route_header}\n{}\n{}\nWrite each page's prose body in that language; keep frontmatter keys, file paths, page type values, and JSON structure in English.",
-        render_compile_core_instructions(),
+        render_compile_core_instructions_with_policy(allow_reviewable_deletions),
         crate::utils::i18n::language_instruction(language),
     )
 }
