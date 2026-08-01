@@ -8,6 +8,8 @@ const DEFAULT_POLL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface WaitForTaskTerminalOptions {
+  projectId: string;
+  projectRootPath: string;
   pollMs?: number;
   timeoutMs?: number;
 }
@@ -47,7 +49,7 @@ export class WaitForTaskTerminalTimeoutError extends Error {
  */
 export function waitForTaskTerminal(
   task: BackendTask,
-  options: WaitForTaskTerminalOptions = {},
+  options: WaitForTaskTerminalOptions,
 ): Promise<BackendTask> {
   if (isTerminalStatus(task.status)) return Promise.resolve(task);
   const taskId = task.id;
@@ -57,6 +59,11 @@ export function waitForTaskTerminal(
   // fast", which is a valid caller choice and never starves).
   const pollMs = Math.max(options.pollMs ?? DEFAULT_POLL_MS, 1);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const request = {
+    taskId,
+    projectId: options.projectId,
+    projectRootPath: options.projectRootPath,
+  };
 
   return new Promise<BackendTask>((resolve, reject) => {
     let settled = false;
@@ -106,7 +113,7 @@ export function waitForTaskTerminal(
     }
 
     function checkOnce(): void {
-      invoke<BackendTask>("get_task", { request: { taskId } })
+      invoke<BackendTask>("get_task", { request })
         .then((next) => {
           // Mirror the event path's taskId filter: get_task is a point query,
           // but a defensive id check prevents silently resolving on a wrong
@@ -128,7 +135,11 @@ export function waitForTaskTerminal(
       listen<BackendEvent>(channel, (evt) => {
         const event = evt.payload;
         const next = event?.payload as BackendTask | undefined;
-        if (event?.taskId === taskId && next) {
+        if (
+          event?.taskId === taskId
+          && event.projectId === options.projectId
+          && next
+        ) {
           finish(next);
         }
       })

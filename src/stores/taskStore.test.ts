@@ -6,7 +6,13 @@ const invokeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { fetchTasks, handleTaskEvent, recoverTasksForProject, useTaskStore } from "./taskStore";
+import {
+  fetchTaskById,
+  fetchTasks,
+  handleTaskEvent,
+  recoverTasksForProject,
+  useTaskStore,
+} from "./taskStore";
 
 function task(id: string, projectId: string): BackendTask {
   return {
@@ -38,11 +44,36 @@ function succeededTask(id: string, projectId: string): BackendTask {
 
 beforeEach(() => {
   invokeMock.mockReset();
-  useTaskStore.getState().setTasks([]);
+  useTaskStore.setState({
+    activeProjectId: "project-a",
+    activeProjectRootPath: "D:/project-a",
+    tasks: [],
+    logs: {},
+    activities: {},
+    taskOutputs: {},
+    selectedTaskId: null,
+    drawerOpen: false,
+    runningCount: 0,
+    tasksHydrated: false,
+  });
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 });
 
 describe("recoverTasksForProject", () => {
+  it("sends explicit project context for task-id reads", async () => {
+    const current = task("task-a", "project-a");
+    invokeMock.mockResolvedValueOnce(current);
+
+    await expect(fetchTaskById("task-a")).resolves.toEqual(current);
+
+    expect(invokeMock).toHaveBeenCalledWith("get_task", {
+      request: {
+        taskId: "task-a",
+        projectId: "project-a",
+        projectRootPath: "D:/project-a",
+      },
+    });
+  });
   it("does not let a late queued snapshot overwrite a terminal event", () => {
     useTaskStore.getState().setTasks([succeededTask("task-a", "project-a")]);
 
@@ -91,8 +122,8 @@ describe("recoverTasksForProject", () => {
     });
   });
 
-  it("keeps the backend global task list when switching projects", async () => {
-    const tasks = [task("task-a", "project-a"), task("task-b", "project-b")];
+  it("replaces the visible task list with only the selected project snapshot", async () => {
+    const tasks = [task("task-b", "project-b")];
     invokeMock.mockResolvedValueOnce(tasks);
 
     await recoverTasksForProject("project-b", "D:/project-b");
@@ -101,24 +132,27 @@ describe("recoverTasksForProject", () => {
       request: { projectId: "project-b", rootPath: "D:/project-b" },
     });
     expect(useTaskStore.getState().tasks).toEqual(tasks);
+    expect(useTaskStore.getState().selectedTaskId).toBeNull();
   });
 
-  it("keeps task events from background projects in the global task list", () => {
+  it("ignores task events from background projects", () => {
     handleTaskEvent({
-      eventId: "event-project-a",
+      eventId: "event-project-b",
       eventType: "task_updated",
-      projectId: "project-a",
-      taskId: "task-a",
+      projectId: "project-b",
+      taskId: "task-b",
       timestamp: "2026-06-21T00:00:30Z",
-      payload: task("task-a", "project-a"),
+      payload: task("task-b", "project-b"),
     });
 
-    expect(useTaskStore.getState().tasks).toContainEqual(task("task-a", "project-a"));
+    expect(useTaskStore.getState().tasks).toEqual([]);
   });
 
   it("propagates task list and recovery failures so the UI can report them", async () => {
     invokeMock.mockRejectedValueOnce(new Error("task registry unavailable"));
-    await expect(fetchTasks()).rejects.toThrow("task registry unavailable");
+    await expect(fetchTasks("project-a", "D:/project-a")).rejects.toThrow(
+      "task registry unavailable",
+    );
 
     invokeMock.mockRejectedValueOnce(new Error("recovery failed"));
     await expect(recoverTasksForProject("project-b", "D:/project-b")).rejects.toThrow(

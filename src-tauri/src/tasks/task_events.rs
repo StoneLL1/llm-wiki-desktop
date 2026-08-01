@@ -86,6 +86,7 @@ fn event_type_to_tauri_name(event_type: &BackendEventType) -> String {
         AgentOutput => "agent://output",
         TaskStreamOutput => "task://stream-output",
         TaskActivity => "task://activity",
+        WorkflowUpdated => "workflow://updated",
     }
     .to_string()
 }

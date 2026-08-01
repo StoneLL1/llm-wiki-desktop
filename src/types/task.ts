@@ -7,7 +7,8 @@ export type TaskType =
   | "deep_lint"
   | "auto_fix"
   | "export"
-  | "source_ai_organize";
+  | "source_ai_organize"
+  | "workflow";
 
 export type TaskStatus =
   | "queued"
@@ -31,7 +32,8 @@ export type BackendEventType =
   | "wiki_changed"
   | "graph_updated"
   | "agent_output"
-  | "task_activity";
+  | "task_activity"
+  | "workflow_updated";
 
 export type LogLevel = "info" | "warn" | "error" | "debug";
 
@@ -169,6 +171,7 @@ export const TASK_TYPE_LABELS: Record<TaskType, string> = {
   auto_fix: "task.type.autoFix",
   export: "task.type.export",
   source_ai_organize: "task.type.sourceAiOrganize",
+  workflow: "task.type.workflow",
 };
 
 export const TASK_STATUS_ORDER: Record<TaskStatus, number> = {

@@ -547,7 +547,7 @@ export function useImportTaskCoordinator({
     if (!hasPendingTaskForCurrentScope()) return;
     let cancelled = false;
     const timer = setTimeout(() => {
-      void fetchTasks()
+      void fetchTasks(projectId, rootPath)
         .then(() => reconcilePendingTasks())
         .catch(() => undefined)
         .finally(() => {
@@ -560,7 +560,7 @@ export function useImportTaskCoordinator({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [hasPendingTaskForCurrentScope, projectKey, reconcilePendingTasks, reconciliationRevision]);
+  }, [hasPendingTaskForCurrentScope, projectId, projectKey, reconcilePendingTasks, reconciliationRevision, rootPath]);
 
   useEffect(() => {
     if (discoveryTask?.status !== "succeeded" || !session?.sessionId) return;

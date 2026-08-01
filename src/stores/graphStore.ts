@@ -264,7 +264,10 @@ async function runGraphBuild(
       error: null,
     },
   }));
-  const terminalTask = await waitForTaskTerminal(task);
+  const terminalTask = await waitForTaskTerminal(task, {
+    projectId,
+    projectRootPath: rootPath,
+  });
   useTaskStore.getState().upsertTask(terminalTask);
   if (!isProjectScopeCurrent(scope)) return;
   if (terminalTask.status !== "succeeded") {

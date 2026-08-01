@@ -8,7 +8,7 @@ import { useTaskLauncher } from "../../hooks/useTaskLauncher";
 import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { cancelTaskRequest, fetchTaskById, useTaskStore } from "../../stores/taskStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import type { LintIssue, LintIssueType, LintRoutePreference } from "../../types/lint";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
@@ -78,7 +78,6 @@ export function LintView() {
   const cancelHighRisk = useLintStore((state) => state.cancelHighRisk);
 
   const tasks = useTaskStore((state) => state.tasks);
-  const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
@@ -183,12 +182,12 @@ export function LintView() {
   const handleStartDeep = () => {
     void startDeepLint(projectId, rootPath, ROUTE_PREFERENCE).then((taskId) => {
       if (taskId) {
-        void invoke("list_tasks", { request: { statusFilter: null } }).then((list) => {
+        void invoke("list_tasks", {
+          request: { projectId, projectRootPath: rootPath, statusFilter: null },
+        }).then((list) => {
           const found = (list as { id: string }[]).find((task) => task.id === taskId);
           if (found) {
-            void invoke("get_task", { request: { taskId } }).then((task) => {
-              if (task) upsertTask(task as never);
-            });
+            void fetchTaskById(taskId);
           }
         });
         openTaskDrawer(taskId);
@@ -198,9 +197,7 @@ export function LintView() {
 
   const handleCancelDeep = () => {
     if (!deepTaskId) return;
-    void invoke("cancel_task", { request: { taskId: deepTaskId } }).then((task) => {
-      if (task) upsertTask(task as never);
-    });
+    void cancelTaskRequest(deepTaskId);
   };
 
   const handleApplyFix = async (issue: LintIssue) => {

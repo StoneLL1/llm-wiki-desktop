@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::models::task::{BackendTask, TaskActivity, TaskStatus};
+use crate::models::workflow::WorkflowExecutionState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +29,7 @@ pub struct TaskEntry {
     pub log_lines: Vec<LogLine>,
     pub activities: Vec<TaskActivity>,
     pub persisted_path: Option<PathBuf>,
+    pub workflow: Option<WorkflowExecutionState>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,11 +67,13 @@ pub fn validate_transition(current: &TaskStatus, next: &TaskStatus) -> Result<()
         | (Running, WaitingForConfirmation)
         | (Running, Succeeded)
         | (Running, Failed)
+        | (Running, Interrupted)
         | (Running, Cancelling)
         | (WaitingForConfirmation, Running)
         | (WaitingForConfirmation, Cancelling)
         | (Cancelling, Cancelled)
-        | (Cancelling, Failed) => Ok(()),
+        | (Cancelling, Failed)
+        | (Cancelling, Interrupted) => Ok(()),
         _ => Err(format!(
             "Invalid state transition: {:?} -> {:?}",
             current, next

@@ -21,7 +21,7 @@ import { pathBasename } from "../../lib/pathDisplay";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { cancelTaskRequest, fetchTaskById, useTaskStore } from "../../stores/taskStore";
 import { isTerminalStatus } from "../../types/task";
 import { type ExportRecord, type ExportRestrictedContentStatus, type ExportType } from "../../types/export";
 import { ExportDialog, type ExportDialogResult } from "./ExportDialog";
@@ -71,7 +71,6 @@ export function ExportsView() {
   const clearWorkspaceFocus = useNavigationStore((state) => state.clearWorkspaceFocus);
 
   const tasks = useTaskStore((state) => state.tasks);
-  const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
@@ -151,12 +150,12 @@ export function ExportsView() {
     }).then((taskId) => {
       if (!taskId) return;
       if (result.openPreview) setPendingPreviewTaskId(taskId);
-      void invoke("list_tasks", { request: { statusFilter: null } }).then((list) => {
+      void invoke("list_tasks", {
+        request: { projectId, projectRootPath: rootPath, statusFilter: null },
+      }).then((list) => {
         const found = (list as { id: string }[]).find((task) => task.id === taskId);
         if (found) {
-          void invoke("get_task", { request: { taskId } }).then((task) => {
-            if (task) upsertTask(task as never);
-          });
+          void fetchTaskById(taskId);
         }
       });
       openTaskDrawer(taskId);
@@ -165,9 +164,7 @@ export function ExportsView() {
 
   const handleCancel = () => {
     if (!runningTaskId) return;
-    void invoke("cancel_task", { request: { taskId: runningTaskId } }).then((task) => {
-      if (task) upsertTask(task as never);
-    });
+    void cancelTaskRequest(runningTaskId);
   };
 
   const handlePreview = (record: ExportRecord) => {
@@ -180,9 +177,7 @@ export function ExportsView() {
   const runRegeneration = (record: ExportRecord, acknowledgeRestrictedContent: boolean) => {
     void regenerateExport(projectId, rootPath, record, { acknowledgeRestrictedContent }).then((taskId) => {
       if (!taskId) return;
-      void invoke("get_task", { request: { taskId } }).then((task) => {
-        if (task) upsertTask(task as never);
-      });
+      void fetchTaskById(taskId);
       openTaskDrawer(taskId);
     });
   };

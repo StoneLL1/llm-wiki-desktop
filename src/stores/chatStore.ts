@@ -461,8 +461,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   cancelTask: async (taskId) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
+    const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
+    if (!projectId || !projectRootPath) return;
     try {
-      const task = await invoke<BackendTask>("cancel_task", { request: { taskId } });
+      const task = await invoke<BackendTask>("cancel_task", {
+        request: { taskId, projectId, projectRootPath },
+      });
+      if (!isProjectScopeCurrent(scope)) return;
       useTaskStore.getState().upsertTask(task);
     } catch (error) {
       if (isProjectScopeCurrent(scope)) set({ error: errorMessage(error) });

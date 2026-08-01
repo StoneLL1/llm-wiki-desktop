@@ -172,7 +172,18 @@ beforeEach(() => {
   tauriInvoke.mockResolvedValue([]);
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   useImportStore.getState().reset();
-  useTaskStore.setState({ tasks: [], logs: {}, drawerOpen: false, selectedTaskId: null, runningCount: 0 });
+  useTaskStore.setState({
+    activeProjectId: projectA.projectId,
+    activeProjectRootPath: projectA.rootPath,
+    tasks: [],
+    logs: {},
+    activities: {},
+    taskOutputs: {},
+    drawerOpen: false,
+    selectedTaskId: null,
+    runningCount: 0,
+    tasksHydrated: false,
+  });
   api.getReadiness.mockResolvedValue(readiness);
   api.createSession.mockResolvedValue(session(projectA.projectId));
   api.getSession.mockResolvedValue(session(projectA.projectId));
