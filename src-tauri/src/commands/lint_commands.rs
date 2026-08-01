@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager, State};
@@ -124,64 +123,18 @@ async fn run_deep_lint(
             false,
         ));
     }
-    // The prompt builder scans the wiki internally. Require the tree and
-    // hashes immediately around that scan to be stable, otherwise the model
-    // could receive one snapshot while fixes are guarded by another.
-    let mut stable_prompt: Option<String> = None;
-    let mut known_paths: HashSet<String> = HashSet::new();
-    let mut scan_hashes: HashMap<String, String> = HashMap::new();
-    let mut prompt_input_hashes: HashMap<String, Option<String>> = HashMap::new();
-    for _ in 0..2 {
-        let before_tree = state.search_service.scan_wiki(context, &HashSet::new())?;
-        let before_paths: HashSet<String> = before_tree
-            .pages
-            .iter()
-            .map(|page| page.path.clone())
-            .collect();
-        let before_hashes = state
-            .lint_service
-            .capture_prompt_input_hashes(context, &before_paths)?;
-        let candidate_prompt =
-            state
-                .lint_service
-                .build_deep_lint_prompt(context, &state.search_service, &language)?;
-        let after_tree = state.search_service.scan_wiki(context, &HashSet::new())?;
-        let after_paths: HashSet<String> = after_tree
-            .pages
-            .iter()
-            .map(|page| page.path.clone())
-            .collect();
-        let after_hashes = state
-            .lint_service
-            .capture_prompt_input_hashes(context, &after_paths)?;
-        if before_paths == after_paths && before_hashes == after_hashes {
-            stable_prompt = Some(candidate_prompt);
-            known_paths = after_paths;
-            prompt_input_hashes = before_hashes;
-            scan_hashes = state
-                .lint_service
-                .capture_page_hashes(context, &known_paths);
-            break;
-        }
-    }
-    let Some(prompt) = stable_prompt else {
-        return Err(BackendError::new(
-            "LINT_SCAN_CHANGED",
-            "The wiki changed while preparing the deep-lint snapshot; run the scan again.",
-            true,
-            true,
-        ));
-    };
-    let deterministic_issue_ids: HashSet<String> = state
+    let local_report = state
         .lint_service
-        .run_local_lint(context, &state.search_service)?
-        .issues
-        .into_iter()
-        .map(|issue| issue.id)
-        .collect();
-    // The deterministic pass is also a prompt input: reject an edit that
-    // lands between prompt construction and model invocation.
-    verify_deep_prompt_snapshot(state, context, &known_paths, &prompt_input_hashes)?;
+        .run_local_lint(context, &state.search_service)?;
+    let snapshot = state.lint_service.prepare_deep_lint_snapshot(
+        context,
+        &state.search_service,
+        &language,
+        &local_report,
+    )?;
+    state
+        .lint_service
+        .verify_deep_lint_snapshot(context, &state.search_service, &snapshot)?;
 
     let raw = match resolve_route(
         state,
@@ -201,8 +154,12 @@ async fn run_deep_lint(
                 .map_err(task_error)?;
             let workspace = create_lint_workspace(task_id)?;
             let _guard = WorkspaceGuard(workspace.clone());
-            verify_deep_prompt_snapshot(state, context, &known_paths, &prompt_input_hashes)?;
-            let invocation = AgentService::lint_invocation(kind, &workspace, &prompt)?;
+            state.lint_service.verify_deep_lint_snapshot(
+                context,
+                &state.search_service,
+                &snapshot,
+            )?;
+            let invocation = AgentService::lint_invocation(kind, &workspace, &snapshot.prompt)?;
             state
                 .agent_service
                 .run_lint_streaming(&invocation, &state.task_service, task_id)?
@@ -218,10 +175,15 @@ async fn run_deep_lint(
                 )
                 .map_err(task_error)?;
             let secret = state.secret_service.get(provider.provider)?;
-            verify_deep_prompt_snapshot(state, context, &known_paths, &prompt_input_hashes)?;
-            let completion = state
-                .llm_service
-                .complete(&provider, secret.as_deref(), &prompt);
+            state.lint_service.verify_deep_lint_snapshot(
+                context,
+                &state.search_service,
+                &snapshot,
+            )?;
+            let completion =
+                state
+                    .llm_service
+                    .complete(&provider, secret.as_deref(), &snapshot.prompt);
             let raw = crate::tasks::byok_progress::poll_with_progress(
                 &state.task_service,
                 task_id,
@@ -253,7 +215,9 @@ async fn run_deep_lint(
     // A provider may take time to start or complete while the user edits the
     // wiki. Do not persist findings from a prompt that no longer represents
     // the project snapshot used for this request.
-    verify_deep_prompt_snapshot(state, context, &known_paths, &prompt_input_hashes)?;
+    state
+        .lint_service
+        .verify_deep_lint_snapshot(context, &state.search_service, &snapshot)?;
 
     if state.task_service.is_cancelled(task_id) {
         return Err(BackendError::new(
@@ -264,17 +228,13 @@ async fn run_deep_lint(
         ));
     }
 
-    let mut issues = crate::services::LintService::parse_agent_issues_for_known_paths(
+    let issues = state.lint_service.finish_deep_lint_snapshot(
+        context,
+        &state.search_service,
+        &snapshot,
         &raw,
-        &known_paths,
-        &deterministic_issue_ids,
+        true,
     )?;
-    state
-        .lint_service
-        .filter_ignored_issues(context, &mut issues)?;
-    for issue in &mut issues {
-        issue.scan_hash = scan_hashes.get(&issue.path).cloned();
-    }
     let issue_count = issues.len();
     if state.task_service.is_cancelled(task_id) {
         return Err(BackendError::new(
@@ -653,28 +613,6 @@ fn is_safe_auto_provider(provider: &LlmProviderConfig) -> bool {
         LlmProviderKind::Ollama => matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"),
         LlmProviderKind::Custom => false,
     }
-}
-
-fn verify_deep_prompt_snapshot(
-    state: &AppState,
-    context: &ProjectContext,
-    expected_paths: &HashSet<String>,
-    expected_hashes: &HashMap<String, Option<String>>,
-) -> Result<(), BackendError> {
-    let tree = state.search_service.scan_wiki(context, &HashSet::new())?;
-    let paths: HashSet<String> = tree.pages.iter().map(|page| page.path.clone()).collect();
-    let hashes = state
-        .lint_service
-        .capture_prompt_input_hashes(context, &paths)?;
-    if &paths != expected_paths || &hashes != expected_hashes {
-        return Err(BackendError::new(
-            "LINT_SCAN_CHANGED",
-            "The wiki changed while preparing or running deep lint; run the scan again.",
-            true,
-            true,
-        ));
-    }
-    Ok(())
 }
 
 fn create_lint_workspace(task_id: &str) -> Result<PathBuf, BackendError> {

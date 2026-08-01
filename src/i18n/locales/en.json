@@ -1113,6 +1113,8 @@
   "lint.history.empty": "No lint reports yet.",
   "lint.history.kind.local": "Local lint",
   "lint.history.kind.deep": "Deep lint",
+  "lint.history.kind.health_check": "Health check",
+  "lint.history.nonPersistent": "Not saved",
   "lint.actions.autoFix": "Auto-fix ({{count}})",
   "lint.summary.errors": "Errors",
   "lint.summary.warnings": "Warnings",

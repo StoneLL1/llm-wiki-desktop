@@ -6,6 +6,7 @@ import type {
   ApplyLintFixRequest,
   ApplyLintFixesBatchRequest,
   DeepLintReport,
+  HealthCheckReport,
   GetDeepLintReportRequest,
   LintBatchConfirmation,
   LintBatchOutcome,
@@ -115,6 +116,7 @@ export interface LintState {
   localReport: LintReport | null;
   deepTaskId: string | null;
   deepReport: DeepLintReport | null;
+  healthReport: HealthCheckReport | null;
   loadingLocal: boolean;
   runningDeep: boolean;
   error: string | null;
@@ -189,6 +191,7 @@ const initial = {
   localReport: null as LintReport | null,
   deepTaskId: null as string | null,
   deepReport: null as DeepLintReport | null,
+  healthReport: null as HealthCheckReport | null,
   loadingLocal: false,
   runningDeep: false,
   error: null as string | null,
@@ -227,6 +230,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       loadingLocal: true,
       error: null,
       localReport: null,
+      healthReport: null,
       selectedIssueId: null,
       activeHistoryId: null,
       fixStatus: {},
@@ -260,7 +264,7 @@ export const useLintStore = create<LintState>((set, get) => ({
     const scope = captureProjectScope();
     // Claim the running slot before the IPC round-trip so a double click
     // cannot enqueue two deep scans.
-    set({ error: null, runningDeep: true });
+    set({ error: null, runningDeep: true, healthReport: null });
     try {
       const request: StartDeepLintRequest = {
         projectId,
@@ -290,6 +294,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       if (!isProjectScopeCurrent(scope)) return;
       set({
         deepReport: report,
+        healthReport: null,
         activeHistoryId: request.taskId,
         runningDeep: false,
       });
@@ -398,6 +403,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       set({
         localReport: persisted.localReport ?? null,
         deepReport: persisted.deepReport ?? null,
+        healthReport: persisted.healthCheckReport ?? null,
         loadingLocal: false,
         selectedIssueId: null,
         fixStatus: {},
@@ -405,7 +411,12 @@ export const useLintStore = create<LintState>((set, get) => ({
         batchConfirmations: [],
         batchRunning: false,
         activeHistoryId: persisted.entry.id,
-        mode: persisted.entry.kind === "local" ? "local" : "agent",
+        mode:
+          persisted.entry.kind === "local"
+            ? "local"
+            : persisted.entry.kind === "deep"
+              ? "agent"
+              : "all",
       });
       return persisted;
     } catch (error) {
@@ -723,6 +734,7 @@ export const useLintStore = create<LintState>((set, get) => ({
 
 /** All issues currently in view: local pass + the latest deep-lint report. */
 export function selectAllIssues(state: LintState): LintIssue[] {
+  if (state.healthReport) return state.healthReport.issues;
   const local = state.localReport?.issues ?? [];
   const deep = state.deepReport?.issues ?? [];
   return [...local, ...deep];

@@ -89,9 +89,14 @@ export function LintIssueDetails({
           <span className="text-[13px] font-semibold text-[var(--text-primary)]">
             {t(`lint.issueType.${issue.issueType}`)}
           </span>
-          <span className="rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[10.5px] text-[var(--text-muted)]">
-            {t(`lint.source.${issue.source}`)}
-          </span>
+          {(issue.origins ?? [issue.source]).map((source) => (
+            <span
+              key={source}
+              className="rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-1.5 py-0.5 text-[10.5px] text-[var(--text-muted)]"
+            >
+              {t(`lint.source.${source}`)}
+            </span>
+          ))}
         </div>
       </div>
 

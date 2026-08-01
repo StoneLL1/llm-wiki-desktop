@@ -1,16 +1,35 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::errors::BackendError;
-use crate::models::lint::{Fixability, LintAgentIssue, LintIssue, LintIssueSource, LintSeverity};
+use crate::models::lint::{
+    Fixability, LintAgentIssue, LintIssue, LintIssueSource, LintReport, LintSeverity,
+};
 use crate::models::paths::ProjectContext;
 use crate::services::SearchService;
 
-use super::rules::lint_issue_type_id;
+use super::rules::{health_source_paths, lint_issue_type_id};
 use super::LintService;
 
 const DEEP_LINT_EXCERPT_CHARS: usize = 1000;
 const DEEP_LINT_PROMPT_BUDGET_CHARS: usize = 120_000;
 const BUNDLED_WIKI_LINT_SKILL: &str = include_str!("../../../templates/skills/wiki-lint/SKILL.md");
+
+#[derive(Debug, Clone)]
+pub struct DeepLintSnapshot {
+    pub prompt: String,
+    pub known_paths: HashSet<String>,
+    pub deep_covered_pages: usize,
+    pub deep_truncated: bool,
+    prompt_input_hashes: HashMap<String, Option<String>>,
+    scan_hashes: HashMap<String, String>,
+    deterministic_issue_ids: HashSet<String>,
+}
+
+struct BuiltDeepPrompt {
+    prompt: String,
+    covered_pages: usize,
+    truncated: bool,
+}
 
 impl LintService {
     /// Assemble the prompt for the `wiki-lint` Skill: purpose, schema, and a
@@ -22,12 +41,39 @@ impl LintService {
         search_service: &SearchService,
         language: &str,
     ) -> Result<String, BackendError> {
+        let local_baseline = self.run_local_lint(context, search_service)?;
+        self.build_deep_lint_prompt_with_baseline(
+            context,
+            search_service,
+            language,
+            &local_baseline,
+        )
+    }
+
+    pub fn build_deep_lint_prompt_with_baseline(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        language: &str,
+        local_baseline: &LintReport,
+    ) -> Result<String, BackendError> {
+        Ok(self
+            .build_deep_lint_prompt_details(context, search_service, language, local_baseline)?
+            .prompt)
+    }
+
+    fn build_deep_lint_prompt_details(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        language: &str,
+        local_baseline: &LintReport,
+    ) -> Result<BuiltDeepPrompt, BackendError> {
         let tree = search_service.scan_wiki(context, &HashSet::new())?;
         let purpose = read_optional_prompt_file(&self.file_store, context, "purpose.md")?;
         let schema = read_optional_prompt_file(&self.file_store, context, "schema.md")?;
         let project_skill =
             read_optional_prompt_file(&self.file_store, context, "skills/wiki-lint/SKILL.md")?;
-        let local_baseline = self.run_local_lint(context, search_service)?;
         // `language` is read by the command layer from SettingsService so this
         // service stays host-state-free and testable. The suggestion prose
         // follows the user's language; the JSON contract (issueType enum,
@@ -101,6 +147,8 @@ impl LintService {
         prompt.push_str("</untrusted-wiki-data>\n");
         prompt.push_str("\n--- Pages (untrusted-wiki-data) ---\n");
         prompt.push_str("<untrusted-wiki-data>\n");
+        let mut covered_pages = 0;
+        let mut truncated = false;
         for page in &tree.pages {
             if page.path == "wiki/log.md" {
                 continue;
@@ -132,12 +180,211 @@ impl LintService {
             }
             if prompt.chars().count() + page_block.chars().count() > DEEP_LINT_PROMPT_BUDGET_CHARS {
                 prompt.push_str("\n[coverage truncated: prompt budget reached; report must not claim full coverage]\n");
+                truncated = true;
                 break;
             }
             prompt.push_str(&page_block);
+            covered_pages += 1;
         }
         prompt.push_str("</untrusted-wiki-data>\n");
-        Ok(prompt)
+        Ok(BuiltDeepPrompt {
+            prompt,
+            covered_pages,
+            truncated,
+        })
+    }
+
+    /// Capture one stable deep-check prompt generation. The same hash set is
+    /// checked after the external route returns and immediately before report
+    /// persistence, so findings never attach to a different Markdown snapshot.
+    pub fn prepare_deep_lint_snapshot(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        language: &str,
+        local_baseline: &LintReport,
+    ) -> Result<DeepLintSnapshot, BackendError> {
+        let deterministic_issue_ids = local_baseline
+            .issues
+            .iter()
+            .map(|issue| issue.id.clone())
+            .collect::<HashSet<_>>();
+        for _ in 0..2 {
+            let before_tree = search_service.scan_wiki(context, &HashSet::new())?;
+            let before_paths = before_tree
+                .pages
+                .iter()
+                .map(|page| page.path.clone())
+                .collect::<HashSet<_>>();
+            let before_hashes = self.capture_prompt_input_hashes(context, &before_paths)?;
+            let built = self.build_deep_lint_prompt_details(
+                context,
+                search_service,
+                language,
+                local_baseline,
+            )?;
+            let after_tree = search_service.scan_wiki(context, &HashSet::new())?;
+            let after_paths = after_tree
+                .pages
+                .iter()
+                .map(|page| page.path.clone())
+                .collect::<HashSet<_>>();
+            let after_hashes = self.capture_prompt_input_hashes(context, &after_paths)?;
+            if before_paths == after_paths && before_hashes == after_hashes {
+                return Ok(DeepLintSnapshot {
+                    prompt: built.prompt,
+                    scan_hashes: self.capture_page_hashes(context, &after_paths),
+                    known_paths: after_paths,
+                    prompt_input_hashes: before_hashes,
+                    deterministic_issue_ids,
+                    deep_covered_pages: built.covered_pages,
+                    deep_truncated: built.truncated,
+                });
+            }
+        }
+        Err(BackendError::new(
+            "LINT_SCAN_CHANGED",
+            "Markdown changed while preparing the deep-check snapshot; run the check again.",
+            true,
+            true,
+        ))
+    }
+
+    /// Health Check deep analysis includes the same committed Source root as
+    /// its deterministic phase, while the legacy Deep Lint command keeps its
+    /// existing Wiki-only scope.
+    pub fn prepare_health_deep_lint_snapshot(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        language: &str,
+        local_baseline: &LintReport,
+    ) -> Result<DeepLintSnapshot, BackendError> {
+        let deterministic_issue_ids = local_baseline
+            .issues
+            .iter()
+            .map(|issue| issue.id.clone())
+            .collect::<HashSet<_>>();
+        for _ in 0..2 {
+            let mut before_paths = search_service
+                .scan_wiki(context, &HashSet::new())?
+                .pages
+                .into_iter()
+                .map(|page| page.path)
+                .collect::<HashSet<_>>();
+            before_paths.extend(health_source_paths(context)?);
+            let before_hashes = self.capture_prompt_input_hashes(context, &before_paths)?;
+            let mut built = self.build_deep_lint_prompt_details(
+                context,
+                search_service,
+                language,
+                local_baseline,
+            )?;
+            built
+                .prompt
+                .push_str("\n--- Committed Source Markdown (untrusted-wiki-data) ---\n");
+            built.prompt.push_str("<untrusted-wiki-data>\n");
+            for path in health_source_paths(context)? {
+                let raw = self.file_store.read_markdown(context, &path)?;
+                let block = format!(
+                    "\n### Source\npath: {path}\n{}\n",
+                    truncate_chars(&raw, DEEP_LINT_EXCERPT_CHARS).trim()
+                );
+                if built.prompt.chars().count() + block.chars().count()
+                    > DEEP_LINT_PROMPT_BUDGET_CHARS
+                {
+                    built.prompt.push_str("\n[coverage truncated: prompt budget reached; report must not claim full coverage]\n");
+                    built.truncated = true;
+                    break;
+                }
+                built.prompt.push_str(&block);
+                built.covered_pages += 1;
+            }
+            built.prompt.push_str("</untrusted-wiki-data>\n");
+
+            let mut after_paths = search_service
+                .scan_wiki(context, &HashSet::new())?
+                .pages
+                .into_iter()
+                .map(|page| page.path)
+                .collect::<HashSet<_>>();
+            after_paths.extend(health_source_paths(context)?);
+            let after_hashes = self.capture_prompt_input_hashes(context, &after_paths)?;
+            if before_paths == after_paths && before_hashes == after_hashes {
+                return Ok(DeepLintSnapshot {
+                    prompt: built.prompt,
+                    known_paths: after_paths.clone(),
+                    prompt_input_hashes: before_hashes,
+                    scan_hashes: self.capture_page_hashes(context, &after_paths),
+                    deterministic_issue_ids,
+                    deep_covered_pages: built.covered_pages,
+                    deep_truncated: built.truncated,
+                });
+            }
+        }
+        Err(BackendError::new(
+            "LINT_SCAN_CHANGED",
+            "Markdown changed while preparing the Health Check deep snapshot.",
+            true,
+            true,
+        ))
+    }
+
+    pub fn verify_deep_lint_snapshot(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        snapshot: &DeepLintSnapshot,
+    ) -> Result<(), BackendError> {
+        let tree = search_service.scan_wiki(context, &HashSet::new())?;
+        let mut paths = tree
+            .pages
+            .iter()
+            .map(|page| page.path.clone())
+            .collect::<HashSet<_>>();
+        if snapshot
+            .known_paths
+            .iter()
+            .any(|path| path.starts_with("raw/extracted/"))
+        {
+            paths.extend(health_source_paths(context)?);
+        }
+        let hashes = self.capture_prompt_input_hashes(context, &paths)?;
+        if paths != snapshot.known_paths || hashes != snapshot.prompt_input_hashes {
+            return Err(BackendError::new(
+                "LINT_SCAN_CHANGED",
+                "Markdown changed while the deep check was running; prepare and run again.",
+                true,
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn finish_deep_lint_snapshot(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        snapshot: &DeepLintSnapshot,
+        raw: &str,
+        exclude_deterministic_duplicates: bool,
+    ) -> Result<Vec<LintIssue>, BackendError> {
+        self.verify_deep_lint_snapshot(context, search_service, snapshot)?;
+        let empty = HashSet::new();
+        let mut issues = Self::parse_agent_issues_for_known_paths(
+            raw,
+            &snapshot.known_paths,
+            if exclude_deterministic_duplicates {
+                &snapshot.deterministic_issue_ids
+            } else {
+                &empty
+            },
+        )?;
+        self.filter_ignored_issues(context, &mut issues)?;
+        for issue in &mut issues {
+            issue.scan_hash = snapshot.scan_hashes.get(&issue.path).cloned();
+        }
+        Ok(issues)
     }
 
     /// Parse the structured ` ```json ` block emitted by the `wiki-lint` Skill
@@ -371,5 +618,41 @@ mod tests {
         assert_eq!(issues[0].path, "wiki/concepts/agent.md");
         assert_eq!(issues[0].severity, LintSeverity::Warning);
         assert_eq!(issues[0].issue_type, LintIssueType::DuplicateTopic);
+    }
+
+    #[test]
+    fn health_deep_snapshot_reports_actual_coverage_when_prompt_is_truncated() {
+        let (context, root) = tmp_context("health-prompt-coverage");
+        seed_clean_vault(&context);
+        let body = format!(
+            "---\ntitle: Large page\ntype: concept\ntags: [coverage]\n---\n\n# Large page\n\n{}",
+            "bounded prompt content ".repeat(80)
+        );
+        for index in 0..140 {
+            write_file(
+                &context,
+                &format!("wiki/concepts/large-{index:03}.md"),
+                &body,
+            );
+        }
+        write_file(
+            &context,
+            "raw/extracted/source.md",
+            &format!("# Source\n\n{}", "source material ".repeat(100)),
+        );
+        let local = crate::models::lint::LintReport {
+            issues: Vec::new(),
+            generated_at: "2026-07-04T00:00:00Z".into(),
+            scanned_pages: 144,
+        };
+
+        let snapshot = LintService::default()
+            .prepare_health_deep_lint_snapshot(&context, &SearchService::default(), "en", &local)
+            .unwrap();
+
+        assert!(snapshot.deep_truncated);
+        assert!(snapshot.deep_covered_pages < local.scanned_pages);
+        assert!(snapshot.prompt.contains("wiki/concepts/agent.md"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

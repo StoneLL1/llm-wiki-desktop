@@ -42,7 +42,7 @@ pub use export_service::ExportService;
 pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
 pub use graph_service::GraphService;
-pub use lint_service::LintService;
+pub use lint_service::{health_source_paths, DeepLintSnapshot, LintService, LocalLintPhase};
 pub use llm_service::LlmService;
 pub use project_service::ProjectService;
 pub use search_service::SearchService;
@@ -52,10 +52,10 @@ pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
 pub use workflow_service::{
     canonical_json, discard_update_wiki_candidate, persist_update_wiki_review, project_identity,
-    run_update_wiki, update_wiki_candidate_is_valid, workflow_baseline_for_scope,
-    workflow_fingerprint, workflow_stages, EnqueueWorkflow, PrepareWorkflowInput,
-    ProjectWorkflowIdentity, UpdateWikiExecutionServices, UpdateWikiRunner, ValidatedWorkflowStart,
-    WorkflowAccessSnapshot, WorkflowCoordinator, WorkflowPreference, WorkflowPreferences,
-    WorkflowPreparationEnvironment, WorkflowPreparationService, WorkflowRunner, WorkflowService,
-    WorkflowStageSink,
+    run_health_check, run_health_check_with_deep, run_update_wiki, update_wiki_candidate_is_valid,
+    workflow_baseline_for_scope, workflow_fingerprint, workflow_stages, EnqueueWorkflow,
+    HealthCheckExecutionServices, HealthCheckRunner, PrepareWorkflowInput, ProjectWorkflowIdentity,
+    UpdateWikiExecutionServices, UpdateWikiRunner, ValidatedWorkflowStart, WorkflowAccessSnapshot,
+    WorkflowCoordinator, WorkflowPreference, WorkflowPreferences, WorkflowPreparationEnvironment,
+    WorkflowPreparationService, WorkflowRunner, WorkflowService, WorkflowStageSink,
 };

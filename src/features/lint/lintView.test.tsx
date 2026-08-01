@@ -127,6 +127,81 @@ describe("LintView", () => {
     expect(screen.getByText(/Passed checks/i)).toBeInTheDocument();
   });
 
+  it("renders a merged Health Check finding once while preserving both origins", () => {
+    const issue = {
+      id: "schema_mismatch:wiki/主题.md",
+      source: "local" as const,
+      severity: "error" as const,
+      issueType: "schema_mismatch" as const,
+      path: "wiki/主题.md",
+      message: "Merged schema finding",
+      evidence: "local and deep evidence",
+      fixability: "none" as const,
+    };
+    useLintStore.setState({
+      healthReport: {
+        reportId: "health-1",
+        taskId: "health-1",
+        mode: "complete",
+        route: {
+          kind: "byok",
+          provider: "ollama",
+          model: "qwen-health",
+          routeRevision: "route-1",
+        },
+        persistent: false,
+        issues: [issue],
+        findingOrigins: { [issue.id]: ["local", "agent"] },
+        coverage: {
+          scannedPages: 1,
+          sourcePages: 0,
+          wikiPages: 1,
+          notApplicableRules: ["index_drift"],
+        },
+        errorCount: 1,
+        warningCount: 0,
+        infoCount: 0,
+        findingsByType: { schema_mismatch: 1 },
+        durationMs: 10,
+        generatedAt: "2026-08-01T00:00:00Z",
+      },
+    });
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+
+    render(<LintView />);
+
+    expect(screen.getByRole("button", { name: "All 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Local 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Agent deep 1" })).toBeInTheDocument();
+    expect(screen.getAllByText("wiki/主题.md")).toHaveLength(1);
+    expect(screen.queryByText("index.md consistent")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("wiki/主题.md").closest("button")!);
+    expect(screen.getAllByText("Local").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Agent").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("labels a memory-only Health Check history entry as not saved", () => {
+    useLintStore.setState({
+      history: [
+        {
+          id: "health-memory",
+          kind: "health_check",
+          createdAt: "2026-08-01T00:00:00Z",
+          issueCount: 0,
+          errorCount: 0,
+          warningCount: 0,
+          infoCount: 0,
+          persistent: false,
+        },
+      ],
+    });
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+
+    render(<LintView />);
+
+    expect(screen.getByText("Not saved")).toBeInTheDocument();
+  });
+
   it("loads lint history and opens the latest report on mount", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "list_lint_ignores") return Promise.resolve({ ignored: [] });

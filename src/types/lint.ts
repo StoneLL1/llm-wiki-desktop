@@ -1,6 +1,7 @@
 import type { AgentKind } from "./agent";
 import type { PendingAction } from "./backend";
 import type { LlmProviderKind } from "./llm";
+import type { HealthCheckMode, WorkflowRoute } from "./workflow";
 
 export type LintSeverity = "error" | "warning" | "info";
 
@@ -36,6 +37,7 @@ export interface LintRange {
 export interface LintIssue {
   id: string;
   source: LintIssueSource;
+  origins?: LintIssueSource[];
   severity: LintSeverity;
   issueType: LintIssueType;
   path: string;
@@ -61,9 +63,35 @@ export interface DeepLintReport {
   generatedAt: string;
 }
 
+export interface HealthCheckCoverage {
+  scannedPages: number;
+  sourcePages: number;
+  wikiPages: number;
+  deepCoveredPages?: number | null;
+  deepTruncated?: boolean;
+  notApplicableRules: string[];
+}
+
+export interface HealthCheckReport {
+  reportId: string;
+  taskId: string;
+  mode: HealthCheckMode;
+  route: WorkflowRoute;
+  persistent: boolean;
+  issues: LintIssue[];
+  findingOrigins: Record<string, LintIssueSource[]>;
+  coverage: HealthCheckCoverage;
+  errorCount: number;
+  warningCount: number;
+  infoCount: number;
+  findingsByType: Partial<Record<LintIssueType, number>>;
+  durationMs: number;
+  generatedAt: string;
+}
+
 export type LintRoutePreference = "auto" | "agent" | "byok";
 
-export type LintReportKind = "local" | "deep";
+export type LintReportKind = "local" | "deep" | "health_check";
 
 export interface LintHistoryEntry {
   id: string;
@@ -76,6 +104,10 @@ export interface LintHistoryEntry {
   scannedPages?: number | null;
   taskId?: string | null;
   route?: LintRoutePreference | null;
+  workflowRoute?: WorkflowRoute | null;
+  healthCheckMode?: HealthCheckMode | null;
+  durationMs?: number | null;
+  persistent?: boolean;
 }
 
 export interface LintHistoryFile {
@@ -87,6 +119,7 @@ export interface PersistedLintReport {
   entry: LintHistoryEntry;
   localReport?: LintReport | null;
   deepReport?: DeepLintReport | null;
+  healthCheckReport?: HealthCheckReport | null;
 }
 
 export interface ListLintHistoryRequest {

@@ -38,6 +38,7 @@ export function LintView() {
 
   const localReport = useLintStore((state) => state.localReport);
   const deepReport = useLintStore((state) => state.deepReport);
+  const healthReport = useLintStore((state) => state.healthReport);
   const loadingLocal = useLintStore((state) => state.loadingLocal);
   const runningDeep = useLintStore((state) => state.runningDeep);
   const deepTaskId = useLintStore((state) => state.deepTaskId);
@@ -85,11 +86,27 @@ export function LintView() {
   const layoutStyle = {
     "--lint-details-w-current": `${paneSizes.lintDetails}px`,
   } as CSSProperties;
-  const localIssues = localReport?.issues ?? [];
-  const deepIssues = deepReport?.issues ?? [];
+  const healthIssues = healthReport
+    ? healthReport.issues.map((issue) => ({
+        ...issue,
+        origins: healthReport.findingOrigins[issue.id] ?? [issue.source],
+      }))
+    : [];
+  const localIssues = healthReport
+    ? healthIssues.filter((issue) =>
+        healthReport.findingOrigins[issue.id]?.includes("local"),
+      )
+    : localReport?.issues ?? [];
+  const deepIssues = healthReport
+    ? healthIssues
+        .filter((issue) =>
+          healthReport.findingOrigins[issue.id]?.includes("agent"),
+        )
+        .map((issue) => ({ ...issue, source: "agent" as const }))
+    : deepReport?.issues ?? [];
   const allIssues = useMemo(
-    () => [...localIssues, ...deepIssues],
-    [localIssues, deepIssues],
+    () => (healthReport ? healthIssues : [...localIssues, ...deepIssues]),
+    [healthReport, healthIssues, localIssues, deepIssues],
   );
   const modeIssues = useMemo(() => {
     if (mode === "local") return localIssues;
@@ -114,10 +131,14 @@ export function LintView() {
     () => new Set(localIssues.map((issue) => issue.issueType)),
     [localIssues],
   );
-  const passedRules = useMemo(
-    () => PASSED_RULES.filter((rule) => !presentRules.has(rule)),
-    [presentRules],
-  );
+  const passedRules = useMemo(() => {
+    const notApplicable = new Set(
+      healthReport?.coverage.notApplicableRules as LintIssueType[] | undefined,
+    );
+    return PASSED_RULES.filter(
+      (rule) => !presentRules.has(rule) && !notApplicable.has(rule),
+    );
+  }, [presentRules, healthReport]);
 
   const deepTask = deepTaskId ? tasks.find((task) => task.id === deepTaskId) ?? null : null;
 
@@ -131,7 +152,9 @@ export function LintView() {
     let cancelled = false;
     void loadHistory({ projectId, projectRootPath: rootPath }).then((entries) => {
       const hasLoadedReport =
-        useLintStore.getState().localReport || useLintStore.getState().deepReport;
+        useLintStore.getState().localReport ||
+        useLintStore.getState().deepReport ||
+        useLintStore.getState().healthReport;
       if (cancelled || hasLoadedReport) return;
       const latest = entries[0];
       if (latest) {
@@ -426,7 +449,7 @@ export function LintView() {
           </section>
         ) : null}
 
-        {localReport ? (
+        {localReport || healthReport ? (
           <LintSummaryCards issues={modeIssues} passedCount={passedRules.length} />
         ) : null}
 
@@ -440,7 +463,7 @@ export function LintView() {
           onApplyFix={handleApplyFix}
         />
 
-        {localReport ? <LintPassedSection passedRules={passedRules} /> : null}
+        {localReport || healthReport ? <LintPassedSection passedRules={passedRules} /> : null}
 
         {batchConfirmations.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] bg-[var(--warning-soft)] px-4 py-2 text-[12px]">
