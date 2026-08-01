@@ -351,6 +351,7 @@ mod tests {
             status,
             bookmarked: false,
             task_id: None,
+            preview: None,
         }
     }
 

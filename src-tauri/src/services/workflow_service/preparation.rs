@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::SourceVersionRef;
+use crate::models::export::ExportType;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::workflow::{
@@ -19,7 +20,8 @@ use crate::models::workflow::{
     WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::services::{
-    AgentService, CompileService, FileStore, GitService, SecretService, SettingsService,
+    AgentService, CompileService, ExportService, FileStore, GitService, SecretService,
+    SettingsService,
 };
 
 use super::fingerprint::{canonical_json, hex_sha256};
@@ -435,6 +437,46 @@ fn build_snapshot(
         &git_policy,
         route_resolution.prerequisite_action,
     );
+    let restricted_content_revision = match &scope {
+        WorkflowScope::GenerateContent {
+            artifact_type,
+            page_paths,
+            ..
+        } => {
+            let export_type = match artifact_type {
+                WorkflowArtifactType::BeautifulRead => ExportType::BeautifulRead,
+                WorkflowArtifactType::KnowledgeCard => ExportType::KnowledgeCard,
+                WorkflowArtifactType::ConceptMap => ExportType::ConceptMap,
+                WorkflowArtifactType::ProjectReport => ExportType::ProjectReport,
+            };
+            ExportService::default().restricted_content_revision_for_pages(
+                environment.context,
+                export_type,
+                page_paths,
+            )?
+        }
+        _ => None,
+    };
+    if restricted_content_revision.is_some() {
+        prerequisites.push(WorkflowPrerequisite {
+            code: "WORKFLOW_RESTRICTED_CONTENT_ACKNOWLEDGEMENT_REQUIRED".into(),
+            message_key: "workflows.prerequisite.acknowledgeRestrictedContent".into(),
+            blocking: false,
+            action: WorkflowPrerequisiteAction::AcknowledgeRestrictedContent,
+        });
+    }
+    if route_requires_remote_acknowledgement(
+        environment.context,
+        environment.settings_service,
+        route.as_ref(),
+    )? {
+        prerequisites.push(WorkflowPrerequisite {
+            code: "WORKFLOW_REMOTE_PROVIDER_ACKNOWLEDGEMENT_REQUIRED".into(),
+            message_key: "workflows.prerequisite.acknowledgeRemoteProvider".into(),
+            blocking: false,
+            action: WorkflowPrerequisiteAction::AcknowledgeRemoteProvider,
+        });
+    }
     prerequisites.sort_by(|left, right| left.code.cmp(&right.code));
     prerequisites.dedup_by(|left, right| left.code == right.code);
     let existing_target_hash = match &scope {
@@ -449,6 +491,7 @@ fn build_snapshot(
         preparation_revision: "pending".into(),
         existing_target_hash,
         restricted_content_acknowledgement_revision: None,
+        remote_provider_acknowledgement_revision: None,
     };
     let preparation_fingerprint = preparation_fingerprint(
         &project_access,
@@ -662,7 +705,7 @@ fn normalize_scope(
             validate_artifact_scope(&artifact_type, &page_paths)?;
             let output_path = match output_path {
                 Some(path) => Some(validate_output_path(context, &path)?),
-                None => Some(default_output_path(&artifact_type, &page_paths)),
+                None => Some(default_output_path(context, &artifact_type, &page_paths)?),
             };
             Ok(WorkflowScope::GenerateContent {
                 artifact_type,
@@ -911,6 +954,22 @@ fn capture_baseline(
         let hash = FileStore.file_hash(context, relative)?;
         parts.push(format!("file:{relative}:{hash}"));
     }
+    if let WorkflowScope::GenerateContent {
+        artifact_type,
+        page_paths,
+        output_path: Some(output_path),
+    } = scope
+    {
+        let export_type = match artifact_type {
+            WorkflowArtifactType::BeautifulRead => ExportType::BeautifulRead,
+            WorkflowArtifactType::KnowledgeCard => ExportType::KnowledgeCard,
+            WorkflowArtifactType::ConceptMap => ExportType::ConceptMap,
+            WorkflowArtifactType::ProjectReport => ExportType::ProjectReport,
+        };
+        let export_service = ExportService::default();
+        export_service.validate_workflow_scope(export_type, page_paths)?;
+        parts.extend(export_service.workflow_baseline_entries(context, &files, output_path)?);
+    }
     parts.sort();
     Ok(WorkflowBaselineSummary {
         fingerprint: hex_sha256(parts.join("\n").as_bytes()),
@@ -1061,7 +1120,7 @@ fn validate_artifact_scope(
     let valid = match artifact {
         WorkflowArtifactType::BeautifulRead => pages.len() == 1,
         WorkflowArtifactType::KnowledgeCard | WorkflowArtifactType::ConceptMap => !pages.is_empty(),
-        WorkflowArtifactType::ProjectReport => true,
+        WorkflowArtifactType::ProjectReport => pages.is_empty(),
     };
     if valid {
         Ok(())
@@ -1077,21 +1136,14 @@ fn validate_artifact_scope(
 
 fn validate_output_path(context: &ProjectContext, value: &str) -> Result<String, BackendError> {
     let normalized = normalize_project_relative(value)?;
-    if !normalized.starts_with("exports/html/")
-        || !normalized.to_ascii_lowercase().ends_with(".html")
-    {
-        return Err(BackendError::new(
-            "WORKFLOW_OUTPUT_PATH_INVALID",
-            "Generated content must use a project-relative HTML path under exports/html/.",
-            true,
-            true,
-        ));
-    }
-    let _ = context.resolve_project_path(&normalized)?;
-    Ok(normalized)
+    ExportService::default().validate_workflow_output_path(context, &normalized)
 }
 
-fn default_output_path(artifact: &WorkflowArtifactType, pages: &[String]) -> String {
+fn default_output_path(
+    context: &ProjectContext,
+    artifact: &WorkflowArtifactType,
+    pages: &[String],
+) -> Result<String, BackendError> {
     let base = pages
         .first()
         .and_then(|path| Path::new(path).file_stem())
@@ -1104,7 +1156,8 @@ fn default_output_path(artifact: &WorkflowArtifactType, pages: &[String]) -> Str
         WorkflowArtifactType::ConceptMap => "concept-map",
         WorkflowArtifactType::ProjectReport => "project-report",
     };
-    format!("exports/html/{base}-{suffix}.html")
+    let root = ExportService::default().workflow_export_root_relative(context)?;
+    Ok(format!("{root}/{base}-{suffix}.html"))
 }
 
 fn normalize_project_relative(value: &str) -> Result<String, BackendError> {
@@ -1129,6 +1182,44 @@ fn normalize_project_relative(value: &str) -> Result<String, BackendError> {
 fn valid_provider_url(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
     lower.starts_with("https://") || lower.starts_with("http://")
+}
+
+pub(crate) fn route_requires_remote_acknowledgement(
+    context: &ProjectContext,
+    settings_service: &SettingsService,
+    route: Option<&WorkflowRoute>,
+) -> Result<bool, BackendError> {
+    let Some(WorkflowRoute::Byok { provider, .. }) = route else {
+        return Ok(false);
+    };
+    if *provider == LlmProviderKind::Ollama {
+        return Ok(false);
+    }
+    if *provider != LlmProviderKind::Custom {
+        return Ok(true);
+    }
+    let config = settings_service
+        .list_providers(context)?
+        .into_iter()
+        .find(|config| config.provider == *provider);
+    Ok(config
+        .as_ref()
+        .is_none_or(|config| !is_loopback_provider_url(&config.base_url)))
+}
+
+fn is_loopback_provider_url(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    let Some((_, authority_and_path)) = lower.split_once("://") else {
+        return false;
+    };
+    let authority = authority_and_path.split('/').next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    host_port == "localhost"
+        || host_port.starts_with("localhost:")
+        || host_port == "127.0.0.1"
+        || host_port.starts_with("127.0.0.1:")
+        || host_port == "[::1]"
+        || host_port.starts_with("[::1]:")
 }
 
 fn provider_order(provider: LlmProviderKind) -> u8 {
@@ -1170,6 +1261,9 @@ fn prerequisite_message_key(action: &WorkflowPrerequisiteAction) -> &'static str
         WorkflowPrerequisiteAction::AcknowledgeRemoteProvider => {
             "workflows.prerequisite.acknowledgeRemoteProvider"
         }
+        WorkflowPrerequisiteAction::AcknowledgeRestrictedContent => {
+            "workflows.prerequisite.acknowledgeRestrictedContent"
+        }
     }
 }
 
@@ -1183,7 +1277,8 @@ fn prerequisite_priority(action: &WorkflowPrerequisiteAction) -> u8 {
         WorkflowPrerequisiteAction::ConfigureExecutionRoute
         | WorkflowPrerequisiteAction::ChooseExecutionRoute => 5,
         WorkflowPrerequisiteAction::PrepareAgain
-        | WorkflowPrerequisiteAction::AcknowledgeRemoteProvider => 6,
+        | WorkflowPrerequisiteAction::AcknowledgeRemoteProvider
+        | WorkflowPrerequisiteAction::AcknowledgeRestrictedContent => 6,
     }
 }
 

@@ -9,7 +9,10 @@ use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus, Con
 use crate::services::import_v2::source_lifecycle::{
     reject_generic_source_create, reject_generic_source_path,
 };
-use crate::services::WriteMode;
+use crate::services::{
+    cancel_generate_content_confirmation, confirm_generate_content_overwrite,
+    GenerateContentExecutionServices, WriteMode,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,11 +131,66 @@ pub fn confirm_pending_action(
     state: State<'_, AppState>,
     request: ConfirmPendingActionRequest,
 ) -> Result<ConfirmedAction, BackendError> {
+    if request.status == ConfirmationStatus::Confirmed {
+        let pending = state.confirmation_registry.peek(&request.action_id)?;
+        if let Some(ConfirmationExecution::GenerateContentOverwrite {
+            project_id,
+            root_path,
+            ..
+        }) = pending.execution
+        {
+            let context = state.resolve_project_context(&project_id, &root_path)?;
+            let access = crate::services::WorkflowAccessSnapshot::legacy_fail_closed(
+                &context,
+                &state.git_service,
+            )?;
+            if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
+                return Err(BackendError::new(
+                    "WORKFLOW_PROJECT_UNTRUSTED",
+                    "Generate Content confirmation requires a trusted project.",
+                    true,
+                    true,
+                ));
+            }
+            if access.filesystem_access
+                != crate::models::workflow::WorkflowFilesystemAccess::Writable
+            {
+                return Err(BackendError::new(
+                    "WORKFLOW_PROJECT_READ_ONLY",
+                    "Generate Content confirmation requires writable project access.",
+                    true,
+                    true,
+                ));
+            }
+        }
+    }
     let stored = state
         .confirmation_registry
         .confirm(&request.action_id, request.status.clone())?;
 
     if request.status == ConfirmationStatus::Cancelled {
+        if let Some(ConfirmationExecution::GenerateContentOverwrite { task_id, .. }) =
+            stored.execution.as_ref()
+        {
+            let next = cancel_generate_content_confirmation(
+                task_id,
+                &GenerateContentExecutionServices {
+                    export_service: &state.export_service,
+                    search_service: &state.search_service,
+                    settings_service: &state.settings_service,
+                    secret_service: &state.secret_service,
+                    agent_service: &state.agent_service,
+                    llm_service: &state.llm_service,
+                    git_service: &state.git_service,
+                    confirmation_registry: &state.confirmation_registry,
+                    task_service: &state.task_service,
+                    coordinator: &state.workflow_service.coordinator,
+                },
+            )?;
+            if let Some(next) = next {
+                state.workflow_service.dispatch_claimed_run(&next)?;
+            }
+        }
         return Ok(ConfirmedAction {
             action: stored.action,
             status: ConfirmationStatus::Cancelled,
@@ -181,6 +239,47 @@ pub fn confirm_pending_action(
             true,
             true,
         )),
+        Some(ConfirmationExecution::GenerateContentOverwrite {
+            project_id,
+            root_path,
+            task_id,
+        }) => {
+            let context = state.resolve_project_context(&project_id, &root_path)?;
+            match confirm_generate_content_overwrite(
+                &context,
+                &task_id,
+                &GenerateContentExecutionServices {
+                    export_service: &state.export_service,
+                    search_service: &state.search_service,
+                    settings_service: &state.settings_service,
+                    secret_service: &state.secret_service,
+                    agent_service: &state.agent_service,
+                    llm_service: &state.llm_service,
+                    git_service: &state.git_service,
+                    confirmation_registry: &state.confirmation_registry,
+                    task_service: &state.task_service,
+                    coordinator: &state.workflow_service.coordinator,
+                },
+            ) {
+                Ok((_, next)) => {
+                    if let Some(next) = next {
+                        state.workflow_service.dispatch_claimed_run(&next)?;
+                    }
+                }
+                Err(failure) => {
+                    if let Some(next) = failure.next {
+                        state.workflow_service.dispatch_claimed_run(&next)?;
+                    }
+                    return Err(failure.error);
+                }
+            }
+            Ok(ConfirmedAction {
+                action: stored.action,
+                status: ConfirmationStatus::Confirmed,
+                checkpoint_exists: true,
+                project_summary: None,
+            })
+        }
         Some(ConfirmationExecution::DeleteWikiPage {
             project_id,
             root_path,

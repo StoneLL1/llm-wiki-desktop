@@ -402,12 +402,20 @@ impl WorkflowCoordinator {
         let original = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
-        if !matches!(
-            original.display_status,
-            crate::models::workflow::WorkflowDisplayStatus::Failed
-                | crate::models::workflow::WorkflowDisplayStatus::Interrupted
-        ) {
-            return Err("Only failed or interrupted workflows can be retried".into());
+        let completed_generate = original.display_status
+            == crate::models::workflow::WorkflowDisplayStatus::Completed
+            && original.kind == WorkflowKind::GenerateContent;
+        if !completed_generate
+            && !matches!(
+                original.display_status,
+                crate::models::workflow::WorkflowDisplayStatus::Failed
+                    | crate::models::workflow::WorkflowDisplayStatus::Interrupted
+            )
+        {
+            return Err(
+                "Only failed/interrupted workflows or completed Generate Content workflows can be retried"
+                    .into(),
+            );
         }
         let retry_identity = project_identity(&project_root)?;
         if retry_identity.canonical_identity_key != original.canonical_identity_key
@@ -423,9 +431,34 @@ impl WorkflowCoordinator {
             .operation_lock
             .lock()
             .map_err(|_| "Workflow coordinator lock is unavailable")?;
-        let execution_options = tasks
+        let mut execution_options = tasks
             .workflow_execution_options(task_id)
             .ok_or_else(|| format!("Workflow execution options missing: {task_id}"))?;
+        let mut baseline_fingerprint = original.baseline_fingerprint.clone();
+        if completed_generate {
+            let mut context = crate::models::paths::ProjectContext::new(
+                original.project_id.clone(),
+                project_root.clone(),
+            );
+            if let WorkflowScope::GenerateContent {
+                output_path: Some(output_path),
+                ..
+            } = &original.scope
+            {
+                let output_parent = std::path::Path::new(output_path)
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .ok_or_else(|| "Generate Content retry output root is invalid".to_string())?;
+                context.exports_dir = context.root.join(output_parent);
+                execution_options.existing_target_hash = crate::services::FileStore
+                    .file_hash_if_exists(&context, output_path)
+                    .map_err(|error| error.message)?;
+            }
+            baseline_fingerprint =
+                super::preparation::workflow_baseline_for_scope(&context, &original.scope)
+                    .map_err(|error| error.message)?
+                    .fingerprint;
+        }
         self.enqueue_locked(
             tasks,
             EnqueueWorkflow {
@@ -436,7 +469,7 @@ impl WorkflowCoordinator {
                 kind: original.kind,
                 scope: original.scope,
                 route: original.route,
-                baseline_fingerprint: original.baseline_fingerprint,
+                baseline_fingerprint,
                 execution_options,
                 stages: original.stages.into_iter().map(reset_stage).collect(),
                 retry: Some(WorkflowRetryLink {

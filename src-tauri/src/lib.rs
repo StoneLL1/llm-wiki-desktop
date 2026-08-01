@@ -276,6 +276,125 @@ pub fn run() {
                     },
                 )))
                 .map_err(startup_backend_error)?;
+            let generate_runner_handle = handle.clone();
+            state
+                .workflow_service
+                .register_runner(std::sync::Arc::new(services::GenerateContentRunner::new(
+                    move |run| {
+                        let app = generate_runner_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<app_state::AppState>();
+                            let fail_dispatch = |code: &str, message: String| {
+                                let sink = services::WorkflowStageSink::new(
+                                    &state.task_service,
+                                    &state.workflow_service.coordinator,
+                                    &run.task_id,
+                                );
+                                let _ = sink.start("confirm_scope");
+                                if let Ok((_, next)) = sink.fail(
+                                    "confirm_scope",
+                                    models::workflow::WorkflowErrorSummary {
+                                        code: code.into(),
+                                        message_key: "workflows.error.prepareAgain".into(),
+                                        recoverable: true,
+                                        user_action_required: true,
+                                        suggested_action: Some(
+                                            models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
+                                        ),
+                                    },
+                                ) {
+                                    if let Some(next) = next {
+                                        let _ = state.workflow_service.dispatch_claimed_run(&next);
+                                    }
+                                }
+                                let _ = state.task_service.append_log(
+                                    &run.task_id,
+                                    tasks::task_model::LogLevel::Error,
+                                    message,
+                                );
+                            };
+                            let Some(root) = state.task_service.project_root_for_task(&run.task_id)
+                            else {
+                                fail_dispatch(
+                                    "WORKFLOW_PROJECT_CONTEXT_MISSING",
+                                    "Generate Content task has no project root.".into(),
+                                );
+                                return;
+                            };
+                            let asserted_root = root.to_string_lossy().into_owned();
+                            let context = match state
+                                .resolve_project_context(&run.project_id, &asserted_root)
+                            {
+                                Ok(context) => context,
+                                Err(error) => {
+                                    fail_dispatch(&error.code, error.message);
+                                    return;
+                                }
+                            };
+                            match services::project_identity(&context.root) {
+                                Ok(identity)
+                                    if identity.canonical_identity_key
+                                        == run.canonical_identity_key
+                                        && identity.identity_revision == run.identity_revision => {}
+                                Ok(_) | Err(_) => {
+                                    fail_dispatch(
+                                        "WORKFLOW_PROJECT_IDENTITY_CHANGED",
+                                        "Generate Content project identity changed while queued."
+                                            .into(),
+                                    );
+                                    return;
+                                }
+                            }
+                            let access = match services::WorkflowAccessSnapshot::legacy_fail_closed(
+                                &context,
+                                &state.git_service,
+                            ) {
+                                Ok(access) => access,
+                                Err(error) => {
+                                    fail_dispatch(&error.code, error.message);
+                                    return;
+                                }
+                            };
+                            if access.trust
+                                != models::workflow::WorkflowProjectTrust::Trusted
+                            {
+                                fail_dispatch(
+                                    "WORKFLOW_PROJECT_UNTRUSTED",
+                                    "Generate Content requires a current trusted project access snapshot."
+                                        .into(),
+                                );
+                                return;
+                            }
+                            if access.filesystem_access
+                                != models::workflow::WorkflowFilesystemAccess::Writable
+                            {
+                                fail_dispatch(
+                                    "WORKFLOW_PROJECT_READ_ONLY",
+                                    "Generate Content project access is no longer writable.".into(),
+                                );
+                                return;
+                            }
+                            let generate = services::GenerateContentExecutionServices {
+                                export_service: &state.export_service,
+                                search_service: &state.search_service,
+                                settings_service: &state.settings_service,
+                                secret_service: &state.secret_service,
+                                agent_service: &state.agent_service,
+                                llm_service: &state.llm_service,
+                                git_service: &state.git_service,
+                                confirmation_registry: &state.confirmation_registry,
+                                task_service: &state.task_service,
+                                coordinator: &state.workflow_service.coordinator,
+                            };
+                            if let Some(next) =
+                                services::run_generate_content(&context, run, &generate).await
+                            {
+                                let _ = state.workflow_service.dispatch_claimed_run(&next);
+                            }
+                        });
+                    },
+                )))
+                .map_err(startup_backend_error)?;
             if let Ok(app_data) = app.path().app_local_data_dir() {
                 let install_root = app_data.join("installed-capabilities");
                 #[cfg(debug_assertions)]

@@ -6,7 +6,7 @@ use chrono::Utc;
 
 use crate::models::task::{BackendTask, TaskStatus};
 use crate::models::workflow::{
-    WorkflowCandidateReference, WorkflowErrorSummary, WorkflowExecutionState,
+    WorkflowCandidateReference, WorkflowErrorSummary, WorkflowExecutionState, WorkflowKind,
     WorkflowPrerequisiteAction,
 };
 
@@ -155,11 +155,20 @@ pub fn pending_action_is_valid(workflow: &WorkflowExecutionState, project_root: 
     if let Some(candidate) = pending.candidate.as_ref() {
         match candidate {
             WorkflowCandidateReference::TaskOwned { candidate_id } => {
-                if !super::runners::update_wiki::update_wiki_candidate_is_valid_for_workflow(
-                    candidate_id,
-                    project_root,
-                    workflow,
-                ) {
+                let valid = match workflow.kind {
+                    WorkflowKind::UpdateWiki => super::runners::update_wiki::update_wiki_candidate_is_valid_for_workflow(
+                        candidate_id,
+                        project_root,
+                        workflow,
+                    ),
+                    WorkflowKind::GenerateContent => super::runners::generate_content::generate_content_candidate_is_valid_for_workflow(
+                        candidate_id,
+                        project_root,
+                        workflow,
+                    ),
+                    WorkflowKind::HealthCheck => false,
+                };
+                if !valid {
                     return false;
                 }
             }

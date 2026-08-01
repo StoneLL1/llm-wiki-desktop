@@ -378,6 +378,18 @@ impl TaskService {
             .map(|workflow| workflow.execution_options.clone())
     }
 
+    pub(crate) fn workflow_execution_state(
+        &self,
+        id: &str,
+    ) -> Option<crate::models::workflow::WorkflowExecutionState> {
+        self.tasks
+            .read()
+            .expect("lock poisoned")
+            .get(id)?
+            .workflow
+            .clone()
+    }
+
     pub fn task_belongs_to_root(&self, id: &str, project_root: &Path) -> bool {
         let expected = project_root
             .canonicalize()
@@ -773,6 +785,35 @@ impl TaskService {
                 }
             }
             task.status = TaskStatus::Running;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn begin_confirmed_workflow_apply(&self, id: &str) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            if cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                return Err(format!("Workflow cancellation was requested: {id}"));
+            }
+            if task.status != TaskStatus::WaitingForConfirmation || !task.cancellable {
+                return Err(format!("Workflow is not confirmable: {id}"));
+            }
+            workflow.pending_action = None;
+            if let Some(stage_id) = workflow.current_stage_id.as_deref() {
+                if let Some(stage) = workflow
+                    .stages
+                    .iter_mut()
+                    .find(|stage| stage.id == stage_id)
+                {
+                    stage.decision = None;
+                    stage.status = WorkflowStageStatus::Running;
+                }
+            }
+            task.status = TaskStatus::Running;
+            task.cancellable = false;
             Ok(())
         })
     }

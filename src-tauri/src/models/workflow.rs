@@ -140,6 +140,8 @@ pub struct WorkflowExecutionOptions {
     pub existing_target_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restricted_content_acknowledgement_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_provider_acknowledgement_revision: Option<String>,
 }
 
 impl WorkflowExecutionOptions {
@@ -152,6 +154,9 @@ impl WorkflowExecutionOptions {
         }
         if let Some(revision) = self.restricted_content_acknowledgement_revision.as_deref() {
             validate_revision("restrictedContentAcknowledgementRevision", revision)?;
+        }
+        if let Some(revision) = self.remote_provider_acknowledgement_revision.as_deref() {
+            validate_revision("remoteProviderAcknowledgementRevision", revision)?;
         }
         Ok(())
     }
@@ -287,6 +292,7 @@ pub enum WorkflowPrerequisiteAction {
     ChooseExecutionRoute,
     PrepareAgain,
     AcknowledgeRemoteProvider,
+    AcknowledgeRestrictedContent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

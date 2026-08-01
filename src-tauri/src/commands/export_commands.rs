@@ -17,7 +17,7 @@ use crate::models::export::{
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
-use crate::services::{AgentService, ExportService, LlmService};
+use crate::services::{AgentService, ExportService, LlmService, WriteMode};
 use crate::tasks::task_model::LogLevel;
 
 /// Derive a human title for the record from the source page (or the export
@@ -361,38 +361,30 @@ async fn run_export(
         ));
     }
 
-    let html = ExportService::extract_html(&raw_html);
-    let lower = html.trim().to_ascii_lowercase();
-    if !lower.contains("<html") && !lower.contains("<!doctype html") {
-        return Err(BackendError::new(
-            "EXPORT_OUTPUT_INVALID",
-            "The model output did not contain an HTML document.",
-            true,
-            false,
-        )
-        .with_details(
-            serde_json::json!({ "preview": html.chars().take(200).collect::<String>() }),
-        ));
-    }
+    let artifact = state.export_service.validate_html_artifact(&raw_html)?;
 
     let output_path = state
         .export_service
         .build_output_relative_path(directive.export_type, directive.source_path.as_deref())?;
-    state
-        .export_service
-        .write_html(context, &output_path, &html)?;
+    state.export_service.write_html_checked(
+        context,
+        &output_path,
+        &artifact.html,
+        WriteMode::CreateNew,
+    )?;
     let title = title_for(
         context,
         directive.export_type,
         directive.source_path.as_deref(),
     );
-    let record = ExportService::new_record(
+    let record = ExportService::new_validated_record(
         directive.export_type,
         title,
         directive.source_path.clone(),
         output_path.clone(),
         route,
         Some(task_id.to_string()),
+        artifact.preview,
     );
     state.export_service.append_record(context, record)?;
 
