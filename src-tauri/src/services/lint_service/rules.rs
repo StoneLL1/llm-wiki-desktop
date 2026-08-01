@@ -18,6 +18,11 @@ use super::LintService;
 /// back to them, and the structural pages themselves are never orphans.
 const STRUCTURAL_FILES: &[&str] = &["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalLintPhase {
+    MarkdownComplete,
+}
+
 impl LintService {
     /// Run every local deterministic rule. No LLM or Agent is invoked.
     pub fn run_local_lint(
@@ -25,6 +30,18 @@ impl LintService {
         context: &ProjectContext,
         search_service: &SearchService,
     ) -> Result<LintReport, BackendError> {
+        self.run_local_lint_with_phase(context, search_service, |_| Ok(()))
+    }
+
+    pub fn run_local_lint_with_phase<F>(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        mut on_phase: F,
+    ) -> Result<LintReport, BackendError>
+    where
+        F: FnMut(LocalLintPhase) -> Result<(), BackendError>,
+    {
         let initial_tree = search_service.scan_wiki(context, &HashSet::new())?;
         let initial_pages = initial_tree.pages;
         // Establish the optimistic-lock baseline before reading page bodies.
@@ -67,44 +84,6 @@ impl LintService {
                 &split.body,
                 &frontmatter,
             ));
-
-            // Dead links. The index has its own rule below so a stale index
-            // entry is reported once as `index_drift`, not twice as both a
-            // generic dead link and an index issue.
-            for target in &page.wikilinks {
-                if page.path == "wiki/index.md" {
-                    continue;
-                }
-                if is_external(target) {
-                    continue;
-                }
-                let key = target.trim().to_ascii_lowercase();
-                if lookup.contains_key(&key) {
-                    continue;
-                }
-                let line = find_wikilink_line(&split.body, target);
-                issues.push(LintIssue {
-                    id: format!("dead_link:{}:{target}", page.path),
-                    source: LintIssueSource::Local,
-                    // Dead links break navigation — they are "must-fix", so the
-                    // summary card's error count carries real data (PRD-LINT-001).
-                    severity: LintSeverity::Error,
-                    issue_type: LintIssueType::DeadLink,
-                    path: page.path.clone(),
-                    scan_hash: None,
-                    range: line.map(|l| LintRange {
-                        line: l,
-                        column: None,
-                    }),
-                    message: format!("Unresolved wikilink `[[{target}]]`."),
-                    evidence: Some(format!("[[{target}]]")),
-                    target: Some(target.clone()),
-                    fixability: Fixability::HighRisk,
-                    suggested_action: Some(
-                        "Remove the link or fix the target to match an existing page.".into(),
-                    ),
-                });
-            }
 
             // Missing frontmatter (structural files are exempt).
             if !frontmatter_present && !STRUCTURAL_FILES.contains(&page.path.as_str()) {
@@ -185,29 +164,6 @@ impl LintService {
             }
         }
 
-        // Orphan pages (no inbound links, not structural).
-        for page in &pages {
-            if STRUCTURAL_FILES.contains(&page.path.as_str()) {
-                continue;
-            }
-            if inbound.get(page.path.as_str()).copied().unwrap_or(0) == 0 {
-                issues.push(LintIssue {
-                    id: format!("orphan_page:{}", page.path),
-                    source: LintIssueSource::Local,
-                    severity: LintSeverity::Info,
-                    issue_type: LintIssueType::OrphanPage,
-                    path: page.path.clone(),
-                    scan_hash: None,
-                    range: None,
-                    message: "No other page links to this page.".into(),
-                    evidence: None,
-                    target: None,
-                    fixability: Fixability::None,
-                    suggested_action: Some("Link it from a related page or the index.".into()),
-                });
-            }
-        }
-
         // Duplicate filenames (same stem, different folders).
         let mut by_stem: HashMap<String, Vec<&WikiPageMeta>> = HashMap::new();
         for page in &pages {
@@ -283,9 +239,72 @@ impl LintService {
             }
         }
 
-        // Index drift (only when wiki/index.md exists).
-        issues.extend(self.check_index_drift(context, &lookup)?);
         issues.extend(check_structural_page_basics(context, &pages, &lookup));
+        on_phase(LocalLintPhase::MarkdownComplete)?;
+
+        // Link/navigation rules execute after the phase callback so Workflows
+        // can attribute their progress and failures to `check_links`.
+        for page in &pages {
+            let raw = self.file_store.read_markdown(context, &page.path)?;
+            let body = split_frontmatter(&raw).body;
+            for target in &page.wikilinks {
+                if page.path == "wiki/index.md" || is_external(target) {
+                    continue;
+                }
+                let key = target.trim().to_ascii_lowercase();
+                if lookup.contains_key(&key) {
+                    continue;
+                }
+                let line = find_wikilink_line(&body, target);
+                issues.push(LintIssue {
+                    id: format!("dead_link:{}:{target}", page.path),
+                    source: LintIssueSource::Local,
+                    severity: LintSeverity::Error,
+                    issue_type: LintIssueType::DeadLink,
+                    path: page.path.clone(),
+                    scan_hash: None,
+                    range: line.map(|line| LintRange { line, column: None }),
+                    message: format!("Unresolved wikilink `[[{target}]]`."),
+                    evidence: Some(format!("[[{target}]]")),
+                    target: Some(target.clone()),
+                    fixability: Fixability::HighRisk,
+                    suggested_action: Some(
+                        "Remove the link or fix the target to match an existing page.".into(),
+                    ),
+                });
+            }
+        }
+        for page in &pages {
+            if STRUCTURAL_FILES.contains(&page.path.as_str()) {
+                continue;
+            }
+            if inbound.get(page.path.as_str()).copied().unwrap_or(0) == 0 {
+                issues.push(LintIssue {
+                    id: format!("orphan_page:{}", page.path),
+                    source: LintIssueSource::Local,
+                    severity: LintSeverity::Info,
+                    issue_type: LintIssueType::OrphanPage,
+                    path: page.path.clone(),
+                    scan_hash: None,
+                    range: None,
+                    message: "No other page links to this page.".into(),
+                    evidence: None,
+                    target: None,
+                    fixability: Fixability::None,
+                    suggested_action: Some("Link it from a related page or the index.".into()),
+                });
+            }
+        }
+
+        // A Source-only compatible layout has no logical Wiki index. In that
+        // case index drift is not applicable; once any derived Wiki page is
+        // present, the established missing/stale index rules apply normally.
+        let has_wiki_pages = pages
+            .iter()
+            .any(|page| !page.path.starts_with("wiki/sources/"));
+        if has_wiki_pages {
+            issues.extend(self.check_index_drift(context, &lookup)?);
+        }
 
         // Re-enumerate immediately before validating the result so files
         // created/deleted after the rules' tree was read are included in the
@@ -344,6 +363,92 @@ impl LintService {
             generated_at: now_rfc3339(),
             scanned_pages: scanned,
         })
+    }
+
+    /// Health Check extends the established Wiki lint pass with committed
+    /// Source Markdown under `raw/extracted`. Source files remain immutable:
+    /// findings are descriptive and never expose an automatic fix.
+    pub fn run_health_local_lint_with_phase<F>(
+        &self,
+        context: &ProjectContext,
+        search_service: &SearchService,
+        mut on_phase: F,
+    ) -> Result<LintReport, BackendError>
+    where
+        F: FnMut(LocalLintPhase) -> Result<(), BackendError>,
+    {
+        let source_paths = health_source_paths(context)?;
+        let before = self.capture_prompt_input_hashes(
+            context,
+            &source_paths.iter().cloned().collect::<HashSet<_>>(),
+        )?;
+        let mut source_issues = Vec::new();
+        for path in &source_paths {
+            let raw = self.file_store.read_markdown(context, path)?;
+            let split = split_frontmatter(&raw);
+            if split.frontmatter.is_none() {
+                source_issues.push(local_issue(
+                    LintIssueType::MissingFrontmatter,
+                    LintSeverity::Warning,
+                    path,
+                    "Committed Source Markdown has no YAML frontmatter.",
+                    None,
+                    None,
+                ));
+            }
+            if split.body.trim().is_empty() {
+                source_issues.push(local_issue(
+                    LintIssueType::EmptyPage,
+                    LintSeverity::Warning,
+                    path,
+                    "Committed Source Markdown has no readable body.",
+                    None,
+                    None,
+                ));
+            }
+            for resource in extract_local_resource_refs(&split.body) {
+                if !is_external(&resource) && !resource_exists(context, path, &resource) {
+                    source_issues.push(local_issue(
+                        LintIssueType::MissingResource,
+                        LintSeverity::Warning,
+                        path,
+                        &format!("Source reference `{resource}` does not exist."),
+                        Some(resource),
+                        None,
+                    ));
+                }
+            }
+        }
+
+        let mut report =
+            self.run_local_lint_with_phase(context, search_service, |phase| on_phase(phase))?;
+        let after_paths = health_source_paths(context)?;
+        let after = self.capture_prompt_input_hashes(
+            context,
+            &after_paths.iter().cloned().collect::<HashSet<_>>(),
+        )?;
+        if source_paths != after_paths || before != after {
+            return Err(BackendError::new(
+                "LINT_SCAN_CHANGED",
+                "Source Markdown changed while the local Health Check was running.",
+                true,
+                true,
+            ));
+        }
+        for issue in &mut source_issues {
+            issue.scan_hash = self.file_store.file_hash(context, &issue.path).ok();
+            issue.fixability = Fixability::None;
+        }
+        report.issues.extend(source_issues);
+        self.filter_ignored_issues(context, &mut report.issues)?;
+        report.scanned_pages += source_paths.len();
+        report.issues.sort_by(|a, b| {
+            severity_rank(a.severity)
+                .cmp(&severity_rank(b.severity))
+                .then_with(|| a.path.cmp(&b.path))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(report)
     }
 
     fn capture_scan_snapshot(
@@ -423,6 +528,21 @@ impl LintService {
         }
         Ok(issues)
     }
+}
+
+pub fn health_source_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+    let mut paths = crate::services::FileStore
+        .list_markdown_files(&context.raw_dir.join("extracted"))?
+        .into_iter()
+        .filter_map(|path| {
+            path.strip_prefix(&context.root)
+                .ok()
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// Case-insensitive lookup from note-name/title/alias -> page path, mirroring

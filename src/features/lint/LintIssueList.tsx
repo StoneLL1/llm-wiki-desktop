@@ -32,7 +32,10 @@ const SEVERITY_BADGE: Record<LintSeverity, string> = {
 };
 
 function groupLabel(issue: LintIssue, t: (key: string) => string): string {
-  return `${t(`lint.severity.${issue.severity}`)} · ${t(`lint.source.${issue.source}`)}`;
+  const origins = issue.origins ?? [issue.source];
+  return `${t(`lint.severity.${issue.severity}`)} · ${origins
+    .map((source) => t(`lint.source.${source}`))
+    .join(" + ")}`;
 }
 
 function subLine(issue: LintIssue): string {
@@ -55,11 +58,13 @@ export function LintIssueList({
     const sorted = [...issues].sort((a, b) => {
       const bySeverity = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
       if (bySeverity !== 0) return bySeverity;
-      return a.source.localeCompare(b.source);
+      return (a.origins ?? [a.source])
+        .join(":")
+        .localeCompare((b.origins ?? [b.source]).join(":"));
     });
     const groups = new Map<string, LintIssue[]>();
     for (const issue of sorted) {
-      const key = `${issue.severity}:${issue.source}`;
+      const key = `${issue.severity}:${(issue.origins ?? [issue.source]).join(":")}`;
       const bucket = groups.get(key);
       if (bucket) bucket.push(issue);
       else groups.set(key, [issue]);
@@ -115,7 +120,11 @@ export function LintIssueList({
                           {t(`lint.severity.${issue.severity}`)}
                         </span>
                         <span className="badge">{t(`lint.issueType.${issue.issueType}`)}</span>
-                        <span className="badge">{t(`lint.source.${issue.source}`)}</span>
+                        {(issue.origins ?? [issue.source]).map((source) => (
+                          <span key={source} className="badge">
+                            {t(`lint.source.${source}`)}
+                          </span>
+                        ))}
                         {fixable && issue.fixability === "safe" ? (
                           <span className="badge badge--outline">{t("lint.tag.autoFixable")}</span>
                         ) : null}

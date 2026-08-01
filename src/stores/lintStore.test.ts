@@ -441,6 +441,69 @@ describe("lintStore", () => {
     expect(invokeMock.mock.calls[0][1].request.id).toBe("task-1");
   });
 
+  it("openHistoryReport exposes one merged Health Check report to Lint", async () => {
+    const issue = localIssue({
+      id: "schema_mismatch:wiki/主题.md",
+      issueType: "schema_mismatch",
+      path: "wiki/主题.md",
+      severity: "error",
+    });
+    const persisted: PersistedLintReport = {
+      entry: {
+        id: "health-1",
+        kind: "health_check",
+        createdAt: "2026-08-01T00:00:00Z",
+        issueCount: 1,
+        errorCount: 1,
+        warningCount: 0,
+        infoCount: 0,
+        taskId: "health-1",
+        healthCheckMode: "complete",
+        persistent: false,
+      },
+      healthCheckReport: {
+        reportId: "health-1",
+        taskId: "health-1",
+        mode: "complete",
+        route: {
+          kind: "byok",
+          provider: "ollama",
+          model: "qwen-health",
+          routeRevision: "route-1",
+        },
+        persistent: false,
+        issues: [issue],
+        findingOrigins: { [issue.id]: ["local", "agent"] },
+        coverage: {
+          scannedPages: 4,
+          sourcePages: 1,
+          wikiPages: 3,
+          notApplicableRules: [],
+        },
+        errorCount: 1,
+        warningCount: 0,
+        infoCount: 0,
+        findingsByType: { schema_mismatch: 1 },
+        durationMs: 42,
+        generatedAt: "2026-08-01T00:00:00Z",
+      },
+    };
+    invokeMock.mockResolvedValueOnce(persisted);
+
+    await useLintStore.getState().openHistoryReport({
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+      id: "health-1",
+    });
+
+    const state = useLintStore.getState();
+    expect(state.healthReport?.reportId).toBe("health-1");
+    expect(state.localReport).toBeNull();
+    expect(state.deepReport).toBeNull();
+    expect(state.mode).toBe("all");
+    expect(selectAllIssues(state)).toEqual([issue]);
+  });
+
   it("cancels every pending action before opening history", async () => {
     const issue = localIssue();
     useLintStore.setState({

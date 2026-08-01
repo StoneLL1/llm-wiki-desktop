@@ -1114,6 +1114,8 @@
   "lint.history.empty": "还没有 Lint 报告。",
   "lint.history.kind.local": "本地检查",
   "lint.history.kind.deep": "深度检查",
+  "lint.history.kind.health_check": "健康检查",
+  "lint.history.nonPersistent": "未持久化",
   "lint.actions.autoFix": "自动修复 ({{count}})",
   "lint.summary.errors": "错误",
   "lint.summary.warnings": "警告",

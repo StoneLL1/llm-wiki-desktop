@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::agent::AgentKind;
 use super::compile::CompileRoutePreference;
 use super::llm::LlmProviderKind;
+use super::workflow::{HealthCheckMode, WorkflowRoute};
 
 /// Coarse severity for surfacing and grouping lint issues.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -153,11 +154,50 @@ pub struct DeepLintReport {
     pub generated_at: String,
 }
 
+/// Coverage and provenance for one composed Health Check run. Finding ids are
+/// stable Lint ids; the origin map lets the existing Lint surface filter a
+/// merged finding by local/deep source without rendering it twice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheckCoverage {
+    pub scanned_pages: usize,
+    pub source_pages: usize,
+    pub wiki_pages: usize,
+    #[serde(default)]
+    pub deep_covered_pages: Option<usize>,
+    #[serde(default)]
+    pub deep_truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applicable_rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheckReport {
+    pub report_id: String,
+    pub task_id: String,
+    pub mode: HealthCheckMode,
+    pub route: WorkflowRoute,
+    pub persistent: bool,
+    pub issues: Vec<LintIssue>,
+    #[serde(default)]
+    pub finding_origins: BTreeMap<String, Vec<LintIssueSource>>,
+    pub coverage: HealthCheckCoverage,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+    #[serde(default)]
+    pub findings_by_type: BTreeMap<String, usize>,
+    pub duration_ms: u64,
+    pub generated_at: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LintReportKind {
     Local,
     Deep,
+    HealthCheck,
 }
 
 impl Default for LintReportKind {
@@ -182,6 +222,14 @@ pub struct LintHistoryEntry {
     pub task_id: Option<String>,
     #[serde(default)]
     pub route: Option<CompileRoutePreference>,
+    #[serde(default)]
+    pub workflow_route: Option<WorkflowRoute>,
+    #[serde(default)]
+    pub health_check_mode: Option<HealthCheckMode>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default = "default_persistent")]
+    pub persistent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -201,6 +249,8 @@ pub struct PersistedLintReport {
     pub local_report: Option<LintReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep_report: Option<DeepLintReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_report: Option<HealthCheckReport>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,6 +270,10 @@ pub struct ListLintHistoryRequest {
 
 fn lint_history_version() -> u32 {
     1
+}
+
+fn default_persistent() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -512,16 +566,22 @@ mod tests {
             scanned_pages: Some(10),
             task_id: None,
             route: None,
+            workflow_route: None,
+            health_check_mode: None,
+            duration_ms: None,
+            persistent: true,
         };
         let value = serde_json::to_value(PersistedLintReport {
             entry,
             local_report: None,
             deep_report: None,
+            health_check_report: None,
         })
         .unwrap();
 
         assert_eq!(value["entry"]["kind"], json!("local"));
         assert!(value.get("localReport").is_none());
         assert!(value.get("deepReport").is_none());
+        assert!(value.get("healthCheckReport").is_none());
     }
 }

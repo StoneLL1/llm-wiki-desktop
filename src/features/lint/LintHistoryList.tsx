@@ -62,6 +62,11 @@ export function LintHistoryList({
               <span className="lint-history__copy">
                 <span className="lint-history__main">
                   {t(`lint.history.kind.${entry.kind}`)}
+                  {entry.persistent === false ? (
+                    <span className="lint-history__count">
+                      {t("lint.history.nonPersistent")}
+                    </span>
+                  ) : null}
                   <span className="lint-history__count">{entry.issueCount}</span>
                 </span>
                 <span className="lint-history__meta">

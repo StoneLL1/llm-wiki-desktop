@@ -410,7 +410,8 @@ fn build_snapshot(
     };
     let wiki_pages = list_wiki_pages(environment.context)?;
     let route_catalog = RouteCatalog::load(environment)?;
-    let default_route = resolve_external_route(input.route_selection.as_ref(), &route_catalog);
+    let default_route =
+        resolve_external_route(input.route_selection.as_ref(), &route_catalog, false);
     let scope = normalize_scope(
         environment.context,
         &input.kind,
@@ -696,7 +697,11 @@ fn resolve_route(
         };
     }
 
-    resolve_external_route(selection, catalog)
+    resolve_external_route(
+        selection,
+        catalog,
+        !matches!(scope, WorkflowScope::HealthCheck { .. }),
+    )
 }
 
 fn route_selection(route: &Option<WorkflowRoute>) -> Option<WorkflowRouteSelection> {
@@ -714,13 +719,14 @@ fn route_selection(route: &Option<WorkflowRoute>) -> Option<WorkflowRouteSelecti
 fn resolve_external_route(
     selection: Option<&WorkflowRouteSelection>,
     catalog: &RouteCatalog,
+    allow_agent: bool,
 ) -> RouteResolution {
     match selection {
         Some(WorkflowRouteSelection::Agent { agent }) => {
             let route = catalog
                 .agents
                 .get(agent)
-                .filter(|candidate| candidate.available)
+                .filter(|candidate| allow_agent && candidate.available)
                 .map(|candidate| WorkflowRoute::Agent {
                     agent: *agent,
                     model: None,
@@ -755,7 +761,7 @@ fn resolve_external_route(
                 let route = catalog
                     .agents
                     .get(&default_agent)
-                    .filter(|candidate| candidate.available)
+                    .filter(|candidate| allow_agent && candidate.available)
                     .map(|candidate| WorkflowRoute::Agent {
                         agent: default_agent,
                         model: None,

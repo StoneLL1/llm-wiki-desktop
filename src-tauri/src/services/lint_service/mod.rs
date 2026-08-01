@@ -7,11 +7,14 @@ mod rules;
 #[cfg(test)]
 mod test_support;
 
-use crate::models::lint::LintIssue;
+use crate::models::lint::{LintIssue, PersistedLintReport};
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
-use std::collections::HashSet;
-use std::sync::{Mutex, MutexGuard};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, MutexGuard, RwLock};
+
+pub use deep::DeepLintSnapshot;
+pub use rules::{health_source_paths, LocalLintPhase};
 
 pub(crate) const LINT_REPORTS_DIR: &str = ".app/lint-reports";
 
@@ -31,6 +34,11 @@ pub struct LintService {
     /// itself still runs asynchronously, but only one active deep run may be
     /// attached to a project at a time.
     pub(super) deep_start_lock: Mutex<()>,
+    /// Read-only/restricted Health Check reports live here for the current
+    /// process. The outer key combines the canonical project identity with its
+    /// identity revision and the inner key is the report/task id, so a replaced
+    /// folder at the same path cannot observe the previous project's result.
+    pub(super) memory_reports: RwLock<HashMap<String, HashMap<String, PersistedLintReport>>>,
 }
 
 impl LintService {
