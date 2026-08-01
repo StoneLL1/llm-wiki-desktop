@@ -1,5 +1,4 @@
 import {
-  Bot,
   BookOpenText,
   FileOutput,
   LayoutDashboard,
@@ -7,6 +6,7 @@ import {
   Network,
   ShieldCheck,
   Upload,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import type { AppView } from "../../stores/navigationStore";
@@ -25,7 +25,7 @@ export const mainViews: NavigationItem[] = [
 ];
 
 export const workflowViews: NavigationItem[] = [
-  { view: "agent", labelKey: "nav.agent", icon: Bot },
+  { view: "workflows", labelKey: "nav.workflows", icon: Workflow },
   { view: "import", labelKey: "nav.import", icon: Upload },
   { view: "lint", labelKey: "nav.lint", icon: ShieldCheck },
   { view: "exports", labelKey: "nav.exports", icon: FileOutput },

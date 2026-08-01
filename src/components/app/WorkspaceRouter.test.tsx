@@ -5,6 +5,7 @@ import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { AgentWorkflow } from "../../features/agent/useAgentWorkflow";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
+import type { WorkflowsController } from "../../features/workflows/useWorkflowsController";
 
 const capabilities: AiCapabilitiesWorkflow = {
   agents: [],
@@ -93,6 +94,21 @@ const agentWorkflow: AgentWorkflow = {
   setDefaultAgent: vi.fn(),
   runAgent: vi.fn(),
 };
+const workflowsController: WorkflowsController = {
+  refresh: vi.fn(),
+  prepare: vi.fn(),
+  startPrepared: vi.fn(),
+  cancel: vi.fn(),
+  undoCancel: vi.fn(),
+  reorder: vi.fn(),
+  retry: vi.fn(),
+  confirm: vi.fn(),
+  discard: vi.fn(),
+  continueQueue: vi.fn(),
+  loadHistoryMore: vi.fn(),
+  handlePrerequisite: vi.fn(),
+  backToOverview: vi.fn(),
+};
 
 function installViewMocks() {
   vi.doMock("../../features/dashboard/DashboardView", () => ({
@@ -119,6 +135,9 @@ function installViewMocks() {
   vi.doMock("../../features/agent/AgentView", () => ({
     AgentView: () => <div data-testid="agent-view" />,
   }));
+  vi.doMock("../../features/workflows/WorkflowsView", () => ({
+    WorkflowsView: () => <div data-testid="workflows-view" />,
+  }));
 }
 
 const sharedProps = {
@@ -126,6 +145,7 @@ const sharedProps = {
   taskLauncher,
   importWorkflow,
   agentWorkflow,
+  workflowsController,
   tasks: [],
   onOpenTask: vi.fn(),
   onNavigate: vi.fn(),
@@ -153,6 +173,7 @@ describe("WorkspaceRouter", () => {
       "exports",
       "import",
       "agent",
+      "workflows",
     ] as const) {
       rerender(<WorkspaceRouter activeView={view} {...sharedProps} />);
       expect(await screen.findByTestId(`${view}-view`)).toBeInTheDocument();

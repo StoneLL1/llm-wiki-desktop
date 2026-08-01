@@ -8,9 +8,9 @@ use llm_wiki_desktop_lib::models::workflow::{
     WorkflowFilesystemAccess, WorkflowGitPolicy, WorkflowGitState, WorkflowKind,
     WorkflowOutputSummary, WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPreparation,
     WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
-    WorkflowProjectTrust, WorkflowRetryLink, WorkflowRoute, WorkflowRun, WorkflowScope,
-    WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
-    WORKFLOW_SCHEMA_VERSION,
+    WorkflowProjectTrust, WorkflowRetryLink, WorkflowRoute, WorkflowRouteSelection, WorkflowRun,
+    WorkflowScope, WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus,
+    WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 use serde_json::{json, Value};
@@ -97,6 +97,8 @@ fn sample_run() -> WorkflowRun {
         started_at: "2026-07-30T00:00:00Z".into(),
         updated_at: "2026-07-30T00:01:00Z".into(),
         completed_at: None,
+        cancellable: true,
+        undo_cancel_until: None,
     }
 }
 
@@ -115,6 +117,8 @@ fn workflow_contract_uses_schema_v1_and_stable_wire_casing() {
     let value = serde_json::to_value(sample_run()).unwrap();
     assert_eq!(value["schemaVersion"], 1);
     assert_eq!(value["displayStatus"], "waiting_for_confirmation");
+    assert_eq!(value["cancellable"], true);
+    assert!(value["undoCancelUntil"].is_null());
     assert_eq!(value["scope"]["kind"], "update_wiki");
     assert_eq!(value["scope"]["mode"], "changed_sources");
     assert_eq!(
@@ -262,12 +266,22 @@ fn preparation_and_start_outcome_are_structured_and_non_secret() {
         git_policy: WorkflowGitPolicy::RequiredBeforeWrite,
         requires_scope_confirmation: true,
         quick_rerun_eligible: false,
+        available_source_versions: vec![WorkflowSourceVersionRef {
+            source_id: "source-1".into(),
+            version_id: "version-1".into(),
+        }],
+        available_wiki_pages: vec!["wiki/概念.md".into()],
+        available_routes: vec![WorkflowRouteSelection::Agent {
+            agent: AgentKind::Codex,
+        }],
     };
 
     let value = serde_json::to_value(&preparation).unwrap();
     assert_eq!(value["projectAccess"]["filesystemAccess"], "writable");
     assert_eq!(value["gitPolicy"], "required_before_write");
     assert_eq!(value["prerequisites"][0]["action"], "resolve_dirty_git");
+    assert_eq!(value["availableWikiPages"][0], "wiki/概念.md");
+    assert_eq!(value["availableRoutes"][0]["kind"], "agent");
     assert_no_secret_bearing_keys(&value);
 
     let outcome = WorkflowStartOutcome::Created { run: sample_run() };
@@ -393,12 +407,21 @@ fn backend_task_still_deserializes_without_batch_identity() {
 }
 
 #[test]
-fn batch_two_workflow_commands_are_registered() {
+fn workflow_frontend_commands_are_registered() {
     let lib = include_str!("../src/lib.rs");
     for command in [
         "commands::workflow_commands::get_workflows_overview",
         "commands::workflow_commands::prepare_workflow",
         "commands::workflow_commands::start_workflow",
+        "commands::workflow_commands::list_workflow_runs",
+        "commands::workflow_commands::get_workflow_run",
+        "commands::workflow_commands::cancel_workflow_run",
+        "commands::workflow_commands::undo_cancel_queued_workflow",
+        "commands::workflow_commands::reorder_queued_workflow",
+        "commands::task_commands::continue_queued_workflows",
+        "commands::workflow_commands::retry_workflow",
+        "commands::workflow_commands::confirm_workflow_action",
+        "commands::workflow_commands::discard_workflow_result",
     ] {
         assert!(lib.contains(command), "missing Tauri command: {command}");
     }

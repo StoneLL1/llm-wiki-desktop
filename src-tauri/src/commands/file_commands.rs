@@ -131,6 +131,21 @@ pub fn confirm_pending_action(
     state: State<'_, AppState>,
     request: ConfirmPendingActionRequest,
 ) -> Result<ConfirmedAction, BackendError> {
+    if state
+        .confirmation_registry
+        .peek(&request.action_id)?
+        .execution
+        .is_some_and(|execution| {
+            matches!(execution, ConfirmationExecution::UpdateWikiReview { .. })
+        })
+    {
+        return Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "Update Wiki review must be handled by confirm_workflow_action or discard_workflow_result.",
+            true,
+            true,
+        ));
+    }
     if request.status == ConfirmationStatus::Confirmed {
         let pending = state.confirmation_registry.peek(&request.action_id)?;
         if let Some(ConfirmationExecution::GenerateContentOverwrite {
@@ -280,6 +295,12 @@ pub fn confirm_pending_action(
                 project_summary: None,
             })
         }
+        Some(ConfirmationExecution::UpdateWikiReview { .. }) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "Update Wiki review must be handled by confirm_workflow_action.",
+            true,
+            true,
+        )),
         Some(ConfirmationExecution::DeleteWikiPage {
             project_id,
             root_path,

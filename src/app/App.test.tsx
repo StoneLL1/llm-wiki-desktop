@@ -466,7 +466,7 @@ describe("App", () => {
 
     expect(useNavigationStore.getState().sidebarCollapsed).toBe(true);
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
-    for (const label of ["Dashboard", "Wiki", "Chat", "Graph", "Agent", "Import", "Lint", "Exports"]) {
+    for (const label of ["Dashboard", "Wiki", "Chat", "Graph", "Workflows", "Import", "Lint", "Exports"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
   });

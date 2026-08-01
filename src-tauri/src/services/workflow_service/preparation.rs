@@ -118,6 +118,9 @@ struct PreparationSnapshot {
     git_policy: WorkflowGitPolicy,
     execution_options: WorkflowExecutionOptions,
     preparation_fingerprint: String,
+    available_source_versions: Vec<WorkflowSourceVersionRef>,
+    available_wiki_pages: Vec<String>,
+    available_routes: Vec<WorkflowRouteSelection>,
 }
 
 #[derive(Default)]
@@ -244,6 +247,9 @@ impl WorkflowPreparationService {
             git_policy: snapshot.git_policy,
             requires_scope_confirmation: !quick_rerun_eligible,
             quick_rerun_eligible,
+            available_source_versions: snapshot.available_source_versions,
+            available_wiki_pages: snapshot.available_wiki_pages,
+            available_routes: snapshot.available_routes,
         };
         let record = PreparedRecord {
             preparation: preparation.clone(),
@@ -412,6 +418,15 @@ fn build_snapshot(
     };
     let wiki_pages = list_wiki_pages(environment.context)?;
     let route_catalog = RouteCatalog::load(environment)?;
+    let available_source_versions = source_versions
+        .iter()
+        .map(|source| WorkflowSourceVersionRef {
+            source_id: source.source_id.clone(),
+            version_id: source.version_id.clone(),
+        })
+        .collect();
+    let available_wiki_pages = wiki_pages.clone();
+    let available_routes = route_catalog.available_selections();
     let default_route =
         resolve_external_route(input.route_selection.as_ref(), &route_catalog, false);
     let scope = normalize_scope(
@@ -513,6 +528,9 @@ fn build_snapshot(
         git_policy,
         execution_options,
         preparation_fingerprint,
+        available_source_versions,
+        available_wiki_pages,
+        available_routes,
     })
 }
 
@@ -534,6 +552,27 @@ struct ProviderRouteCandidate {
 }
 
 impl RouteCatalog {
+    fn available_selections(&self) -> Vec<WorkflowRouteSelection> {
+        let mut selections = AgentKind::ALL
+            .into_iter()
+            .filter(|kind| {
+                self.agents
+                    .get(kind)
+                    .is_some_and(|candidate| candidate.available)
+            })
+            .map(|agent| WorkflowRouteSelection::Agent { agent })
+            .collect::<Vec<_>>();
+        selections.extend(
+            self.providers
+                .iter()
+                .filter(|candidate| candidate.available)
+                .map(|candidate| WorkflowRouteSelection::Byok {
+                    provider: candidate.config.provider,
+                }),
+        );
+        selections
+    }
+
     fn load(environment: &WorkflowPreparationEnvironment<'_>) -> Result<Self, BackendError> {
         let settings = environment
             .settings_service

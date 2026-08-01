@@ -3,6 +3,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 
 import type { AgentWorkflow } from "../../features/agent/useAgentWorkflow";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
+import type { WorkflowsController } from "../../features/workflows/useWorkflowsController";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 
@@ -101,6 +102,11 @@ const agentWorkflow: AgentWorkflow = {
   setDefaultAgent: vi.fn(),
   runAgent: vi.fn(),
 };
+const workflowsController: WorkflowsController = {
+  refresh: vi.fn(), prepare: vi.fn(), startPrepared: vi.fn(), cancel: vi.fn(),
+  undoCancel: vi.fn(), reorder: vi.fn(), retry: vi.fn(), confirm: vi.fn(),
+  discard: vi.fn(), continueQueue: vi.fn(), loadHistoryMore: vi.fn(), handlePrerequisite: vi.fn(), backToOverview: vi.fn(),
+};
 
 afterAll(() => {
   consoleError.mockRestore();
@@ -115,6 +121,7 @@ describe("WorkspaceRouter lazy failure", () => {
         taskLauncher={taskLauncher}
         importWorkflow={importWorkflow}
         agentWorkflow={agentWorkflow}
+        workflowsController={workflowsController}
         tasks={[]}
         onOpenTask={vi.fn()}
         onNavigate={vi.fn()}

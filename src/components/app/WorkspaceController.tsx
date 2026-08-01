@@ -1,9 +1,10 @@
-import { PanelRightOpen } from "lucide-react";
+import { History, PanelRightOpen } from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 import { RunAgentDialog } from "../../features/agent/RunAgentDialog";
 import { useAgentWorkflow } from "../../features/agent/useAgentWorkflow";
+import { useWorkflowsController } from "../../features/workflows/useWorkflowsController";
 import { useImportWorkflow } from "../../features/import/useImportWorkflow";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { useProviderWorkflow } from "../../features/settings/useProviderWorkflow";
@@ -12,6 +13,7 @@ import { useTaskLauncher } from "../../hooks/useTaskLauncher";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useWorkflowStore } from "../../stores/workflowStore";
 import { WorkspaceRouter } from "./WorkspaceRouter";
 
 export function WorkspaceController() {
@@ -32,6 +34,7 @@ export function WorkspaceController() {
   const activities = useTaskStore((state) => state.activities);
   const taskOutputs = useTaskStore((state) => state.taskOutputs);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
+  const setWorkflowsSurface = useWorkflowStore((state) => state.setSurface);
 
   const capabilities = useAiCapabilities(
     currentProject,
@@ -49,6 +52,10 @@ export function WorkspaceController() {
     capabilities,
     taskLauncher,
   );
+  const workflowsController = useWorkflowsController(
+    currentProject,
+    activeView === "workflows",
+  );
 
   useEffect(() => {
     if (!agentRunPreset || activeView !== "agent") return;
@@ -63,21 +70,34 @@ export function WorkspaceController() {
     activeView === "lint" ||
     activeView === "exports" ||
     activeView === "import"
+    || activeView === "workflows"
       ? "min-h-0 flex-1 overflow-hidden"
       : "min-h-0 flex-1 overflow-auto p-4";
 
   return (
     <section className="flex h-full flex-col">
       <header className="workspace-header">
-        <h1 className="m-0 text-[16px] font-semibold tracking-[-0.01em]">
-          {t(`nav.${activeView}`)}
-        </h1>
+        <div>
+          <h1 className="m-0 text-[16px] font-semibold tracking-[-0.01em]">{t(`nav.${activeView}`)}</h1>
+          {activeView === "workflows" ? <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("workflows.header.subtitle")}</p> : null}
+        </div>
+        {activeView === "workflows" ? (
+          <button
+            aria-label={t("workflows.history.title")}
+            className="icon-button ml-auto"
+            onClick={() => setWorkflowsSurface("history")}
+            title={t("workflows.history.title")}
+            type="button"
+          >
+            <History aria-hidden="true" size={16} />
+          </button>
+        ) : null}
         {!rightPanelOpen && workspaceFocus === null ? (
           <button
             aria-controls="right-context-panel"
             aria-expanded="false"
             aria-label={t("shell.contextPanel.open")}
-            className="icon-button ml-auto"
+            className={`icon-button ${activeView === "workflows" ? "" : "ml-auto"}`}
             onClick={() => setRightPanelOpen(true)}
             title={t("shell.contextPanel.open")}
             type="button"
@@ -94,6 +114,7 @@ export function WorkspaceController() {
           taskLauncher={taskLauncher}
           importWorkflow={importWorkflow}
           agentWorkflow={agentWorkflow}
+          workflowsController={workflowsController}
           tasks={tasks}
           activities={activities}
           taskOutputs={taskOutputs}

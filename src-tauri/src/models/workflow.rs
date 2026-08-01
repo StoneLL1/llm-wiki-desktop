@@ -337,6 +337,12 @@ pub struct WorkflowPreparation {
     pub git_policy: WorkflowGitPolicy,
     pub requires_scope_confirmation: bool,
     pub quick_rerun_eligible: bool,
+    #[serde(default)]
+    pub available_source_versions: Vec<WorkflowSourceVersionRef>,
+    #[serde(default)]
+    pub available_wiki_pages: Vec<String>,
+    #[serde(default)]
+    pub available_routes: Vec<WorkflowRouteSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -419,6 +425,8 @@ pub struct WorkflowRun {
     pub started_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+    pub cancellable: bool,
+    pub undo_cancel_until: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -529,6 +537,8 @@ impl WorkflowExecutionState {
             started_at: task.started_at.clone(),
             updated_at: task.updated_at.clone(),
             completed_at: task.completed_at.clone(),
+            cancellable: task.cancellable,
+            undo_cancel_until: self.undo_cancel_until.clone(),
         })
     }
 }
