@@ -45,6 +45,7 @@ pub fn workflow_fingerprint(
         canonical_json(&(
             &execution_options.existing_target_hash,
             &execution_options.restricted_content_acknowledgement_revision,
+            &execution_options.remote_provider_acknowledgement_revision,
         ))?,
         canonical_json(route)?,
         baseline_fingerprint.to_string(),

@@ -11,6 +11,13 @@ export type ExportRoutePreference = "auto" | "agent" | "byok";
 
 export type ExportPreviewMode = "inline" | "source";
 
+export interface ExportPreviewMetadata {
+  contentType: string;
+  byteSize: number;
+  contentHash: string;
+  validationPassed: boolean;
+}
+
 /**
  * User-controlled content flags for an export. Mirrors the backend
  * `ExportContentOptions`; these adjust the prompt only. `embedCss` reflects the
@@ -39,6 +46,7 @@ export interface ExportRecord {
   status: ExportStatus;
   bookmarked: boolean;
   taskId?: string;
+  preview?: ExportPreviewMetadata;
 }
 
 export interface StartExportRequest {

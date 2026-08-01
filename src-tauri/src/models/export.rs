@@ -62,6 +62,15 @@ pub enum ExportStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportPreviewMetadata {
+    pub content_type: String,
+    pub byte_size: u64,
+    pub content_hash: String,
+    pub validation_passed: bool,
+}
+
 /// A persisted export artifact. `output_path` is always project-relative and
 /// always under `exports/html/`. Stored as a list in `.app/exports.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +90,8 @@ pub struct ExportRecord {
     pub bookmarked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<ExportPreviewMetadata>,
 }
 
 /// Route preference, mirroring `CompileRoutePreference` but kept local to exports
@@ -230,8 +241,8 @@ pub struct OpenExportInBrowserRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportContentOptions, ExportRecord, ExportRoute, ExportStatus, ExportType,
-        OpenExportInBrowserRequest,
+        ExportContentOptions, ExportPreviewMetadata, ExportRecord, ExportRoute, ExportStatus,
+        ExportType, OpenExportInBrowserRequest,
     };
 
     #[test]
@@ -271,6 +282,12 @@ mod tests {
             status: ExportStatus::Succeeded,
             bookmarked: false,
             task_id: Some("task-1".into()),
+            preview: Some(ExportPreviewMetadata {
+                content_type: "text/html".into(),
+                byte_size: 42,
+                content_hash: "a".repeat(64),
+                validation_passed: true,
+            }),
         };
         let value = serde_json::to_value(&record).unwrap();
         assert_eq!(value["exportType"], serde_json::json!("beautiful_read"));
@@ -283,6 +300,10 @@ mod tests {
             serde_json::json!("wiki/concepts/agent.md")
         );
         assert!(value.get("export_type").is_none());
+        assert_eq!(
+            value["preview"]["validationPassed"],
+            serde_json::json!(true)
+        );
 
         let back: ExportRecord = serde_json::from_value(value).unwrap();
         assert_eq!(back, record);

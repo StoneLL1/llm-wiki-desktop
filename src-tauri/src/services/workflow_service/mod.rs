@@ -29,6 +29,13 @@ pub use preparation::{
     ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowPreparationEnvironment,
     WorkflowPreparationService,
 };
+pub use runners::generate_content::{
+    cancel_generate_content_confirmation, confirm_generate_content_overwrite,
+    discard_generate_content_candidate, generate_content_candidate_is_valid_for_workflow,
+    restore_generate_content_confirmation, run_generate_content,
+    run_generate_content_with_generator, GenerateContentConfirmationFailure,
+    GenerateContentExecutionServices, GenerateContentRunner,
+};
 pub use runners::health_check::{
     run_health_check, run_health_check_with_deep, HealthCheckExecutionServices, HealthCheckRunner,
 };
@@ -101,6 +108,34 @@ impl WorkflowService {
         preparation_id: &str,
         preparation_revision: &str,
     ) -> Result<WorkflowStartOutcome, BackendError> {
+        self.start_with_acknowledgements(
+            context,
+            access,
+            settings_service,
+            secret_service,
+            agent_service,
+            tasks,
+            preparation_id,
+            preparation_revision,
+            false,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_acknowledgements(
+        &self,
+        context: &ProjectContext,
+        access: WorkflowAccessSnapshot,
+        settings_service: &SettingsService,
+        secret_service: &SecretService,
+        agent_service: &AgentService,
+        tasks: &TaskService,
+        preparation_id: &str,
+        preparation_revision: &str,
+        acknowledge_restricted_content: bool,
+        acknowledge_remote_provider: bool,
+    ) -> Result<WorkflowStartOutcome, BackendError> {
         if let Some(task_id) = self
             .preparation
             .started_task_id(preparation_id, preparation_revision)?
@@ -135,11 +170,76 @@ impl WorkflowService {
             secret_service,
             agent_service,
         };
-        let validated = self.preparation.validate_for_start(
+        let mut validated = self.preparation.validate_for_start(
             &environment,
             preparation_id,
             preparation_revision,
         )?;
+        if let crate::models::workflow::WorkflowScope::GenerateContent {
+            artifact_type,
+            page_paths,
+            ..
+        } = &validated.preparation.scope
+        {
+            use crate::models::export::ExportType;
+            let export_type = match artifact_type {
+                crate::models::workflow::WorkflowArtifactType::BeautifulRead => {
+                    ExportType::BeautifulRead
+                }
+                crate::models::workflow::WorkflowArtifactType::KnowledgeCard => {
+                    ExportType::KnowledgeCard
+                }
+                crate::models::workflow::WorkflowArtifactType::ConceptMap => ExportType::ConceptMap,
+                crate::models::workflow::WorkflowArtifactType::ProjectReport => {
+                    ExportType::ProjectReport
+                }
+            };
+            let required_revision = crate::services::ExportService::default()
+                .restricted_content_revision_for_pages(context, export_type, page_paths)?;
+            if required_revision.is_some() && !acknowledge_restricted_content {
+                return Err(BackendError::new(
+                    "WORKFLOW_RESTRICTED_CONTENT_ACKNOWLEDGEMENT_REQUIRED",
+                    "This artifact includes restricted content and requires a separate acknowledgement.",
+                    true,
+                    true,
+                ));
+            }
+            validated
+                .execution_options
+                .restricted_content_acknowledgement_revision = required_revision;
+        }
+        let remote_revision = if validated.preparation.kind == WorkflowKind::GenerateContent
+            && preparation::route_requires_remote_acknowledgement(
+                context,
+                settings_service,
+                validated.preparation.route.as_ref(),
+            )? {
+            Some(fingerprint::hex_sha256(
+                canonical_json(&validated.preparation.route)
+                    .map_err(|_| {
+                        BackendError::new(
+                            "WORKFLOW_ROUTE_INVALID",
+                            "The prepared remote route could not be acknowledged.",
+                            true,
+                            true,
+                        )
+                    })?
+                    .as_bytes(),
+            ))
+        } else {
+            None
+        };
+        if remote_revision.is_some() && !acknowledge_remote_provider {
+            return Err(BackendError::new(
+                "WORKFLOW_REMOTE_PROVIDER_ACKNOWLEDGEMENT_REQUIRED",
+                "This workflow sends selected content to a remote provider and requires a separate acknowledgement.",
+                true,
+                true,
+            ));
+        }
+        validated
+            .execution_options
+            .remote_provider_acknowledgement_revision = remote_revision;
         let runner = self
             .runners
             .read()

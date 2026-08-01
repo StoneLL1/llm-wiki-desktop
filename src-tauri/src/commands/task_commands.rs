@@ -111,6 +111,18 @@ pub fn cancel_task(
                     ),
                 );
             }
+            if let Err(error) =
+                crate::services::discard_generate_content_candidate(&request.task_id)
+            {
+                let _ = state.task_service.append_log(
+                    &request.task_id,
+                    crate::tasks::task_model::LogLevel::Warn,
+                    format!(
+                        "Workflow was cancelled, but generated artifact cleanup needs attention: {}",
+                        error.message
+                    ),
+                );
+            }
             let (_, next) = state
                 .workflow_service
                 .coordinator
@@ -212,14 +224,33 @@ pub fn set_active_project(
         }
     };
     match project_context {
-        Some(context) => state
-            .task_service
-            .set_project_context(
-                context.project_id,
-                context.root,
-                context.app_dir.join("tasks"),
-            )
-            .map_err(|msg| BackendError::new("TASK_RECOVERY_FAILED", &msg, true, false)),
+        Some(context) => {
+            let tasks = state
+                .task_service
+                .set_project_context(
+                    context.project_id.clone(),
+                    context.root.clone(),
+                    context.app_dir.join("tasks"),
+                )
+                .map_err(|msg| BackendError::new("TASK_RECOVERY_FAILED", &msg, true, false))?;
+            for task in &tasks {
+                let Some(run) = state.task_service.get_workflow_run(&task.id) else {
+                    continue;
+                };
+                if run.kind == crate::models::workflow::WorkflowKind::GenerateContent
+                    && run.display_status
+                        == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+                {
+                    crate::services::restore_generate_content_confirmation(
+                        &context,
+                        &run,
+                        &state.task_service,
+                        &state.confirmation_registry,
+                    )?;
+                }
+            }
+            Ok(tasks)
+        }
         None => state
             .task_service
             .set_project_root(None)

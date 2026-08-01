@@ -656,9 +656,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     "--output-format".into(),
                     "stream-json".into(),
                     "--verbose".into(),
-                    prompt_owned,
                 ],
-                stdin: None,
+                stdin: Some(prompt_owned),
                 cwd,
             },
             AgentKind::Codex => AgentInvocation {
@@ -788,6 +787,52 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                     }
                     .into(),
                 ),
+            },
+        );
+        result
+    }
+
+    /// Run an HTML export candidate without persisting generated HTML or raw
+    /// stderr/stdout in task logs. Structured lifecycle activity remains
+    /// visible, while the returned document stays in the caller-owned
+    /// candidate workspace until validation and an authorized write.
+    pub fn run_export_streaming(
+        &self,
+        kind: AgentKind,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<String, BackendError> {
+        let on_activity = |activity: TaskActivity| tasks.emit_activity(task_id, activity);
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "export".into(),
+                status: TaskActivityStatus::Started,
+                label: Some("Generating export artifact".into()),
+            },
+        );
+        let result = self.runner.run_task_streaming_isolated_with_events(
+            invocation,
+            tasks,
+            task_id,
+            Some(kind),
+            &on_activity,
+        );
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "export".into(),
+                status: if result.is_ok() {
+                    TaskActivityStatus::Completed
+                } else {
+                    TaskActivityStatus::Failed
+                },
+                label: Some(if result.is_ok() {
+                    "Export candidate generated".into()
+                } else {
+                    "Export candidate generation failed".into()
+                }),
             },
         );
         result
@@ -2876,7 +2921,8 @@ mod tests {
         assert!(claude.args.contains(&"--output-format".to_string()));
         assert!(claude.args.contains(&"stream-json".to_string()));
         assert!(claude.args.contains(&"--verbose".to_string()));
-        assert!(claude.stdin.is_none());
+        assert_eq!(claude.stdin.as_deref(), Some("build html"));
+        assert!(!claude.args.contains(&"build html".to_string()));
 
         let codex =
             AgentService::html_export_invocation(AgentKind::Codex, &workspace, "build html")

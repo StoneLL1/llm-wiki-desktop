@@ -158,7 +158,8 @@ export type WorkflowPrerequisiteAction =
   | "configure_execution_route"
   | "choose_execution_route"
   | "prepare_again"
-  | "acknowledge_remote_provider";
+  | "acknowledge_remote_provider"
+  | "acknowledge_restricted_content";
 
 export interface WorkflowPrerequisite {
   code: string;
@@ -308,6 +309,8 @@ export interface PrepareWorkflowRequest extends WorkflowProjectRequest {
 export interface StartWorkflowRequest extends WorkflowProjectRequest {
   preparationId: string;
   preparationRevision: string;
+  acknowledgeRestrictedContent?: boolean;
+  acknowledgeRemoteProvider?: boolean;
 }
 
 export interface ListWorkflowRunsRequest extends WorkflowProjectRequest {

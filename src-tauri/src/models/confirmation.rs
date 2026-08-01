@@ -118,6 +118,11 @@ pub enum ConfirmationExecution {
         target_path: String,
         current_hash: String,
     },
+    GenerateContentOverwrite {
+        project_id: String,
+        root_path: String,
+        task_id: String,
+    },
     DeleteWikiPage {
         project_id: String,
         root_path: String,

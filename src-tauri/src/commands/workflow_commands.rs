@@ -35,6 +35,10 @@ pub struct StartWorkflowRequest {
     pub project_root_path: String,
     pub preparation_id: String,
     pub preparation_revision: String,
+    #[serde(default)]
+    pub acknowledge_restricted_content: bool,
+    #[serde(default)]
+    pub acknowledge_remote_provider: bool,
 }
 
 #[tauri::command]
@@ -87,7 +91,7 @@ pub fn start_workflow(
 ) -> Result<WorkflowStartOutcome, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let access = WorkflowAccessSnapshot::legacy_fail_closed(&context, &state.git_service)?;
-    state.workflow_service.start(
+    state.workflow_service.start_with_acknowledgements(
         &context,
         access,
         &state.settings_service,
@@ -96,5 +100,7 @@ pub fn start_workflow(
         &state.task_service,
         &request.preparation_id,
         &request.preparation_revision,
+        request.acknowledge_restricted_content,
+        request.acknowledge_remote_provider,
     )
 }

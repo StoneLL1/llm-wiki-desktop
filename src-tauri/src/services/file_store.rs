@@ -111,6 +111,28 @@ impl FileStore {
         Ok(())
     }
 
+    pub fn write_markdown_create_new_atomic(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        contents: &str,
+    ) -> Result<(), BackendError> {
+        let _guard = GUARDED_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| {
+                BackendError::new(
+                    "FILE_WRITE_LOCK_FAILED",
+                    "Another guarded file write is currently running.",
+                    true,
+                    false,
+                )
+            })?;
+        let path = context.resolve_project_path(relative_path)?;
+        self.verify_write_mode(&path, relative_path, WriteMode::CreateNew)?;
+        write_atomic_create_new(&path, relative_path, contents.as_bytes())
+    }
+
     pub fn write_text_absolute(&self, path: &Path, contents: &str) -> Result<(), BackendError> {
         write_text(path, contents)
     }
@@ -389,6 +411,78 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
     })
 }
 
+fn write_atomic_create_new(
+    path: &Path,
+    relative_path: &str,
+    bytes: &[u8],
+) -> Result<(), BackendError> {
+    let parent = path.parent().ok_or_else(|| {
+        BackendError::new(
+            "PATH_INVALID",
+            "Cannot determine parent directory.",
+            false,
+            true,
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
+    let file_name = path.file_name().ok_or_else(|| {
+        BackendError::new("PATH_INVALID", "Cannot determine file name.", false, true)
+    })?;
+    let (tmp_path, mut file) = (0..16)
+        .find_map(|_| {
+            let candidate = parent.join(format!(
+                ".{}.{}.tmp",
+                file_name.to_string_lossy(),
+                uuid::Uuid::new_v4()
+            ));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => Some(Ok((candidate, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(io_error("FILE_WRITE_FAILED", error, &candidate))),
+            }
+        })
+        .unwrap_or_else(|| {
+            Err(BackendError::new(
+                "FILE_WRITE_FAILED",
+                "Could not reserve a unique atomic-create temporary file.",
+                true,
+                false,
+            ))
+        })?;
+    let write_result = file
+        .write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| io_error("FILE_WRITE_FAILED", error, &tmp_path));
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    // Linking a complete same-directory temporary file is an OS-level
+    // no-replace publish: every pre-existing target (including a link created
+    // after the initial check) makes hard_link fail instead of being replaced.
+    let publish_result = fs::hard_link(&tmp_path, path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            BackendError::new(
+                "FILE_ALREADY_EXISTS",
+                "File already exists and cannot be overwritten without an explicit hash match.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": relative_path }))
+        } else {
+            io_error("FILE_WRITE_FAILED", error, path)
+        }
+    });
+    let _ = fs::remove_file(&tmp_path);
+    publish_result
+}
+
 fn walk_markdown(current: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
@@ -562,6 +656,48 @@ mod tests {
             "# Second"
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_create_new_publishes_exactly_one_complete_file() {
+        let (context, root) = tmp_context("create-new-race");
+        let context = std::sync::Arc::new(context);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for contents in ["first-complete", "second-complete"] {
+            let context = context.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                FileStore.write_markdown_create_new_atomic(
+                    &context,
+                    "exports/html/race.html",
+                    contents,
+                )
+            }));
+        }
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .map(|error| error.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["FILE_ALREADY_EXISTS"]
+        );
+        let published = FileStore
+            .read_markdown(&context, "exports/html/race.html")
+            .unwrap();
+        assert!(matches!(
+            published.as_str(),
+            "first-complete" | "second-complete"
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 

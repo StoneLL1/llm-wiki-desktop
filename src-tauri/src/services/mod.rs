@@ -38,7 +38,7 @@ pub use compile_service::{
     CompileExecutionServices, CompileGenerationObserver, CompileGenerationPolicy, CompileService,
     CompileSourceRegistry, NoopCompileGenerationObserver, ResolvedCompileSource,
 };
-pub use export_service::ExportService;
+pub use export_service::{ExportService, ValidatedExportArtifact};
 pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
 pub use graph_service::GraphService;
@@ -51,11 +51,16 @@ pub use settings_service::SettingsService;
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
 pub use workflow_service::{
-    canonical_json, discard_update_wiki_candidate, persist_update_wiki_review, project_identity,
-    run_health_check, run_health_check_with_deep, run_update_wiki, update_wiki_candidate_is_valid,
-    workflow_baseline_for_scope, workflow_fingerprint, workflow_stages, EnqueueWorkflow,
-    HealthCheckExecutionServices, HealthCheckRunner, PrepareWorkflowInput, ProjectWorkflowIdentity,
-    UpdateWikiExecutionServices, UpdateWikiRunner, ValidatedWorkflowStart, WorkflowAccessSnapshot,
-    WorkflowCoordinator, WorkflowPreference, WorkflowPreferences, WorkflowPreparationEnvironment,
+    cancel_generate_content_confirmation, canonical_json, confirm_generate_content_overwrite,
+    discard_generate_content_candidate, discard_update_wiki_candidate,
+    generate_content_candidate_is_valid_for_workflow, persist_update_wiki_review, project_identity,
+    restore_generate_content_confirmation, run_generate_content,
+    run_generate_content_with_generator, run_health_check, run_health_check_with_deep,
+    run_update_wiki, update_wiki_candidate_is_valid, workflow_baseline_for_scope,
+    workflow_fingerprint, workflow_stages, EnqueueWorkflow, GenerateContentConfirmationFailure,
+    GenerateContentExecutionServices, GenerateContentRunner, HealthCheckExecutionServices,
+    HealthCheckRunner, PrepareWorkflowInput, ProjectWorkflowIdentity, UpdateWikiExecutionServices,
+    UpdateWikiRunner, ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowCoordinator,
+    WorkflowPreference, WorkflowPreferences, WorkflowPreparationEnvironment,
     WorkflowPreparationService, WorkflowRunner, WorkflowService, WorkflowStageSink,
 };
