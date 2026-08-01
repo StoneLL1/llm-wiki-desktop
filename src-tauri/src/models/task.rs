@@ -49,6 +49,7 @@ pub enum TaskStatus {
     Cancelled,
     Succeeded,
     Failed,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

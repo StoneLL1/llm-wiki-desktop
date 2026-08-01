@@ -16,7 +16,8 @@ export type TaskStatus =
   | "cancelling"
   | "cancelled"
   | "succeeded"
-  | "failed";
+  | "failed"
+  | "interrupted";
 
 export type BackendEventType =
   | "task_updated"
@@ -178,7 +179,11 @@ export const TASK_STATUS_ORDER: Record<TaskStatus, number> = {
   succeeded: 4,
   failed: 5,
   cancelled: 6,
+  interrupted: 7,
 };
 
 export const isTerminalStatus = (status: TaskStatus): boolean =>
-  status === "succeeded" || status === "failed" || status === "cancelled";
+  status === "succeeded" ||
+  status === "failed" ||
+  status === "cancelled" ||
+  status === "interrupted";
