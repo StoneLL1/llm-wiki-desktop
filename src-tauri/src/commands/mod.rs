@@ -20,3 +20,4 @@ pub mod settings_commands;
 pub mod source_commands;
 pub mod task_commands;
 pub mod wiki_commands;
+pub mod workflow_commands;

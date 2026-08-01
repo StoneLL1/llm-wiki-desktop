@@ -1,0 +1,210 @@
+use crate::errors::BackendError;
+use crate::models::paths::ProjectContext;
+use crate::models::workflow::{
+    WorkflowDisplayStatus, WorkflowKind, WorkflowOverviewRow, WorkflowOverviewState,
+    WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
+    WorkflowsOverview, WORKFLOW_SCHEMA_VERSION,
+};
+use crate::services::{CompileService, FileStore};
+use crate::tasks::TaskService;
+
+#[derive(Default)]
+pub struct WorkflowOverviewService;
+
+impl WorkflowOverviewService {
+    pub fn no_project(&self) -> WorkflowsOverview {
+        let prerequisite = open_project_prerequisite();
+        WorkflowsOverview {
+            schema_version: WORKFLOW_SCHEMA_VERSION,
+            project_access: None,
+            rows: fixed_kinds()
+                .into_iter()
+                .map(|kind| WorkflowOverviewRow {
+                    kind,
+                    state: WorkflowOverviewState::NeedsPrerequisite,
+                    recommended: false,
+                    active_task_id: None,
+                    last_completed_at: None,
+                    prerequisite: Some(prerequisite.clone()),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn for_project(
+        &self,
+        context: &ProjectContext,
+        access: WorkflowProjectAccessSummary,
+        prerequisites: &[(WorkflowKind, Option<WorkflowPrerequisite>, String)],
+        tasks: &TaskService,
+    ) -> Result<WorkflowsOverview, BackendError> {
+        let source_versions = CompileService::list_source_versions(context)?;
+        let resolved_sources = if source_versions.is_empty() {
+            Vec::new()
+        } else {
+            CompileService::resolve_source_versions(context, &source_versions)?
+        };
+        let changed_source_count = resolved_sources
+            .iter()
+            .filter(|source| !source.already_consumed)
+            .count();
+        let readable_markdown = !source_versions.is_empty()
+            || !FileStore.list_markdown_files(&context.wiki_dir)?.is_empty()
+            || !FileStore
+                .list_markdown_files(&context.raw_dir.join("extracted"))?
+                .is_empty();
+        let owner_runs = tasks
+            .list_workflow_runs()
+            .into_iter()
+            .filter(|run| {
+                run.canonical_identity_key == access.canonical_identity_key
+                    && run.identity_revision == access.identity_revision
+            })
+            .collect::<Vec<_>>();
+        let current_health_baseline = prerequisites
+            .iter()
+            .find(|(kind, _, _)| *kind == WorkflowKind::HealthCheck)
+            .map(|(_, _, baseline)| baseline.as_str());
+        let has_current_health = owner_runs.iter().any(|run| {
+            run.kind == WorkflowKind::HealthCheck
+                && run.display_status == WorkflowDisplayStatus::Completed
+                && current_health_baseline == Some(run.baseline_fingerprint.as_str())
+        });
+        let recommendation = if source_versions.is_empty() || changed_source_count > 0 {
+            Some(WorkflowKind::UpdateWiki)
+        } else if readable_markdown && !has_current_health {
+            Some(WorkflowKind::HealthCheck)
+        } else {
+            None
+        };
+        let rows = fixed_kinds()
+            .into_iter()
+            .map(|kind| {
+                row_for_kind(
+                    kind.clone(),
+                    &owner_runs,
+                    recommendation.as_ref(),
+                    !source_versions.is_empty(),
+                    changed_source_count,
+                    prerequisites
+                        .iter()
+                        .find(|(candidate, _, _)| *candidate == kind)
+                        .and_then(|(_, prerequisite, _)| prerequisite.clone()),
+                )
+            })
+            .collect();
+        Ok(WorkflowsOverview {
+            schema_version: WORKFLOW_SCHEMA_VERSION,
+            project_access: Some(access),
+            rows,
+        })
+    }
+}
+
+fn row_for_kind(
+    kind: WorkflowKind,
+    runs: &[crate::models::workflow::WorkflowRun],
+    recommendation: Option<&WorkflowKind>,
+    has_sources: bool,
+    changed_source_count: usize,
+    mut prerequisite: Option<WorkflowPrerequisite>,
+) -> WorkflowOverviewRow {
+    let mut matching = runs
+        .iter()
+        .filter(|run| run.kind == kind)
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let attention = matching.iter().copied().find(|run| {
+        matches!(
+            run.display_status,
+            WorkflowDisplayStatus::Running
+                | WorkflowDisplayStatus::WaitingForConfirmation
+                | WorkflowDisplayStatus::Queued
+                | WorkflowDisplayStatus::Failed
+                | WorkflowDisplayStatus::Interrupted
+        )
+    });
+    let last_completed_at = matching
+        .iter()
+        .copied()
+        .filter(|run| run.display_status == WorkflowDisplayStatus::Completed)
+        .filter_map(|run| run.completed_at.clone())
+        .max();
+    let update_is_current =
+        kind == WorkflowKind::UpdateWiki && has_sources && changed_source_count == 0;
+    if update_is_current {
+        prerequisite = None;
+    }
+    let state = attention.map_or_else(
+        || {
+            if update_is_current {
+                WorkflowOverviewState::UpToDate
+            } else if prerequisite.is_some() {
+                WorkflowOverviewState::NeedsPrerequisite
+            } else {
+                WorkflowOverviewState::Ready
+            }
+        },
+        |run| match run.display_status {
+            WorkflowDisplayStatus::Queued => WorkflowOverviewState::Queued,
+            WorkflowDisplayStatus::Running => WorkflowOverviewState::Running,
+            WorkflowDisplayStatus::WaitingForConfirmation => {
+                WorkflowOverviewState::WaitingForConfirmation
+            }
+            WorkflowDisplayStatus::Failed => WorkflowOverviewState::Failed,
+            WorkflowDisplayStatus::Interrupted => WorkflowOverviewState::Interrupted,
+            WorkflowDisplayStatus::Completed | WorkflowDisplayStatus::Cancelled => {
+                WorkflowOverviewState::Ready
+            }
+        },
+    );
+    WorkflowOverviewRow {
+        recommended: recommendation.is_some_and(|recommended| *recommended == kind),
+        active_task_id: attention.map(|run| run.task_id.clone()),
+        last_completed_at,
+        prerequisite,
+        kind,
+        state,
+    }
+}
+
+fn fixed_kinds() -> [WorkflowKind; 3] {
+    [
+        WorkflowKind::UpdateWiki,
+        WorkflowKind::HealthCheck,
+        WorkflowKind::GenerateContent,
+    ]
+}
+
+fn open_project_prerequisite() -> WorkflowPrerequisite {
+    WorkflowPrerequisite {
+        code: "WORKFLOW_PROJECT_REQUIRED".into(),
+        message_key: "workflows.prerequisite.openOrCreateProject".into(),
+        blocking: true,
+        action: WorkflowPrerequisiteAction::OpenOrCreateProject,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consumed_sources_are_up_to_date_even_when_execution_is_currently_blocked() {
+        let row = row_for_kind(
+            WorkflowKind::UpdateWiki,
+            &[],
+            None,
+            true,
+            0,
+            Some(WorkflowPrerequisite {
+                code: "WORKFLOW_PROJECT_UNTRUSTED".into(),
+                message_key: "workflows.prerequisite.trustProject".into(),
+                blocking: true,
+                action: WorkflowPrerequisiteAction::TrustProject,
+            }),
+        );
+        assert_eq!(row.state, WorkflowOverviewState::UpToDate);
+        assert!(row.prerequisite.is_none());
+    }
+}

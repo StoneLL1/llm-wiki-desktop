@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Windows MSVC Rust test linking can fail with LNK1207 for one generated PDB — Root cause: an interrupted or incompatible incremental link can leave a stale `src-tauri/target/debug/deps/*.pdb` even when the source and focused integration tests are valid — How to avoid: verify the exact path is inside `src-tauri/target/debug/deps`, remove only the named generated PDB from the linker error, and rerun the same Rust test before the final full gate.
+
 Agent model identity and CLI version are different audit fields — Root cause: storing a CLI version in `model` makes retries and provenance look pinned to a model that the app never selected — How to avoid: record the Agent execution profile/model identity separately from `engineVersion`, and normalize legacy candidate metadata on read.
 
 Stale Source AI workspace cleanup needs an active lease — Root cause: age-only cleanup can race a long-running or resumed task after sleep or a clock jump — How to avoid: skip current-process leased workspaces and unregister the lease on every normal cleanup path.

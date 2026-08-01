@@ -391,3 +391,15 @@ fn backend_task_still_deserializes_without_batch_identity() {
         .expect("legacy task should remain readable");
     assert!(task.batch_id.is_none());
 }
+
+#[test]
+fn batch_two_workflow_commands_are_registered() {
+    let lib = include_str!("../src/lib.rs");
+    for command in [
+        "commands::workflow_commands::get_workflows_overview",
+        "commands::workflow_commands::prepare_workflow",
+        "commands::workflow_commands::start_workflow",
+    ] {
+        assert!(lib.contains(command), "missing Tauri command: {command}");
+    }
+}
