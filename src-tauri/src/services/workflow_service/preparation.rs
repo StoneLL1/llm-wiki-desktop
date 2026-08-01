@@ -913,6 +913,14 @@ fn capture_baseline(
     })
 }
 
+pub fn workflow_baseline_for_scope(
+    context: &ProjectContext,
+    scope: &WorkflowScope,
+) -> Result<WorkflowBaselineSummary, BackendError> {
+    let current_sources = CompileService::list_source_versions(context)?;
+    capture_baseline(context, scope, &current_sources)
+}
+
 fn baseline_files(
     context: &ProjectContext,
     scope: &WorkflowScope,

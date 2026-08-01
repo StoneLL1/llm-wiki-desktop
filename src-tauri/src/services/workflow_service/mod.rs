@@ -4,6 +4,7 @@ pub mod overview;
 pub mod persistence;
 pub mod preferences;
 pub mod preparation;
+pub mod runners;
 pub mod stage_sink;
 
 use std::sync::{Arc, RwLock};
@@ -24,8 +25,13 @@ pub(crate) use persistence::recover_workflow;
 pub use persistence::{project_identity, ProjectWorkflowIdentity};
 pub use preferences::{WorkflowPreference, WorkflowPreferences};
 pub use preparation::{
-    overview_prerequisites, workflow_stages, PrepareWorkflowInput, ValidatedWorkflowStart,
-    WorkflowAccessSnapshot, WorkflowPreparationEnvironment, WorkflowPreparationService,
+    overview_prerequisites, workflow_baseline_for_scope, workflow_stages, PrepareWorkflowInput,
+    ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowPreparationEnvironment,
+    WorkflowPreparationService,
+};
+pub use runners::update_wiki::{
+    discard_update_wiki_candidate, persist_update_wiki_review, run_update_wiki,
+    update_wiki_candidate_is_valid, UpdateWikiExecutionServices, UpdateWikiRunner,
 };
 pub use stage_sink::WorkflowStageSink;
 

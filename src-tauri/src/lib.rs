@@ -33,6 +33,130 @@ pub fn run() {
             state
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
+            let runner_handle = handle.clone();
+            state
+                .workflow_service
+                .register_runner(std::sync::Arc::new(services::UpdateWikiRunner::new(
+                    move |run| {
+                        let app = runner_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<app_state::AppState>();
+                            let fail_dispatch = |code: &str, message: String| {
+                                let sink = services::WorkflowStageSink::new(
+                                    &state.task_service,
+                                    &state.workflow_service.coordinator,
+                                    &run.task_id,
+                                );
+                                let _ = sink.start("analyze_sources");
+                                if let Ok((_, next)) = sink.fail(
+                                    "analyze_sources",
+                                    models::workflow::WorkflowErrorSummary {
+                                        code: code.into(),
+                                        message_key: "workflows.error.prepareAgain".into(),
+                                        recoverable: true,
+                                        user_action_required: true,
+                                        suggested_action: Some(
+                                            models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
+                                        ),
+                                    },
+                                ) {
+                                    if let Some(next) = next {
+                                        let _ = state.workflow_service.dispatch_claimed_run(&next);
+                                    }
+                                }
+                                let _ = state.task_service.append_log(
+                                    &run.task_id,
+                                    tasks::task_model::LogLevel::Error,
+                                    message,
+                                );
+                            };
+                            let Some(root) = state.task_service.project_root_for_task(&run.task_id) else {
+                                fail_dispatch(
+                                    "WORKFLOW_PROJECT_CONTEXT_MISSING",
+                                    "Update Wiki task has no project root.".into(),
+                                );
+                                return;
+                            };
+                            let asserted_root = root.to_string_lossy().into_owned();
+                            let context = match state
+                                .resolve_project_context(&run.project_id, &asserted_root)
+                            {
+                                Ok(context) => context,
+                                Err(error) => {
+                                    fail_dispatch(&error.code, error.message);
+                                    return;
+                                }
+                            };
+                            let identity = match services::project_identity(&context.root) {
+                                Ok(identity)
+                                    if identity.canonical_identity_key
+                                        == run.canonical_identity_key
+                                        && identity.identity_revision == run.identity_revision =>
+                                {
+                                    identity
+                                }
+                                Ok(_) | Err(_) => {
+                                    fail_dispatch(
+                                        "WORKFLOW_PROJECT_IDENTITY_CHANGED",
+                                        "Update Wiki project identity changed while queued.".into(),
+                                    );
+                                    return;
+                                }
+                            };
+                            let _ = identity;
+                            let access = match services::WorkflowAccessSnapshot::legacy_fail_closed(
+                                &context,
+                                &state.git_service,
+                            ) {
+                                Ok(access) => access,
+                                Err(error) => {
+                                    fail_dispatch(&error.code, error.message);
+                                    return;
+                                }
+                            };
+                            if access.trust
+                                != models::workflow::WorkflowProjectTrust::Trusted
+                            {
+                                fail_dispatch(
+                                    "WORKFLOW_PROJECT_UNTRUSTED",
+                                    "Update Wiki cannot execute until the backend project-open trust policy supplies a current trusted access snapshot.".into(),
+                                );
+                                return;
+                            }
+                            if access.filesystem_access
+                                != models::workflow::WorkflowFilesystemAccess::Writable
+                            {
+                                fail_dispatch(
+                                    "WORKFLOW_PROJECT_READ_ONLY",
+                                    "Update Wiki project access is no longer writable.".into(),
+                                );
+                                return;
+                            }
+                            let compile = services::CompileExecutionServices {
+                                agent_service: &state.agent_service,
+                                llm_service: &state.llm_service,
+                                secret_service: &state.secret_service,
+                                settings_service: &state.settings_service,
+                                task_service: &state.task_service,
+                            };
+                            let update = services::UpdateWikiExecutionServices {
+                                compile,
+                                git_service: &state.git_service,
+                                file_store: &state.file_store,
+                                bookmark_service: &state.bookmark_service,
+                                search_service: &state.search_service,
+                                confirmation_registry: &state.confirmation_registry,
+                                coordinator: &state.workflow_service.coordinator,
+                            };
+                            if let Some(next) =
+                                services::run_update_wiki(&context, run, &update).await
+                            {
+                                let _ = state.workflow_service.dispatch_claimed_run(&next);
+                            }
+                        });
+                    },
+                )))
+                .map_err(startup_backend_error)?;
             if let Ok(app_data) = app.path().app_local_data_dir() {
                 let install_root = app_data.join("installed-capabilities");
                 #[cfg(debug_assertions)]
