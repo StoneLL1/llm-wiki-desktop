@@ -47,6 +47,8 @@ pub use settings_service::SettingsService;
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
 pub use workflow_service::{
-    canonical_json, project_identity, workflow_fingerprint, EnqueueWorkflow,
-    ProjectWorkflowIdentity, WorkflowCoordinator, WorkflowService, WorkflowStageSink,
+    canonical_json, project_identity, workflow_fingerprint, workflow_stages, EnqueueWorkflow,
+    PrepareWorkflowInput, ProjectWorkflowIdentity, ValidatedWorkflowStart, WorkflowAccessSnapshot,
+    WorkflowCoordinator, WorkflowPreference, WorkflowPreferences, WorkflowPreparationEnvironment,
+    WorkflowPreparationService, WorkflowRunner, WorkflowService, WorkflowStageSink,
 };

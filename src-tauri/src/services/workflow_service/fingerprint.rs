@@ -42,7 +42,10 @@ pub fn workflow_fingerprint(
         identity_revision.to_string(),
         canonical_json(kind)?,
         canonical_json(scope)?,
-        canonical_json(execution_options)?,
+        canonical_json(&(
+            &execution_options.existing_target_hash,
+            &execution_options.restricted_content_acknowledgement_revision,
+        ))?,
         canonical_json(route)?,
         baseline_fingerprint.to_string(),
     ];

@@ -416,6 +416,13 @@ describe("workflow API", () => {
     }
   });
 
+  it("keeps the frozen overview envelope while representing no active project", async () => {
+    await getWorkflowsOverview({ projectId: "", projectRootPath: "" });
+    expect(invoke).toHaveBeenCalledWith("get_workflows_overview", {
+      request: { projectId: "", projectRootPath: "" },
+    });
+  });
+
   it("accepts a Rust-shaped fixture as the discriminated workflow union", () => {
     const parsed = parseRustWorkflowRun(JSON.parse(JSON.stringify(rustRunFixture)));
 

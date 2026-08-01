@@ -120,7 +120,19 @@ fn deduplicates_only_matching_active_fingerprints_and_serializes_one_project() {
     changed_options_request
         .execution_options
         .preparation_revision = "prep-2".into();
-    let changed_options = created(
+    match coordinator
+        .enqueue(&service, changed_options_request.clone())
+        .unwrap()
+    {
+        WorkflowStartOutcome::Existing { run } => assert_eq!(run.task_id, first.task_id),
+        WorkflowStartOutcome::Created { .. } => {
+            panic!("preparation revision must not change execution identity")
+        }
+    }
+    changed_options_request
+        .execution_options
+        .existing_target_hash = Some("a".repeat(64));
+    let changed_execution_options = created(
         coordinator
             .enqueue(&service, changed_options_request)
             .unwrap(),
@@ -152,7 +164,7 @@ fn deduplicates_only_matching_active_fingerprints_and_serializes_one_project() {
         &changed_range,
         &changed_baseline,
         &changed_route,
-        &changed_options,
+        &changed_execution_options,
         &beautiful_read,
         &changed_output_type,
     ] {
