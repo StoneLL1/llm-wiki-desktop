@@ -91,13 +91,17 @@ fn restart_interrupts_running_and_holds_queued_until_explicit_continuation() {
     assert!(recovered_queue.continuation_required);
 
     let identity = project_identity(&root).unwrap();
-    let continued = coordinator
+    let (continued, claimed) = coordinator
         .continue_queued(
             &restarted,
             &identity.canonical_identity_key,
             &identity.identity_revision,
         )
         .unwrap();
+    assert_eq!(
+        claimed.as_ref().map(|run| run.task_id.as_str()),
+        Some(queued.task_id.as_str())
+    );
     assert!(continued.iter().any(|run| {
         run.task_id == queued.task_id && run.display_status == WorkflowDisplayStatus::Running
     }));

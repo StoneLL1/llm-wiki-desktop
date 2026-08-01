@@ -138,7 +138,7 @@ export function LeftSidebar() {
 
         <div className="py-3">
           <div className="app-sidebar__section-label">
-            {t("shell.workflow")}
+            {t("shell.knowledgeProcessing")}
           </div>
           <div className="flex flex-col gap-[1px] px-2">{renderNavGroup(workflowViews)}</div>
         </div>

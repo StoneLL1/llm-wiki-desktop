@@ -93,7 +93,7 @@ describe("LeftSidebar favorites", () => {
   it("renders favorites between workflow and recent pages", () => {
     render(<LeftSidebar />);
 
-    const workflow = screen.getByText("Workflow");
+    const workflow = screen.getByText("Knowledge Processing");
     const favorites = screen.getByText("Favorites");
     const recent = screen.getByText("Recent pages");
 
@@ -106,7 +106,7 @@ describe("LeftSidebar favorites", () => {
 
     const sectionLabels = [
       screen.getByText("Main views"),
-      screen.getByText("Workflow"),
+      screen.getByText("Knowledge Processing"),
       screen.getByText("Favorites"),
       screen.getByText("Recent pages"),
     ];

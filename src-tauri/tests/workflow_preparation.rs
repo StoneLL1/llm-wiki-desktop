@@ -155,6 +155,7 @@ fn untrusted_local_quick_is_memory_only_and_does_not_write_workflow_state() {
         preparation.route,
         Some(llm_wiki_desktop_lib::models::workflow::WorkflowRoute::Local { .. })
     ));
+    assert_eq!(preparation.available_wiki_pages, vec!["wiki/概览.md"]);
     assert!(!root.path().join(".app/workflows").exists());
 }
 

@@ -162,7 +162,7 @@ describe("Workflows architecture", () => {
     ]);
   });
 
-  it("freezes the visible legacy Agent surface until the cutover batches", () => {
+  it("adds the Workflows route while preserving the legacy Agent compatibility surface", () => {
     const navigation = readFileSync(
       join(root, "src", "stores", "navigationStore.ts"),
       "utf8",
@@ -182,9 +182,11 @@ describe("Workflows architecture", () => {
 
     expect(navigation).toContain('| "agent"');
     expect(navigation).toContain("agentRunPreset");
-    expect(navigation).not.toContain('| "workflows"');
+    expect(navigation).toContain('| "workflows"');
     expect(router).toContain('case "agent"');
     expect(router).toContain("features/agent/AgentView");
+    expect(router).toContain('case "workflows"');
+    expect(router).toContain("features/workflows/WorkflowsView");
     expect(dialog).toContain('"wiki-ingest"');
     expect(dialog).toContain('"html-project-report"');
     expect(launcher).toContain('"start_wiki_compile"');

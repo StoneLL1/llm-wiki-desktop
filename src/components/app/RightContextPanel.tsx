@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
 import { AgentRightPanel } from "../../features/agent/AgentRightPanel";
+import { WorkflowsRightPanel } from "../../features/workflows/WorkflowsRightPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { SourceRightPanel } from "../../features/wiki/SourceRightPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
@@ -73,6 +74,10 @@ export function RightContextPanel() {
   const [chatCopied, setChatCopied] = useState(false);
 
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
+
+  if (activeView === "workflows") {
+    return <WorkflowsRightPanel />;
+  }
 
   const openPage = (path: string) => {
     void openWikiPage(currentProject.projectId, currentProject.rootPath, path);

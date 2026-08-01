@@ -195,7 +195,7 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         canonical_identity_key: &str,
         identity_revision: &str,
-    ) -> Result<Vec<WorkflowRun>, String> {
+    ) -> Result<(Vec<WorkflowRun>, Option<WorkflowRun>), String> {
         let _operation = self
             .operation_lock
             .lock()
@@ -207,8 +207,11 @@ impl WorkflowCoordinator {
                 tasks.set_workflow_queue_state(&run.task_id, run.queue_position, false)?;
             }
         }
-        let _ = self.claim_next_locked(tasks, canonical_identity_key, identity_revision)?;
-        Ok(self.owner_runs(tasks, canonical_identity_key, identity_revision))
+        let claimed = self.claim_next_locked(tasks, canonical_identity_key, identity_revision)?;
+        Ok((
+            self.owner_runs(tasks, canonical_identity_key, identity_revision),
+            claimed,
+        ))
     }
 
     pub fn complete_and_claim_next(

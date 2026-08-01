@@ -248,6 +248,17 @@ pub fn set_active_project(
                         &state.confirmation_registry,
                     )?;
                 }
+                if run.kind == crate::models::workflow::WorkflowKind::UpdateWiki
+                    && run.display_status
+                        == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+                {
+                    crate::services::restore_update_wiki_confirmation(
+                        &context,
+                        &run,
+                        &state.task_service,
+                        &state.confirmation_registry,
+                    )?;
+                }
             }
             Ok(tasks)
         }
@@ -266,7 +277,26 @@ pub fn continue_queued_workflows(
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let identity = crate::services::project_identity(&context.root)
         .map_err(|message| BackendError::new("WORKFLOW_IDENTITY_FAILED", &message, true, false))?;
-    let runs = state
+    let mut queued = state
+        .task_service
+        .list_workflow_runs()
+        .into_iter()
+        .filter(|run| {
+            run.canonical_identity_key == identity.canonical_identity_key
+                && run.identity_revision == identity.identity_revision
+                && run.display_status == crate::models::workflow::WorkflowDisplayStatus::Queued
+        })
+        .collect::<Vec<_>>();
+    queued.sort_by_key(|run| {
+        (
+            run.queue_position.unwrap_or(u32::MAX),
+            run.started_at.clone(),
+        )
+    });
+    for queued_run in &queued {
+        super::workflow_commands::revalidate_workflow_replay(&state, &context, queued_run)?;
+    }
+    let (runs, claimed) = state
         .workflow_service
         .coordinator
         .continue_queued(
@@ -275,6 +305,9 @@ pub fn continue_queued_workflows(
             &identity.identity_revision,
         )
         .map_err(|message| BackendError::new("WORKFLOW_CONTINUE_FAILED", &message, true, false))?;
+    if let Some(run) = claimed {
+        state.workflow_service.dispatch_claimed_run(&run)?;
+    }
     Ok(WorkflowRunPage {
         runs,
         next_cursor: None,

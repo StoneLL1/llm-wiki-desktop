@@ -8,7 +8,8 @@ use crate::models::compile::{
     ResolvedCompileRoute, SourceVersionRef,
 };
 use crate::models::confirmation::{
-    ActionPreview, ConfirmationRegistry, PendingAction, PendingActionType, RiskLevel,
+    ActionPreview, ConfirmationExecution, ConfirmationRegistry, PendingAction, PendingActionType,
+    RiskLevel,
 };
 use crate::models::git::CheckpointPurpose;
 use crate::models::paths::ProjectContext;
@@ -256,9 +257,6 @@ async fn execute_update_wiki(
             )?;
             return Ok(UpdateWikiOutcome::Waiting);
         }
-        sink.complete(REVIEW_RISK).map_err(task_error)?;
-        sink.start(APPLY_CHANGES).map_err(task_error)?;
-        let expected_hashes = baseline_manifest_hashes(&candidate.manifest, &wiki_baseline);
         let candidate_sources = selected_sources
             .iter()
             .map(|source| source.reference.clone())
@@ -274,192 +272,16 @@ async fn execute_update_wiki(
             &wiki_baseline,
             checkpoint.commit_hash.clone(),
         )?;
-        let mut metadata_paths = vec![format!(".app/compile/{task_id}.json")];
-        metadata_paths.extend(
-            candidate_sources
-                .iter()
-                .filter(|reference| !reference.source_id.starts_with("legacy-"))
-                .map(|reference| format!(".app/sources/{}.json", reference.source_id)),
-        );
-        let backup = CompileService::backup_workflow_outputs(
-            context,
-            &candidate.manifest,
-            &metadata_paths,
-        )?;
-        services
-            .compile
-            .task_service
-            .set_task_cancellable(task_id, false)
-            .map_err(task_error)?;
-        let preapply_check = (|| {
-            ensure_checkpoint_head(
-                services.git_service,
-                context,
-                checkpoint.commit_hash.as_deref(),
-            )?;
-            revalidate_non_wiki_inputs(context, &input_baseline)?;
-            ensure_clean_git(services.git_service, context)
-        })();
-        if let Err(error) = preapply_check {
-            services
-                .compile
-                .task_service
-                .set_task_cancellable(task_id, true)
-                .map_err(task_error)?;
-            return Err(error);
-        }
-        let apply_result = CompileService::apply_confirmed_workflow_manifest(
-            context,
-            &candidate.manifest,
-            Some(&candidate.plan),
-            &expected_hashes,
-        );
-        let affected_paths = match apply_result {
-            Ok(paths) => paths,
-            Err(error) => {
-                let applied_paths = applied_paths_from_error(&error);
-                if let Err(rollback_error) = CompileService::restore_workflow_outputs_if_unchanged(
-                    context,
-                    &backup,
-                    &candidate.manifest,
-                    &applied_paths,
-                ) {
-                    return Err(BackendError::new(
-                        "WORKFLOW_APPLY_ROLLBACK_FAILED",
-                        format!(
-                            "Update Wiki apply failed and rollback could not restore a stable state: apply={}; rollback={}",
-                            error.message, rollback_error.message
-                        ),
-                        false,
-                        true,
-                    )
-                    .with_details(serde_json::json!({
-                        "candidateId": task_id,
-                        "appliedPaths": applied_paths,
-                    })));
-                }
-                services
-                    .compile
-                    .task_service
-                    .set_task_cancellable(task_id, true)
-                    .map_err(task_error)?;
-                return Err(error);
-            }
-        };
-        let mut rollback_paths = affected_paths.clone();
-        rollback_paths.push(".app/graph-cache.json".into());
-        rollback_paths.extend(metadata_paths);
-        let reversible_finalize = (|| {
-            sink.progress(
-                APPLY_CHANGES,
-                affected_paths.first().cloned(),
-                affected_paths.len() as u64,
-                Some(affected_paths.len() as u64),
-            )
-            .map_err(task_error)?;
-            sink.complete(APPLY_CHANGES).map_err(task_error)?;
-            sink.start(REFRESH_INDEXES).map_err(task_error)?;
-            refresh_indexes(context, task_id, services)?;
-            sink.complete(REFRESH_INDEXES).map_err(task_error)?;
-            sink.start(RECORD_RESULT).map_err(task_error)?;
-            let source_versions = selected_sources
-                .iter()
-                .map(|source| source.reference.clone())
-                .collect::<Vec<_>>();
-            Ok::<_, BackendError>(source_versions)
-        })();
-        let source_versions = match reversible_finalize {
-            Ok(source_versions) => source_versions,
-            Err(error) => {
-                rollback_after_apply(
-                    context,
-                    task_id,
-                    &backup,
-                    &candidate.manifest,
-                    &rollback_paths,
-                    services,
-                    &error,
-                )?;
-                return Err(error);
-            }
-        };
-        let pending_result = WorkflowResult::UpdateWiki {
-            created: summary.created.len() as u64,
-            updated: summary.updated.len() as u64,
-            skipped: summary.skipped.len() as u64,
-            deleted: summary.deleted.len() as u64,
-            conflicted: summary.conflicted.len() as u64,
-            affected_paths: affected_paths.clone(),
-            checkpoint_hash: checkpoint.commit_hash.clone(),
-            final_commit: None,
-        };
-        if let Err(error) = persist_reconciliation_result(task_id, &pending_result) {
-            rollback_after_apply(
-                context,
-                task_id,
-                &backup,
-                &candidate.manifest,
-                &rollback_paths,
-                services,
-                &error,
-            )?;
-            return Err(error);
-        }
-        let final_commit = match record_compile_result(
-            context,
-            task_id,
-            candidate.route.legacy_kind(),
-            &affected_paths,
-            checkpoint.commit_hash.clone(),
-            &source_versions,
-            services,
-        ) {
-            Ok(commit) => commit,
-            Err(error) => {
-                rollback_after_apply(
-                    context,
-                    task_id,
-                    &backup,
-                    &candidate.manifest,
-                    &rollback_paths,
-                    services,
-                    &error,
-                )?;
-                return Err(error);
-            }
-        };
-        let committed_result = WorkflowResult::UpdateWiki {
-            created: summary.created.len() as u64,
-            updated: summary.updated.len() as u64,
-            skipped: summary.skipped.len() as u64,
-            deleted: summary.deleted.len() as u64,
-            conflicted: summary.conflicted.len() as u64,
-            affected_paths,
-            checkpoint_hash: checkpoint.commit_hash,
-            final_commit,
-        };
-        let _ = persist_reconciliation_result(task_id, &committed_result);
-        let terminal = sink
-            .complete(RECORD_RESULT)
-            .and_then(|_| sink.finish(committed_result).map(|(_, next)| next));
-        let next = match terminal {
-            Ok(next) => next,
-            Err(error) => {
-                let _ = services.compile.task_service.append_log(
-                    task_id,
-                    LogLevel::Error,
-                    format!(
-                        "Update Wiki committed successfully but task completion requires recovery: {error}"
-                    ),
-                );
-                return Ok(UpdateWikiOutcome::CommittedPendingReconciliation);
-            }
-        };
-        let _ = services
-            .compile
-            .task_service
-            .set_task_cancellable(task_id, true);
-        Ok(UpdateWikiOutcome::Finished(next))
+        let descriptor =
+            load_valid_update_wiki_candidate(task_id, &context.root).ok_or_else(|| {
+                BackendError::new(
+                    "WORKFLOW_CANDIDATE_STALE",
+                    "The Update Wiki candidate is no longer valid.",
+                    true,
+                    true,
+                )
+            })?;
+        apply_persisted_update_wiki_candidate(context, run, descriptor, services)
     }
     .await;
     let preserve_recovery = result.as_ref().is_err_and(|error| {
@@ -670,7 +492,14 @@ fn register_waiting_decision(
         expires_at: None,
         checkpoint_hash: checkpoint_hash.clone(),
     };
-    services.confirmation_registry.register(action)?;
+    services.confirmation_registry.register_with_execution(
+        action,
+        Some(ConfirmationExecution::UpdateWikiReview {
+            project_id: context.project_id.clone(),
+            root_path: context.root.to_string_lossy().into_owned(),
+            task_id: run.task_id.clone(),
+        }),
+    )?;
     Ok(WorkflowPendingAction {
         id: action_id,
         action_type: PendingActionType::MergeConflict,
@@ -848,6 +677,457 @@ pub fn persist_update_wiki_review(
     )
     .wait(REVIEW_RISK, pending)
     .map_err(task_error)
+}
+
+#[derive(Debug)]
+pub struct UpdateWikiConfirmationFailure {
+    pub error: BackendError,
+    pub next: Option<WorkflowRun>,
+}
+
+pub fn confirm_update_wiki_review(
+    context: &ProjectContext,
+    task_id: &str,
+    services: &UpdateWikiExecutionServices<'_>,
+) -> Result<(WorkflowRun, Option<WorkflowRun>), UpdateWikiConfirmationFailure> {
+    let run = services
+        .compile
+        .task_service
+        .get_workflow_run(task_id)
+        .ok_or_else(|| UpdateWikiConfirmationFailure {
+            error: BackendError::new(
+                "TASK_NOT_FOUND",
+                "Update Wiki task not found.",
+                false,
+                false,
+            ),
+            next: None,
+        })?;
+    let workflow = services
+        .compile
+        .task_service
+        .workflow_execution_state(task_id)
+        .ok_or_else(|| UpdateWikiConfirmationFailure {
+            error: BackendError::new(
+                "TASK_NOT_FOUND",
+                "Update Wiki execution state is unavailable.",
+                false,
+                false,
+            ),
+            next: None,
+        })?;
+    if run.kind != WorkflowKind::UpdateWiki
+        || run.display_status
+            != crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+        || !update_wiki_candidate_is_valid_for_workflow(task_id, &context.root, &workflow)
+    {
+        let error = BackendError::new(
+            "WORKFLOW_CANDIDATE_STALE",
+            "The Update Wiki candidate is no longer safe to apply.",
+            true,
+            true,
+        );
+        let next = finish_error(&run, services, error.clone());
+        let _ = discard_update_wiki_candidate(task_id);
+        return Err(UpdateWikiConfirmationFailure { error, next });
+    }
+    let Some(descriptor) = load_valid_update_wiki_candidate(task_id, &context.root) else {
+        let error = BackendError::new(
+            "WORKFLOW_CANDIDATE_STALE",
+            "The Update Wiki candidate is unavailable.",
+            true,
+            true,
+        );
+        let next = finish_error(&run, services, error.clone());
+        let _ = discard_update_wiki_candidate(task_id);
+        return Err(UpdateWikiConfirmationFailure { error, next });
+    };
+    if let Err(message) = services
+        .compile
+        .task_service
+        .begin_confirmed_workflow_apply(task_id)
+    {
+        let error = task_error(message);
+        let next = finish_error(&run, services, error.clone());
+        let _ = discard_update_wiki_candidate(task_id);
+        return Err(UpdateWikiConfirmationFailure { error, next });
+    }
+
+    match apply_persisted_update_wiki_candidate(context, &run, descriptor, services) {
+        Ok(UpdateWikiOutcome::Finished(next)) => {
+            let completed = services
+                .compile
+                .task_service
+                .get_workflow_run(task_id)
+                .ok_or_else(|| UpdateWikiConfirmationFailure {
+                    error: BackendError::new(
+                        "TASK_NOT_FOUND",
+                        "Update Wiki task disappeared after confirmation.",
+                        false,
+                        false,
+                    ),
+                    next: next.clone(),
+                })?;
+            let _ = discard_update_wiki_candidate(task_id);
+            Ok((completed, next))
+        }
+        Ok(UpdateWikiOutcome::CommittedPendingReconciliation) => {
+            let current = services
+                .compile
+                .task_service
+                .get_workflow_run(task_id)
+                .ok_or_else(|| UpdateWikiConfirmationFailure {
+                    error: BackendError::new(
+                        "TASK_NOT_FOUND",
+                        "Update Wiki task disappeared after the committed result.",
+                        false,
+                        false,
+                    ),
+                    next: None,
+                })?;
+            Ok((current, None))
+        }
+        Ok(UpdateWikiOutcome::Waiting) => Err(UpdateWikiConfirmationFailure {
+            error: BackendError::new(
+                "WORKFLOW_CONFIRMATION_STATE_INVALID",
+                "Update Wiki remained waiting after confirmation.",
+                false,
+                true,
+            ),
+            next: None,
+        }),
+        Err(error) => {
+            let preserve_recovery = matches!(
+                error.code.as_str(),
+                "WORKFLOW_APPLY_ROLLBACK_FAILED" | "WORKFLOW_ROLLBACK_CONFLICT"
+            );
+            let next = finish_error(&run, services, error.clone());
+            if !preserve_recovery {
+                let _ = discard_update_wiki_candidate(task_id);
+            }
+            Err(UpdateWikiConfirmationFailure { error, next })
+        }
+    }
+}
+
+pub fn restore_update_wiki_confirmation(
+    context: &ProjectContext,
+    run: &WorkflowRun,
+    tasks: &TaskService,
+    registry: &ConfirmationRegistry,
+) -> Result<(), BackendError> {
+    let pending = run.pending_action.as_ref().ok_or_else(|| {
+        BackendError::new(
+            "WORKFLOW_CONFIRMATION_RECOVERY_FAILED",
+            "Update Wiki has no pending confirmation to restore.",
+            true,
+            true,
+        )
+    })?;
+    if registry.peek(&pending.id).is_ok() {
+        return Ok(());
+    }
+    let workflow = tasks
+        .workflow_execution_state(&run.task_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                "WORKFLOW_CONFIRMATION_RECOVERY_FAILED",
+                "Update Wiki execution state is unavailable.",
+                true,
+                true,
+            )
+        })?;
+    if !update_wiki_candidate_is_valid_for_workflow(&run.task_id, &context.root, &workflow) {
+        return Err(BackendError::new(
+            "WORKFLOW_CONFIRMATION_RECOVERY_FAILED",
+            "Update Wiki candidate is no longer valid.",
+            true,
+            true,
+        ));
+    }
+    let descriptor =
+        load_valid_update_wiki_candidate(&run.task_id, &context.root).ok_or_else(|| {
+            BackendError::new(
+                "WORKFLOW_CONFIRMATION_RECOVERY_FAILED",
+                "Update Wiki candidate is unavailable.",
+                true,
+                true,
+            )
+        })?;
+    registry.register_with_execution(
+        PendingAction {
+            id: pending.id.clone(),
+            action_type: pending.action_type.clone(),
+            title: "Review Update Wiki changes".into(),
+            message: "Generated Wiki changes require review before they can be applied.".into(),
+            risk_level: pending.risk_level.clone(),
+            affected_paths: pending.affected_paths.clone(),
+            preview: Some(ActionPreview {
+                summary: format!("{} path(s) require review", pending.affected_paths.len()),
+                before: None,
+                after: None,
+                diff: Some(CompileService::candidate_diff(
+                    &descriptor.candidate.manifest,
+                )),
+            }),
+            expires_at: pending.expires_at.clone(),
+            checkpoint_hash: pending.checkpoint_hash.clone(),
+        },
+        Some(ConfirmationExecution::UpdateWikiReview {
+            project_id: context.project_id.clone(),
+            root_path: context.root.to_string_lossy().into_owned(),
+            task_id: run.task_id.clone(),
+        }),
+    )
+}
+
+fn apply_persisted_update_wiki_candidate(
+    context: &ProjectContext,
+    run: &WorkflowRun,
+    descriptor: PersistedUpdateWikiCandidate,
+    services: &UpdateWikiExecutionServices<'_>,
+) -> Result<UpdateWikiOutcome, BackendError> {
+    let task_id = run.task_id.as_str();
+    let sink = WorkflowStageSink::new(services.compile.task_service, services.coordinator, task_id);
+    let (mode, _) = update_scope(run)?;
+    ensure_checkpoint_head(
+        services.git_service,
+        context,
+        descriptor.checkpoint_hash.as_deref(),
+    )?;
+    ensure_clean_git(services.git_service, context)?;
+    if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
+        != descriptor.current_hashes
+    {
+        return Err(BackendError::new(
+            "WORKFLOW_OUTPUT_BASELINE_CHANGED",
+            "Wiki outputs changed after the Update Wiki candidate was prepared.",
+            true,
+            true,
+        ));
+    }
+    let resolved_sources =
+        CompileService::resolve_source_versions(context, &descriptor.source_versions)?;
+    if mode == UpdateWikiMode::ChangedSources
+        && resolved_sources
+            .iter()
+            .any(|source| source.already_consumed)
+    {
+        return Err(BackendError::new(
+            "COMPILE_SOURCE_VERSION_STALE",
+            "A selected Source version was consumed before Update Wiki confirmation.",
+            true,
+            true,
+        ));
+    }
+    let known_sources = CompileService::known_source_refs(context)?;
+    CompileService::validate_workflow_manifest_semantics(
+        context,
+        &descriptor.candidate.manifest,
+        Some(&descriptor.candidate.plan),
+        &known_sources,
+    )?;
+    let summary = CompileService::classify_workflow_changes(
+        context,
+        &descriptor.candidate.manifest,
+        &descriptor.candidate.plan,
+        &descriptor.baseline_hashes,
+        mode == UpdateWikiMode::FullRecompile,
+    )?;
+    sink.complete(REVIEW_RISK).map_err(task_error)?;
+    sink.start(APPLY_CHANGES).map_err(task_error)?;
+
+    let mut metadata_paths = vec![format!(".app/compile/{task_id}.json")];
+    metadata_paths.extend(
+        descriptor
+            .source_versions
+            .iter()
+            .filter(|reference| !reference.source_id.starts_with("legacy-"))
+            .map(|reference| format!(".app/sources/{}.json", reference.source_id)),
+    );
+    let backup = CompileService::backup_workflow_outputs(
+        context,
+        &descriptor.candidate.manifest,
+        &metadata_paths,
+    )?;
+    services
+        .compile
+        .task_service
+        .set_task_cancellable(task_id, false)
+        .map_err(task_error)?;
+    let preapply_check = (|| {
+        ensure_checkpoint_head(
+            services.git_service,
+            context,
+            descriptor.checkpoint_hash.as_deref(),
+        )?;
+        ensure_clean_git(services.git_service, context)?;
+        if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
+            != descriptor.current_hashes
+        {
+            return Err(BackendError::new(
+                "WORKFLOW_OUTPUT_BASELINE_CHANGED",
+                "Wiki outputs changed immediately before Update Wiki apply.",
+                true,
+                true,
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = preapply_check {
+        services
+            .compile
+            .task_service
+            .set_task_cancellable(task_id, true)
+            .map_err(task_error)?;
+        return Err(error);
+    }
+    let expected_hashes =
+        baseline_manifest_hashes(&descriptor.candidate.manifest, &descriptor.baseline_hashes);
+    let affected_paths = match CompileService::apply_confirmed_workflow_manifest(
+        context,
+        &descriptor.candidate.manifest,
+        Some(&descriptor.candidate.plan),
+        &expected_hashes,
+    ) {
+        Ok(paths) => paths,
+        Err(error) => {
+            let applied_paths = applied_paths_from_error(&error);
+            if let Err(rollback_error) = CompileService::restore_workflow_outputs_if_unchanged(
+                context,
+                &backup,
+                &descriptor.candidate.manifest,
+                &applied_paths,
+            ) {
+                return Err(BackendError::new(
+                    "WORKFLOW_APPLY_ROLLBACK_FAILED",
+                    format!(
+                        "Update Wiki apply failed and rollback could not restore a stable state: apply={}; rollback={}",
+                        error.message, rollback_error.message
+                    ),
+                    false,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "candidateId": task_id,
+                    "appliedPaths": applied_paths,
+                })));
+            }
+            services
+                .compile
+                .task_service
+                .set_task_cancellable(task_id, true)
+                .map_err(task_error)?;
+            return Err(error);
+        }
+    };
+    let mut rollback_paths = affected_paths.clone();
+    rollback_paths.push(".app/graph-cache.json".into());
+    rollback_paths.extend(metadata_paths);
+    let reversible_finalize = (|| {
+        sink.progress(
+            APPLY_CHANGES,
+            affected_paths.first().cloned(),
+            affected_paths.len() as u64,
+            Some(affected_paths.len() as u64),
+        )
+        .map_err(task_error)?;
+        sink.complete(APPLY_CHANGES).map_err(task_error)?;
+        sink.start(REFRESH_INDEXES).map_err(task_error)?;
+        refresh_indexes(context, task_id, services)?;
+        sink.complete(REFRESH_INDEXES).map_err(task_error)?;
+        sink.start(RECORD_RESULT).map_err(task_error)?;
+        Ok::<_, BackendError>(())
+    })();
+    if let Err(error) = reversible_finalize {
+        rollback_after_apply(
+            context,
+            task_id,
+            &backup,
+            &descriptor.candidate.manifest,
+            &rollback_paths,
+            services,
+            &error,
+        )?;
+        return Err(error);
+    }
+    let pending_result = WorkflowResult::UpdateWiki {
+        created: summary.created.len() as u64,
+        updated: summary.updated.len() as u64,
+        skipped: summary.skipped.len() as u64,
+        deleted: summary.deleted.len() as u64,
+        conflicted: summary.conflicted.len() as u64,
+        affected_paths: affected_paths.clone(),
+        checkpoint_hash: descriptor.checkpoint_hash.clone(),
+        final_commit: None,
+    };
+    if let Err(error) = persist_reconciliation_result(task_id, &pending_result) {
+        rollback_after_apply(
+            context,
+            task_id,
+            &backup,
+            &descriptor.candidate.manifest,
+            &rollback_paths,
+            services,
+            &error,
+        )?;
+        return Err(error);
+    }
+    let final_commit = match record_compile_result(
+        context,
+        task_id,
+        descriptor.candidate.route.legacy_kind(),
+        &affected_paths,
+        descriptor.checkpoint_hash.clone(),
+        &descriptor.source_versions,
+        services,
+    ) {
+        Ok(commit) => commit,
+        Err(error) => {
+            rollback_after_apply(
+                context,
+                task_id,
+                &backup,
+                &descriptor.candidate.manifest,
+                &rollback_paths,
+                services,
+                &error,
+            )?;
+            return Err(error);
+        }
+    };
+    let committed_result = WorkflowResult::UpdateWiki {
+        created: summary.created.len() as u64,
+        updated: summary.updated.len() as u64,
+        skipped: summary.skipped.len() as u64,
+        deleted: summary.deleted.len() as u64,
+        conflicted: summary.conflicted.len() as u64,
+        affected_paths,
+        checkpoint_hash: descriptor.checkpoint_hash,
+        final_commit,
+    };
+    let _ = persist_reconciliation_result(task_id, &committed_result);
+    let terminal = sink
+        .complete(RECORD_RESULT)
+        .and_then(|_| sink.finish(committed_result).map(|(_, next)| next));
+    let next = match terminal {
+        Ok(next) => next,
+        Err(error) => {
+            let _ = services.compile.task_service.append_log(
+                task_id,
+                LogLevel::Error,
+                format!(
+                    "Update Wiki committed successfully but task completion requires recovery: {error}"
+                ),
+            );
+            return Ok(UpdateWikiOutcome::CommittedPendingReconciliation);
+        }
+    };
+    let _ = services
+        .compile
+        .task_service
+        .set_task_cancellable(task_id, true);
+    Ok(UpdateWikiOutcome::Finished(next))
 }
 
 fn current_manifest_hashes(
@@ -1097,6 +1377,16 @@ fn finish_error(
         || tasks.get_task(&run.task_id).is_some_and(|task| {
             matches!(task.status, TaskStatus::Cancelling | TaskStatus::Cancelled)
         });
+    if tasks.get_workflow_run(&run.task_id).is_some_and(|current| {
+        current.display_status
+            == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+    }) {
+        if cancelled {
+            let _ = services.coordinator.cancel(tasks, &run.task_id);
+        } else {
+            let _ = tasks.clear_workflow_pending_action(&run.task_id);
+        }
+    }
     let outcome = if cancelled {
         services
             .coordinator

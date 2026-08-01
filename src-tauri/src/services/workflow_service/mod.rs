@@ -40,8 +40,9 @@ pub use runners::health_check::{
     run_health_check, run_health_check_with_deep, HealthCheckExecutionServices, HealthCheckRunner,
 };
 pub use runners::update_wiki::{
-    discard_update_wiki_candidate, persist_update_wiki_review, run_update_wiki,
-    update_wiki_candidate_is_valid, UpdateWikiExecutionServices, UpdateWikiRunner,
+    confirm_update_wiki_review, discard_update_wiki_candidate, persist_update_wiki_review,
+    restore_update_wiki_confirmation, run_update_wiki, update_wiki_candidate_is_valid,
+    UpdateWikiConfirmationFailure, UpdateWikiExecutionServices, UpdateWikiRunner,
 };
 pub use stage_sink::WorkflowStageSink;
 

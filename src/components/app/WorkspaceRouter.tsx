@@ -3,6 +3,7 @@ import { lazy, Suspense } from "react";
 import type { AgentWorkflow } from "../../features/agent/useAgentWorkflow";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
+import type { WorkflowsController } from "../../features/workflows/useWorkflowsController";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { AppView } from "../../stores/navigationStore";
@@ -45,6 +46,11 @@ const AgentView = lazy(() =>
     default: module.AgentView,
   })),
 );
+const WorkflowsView = lazy(() =>
+  import("../../features/workflows/WorkflowsView").then((module) => ({
+    default: module.WorkflowsView,
+  })),
+);
 
 interface WorkspaceRouterProps {
   activeView: AppView;
@@ -52,6 +58,7 @@ interface WorkspaceRouterProps {
   taskLauncher: TaskLauncher;
   importWorkflow: ImportWorkflow;
   agentWorkflow: AgentWorkflow;
+  workflowsController: WorkflowsController;
   tasks: BackendTask[];
   activities?: Record<string, TaskActivity[]>;
   taskOutputs?: Record<string, string>;
@@ -65,6 +72,7 @@ export function WorkspaceRouter({
   taskLauncher,
   importWorkflow,
   agentWorkflow,
+  workflowsController,
   tasks,
   activities = {},
   taskOutputs = {},
@@ -110,6 +118,8 @@ export function WorkspaceRouter({
             onNavigate={onNavigate}
           />
         );
+      case "workflows":
+        return <WorkflowsView controller={workflowsController} onOpenTask={onOpenTask} />;
     }
   };
 

@@ -123,6 +123,11 @@ pub enum ConfirmationExecution {
         root_path: String,
         task_id: String,
     },
+    UpdateWikiReview {
+        project_id: String,
+        root_path: String,
+        task_id: String,
+    },
     DeleteWikiPage {
         project_id: String,
         root_path: String,

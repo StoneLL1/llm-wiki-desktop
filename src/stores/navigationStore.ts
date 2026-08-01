@@ -15,6 +15,7 @@ export type AppView =
   | "chat"
   | "graph"
   | "agent"
+  | "workflows"
   | "import"
   | "lint"
   | "exports";

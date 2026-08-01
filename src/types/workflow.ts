@@ -193,6 +193,9 @@ export interface WorkflowPreparation {
   gitPolicy: WorkflowGitPolicy;
   requiresScopeConfirmation: boolean;
   quickRerunEligible: boolean;
+  availableSourceVersions?: WorkflowSourceVersionRef[];
+  availableWikiPages?: string[];
+  availableRoutes?: WorkflowRouteSelection[];
 }
 
 export type WorkflowResult =
@@ -259,6 +262,8 @@ export interface WorkflowRun {
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
+  cancellable?: boolean;
+  undoCancelUntil?: string | null;
 }
 
 export type WorkflowOverviewState =

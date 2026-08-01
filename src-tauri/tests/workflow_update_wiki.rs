@@ -16,11 +16,11 @@ use llm_wiki_desktop_lib::models::workflow::{
     WorkflowScope, WorkflowSourceVersionRef, WorkflowStageStatus,
 };
 use llm_wiki_desktop_lib::services::{
-    persist_update_wiki_review, run_update_wiki, update_wiki_candidate_is_valid,
-    workflow_baseline_for_scope, workflow_stages, AgentInvocation, AgentService, BookmarkService,
-    CompileExecutionServices, CompileService, EnqueueWorkflow, FileStore, GitService, LlmService,
-    ProcessRunner, SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
-    WorkflowCoordinator, WorkflowStageSink,
+    confirm_update_wiki_review, persist_update_wiki_review, run_update_wiki,
+    update_wiki_candidate_is_valid, workflow_baseline_for_scope, workflow_stages, AgentInvocation,
+    AgentService, BookmarkService, CompileExecutionServices, CompileService, EnqueueWorkflow,
+    FileStore, GitService, LlmService, ProcessRunner, SearchService, SecretService,
+    SettingsService, UpdateWikiExecutionServices, WorkflowCoordinator, WorkflowStageSink,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 
@@ -851,6 +851,13 @@ async fn real_generated_deletion_enters_persisted_waiting_without_mutating_wiki(
     assert!(!context.wiki_dir.join("concepts/工作流成功.md").exists());
     assert!(update_wiki_candidate_is_valid(&run.task_id, &context.root));
     llm_wiki_desktop_lib::services::discard_update_wiki_candidate(&run.task_id).unwrap();
+    let failure = confirm_update_wiki_review(&context, &run.task_id, &services)
+        .expect_err("a removed candidate must fail closed");
+    assert_eq!(failure.error.code, "WORKFLOW_CANDIDATE_STALE");
+    assert_eq!(
+        tasks.get_workflow_run(&run.task_id).unwrap().display_status,
+        WorkflowDisplayStatus::Failed
+    );
     fs::remove_dir_all(root).ok();
 }
 

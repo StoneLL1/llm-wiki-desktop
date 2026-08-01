@@ -7,6 +7,7 @@ import { useImportStore } from "./importStore";
 import { useLintStore } from "./lintStore";
 import { useNavigationStore } from "./navigationStore";
 import { useSettingsStore } from "./settingsStore";
+import { useWorkflowStore } from "./workflowStore";
 
 export function resetProjectScopedStores(): void {
   // Project switching is synchronous for the shell, but do not discard lint
@@ -22,5 +23,6 @@ export function resetProjectScopedStores(): void {
   useGraphStore.getState().reset();
   useLintStore.getState().reset();
   useSettingsStore.getState().reset();
+  useWorkflowStore.getState().reset();
   useNavigationStore.getState().setActiveView("dashboard");
 }
