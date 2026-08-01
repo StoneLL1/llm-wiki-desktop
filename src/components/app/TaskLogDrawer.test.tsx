@@ -44,11 +44,16 @@ describe("TaskLogDrawer", () => {
     invokeMock.mockReset();
     window.localStorage.clear();
     useTaskStore.setState({
+      activeProjectId: "project-1",
+      activeProjectRootPath: "D:/project-1",
       tasks: [runningTask],
       logs: {},
+      activities: {},
+      taskOutputs: {},
       drawerOpen: true,
       selectedTaskId: "task-1",
       runningCount: 1,
+      tasksHydrated: true,
     });
     useToastStore.setState({ toasts: [] });
     Object.defineProperty(window, "__TAURI_INTERNALS__", {

@@ -8,6 +8,10 @@ use uuid::Uuid;
 use crate::models::task::{
     BackendTask, StreamDelta, TaskActivity, TaskProgress, TaskResult, TaskStatus, TaskType,
 };
+use crate::models::workflow::{
+    WorkflowErrorSummary, WorkflowExecutionState, WorkflowPendingAction, WorkflowResult,
+    WorkflowRun, WorkflowStageStatus,
+};
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
 use crate::tasks::task_events::EventBus;
@@ -15,14 +19,24 @@ use crate::tasks::task_model::{
     validate_transition, CancellationToken, LogLevel, LogLine, TaskEntry,
 };
 
-#[derive(serde::Serialize, serde::Deserialize)]
+const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
+
+fn legacy_task_schema_version() -> u32 {
+    1
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedTaskEntry {
+    #[serde(default = "legacy_task_schema_version")]
+    schema_version: u32,
     task: BackendTask,
     #[serde(default)]
     log_lines: Vec<LogLine>,
     #[serde(default)]
     activities: Vec<TaskActivity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow: Option<WorkflowExecutionState>,
 }
 
 pub struct TaskService {
@@ -31,6 +45,7 @@ pub struct TaskService {
     event_bus: RwLock<EventBus>,
     project_root: RwLock<Option<PathBuf>>,
     task_roots: RwLock<HashMap<String, PathBuf>>,
+    task_persistence_dirs: RwLock<HashMap<String, PathBuf>>,
 }
 
 impl Default for TaskService {
@@ -41,6 +56,7 @@ impl Default for TaskService {
             event_bus: RwLock::new(EventBus::new_noop()),
             project_root: RwLock::new(None),
             task_roots: RwLock::new(HashMap::new()),
+            task_persistence_dirs: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -53,6 +69,7 @@ impl TaskService {
             event_bus: RwLock::new(event_bus),
             project_root: RwLock::new(None),
             task_roots: RwLock::new(HashMap::new()),
+            task_persistence_dirs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -73,8 +90,21 @@ impl TaskService {
         }
         if let Some(root_path) = root {
             self.recover_tasks(&root_path)?;
+            return Ok(self.list_tasks_for_root(&root_path, None));
         }
-        Ok(self.list_tasks(None))
+        Ok(Vec::new())
+    }
+
+    pub fn set_project_context(
+        &self,
+        project_id: String,
+        root: PathBuf,
+        task_state_root: PathBuf,
+    ) -> Result<Vec<BackendTask>, String> {
+        validate_persistence_dir(&root, &task_state_root)?;
+        *self.project_root.write().expect("lock poisoned") = Some(root.clone());
+        self.recover_tasks_from(&root, &task_state_root, Some(&project_id))?;
+        Ok(self.list_tasks_for_root(&root, None))
     }
 
     pub fn current_project_root(&self) -> Option<PathBuf> {
@@ -101,14 +131,18 @@ impl TaskService {
         title: String,
         cancellable: bool,
     ) -> BackendTask {
+        let project_root = self.current_project_root();
+        let persistence_dir = project_root.as_ref().map(|root| root.join(".app/tasks"));
         self.create_task_internal(
             task_type,
             project_id,
-            self.current_project_root(),
+            project_root,
             title,
             cancellable,
             None,
             false,
+            None,
+            persistence_dir,
         )
         .expect("non-project task creation cannot require persistence")
     }
@@ -121,6 +155,7 @@ impl TaskService {
         title: String,
         cancellable: bool,
     ) -> Result<BackendTask, String> {
+        let persistence_dir = project_root.join(".app/tasks");
         self.create_task_internal(
             task_type,
             Some(project_id),
@@ -129,6 +164,8 @@ impl TaskService {
             cancellable,
             None,
             true,
+            None,
+            Some(persistence_dir),
         )
     }
 
@@ -144,6 +181,7 @@ impl TaskService {
         cancellable: bool,
         batch_id: String,
     ) -> Result<BackendTask, String> {
+        let persistence_dir = project_root.join(".app/tasks");
         self.create_task_internal(
             task_type,
             Some(project_id),
@@ -152,7 +190,41 @@ impl TaskService {
             cancellable,
             Some(batch_id),
             true,
+            None,
+            Some(persistence_dir),
         )
+    }
+
+    pub fn create_workflow_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        title: String,
+        workflow: WorkflowExecutionState,
+        task_state_root: Option<PathBuf>,
+    ) -> Result<WorkflowRun, String> {
+        let require_persistence = task_state_root.is_some();
+        let task = self.create_task_internal(
+            TaskType::Workflow,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            require_persistence,
+            Some(workflow),
+            task_state_root,
+        )?;
+        let run = self
+            .get_workflow_run(&task.id)
+            .ok_or_else(|| format!("Workflow task state missing: {}", task.id))?;
+        self.emit(
+            crate::models::task::BackendEventType::WorkflowUpdated,
+            task.project_id.clone(),
+            Some(task.id.clone()),
+            run.clone(),
+        );
+        Ok(run)
     }
 
     fn create_task_internal(
@@ -164,6 +236,8 @@ impl TaskService {
         cancellable: bool,
         batch_id: Option<String>,
         require_persistence: bool,
+        workflow: Option<WorkflowExecutionState>,
+        persistence_dir: Option<PathBuf>,
     ) -> Result<BackendTask, String> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -192,6 +266,7 @@ impl TaskService {
             log_lines: Vec::new(),
             activities: Vec::new(),
             persisted_path: None,
+            workflow,
         };
 
         self.tasks
@@ -204,10 +279,20 @@ impl TaskService {
                 .expect("lock poisoned")
                 .insert(id.clone(), root);
         }
+        if let Some(dir) = persistence_dir {
+            self.task_persistence_dirs
+                .write()
+                .expect("lock poisoned")
+                .insert(id.clone(), dir);
+        }
         if let Err(error) = self.persist_current_task(&id) {
             if require_persistence {
                 self.tasks.write().expect("lock poisoned").remove(&id);
                 self.task_roots.write().expect("lock poisoned").remove(&id);
+                self.task_persistence_dirs
+                    .write()
+                    .expect("lock poisoned")
+                    .remove(&id);
                 self.cancellation.remove(&id);
                 return Err(error);
             }
@@ -238,6 +323,459 @@ impl TaskService {
         list
     }
 
+    pub fn list_tasks_for_root(
+        &self,
+        project_root: &Path,
+        status_filter: Option<TaskStatus>,
+    ) -> Vec<BackendTask> {
+        let canonical = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let roots = self.task_roots.read().expect("lock poisoned");
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let mut list = tasks
+            .iter()
+            .filter(|(id, entry)| {
+                roots
+                    .get(*id)
+                    .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()) == canonical)
+                    .unwrap_or(false)
+                    && status_filter
+                        .as_ref()
+                        .map(|status| &entry.task.status == status)
+                        .unwrap_or(true)
+            })
+            .map(|(_, entry)| entry.task.clone())
+            .collect::<Vec<_>>();
+        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        list
+    }
+
+    pub fn get_workflow_run(&self, id: &str) -> Option<WorkflowRun> {
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let entry = tasks.get(id)?;
+        entry.workflow.as_ref()?.to_run(&entry.task)
+    }
+
+    pub(crate) fn workflow_persistence_dir(&self, id: &str) -> Option<PathBuf> {
+        self.task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    pub(crate) fn workflow_execution_options(
+        &self,
+        id: &str,
+    ) -> Option<crate::models::workflow::WorkflowExecutionOptions> {
+        self.tasks
+            .read()
+            .expect("lock poisoned")
+            .get(id)?
+            .workflow
+            .as_ref()
+            .map(|workflow| workflow.execution_options.clone())
+    }
+
+    pub fn task_belongs_to_root(&self, id: &str, project_root: &Path) -> bool {
+        let expected = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        self.task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()) == expected)
+            .unwrap_or(false)
+    }
+
+    pub fn list_workflow_runs(&self) -> Vec<WorkflowRun> {
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let mut runs = tasks
+            .values()
+            .filter_map(|entry| entry.workflow.as_ref()?.to_run(&entry.task))
+            .collect::<Vec<_>>();
+        runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        runs
+    }
+
+    pub(crate) fn mutate_workflow<F>(&self, id: &str, mutate: F) -> Result<WorkflowRun, String>
+    where
+        F: FnOnce(&mut BackendTask, &mut WorkflowExecutionState) -> Result<(), String>,
+    {
+        let persistence_dir = self
+            .task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
+        let project_root = self
+            .task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        let previous_task = entry.task.clone();
+        let previous_workflow = entry.workflow.clone();
+        let workflow = entry
+            .workflow
+            .as_mut()
+            .ok_or_else(|| format!("Task is not a workflow: {id}"))?;
+
+        mutate(&mut entry.task, workflow)?;
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        if matches!(
+            entry.task.status,
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+        ) && entry.task.completed_at.is_none()
+        {
+            entry.task.completed_at = Some(entry.task.updated_at.clone());
+        }
+
+        let persisted = PersistedTaskEntry {
+            schema_version: PERSISTED_TASK_SCHEMA_VERSION,
+            task: entry.task.clone(),
+            log_lines: entry.log_lines.clone(),
+            activities: entry.activities.clone(),
+            workflow: entry.workflow.clone(),
+        };
+        if let Some(tasks_dir) = persistence_dir {
+            let project_root = project_root
+                .as_deref()
+                .ok_or_else(|| format!("Workflow task has no project root: {id}"))?;
+            validate_persistence_dir(project_root, &tasks_dir)?;
+            let write_result = std::fs::create_dir_all(&tasks_dir)
+                .map_err(|error| format!("Failed to create tasks dir: {error}"))
+                .and_then(|_| {
+                    let path = tasks_dir.join(format!("{id}.json"));
+                    FileStore
+                        .write_json_atomic_absolute(&path, &persisted)
+                        .map_err(|error| format!("Failed to write task file: {}", error.message))?;
+                    entry.persisted_path = Some(path);
+                    Ok(())
+                });
+            if let Err(error) = write_result {
+                entry.task = previous_task;
+                entry.workflow = previous_workflow;
+                return Err(error);
+            }
+        }
+
+        let task = entry.task.clone();
+        let run = entry
+            .workflow
+            .as_ref()
+            .and_then(|workflow| workflow.to_run(&task))
+            .ok_or_else(|| format!("Workflow task has no project: {id}"))?;
+        drop(tasks);
+
+        self.emit(
+            crate::models::task::BackendEventType::WorkflowUpdated,
+            task.project_id.clone(),
+            Some(id.to_string()),
+            run.clone(),
+        );
+        let task_event = match task.status {
+            TaskStatus::Succeeded => crate::models::task::BackendEventType::TaskCompleted,
+            TaskStatus::Failed => crate::models::task::BackendEventType::TaskFailed,
+            TaskStatus::Cancelled => crate::models::task::BackendEventType::TaskCancelled,
+            TaskStatus::WaitingForConfirmation => {
+                crate::models::task::BackendEventType::ConfirmationRequested
+            }
+            _ => crate::models::task::BackendEventType::TaskUpdated,
+        };
+        self.emit(
+            task_event,
+            task.project_id.clone(),
+            Some(id.to_string()),
+            task,
+        );
+        Ok(run)
+    }
+
+    pub fn set_workflow_queue_state(
+        &self,
+        id: &str,
+        queue_position: Option<u32>,
+        continuation_required: bool,
+    ) -> Result<WorkflowRun, String> {
+        self.mutate_workflow(id, |_, workflow| {
+            workflow.queue_position = queue_position;
+            workflow.continuation_required = continuation_required;
+            Ok(())
+        })
+    }
+
+    pub fn transition_workflow_status(
+        &self,
+        id: &str,
+        status: TaskStatus,
+    ) -> Result<WorkflowRun, String> {
+        self.mutate_workflow(id, |task, workflow| {
+            validate_transition(&task.status, &status)?;
+            task.status = status.clone();
+            if status == TaskStatus::Running {
+                workflow.queue_position = None;
+                workflow.continuation_required = false;
+                workflow.cancelled_from_queue = false;
+                workflow.undo_cancel_until = None;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn start_workflow_stage(&self, id: &str, stage_id: &str) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            require_running_workflow(task, cancellation.as_ref(), id)?;
+            if workflow.current_stage_id.is_some()
+                || workflow.stages.iter().any(|stage| {
+                    matches!(
+                        stage.status,
+                        WorkflowStageStatus::Running | WorkflowStageStatus::Waiting
+                    )
+                })
+            {
+                return Err(format!("Workflow already has an active stage: {id}"));
+            }
+            let target_ordinal = workflow
+                .stages
+                .iter()
+                .find(|stage| stage.id == stage_id)
+                .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?
+                .ordinal;
+            if workflow.stages.iter().any(|stage| {
+                stage.ordinal < target_ordinal
+                    && !matches!(
+                        stage.status,
+                        WorkflowStageStatus::Completed | WorkflowStageStatus::Skipped
+                    )
+            }) {
+                return Err(format!(
+                    "Earlier workflow stages are incomplete: {stage_id}"
+                ));
+            }
+            let stage = workflow
+                .stages
+                .iter_mut()
+                .find(|stage| stage.id == stage_id)
+                .expect("workflow stage was resolved above");
+            if stage.status != WorkflowStageStatus::Pending {
+                return Err(format!("Workflow stage is not pending: {stage_id}"));
+            }
+            stage.status = WorkflowStageStatus::Running;
+            stage
+                .started_at
+                .get_or_insert_with(|| Utc::now().to_rfc3339());
+            stage.completed_at = None;
+            workflow.current_stage_id = Some(stage_id.to_string());
+            Ok(())
+        })
+    }
+
+    pub fn update_workflow_stage_progress(
+        &self,
+        id: &str,
+        stage_id: &str,
+        current_item: Option<String>,
+        current: u64,
+        total: Option<u64>,
+    ) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            require_running_workflow(task, cancellation.as_ref(), id)?;
+            require_current_stage(workflow, stage_id)?;
+            let stage = workflow
+                .stages
+                .iter_mut()
+                .find(|stage| stage.id == stage_id)
+                .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?;
+            if stage.status != WorkflowStageStatus::Running {
+                return Err(format!("Workflow stage is not running: {stage_id}"));
+            }
+            stage.current_item = current_item;
+            stage.progress =
+                Some(crate::models::workflow::WorkflowCountProgress { current, total });
+            Ok(())
+        })
+    }
+
+    pub fn complete_workflow_stage(&self, id: &str, stage_id: &str) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            require_running_workflow(task, cancellation.as_ref(), id)?;
+            require_current_stage(workflow, stage_id)?;
+            let stage = workflow
+                .stages
+                .iter_mut()
+                .find(|stage| stage.id == stage_id)
+                .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?;
+            if stage.status != WorkflowStageStatus::Running {
+                return Err(format!("Workflow stage is not running: {stage_id}"));
+            }
+            stage.status = WorkflowStageStatus::Completed;
+            stage.completed_at = Some(Utc::now().to_rfc3339());
+            stage.decision = None;
+            workflow.current_stage_id = None;
+            Ok(())
+        })
+    }
+
+    pub fn fail_workflow_stage(
+        &self,
+        id: &str,
+        stage_id: &str,
+        error: WorkflowErrorSummary,
+    ) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            require_running_workflow(task, cancellation.as_ref(), id)?;
+            require_current_stage(workflow, stage_id)?;
+            let stage = workflow
+                .stages
+                .iter_mut()
+                .find(|stage| stage.id == stage_id)
+                .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?;
+            if stage.status != WorkflowStageStatus::Running {
+                return Err(format!("Workflow stage is not running: {stage_id}"));
+            }
+            validate_transition(&task.status, &TaskStatus::Failed)?;
+            stage.status = WorkflowStageStatus::Failed;
+            stage.completed_at = Some(Utc::now().to_rfc3339());
+            workflow.current_stage_id = Some(stage_id.to_string());
+            workflow.error = Some(error);
+            task.status = TaskStatus::Failed;
+            Ok(())
+        })
+    }
+
+    pub fn wait_workflow_stage(
+        &self,
+        id: &str,
+        stage_id: &str,
+        pending: WorkflowPendingAction,
+    ) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            require_running_workflow(task, cancellation.as_ref(), id)?;
+            require_current_stage(workflow, stage_id)?;
+            let stage = workflow
+                .stages
+                .iter_mut()
+                .find(|stage| stage.id == stage_id)
+                .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?;
+            if stage.status != WorkflowStageStatus::Running {
+                return Err(format!("Workflow stage is not running: {stage_id}"));
+            }
+            validate_transition(&task.status, &TaskStatus::WaitingForConfirmation)?;
+            stage.status = WorkflowStageStatus::Waiting;
+            stage.decision = Some(pending.clone());
+            workflow.current_stage_id = Some(stage_id.to_string());
+            workflow.pending_action = Some(pending);
+            task.status = TaskStatus::WaitingForConfirmation;
+            Ok(())
+        })
+    }
+
+    pub fn clear_workflow_pending_action(&self, id: &str) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            if cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                return Err(format!("Workflow cancellation was requested: {id}"));
+            }
+            if task.status != TaskStatus::WaitingForConfirmation {
+                return Err(format!("Workflow is not waiting for confirmation: {id}"));
+            }
+            workflow.pending_action = None;
+            if let Some(stage_id) = workflow.current_stage_id.as_deref() {
+                if let Some(stage) = workflow
+                    .stages
+                    .iter_mut()
+                    .find(|stage| stage.id == stage_id)
+                {
+                    stage.decision = None;
+                    stage.status = WorkflowStageStatus::Running;
+                }
+            }
+            task.status = TaskStatus::Running;
+            Ok(())
+        })
+    }
+
+    pub fn complete_workflow(
+        &self,
+        id: &str,
+        result: WorkflowResult,
+    ) -> Result<WorkflowRun, String> {
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            require_running_workflow(task, cancellation.as_ref(), id)?;
+            if workflow.current_stage_id.is_some()
+                || workflow.pending_action.is_some()
+                || workflow.stages.iter().any(|stage| {
+                    !matches!(
+                        stage.status,
+                        WorkflowStageStatus::Completed | WorkflowStageStatus::Skipped
+                    )
+                })
+            {
+                return Err(format!(
+                    "Workflow cannot finish before every stage is completed or skipped: {id}"
+                ));
+            }
+            validate_transition(&task.status, &TaskStatus::Succeeded)?;
+            workflow.result = Some(result);
+            workflow.pending_action = None;
+            workflow.current_stage_id = None;
+            task.status = TaskStatus::Succeeded;
+            Ok(())
+        })
+    }
+
+    pub fn request_workflow_cancel(&self, id: &str) -> Result<WorkflowRun, String> {
+        let run = self
+            .get_workflow_run(id)
+            .ok_or_else(|| format!("Workflow not found: {id}"))?;
+        let updated = match run.display_status {
+            crate::models::workflow::WorkflowDisplayStatus::Running => {
+                self.mutate_workflow(id, |task, _| {
+                    task.status = TaskStatus::Cancelling;
+                    Ok(())
+                })
+            }
+            crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation => self
+                .mutate_workflow(id, |task, workflow| {
+                    task.status = TaskStatus::Cancelling;
+                    workflow.pending_action = None;
+                    Ok(())
+                }),
+            _ => Ok(run),
+        }?;
+        self.cancellation.cancel(id);
+        Ok(updated)
+    }
+
+    pub(crate) fn reset_workflow_cancellation(&self, id: &str) -> Result<(), String> {
+        let token = self.cancellation.register(id);
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        entry.cancellation = token;
+        Ok(())
+    }
+
     pub fn transition_status(
         &self,
         id: &str,
@@ -255,7 +793,10 @@ impl TaskService {
 
         if matches!(
             new_status,
-            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
         ) {
             entry.task.completed_at = Some(Utc::now().to_rfc3339());
         }
@@ -408,7 +949,10 @@ impl TaskService {
         }
         if matches!(
             entry.task.status,
-            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
         ) {
             // Idempotent: the task is already in a terminal state, so the
             // caller's intent (stop the task) is already satisfied. Return
@@ -445,7 +989,10 @@ impl TaskService {
         }
         if matches!(
             entry.task.status,
-            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
         ) {
             return Ok(entry.task.clone());
         }
@@ -568,7 +1115,10 @@ impl TaskService {
         tasks.retain(|id, entry| {
             let is_terminal = matches!(
                 entry.task.status,
-                TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                TaskStatus::Succeeded
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Interrupted
             );
             if is_terminal {
                 removed_ids.push(id.clone());
@@ -578,6 +1128,8 @@ impl TaskService {
             }
             !is_terminal
         });
+        let removed_count = before - tasks.len();
+        drop(tasks);
 
         // Clean up persisted files and cancellation tokens for removed tasks.
         for id in &removed_ids {
@@ -587,11 +1139,67 @@ impl TaskService {
             .write()
             .expect("lock poisoned")
             .retain(|id, _| !removed_ids.contains(id));
+        self.task_persistence_dirs
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !removed_ids.contains(id));
         for path in removed_paths {
             let _ = std::fs::remove_file(path);
         }
 
-        before - tasks.len()
+        removed_count
+    }
+
+    pub fn remove_completed_for_root(&self, project_root: &Path) -> usize {
+        let canonical = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let matching_ids = {
+            let roots = self.task_roots.read().expect("lock poisoned");
+            let tasks = self.tasks.read().expect("lock poisoned");
+            tasks
+                .iter()
+                .filter(|(id, entry)| {
+                    matches!(
+                        entry.task.status,
+                        TaskStatus::Succeeded
+                            | TaskStatus::Failed
+                            | TaskStatus::Cancelled
+                            | TaskStatus::Interrupted
+                    ) && roots
+                        .get(*id)
+                        .map(|root| {
+                            root.canonicalize().unwrap_or_else(|_| root.clone()) == canonical
+                        })
+                        .unwrap_or(false)
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut removed_paths = Vec::new();
+        {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            for id in &matching_ids {
+                if let Some(entry) = tasks.remove(id) {
+                    if let Some(path) = entry.persisted_path {
+                        removed_paths.push(path);
+                    }
+                }
+            }
+        }
+        {
+            let mut roots = self.task_roots.write().expect("lock poisoned");
+            let mut persistence_dirs = self.task_persistence_dirs.write().expect("lock poisoned");
+            for id in &matching_ids {
+                roots.remove(id);
+                persistence_dirs.remove(id);
+                self.cancellation.remove(id);
+            }
+        }
+        for path in removed_paths {
+            let _ = std::fs::remove_file(path);
+        }
+        matching_ids.len()
     }
 
     /// Remove tasks that were prepared for a batch which failed before any
@@ -632,6 +1240,10 @@ impl TaskService {
             .write()
             .expect("lock poisoned")
             .retain(|id, _| !ids.contains(id));
+        self.task_persistence_dirs
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !ids.contains(id));
         for id in ids {
             self.cancellation.remove(id);
         }
@@ -639,20 +1251,32 @@ impl TaskService {
     }
 
     pub fn persist_task(&self, id: &str, project_root: &Path) -> Result<(), String> {
+        let tasks_dir = project_root.join(".app").join("tasks");
+        validate_persistence_dir(project_root, &tasks_dir)?;
+        self.persist_task_to_dir(id, &tasks_dir)?;
+        self.task_persistence_dirs
+            .write()
+            .expect("lock poisoned")
+            .insert(id.to_string(), tasks_dir);
+        Ok(())
+    }
+
+    fn persist_task_to_dir(&self, id: &str, tasks_dir: &Path) -> Result<(), String> {
         let tasks = self.tasks.read().expect("lock poisoned");
         let entry = tasks
             .get(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
 
-        let tasks_dir = project_root.join(".app").join("tasks");
-        std::fs::create_dir_all(&tasks_dir)
+        std::fs::create_dir_all(tasks_dir)
             .map_err(|e| format!("Failed to create tasks dir: {}", e))?;
 
         let path = tasks_dir.join(format!("{}.json", id));
         let persisted = PersistedTaskEntry {
+            schema_version: PERSISTED_TASK_SCHEMA_VERSION,
             task: entry.task.clone(),
             log_lines: entry.log_lines.clone(),
             activities: entry.activities.clone(),
+            workflow: entry.workflow.clone(),
         };
         FileStore
             .write_json_atomic_absolute(&path, &persisted)
@@ -668,21 +1292,38 @@ impl TaskService {
     }
 
     fn persist_current_task(&self, id: &str) -> Result<(), String> {
-        let root = self
-            .task_roots
+        let persistence_dir = self
+            .task_persistence_dirs
             .read()
             .expect("lock poisoned")
             .get(id)
-            .cloned()
-            .or_else(|| self.current_project_root());
-        match root {
-            Some(root) => self.persist_task(id, &root),
+            .cloned();
+        match persistence_dir {
+            Some(dir) => {
+                let project_root = self
+                    .task_roots
+                    .read()
+                    .expect("lock poisoned")
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("Task has no project root: {id}"))?;
+                validate_persistence_dir(&project_root, &dir)?;
+                self.persist_task_to_dir(id, &dir)
+            }
             None => Ok(()),
         }
     }
 
     pub fn recover_tasks(&self, project_root: &Path) -> Result<Vec<BackendTask>, String> {
-        let tasks_dir = project_root.join(".app").join("tasks");
+        self.recover_tasks_from(project_root, &project_root.join(".app/tasks"), None)
+    }
+
+    fn recover_tasks_from(
+        &self,
+        project_root: &Path,
+        tasks_dir: &Path,
+        current_project_id: Option<&str>,
+    ) -> Result<Vec<BackendTask>, String> {
         if !tasks_dir.exists() {
             return Ok(Vec::new());
         }
@@ -698,19 +1339,66 @@ impl TaskService {
                 match std::fs::read_to_string(&path) {
                     Ok(json) => {
                         let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
-                            .map(|entry| (entry.task, entry.log_lines, entry.activities))
+                            .map(|entry| {
+                                (
+                                    entry.task,
+                                    entry.log_lines,
+                                    entry.activities,
+                                    entry.workflow,
+                                )
+                            })
                             .or_else(|_| {
                                 serde_json::from_str::<BackendTask>(&json)
-                                    .map(|task| (task, Vec::new(), Vec::new()))
+                                    .map(|task| (task, Vec::new(), Vec::new(), None))
                             });
                         match parsed {
-                            Ok((mut task, log_lines, activities)) => {
+                            Ok((mut task, log_lines, activities, mut workflow)) => {
+                                if let Some(project_id) = current_project_id {
+                                    task.project_id = Some(project_id.to_string());
+                                }
                                 if let Some(existing) = self.get_task(&task.id) {
-                                    recovered.push(existing);
+                                    if !self.task_belongs_to_root(&task.id, project_root) {
+                                        return Err(format!(
+                                            "Recovered task id collision across project roots: {}",
+                                            task.id
+                                        ));
+                                    }
+                                    let rebound = if let Some(project_id) = current_project_id {
+                                        let mut tasks = self.tasks.write().expect("lock poisoned");
+                                        let entry = tasks
+                                            .get_mut(&task.id)
+                                            .expect("existing task must remain present");
+                                        entry.task.project_id = Some(project_id.to_string());
+                                        entry.task.clone()
+                                    } else {
+                                        existing
+                                    };
+                                    self.persist_current_task(&task.id)?;
+                                    if let Some(run) = self.get_workflow_run(&task.id) {
+                                        self.emit(
+                                            crate::models::task::BackendEventType::WorkflowUpdated,
+                                            Some(run.project_id.clone()),
+                                            Some(run.task_id.clone()),
+                                            run,
+                                        );
+                                    }
+                                    self.emit(
+                                        crate::models::task::BackendEventType::TaskUpdated,
+                                        rebound.project_id.clone(),
+                                        Some(rebound.id.clone()),
+                                        rebound.clone(),
+                                    );
+                                    recovered.push(rebound);
                                     continue;
                                 }
                                 let token = self.cancellation.register(&task.id);
-                                if matches!(
+                                if let Some(state) = workflow.as_mut() {
+                                    crate::services::recover_workflow(
+                                        &mut task,
+                                        state,
+                                        project_root,
+                                    );
+                                } else if matches!(
                                     task.status,
                                     TaskStatus::Running
                                         | TaskStatus::Queued
@@ -734,6 +1422,7 @@ impl TaskService {
                                     log_lines,
                                     activities,
                                     persisted_path: Some(path),
+                                    workflow,
                                 };
 
                                 self.tasks
@@ -744,7 +1433,24 @@ impl TaskService {
                                     .write()
                                     .expect("lock poisoned")
                                     .insert(task.id.clone(), project_root.to_path_buf());
+                                self.task_persistence_dirs
+                                    .write()
+                                    .expect("lock poisoned")
+                                    .insert(task.id.clone(), tasks_dir.to_path_buf());
                                 recovered.push(task);
+                                self.persist_current_task(
+                                    recovered.last().expect("recovered task exists").id.as_str(),
+                                )?;
+                                if let Some(run) = self.get_workflow_run(
+                                    recovered.last().expect("recovered task exists").id.as_str(),
+                                ) {
+                                    self.emit(
+                                        crate::models::task::BackendEventType::WorkflowUpdated,
+                                        run.project_id.clone().into(),
+                                        Some(run.task_id.clone()),
+                                        run,
+                                    );
+                                }
                             }
                             Err(e) => {
                                 eprintln!("Failed to parse task file {}: {}", path.display(), e);
@@ -760,6 +1466,46 @@ impl TaskService {
 
         Ok(recovered)
     }
+}
+
+fn require_running_workflow(
+    task: &BackendTask,
+    cancellation: Option<&CancellationToken>,
+    id: &str,
+) -> Result<(), String> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(format!("Workflow cancellation was requested: {id}"));
+    }
+    if task.status != TaskStatus::Running {
+        return Err(format!("Workflow is not running: {id}"));
+    }
+    Ok(())
+}
+
+fn validate_persistence_dir(project_root: &Path, persistence_dir: &Path) -> Result<(), String> {
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("Project root is unavailable: {error}"))?;
+    let mut ancestor = persistence_dir;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| "Task persistence path has no existing ancestor".to_string())?;
+    }
+    let canonical_ancestor = ancestor
+        .canonicalize()
+        .map_err(|error| format!("Task persistence ancestor is unavailable: {error}"))?;
+    if !canonical_ancestor.starts_with(canonical_root) {
+        return Err("Task persistence path resolves outside the project root".into());
+    }
+    Ok(())
+}
+
+fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> Result<(), String> {
+    if workflow.current_stage_id.as_deref() != Some(stage_id) {
+        return Err(format!("Workflow stage is not current: {stage_id}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1369,7 +2115,7 @@ mod tests {
     }
 
     #[test]
-    fn test_switching_project_keeps_running_tasks_visible_cancellable_and_scoped() {
+    fn test_switching_project_keeps_background_tasks_alive_but_returns_scoped_snapshots() {
         let proj_a = std::env::temp_dir().join("llm-wiki-task-test-isolation-a");
         let proj_b = std::env::temp_dir().join("llm-wiki-task-test-isolation-b");
         let _ = std::fs::remove_dir_all(&proj_a);
@@ -1391,10 +2137,10 @@ mod tests {
         let token_a = service.get_cancellation_token(&task_a.id).unwrap();
         assert_eq!(service.list_tasks(None).len(), 1);
 
-        // Switch to project B: A keeps running in the background and must remain
-        // visible and cancellable from the global task center.
+        // Switch to project B: A keeps running in the backend, but the
+        // frontend-facing snapshot for B must not expose it.
         let recovered_b = service.set_project_root(Some(proj_b.clone())).unwrap();
-        assert_eq!(recovered_b.len(), 1);
+        assert!(recovered_b.is_empty());
         assert_eq!(service.list_tasks(None).len(), 1);
         assert!(service.get_cancellation_token(&task_a.id).is_some());
         let returned_to_a = service.set_project_root(Some(proj_a.clone())).unwrap();
@@ -1424,7 +2170,7 @@ mod tests {
 
         // Closing the workspace must not make background work disappear.
         let recovered_none = service.set_project_root(None).unwrap();
-        assert_eq!(recovered_none.len(), 2);
+        assert!(recovered_none.is_empty());
         assert_eq!(service.list_tasks(None).len(), 2);
 
         let _ = std::fs::remove_dir_all(&proj_a);

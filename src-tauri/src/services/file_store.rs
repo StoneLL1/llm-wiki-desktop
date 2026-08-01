@@ -340,19 +340,47 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
     })?;
     fs::create_dir_all(parent).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
 
-    let tmp_name = match path.file_name() {
-        Some(name) => format!(".{}.tmp", name.to_string_lossy()),
-        None => ".tmp".to_string(),
-    };
-    let tmp_path = parent.join(tmp_name);
+    let file_name = path.file_name().ok_or_else(|| {
+        BackendError::new("PATH_INVALID", "Cannot determine file name.", false, true)
+    })?;
+    let (tmp_path, mut file) = (0..16)
+        .find_map(|_| {
+            let candidate = parent.join(format!(
+                ".{}.{}.tmp",
+                file_name.to_string_lossy(),
+                uuid::Uuid::new_v4()
+            ));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => Some(Ok((candidate, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(io_error("FILE_WRITE_FAILED", error, &candidate))),
+            }
+        })
+        .unwrap_or_else(|| {
+            Err(BackendError::new(
+                "FILE_WRITE_FAILED",
+                "Could not reserve a unique atomic-write temporary file.",
+                true,
+                false,
+            ))
+        })?;
 
-    {
-        let mut file = fs::File::create(&tmp_path)
-            .map_err(|err| io_error("FILE_WRITE_FAILED", err, &tmp_path))?;
-        file.write_all(bytes)
-            .map_err(|err| io_error("FILE_WRITE_FAILED", err, &tmp_path))?;
-        file.sync_all()
-            .map_err(|err| io_error("FILE_WRITE_FAILED", err, &tmp_path))?;
+    // `create_new` atomically rejects every pre-existing filesystem object at
+    // the candidate path, including links/reparse points, before any bytes are
+    // written. The random same-directory name also prevents prediction-based
+    // replacement between project-path validation and this write.
+    let write_result = file
+        .write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|err| io_error("FILE_WRITE_FAILED", err, &tmp_path));
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
     }
 
     fs::rename(&tmp_path, path).map_err(|err| {

@@ -156,7 +156,10 @@ describe("graphStore", () => {
 
     await useGraphStore.getState().rebuild("project-1", "D:/wiki");
 
-    expect(waitForTaskTerminalMock).toHaveBeenCalledWith(started);
+    expect(waitForTaskTerminalMock).toHaveBeenCalledWith(started, {
+      projectId: "project-1",
+      projectRootPath: "D:/wiki",
+    });
     expect(invokeMock).not.toHaveBeenCalledWith("get_task", expect.anything());
     expect(useTaskStore.getState().tasks).toContainEqual(completed);
   });

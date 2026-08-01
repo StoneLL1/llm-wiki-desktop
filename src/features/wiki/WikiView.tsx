@@ -9,7 +9,6 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { Book, Edit2, FileOutput, LoaderCircle, MessageSquareText, Sparkles, Star } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { ViewErrorBoundary } from "../../components/app/ViewErrorBoundary";
@@ -19,7 +18,7 @@ import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { fetchTaskById, useTaskStore } from "../../stores/taskStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
 import type { ExportRecord, ExportType } from "../../types/export";
@@ -149,7 +148,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const loadPreview = useExportStore((state) => state.loadPreview);
   const openFolder = useExportStore((state) => state.openFolder);
   const tasks = useTaskStore((state) => state.tasks);
-  const upsertTask = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
@@ -303,9 +301,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const pagePreviewHtml = previewRecord?.id === previewId ? previewHtml : null;
 
   const showExportTask = (taskId: string) => {
-    void invoke<BackendTask>("get_task", { request: { taskId } }).then((task) => {
-      if (task) upsertTask(task);
-    });
+    void fetchTaskById(taskId);
     openTaskDrawer(taskId);
   };
 

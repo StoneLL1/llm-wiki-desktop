@@ -4,6 +4,7 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::task::{BackendTask, TaskActivity, TaskStatus, TaskType};
+use crate::models::workflow::WorkflowRunPage;
 use crate::tasks::task_model::LogLine;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -19,11 +20,15 @@ pub struct CreateTaskRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TaskByIdRequest {
     pub task_id: String,
+    pub project_id: String,
+    pub project_root_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTasksRequest {
+    pub project_id: String,
+    pub project_root_path: String,
     pub status_filter: Option<TaskStatus>,
 }
 
@@ -53,7 +58,17 @@ pub fn list_tasks(
     state: State<'_, AppState>,
     request: ListTasksRequest,
 ) -> Result<Vec<BackendTask>, BackendError> {
-    Ok(state.task_service.list_tasks(request.status_filter))
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    Ok(state
+        .task_service
+        .list_tasks_for_root(&context.root, request.status_filter))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowProjectRequest {
+    pub project_id: String,
+    pub project_root_path: String,
 }
 
 #[tauri::command]
@@ -61,6 +76,7 @@ pub fn get_task(
     state: State<'_, AppState>,
     request: TaskByIdRequest,
 ) -> Result<Option<BackendTask>, BackendError> {
+    require_task_project(&state, &request)?;
     Ok(state.task_service.get_task(&request.task_id))
 }
 
@@ -69,6 +85,7 @@ pub fn cancel_task(
     state: State<'_, AppState>,
     request: TaskByIdRequest,
 ) -> Result<BackendTask, BackendError> {
+    require_task_project(&state, &request)?;
     let result = if state
         .task_service
         .get_task(&request.task_id)
@@ -90,6 +107,7 @@ pub fn get_task_logs(
     state: State<'_, AppState>,
     request: TaskByIdRequest,
 ) -> Result<Vec<LogLine>, BackendError> {
+    require_task_project(&state, &request)?;
     state
         .task_service
         .get_logs(&request.task_id)
@@ -101,6 +119,7 @@ pub fn get_task_activities(
     state: State<'_, AppState>,
     request: TaskByIdRequest,
 ) -> Result<Vec<TaskActivity>, BackendError> {
+    require_task_project(&state, &request)?;
     state
         .task_service
         .get_activities(&request.task_id)
@@ -108,8 +127,28 @@ pub fn get_task_activities(
 }
 
 #[tauri::command]
-pub fn remove_completed_tasks(state: State<'_, AppState>) -> Result<usize, BackendError> {
-    Ok(state.task_service.remove_completed())
+pub fn remove_completed_tasks(
+    state: State<'_, AppState>,
+    request: WorkflowProjectRequest,
+) -> Result<usize, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    Ok(state.task_service.remove_completed_for_root(&context.root))
+}
+
+fn require_task_project(state: &AppState, request: &TaskByIdRequest) -> Result<(), BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if !state
+        .task_service
+        .task_belongs_to_root(&request.task_id, &context.root)
+    {
+        return Err(BackendError::new(
+            "TASK_PROJECT_MISMATCH",
+            "Task does not belong to the asserted project.",
+            true,
+            true,
+        ));
+    }
+    Ok(())
 }
 
 /// Bind (or clear) the active project root for task persistence. When a root is set,
@@ -119,9 +158,9 @@ pub fn set_active_project(
     state: State<'_, AppState>,
     request: SetActiveProjectRequest,
 ) -> Result<Vec<BackendTask>, BackendError> {
-    let root = match (request.project_id.as_deref(), request.root_path.as_deref()) {
+    let project_context = match (request.project_id.as_deref(), request.root_path.as_deref()) {
         (Some(project_id), Some(root_path)) => {
-            Some(state.resolve_project_context(project_id, root_path)?.root)
+            Some(state.resolve_project_context(project_id, root_path)?)
         }
         (None, None) => None,
         _ => {
@@ -133,8 +172,41 @@ pub fn set_active_project(
             ))
         }
     };
-    state
-        .task_service
-        .set_project_root(root)
-        .map_err(|msg| BackendError::new("TASK_RECOVERY_FAILED", &msg, true, false))
+    match project_context {
+        Some(context) => state
+            .task_service
+            .set_project_context(
+                context.project_id,
+                context.root,
+                context.app_dir.join("tasks"),
+            )
+            .map_err(|msg| BackendError::new("TASK_RECOVERY_FAILED", &msg, true, false)),
+        None => state
+            .task_service
+            .set_project_root(None)
+            .map_err(|msg| BackendError::new("TASK_RECOVERY_FAILED", &msg, true, false)),
+    }
+}
+
+#[tauri::command]
+pub fn continue_queued_workflows(
+    state: State<'_, AppState>,
+    request: WorkflowProjectRequest,
+) -> Result<WorkflowRunPage, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let identity = crate::services::project_identity(&context.root)
+        .map_err(|message| BackendError::new("WORKFLOW_IDENTITY_FAILED", &message, true, false))?;
+    let runs = state
+        .workflow_service
+        .coordinator
+        .continue_queued(
+            &state.task_service,
+            &identity.canonical_identity_key,
+            &identity.identity_revision,
+        )
+        .map_err(|message| BackendError::new("WORKFLOW_CONTINUE_FAILED", &message, true, false))?;
+    Ok(WorkflowRunPage {
+        runs,
+        next_cursor: None,
+    })
 }

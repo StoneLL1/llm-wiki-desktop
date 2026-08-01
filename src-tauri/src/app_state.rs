@@ -11,7 +11,7 @@ use crate::services::import_v2::ImportV2Service;
 use crate::services::{
     AgentService, BookmarkService, ChatConvenienceService, ChatService, ExportService, FileStore,
     GitService, GraphService, LintService, LlmService, ProjectService, SearchService,
-    SecretService, SettingsService,
+    SecretService, SettingsService, WorkflowService,
 };
 use crate::tasks::TaskService;
 
@@ -36,6 +36,7 @@ pub struct AppState {
     pub settings_service: SettingsService,
     pub secret_service: SecretService,
     pub task_service: TaskService,
+    pub workflow_service: WorkflowService,
     pub confirmation_registry: ConfirmationRegistry,
 }
 

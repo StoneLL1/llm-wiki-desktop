@@ -240,6 +240,7 @@ pub fn run() {
             commands::task_commands::get_task_activities,
             commands::task_commands::remove_completed_tasks,
             commands::task_commands::set_active_project,
+            commands::task_commands::continue_queued_workflows,
             commands::wiki_commands::scan_wiki,
             commands::wiki_commands::read_wiki_page,
             commands::wiki_commands::read_wiki_asset,

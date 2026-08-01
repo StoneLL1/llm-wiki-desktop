@@ -42,8 +42,12 @@ beforeEach(() => {
     configurable: true,
   });
   useTaskStore.setState({
+    activeProjectId: "p1",
+    activeProjectRootPath: "/wiki/p1",
     tasks: [],
     logs: {},
+    activities: {},
+    taskOutputs: {},
     drawerOpen: false,
     selectedTaskId: null,
     runningCount: 0,
@@ -181,7 +185,11 @@ describe("useTaskLauncher", () => {
     });
 
     expect(invokeMock).toHaveBeenCalledWith("cancel_task", {
-      request: { taskId: "task-1" },
+      request: {
+        taskId: "task-1",
+        projectId: "p1",
+        projectRootPath: "/wiki/p1",
+      },
     });
     expect(useToastStore.getState().toasts).toEqual([
       expect.objectContaining({

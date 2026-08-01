@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BackendEvent } from "../types/task";
-import { notifyTaskEventListeners, registerTaskEventListener } from "./useTaskEvents";
+import {
+  isTaskEventForProject,
+  notifyTaskEventListeners,
+  registerTaskEventListener,
+} from "./useTaskEvents";
 
 const event: BackendEvent = {
   eventId: "event-1",
@@ -15,6 +19,11 @@ const event: BackendEvent = {
 afterEach(() => vi.restoreAllMocks());
 
 describe("task event listener bridge", () => {
+  it("accepts only events owned by the active project", () => {
+    expect(isTaskEventForProject(event, "project-a")).toBe(true);
+    expect(isTaskEventForProject(event, "project-b")).toBe(false);
+    expect(isTaskEventForProject({ ...event, projectId: null }, "project-a")).toBe(false);
+  });
   it("returns an unsubscribe handle for workflow-owned listeners", () => {
     const listener = vi.fn();
     const unsubscribe = registerTaskEventListener(listener);

@@ -129,6 +129,46 @@ pub enum WorkflowScope {
     },
 }
 
+/// Bounded, non-secret execution facts that may be reused for a linked retry.
+/// Free-form prompts, credentials, source text, model output, raw arguments,
+/// and temporary paths have no representation in this persisted type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowExecutionOptions {
+    pub preparation_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_target_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restricted_content_acknowledgement_revision: Option<String>,
+}
+
+impl WorkflowExecutionOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_revision("preparationRevision", &self.preparation_revision)?;
+        if let Some(hash) = self.existing_target_hash.as_deref() {
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err("existingTargetHash must be a SHA-256 hex digest".into());
+            }
+        }
+        if let Some(revision) = self.restricted_content_acknowledgement_revision.as_deref() {
+            validate_revision("restrictedContentAcknowledgementRevision", revision)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_revision(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(format!("{label} is not a bounded backend revision"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowStageStatus {
@@ -420,4 +460,69 @@ pub enum WorkflowStartOutcome {
 pub struct WorkflowRunPage {
     pub runs: Vec<WorkflowRun>,
     pub next_cursor: Option<String>,
+}
+
+/// Private persisted execution state attached to one generic task snapshot.
+/// It deliberately mirrors only bounded, non-secret workflow facts; task
+/// lifecycle timestamps and project id remain owned by `BackendTask`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowExecutionState {
+    #[serde(default = "workflow_schema_version")]
+    pub schema_version: u32,
+    pub canonical_identity_key: String,
+    pub identity_revision: String,
+    pub kind: WorkflowKind,
+    pub scope: WorkflowScope,
+    #[serde(default)]
+    pub execution_options: WorkflowExecutionOptions,
+    pub route: Option<WorkflowRoute>,
+    pub fingerprint: String,
+    pub baseline_fingerprint: String,
+    pub stages: Vec<WorkflowStage>,
+    pub current_stage_id: Option<String>,
+    pub queue_position: Option<u32>,
+    #[serde(default)]
+    pub continuation_required: bool,
+    #[serde(default)]
+    pub retry: Option<WorkflowRetryLink>,
+    #[serde(default)]
+    pub pending_action: Option<WorkflowPendingAction>,
+    #[serde(default)]
+    pub result: Option<WorkflowResult>,
+    #[serde(default)]
+    pub error: Option<WorkflowErrorSummary>,
+    #[serde(default)]
+    pub cancelled_from_queue: bool,
+    #[serde(default)]
+    pub undo_cancel_until: Option<String>,
+}
+
+impl WorkflowExecutionState {
+    pub fn to_run(&self, task: &crate::models::task::BackendTask) -> Option<WorkflowRun> {
+        Some(WorkflowRun {
+            schema_version: self.schema_version,
+            task_id: task.id.clone(),
+            project_id: task.project_id.clone()?,
+            canonical_identity_key: self.canonical_identity_key.clone(),
+            identity_revision: self.identity_revision.clone(),
+            kind: self.kind.clone(),
+            display_status: WorkflowDisplayStatus::from(&task.status),
+            scope: self.scope.clone(),
+            route: self.route.clone(),
+            fingerprint: self.fingerprint.clone(),
+            baseline_fingerprint: self.baseline_fingerprint.clone(),
+            stages: self.stages.clone(),
+            current_stage_id: self.current_stage_id.clone(),
+            queue_position: self.queue_position,
+            continuation_required: self.continuation_required,
+            retry: self.retry.clone(),
+            pending_action: self.pending_action.clone(),
+            result: self.result.clone(),
+            error: self.error.clone(),
+            started_at: task.started_at.clone(),
+            updated_at: task.updated_at.clone(),
+            completed_at: task.completed_at.clone(),
+        })
+    }
 }

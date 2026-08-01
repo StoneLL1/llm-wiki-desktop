@@ -750,6 +750,7 @@
   "task.type.autoFix": "Auto Fix",
   "task.type.export": "Export",
   "task.type.sourceAiOrganize": "Source AI Organize",
+  "task.type.workflow": "Workflow",
   "notification.taskCompleted.title": "Task completed",
   "notification.taskCompleted.body": "{{title}} finished successfully.",
   "notification.taskCompleted.bodyGeneric": "A task finished successfully.",

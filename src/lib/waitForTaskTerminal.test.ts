@@ -5,6 +5,7 @@ import { waitForTaskTerminal, WaitForTaskTerminalTimeoutError } from "./waitForT
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
 const unlistenMock = vi.hoisted(() => vi.fn());
+const projectScope = { projectId: "p1", projectRootPath: "/wiki/p1" };
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
@@ -38,7 +39,7 @@ function terminalEvent(taskId: string, task: BackendTask): { payload: BackendEve
     payload: {
       eventId: "e1",
       eventType: "task_completed",
-      projectId: null,
+      projectId: "p1",
       taskId,
       timestamp: "",
       payload: task,
@@ -55,7 +56,7 @@ describe("waitForTaskTerminal", () => {
   it("resolves immediately without the event bus when the task is already terminal", async () => {
     const task = { id: "t1", status: "succeeded" } as BackendTask;
 
-    await expect(waitForTaskTerminal(task)).resolves.toEqual(task);
+    await expect(waitForTaskTerminal(task, projectScope)).resolves.toEqual(task);
 
     expect(listenMock).not.toHaveBeenCalled();
     expect(invokeMock).not.toHaveBeenCalled();
@@ -65,7 +66,7 @@ describe("waitForTaskTerminal", () => {
     const handlers = captureHandlers();
     invokeMock.mockResolvedValue(running("t1"));
 
-    const promise = waitForTaskTerminal(running("t1"));
+    const promise = waitForTaskTerminal(running("t1"), projectScope);
     await flush();
 
     const done: BackendTask = succeeded("t1");
@@ -82,7 +83,7 @@ describe("waitForTaskTerminal", () => {
     const terminal: BackendTask = { id: "t1", status: "failed" } as BackendTask;
     invokeMock.mockResolvedValue(terminal);
 
-    const promise = waitForTaskTerminal(running("t1"));
+    const promise = waitForTaskTerminal(running("t1"), projectScope);
     await expect(promise).resolves.toEqual(terminal);
     await flush();
     expect(unlistenMock).toHaveBeenCalledTimes(3);
@@ -92,7 +93,7 @@ describe("waitForTaskTerminal", () => {
     const handlers = captureHandlers();
     invokeMock.mockResolvedValue(running("t1"));
 
-    const promise = waitForTaskTerminal(running("t1"));
+    const promise = waitForTaskTerminal(running("t1"), projectScope);
     await flush();
 
     const other: BackendTask = succeeded("other");
@@ -130,7 +131,7 @@ describe("waitForTaskTerminal polling and timeout", () => {
       return Promise.resolve(calls === 1 ? running("t1") : succeeded("t1"));
     });
 
-    const promise = waitForTaskTerminal(running("t1"), { pollMs: 1000, timeoutMs: 30000 });
+    const promise = waitForTaskTerminal(running("t1"), { ...projectScope, pollMs: 1000, timeoutMs: 30000 });
 
     await vi.advanceTimersByTimeAsync(1000);
     await expect(promise).resolves.toEqual(succeeded("t1"));
@@ -147,7 +148,7 @@ describe("waitForTaskTerminal polling and timeout", () => {
       return Promise.resolve(succeeded("t1"));
     });
 
-    const promise = waitForTaskTerminal(running("t1"), { pollMs: 1000, timeoutMs: 30000 });
+    const promise = waitForTaskTerminal(running("t1"), { ...projectScope, pollMs: 1000, timeoutMs: 30000 });
 
     await vi.advanceTimersByTimeAsync(2000);
     await expect(promise).resolves.toEqual(succeeded("t1"));
@@ -159,7 +160,7 @@ describe("waitForTaskTerminal polling and timeout", () => {
     captureHandlers();
     invokeMock.mockResolvedValue(succeeded("other"));
 
-    const promise = waitForTaskTerminal(running("t1"), { pollMs: 1000, timeoutMs: 2500 });
+    const promise = waitForTaskTerminal(running("t1"), { ...projectScope, pollMs: 1000, timeoutMs: 2500 });
     const caught = promise.catch((err: unknown) => err);
 
     await vi.advanceTimersByTimeAsync(2500);
@@ -172,7 +173,7 @@ describe("waitForTaskTerminal polling and timeout", () => {
     captureHandlers();
     invokeMock.mockResolvedValue(running("t1"));
 
-    const promise = waitForTaskTerminal(running("t1"), { pollMs: 1000, timeoutMs: 2500 });
+    const promise = waitForTaskTerminal(running("t1"), { ...projectScope, pollMs: 1000, timeoutMs: 2500 });
     // Attach the rejection handler before advancing time so the deadline's
     // reject never sits unhandled for a tick (which would surface as an
     // unhandled-rejection warning and could mask real failures).
@@ -193,7 +194,7 @@ describe("waitForTaskTerminal polling and timeout", () => {
     const handlers = captureHandlers();
     invokeMock.mockResolvedValue(running("t1"));
 
-    const promise = waitForTaskTerminal(running("t1"), { pollMs: 1000, timeoutMs: 2500 });
+    const promise = waitForTaskTerminal(running("t1"), { ...projectScope, pollMs: 1000, timeoutMs: 2500 });
     await vi.advanceTimersByTimeAsync(0);
     const done = succeeded("t1");
     handlers

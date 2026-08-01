@@ -37,6 +37,7 @@ pub enum TaskType {
     AutoFix,
     Export,
     SourceAiOrganize,
+    Workflow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,6 +150,9 @@ pub enum BackendEventType {
     /// tool arguments, file contents, and command output never cross this
     /// boundary. Frontend channel: `task://activity`.
     TaskActivity,
+    /// Persisted structured workflow state changed. The payload is the full
+    /// bounded [`WorkflowRun`](crate::models::workflow::WorkflowRun) snapshot.
+    WorkflowUpdated,
 }
 
 /// Payload of a [`BackendEventType::TaskStreamOutput`] event. `delta` is the

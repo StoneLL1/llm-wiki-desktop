@@ -10,6 +10,8 @@ import type {
 import { isTerminalStatus } from "../types/task";
 
 interface TaskState {
+  activeProjectId: string | null;
+  activeProjectRootPath: string | null;
   tasks: BackendTask[];
   logs: Record<string, LogLine[]>;
   activities: Record<string, TaskActivity[]>;
@@ -115,6 +117,8 @@ function applyBackendEvent(state: TaskState, event: BackendEvent): TaskState {
 }
 
 export const useTaskStore = create<TaskState>((set, get) => ({
+  activeProjectId: null,
+  activeProjectRootPath: null,
   tasks: [],
   logs: {},
   activities: {},
@@ -180,7 +184,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 }));
 
 export function handleTaskEvent(event: BackendEvent): void {
-  useTaskStore.setState((state) => applyBackendEvent(state, event));
+  useTaskStore.setState((state) => {
+    if (!state.activeProjectId || event.projectId !== state.activeProjectId) return state;
+    return applyBackendEvent(state, event);
+  });
 }
 
 function preferFreshTask(current: BackendTask, incoming: BackendTask): BackendTask {
@@ -237,63 +244,122 @@ function replaceTaskSnapshot(current: readonly BackendTask[], incoming: readonly
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-export async function fetchTasks(): Promise<void> {
+export async function fetchTasks(projectId: string, rootPath: string): Promise<void> {
   if (!hasTauri()) return;
   const { invoke } = await import("@tauri-apps/api/core");
   const tasks = await invoke<BackendTask[]>("list_tasks", {
-    request: { statusFilter: null },
+    request: { projectId, projectRootPath: rootPath, statusFilter: null },
   });
-  const current = useTaskStore.getState().tasks;
+  const state = useTaskStore.getState();
+  if (state.activeProjectId !== projectId || state.activeProjectRootPath !== rootPath) return;
+  const current = state.tasks;
   const mergedTasks = mergeTaskSnapshots(current, tasks);
   useTaskStore.setState({ tasks: mergedTasks, runningCount: countRunning(mergedTasks) });
 }
 
 export async function cancelTaskRequest(taskId: string): Promise<void> {
   if (!hasTauri()) return;
+  const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
+  if (!projectId || !projectRootPath) return;
   const task = await invokeCommand<BackendTask>("cancel_task", {
-    request: { taskId },
+    request: { taskId, projectId, projectRootPath },
   });
+  const current = useTaskStore.getState();
+  if (current.activeProjectId !== projectId || current.activeProjectRootPath !== projectRootPath) return;
   useTaskStore.getState().upsertTask(task);
+}
+
+export async function fetchTaskById(taskId: string): Promise<BackendTask | null> {
+  if (!hasTauri()) return null;
+  const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
+  if (!projectId || !projectRootPath) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  const task = await invoke<BackendTask | null>("get_task", {
+    request: { taskId, projectId, projectRootPath },
+  });
+  const current = useTaskStore.getState();
+  if (current.activeProjectId !== projectId || current.activeProjectRootPath !== projectRootPath) return null;
+  if (task) current.upsertTask(task);
+  return task;
 }
 
 export async function fetchTaskLogs(taskId: string): Promise<void> {
   if (!hasTauri()) return;
+  const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
+  if (!projectId || !projectRootPath) return;
   const { invoke } = await import("@tauri-apps/api/core");
   const lines = await invoke<LogLine[]>("get_task_logs", {
-    request: { taskId },
+    request: { taskId, projectId, projectRootPath },
   });
+  const current = useTaskStore.getState();
+  if (current.activeProjectId !== projectId || current.activeProjectRootPath !== projectRootPath) return;
   useTaskStore.getState().setLogs(taskId, lines);
 }
 
 export async function fetchTaskActivities(taskId: string): Promise<void> {
   if (!hasTauri()) return;
+  const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
+  if (!projectId || !projectRootPath) return;
   const { invoke } = await import("@tauri-apps/api/core");
   const activities = await invoke<TaskActivity[]>("get_task_activities", {
-    request: { taskId },
+    request: { taskId, projectId, projectRootPath },
   });
+  const current = useTaskStore.getState();
+  if (current.activeProjectId !== projectId || current.activeProjectRootPath !== projectRootPath) return;
   useTaskStore.getState().setActivities(taskId, Array.isArray(activities) ? activities : []);
 }
 
 export async function removeCompletedTasks(): Promise<void> {
   if (!hasTauri()) return;
+  const { activeProjectId, activeProjectRootPath } = useTaskStore.getState();
+  if (!activeProjectId || !activeProjectRootPath) return;
   const { invoke } = await import("@tauri-apps/api/core");
-  await invoke<number>("remove_completed_tasks");
-  await fetchTasks();
+  await invoke<number>("remove_completed_tasks", {
+    request: { projectId: activeProjectId, projectRootPath: activeProjectRootPath },
+  });
+  await fetchTasks(activeProjectId, activeProjectRootPath);
 }
 
 export async function recoverTasksForProject(projectId: string, rootPath: string): Promise<void> {
   if (!hasTauri()) return;
-  useTaskStore.setState({ tasksHydrated: false });
+  const recoveryId = ++recoveryEpoch;
+  useTaskStore.setState({
+    activeProjectId: projectId,
+    activeProjectRootPath: rootPath,
+    tasks: [],
+    logs: {},
+    activities: {},
+    taskOutputs: {},
+    selectedTaskId: null,
+    drawerOpen: false,
+    runningCount: 0,
+    tasksHydrated: false,
+  });
   const { invoke } = await import("@tauri-apps/api/core");
   try {
     const tasks = await invoke<BackendTask[]>("set_active_project", {
       request: { projectId, rootPath },
     });
+    const state = useTaskStore.getState();
+    if (
+      recoveryId !== recoveryEpoch ||
+      state.activeProjectId !== projectId ||
+      state.activeProjectRootPath !== rootPath
+    ) return;
     useTaskStore.getState().setTasks(tasks);
   } finally {
     // Unknown task cards are only dismissible after the project task registry
     // has had a chance to hydrate; otherwise a restart race can hide a live
     // batch before its task snapshot arrives.
-    useTaskStore.setState({ tasksHydrated: true });
+    const state = useTaskStore.getState();
+    if (
+      recoveryId === recoveryEpoch &&
+      state.activeProjectId === projectId &&
+      state.activeProjectRootPath === rootPath
+    ) {
+      useTaskStore.setState({ tasksHydrated: true });
+    }
   }
 }
+
+let recoveryEpoch = 0;

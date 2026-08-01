@@ -17,6 +17,7 @@ mod search_service;
 mod secret_service;
 mod settings_service;
 mod wiki_index;
+mod workflow_service;
 
 pub use agent_service::{AgentInvocation, AgentService, ProcessRunner, SystemProcessRunner};
 pub use bookmark_service::BookmarkService;
@@ -44,3 +45,8 @@ pub use search_service::SearchService;
 pub use secret_service::SecretService;
 pub use settings_service::SettingsService;
 pub use wiki_index::{IndexEntry, WikiIndex};
+pub(crate) use workflow_service::recover_workflow;
+pub use workflow_service::{
+    canonical_json, project_identity, workflow_fingerprint, EnqueueWorkflow,
+    ProjectWorkflowIdentity, WorkflowCoordinator, WorkflowService, WorkflowStageSink,
+};

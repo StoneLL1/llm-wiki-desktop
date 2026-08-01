@@ -2,6 +2,7 @@
 pub struct GitService;
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use crate::errors::BackendError;
@@ -12,6 +13,17 @@ use crate::models::git::{
 use crate::models::paths::ProjectContext;
 
 impl GitService {
+    pub fn checkpoint_exists(project_root: &Path, checkpoint_hash: &str) -> bool {
+        if !matches!(checkpoint_hash.len(), 40 | 64)
+            || !checkpoint_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return false;
+        }
+        let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
+        let commit = format!("{checkpoint_hash}^{{commit}}");
+        run_git(&context, &["rev-parse", "--verify", "--quiet", &commit]).is_ok()
+    }
+
     /// Render a candidate comparison with Git's existing diff renderer without
     /// staging or mutating either file.
     pub fn diff_candidate_files(
