@@ -160,6 +160,44 @@ fn untrusted_local_quick_is_memory_only_and_does_not_write_workflow_state() {
 }
 
 #[test]
+fn compatible_preparation_reads_mixed_pages_and_excludes_source_only_roots() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".obsidian")).unwrap();
+    std::fs::create_dir_all(root.path().join("notes")).unwrap();
+    std::fs::create_dir_all(root.path().join("sources")).unwrap();
+    std::fs::write(root.path().join("index.md"), "# Index\n").unwrap();
+    std::fs::write(root.path().join("notes/shared.md"), "# Shared\n").unwrap();
+    std::fs::write(root.path().join("sources/material.md"), "# Material\n").unwrap();
+    let context = ProjectContext::new("compatible-preparation", root.path().to_path_buf())
+        .with_resolved_layout()
+        .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    let secrets = SecretService::memory();
+    let agents = AgentService::default();
+    let service = WorkflowService::default();
+
+    let preparation = prepare(
+        &service,
+        &context,
+        access(
+            WorkflowProjectTrust::Untrusted,
+            WorkflowFilesystemAccess::ReadOnly,
+            WorkflowPersistenceMode::MemoryOnly,
+        ),
+        &settings,
+        &secrets,
+        &agents,
+    );
+
+    assert_eq!(
+        preparation.available_wiki_pages,
+        vec!["index.md", "notes/shared.md"]
+    );
+    assert!(!root.path().join(".app").exists());
+}
+
+#[test]
 fn unavailable_runner_fails_before_task_creation() {
     let (_root, context) = project();
     let config = tempfile::tempdir().unwrap();

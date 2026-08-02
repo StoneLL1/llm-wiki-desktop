@@ -3,6 +3,10 @@ use std::path::{Component, Path, PathBuf};
 use crate::errors::{
     BackendError, PATH_ABSOLUTE_NOT_ALLOWED, PATH_INVALID, PATH_OUTSIDE_PROJECT, PATH_TRAVERSAL,
 };
+use crate::models::layout::{
+    resolve_layout, ProjectLayout, ProjectLayoutConfidence, ProjectLayoutWarning,
+    ProjectMarkdownRootRole,
+};
 use crate::utils::path_utils::normalize_project_path;
 
 #[derive(Debug, Clone)]
@@ -14,6 +18,9 @@ pub struct ProjectContext {
     pub wiki_dir: PathBuf,
     pub exports_dir: PathBuf,
     pub skills_dir: PathBuf,
+    pub layout: ProjectLayout,
+    pub layout_confidence: ProjectLayoutConfidence,
+    pub layout_warnings: Vec<ProjectLayoutWarning>,
 }
 
 impl ProjectContext {
@@ -25,8 +32,26 @@ impl ProjectContext {
             wiki_dir: root.join("wiki"),
             exports_dir: root.join("exports"),
             skills_dir: root.join("skills"),
+            layout: ProjectLayout::native(),
+            layout_confidence: ProjectLayoutConfidence::High,
+            layout_warnings: Vec::new(),
             root,
         }
+    }
+
+    pub fn with_resolved_layout(mut self) -> Result<Self, BackendError> {
+        let resolution = resolve_layout(&self.root)?;
+        self.layout = resolution.layout;
+        self.layout_confidence = resolution.confidence;
+        self.layout_warnings = resolution.warnings;
+        Ok(self)
+    }
+
+    pub fn list_markdown_files_for_roles(
+        &self,
+        roles: &[ProjectMarkdownRootRole],
+    ) -> Result<Vec<PathBuf>, BackendError> {
+        self.layout.list_markdown_files(&self.root, roles)
     }
 
     pub fn resolve_project_path(&self, relative_path: &str) -> Result<PathBuf, BackendError> {
@@ -181,5 +206,13 @@ mod tests {
         assert_eq!(context.wiki_dir, root.join("wiki"));
         assert_eq!(context.exports_dir, root.join("exports"));
         assert_eq!(context.skills_dir, root.join("skills"));
+        assert_eq!(
+            context.layout,
+            crate::models::layout::ProjectLayout::native()
+        );
+        assert_eq!(
+            context.layout_confidence,
+            crate::models::layout::ProjectLayoutConfidence::High
+        );
     }
 }

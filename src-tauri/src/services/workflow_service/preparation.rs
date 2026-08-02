@@ -1122,13 +1122,20 @@ fn preparation_fingerprint(
 }
 
 fn list_wiki_pages(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-    let mut pages = FileStore
-        .list_markdown_files(&context.wiki_dir)?
+    let source_only = context
+        .list_markdown_files_for_roles(&[crate::models::layout::ProjectMarkdownRootRole::Source])?
+        .into_iter()
+        .filter_map(|path| context.to_project_relative(&path).ok())
+        .collect::<HashSet<_>>();
+    let mut pages = context
+        .list_markdown_files_for_roles(&[
+            crate::models::layout::ProjectMarkdownRootRole::Wiki,
+            crate::models::layout::ProjectMarkdownRootRole::Mixed,
+        ])?
         .into_iter()
         .filter_map(|path| {
-            let relative = path.strip_prefix(&context.root).ok()?;
-            let normalized = relative.to_string_lossy().replace('\\', "/");
-            (!normalized.starts_with("wiki/sources/")).then_some(normalized)
+            let normalized = context.to_project_relative(&path).ok()?;
+            (!source_only.contains(&normalized)).then_some(normalized)
         })
         .collect::<Vec<_>>();
     pages.sort();
@@ -1137,15 +1144,14 @@ fn list_wiki_pages(context: &ProjectContext) -> Result<Vec<String>, BackendError
 }
 
 fn list_readable_markdown(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-    let mut files = FileStore
-        .list_markdown_files(&context.wiki_dir)?
+    let mut files = context
+        .list_markdown_files_for_roles(&[
+            crate::models::layout::ProjectMarkdownRootRole::Source,
+            crate::models::layout::ProjectMarkdownRootRole::Wiki,
+            crate::models::layout::ProjectMarkdownRootRole::Mixed,
+        ])?
         .into_iter()
-        .chain(FileStore.list_markdown_files(&context.raw_dir.join("extracted"))?)
-        .filter_map(|path| {
-            path.strip_prefix(&context.root)
-                .ok()
-                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-        })
+        .filter_map(|path| context.to_project_relative(&path).ok())
         .collect::<Vec<_>>();
     files.sort();
     files.dedup();

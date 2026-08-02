@@ -128,6 +128,7 @@ impl AppState {
     ) -> Result<ProjectContext, BackendError> {
         self.project_registry
             .resolve(project_id, Path::new(asserted_root))
+            .and_then(ProjectContext::with_resolved_layout)
     }
 
     /// Preview a folder for the "Open folder as project" dialog (dlg-folder).

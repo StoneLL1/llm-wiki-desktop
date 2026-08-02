@@ -299,9 +299,16 @@ impl LintService {
         // A Source-only compatible layout has no logical Wiki index. In that
         // case index drift is not applicable; once any derived Wiki page is
         // present, the established missing/stale index rules apply normally.
+        let source_only_paths = context
+            .list_markdown_files_for_roles(&[
+                crate::models::layout::ProjectMarkdownRootRole::Source,
+            ])?
+            .into_iter()
+            .filter_map(|path| context.to_project_relative(&path).ok())
+            .collect::<HashSet<_>>();
         let has_wiki_pages = pages
             .iter()
-            .any(|page| !page.path.starts_with("wiki/sources/"));
+            .any(|page| !source_only_paths.contains(&page.path));
         if has_wiki_pages {
             issues.extend(self.check_index_drift(context, &lookup)?);
         }
@@ -460,7 +467,9 @@ impl LintService {
             .iter()
             .map(|page| page.path.clone())
             .collect::<HashSet<_>>();
-        paths.insert("wiki/index.md".into());
+        if let Some(index_path) = &context.layout.wiki_index_path {
+            paths.insert(index_path.clone());
+        }
         paths
             .into_iter()
             .map(|path| {
@@ -475,31 +484,34 @@ impl LintService {
         context: &ProjectContext,
         lookup: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<LintIssue>, BackendError> {
+        let Some(index_path) = context.layout.wiki_index_path.as_deref() else {
+            return Ok(Vec::new());
+        };
         let mut issues = Vec::new();
         if self
             .file_store
-            .file_hash_if_exists(context, "wiki/index.md")?
+            .file_hash_if_exists(context, index_path)?
             .is_none()
         {
             issues.push(LintIssue {
-                id: "index_drift:wiki/index.md:missing".into(),
+                id: format!("index_drift:{index_path}:missing"),
                 source: LintIssueSource::Local,
                 severity: LintSeverity::Error,
                 issue_type: LintIssueType::IndexDrift,
-                path: "wiki/index.md".into(),
+                path: index_path.into(),
                 scan_hash: None,
                 range: None,
                 message: "The wiki index file is missing.".into(),
                 evidence: None,
                 target: None,
                 fixability: Fixability::None,
-                suggested_action: Some(
-                    "Create wiki/index.md or run a Wiki compile to regenerate it.".into(),
-                ),
+                suggested_action: Some(format!(
+                    "Create {index_path} or use the project workflow that maintains its index."
+                )),
             });
             return Ok(issues);
         }
-        let raw = self.file_store.read_markdown(context, "wiki/index.md")?;
+        let raw = self.file_store.read_markdown(context, index_path)?;
         let split = split_frontmatter(&raw);
         let linked: Vec<String> = extract_wikilinks(&split.body);
 
@@ -510,13 +522,13 @@ impl LintService {
                 continue;
             }
             issues.push(LintIssue {
-                id: format!("index_drift:wiki/index.md:{target}"),
+                id: format!("index_drift:{index_path}:{target}"),
                 source: LintIssueSource::Local,
                 // Index drift means the entry point references missing pages —
                 // must-fix, surfaces in the error summary (PRD-LINT-001).
                 severity: LintSeverity::Error,
                 issue_type: LintIssueType::IndexDrift,
-                path: "wiki/index.md".into(),
+                path: index_path.into(),
                 scan_hash: None,
                 range: None,
                 message: format!("Index links to `{target}`, which does not exist."),
@@ -531,14 +543,26 @@ impl LintService {
 }
 
 pub fn health_source_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-    let mut paths = crate::services::FileStore
-        .list_markdown_files(&context.raw_dir.join("extracted"))?
+    let structural_paths = [
+        context.layout.wiki_index_path.as_deref(),
+        context.layout.wiki_overview_path.as_deref(),
+        context.layout.activity_log_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<HashSet<_>>();
+    let mut paths = context
+        .list_markdown_files_for_roles(&[
+            crate::models::layout::ProjectMarkdownRootRole::Source,
+            crate::models::layout::ProjectMarkdownRootRole::Mixed,
+        ])?
         .into_iter()
         .filter_map(|path| {
             path.strip_prefix(&context.root)
                 .ok()
                 .map(|relative| relative.to_string_lossy().replace('\\', "/"))
         })
+        .filter(|path| !structural_paths.contains(path.as_str()))
         .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();

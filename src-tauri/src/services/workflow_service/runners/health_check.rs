@@ -128,23 +128,34 @@ where
     let tree = services
         .search_service
         .scan_wiki(context, &std::collections::HashSet::new())?;
-    let raw_source_paths = health_source_paths(context)?;
-    let wiki_source_pages = tree
+    let source_paths = health_source_paths(context)?;
+    let source_only_paths = context
+        .list_markdown_files_for_roles(&[crate::models::layout::ProjectMarkdownRootRole::Source])?
+        .into_iter()
+        .filter_map(|path| context.to_project_relative(&path).ok())
+        .collect::<std::collections::HashSet<_>>();
+    let source_pages = source_paths.len();
+    let wiki_pages = tree
         .pages
         .iter()
-        .filter(|page| page.path.starts_with("wiki/sources/"))
+        .filter(|page| !source_only_paths.contains(&page.path))
         .count();
-    let source_pages = wiki_source_pages + raw_source_paths.len();
-    let wiki_pages = tree.pages.len().saturating_sub(wiki_source_pages);
+    let readable_pages = tree
+        .pages
+        .iter()
+        .map(|page| page.path.as_str())
+        .chain(source_paths.iter().map(String::as_str))
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u64;
     let mut not_applicable_rules = Vec::new();
-    if wiki_pages == 0 && source_pages > 0 {
+    if context.layout.wiki_index_path.is_none() || (wiki_pages == 0 && source_pages > 0) {
         not_applicable_rules.push("index_drift".to_string());
     }
     sink.progress(
         READ_MARKDOWN,
         tree.pages.first().map(|page| page.path.clone()),
-        (tree.pages.len() + raw_source_paths.len()) as u64,
-        Some((tree.pages.len() + raw_source_paths.len()) as u64),
+        readable_pages,
+        Some(readable_pages),
     )
     .map_err(task_error)?;
     sink.complete(READ_MARKDOWN).map_err(task_error)?;
@@ -156,13 +167,8 @@ where
         services.search_service,
         |phase| match phase {
             LocalLintPhase::MarkdownComplete => {
-                sink.progress(
-                    CHECK_MARKDOWN,
-                    None,
-                    (tree.pages.len() + raw_source_paths.len()) as u64,
-                    Some((tree.pages.len() + raw_source_paths.len()) as u64),
-                )
-                .map_err(task_error)?;
+                sink.progress(CHECK_MARKDOWN, None, readable_pages, Some(readable_pages))
+                    .map_err(task_error)?;
                 sink.complete(CHECK_MARKDOWN).map_err(task_error)?;
                 sink.start(CHECK_LINKS).map_err(task_error)?;
                 ensure_not_cancelled(services.task_service, task_id)
