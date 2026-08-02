@@ -8,7 +8,11 @@ export type PendingActionType =
   | "merge_conflict"
   | "agent_auto_fix"
   | "install_agent"
-  | "run_skill";
+  | "run_skill"
+  | "enable_compatible_project"
+  | "trust_compatible_project"
+  | "initialize_git_repository"
+  | "create_git_checkpoint";
 
 export interface ActionPreview {
   summary: string;

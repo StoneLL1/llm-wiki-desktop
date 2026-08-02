@@ -6,7 +6,9 @@ import type { PendingAction } from "../../types/backend";
 
 interface ConfirmationDialogProps {
   action: PendingAction;
+  busy?: boolean;
   checkpointExists: boolean;
+  error?: string | null;
   onCancel: () => void;
   onConfirm: () => void;
 }
@@ -20,17 +22,40 @@ const confirmLabelKeys: Record<PendingAction["actionType"], string> = {
   agent_auto_fix: "confirmation.confirm.agent_auto_fix",
   install_agent: "confirmation.confirm.install_agent",
   run_skill: "confirmation.confirm.run_skill",
+  enable_compatible_project: "confirmation.confirm.enable_compatible_project",
+  trust_compatible_project: "confirmation.confirm.trust_compatible_project",
+  initialize_git_repository: "confirmation.confirm.initialize_git_repository",
+  create_git_checkpoint: "confirmation.confirm.create_git_checkpoint",
 };
+
+const localizedAuthorityActions = new Set<PendingAction["actionType"]>([
+  "enable_compatible_project",
+  "trust_compatible_project",
+  "initialize_git_repository",
+  "create_git_checkpoint",
+]);
 
 export function ConfirmationDialog({
   action,
+  busy = false,
   checkpointExists,
+  error = null,
   onCancel,
   onConfirm,
 }: ConfirmationDialogProps) {
   const { t } = useTranslation();
   const dialogRef = useModalDialog({ open: true, onClose: onCancel });
   const isDestructive = action.riskLevel === "destructive";
+  const hasLocalizedAuthorityCopy = localizedAuthorityActions.has(action.actionType);
+  const title = hasLocalizedAuthorityCopy
+    ? t(`confirmation.action.${action.actionType}.title`)
+    : action.title;
+  const message = hasLocalizedAuthorityCopy
+    ? t(`confirmation.action.${action.actionType}.message`)
+    : action.message;
+  const previewSummary = hasLocalizedAuthorityCopy && action.preview
+    ? t(`confirmation.action.${action.actionType}.preview`)
+    : action.preview?.summary;
 
   return (
     <div
@@ -58,7 +83,7 @@ export function ConfirmationDialog({
               id="confirmation-dialog-title"
               className="truncate text-[16px] font-semibold leading-tight text-[var(--text-primary)]"
             >
-              {action.title}
+              {title}
             </h2>
             <p className="mt-1 text-[12px] text-[var(--text-muted)]">
               {t("confirmation.risk", { risk: action.riskLevel })}
@@ -67,7 +92,16 @@ export function ConfirmationDialog({
         </header>
 
         <div className="max-h-[65vh] space-y-4 overflow-y-auto px-4 py-4 text-[13px] text-[var(--text-secondary)]">
-          <p className="leading-5">{action.message}</p>
+          <p className="leading-5">{message}</p>
+
+          {error ? (
+            <p
+              className="rounded-[var(--radius-md)] border border-[var(--danger)]/30 bg-[var(--danger)]/5 px-3 py-2 text-[12px] text-[var(--danger)]"
+              role="alert"
+            >
+              {error}
+            </p>
+          ) : null}
 
           <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--surface)] px-3 py-2 text-[12px]">
             <GitBranch size={14} aria-hidden="true" />
@@ -86,7 +120,7 @@ export function ConfirmationDialog({
                 {t("confirmation.preview")}
               </h3>
               <p className="text-[12px] text-[var(--text-muted)]">
-                {action.preview.summary}
+                {previewSummary}
               </p>
               {action.preview.diff ? (
                 <pre className="max-h-[180px] overflow-auto rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-3 font-mono text-[11px] leading-5 text-[var(--text-primary)]">
@@ -100,7 +134,7 @@ export function ConfirmationDialog({
             </div>
           ) : null}
 
-          <div className="space-y-2">
+          {action.affectedPaths.length > 0 ? <div className="space-y-2">
             <h3 className="text-[12px] font-medium text-[var(--text-primary)]">
               {t("confirmation.affectedPaths")}
             </h3>
@@ -114,17 +148,18 @@ export function ConfirmationDialog({
                 </li>
               ))}
             </ul>
-          </div>
+          </div> : null}
         </div>
 
         <footer className="flex min-h-[52px] items-center justify-end gap-2 border-t border-[var(--border)] px-4">
-          <Button type="button" variant="secondary" onClick={onCancel}>
+          <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
             {t("confirmation.cancel")}
           </Button>
           <Button
             type="button"
             variant={isDestructive ? "danger" : "secondary"}
             onClick={onConfirm}
+            disabled={busy}
           >
             {t(confirmLabelKeys[action.actionType])}
           </Button>

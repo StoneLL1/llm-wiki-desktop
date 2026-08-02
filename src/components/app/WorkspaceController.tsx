@@ -1,10 +1,11 @@
 import { History, PanelRightOpen } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { RunAgentDialog } from "../../features/agent/RunAgentDialog";
 import { useAgentWorkflow } from "../../features/agent/useAgentWorkflow";
 import { useWorkflowsController } from "../../features/workflows/useWorkflowsController";
+import { ProjectAuthorityDialog } from "../../features/project/ProjectAuthorityDialog";
 import { useImportWorkflow } from "../../features/import/useImportWorkflow";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { useProviderWorkflow } from "../../features/settings/useProviderWorkflow";
@@ -14,6 +15,7 @@ import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useWorkflowStore } from "../../stores/workflowStore";
+import type { ProjectSummary } from "../../types/project";
 import { WorkspaceRouter } from "./WorkspaceRouter";
 
 export function WorkspaceController() {
@@ -37,6 +39,19 @@ export function WorkspaceController() {
   const taskOutputs = useTaskStore((state) => state.taskOutputs);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const setWorkflowsSurface = useWorkflowStore((state) => state.setSurface);
+  const [projectAuthorityProject, setProjectAuthorityProject] = useState<
+    Pick<ProjectSummary, "projectId" | "rootPath"> | null
+  >(null);
+
+  useEffect(() => {
+    if (
+      projectAuthorityProject
+      && (projectAuthorityProject.projectId !== currentProject.projectId
+        || projectAuthorityProject.rootPath !== currentProject.rootPath)
+    ) {
+      setProjectAuthorityProject(null);
+    }
+  }, [currentProject.projectId, currentProject.rootPath, projectAuthorityProject]);
 
   const capabilities = useAiCapabilities(
     currentProject,
@@ -168,7 +183,19 @@ export function WorkspaceController() {
         onSaveSecret={providerWorkflow.saveSecret}
         onDeleteSecret={providerWorkflow.deleteSecret}
         onTestProvider={providerWorkflow.testProvider}
+        onManageProjectAuthority={() => {
+          closeSettings();
+          setProjectAuthorityProject(currentProject);
+        }}
       />
+      {projectAuthorityProject ? (
+        <ProjectAuthorityDialog
+          action="manage"
+          project={projectAuthorityProject}
+          onClose={() => setProjectAuthorityProject(null)}
+          onSatisfied={() => undefined}
+        />
+      ) : null}
     </section>
   );
 }

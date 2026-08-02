@@ -1,11 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import type { BackendTask } from "../../types/task";
 import { CompileConflictDialog } from "./CompileConflictDialog";
 import { ConfirmationDialog } from "./ConfirmationDialog";
+
+function errorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return String(error);
+}
 
 export function ProjectConfirmationController() {
   const currentProject = useProjectStore((state) => state.currentProject);
@@ -26,6 +34,13 @@ export function ProjectConfirmationController() {
       task.result?.pendingAction,
   )?.result?.pendingAction;
   const displayedPendingAction = pendingAction ?? compilePendingAction;
+  const [submitting, setSubmitting] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSubmitting(false);
+    setSubmissionError(null);
+  }, [displayedPendingAction?.id]);
 
   const submitCompileConfirmation = useCallback(
     async (confirmed: boolean) => {
@@ -39,6 +54,26 @@ export function ProjectConfirmationController() {
   );
 
   if (!displayedPendingAction) return null;
+
+  const submitConfirmation = async (confirmed: boolean) => {
+    setSubmitting(true);
+    setSubmissionError(null);
+    try {
+      if (pendingAction) {
+        if (confirmed) {
+          await confirmPendingAction();
+        } else {
+          await cancelPendingAction();
+        }
+      } else {
+        await submitCompileConfirmation(confirmed);
+      }
+    } catch (error) {
+      setSubmissionError(errorMessage(error));
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   if (
     displayedPendingAction.actionType === "merge_conflict" &&
@@ -58,20 +93,14 @@ export function ProjectConfirmationController() {
   return (
     <ConfirmationDialog
       action={displayedPendingAction}
+      busy={submitting}
       checkpointExists={displayedPendingAction.checkpointHash != null}
+      error={submissionError}
       onCancel={() => {
-        if (pendingAction) {
-          void cancelPendingAction();
-        } else {
-          void submitCompileConfirmation(false);
-        }
+        void submitConfirmation(false);
       }}
       onConfirm={() => {
-        if (pendingAction) {
-          void confirmPendingAction();
-        } else {
-          void submitCompileConfirmation(true);
-        }
+        void submitConfirmation(true);
       }}
     />
   );

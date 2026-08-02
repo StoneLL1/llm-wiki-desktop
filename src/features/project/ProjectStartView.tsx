@@ -20,6 +20,7 @@ import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import { useModalDialog } from "../../hooks/useModalDialog";
 import { pickDirectory } from "../import/nativeFilePicker";
 import { buildProjectRootPath, sanitizeProjectFolderName } from "./projectPath";
+import { ProjectAssessmentPanel } from "./ProjectAssessmentPanel";
 
 const TEMPLATES: Array<{ key: ProjectTemplate; titleKey: string; descKey: string }> = [
   { key: "general", titleKey: "launch.template.general", descKey: "launch.template.generalDesc" },
@@ -58,6 +59,12 @@ export function ProjectStartView() {
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
   const cancelPendingAction = useProjectStore((state) => state.cancelPendingAction);
+  const assessment = useProjectStore((state) => state.assessment);
+  const assessing = useProjectStore((state) => state.assessing);
+  const assessmentError = useProjectStore((state) => state.assessmentError);
+  const assessProject = useProjectStore((state) => state.assessProject);
+  const cancelProjectAssessment = useProjectStore((state) => state.cancelProjectAssessment);
+  const openAssessedProject = useProjectStore((state) => state.openAssessedProject);
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<Category>("all");
@@ -75,6 +82,8 @@ export function ProjectStartView() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const templatesRequestedRef = useRef(false);
+  const runEpochRef = useRef(0);
+  const cancelledRunEpochsRef = useRef(new Set<number>());
 
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
 
@@ -148,14 +157,23 @@ export function ProjectStartView() {
   }, [recentProjects, query, category]);
 
   const run = async (operation: () => Promise<unknown>) => {
+    const runEpoch = ++runEpochRef.current;
     setBusy(true);
     setLocalError(null);
     try {
       await operation();
     } catch (error) {
-      setLocalError(errorMessage(error));
+      if (
+        runEpoch === runEpochRef.current &&
+        !cancelledRunEpochsRef.current.has(runEpoch)
+      ) {
+        setLocalError(errorMessage(error));
+      }
     } finally {
-      setBusy(false);
+      cancelledRunEpochsRef.current.delete(runEpoch);
+      if (runEpoch === runEpochRef.current) {
+        setBusy(false);
+      }
     }
   };
 
@@ -172,7 +190,19 @@ export function ProjectStartView() {
         ),
       });
       if (!selected) return;
-      await openProject(selected);
+      if (intent === "open_existing") {
+        const result = await assessProject(selected);
+        const canOpen = ![
+          "ambiguous_markdown",
+          "ordinary_materials",
+          "unknown",
+        ].includes(result.format) && result.health !== "unreadable";
+        if (canOpen) {
+          await openAssessedProject(result.assessmentId);
+        }
+      } else {
+        await openProject(selected);
+      }
     });
   };
 
@@ -266,6 +296,25 @@ export function ProjectStartView() {
             </div>
           </div>
 
+          {assessing ? (
+            <section className="mx-auto mt-5 flex w-full max-w-[760px] items-center justify-between border border-[var(--border)] bg-[var(--surface)] px-[var(--sp-4)] py-[var(--sp-3)]" aria-live="polite">
+              <div>
+                <h2 className="m-0 text-[13px] font-semibold">{t("projectAssessment.scanning")}</h2>
+                <p className="m-0 mt-1 text-[12px] text-[var(--text-muted)]">{t("projectAssessment.scanningDetail")}</p>
+              </div>
+              <button className="btn btn--secondary" onClick={() => {
+                cancelledRunEpochsRef.current.add(runEpochRef.current);
+                void cancelProjectAssessment();
+              }} type="button">
+                {t("projectAssessment.cancel")}
+              </button>
+            </section>
+          ) : assessment ? (
+            <ProjectAssessmentPanel
+              assessment={assessment}
+              onBack={() => void cancelProjectAssessment()}
+            />
+          ) : (
           <div className="projgrid">
             {/* Quick actions */}
             <button type="button" className="quickaction" onClick={() => setNewDialogOpen(true)}>
@@ -324,9 +373,10 @@ export function ProjectStartView() {
               ))
             )}
           </div>
+          )}
 
-          {localError || storeError ? (
-            <p role="alert" className="mt-4 text-[12px] text-[var(--danger)]">{localError ?? storeError}</p>
+          {localError || storeError || assessmentError ? (
+            <p role="alert" className="mt-4 text-[12px] text-[var(--danger)]">{localError ?? storeError ?? assessmentError}</p>
           ) : null}
         </main>
 

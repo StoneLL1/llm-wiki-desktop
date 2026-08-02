@@ -2,8 +2,12 @@
 pub struct GitService;
 
 use std::fs;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
 use crate::errors::BackendError;
 use crate::models::git::{
@@ -11,8 +15,209 @@ use crate::models::git::{
     GitRepositoryStatus,
 };
 use crate::models::paths::ProjectContext;
+use crate::utils::path_safety::{
+    validate_existing_project_directory, validate_existing_project_file,
+    validate_existing_project_root,
+};
 
 impl GitService {
+    pub fn initial_commit_paths(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<Vec<String>, BackendError> {
+        let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
+        let mut paths = Vec::new();
+        let mut entries_seen = 0;
+        collect_initial_commit_paths(&root, &root, 0, &mut entries_seen, &mut paths)?;
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    pub fn verify_initialization_state(
+        &self,
+        context: &ProjectContext,
+        expected_head: Option<&str>,
+        expected_paths: &[String],
+    ) -> Result<(), BackendError> {
+        let current_head = self.repository_status(context)?.head;
+        let current_paths = self.initial_commit_paths(context)?;
+        if current_head.as_deref() != expected_head || current_paths != expected_paths {
+            return Err(BackendError::new(
+                "GIT_INITIALIZATION_STATE_CHANGED",
+                "Project files no longer match the confirmed Git initialization preview.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "expectedPaths": expected_paths,
+                "currentPaths": current_paths,
+                "expectedHead": expected_head,
+                "currentHead": current_head,
+            })));
+        }
+        Ok(())
+    }
+
+    pub fn initialize_repository_from_snapshot(
+        &self,
+        context: &ProjectContext,
+        initial_message: &str,
+        expected_paths: &[String],
+    ) -> Result<GitRepositoryStatus, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            run_git(context, &["init"])?;
+        }
+        let has_head = run_git(context, &["rev-parse", "--verify", "HEAD"]).is_ok();
+        if !has_head {
+            let candidates = initial_commit_git_candidates(context)?;
+            if candidates
+                .iter()
+                .any(|candidate| !expected_paths.contains(candidate))
+            {
+                return Err(BackendError::new(
+                    "GIT_INITIALIZATION_STATE_CHANGED",
+                    "New project files appeared after the Git initialization preview.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "expectedPaths": expected_paths,
+                    "currentGitCandidates": candidates,
+                })));
+            }
+            if !candidates.is_empty() {
+                let literal_candidates = candidates
+                    .iter()
+                    .map(|path| format!(":(literal){path}"))
+                    .collect::<Vec<_>>();
+                let mut args = vec!["add", "--"];
+                args.extend(literal_candidates.iter().map(String::as_str));
+                run_git(context, &args)?;
+            }
+            let _ = commit_with_message(context, initial_message, true)?;
+        }
+        self.repository_status(context)
+    }
+
+    pub fn repository_status_for_assessment(
+        &self,
+        context: &ProjectContext,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<GitRepositoryStatus, BackendError> {
+        let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
+        let has_git_marker = validate_git_marker(&root)?;
+        let version = run_git_bounded(context, &["--version"], deadline, cancelled)?;
+        if !version.success {
+            return Err(git_command_error(&version.stderr, &["--version"]));
+        }
+
+        let top_level = run_git_bounded(
+            context,
+            &["rev-parse", "--show-toplevel"],
+            deadline,
+            cancelled,
+        )?;
+        if !top_level.success {
+            if has_git_marker {
+                return Err(BackendError::new(
+                    "GIT_REPOSITORY_INVALID",
+                    "Project-local Git metadata is incomplete or unreadable.",
+                    true,
+                    true,
+                ));
+            }
+            return Ok(GitRepositoryStatus {
+                is_repository: false,
+                branch: None,
+                head: None,
+                has_changes: false,
+            });
+        }
+        let top_level = String::from_utf8_lossy(&top_level.stdout);
+        let is_repository = Path::new(top_level.trim())
+            .canonicalize()
+            .is_ok_and(|candidate| candidate == root);
+        if !is_repository {
+            return Ok(GitRepositoryStatus {
+                is_repository: false,
+                branch: None,
+                head: None,
+                has_changes: false,
+            });
+        }
+
+        let branch = bounded_optional_git_value(
+            context,
+            &["branch", "--show-current"],
+            deadline,
+            cancelled,
+        )?;
+        let head = bounded_optional_git_value(
+            context,
+            &["rev-parse", "--short", "HEAD"],
+            deadline,
+            cancelled,
+        )?;
+        let status = run_git_bounded(
+            context,
+            &["status", "--porcelain=v1", "--untracked-files=normal", "--"],
+            deadline,
+            cancelled,
+        )?;
+        if !status.success && status.stdout.is_empty() {
+            return Err(git_command_error(
+                &status.stderr,
+                &["status", "--porcelain=v1", "--untracked-files=normal", "--"],
+            ));
+        }
+
+        Ok(GitRepositoryStatus {
+            is_repository: true,
+            branch,
+            head,
+            has_changes: !status.stdout.is_empty(),
+        })
+    }
+
+    pub fn changed_paths(&self, context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before enumerating changes.",
+                true,
+                true,
+            ));
+        }
+        status_paths(context)
+    }
+
+    pub fn verify_checkpoint_state(
+        &self,
+        context: &ProjectContext,
+        expected_head: Option<&str>,
+        expected_paths: &[String],
+    ) -> Result<(), BackendError> {
+        let current_head = self.repository_status(context)?.head;
+        let current_paths = status_paths(context)?;
+        if current_head.as_deref() != expected_head || current_paths != expected_paths {
+            return Err(BackendError::new(
+                "GIT_CHECKPOINT_STATE_CHANGED",
+                "Project changes no longer match the confirmed checkpoint preview.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "expectedPaths": expected_paths,
+                "currentPaths": current_paths,
+                "expectedHead": expected_head,
+                "currentHead": current_head,
+            })));
+        }
+        Ok(())
+    }
+
     pub fn checkpoint_exists(project_root: &Path, checkpoint_hash: &str) -> bool {
         if !(7..=64).contains(&checkpoint_hash.len())
             || !checkpoint_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -20,11 +225,23 @@ impl GitService {
             return false;
         }
         let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
+        if !GitService
+            .repository_status(&context)
+            .is_ok_and(|status| status.is_repository)
+        {
+            return false;
+        }
         let commit = format!("{checkpoint_hash}^{{commit}}");
         run_git(&context, &["rev-parse", "--verify", "--quiet", &commit]).is_ok()
     }
 
     pub fn head_subject(context: &ProjectContext) -> Option<String> {
+        if !GitService
+            .repository_status(context)
+            .is_ok_and(|status| status.is_repository)
+        {
+            return None;
+        }
         run_git(context, &["log", "-1", "--pretty=%s"])
             .ok()
             .map(|subject| subject.trim().to_string())
@@ -87,7 +304,7 @@ impl GitService {
         context: &ProjectContext,
         initial_message: &str,
     ) -> Result<GitRepositoryStatus, BackendError> {
-        if !context.root.join(".git").exists() {
+        if !self.repository_status(context)?.is_repository {
             run_git(context, &["init"])?;
         }
         let has_head = run_git(context, &["rev-parse", "--verify", "HEAD"]).is_ok();
@@ -102,8 +319,36 @@ impl GitService {
         &self,
         context: &ProjectContext,
     ) -> Result<GitRepositoryStatus, BackendError> {
-        let is_repository = context.root.join(".git").exists()
-            || run_git(context, &["rev-parse", "--is-inside-work-tree"]).is_ok();
+        let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
+        let has_git_marker = validate_git_marker(&root)?;
+        let version = Command::new("git")
+            .arg("--version")
+            .output()
+            .map_err(|error| {
+                BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false)
+            })?;
+        if !version.status.success() {
+            return Err(BackendError::new(
+                "GIT_COMMAND_FAILED",
+                "Git is unavailable.",
+                true,
+                false,
+            ));
+        }
+        let is_repository = match run_git(context, &["rev-parse", "--show-toplevel"]) {
+            Ok(value) => Path::new(value.trim())
+                .canonicalize()
+                .is_ok_and(|top_level| top_level == root),
+            Err(_) if has_git_marker => {
+                return Err(BackendError::new(
+                    "GIT_REPOSITORY_INVALID",
+                    "Project-local Git metadata is incomplete or unreadable.",
+                    true,
+                    true,
+                ));
+            }
+            Err(_) => false,
+        };
         if !is_repository {
             return Ok(GitRepositoryStatus {
                 is_repository: false,
@@ -475,6 +720,246 @@ impl GitService {
     }
 }
 
+const MAX_INITIAL_COMMIT_PREVIEW_ENTRIES: usize = 10_000;
+const MAX_INITIAL_COMMIT_PREVIEW_DEPTH: usize = 32;
+
+fn collect_initial_commit_paths(
+    root: &Path,
+    current: &Path,
+    depth: usize,
+    entries_seen: &mut usize,
+    paths: &mut Vec<String>,
+) -> Result<(), BackendError> {
+    if depth > MAX_INITIAL_COMMIT_PREVIEW_DEPTH {
+        return Err(initial_commit_preview_too_large());
+    }
+    for entry in fs::read_dir(current).map_err(|error| {
+        BackendError::new("GIT_INITIALIZATION_PREVIEW_FAILED", error.to_string(), true, true)
+    })? {
+        let entry = entry.map_err(|error| {
+            BackendError::new("GIT_INITIALIZATION_PREVIEW_FAILED", error.to_string(), true, true)
+        })?;
+        *entries_seen += 1;
+        if *entries_seen > MAX_INITIAL_COMMIT_PREVIEW_ENTRIES {
+            return Err(initial_commit_preview_too_large());
+        }
+        let path = entry.path();
+        if depth == 0 && entry.file_name() == ".git" {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            BackendError::new("GIT_INITIALIZATION_PREVIEW_FAILED", error.to_string(), true, true)
+        })?;
+        if metadata.is_dir() {
+            if validate_existing_project_directory(root, &path).is_ok() {
+                collect_initial_commit_paths(
+                    root,
+                    &path,
+                    depth + 1,
+                    entries_seen,
+                    paths,
+                )?;
+            }
+        } else if metadata.is_file() && validate_existing_project_file(root, &path).is_ok() {
+            let relative = path.strip_prefix(root).map_err(|_| git_path_unsafe(
+                "Initial commit candidate escaped the project root".into(),
+            ))?;
+            paths.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Ok(())
+}
+
+fn initial_commit_preview_too_large() -> BackendError {
+    BackendError::new(
+        "GIT_INITIALIZATION_PREVIEW_TOO_LARGE",
+        "The initial Git commit preview exceeded the safe file or depth limit.",
+        true,
+        true,
+    )
+}
+
+fn validate_git_marker(root: &Path) -> Result<bool, BackendError> {
+    let marker = root.join(".git");
+    let Ok(metadata) = fs::symlink_metadata(&marker) else {
+        return Ok(false);
+    };
+    let validation = if metadata.is_dir() {
+        validate_existing_project_directory(root, &marker).map(|_| ())
+    } else if metadata.is_file() {
+        validate_existing_project_file(root, &marker).map(|_| ())
+    } else {
+        Err("Git metadata has an unsupported file type".into())
+    };
+    validation.map_err(git_path_unsafe)?;
+    Ok(true)
+}
+
+fn git_path_unsafe(message: String) -> BackendError {
+    BackendError::new(
+        "GIT_REPOSITORY_PATH_UNSAFE",
+        "Git metadata is linked, outside the project, or otherwise unsafe.",
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({ "error": message }))
+}
+
+const MAX_ASSESSMENT_GIT_OUTPUT_BYTES: u64 = 64 * 1024;
+const ASSESSMENT_READER_GRACE: Duration = Duration::from_millis(100);
+
+struct BoundedGitOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_git_bounded(
+    context: &ProjectContext,
+    args: &[&str],
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<BoundedGitOutput, BackendError> {
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(BackendError::new(
+            "PROJECT_ASSESSMENT_CANCELLED",
+            "Project assessment was cancelled.",
+            true,
+            true,
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(git_assessment_timeout());
+    }
+
+    let mut child = Command::new("git")
+        .arg("--no-optional-locks")
+        .args([
+            "-c",
+            "core.quotepath=false",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            assessment_disabled_hooks_config(),
+        ])
+        .args(args)
+        .current_dir(&context.root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false)
+        })?;
+    let stdout = child.stdout.take().expect("piped Git stdout");
+    let stderr = child.stderr.take().expect("piped Git stderr");
+    let stdout_reader = spawn_bounded_reader(stdout);
+    let stderr_reader = spawn_bounded_reader(stderr);
+
+    let status = loop {
+        if cancelled.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(BackendError::new(
+                "PROJECT_ASSESSMENT_CANCELLED",
+                "Project assessment was cancelled.",
+                true,
+                true,
+            ));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(git_assessment_timeout());
+        }
+        match child.try_wait().map_err(|error| {
+            BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false)
+        })? {
+            Some(status) => break status,
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    };
+
+    Ok(BoundedGitOutput {
+        success: status.success(),
+        stdout: receive_bounded_reader(stdout_reader),
+        stderr: receive_bounded_reader(stderr_reader),
+    })
+}
+
+#[cfg(windows)]
+fn assessment_disabled_hooks_config() -> &'static str {
+    "core.hooksPath=NUL"
+}
+
+#[cfg(not(windows))]
+fn assessment_disabled_hooks_config() -> &'static str {
+    "core.hooksPath=/dev/null"
+}
+
+fn spawn_bounded_reader(reader: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read_bounded(reader));
+    });
+    receiver
+}
+
+fn receive_bounded_reader(receiver: Receiver<Vec<u8>>) -> Vec<u8> {
+    receiver
+        .recv_timeout(ASSESSMENT_READER_GRACE)
+        .unwrap_or_default()
+}
+
+fn read_bounded(reader: impl Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let _ = reader
+        .take(MAX_ASSESSMENT_GIT_OUTPUT_BYTES + 1)
+        .read_to_end(&mut bytes);
+    bytes
+}
+
+fn bounded_optional_git_value(
+    context: &ProjectContext,
+    args: &[&str],
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Option<String>, BackendError> {
+    let output = run_git_bounded(context, args, deadline, cancelled)?;
+    if !output.success {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+fn git_assessment_timeout() -> BackendError {
+    BackendError::new(
+        "GIT_ASSESSMENT_TIMEOUT",
+        "Git inspection exceeded the project assessment time limit.",
+        true,
+        true,
+    )
+}
+
+fn git_command_error(stderr: &[u8], args: &[&str]) -> BackendError {
+    let message = String::from_utf8_lossy(stderr).trim().to_string();
+    BackendError::new(
+        "GIT_COMMAND_FAILED",
+        if message.is_empty() {
+            "Git command failed.".to_string()
+        } else {
+            message
+        },
+        true,
+        false,
+    )
+    .with_details(serde_json::json!({ "args": args }))
+}
+
 fn run_git(context: &ProjectContext, args: &[&str]) -> Result<String, BackendError> {
     run_git_bytes(context, args).map(|stdout| String::from_utf8_lossy(&stdout).to_string())
 }
@@ -559,6 +1044,28 @@ fn status_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
 fn status_changes(context: &ProjectContext) -> Result<Vec<GitChangedFile>, BackendError> {
     let raw = run_git_bytes(context, &["status", "--porcelain=v1", "-z", "-uall"])?;
     Ok(parse_status_changes(&raw))
+}
+
+fn initial_commit_git_candidates(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+    let raw = run_git_bytes(
+        context,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )?;
+    let mut paths = raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| normalize_git_path(&String::from_utf8_lossy(record)))
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn append_ignored_changes(
@@ -779,13 +1286,15 @@ fn normalize_git_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::GitService;
+    use super::{run_git, GitService};
     use crate::models::git::{CheckpointPurpose, GitChangedFileKind};
     use crate::models::paths::ProjectContext;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command as ProcessCommand;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let stamp = std::time::SystemTime::now()
@@ -810,6 +1319,33 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn assessment_git_probe_honors_cancellation_and_deadline_before_spawning() {
+        let root = unique_temp_dir("assessment-bounds");
+        let context = ProjectContext::new("project-1", root.clone());
+        let cancelled = AtomicBool::new(true);
+
+        let cancelled_error = GitService
+            .repository_status_for_assessment(
+                &context,
+                Instant::now() + Duration::from_secs(1),
+                &cancelled,
+            )
+            .unwrap_err();
+        assert_eq!(cancelled_error.code, "PROJECT_ASSESSMENT_CANCELLED");
+
+        let active = AtomicBool::new(false);
+        let timeout_error = GitService
+            .repository_status_for_assessment(
+                &context,
+                Instant::now() - Duration::from_millis(1),
+                &active,
+            )
+            .unwrap_err();
+        assert_eq!(timeout_error.code, "GIT_ASSESSMENT_TIMEOUT");
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -887,6 +1423,33 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_preview_rejects_new_unconfirmed_paths_without_committing() {
+        let root = unique_temp_dir("checkpoint-preview-drift");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::write(root.join("existing.md"), "initial\n").unwrap();
+        let service = GitService;
+        let initial_head = service
+            .initialize_repository(&context, "Initial project")
+            .unwrap()
+            .head;
+        fs::write(root.join("existing.md"), "changed\n").unwrap();
+        let expected = service.changed_paths(&context).unwrap();
+        fs::write(root.join("late.md"), "late\n").unwrap();
+
+        let error = service
+            .verify_checkpoint_state(&context, initial_head.as_deref(), &expected)
+            .unwrap_err();
+
+        assert_eq!(error.code, "GIT_CHECKPOINT_STATE_CHANGED");
+        assert_eq!(
+            service.repository_status(&context).unwrap().head,
+            initial_head
+        );
+        assert!(service.repository_status(&context).unwrap().has_changes);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn initializes_empty_repo_with_empty_initial_commit() {
         let root = unique_temp_dir("empty-init");
         let context = ProjectContext::new("project-1", root.clone());
@@ -901,6 +1464,110 @@ mod tests {
         assert!(!repo.has_changes);
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn completes_an_existing_unborn_repository_with_an_initial_commit() {
+        let root = unique_temp_dir("unborn-init");
+        let context = ProjectContext::new("project-1", root.clone());
+        run_git_in(&root, &["init"]);
+        fs::write(root.join("note.md"), "# Note\n").unwrap();
+        let service = GitService;
+        let before = service.repository_status(&context).unwrap();
+        assert!(before.is_repository);
+        assert!(before.head.is_none());
+        let expected_paths = service.initial_commit_paths(&context).unwrap();
+        service
+            .verify_initialization_state(&context, None, &expected_paths)
+            .unwrap();
+
+        let after = service
+            .initialize_repository_from_snapshot(&context, "Initial project", &expected_paths)
+            .unwrap();
+
+        assert!(after.head.is_some());
+        assert!(!after.has_changes);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn assessed_initialization_rejects_files_added_after_confirmation() {
+        let root = unique_temp_dir("initialization-preview-drift");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::write(root.join("approved.md"), "approved\n").unwrap();
+        let service = GitService;
+        let expected_paths = service.initial_commit_paths(&context).unwrap();
+        fs::write(root.join("late.md"), "late\n").unwrap();
+
+        let error = service
+            .verify_initialization_state(&context, None, &expected_paths)
+            .unwrap_err();
+
+        assert_eq!(error.code, "GIT_INITIALIZATION_STATE_CHANGED");
+        assert!(!root.join(".git").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn parent_repository_is_not_treated_as_project_local_history() {
+        let parent = unique_temp_dir("parent-repository");
+        let parent_context = ProjectContext::new("parent", parent.clone());
+        fs::write(parent.join("parent.md"), "parent\n").unwrap();
+        let service = GitService;
+        service
+            .initialize_repository(&parent_context, "Initial parent")
+            .unwrap();
+
+        let child = parent.join("knowledge-base");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("note.md"), "# Note\n").unwrap();
+        let child_context = ProjectContext::new("child", child.clone());
+
+        assert!(
+            !service
+                .repository_status(&child_context)
+                .unwrap()
+                .is_repository
+        );
+        assert_eq!(
+            service
+                .create_checkpoint(
+                    &child_context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Unsafe parent checkpoint",
+                )
+                .unwrap_err()
+                .code,
+            "GIT_REPOSITORY_MISSING"
+        );
+
+        let nested = service
+            .initialize_repository(&child_context, "Initial knowledge base")
+            .unwrap();
+        assert!(nested.is_repository);
+        let top_level = run_git(&child_context, &["rev-parse", "--show-toplevel"]).unwrap();
+        assert_eq!(
+            Path::new(top_level.trim()).canonicalize().unwrap(),
+            child.canonicalize().unwrap()
+        );
+        fs::remove_dir_all(parent).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_git_metadata_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("linked-git-root");
+        let external = unique_temp_dir("linked-git-external");
+        symlink(&external, root.join(".git")).unwrap();
+        let context = ProjectContext::new("linked", root.clone());
+
+        let error = GitService.repository_status(&context).unwrap_err();
+        assert_eq!(error.code, "GIT_REPOSITORY_PATH_UNSAFE");
+        fs::remove_file(root.join(".git")).ok();
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(external).ok();
     }
 
     #[test]
@@ -1129,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_from_parent_repo_subdirectory_preserves_outside_files() {
+    fn rollback_rejects_a_parent_repository_without_touching_any_files() {
         let root = unique_temp_dir("parent-repo");
         let project = root.join("project");
         fs::create_dir_all(project.join("wiki")).unwrap();
@@ -1148,13 +1815,14 @@ mod tests {
 
         let service = GitService;
         let context = ProjectContext::new("project-1", project.clone());
-        service.rollback_worktree_to_head(&context).unwrap();
+        let error = service.rollback_worktree_to_head(&context).unwrap_err();
 
-        let restored = fs::read_to_string(project.join("wiki").join("page.md"))
+        assert_eq!(error.code, "GIT_REPOSITORY_MISSING");
+        let unchanged = fs::read_to_string(project.join("wiki").join("page.md"))
             .unwrap()
             .replace("\r\n", "\n");
-        assert_eq!(restored, "stable\n");
-        assert!(!project.join("wiki").join("agent-new.md").exists());
+        assert_eq!(unchanged, "agent edit\n");
+        assert!(project.join("wiki").join("agent-new.md").exists());
         assert_eq!(
             fs::read_to_string(root.join("outside.txt"))
                 .unwrap()

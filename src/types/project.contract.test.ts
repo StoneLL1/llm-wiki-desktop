@@ -7,6 +7,11 @@ import type {
   ProjectLayoutConfidence,
   ProjectLayoutWarningCode,
   ProjectMarkdownRootRole,
+  ProjectCapability,
+  ProjectFilesystemAccess,
+  ProjectFormat,
+  ProjectHealth,
+  ProjectTrustState,
 } from "./project";
 
 describe("Project layout shared Rust/TypeScript contract", () => {
@@ -108,5 +113,25 @@ describe("Project layout shared Rust/TypeScript contract", () => {
   it("keeps markdownRoots as the only required layout field", () => {
     const minimum = { markdownRoots: [] } satisfies ProjectLayout;
     expect(minimum.markdownRoots).toEqual([]);
+  });
+
+  it("freezes every typed assessment dimension independently", () => {
+    const formats = [
+      "native_current", "native_legacy", "nashsu_llm_wiki", "obsidian_vault",
+      "markdown_vault", "ambiguous_markdown", "ordinary_materials", "unknown",
+    ] as const satisfies readonly ProjectFormat[];
+    const trust = ["trusted", "untrusted"] as const satisfies readonly ProjectTrustState[];
+    const access = ["writable", "read_only"] as const satisfies readonly ProjectFilesystemAccess[];
+    const health = ["healthy", "repairable", "recovery", "unreadable"] as const satisfies readonly ProjectHealth[];
+    const capabilities = [
+      "read_markdown", "local_search", "in_memory_graph", "local_health_check",
+      "external_ai", "project_write", "git_checkpoint", "enable_compatible_features",
+    ] as const satisfies readonly ProjectCapability[];
+
+    expect(formats).toHaveLength(8);
+    expect(trust).toEqual(["trusted", "untrusted"]);
+    expect(access).toEqual(["writable", "read_only"]);
+    expect(health).toHaveLength(4);
+    expect(capabilities).toHaveLength(8);
   });
 });
