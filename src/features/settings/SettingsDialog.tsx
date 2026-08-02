@@ -31,6 +31,7 @@ interface SettingsDialogProps {
   onDeleteSecret: (provider: LlmProviderKind) => Promise<unknown> | unknown;
   onTestProvider: (config: LlmProviderConfig) => Promise<ProviderTestResult>;
   importWorkflow?: ImportWorkflow;
+  onManageProjectAuthority?: () => void;
 }
 
 export function SettingsDialog({ open, onClose, ...settingsProps }: SettingsDialogProps) {

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::confirmation::PendingAction;
+use crate::models::git::GitRepositoryStatus;
+use crate::models::layout::{ProjectLayout, ProjectLayoutConfidence, ProjectLayoutWarning};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +57,117 @@ pub enum ProjectTrustKind {
 pub enum ProjectFilesystemAccess {
     Writable,
     ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectFormat {
+    NativeCurrent,
+    NativeLegacy,
+    NashsuLlmWiki,
+    ObsidianVault,
+    MarkdownVault,
+    AmbiguousMarkdown,
+    OrdinaryMaterials,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectTrustState {
+    Trusted,
+    Untrusted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectHealth {
+    Healthy,
+    Repairable,
+    Recovery,
+    Unreadable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectCapability {
+    ReadMarkdown,
+    LocalSearch,
+    InMemoryGraph,
+    LocalHealthCheck,
+    ExternalAi,
+    ProjectWrite,
+    GitCheckpoint,
+    EnableCompatibleFeatures,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMarker {
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAssessmentWarning {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct AssessmentOperationId(pub String);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct AssessmentId(pub String);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectOpenAssessment {
+    pub assessment_id: AssessmentId,
+    pub canonical_root_path: String,
+    pub canonical_identity_key: String,
+    pub identity_revision: String,
+    pub format: ProjectFormat,
+    pub trust: ProjectTrustState,
+    pub filesystem_access: ProjectFilesystemAccess,
+    pub health: ProjectHealth,
+    pub layout: ProjectLayout,
+    pub confidence: ProjectLayoutConfidence,
+    pub markers: Vec<ProjectMarker>,
+    pub capabilities: Vec<ProjectCapability>,
+    pub warnings: Vec<ProjectAssessmentWarning>,
+    pub layout_warnings: Vec<ProjectLayoutWarning>,
+    pub git: GitRepositoryStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentOperationStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAssessmentOperation {
+    pub assessment_operation_id: AssessmentOperationId,
+    pub status: AssessmentOperationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<ProjectOpenAssessment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::errors::BackendError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartProjectOpenAssessmentResult {
+    pub assessment_operation_id: AssessmentOperationId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -15,11 +15,14 @@ use crate::models::project::{
 use crate::services::file_store::FileStore;
 use crate::services::git_service::GitService;
 use crate::utils::path_safety::{
-    validate_existing_project_directory, validate_existing_project_root,
+    validate_existing_project_directory, validate_existing_project_file,
+    validate_existing_project_root,
 };
 
+pub(crate) mod assessment;
 mod trust_store;
 
+pub use assessment::{assess_project_folder, ProjectAssessmentService};
 use trust_store::ProjectTrustStore;
 
 const GENERAL_PURPOSE: &str = include_str!("../../templates/projects/general/purpose.md");
@@ -119,6 +122,170 @@ impl ProjectService {
                 probe_writable_project_directory(&context.root, &safe_task_state_root)
             },
         )
+    }
+
+    pub fn enable_compatible_guidance(
+        &self,
+        context: &ProjectContext,
+        template: ProjectTemplate,
+    ) -> Result<Vec<String>, BackendError> {
+        let root = validate_existing_project_root(&context.root).map_err(|message| {
+            BackendError::new(
+                "PROJECT_COMPAT_PATH_UNSAFE",
+                "Compatibility guidance cannot be written to an unsafe project path.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "error": message }))
+        })?;
+        let app_dir = root.join(".app");
+        let compat_dir = app_dir.join("compat");
+        let mut created_dirs = Vec::new();
+        let mut created_files = Vec::new();
+
+        let result = (|| {
+            for directory in [&app_dir, &compat_dir] {
+                if directory.exists() {
+                    validate_existing_project_directory(&root, directory).map_err(|message| {
+                        BackendError::new(
+                            "PROJECT_COMPAT_PATH_UNSAFE",
+                            "Compatibility guidance cannot use a linked or unsafe directory.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "error": message }))
+                    })?;
+                    continue;
+                }
+                fs::create_dir(directory).map_err(|error| {
+                    BackendError::new(
+                        "PROJECT_COMPAT_DIRECTORY_CREATE_FAILED",
+                        "Compatibility guidance directory could not be created.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({
+                        "path": directory.to_string_lossy(),
+                        "error": error.to_string(),
+                    }))
+                })?;
+                validate_existing_project_directory(&root, directory).map_err(|message| {
+                    BackendError::new(
+                        "PROJECT_COMPAT_PATH_UNSAFE",
+                        "Compatibility guidance cannot use a linked or unsafe directory.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "error": message }))
+                })?;
+                created_dirs.push(directory.to_path_buf());
+            }
+
+            for (name, contents) in [
+                ("purpose.md", template_purpose(template)),
+                ("schema.md", template_schema(template)),
+            ] {
+                let target = compat_dir.join(name);
+                if fs::symlink_metadata(&target).is_ok() {
+                    let safe_target =
+                        validate_existing_project_file(&root, &target).map_err(|message| {
+                            BackendError::new(
+                                "PROJECT_COMPAT_PATH_UNSAFE",
+                                "Compatibility guidance cannot use a linked or unsafe file.",
+                                true,
+                                true,
+                            )
+                            .with_details(serde_json::json!({ "error": message }))
+                        })?;
+                    let existing = fs::read(&safe_target).map_err(|error| {
+                        BackendError::new(
+                            "PROJECT_COMPAT_GUIDANCE_READ_FAILED",
+                            "Existing compatibility guidance could not be verified.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "error": error.to_string() }))
+                    })?;
+                    if existing == contents.as_bytes() {
+                        continue;
+                    }
+                    return Err(BackendError::new(
+                        "PROJECT_COMPAT_GUIDANCE_EXISTS",
+                        "Existing compatibility guidance will not be overwritten.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({
+                        "path": format!(".app/compat/{name}"),
+                    })));
+                }
+                let temporary = compat_dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+                let write_result = (|| {
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temporary)
+                        .map_err(|error| {
+                            BackendError::new(
+                                "PROJECT_COMPAT_GUIDANCE_WRITE_FAILED",
+                                "Compatibility guidance could not be written.",
+                                true,
+                                true,
+                            )
+                            .with_details(serde_json::json!({ "error": error.to_string() }))
+                        })?;
+                    file.write_all(contents.as_bytes()).map_err(|error| {
+                        BackendError::new(
+                            "PROJECT_COMPAT_GUIDANCE_WRITE_FAILED",
+                            "Compatibility guidance could not be written.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "error": error.to_string() }))
+                    })?;
+                    file.sync_all().map_err(|error| {
+                        BackendError::new(
+                            "PROJECT_COMPAT_GUIDANCE_WRITE_FAILED",
+                            "Compatibility guidance could not be synchronized.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "error": error.to_string() }))
+                    })?;
+                    fs::rename(&temporary, &target).map_err(|error| {
+                        BackendError::new(
+                            "PROJECT_COMPAT_GUIDANCE_COMMIT_FAILED",
+                            "Compatibility guidance could not be committed.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "error": error.to_string() }))
+                    })?;
+                    Ok::<(), BackendError>(())
+                })();
+                if write_result.is_err() {
+                    let _ = fs::remove_file(&temporary);
+                }
+                write_result?;
+                created_files.push(target);
+            }
+            Ok::<(), BackendError>(())
+        })();
+
+        if let Err(error) = result {
+            for file in created_files.iter().rev() {
+                let _ = fs::remove_file(file);
+            }
+            for directory in created_dirs.iter().rev() {
+                let _ = fs::remove_dir(directory);
+            }
+            return Err(error);
+        }
+
+        Ok(vec![
+            ".app/compat/purpose.md".into(),
+            ".app/compat/schema.md".into(),
+        ])
     }
 
     pub fn create_project(
@@ -963,7 +1130,7 @@ fn normalize_root_key(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn default_config_dir() -> PathBuf {
+pub(crate) fn default_config_dir() -> PathBuf {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         return PathBuf::from(appdata).join("llm-wiki-desktop");
     }
@@ -1554,5 +1721,89 @@ mod tests {
             }
             _ => panic!("sample wiki should open as a compatible project"),
         }
+    }
+
+    #[test]
+    fn compatible_guidance_only_adds_two_scoped_files_and_does_not_initialize_git() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("compatible-guidance");
+        fs::create_dir(root.join(".obsidian")).unwrap();
+        fs::write(root.join("首页.md"), "# 首页\n原文").unwrap();
+        fs::write(root.join(".obsidian/app.json"), "{\"legacy\":true}").unwrap();
+        let markdown_before = fs::read(root.join("首页.md")).unwrap();
+        let obsidian_before = fs::read(root.join(".obsidian/app.json")).unwrap();
+        let context = ProjectContext::new("compatible", root.clone());
+
+        let changed = service
+            .enable_compatible_guidance(&context, ProjectTemplate::General)
+            .unwrap();
+
+        assert_eq!(
+            changed,
+            vec![".app/compat/purpose.md", ".app/compat/schema.md"]
+        );
+        assert!(root.join(".app/compat/purpose.md").is_file());
+        assert!(root.join(".app/compat/schema.md").is_file());
+        assert!(!root.join("purpose.md").exists());
+        assert!(!root.join("schema.md").exists());
+        assert!(!root.join(".git").exists());
+        assert_eq!(fs::read(root.join("首页.md")).unwrap(), markdown_before);
+        assert_eq!(
+            fs::read(root.join(".obsidian/app.json")).unwrap(),
+            obsidian_before
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compatible_guidance_never_overwrites_existing_app_owned_guidance() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("compatible-existing");
+        fs::create_dir_all(root.join(".app/compat")).unwrap();
+        fs::write(root.join(".app/compat/purpose.md"), "custom").unwrap();
+        let context = ProjectContext::new("compatible", root.clone());
+
+        let error = service
+            .enable_compatible_guidance(&context, ProjectTemplate::Research)
+            .unwrap_err();
+
+        assert_eq!(error.code, "PROJECT_COMPAT_GUIDANCE_EXISTS");
+        assert_eq!(
+            fs::read_to_string(root.join(".app/compat/purpose.md")).unwrap(),
+            "custom"
+        );
+        assert!(!root.join(".app/compat/schema.md").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compatible_guidance_retry_accepts_only_the_exact_generated_templates() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("compatible-idempotent");
+        let context = ProjectContext::new("compatible", root.clone());
+
+        service
+            .enable_compatible_guidance(&context, ProjectTemplate::Research)
+            .unwrap();
+        let purpose = fs::read(root.join(".app/compat/purpose.md")).unwrap();
+        let schema = fs::read(root.join(".app/compat/schema.md")).unwrap();
+
+        let changed = service
+            .enable_compatible_guidance(&context, ProjectTemplate::Research)
+            .unwrap();
+
+        assert_eq!(
+            changed,
+            vec![".app/compat/purpose.md", ".app/compat/schema.md"]
+        );
+        assert_eq!(
+            fs::read(root.join(".app/compat/purpose.md")).unwrap(),
+            purpose
+        );
+        assert_eq!(
+            fs::read(root.join(".app/compat/schema.md")).unwrap(),
+            schema
+        );
+        fs::remove_dir_all(root).ok();
     }
 }

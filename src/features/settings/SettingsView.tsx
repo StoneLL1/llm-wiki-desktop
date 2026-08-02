@@ -36,6 +36,7 @@ export interface SettingsViewProps {
   onDeleteSecret: (provider: LlmProviderKind) => Promise<unknown> | unknown;
   onTestProvider: (config: LlmProviderConfig) => Promise<ProviderTestResult>;
   importWorkflow?: ImportWorkflow;
+  onManageProjectAuthority?: () => void;
 }
 
 type SettingsSectionKey =
@@ -104,6 +105,7 @@ export function SettingsView({
   onDeleteSecret,
   onTestProvider,
   importWorkflow,
+  onManageProjectAuthority,
 }: SettingsViewProps) {
   const { t } = useTranslation();
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>("general");
@@ -228,6 +230,15 @@ export function SettingsView({
                   <div className="settings-view__card-label">{t("settings.general.scope")}</div>
                   <div className="settings-view__card-value">{t("settings.general.scopeCopy")}</div>
                 </div>
+                {onManageProjectAuthority ? (
+                  <div className="settings-view__card">
+                    <div className="settings-view__card-label">{t("settings.general.projectAuthority")}</div>
+                    <div className="settings-view__card-value">{t("settings.general.projectAuthorityDescription")}</div>
+                    <button className="btn btn--secondary mt-3" onClick={onManageProjectAuthority} type="button">
+                      {t("settings.general.manageProjectAuthority")}
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </section>
           ) : null}

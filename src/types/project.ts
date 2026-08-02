@@ -47,6 +47,79 @@ export interface ProjectLayout {
 
 export type ProjectLayoutConfidence = "high" | "medium" | "low";
 
+export type ProjectFormat =
+  | "native_current"
+  | "native_legacy"
+  | "nashsu_llm_wiki"
+  | "obsidian_vault"
+  | "markdown_vault"
+  | "ambiguous_markdown"
+  | "ordinary_materials"
+  | "unknown";
+
+export type ProjectTrustState = "trusted" | "untrusted";
+export type ProjectFilesystemAccess = "writable" | "read_only";
+export type ProjectHealth = "healthy" | "repairable" | "recovery" | "unreadable";
+
+export type ProjectCapability =
+  | "read_markdown"
+  | "local_search"
+  | "in_memory_graph"
+  | "local_health_check"
+  | "external_ai"
+  | "project_write"
+  | "git_checkpoint"
+  | "enable_compatible_features";
+
+export interface ProjectMarker {
+  kind: string;
+  path: string;
+}
+
+export interface ProjectAssessmentWarning {
+  code: string;
+  message: string;
+  path?: string;
+}
+
+export interface ProjectGitAssessment {
+  isRepository: boolean;
+  branch: string | null;
+  head: string | null;
+  hasChanges: boolean;
+}
+
+export interface ProjectOpenAssessment {
+  assessmentId: string;
+  canonicalRootPath: string;
+  canonicalIdentityKey: string;
+  identityRevision: string;
+  format: ProjectFormat;
+  trust: ProjectTrustState;
+  filesystemAccess: ProjectFilesystemAccess;
+  health: ProjectHealth;
+  layout: ProjectLayout;
+  confidence: ProjectLayoutConfidence;
+  markers: ProjectMarker[];
+  capabilities: ProjectCapability[];
+  warnings: ProjectAssessmentWarning[];
+  layoutWarnings: ProjectLayoutWarning[];
+  git: ProjectGitAssessment;
+}
+
+export type AssessmentOperationStatus = "running" | "completed" | "failed";
+
+export interface ProjectAssessmentOperation {
+  assessmentOperationId: string;
+  status: AssessmentOperationStatus;
+  assessment?: ProjectOpenAssessment;
+  error?: { code: string; message: string };
+}
+
+export interface StartProjectOpenAssessmentResult {
+  assessmentOperationId: string;
+}
+
 export type ProjectLayoutWarningCode =
   | "LOW_CONFIDENCE"
   | "DISCOVERY_LIMIT_REACHED"

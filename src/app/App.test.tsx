@@ -134,11 +134,34 @@ describe("App", () => {
       configurable: true,
     });
     invokeMock.mockImplementation((command: string) => {
-      if (command === "open_project") {
+      if (command === "start_project_open_assessment") {
+        return Promise.resolve({ assessmentOperationId: "operation-a" });
+      }
+      if (command === "get_project_open_assessment") {
         return Promise.resolve({
-          kind: "opened",
-          summary: sampleProject({ rootPath: "D:/知识库/agent" }),
+          assessmentOperationId: "operation-a",
+          status: "completed",
+          assessment: {
+            assessmentId: "assessment-a",
+            canonicalRootPath: "D:/知识库/agent",
+            canonicalIdentityKey: "identity-a",
+            identityRevision: "revision-a",
+            format: "native_current",
+            trust: "trusted",
+            filesystemAccess: "writable",
+            health: "healthy",
+            layout: { markdownRoots: [{ path: "wiki", role: "wiki" }] },
+            confidence: "high",
+            markers: [],
+            capabilities: ["read_markdown", "project_write"],
+            warnings: [],
+            layoutWarnings: [],
+            git: { isRepository: true, branch: "main", head: "abc", hasChanges: false },
+          },
         });
+      }
+      if (command === "open_assessed_project") {
+        return Promise.resolve(sampleProject({ rootPath: "D:/知识库/agent" }));
       }
       return Promise.resolve([]);
     });
@@ -151,9 +174,14 @@ describe("App", () => {
         expect.objectContaining({ directory: true, multiple: false }),
       ),
     );
-    expect(invokeMock).toHaveBeenCalledWith("open_project", {
+    expect(invokeMock).toHaveBeenCalledWith("start_project_open_assessment", {
       request: { path: "D:\\知识库\\agent" },
     });
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("open_assessed_project", {
+        request: { assessmentId: "assessment-a" },
+      }),
+    );
   });
 
   it("shows launch picker errors instead of leaving an unhandled rejection", async () => {

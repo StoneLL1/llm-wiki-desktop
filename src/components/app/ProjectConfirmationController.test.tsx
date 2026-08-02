@@ -14,16 +14,21 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("./ConfirmationDialog", () => ({
   ConfirmationDialog: ({
     action,
+    busy,
+    error,
     onCancel,
     onConfirm,
   }: {
     action: PendingAction;
+    busy?: boolean;
+    error?: string | null;
     onCancel: () => void;
     onConfirm: () => void;
   }) => (
     <div role="dialog" aria-label={action.title}>
-      <button onClick={onCancel}>Cancel action</button>
-      <button onClick={onConfirm}>Confirm action</button>
+      {error ? <p role="alert">{error}</p> : null}
+      <button disabled={busy} onClick={onCancel}>Cancel action</button>
+      <button disabled={busy} onClick={onConfirm}>Confirm action</button>
     </div>
   ),
 }));
@@ -122,6 +127,20 @@ describe("ProjectConfirmationController", () => {
 
     await waitFor(() => expect(confirmPendingAction).toHaveBeenCalledTimes(1));
     expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed confirmation visible and retryable", async () => {
+    confirmPendingAction.mockRejectedValueOnce(new Error("Project identity changed; assess again."));
+    useProjectStore.setState({ pendingAction: projectAction });
+    render(<ProjectConfirmationController />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Project identity changed; assess again.",
+    );
+    expect(screen.getByRole("button", { name: "Confirm action" })).toBeEnabled();
+    expect(useProjectStore.getState().pendingAction).toEqual(projectAction);
   });
 
   it.each([

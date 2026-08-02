@@ -44,7 +44,7 @@ pub use git_service::GitService;
 pub use graph_service::GraphService;
 pub use lint_service::{health_source_paths, DeepLintSnapshot, LintService, LocalLintPhase};
 pub use llm_service::LlmService;
-pub use project_service::ProjectService;
+pub use project_service::{assess_project_folder, ProjectAssessmentService, ProjectService};
 pub use search_service::SearchService;
 pub use secret_service::SecretService;
 pub use settings_service::SettingsService;

@@ -32,6 +32,10 @@ pub struct PendingAction {
 #[serde(rename_all = "snake_case")]
 pub enum PendingActionType {
     InitializeFolder,
+    EnableCompatibleProject,
+    TrustCompatibleProject,
+    InitializeGitRepository,
+    CreateGitCheckpoint,
     DeleteFile,
     OverwriteFile,
     BatchRewrite,
@@ -93,6 +97,32 @@ pub enum ConfirmationExecution {
     InitializeFolder {
         root_path: String,
         file_hashes: Vec<(String, String)>,
+    },
+    EnableCompatibleProject {
+        assessment_id: crate::models::project::AssessmentId,
+        project_id: String,
+        root_path: String,
+        template: crate::models::project::ProjectTemplate,
+        initialize_git: bool,
+    },
+    TrustCompatibleProject {
+        assessment_id: crate::models::project::AssessmentId,
+        project_id: String,
+        root_path: String,
+    },
+    InitializeAssessedGit {
+        assessment_id: crate::models::project::AssessmentId,
+        project_id: String,
+        root_path: String,
+        expected_head: Option<String>,
+        expected_paths: Vec<String>,
+    },
+    CheckpointAssessedGit {
+        assessment_id: crate::models::project::AssessmentId,
+        project_id: String,
+        root_path: String,
+        expected_head: Option<String>,
+        expected_paths: Vec<String>,
     },
     CompileMerge {
         project_id: String,

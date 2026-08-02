@@ -6,6 +6,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::BackendError;
+use crate::utils::path_safety::{
+    validate_existing_project_directory, validate_existing_project_file,
+};
 use crate::utils::path_utils::normalize_project_path;
 
 const MAX_TOP_LEVEL_ENTRIES: usize = 512;
@@ -189,7 +192,7 @@ impl ProjectLayout {
         roles: &[ProjectMarkdownRootRole],
     ) -> Result<Vec<PathBuf>, BackendError> {
         let wanted = roles.iter().copied().collect::<HashSet<_>>();
-        let legacy_native_scan = self.app_state_root.is_some();
+        let legacy_native_scan = self.app_state_root.is_some() && self.evidence_root.is_some();
         let mut seen = HashSet::new();
         let mut files = Vec::new();
         for markdown_root in &self.markdown_roots {
@@ -293,7 +296,7 @@ fn discover_compatible_layout(root: &Path) -> Result<ProjectLayoutResolution, Ba
         });
     }
 
-    let has_obsidian = safe_directory_marker(&root.join(".obsidian"));
+    let has_obsidian = safe_directory_marker(root, ".obsidian");
     let confidence = if has_obsidian {
         ProjectLayoutConfidence::High
     } else if has_root_index || !directory_roots.is_empty() {
@@ -321,11 +324,14 @@ fn discover_compatible_layout(root: &Path) -> Result<ProjectLayoutResolution, Ba
     directory_roots.sort_by(|a, b| a.path.cmp(&b.path));
     markdown_roots.extend(directory_roots);
 
-    let root_purpose = root.join("purpose.md").is_file();
-    let root_schema = root.join("schema.md").is_file();
+    let root_purpose = safe_file_marker(root, "purpose.md");
+    let root_schema = safe_file_marker(root, "schema.md");
+    let compat_purpose = safe_file_marker(root, ".app/compat/purpose.md");
+    let compat_schema = safe_file_marker(root, ".app/compat/schema.md");
+    let compat_enabled = compat_purpose && compat_schema;
     Ok(ProjectLayoutResolution {
         layout: ProjectLayout {
-            app_state_root: None,
+            app_state_root: compat_enabled.then(|| ".app".into()),
             evidence_root: None,
             markdown_roots,
             source_write_root: None,
@@ -349,16 +355,32 @@ fn discover_compatible_layout(root: &Path) -> Result<ProjectLayoutResolution, Ba
             bookmarks_path: None,
             settings_path: None,
             agent_config_path: None,
-            purpose_context: root_purpose.then(|| ProjectContextDocument {
-                read_path: some("purpose.md"),
-                write_path: None,
-                inferred: Some(true),
-            }),
-            schema_context: root_schema.then(|| ProjectContextDocument {
-                read_path: some("schema.md"),
-                write_path: None,
-                inferred: Some(true),
-            }),
+            purpose_context: if compat_purpose {
+                Some(ProjectContextDocument {
+                    read_path: some(".app/compat/purpose.md"),
+                    write_path: some(".app/compat/purpose.md"),
+                    inferred: Some(false),
+                })
+            } else {
+                root_purpose.then(|| ProjectContextDocument {
+                    read_path: some("purpose.md"),
+                    write_path: None,
+                    inferred: Some(true),
+                })
+            },
+            schema_context: if compat_schema {
+                Some(ProjectContextDocument {
+                    read_path: some(".app/compat/schema.md"),
+                    write_path: some(".app/compat/schema.md"),
+                    inferred: Some(false),
+                })
+            } else {
+                root_schema.then(|| ProjectContextDocument {
+                    read_path: some("schema.md"),
+                    write_path: None,
+                    inferred: Some(true),
+                })
+            },
         },
         confidence,
         warnings,
@@ -366,13 +388,13 @@ fn discover_compatible_layout(root: &Path) -> Result<ProjectLayoutResolution, Ba
 }
 
 fn native_markers_present(root: &Path) -> bool {
-    root.join("purpose.md").is_file()
-        && root.join("schema.md").is_file()
-        && root.join(".app").is_dir()
-        && root.join("raw").is_dir()
-        && root.join("wiki").is_dir()
-        && root.join("exports").is_dir()
-        && root.join("skills").is_dir()
+    safe_file_marker(root, "purpose.md")
+        && safe_file_marker(root, "schema.md")
+        && safe_directory_marker(root, ".app")
+        && safe_directory_marker(root, "raw")
+        && safe_directory_marker(root, "wiki")
+        && safe_directory_marker(root, "exports")
+        && safe_directory_marker(root, "skills")
 }
 
 fn compatible_role(name: &str) -> ProjectMarkdownRootRole {
@@ -547,10 +569,12 @@ fn is_markdown_path(path: &Path, case_insensitive: bool) -> bool {
         })
 }
 
-fn safe_directory_marker(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|metadata| metadata.is_dir() && !is_link_or_reparse(&metadata))
-        .unwrap_or(false)
+fn safe_directory_marker(root: &Path, relative: &str) -> bool {
+    validate_existing_project_directory(root, &root.join(relative)).is_ok()
+}
+
+fn safe_file_marker(root: &Path, relative: &str) -> bool {
+    validate_existing_project_file(root, &root.join(relative)).is_ok()
 }
 
 fn some(value: &str) -> Option<String> {
@@ -665,6 +689,31 @@ mod tests {
     }
 
     #[test]
+    fn app_owned_compatible_guidance_does_not_switch_to_native_scan_rules() {
+        let root = temp_root("compatible-guidance-scan");
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::create_dir_all(root.join(".app/compat")).unwrap();
+        fs::write(root.join(".app/compat/purpose.md"), "# Purpose").unwrap();
+        fs::write(root.join(".app/compat/schema.md"), "# Schema").unwrap();
+        fs::write(root.join("UPPER.MD"), "# Upper").unwrap();
+
+        let layout = resolve_layout(&root).unwrap().layout;
+        let files = layout
+            .list_markdown_files(
+                &root,
+                &[
+                    ProjectMarkdownRootRole::Source,
+                    ProjectMarkdownRootRole::Wiki,
+                    ProjectMarkdownRootRole::Mixed,
+                ],
+            )
+            .unwrap();
+
+        assert!(files.iter().any(|path| path.ends_with("UPPER.MD")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_like_user_files_do_not_expose_native_write_or_state_paths() {
         let root = temp_root("native-like-compatible");
         fs::create_dir_all(root.join(".obsidian")).unwrap();
@@ -729,6 +778,38 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code == ProjectLayoutWarningCode::UnsafeEntrySkipped));
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside).ok();
+    }
+
+    #[test]
+    fn linked_app_marker_cannot_enable_native_or_compatible_write_paths() {
+        let root = temp_root("linked-app-marker");
+        let outside = temp_root("linked-app-marker-outside");
+        for directory in ["raw", "wiki", "exports", "skills"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        write(&root, "purpose.md");
+        write(&root, "schema.md");
+        fs::create_dir_all(outside.join("compat")).unwrap();
+        fs::write(outside.join("compat/purpose.md"), "external").unwrap();
+        fs::write(outside.join("compat/schema.md"), "external").unwrap();
+        if create_directory_link(&outside, &root.join(".app")).is_err() {
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(outside).ok();
+            return;
+        }
+
+        let resolution = resolve_layout(&root).unwrap();
+
+        assert!(resolution.layout.app_state_root.is_none());
+        assert!(resolution.layout.wiki_write_root.is_none());
+        assert!(resolution.layout.workflow_state_root.is_none());
+        assert_eq!(
+            resolution.layout.purpose_context.and_then(|value| value.read_path),
+            Some("purpose.md".into())
+        );
+        fs::remove_dir(root.join(".app")).ok();
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(outside).ok();
     }
