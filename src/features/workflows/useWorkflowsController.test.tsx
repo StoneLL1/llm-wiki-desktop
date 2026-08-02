@@ -46,12 +46,23 @@ const run: WorkflowRun = {
   retry: null, pendingAction: null, result: null, error: null, startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z", completedAt: null,
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("useWorkflowsController", () => {
   beforeEach(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
     useWorkflowStore.getState().reset();
-    mocks.getOverview.mockResolvedValue(overview);
-    mocks.listRuns.mockResolvedValue({ runs: [], nextCursor: null });
+    mocks.listener = null;
+    mocks.getOverview.mockReset().mockResolvedValue(overview);
+    mocks.listRuns.mockReset().mockResolvedValue({ runs: [], nextCursor: null });
   });
   afterEach(() => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
@@ -65,6 +76,209 @@ describe("useWorkflowsController", () => {
     expect(useWorkflowStore.getState().runs).toEqual([]);
     act(() => mocks.listener?.({ eventId: "2", eventType: "workflow_updated", projectId: "project-a", taskId: "run-a", timestamp: run.updatedAt, payload: run }));
     expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("run-a");
+  });
+
+  it("buffers an event received before overview access and applies it after identity validation", async () => {
+    const pendingOverview = deferred<WorkflowsOverview>();
+    mocks.getOverview
+      .mockReset()
+      .mockReturnValueOnce(pendingOverview.promise)
+      .mockResolvedValue(overview);
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(mocks.listener).not.toBeNull());
+
+    act(() => mocks.listener?.({
+      eventId: "before-overview",
+      eventType: "workflow_updated",
+      projectId: "project-a",
+      taskId: run.taskId,
+      timestamp: run.updatedAt,
+      payload: run,
+    }));
+    expect(useWorkflowStore.getState().runs).toEqual([]);
+
+    await act(async () => pendingOverview.resolve(overview));
+
+    await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe(run.taskId));
+    expect(mocks.getOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps only the newest buffered event for the same task", async () => {
+    const pendingOverview = deferred<WorkflowsOverview>();
+    mocks.getOverview.mockReset().mockReturnValueOnce(pendingOverview.promise);
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(mocks.listener).not.toBeNull());
+    const newerRun = {
+      ...run,
+      displayStatus: "succeeded" as const,
+      updatedAt: "2026-08-01T02:00:00Z",
+      completedAt: "2026-08-01T02:00:00Z",
+    };
+
+    act(() => {
+      mocks.listener?.({
+        eventId: "newer",
+        eventType: "workflow_updated",
+        projectId: "project-a",
+        taskId: run.taskId,
+        timestamp: newerRun.updatedAt,
+        payload: newerRun,
+      });
+      mocks.listener?.({
+        eventId: "older",
+        eventType: "workflow_updated",
+        projectId: "project-a",
+        taskId: run.taskId,
+        timestamp: run.updatedAt,
+        payload: run,
+      });
+    });
+    await act(async () => pendingOverview.resolve(overview));
+
+    await waitFor(() => expect(useWorkflowStore.getState().runs[0]).toMatchObject({
+      taskId: run.taskId,
+      displayStatus: "succeeded",
+      updatedAt: newerRun.updatedAt,
+    }));
+  });
+
+  it("retries one coalesced refresh after a buffered-event refresh fails", async () => {
+    const failedOverview = deferred<WorkflowsOverview>();
+    mocks.getOverview
+      .mockReset()
+      .mockReturnValueOnce(failedOverview.promise)
+      .mockResolvedValueOnce(overview);
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(mocks.listener).not.toBeNull());
+
+    act(() => mocks.listener?.({
+      eventId: "before-failure",
+      eventType: "workflow_updated",
+      projectId: "project-a",
+      taskId: run.taskId,
+      timestamp: run.updatedAt,
+      payload: run,
+    }));
+    await act(async () => failedOverview.reject(new Error("overview unavailable")));
+
+    await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe(run.taskId));
+  });
+
+  it("drops buffered events for another project or canonical identity", async () => {
+    const pendingOverview = deferred<WorkflowsOverview>();
+    mocks.getOverview
+      .mockReset()
+      .mockReturnValueOnce(pendingOverview.promise)
+      .mockResolvedValue(overview);
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(mocks.listener).not.toBeNull());
+
+    act(() => {
+      mocks.listener?.({
+        eventId: "other-project",
+        eventType: "workflow_updated",
+        projectId: "project-b",
+        taskId: "run-b",
+        timestamp: run.updatedAt,
+        payload: { ...run, taskId: "run-b", projectId: "project-b" },
+      });
+      mocks.listener?.({
+        eventId: "stale-identity",
+        eventType: "workflow_updated",
+        projectId: "project-a",
+        taskId: run.taskId,
+        timestamp: run.updatedAt,
+        payload: { ...run, identityRevision: "stale" },
+      });
+    });
+
+    await act(async () => pendingOverview.resolve(overview));
+
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    expect(useWorkflowStore.getState().runs).toEqual([]);
+  });
+
+  it("clears buffered events when the active project changes", async () => {
+    const projectB = { ...project, name: "B", rootPath: "D:/b" };
+    const overviewB: WorkflowsOverview = { ...overview };
+    const pendingA = deferred<WorkflowsOverview>();
+    const pendingB = deferred<WorkflowsOverview>();
+    mocks.getOverview
+      .mockReset()
+      .mockReturnValueOnce(pendingA.promise)
+      .mockReturnValueOnce(pendingB.promise)
+      .mockResolvedValue(overviewB);
+    const { rerender } = renderHook(
+      ({ currentProject }) => useWorkflowsController(currentProject, true),
+      { initialProps: { currentProject: project } },
+    );
+    await waitFor(() => expect(mocks.listener).not.toBeNull());
+    act(() => mocks.listener?.({
+      eventId: "project-a-pending",
+      eventType: "workflow_updated",
+      projectId: "project-a",
+      taskId: run.taskId,
+      timestamp: run.updatedAt,
+      payload: run,
+    }));
+
+    rerender({ currentProject: projectB });
+    await act(async () => {
+      pendingA.resolve(overview);
+      pendingB.resolve(overviewB);
+    });
+
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overviewB));
+    expect(useWorkflowStore.getState().runs).toEqual([]);
+  });
+
+  it("lets the current project refresh while the previous project refresh is still in flight", async () => {
+    const projectB = { ...project, projectId: "project-b", name: "B", rootPath: "D:/b" };
+    const overviewB: WorkflowsOverview = {
+      ...overview,
+      projectAccess: {
+        ...overview.projectAccess!,
+        projectId: "project-b",
+        canonicalIdentityKey: "identity-b",
+        identityRevision: "revision-b",
+      },
+    };
+    const runB: WorkflowRun = {
+      ...run,
+      taskId: "run-b",
+      projectId: "project-b",
+      canonicalIdentityKey: "identity-b",
+      identityRevision: "revision-b",
+    };
+    const pendingA = deferred<WorkflowsOverview>();
+    const pendingB = deferred<WorkflowsOverview>();
+    mocks.getOverview
+      .mockReset()
+      .mockReturnValueOnce(pendingA.promise)
+      .mockReturnValueOnce(pendingB.promise)
+      .mockResolvedValue(overviewB);
+    const { rerender } = renderHook(
+      ({ currentProject }) => useWorkflowsController(currentProject, true),
+      { initialProps: { currentProject: project } },
+    );
+    await waitFor(() => expect(mocks.listener).not.toBeNull());
+
+    rerender({ currentProject: projectB });
+    await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(2));
+    act(() => mocks.listener?.({
+      eventId: "project-b-pending",
+      eventType: "workflow_updated",
+      projectId: "project-b",
+      taskId: runB.taskId,
+      timestamp: runB.updatedAt,
+      payload: runB,
+    }));
+    await act(async () => pendingB.reject(new Error("project B overview unavailable")));
+
+    await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe(runB.taskId));
+    await act(async () => pendingA.resolve(overview));
   });
 
   it("loads workflow history through the backend cursor", async () => {
