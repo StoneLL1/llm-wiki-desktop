@@ -1,5 +1,11 @@
 # 踩坑清单 (gotchas.txt)
 
+Cached task persistence paths are not safe delete capabilities — Root cause: a validated `.app/tasks` parent can later be replaced by a junction or symlink, causing a cached file path to resolve outside the project during cleanup — How to avoid: revalidate the bound project root, every existing parent, the exact regular file, and its task-id filename immediately before deletion; document the residual path-API TOCTOU window.
+
+Buffered Workflow events need versioned refresh ownership — Root cause: a boolean refresh flag can be cleared by a later concurrent or failed overview request while the event remains buffered, leaving terminal state invisible until an unrelated refresh — How to avoid: keep per-project pending/attempted versions until a successful access snapshot flushes the buffer, coalesce one retry per event generation, and clear all pending state on project-key changes.
+
+Direct GUI-feature Rust test binaries may fail on Windows even when the project gate is healthy — Root cause: `cargo test` with default GUI features can exit with `STATUS_ENTRYPOINT_NOT_FOUND` in the test environment, while the project test contract intentionally uses `--no-default-features` — How to avoid: run focused Rust tests with `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features ...` and use `npm run check` for the authoritative full gate.
+
 Import QA evidence resolves frontend tests by exact declaration text — Root cause: renaming the explicit Import action from legacy Compile wording to Workflows preparation left the JSON evidence anchor pointing at a declaration that no longer existed — How to avoid: update `docs/qa/import-source-media-flow-batch9-evidence.json` whenever an evidenced test is intentionally renamed, and keep the requirement wording aligned with the current product authority.
 
 Explicit queue continuation can create a runner-less `Running` task — Root cause: the coordinator claimed the first recovered item but returned only the refreshed queue, so the command had no claimed run to dispatch — How to avoid: return the claimed run together with queue snapshots, revalidate every recovered queued item before clearing continuation holds, and dispatch exactly the returned claim.

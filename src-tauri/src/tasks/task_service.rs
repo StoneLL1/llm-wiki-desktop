@@ -18,6 +18,10 @@ use crate::tasks::task_events::EventBus;
 use crate::tasks::task_model::{
     validate_transition, CancellationToken, LogLevel, LogLine, TaskEntry,
 };
+use crate::utils::path_safety::{
+    ensure_project_directory, validate_existing_project_directory, validate_existing_project_file,
+    validate_project_directory,
+};
 
 const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
 
@@ -101,7 +105,7 @@ impl TaskService {
         root: PathBuf,
         task_state_root: PathBuf,
     ) -> Result<Vec<BackendTask>, String> {
-        validate_persistence_dir(&root, &task_state_root)?;
+        let task_state_root = validate_persistence_dir(&root, &task_state_root)?;
         *self.project_root.write().expect("lock poisoned") = Some(root.clone());
         self.recover_tasks_from(&root, &task_state_root, Some(&project_id))?;
         Ok(self.list_tasks_for_root(&root, None))
@@ -471,17 +475,8 @@ impl TaskService {
             let project_root = project_root
                 .as_deref()
                 .ok_or_else(|| format!("Workflow task has no project root: {id}"))?;
-            validate_persistence_dir(project_root, &tasks_dir)?;
-            let write_result = std::fs::create_dir_all(&tasks_dir)
-                .map_err(|error| format!("Failed to create tasks dir: {error}"))
-                .and_then(|_| {
-                    let path = tasks_dir.join(format!("{id}.json"));
-                    FileStore
-                        .write_json_atomic_absolute(&path, &persisted)
-                        .map_err(|error| format!("Failed to write task file: {}", error.message))?;
-                    entry.persisted_path = Some(path);
-                    Ok(())
-                });
+            let write_result = write_persisted_task(project_root, &tasks_dir, id, &persisted)
+                .map(|path| entry.persisted_path = Some(path));
             if let Err(error) = write_result {
                 entry.task = previous_task;
                 entry.workflow = previous_workflow;
@@ -1234,7 +1229,7 @@ impl TaskService {
             if is_terminal {
                 removed_ids.push(id.clone());
                 if let Some(path) = &entry.persisted_path {
-                    removed_paths.push(path.clone());
+                    removed_paths.push((id.clone(), path.clone()));
                 }
             }
             !is_terminal
@@ -1246,6 +1241,9 @@ impl TaskService {
         for id in &removed_ids {
             self.cancellation.remove(id);
         }
+        for (id, path) in &removed_paths {
+            let _ = self.remove_persisted_task_file(id, path);
+        }
         self.task_roots
             .write()
             .expect("lock poisoned")
@@ -1254,10 +1252,6 @@ impl TaskService {
             .write()
             .expect("lock poisoned")
             .retain(|id, _| !removed_ids.contains(id));
-        for path in removed_paths {
-            let _ = std::fs::remove_file(path);
-        }
-
         removed_count
     }
 
@@ -1293,10 +1287,13 @@ impl TaskService {
             for id in &matching_ids {
                 if let Some(entry) = tasks.remove(id) {
                     if let Some(path) = entry.persisted_path {
-                        removed_paths.push(path);
+                        removed_paths.push((id.clone(), path));
                     }
                 }
             }
+        }
+        for (id, path) in &removed_paths {
+            let _ = self.remove_persisted_task_file(id, path);
         }
         {
             let mut roots = self.task_roots.write().expect("lock poisoned");
@@ -1306,9 +1303,6 @@ impl TaskService {
                 persistence_dirs.remove(id);
                 self.cancellation.remove(id);
             }
-        }
-        for path in removed_paths {
-            let _ = std::fs::remove_file(path);
         }
         matching_ids.len()
     }
@@ -1328,20 +1322,13 @@ impl TaskService {
                     return Err(format!("Task is not queued: {id}"));
                 }
                 if let Some(path) = &entry.persisted_path {
-                    paths.push(path.clone());
+                    paths.push((id.clone(), path.clone()));
                 }
             }
             paths
         };
-        for path in &persisted_paths {
-            if path.exists() {
-                std::fs::remove_file(path).map_err(|error| {
-                    format!(
-                        "Failed to discard prepared task {}: {error}",
-                        path.display()
-                    )
-                })?;
-            }
+        for (id, path) in &persisted_paths {
+            self.remove_persisted_task_file(id, path)?;
         }
         self.tasks
             .write()
@@ -1361,10 +1348,61 @@ impl TaskService {
         Ok(())
     }
 
+    fn remove_persisted_task_file(&self, id: &str, path: &Path) -> Result<(), String> {
+        let project_root = self
+            .task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("Task has no project root: {id}"))?;
+        let persistence_dir = self
+            .task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("Task has no persistence directory: {id}"))?;
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect persisted task {}: {error}",
+                    path.display()
+                ));
+            }
+            Ok(_) => {}
+        }
+        let persistence_dir = validate_existing_project_directory(&project_root, &persistence_dir)
+            .map_err(|error| format!("Task persistence path is unsafe: {error}"))?;
+        let path = validate_existing_project_file(&project_root, path)
+            .map_err(|error| format!("Task persistence entry is unsafe: {error}"))?;
+        let expected_name = format!("{id}.json");
+        if path.parent() != Some(persistence_dir.as_path())
+            || path.file_name() != Some(std::ffi::OsStr::new(&expected_name))
+        {
+            return Err(format!(
+                "Task persistence entry does not match its task binding: {}",
+                path.display()
+            ));
+        }
+
+        // As with writes, the path-based standard-library API cannot hold all
+        // parent directories open with no-follow semantics. Revalidating the
+        // directory and exact regular file immediately before remove narrows
+        // the remaining replacement window and fails closed on observed drift.
+        std::fs::remove_file(&path).map_err(|error| {
+            format!(
+                "Failed to remove persisted task {}: {error}",
+                path.display()
+            )
+        })
+    }
+
     pub fn persist_task(&self, id: &str, project_root: &Path) -> Result<(), String> {
         let tasks_dir = project_root.join(".app").join("tasks");
-        validate_persistence_dir(project_root, &tasks_dir)?;
-        self.persist_task_to_dir(id, &tasks_dir)?;
+        let tasks_dir = validate_persistence_dir(project_root, &tasks_dir)?;
+        self.persist_task_to_dir(id, project_root, &tasks_dir)?;
         self.task_persistence_dirs
             .write()
             .expect("lock poisoned")
@@ -1372,16 +1410,17 @@ impl TaskService {
         Ok(())
     }
 
-    fn persist_task_to_dir(&self, id: &str, tasks_dir: &Path) -> Result<(), String> {
+    fn persist_task_to_dir(
+        &self,
+        id: &str,
+        project_root: &Path,
+        tasks_dir: &Path,
+    ) -> Result<(), String> {
         let tasks = self.tasks.read().expect("lock poisoned");
         let entry = tasks
             .get(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
 
-        std::fs::create_dir_all(tasks_dir)
-            .map_err(|e| format!("Failed to create tasks dir: {}", e))?;
-
-        let path = tasks_dir.join(format!("{}.json", id));
         let persisted = PersistedTaskEntry {
             schema_version: PERSISTED_TASK_SCHEMA_VERSION,
             task: entry.task.clone(),
@@ -1389,9 +1428,7 @@ impl TaskService {
             activities: entry.activities.clone(),
             workflow: entry.workflow.clone(),
         };
-        FileStore
-            .write_json_atomic_absolute(&path, &persisted)
-            .map_err(|error| format!("Failed to write task file: {}", error.message))?;
+        let path = write_persisted_task(project_root, tasks_dir, id, &persisted)?;
 
         drop(tasks);
         let mut tasks = self.tasks.write().expect("lock poisoned");
@@ -1418,8 +1455,8 @@ impl TaskService {
                     .get(id)
                     .cloned()
                     .ok_or_else(|| format!("Task has no project root: {id}"))?;
-                validate_persistence_dir(&project_root, &dir)?;
-                self.persist_task_to_dir(id, &dir)
+                let dir = validate_persistence_dir(&project_root, &dir)?;
+                self.persist_task_to_dir(id, &project_root, &dir)
             }
             None => Ok(()),
         }
@@ -1435,9 +1472,12 @@ impl TaskService {
         tasks_dir: &Path,
         current_project_id: Option<&str>,
     ) -> Result<Vec<BackendTask>, String> {
+        let tasks_dir = validate_persistence_dir(project_root, tasks_dir)?;
         if !tasks_dir.exists() {
             return Ok(Vec::new());
         }
+        let tasks_dir = validate_existing_project_directory(project_root, &tasks_dir)
+            .map_err(|error| format!("Task persistence path is unsafe: {error}"))?;
 
         let mut recovered = Vec::new();
         let entries = std::fs::read_dir(&tasks_dir)
@@ -1447,6 +1487,8 @@ impl TaskService {
             let entry = entry.map_err(|e| format!("Failed to read dir entry: {}", e))?;
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
+                let path = validate_existing_project_file(project_root, &path)
+                    .map_err(|error| format!("Task persistence entry is unsafe: {error}"))?;
                 match std::fs::read_to_string(&path) {
                     Ok(json) => {
                         let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
@@ -1593,23 +1635,35 @@ fn require_running_workflow(
     Ok(())
 }
 
-fn validate_persistence_dir(project_root: &Path, persistence_dir: &Path) -> Result<(), String> {
-    let canonical_root = project_root
-        .canonicalize()
-        .map_err(|error| format!("Project root is unavailable: {error}"))?;
-    let mut ancestor = persistence_dir;
-    while !ancestor.exists() {
-        ancestor = ancestor
-            .parent()
-            .ok_or_else(|| "Task persistence path has no existing ancestor".to_string())?;
-    }
-    let canonical_ancestor = ancestor
-        .canonicalize()
-        .map_err(|error| format!("Task persistence ancestor is unavailable: {error}"))?;
-    if !canonical_ancestor.starts_with(canonical_root) {
-        return Err("Task persistence path resolves outside the project root".into());
-    }
-    Ok(())
+fn validate_persistence_dir(
+    project_root: &Path,
+    persistence_dir: &Path,
+) -> Result<PathBuf, String> {
+    validate_project_directory(project_root, persistence_dir)
+        .map_err(|error| format!("Task persistence path is unsafe: {error}"))
+}
+
+fn write_persisted_task(
+    project_root: &Path,
+    persistence_dir: &Path,
+    id: &str,
+    persisted: &PersistedTaskEntry,
+) -> Result<PathBuf, String> {
+    let persistence_dir = ensure_project_directory(project_root, persistence_dir)
+        .map_err(|error| format!("Task persistence path is unsafe: {error}"))?;
+    let persistence_dir = validate_existing_project_directory(project_root, &persistence_dir)
+        .map_err(|error| format!("Task persistence path is unsafe: {error}"))?;
+    let path = persistence_dir.join(format!("{id}.json"));
+
+    // Revalidation is intentionally adjacent to the atomic writer. The
+    // path-based FileStore API cannot make every parent traversal atomic with
+    // no-follow flags, so this narrows rather than eliminates the remaining
+    // replacement window. Its random create-new temporary file still prevents
+    // pre-creating the task's staging file itself.
+    FileStore
+        .write_json_atomic_absolute(&path, persisted)
+        .map_err(|error| format!("Failed to write task file: {}", error.message))?;
+    Ok(path)
 }
 
 fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> Result<(), String> {
@@ -1674,6 +1728,32 @@ mod tests {
         let (event_bus, events) = EventBus::new_test_capture();
         let service = TaskService::with_event_bus(event_bus);
         (service, events)
+    }
+
+    #[cfg(unix)]
+    fn create_directory_alias(target: &Path, alias: &Path) {
+        std::os::unix::fs::symlink(target, alias).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn create_directory_alias(target: &Path, alias: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(alias)
+            .arg(target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create test junction");
+    }
+
+    #[cfg(unix)]
+    fn remove_directory_alias(alias: &Path) {
+        std::fs::remove_file(alias).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn remove_directory_alias(alias: &Path) {
+        std::fs::remove_dir(alias).unwrap();
     }
 
     #[test]
@@ -2357,6 +2437,55 @@ mod tests {
             .join(format!("{}.json", second.id))
             .exists());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn discard_rejects_replaced_persistence_parent_without_deleting_outside_file() {
+        let (service, _events) = make_service();
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let task = service
+            .create_project_task(
+                TaskType::Import,
+                "project".into(),
+                root.path().to_path_buf(),
+                "queued".into(),
+                true,
+            )
+            .unwrap();
+        let app_dir = root.path().join(".app");
+        std::fs::remove_dir_all(&app_dir).unwrap();
+        let outside_tasks = outside.path().join("tasks");
+        std::fs::create_dir_all(&outside_tasks).unwrap();
+        let outside_file = outside_tasks.join(format!("{}.json", task.id));
+        std::fs::write(&outside_file, b"outside sentinel").unwrap();
+        create_directory_alias(outside.path(), &app_dir);
+
+        let result = service.discard_unstarted_tasks(std::slice::from_ref(&task.id));
+        let outside_contents = std::fs::read(&outside_file).unwrap();
+        let task_was_preserved = service.get_task(&task.id).is_some();
+        remove_directory_alias(&app_dir);
+
+        assert!(result.is_err());
+        assert_eq!(outside_contents, b"outside sentinel");
+        assert!(task_was_preserved);
+    }
+
+    #[test]
+    fn recovery_rejects_json_named_directory_alias() {
+        let (service, _events) = make_service();
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let tasks_dir = root.path().join(".app").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let alias = tasks_dir.join("outside.json");
+        create_directory_alias(outside.path(), &alias);
+
+        let result = service.recover_tasks(root.path());
+        remove_directory_alias(&alias);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unsafe"));
     }
 
     #[test]

@@ -23,12 +23,18 @@ import {
 import type { ProjectSummary } from "../../types/project";
 import type {
   WorkflowKind,
+  WorkflowProjectAccessSummary,
   WorkflowPrerequisiteAction,
   WorkflowRouteSelection,
   WorkflowRun,
   WorkflowScope,
   WorkflowStartOutcome,
 } from "../../types/workflow";
+
+interface PendingWorkflowEvent {
+  eventProjectId: string | null;
+  run: WorkflowRun;
+}
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -39,6 +45,31 @@ function messageOf(error: unknown): string {
     if (typeof message === "string") return message;
   }
   return String(error);
+}
+
+function workflowEventMatchesAccess(
+  event: PendingWorkflowEvent,
+  projectId: string,
+  access: WorkflowProjectAccessSummary,
+): boolean {
+  return event.eventProjectId === projectId
+    && event.run.projectId === projectId
+    && event.run.canonicalIdentityKey === access.canonicalIdentityKey
+    && event.run.identityRevision === access.identityRevision;
+}
+
+function keepLatestPendingEvent(
+  pending: Map<string, PendingWorkflowEvent>,
+  event: PendingWorkflowEvent,
+): void {
+  const previous = pending.get(event.run.taskId);
+  if (
+    previous
+    && Date.parse(previous.run.updatedAt) > Date.parse(event.run.updatedAt)
+  ) {
+    return;
+  }
+  pending.set(event.run.taskId, event);
 }
 
 export interface WorkflowsController {
@@ -67,6 +98,10 @@ export function useWorkflowsController(
   const projectKey = `${project.projectId}\0${project.rootPath}`;
   const activeKeyRef = useRef(projectKey);
   const refreshRequestRef = useRef(0);
+  const refreshInFlightRef = useRef<Map<string, number>>(new Map());
+  const pendingEventsRef = useRef<Map<string, PendingWorkflowEvent>>(new Map());
+  const pendingRefreshVersionRef = useRef<Map<string, number>>(new Map());
+  const attemptedPendingRefreshVersionRef = useRef<Map<string, number>>(new Map());
   const prepareRequestRef = useRef(0);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const openSettings = useNavigationStore((state) => state.openSettings);
@@ -85,6 +120,10 @@ export function useWorkflowsController(
     if (!enabled || !project.projectId || !project.rootPath || !hasTauri()) return;
     const state = useWorkflowStore.getState();
     const refreshRequest = ++refreshRequestRef.current;
+    refreshInFlightRef.current.set(
+      projectKey,
+      (refreshInFlightRef.current.get(projectKey) ?? 0) + 1,
+    );
     const epoch = state.requestEpoch;
     const expectedKey = projectKey;
     state.setLoading(true);
@@ -104,6 +143,17 @@ export function useWorkflowsController(
       if (latest.projectKey !== expectedKey || latest.requestEpoch !== epoch || refreshRequestRef.current !== refreshRequest) return;
       latest.setOverview(overview);
       latest.replaceRuns(page.runs);
+      if (overview.projectAccess) {
+        const pendingEvents = [...pendingEventsRef.current.values()];
+        pendingEventsRef.current.clear();
+        for (const pendingEvent of pendingEvents) {
+          if (workflowEventMatchesAccess(pendingEvent, project.projectId, overview.projectAccess)) {
+            latest.upsertRun(pendingEvent.run);
+          }
+        }
+        pendingRefreshVersionRef.current.delete(projectKey);
+        attemptedPendingRefreshVersionRef.current.delete(projectKey);
+      }
       latest.setHistoryCursor(page.nextCursor);
     } catch (error) {
       const latest = useWorkflowStore.getState();
@@ -111,15 +161,36 @@ export function useWorkflowsController(
         latest.setError(messageOf(error));
       }
     } finally {
+      const remainingRefreshes = Math.max(
+        0,
+        (refreshInFlightRef.current.get(projectKey) ?? 1) - 1,
+      );
+      if (remainingRefreshes === 0) refreshInFlightRef.current.delete(projectKey);
+      else refreshInFlightRef.current.set(projectKey, remainingRefreshes);
       const latest = useWorkflowStore.getState();
       if (latest.projectKey === expectedKey && latest.requestEpoch === epoch && refreshRequestRef.current === refreshRequest) {
         latest.setLoading(false);
+      }
+      if (remainingRefreshes === 0 && activeKeyRef.current === projectKey) {
+        const pendingVersion = pendingRefreshVersionRef.current.get(projectKey) ?? 0;
+        const attemptedVersion = attemptedPendingRefreshVersionRef.current.get(projectKey) ?? 0;
+        if (pendingVersion > attemptedVersion) {
+          // A buffered event gets one coalesced follow-up after the current
+          // refresh wave. Keeping the version until a successful identity
+          // check prevents a failed or superseded request from losing the
+          // event, without creating an unbounded retry loop.
+          attemptedPendingRefreshVersionRef.current.set(projectKey, pendingVersion);
+          void refresh();
+        }
       }
     }
   }, [enabled, project.projectId, project.rootPath, projectKey, request]);
 
   useEffect(() => {
     activeKeyRef.current = projectKey;
+    pendingEventsRef.current.clear();
+    pendingRefreshVersionRef.current.clear();
+    attemptedPendingRefreshVersionRef.current.clear();
     useWorkflowStore.getState().activateProject(projectKey);
   }, [projectKey]);
 
@@ -134,10 +205,22 @@ export function useWorkflowsController(
         const run = event.payload as WorkflowRun;
         const state = useWorkflowStore.getState();
         const access = state.overview?.projectAccess;
+        if (event.projectId !== project.projectId || run.projectId !== project.projectId) {
+          return;
+        }
+        if (!access) {
+          keepLatestPendingEvent(pendingEventsRef.current, {
+            eventProjectId: event.projectId,
+            run,
+          });
+          pendingRefreshVersionRef.current.set(
+            projectKey,
+            (pendingRefreshVersionRef.current.get(projectKey) ?? 0) + 1,
+          );
+          if ((refreshInFlightRef.current.get(projectKey) ?? 0) === 0) void refresh();
+          return;
+        }
         if (
-          event.projectId !== project.projectId ||
-          run.projectId !== project.projectId ||
-          !access ||
           run.canonicalIdentityKey !== access.canonicalIdentityKey ||
           run.identityRevision !== access.identityRevision
         ) {
