@@ -6,6 +6,7 @@ use std::time::Duration;
 use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
+use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
 use llm_wiki_desktop_lib::models::settings::Settings;
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
@@ -236,9 +237,11 @@ impl Fixture {
 fn trusted_persistent() -> WorkflowAccessSnapshot {
     WorkflowAccessSnapshot {
         trust: WorkflowProjectTrust::Trusted,
+        trust_kind: Some(ProjectTrustKind::Native),
         filesystem_access: WorkflowFilesystemAccess::Writable,
         persistence: WorkflowPersistenceMode::Persistent,
         git_state: WorkflowGitState::Clean,
+        authority_revision: "test-authority".into(),
     }
 }
 

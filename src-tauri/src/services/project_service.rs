@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::errors::BackendError;
@@ -8,11 +9,18 @@ use crate::models::confirmation::{
 use crate::models::git::CheckpointPurpose;
 use crate::models::paths::ProjectContext;
 use crate::models::project::{
-    AgentRoute, GraphState, IndexState, OpenProjectResponse, ProjectHealthReport, ProjectSummary,
-    ProjectTemplate, RecentProject,
+    AgentRoute, GraphState, IndexState, OpenProjectResponse, ProjectFilesystemAccess,
+    ProjectHealthReport, ProjectSummary, ProjectTemplate, ProjectTrustKind, RecentProject,
 };
 use crate::services::file_store::FileStore;
 use crate::services::git_service::GitService;
+use crate::utils::path_safety::{
+    validate_existing_project_directory, validate_existing_project_root,
+};
+
+mod trust_store;
+
+use trust_store::ProjectTrustStore;
 
 const GENERAL_PURPOSE: &str = include_str!("../../templates/projects/general/purpose.md");
 const GENERAL_SCHEMA: &str = include_str!("../../templates/projects/general/schema.md");
@@ -30,19 +38,87 @@ const MAX_RECENT_PROJECTS: usize = 20;
 
 pub struct ProjectService {
     config_dir: PathBuf,
+    trust_store: ProjectTrustStore,
 }
 
 impl Default for ProjectService {
     fn default() -> Self {
+        let config_dir = default_config_dir();
         Self {
-            config_dir: default_config_dir(),
+            trust_store: ProjectTrustStore::new(&config_dir),
+            config_dir,
         }
     }
 }
 
 impl ProjectService {
     pub fn with_config_dir(config_dir: PathBuf) -> Self {
-        Self { config_dir }
+        Self {
+            trust_store: ProjectTrustStore::new(&config_dir),
+            config_dir,
+        }
+    }
+
+    pub(crate) fn grant_project_trust(
+        &self,
+        root: &Path,
+        trust_kind: ProjectTrustKind,
+        expected_identity_key: &str,
+        expected_identity_revision: &str,
+    ) -> Result<(), BackendError> {
+        self.trust_store
+            .grant(
+                root,
+                trust_kind,
+                expected_identity_key,
+                expected_identity_revision,
+            )
+            .map(|_| ())
+    }
+
+    pub(crate) fn restore_project_trust(
+        &self,
+        root: &Path,
+    ) -> Result<Option<ProjectTrustKind>, BackendError> {
+        self.trust_store
+            .restore(root)
+            .map(|trust| trust.map(|trust| trust.trust_kind))
+    }
+
+    pub(crate) fn revoke_project_trust(&self, root: &Path) -> Result<(), BackendError> {
+        self.trust_store.revoke(root)
+    }
+
+    pub(crate) fn filesystem_access(
+        &self,
+        context: &ProjectContext,
+        trusted: bool,
+    ) -> ProjectFilesystemAccess {
+        if !trusted {
+            return ProjectFilesystemAccess::ReadOnly;
+        }
+        let Ok(safe_root) = validate_existing_project_root(&context.root) else {
+            return ProjectFilesystemAccess::ReadOnly;
+        };
+        if probe_writable_directory(&safe_root) {
+            ProjectFilesystemAccess::Writable
+        } else {
+            ProjectFilesystemAccess::ReadOnly
+        }
+    }
+
+    pub(crate) fn has_writable_task_state_root(&self, context: &ProjectContext) -> bool {
+        let Some(relative) = context.layout.task_state_root.as_deref() else {
+            return false;
+        };
+        let Ok(task_state_root) = context.resolve_project_path(relative) else {
+            return false;
+        };
+        validate_existing_project_directory(&context.root, &task_state_root).is_ok_and(
+            |safe_task_state_root| {
+                probe_writable_project_directory(&context.root, &safe_task_state_root)
+            },
+        )
     }
 
     pub fn create_project(
@@ -538,6 +614,80 @@ impl ProjectService {
     }
 }
 
+fn probe_writable_directory(directory: &Path) -> bool {
+    let Ok(canonical_directory) = directory.canonicalize() else {
+        return false;
+    };
+    if !canonical_directory.is_dir() {
+        return false;
+    }
+    let probe_path = canonical_directory.join(format!(
+        ".llm-wiki-writability-{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    probe_writable_path(&probe_path)
+}
+
+fn probe_writable_project_directory(project_root: &Path, directory: &Path) -> bool {
+    let Ok(canonical_root) = validate_existing_project_root(project_root) else {
+        return false;
+    };
+    let Ok(safe_directory) = validate_existing_project_directory(project_root, directory) else {
+        return false;
+    };
+    let Ok(canonical_directory) = safe_directory.canonicalize() else {
+        return false;
+    };
+    if !canonical_directory.starts_with(&canonical_root) {
+        return false;
+    }
+    let Ok(revalidated) = validate_existing_project_directory(project_root, &safe_directory) else {
+        return false;
+    };
+    let Ok(current_directory) = revalidated.canonicalize() else {
+        return false;
+    };
+    if current_directory != canonical_directory || !current_directory.starts_with(&canonical_root) {
+        return false;
+    }
+    let probe_path = revalidated.join(format!(
+        ".llm-wiki-writability-{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    probe_writable_path(&probe_path)
+}
+
+fn probe_writable_path(probe_path: &Path) -> bool {
+    let mut probe = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe_path)
+    {
+        Ok(probe) => probe,
+        Err(_) => return false,
+    };
+    // Arm cleanup only after create_new proves this process created the file.
+    let cleanup = ProbeCleanup(probe_path.to_path_buf());
+    let write_succeeded = probe
+        .write_all(b"llm-wiki-writability-probe")
+        .and_then(|_| probe.sync_all())
+        .is_ok();
+    drop(probe);
+    let cleanup_succeeded = fs::remove_file(&probe_path).is_ok();
+    drop(cleanup);
+    write_succeeded && cleanup_succeeded
+}
+
+struct ProbeCleanup(PathBuf);
+
+impl Drop for ProbeCleanup {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ProjectSettings {
     #[serde(default)]
@@ -832,7 +982,9 @@ mod tests {
     use crate::models::confirmation::ConfirmationExecution;
     use crate::models::confirmation::{PendingActionType, RiskLevel};
     use crate::models::paths::ProjectContext;
-    use crate::models::project::{GraphState, IndexState, ProjectTemplate};
+    use crate::models::project::{
+        GraphState, IndexState, ProjectFilesystemAccess, ProjectTemplate,
+    };
     use crate::services::GitService;
     use std::fs;
     use std::path::PathBuf;
@@ -889,6 +1041,126 @@ mod tests {
             ".app/graph-cache.json",
             ".app/import-conflicts.json",
         ]
+    }
+
+    #[test]
+    fn untrusted_filesystem_access_is_fail_closed_without_a_probe_write() {
+        let root = unique_temp_dir("untrusted-access");
+        fs::write(root.join("现有.md"), "# Existing").unwrap();
+        let context = ProjectContext::new("untrusted", root.clone());
+        let (service, config) = service_in_temp();
+        let before = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+
+        let access = service.filesystem_access(&context, false);
+
+        let after = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(access, ProjectFilesystemAccess::ReadOnly);
+        assert_eq!(after, before);
+        assert!(!root.join(".app").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn trusted_writable_probe_cleans_up_and_does_not_invent_task_state() {
+        let root = unique_temp_dir("trusted-access");
+        let context = ProjectContext::new("trusted", root.clone());
+        let (service, config) = service_in_temp();
+
+        let access = service.filesystem_access(&context, true);
+
+        assert_eq!(access, ProjectFilesystemAccess::Writable);
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
+        assert!(!service.has_writable_task_state_root(&context));
+        assert!(!root.join(".app").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn task_state_root_must_already_exist_and_be_path_safe() {
+        let root = unique_temp_dir("task-state-root");
+        let context = ProjectContext::new("trusted", root.clone());
+        let (service, config) = service_in_temp();
+
+        assert!(!service.has_writable_task_state_root(&context));
+        fs::create_dir_all(root.join(".app/tasks")).unwrap();
+        assert!(service.has_writable_task_state_root(&context));
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn failed_create_new_probe_never_deletes_a_preexisting_path() {
+        let root = unique_temp_dir("occupied-probe");
+        let occupied = root.join("occupied.tmp");
+        fs::write(&occupied, "owned by someone else").unwrap();
+
+        assert!(!super::probe_writable_path(&occupied));
+        assert_eq!(
+            fs::read_to_string(&occupied).unwrap(),
+            "owned by someone else"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_task_state_root_forces_memory_only_without_probe_residue() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = unique_temp_dir("read-only-task-state");
+        let task_root = root.join(".app/tasks");
+        fs::create_dir_all(&task_root).unwrap();
+        let context = ProjectContext::new("trusted", root.clone());
+        let (service, config) = service_in_temp();
+        fs::set_permissions(&task_root, fs::Permissions::from_mode(0o555)).unwrap();
+
+        assert_eq!(
+            service.filesystem_access(&context, true),
+            ProjectFilesystemAccess::Writable
+        );
+        assert!(!service.has_writable_task_state_root(&context));
+        assert!(fs::read_dir(&task_root).unwrap().next().is_none());
+
+        fs::set_permissions(&task_root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_read_only_directory_is_reported_read_only_without_probe_residue() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("read-only-access");
+        let context = ProjectContext::new("trusted", root.clone());
+        let (service, config) = service_in_temp();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let access = service.filesystem_access(&context, true);
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        if unsafe { libc::geteuid() } == 0 {
+            fs::remove_dir_all(root).unwrap();
+            fs::remove_dir_all(config).ok();
+            return;
+        }
+        assert_eq!(access, ProjectFilesystemAccess::ReadOnly);
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(config).ok();
     }
 
     #[test]

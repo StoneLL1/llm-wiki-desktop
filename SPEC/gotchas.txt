@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Runtime trust and global trust JSON can diverge across concurrent grants or revokes — Root cause: publishing runtime authority before durable identity-bound persistence, using only per-instance locks, or failing to revalidate another process's revocation creates fail-open windows and lost updates — How to avoid: serialize in-process transitions, persist compatible grants before runtime publication, revoke runtime first, use bounded cross-process read-modify-write locking, and revalidate durable compatible trust at every execution boundary.
+
 Cached task persistence paths are not safe delete capabilities — Root cause: a validated `.app/tasks` parent can later be replaced by a junction or symlink, causing a cached file path to resolve outside the project during cleanup — How to avoid: revalidate the bound project root, every existing parent, the exact regular file, and its task-id filename immediately before deletion; document the residual path-API TOCTOU window.
 
 Buffered Workflow events need versioned refresh ownership — Root cause: a boolean refresh flag can be cleared by a later concurrent or failed overview request while the event remains buffered, leaving terminal state invisible until an unrelated refresh — How to avoid: keep per-project pending/attempted versions until a successful access snapshot flushes the buffer, coalesce one retry per event generation, and clear all pending state on project-key changes.
