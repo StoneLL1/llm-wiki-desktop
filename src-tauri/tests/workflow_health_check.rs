@@ -101,16 +101,46 @@ impl Fixture {
     }
 
     fn source_only(label: &str) -> Self {
-        let fixture = Self::native(label);
+        let mut fixture = Self::native(label);
         fs::remove_dir_all(&fixture.context.app_dir).unwrap();
         fs::remove_dir_all(fixture.context.root.join("wiki")).unwrap();
         fs::remove_dir_all(fixture.context.root.join("raw")).unwrap();
+        fs::create_dir_all(fixture.context.root.join(".obsidian")).unwrap();
         fs::create_dir_all(fixture.context.root.join("raw/extracted")).unwrap();
         fs::write(
             fixture.context.root.join("raw/extracted/资料.md"),
             "---\ntype: source\n---\n# 资料\n",
         )
         .unwrap();
+        fs::write(
+            fixture.context.root.join("raw/extracted/invalid.md"),
+            "# Invalid source\n",
+        )
+        .unwrap();
+        fixture.context =
+            ProjectContext::new(format!("health-{label}"), fixture.context.root.clone())
+                .with_resolved_layout()
+                .unwrap();
+        fixture
+    }
+
+    fn mixed_compatible(label: &str) -> Self {
+        let mut fixture = Self::native(label);
+        fs::remove_dir_all(&fixture.context.app_dir).unwrap();
+        fs::remove_dir_all(fixture.context.root.join("wiki")).unwrap();
+        fs::remove_dir_all(fixture.context.root.join("raw")).unwrap();
+        fs::create_dir_all(fixture.context.root.join(".obsidian")).unwrap();
+        fs::create_dir_all(fixture.context.root.join("notes")).unwrap();
+        fs::write(fixture.context.root.join("index.md"), "# Index\n").unwrap();
+        fs::write(
+            fixture.context.root.join("notes/shared.md"),
+            "---\ntype: note\n---\n# Shared\n",
+        )
+        .unwrap();
+        fixture.context =
+            ProjectContext::new(format!("health-{label}"), fixture.context.root.clone())
+                .with_resolved_layout()
+                .unwrap();
         fixture
     }
 
@@ -262,11 +292,15 @@ async fn local_quick_is_memory_only_skips_ai_and_keeps_eight_ordered_stages() {
         .unwrap();
     let report = stored.health_check_report.unwrap();
     assert!(!report.persistent);
-    assert_eq!(report.coverage.source_pages, 1);
+    assert_eq!(report.coverage.source_pages, 2);
     assert_eq!(report.coverage.wiki_pages, 0);
     assert_eq!(report.coverage.deep_covered_pages, None);
     assert!(!report.coverage.deep_truncated);
     assert_eq!(report.coverage.not_applicable_rules, vec!["index_drift"]);
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| format!("{:?}", issue.issue_type) == "MissingFrontmatter"));
     assert!(!report
         .issues
         .iter()
@@ -279,6 +313,38 @@ async fn local_quick_is_memory_only_skips_ai_and_keeps_eight_ordered_stages() {
         })
     ));
     assert!(finished.pending_action.is_none());
+}
+
+#[tokio::test]
+async fn mixed_compatible_root_counts_as_source_and_wiki_so_index_drift_applies() {
+    let fixture = Fixture::mixed_compatible("mixed");
+    let run = fixture.enqueue(
+        HealthCheckMode::LocalQuick,
+        WorkflowRoute::Local {
+            route_revision: "local-v1".into(),
+        },
+        false,
+    );
+    let task_id = run.task_id.clone();
+    run_health_check_with_deep(&fixture.context, run, &fixture.services(), |_, _| async {
+        panic!("Local Quick must not invoke an AI route")
+    })
+    .await;
+
+    let stored = fixture
+        .lint
+        .read_lint_history_report(&fixture.context, &task_id)
+        .unwrap();
+    let report = stored.health_check_report.unwrap();
+    assert_eq!(report.coverage.source_pages, 1);
+    assert_eq!(report.coverage.wiki_pages, 2);
+    assert!(!report
+        .coverage
+        .not_applicable_rules
+        .contains(&"index_drift".to_string()));
+    assert!(!report.issues.iter().any(|issue| {
+        format!("{:?}", issue.issue_type) == "IndexDrift" && issue.path == "wiki/index.md"
+    }));
 }
 
 #[tokio::test]

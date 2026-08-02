@@ -1,0 +1,40 @@
+{
+  "appStateRoot": ".app",
+  "evidenceRoot": "raw",
+  "markdownRoots": [
+    { "path": "wiki", "role": "wiki" },
+    { "path": "wiki/sources", "role": "source" },
+    { "path": "raw/extracted", "role": "source" }
+  ],
+  "sourceWriteRoot": "wiki/sources",
+  "wikiWriteRoot": "wiki",
+  "wikiIndexPath": "wiki/index.md",
+  "wikiOverviewPath": "wiki/overview.md",
+  "activityLogPath": "wiki/log.md",
+  "queriesWriteRoot": "wiki/queries",
+  "exportRoot": "exports/html",
+  "skillsRoot": "skills",
+  "importStateRoot": ".app/import-sessions",
+  "sourceStateRoot": ".app/sources",
+  "compileStateRoot": ".app/compile",
+  "chatStateRoot": ".app/chats",
+  "taskStateRoot": ".app/tasks",
+  "workflowStateRoot": ".app/workflows",
+  "graphCachePath": ".app/graph-cache.json",
+  "lintReportRoot": ".app/lint-reports",
+  "lintIgnorePath": ".app/lint-ignore.json",
+  "exportRecordPath": ".app/exports.json",
+  "bookmarksPath": ".app/bookmarks.json",
+  "settingsPath": ".app/settings.json",
+  "agentConfigPath": ".app/agent-config.json",
+  "purposeContext": {
+    "readPath": "purpose.md",
+    "writePath": "purpose.md",
+    "inferred": false
+  },
+  "schemaContext": {
+    "readPath": "schema.md",
+    "writePath": "schema.md",
+    "inferred": false
+  }
+}

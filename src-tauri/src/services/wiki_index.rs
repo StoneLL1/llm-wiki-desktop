@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use chrono::TimeZone;
 
 use crate::errors::BackendError;
+use crate::models::layout::ProjectMarkdownRootRole;
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::WikiPageMeta;
 use crate::services::file_store::FileStore;
@@ -121,10 +122,13 @@ impl WikiIndex {
     fn refresh_internal(
         &self,
         context: &ProjectContext,
-        file_store: &FileStore,
+        _file_store: &FileStore,
         mut on_read: Option<&mut dyn FnMut(&str)>,
     ) -> Result<Vec<IndexEntry>, BackendError> {
-        let files = file_store.list_markdown_files(&context.wiki_dir)?;
+        let files = context.list_markdown_files_for_roles(&[
+            ProjectMarkdownRootRole::Wiki,
+            ProjectMarkdownRootRole::Mixed,
+        ])?;
 
         // Build the next snapshot from the current on-disk file set. Reuse
         // unchanged entries from the prior snapshot; replace stale/missing
@@ -402,6 +406,66 @@ mod tests {
         assert!(!agent.hash.is_empty());
         assert!(agent.body_markdown.contains("# Agent"));
         assert_eq!(agent.content_reads, 1);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_layout_index_preserves_the_exact_legacy_wiki_scan_boundary() {
+        let (context, root) = tmp_context("native-layout-equivalence");
+        write_file(&context, "wiki/index.md", "# Index");
+        write_file(&context, "wiki/concepts/agent.md", "# Agent");
+        write_file(&context, "wiki/sources/imported.md", "# Imported source");
+        write_file(&context, "wiki/.hidden/private.md", "# Hidden but indexed");
+        write_file(&context, "wiki/node_modules/package.md", "# Package notes");
+        write_file(&context, "wiki/target/build.md", "# Build notes");
+        write_file(&context, "wiki/concepts/upper.MD", "# Uppercase extension");
+        write_file(
+            &context,
+            "raw/extracted/source.md",
+            "# Raw extracted source",
+        );
+        let index = WikiIndex::default();
+        let store = FileStore;
+
+        let entries = index.refresh(&context, &store).unwrap();
+        let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                "wiki/.hidden/private.md",
+                "wiki/concepts/agent.md",
+                "wiki/index.md",
+                "wiki/node_modules/package.md",
+                "wiki/sources/imported.md",
+                "wiki/target/build.md",
+            ]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compatible_obsidian_layout_indexes_root_and_discovered_markdown_roots() {
+        let (context, root) = tmp_context("compatible-obsidian");
+        std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+        write_file(&context, "index.md", "# Vault index");
+        write_file(&context, "笔记/概念.md", "# 概念");
+        write_file(&context, "sources/材料.md", "# 材料");
+        let context = context.with_resolved_layout().unwrap();
+        let index = WikiIndex::default();
+        let store = FileStore;
+
+        let entries = index.refresh(&context, &store).unwrap();
+        let paths = entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["index.md", "笔记/概念.md"]);
+        assert!(context.layout.app_state_root.is_none());
+        assert_eq!(context.wiki_dir, root.join("wiki"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
