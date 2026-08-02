@@ -341,9 +341,11 @@ impl WorkflowService {
                 context,
                 access: WorkflowAccessSnapshot {
                     trust: access_summary.trust.clone(),
+                    trust_kind: access.trust_kind,
                     filesystem_access: access_summary.filesystem_access.clone(),
                     persistence: access_summary.persistence.clone(),
                     git_state: access_summary.git_state.clone(),
+                    authority_revision: access.authority_revision,
                 },
                 settings_service,
                 secret_service,

@@ -35,7 +35,7 @@ pub fn create_project(
         &request.name,
         request.template,
     )?;
-    state.project_registry.register(
+    state.project_registry.register_trusted_native(
         summary.project_id.clone(),
         &PathBuf::from(&summary.root_path),
     )?;
@@ -67,17 +67,7 @@ pub fn open_project(
     let outcome = state.project_service.open_project(&request.path)?;
     if let Some(summary) = outcome.summary.as_ref() {
         if outcome.kind == OpenProjectKind::Opened {
-            let context = crate::models::paths::ProjectContext::new(
-                summary.project_id.clone(),
-                PathBuf::from(&summary.root_path),
-            );
-            state
-                .git_service
-                .initialize_repository(&context, "Initialize existing wiki project")?;
-            state.project_registry.register(
-                summary.project_id.clone(),
-                &PathBuf::from(&summary.root_path),
-            )?;
+            register_opened_project(&state, summary)?;
             state
                 .project_service
                 .remember_recent_project(RecentProject {
@@ -104,6 +94,12 @@ pub fn open_project(
             .register_with_execution(pending_action.clone(), Some(execution))?;
     }
     Ok(outcome)
+}
+
+fn register_opened_project(state: &AppState, summary: &ProjectSummary) -> Result<(), BackendError> {
+    let root = PathBuf::from(&summary.root_path);
+    state.register_opened_project_authority(summary.project_id.clone(), &root)?;
+    Ok(())
 }
 
 /// Preview entry point for the "Open folder as project" dialog (dlg-folder).

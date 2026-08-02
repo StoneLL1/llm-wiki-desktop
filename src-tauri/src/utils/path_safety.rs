@@ -2,6 +2,23 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
+/// Resolve an existing project root while rejecting a root-level link or
+/// Windows reparse point. Descendant operations should still use the more
+/// specific helpers below so every traversed component is revalidated.
+pub(crate) fn validate_existing_project_root(project_root: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(project_root)
+        .map_err(|error| format!("Project root is unavailable: {error}"))?;
+    if metadata_is_link_or_reparse(&metadata) {
+        return Err("Project root is a link or reparse point".into());
+    }
+    if !metadata.is_dir() {
+        return Err("Project root is not a directory".into());
+    }
+    project_root
+        .canonicalize()
+        .map_err(|error| format!("Project root is unavailable: {error}"))
+}
+
 /// Resolve a project-owned directory without following any descendant link or
 /// Windows reparse point. Missing suffix components are allowed so callers can
 /// inspect a not-yet-created state root without mutating the project.
@@ -252,6 +269,19 @@ mod tests {
 
         assert!(validate_project_directory(root.path(), Path::new("../outside")).is_err());
         assert!(validate_project_directory(root.path(), root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlink_used_as_the_project_root() {
+        use std::os::unix::fs::symlink;
+
+        let target = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let linked_root = parent.path().join("linked-project");
+        symlink(target.path(), &linked_root).unwrap();
+
+        assert!(super::validate_existing_project_root(&linked_root).is_err());
     }
 
     #[cfg(windows)]

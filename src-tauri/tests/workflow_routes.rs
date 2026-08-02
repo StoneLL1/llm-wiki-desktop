@@ -2,6 +2,7 @@ use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
+use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
 use llm_wiki_desktop_lib::models::settings::Settings;
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind,
@@ -87,9 +88,11 @@ fn fixture() -> (
 fn trusted() -> WorkflowAccessSnapshot {
     WorkflowAccessSnapshot {
         trust: WorkflowProjectTrust::Trusted,
+        trust_kind: Some(ProjectTrustKind::Native),
         filesystem_access: WorkflowFilesystemAccess::Writable,
         persistence: WorkflowPersistenceMode::Persistent,
         git_state: WorkflowGitState::Clean,
+        authority_revision: "test-authority".into(),
     }
 }
 
@@ -174,9 +177,11 @@ fn health_default_is_complete_only_when_trusted_route_is_available() {
 
     let untrusted = WorkflowAccessSnapshot {
         trust: WorkflowProjectTrust::Untrusted,
+        trust_kind: None,
         filesystem_access: WorkflowFilesystemAccess::ReadOnly,
         persistence: WorkflowPersistenceMode::MemoryOnly,
         git_state: WorkflowGitState::Clean,
+        authority_revision: "test-authority".into(),
     };
     let local = prepare(
         &service, &context, &settings, &secrets, &agents, untrusted, None, None,

@@ -1,4 +1,5 @@
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
+use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, WorkflowArtifactType, WorkflowFilesystemAccess, WorkflowGitState,
     WorkflowKind, WorkflowPersistenceMode, WorkflowProjectTrust, WorkflowRun, WorkflowScope,
@@ -29,10 +30,12 @@ fn access(
     persistence: WorkflowPersistenceMode,
 ) -> WorkflowAccessSnapshot {
     WorkflowAccessSnapshot {
+        trust_kind: (trust == WorkflowProjectTrust::Trusted).then_some(ProjectTrustKind::Native),
         trust,
         filesystem_access,
         persistence,
         git_state: WorkflowGitState::Clean,
+        authority_revision: "test-authority".into(),
     }
 }
 
@@ -465,7 +468,14 @@ fn changed_baseline_or_access_invalidates_the_token() {
         .unwrap_err();
     assert_eq!(error.code, "WORKFLOW_PREPARATION_STALE");
 
-    let access_token = prepare(&service, &context, trusted, &settings, &secrets, &agents);
+    let access_token = prepare(
+        &service,
+        &context,
+        trusted.clone(),
+        &settings,
+        &secrets,
+        &agents,
+    );
     let error = service
         .start(
             &context,
@@ -480,6 +490,30 @@ fn changed_baseline_or_access_invalidates_the_token() {
             &tasks,
             &access_token.preparation_id,
             &access_token.preparation_revision,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "WORKFLOW_PREPARATION_STALE");
+
+    let authority_token = prepare(
+        &service,
+        &context,
+        trusted.clone(),
+        &settings,
+        &secrets,
+        &agents,
+    );
+    let mut changed_authority = trusted;
+    changed_authority.authority_revision = "replacement-authority".into();
+    let error = service
+        .start(
+            &context,
+            changed_authority,
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &authority_token.preparation_id,
+            &authority_token.preparation_revision,
         )
         .unwrap_err();
     assert_eq!(error.code, "WORKFLOW_PREPARATION_STALE");

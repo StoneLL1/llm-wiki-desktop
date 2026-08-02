@@ -11,6 +11,7 @@ use crate::models::compile::SourceVersionRef;
 use crate::models::export::ExportType;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
+use crate::models::project::{ProjectFilesystemAccess, ProjectTrustKind};
 use crate::models::workflow::{
     HealthCheckMode, UpdateWikiMode, WorkflowArtifactType, WorkflowBaselineSummary,
     WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitPolicy, WorkflowGitState,
@@ -34,33 +35,41 @@ const PREPARATION_TTL_MINUTES: i64 = 15;
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowAccessSnapshot {
     pub trust: WorkflowProjectTrust,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_kind: Option<ProjectTrustKind>,
     pub filesystem_access: WorkflowFilesystemAccess,
     pub persistence: WorkflowPersistenceMode,
     pub git_state: WorkflowGitState,
+    pub authority_revision: String,
 }
 
 impl WorkflowAccessSnapshot {
-    /// The legacy project registry proves only canonical path ownership. Until
-    /// the typed project-open access policy lands, Workflows must not convert
-    /// that runtime registration into user trust.
-    pub fn legacy_fail_closed(
+    pub fn from_project_authority(
         context: &ProjectContext,
         git_service: &GitService,
+        trusted: bool,
+        trust_kind: Option<ProjectTrustKind>,
+        filesystem_access: ProjectFilesystemAccess,
+        persistent: bool,
+        authority_revision: String,
     ) -> Result<Self, BackendError> {
         let git = git_service.repository_status(context)?;
         Ok(Self {
-            trust: WorkflowProjectTrust::Untrusted,
-            filesystem_access: if std::fs::metadata(&context.root)
-                .map(|metadata| metadata.permissions().readonly())
-                .unwrap_or(true)
-            {
-                WorkflowFilesystemAccess::ReadOnly
+            trust: if trusted {
+                WorkflowProjectTrust::Trusted
             } else {
-                WorkflowFilesystemAccess::Writable
+                WorkflowProjectTrust::Untrusted
             },
-            // An untrusted project never receives new or updated `.app`
-            // state through the Workflows preparation path.
-            persistence: WorkflowPersistenceMode::MemoryOnly,
+            trust_kind,
+            filesystem_access: match filesystem_access {
+                ProjectFilesystemAccess::Writable => WorkflowFilesystemAccess::Writable,
+                ProjectFilesystemAccess::ReadOnly => WorkflowFilesystemAccess::ReadOnly,
+            },
+            persistence: if persistent {
+                WorkflowPersistenceMode::Persistent
+            } else {
+                WorkflowPersistenceMode::MemoryOnly
+            },
             git_state: if !git.is_repository {
                 WorkflowGitState::Unavailable
             } else if git.has_changes {
@@ -68,6 +77,7 @@ impl WorkflowAccessSnapshot {
             } else {
                 WorkflowGitState::Clean
             },
+            authority_revision,
         })
     }
 }
@@ -100,6 +110,7 @@ pub struct ValidatedWorkflowStart {
 #[derive(Debug, Clone)]
 struct PreparedRecord {
     preparation: WorkflowPreparation,
+    authority_revision: String,
     route_selection: Option<WorkflowRouteSelection>,
     execution_options: WorkflowExecutionOptions,
     preparation_fingerprint: String,
@@ -110,6 +121,7 @@ struct PreparedRecord {
 #[derive(Debug, Clone)]
 struct PreparationSnapshot {
     project_access: WorkflowProjectAccessSummary,
+    authority_revision: String,
     scope: WorkflowScope,
     baseline: WorkflowBaselineSummary,
     route: Option<WorkflowRoute>,
@@ -253,6 +265,7 @@ impl WorkflowPreparationService {
         };
         let record = PreparedRecord {
             preparation: preparation.clone(),
+            authority_revision: snapshot.authority_revision,
             route_selection: applied_remembered_input
                 .and_then(|remembered| remembered.route_selection)
                 .or(input.route_selection),
@@ -336,6 +349,7 @@ impl WorkflowPreparationService {
             },
         )?;
         if refreshed.project_access != record.preparation.project_access
+            || refreshed.authority_revision != record.authority_revision
             || refreshed.scope != record.preparation.scope
             || refreshed.baseline.fingerprint != record.preparation.baseline.fingerprint
             || refreshed.route != record.preparation.route
@@ -520,6 +534,7 @@ fn build_snapshot(
     )?;
     Ok(PreparationSnapshot {
         project_access,
+        authority_revision: environment.access.authority_revision.clone(),
         scope,
         baseline,
         route,
