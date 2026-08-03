@@ -10,9 +10,10 @@ use crate::models::workflow::{
     WorkflowScope, WorkflowStartOutcome, WorkflowsOverview,
 };
 use crate::services::{
-    restore_generate_content_confirmation, restore_update_wiki_confirmation,
-    CompileExecutionServices, GenerateContentExecutionServices, PrepareWorkflowInput,
-    UpdateWikiExecutionServices, WorkflowAccessSnapshot, WorkflowPreparationEnvironment,
+    resolve_workflow_persistence_binding, restore_generate_content_confirmation,
+    restore_update_wiki_confirmation, CompileExecutionServices, GenerateContentExecutionServices,
+    PrepareWorkflowInput, UpdateWikiExecutionServices, WorkflowPersistenceBinding,
+    WorkflowPreparationEnvironment,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,7 +92,7 @@ pub fn get_workflows_overview(
         return Ok(state.workflow_service.no_project_overview());
     }
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let access = WorkflowAccessSnapshot::legacy_fail_closed(&context, &state.git_service)?;
+    let access = state.resolve_workflow_access(&context)?;
     state.workflow_service.project_overview(
         &context,
         access,
@@ -108,7 +109,7 @@ pub fn prepare_workflow(
     request: PrepareWorkflowRequest,
 ) -> Result<WorkflowPreparation, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let access = WorkflowAccessSnapshot::legacy_fail_closed(&context, &state.git_service)?;
+    let access = state.resolve_workflow_access(&context)?;
     state.workflow_service.prepare(
         &WorkflowPreparationEnvironment {
             context: &context,
@@ -131,19 +132,20 @@ pub fn start_workflow(
     request: StartWorkflowRequest,
 ) -> Result<WorkflowStartOutcome, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let access = WorkflowAccessSnapshot::legacy_fail_closed(&context, &state.git_service)?;
-    state.workflow_service.start_with_acknowledgements(
-        &context,
-        access,
-        &state.settings_service,
-        &state.secret_service,
-        &state.agent_service,
-        &state.task_service,
-        &request.preparation_id,
-        &request.preparation_revision,
-        request.acknowledge_restricted_content,
-        request.acknowledge_remote_provider,
-    )
+    state.with_workflow_access(&context, |access| {
+        state.workflow_service.start_with_acknowledgements(
+            &context,
+            access,
+            &state.settings_service,
+            &state.secret_service,
+            &state.agent_service,
+            &state.task_service,
+            &request.preparation_id,
+            &request.preparation_revision,
+            request.acknowledge_restricted_content,
+            request.acknowledge_remote_provider,
+        )
+    })
 }
 
 #[tauri::command]
@@ -348,14 +350,42 @@ pub fn retry_workflow(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowStartOutcome, BackendError> {
-    let context = require_workflow_project(&state, &request)?;
-    let original = workflow_run(&state, &request.task_id)?;
-    revalidate_workflow_replay(&state, &context, &original)?;
-    let outcome = state
-        .workflow_service
-        .coordinator
-        .retry(&state.task_service, &request.task_id, context.root)
-        .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+    retry_workflow_for_state(&state, request)
+}
+
+pub(crate) fn retry_workflow_for_state(
+    state: &AppState,
+    request: WorkflowRunRequest,
+) -> Result<WorkflowStartOutcome, BackendError> {
+    let context = require_workflow_project(state, &request)?;
+    let original = workflow_run(state, &request.task_id)?;
+    let outcome = state.with_workflow_access(&context, |access| {
+        let replay = revalidate_workflow_replay_with_access(state, &context, &original, access)?;
+        if let Err(error) = replay.eligibility {
+            state
+                .workflow_service
+                .coordinator
+                .apply_persistence_and_continue_queued(
+                    &state.task_service,
+                    &original.canonical_identity_key,
+                    &original.identity_revision,
+                    &[(original.task_id.clone(), replay.persistence.task_state_root)],
+                    false,
+                )
+                .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+            return Err(error);
+        }
+        state
+            .workflow_service
+            .coordinator
+            .retry(
+                &state.task_service,
+                &request.task_id,
+                context.root.clone(),
+                replay.persistence.task_state_root,
+            )
+            .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))
+    })?;
     let run = match &outcome {
         WorkflowStartOutcome::Created { run } | WorkflowStartOutcome::Existing { run } => run,
     };
@@ -365,12 +395,19 @@ pub fn retry_workflow(
     Ok(outcome)
 }
 
-pub(crate) fn revalidate_workflow_replay(
+pub(crate) struct WorkflowReplayValidation {
+    pub persistence: WorkflowPersistenceBinding,
+    pub eligibility: Result<(), BackendError>,
+}
+
+pub(crate) fn revalidate_workflow_replay_with_access(
     state: &AppState,
     context: &crate::models::paths::ProjectContext,
     run: &WorkflowRun,
-) -> Result<(), BackendError> {
-    let access = WorkflowAccessSnapshot::legacy_fail_closed(context, &state.git_service)?;
+    access: crate::services::WorkflowAccessSnapshot,
+) -> Result<WorkflowReplayValidation, BackendError> {
+    ensure_workflow_identity(context, run)?;
+    let persistence = resolve_workflow_persistence_binding(context, access.persistence.clone())?;
     let route_selection = run.route.as_ref().and_then(|route| match route {
         crate::models::workflow::WorkflowRoute::Agent { agent, .. } => {
             Some(WorkflowRouteSelection::Agent {
@@ -384,44 +421,50 @@ pub(crate) fn revalidate_workflow_replay(
         }
         crate::models::workflow::WorkflowRoute::Local { .. } => None,
     });
-    let preparation = state.workflow_service.prepare(
-        &WorkflowPreparationEnvironment {
-            context,
-            access,
-            settings_service: &state.settings_service,
-            secret_service: &state.secret_service,
-            agent_service: &state.agent_service,
-        },
-        PrepareWorkflowInput {
-            kind: run.kind.clone(),
-            scope: Some(run.scope.clone()),
-            route_selection,
-        },
-    )?;
-    let blocking = preparation.prerequisites.iter().find(|item| {
-        item.blocking
-            && !matches!(
-                item.action,
-                crate::models::workflow::WorkflowPrerequisiteAction::AcknowledgeRemoteProvider
-                    | crate::models::workflow::WorkflowPrerequisiteAction::AcknowledgeRestrictedContent
+    let eligibility = (|| {
+        let preparation = state.workflow_service.prepare(
+            &WorkflowPreparationEnvironment {
+                context,
+                access,
+                settings_service: &state.settings_service,
+                secret_service: &state.secret_service,
+                agent_service: &state.agent_service,
+            },
+            PrepareWorkflowInput {
+                kind: run.kind.clone(),
+                scope: Some(run.scope.clone()),
+                route_selection,
+            },
+        )?;
+        let blocking = preparation.prerequisites.iter().find(|item| {
+            item.blocking
+                && !matches!(
+                    item.action,
+                    crate::models::workflow::WorkflowPrerequisiteAction::AcknowledgeRemoteProvider
+                        | crate::models::workflow::WorkflowPrerequisiteAction::AcknowledgeRestrictedContent
+                )
+        });
+        if preparation.baseline.fingerprint != run.baseline_fingerprint
+            || preparation.route != run.route
+            || blocking.is_some()
+        {
+            return Err(BackendError::new(
+                "WORKFLOW_REPREPARATION_REQUIRED",
+                "Project access, inputs, Git state, or execution route changed. Prepare the workflow again.",
+                true,
+                true,
             )
-    });
-    if preparation.baseline.fingerprint != run.baseline_fingerprint
-        || preparation.route != run.route
-        || blocking.is_some()
-    {
-        return Err(BackendError::new(
-            "WORKFLOW_REPREPARATION_REQUIRED",
-            "Project access, inputs, Git state, or execution route changed. Prepare the workflow again.",
-            true,
-            true,
-        )
-        .with_details(serde_json::json!({
-            "action": crate::models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
-            "prerequisite": blocking,
-        })));
-    }
-    Ok(())
+            .with_details(serde_json::json!({
+                "action": crate::models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
+                "prerequisite": blocking,
+            })));
+        }
+        Ok(())
+    })();
+    Ok(WorkflowReplayValidation {
+        persistence,
+        eligibility,
+    })
 }
 
 #[tauri::command]
@@ -448,111 +491,113 @@ pub fn confirm_workflow_action(
             "The confirmation does not belong to this workflow run.",
         ));
     }
-    let access = WorkflowAccessSnapshot::legacy_fail_closed(&context, &state.git_service)?;
-    if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
-        return Err(workflow_error(
-            "WORKFLOW_PROJECT_UNTRUSTED",
-            "Workflow confirmation requires a trusted project.",
-        ));
-    }
-    if access.filesystem_access != crate::models::workflow::WorkflowFilesystemAccess::Writable {
-        return Err(workflow_error(
-            "WORKFLOW_PROJECT_READ_ONLY",
-            "Workflow confirmation requires writable project access.",
-        ));
-    }
-    let stored = state.confirmation_registry.claim(&request.action_id)?;
-    if !confirmation_execution_matches(
-        &run.kind,
-        stored.execution.as_ref(),
-        &context,
-        &run_request.task_id,
-    ) {
-        let _ = state
-            .confirmation_registry
-            .finish_claim(&request.action_id, false);
-        return Err(workflow_error(
-            "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
-            "The confirmation execution plan does not match this workflow run.",
-        ));
-    }
-    let execution_result = match (run.kind, stored.execution) {
-        (
-            WorkflowKind::GenerateContent,
-            Some(ConfirmationExecution::GenerateContentOverwrite {
-                project_id,
-                root_path,
-                task_id,
-            }),
-        ) if project_id == context.project_id
-            && root_path == context.root.to_string_lossy()
-            && task_id == run_request.task_id =>
-        {
-            match crate::services::confirm_generate_content_overwrite(
-                &context,
-                &run_request.task_id,
-                &generate_content_services(&state),
-            ) {
-                Ok(value) => Ok(value),
-                Err(failure) => Err((failure.error, failure.next)),
-            }
+    let execution_result = state.with_workflow_access(&context, |access| {
+        if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
+            return Err(workflow_error(
+                "WORKFLOW_PROJECT_UNTRUSTED",
+                "Workflow confirmation requires a trusted project.",
+            ));
         }
-        (
-            WorkflowKind::UpdateWiki,
-            Some(ConfirmationExecution::UpdateWikiReview {
-                project_id,
-                root_path,
-                task_id,
-            }),
-        ) if project_id == context.project_id
-            && root_path == context.root.to_string_lossy()
-            && task_id == run_request.task_id =>
-        {
-            let compile = CompileExecutionServices {
-                agent_service: &state.agent_service,
-                llm_service: &state.llm_service,
-                secret_service: &state.secret_service,
-                settings_service: &state.settings_service,
-                task_service: &state.task_service,
-            };
-            match crate::services::confirm_update_wiki_review(
-                &context,
-                &run_request.task_id,
-                &UpdateWikiExecutionServices {
-                    compile,
-                    git_service: &state.git_service,
-                    file_store: &state.file_store,
-                    bookmark_service: &state.bookmark_service,
-                    search_service: &state.search_service,
-                    confirmation_registry: &state.confirmation_registry,
-                    coordinator: &state.workflow_service.coordinator,
-                },
-            ) {
-                Ok(value) => Ok(value),
-                Err(failure) => Err((failure.error, failure.next)),
-            }
+        if access.filesystem_access != crate::models::workflow::WorkflowFilesystemAccess::Writable {
+            return Err(workflow_error(
+                "WORKFLOW_PROJECT_READ_ONLY",
+                "Workflow confirmation requires writable project access.",
+            ));
         }
-        _ => Err((
-            workflow_error(
+        let stored = state.confirmation_registry.claim(&request.action_id)?;
+        if !confirmation_execution_matches(
+            &run.kind,
+            stored.execution.as_ref(),
+            &context,
+            &run_request.task_id,
+        ) {
+            let _ = state
+                .confirmation_registry
+                .finish_claim(&request.action_id, false);
+            return Err(workflow_error(
                 "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
                 "The confirmation execution plan does not match this workflow run.",
-            ),
-            None,
-        )),
-    };
-    let consume_confirmation = execution_result.is_ok()
-        || state
-            .task_service
-            .get_workflow_run(&run_request.task_id)
-            .is_none_or(|current| {
-                current
-                    .pending_action
-                    .as_ref()
-                    .is_none_or(|pending| pending.id != request.action_id)
-            });
-    state
-        .confirmation_registry
-        .finish_claim(&request.action_id, consume_confirmation)?;
+            ));
+        }
+        let execution_result = match (run.kind, stored.execution) {
+            (
+                WorkflowKind::GenerateContent,
+                Some(ConfirmationExecution::GenerateContentOverwrite {
+                    project_id,
+                    root_path,
+                    task_id,
+                }),
+            ) if project_id == context.project_id
+                && root_path == context.root.to_string_lossy()
+                && task_id == run_request.task_id =>
+            {
+                match crate::services::confirm_generate_content_overwrite(
+                    &context,
+                    &run_request.task_id,
+                    &generate_content_services(&state),
+                ) {
+                    Ok(value) => Ok(value),
+                    Err(failure) => Err((failure.error, failure.next)),
+                }
+            }
+            (
+                WorkflowKind::UpdateWiki,
+                Some(ConfirmationExecution::UpdateWikiReview {
+                    project_id,
+                    root_path,
+                    task_id,
+                }),
+            ) if project_id == context.project_id
+                && root_path == context.root.to_string_lossy()
+                && task_id == run_request.task_id =>
+            {
+                let compile = CompileExecutionServices {
+                    agent_service: &state.agent_service,
+                    llm_service: &state.llm_service,
+                    secret_service: &state.secret_service,
+                    settings_service: &state.settings_service,
+                    task_service: &state.task_service,
+                };
+                match crate::services::confirm_update_wiki_review(
+                    &context,
+                    &run_request.task_id,
+                    &UpdateWikiExecutionServices {
+                        compile,
+                        git_service: &state.git_service,
+                        file_store: &state.file_store,
+                        bookmark_service: &state.bookmark_service,
+                        search_service: &state.search_service,
+                        confirmation_registry: &state.confirmation_registry,
+                        coordinator: &state.workflow_service.coordinator,
+                    },
+                ) {
+                    Ok(value) => Ok(value),
+                    Err(failure) => Err((failure.error, failure.next)),
+                }
+            }
+            _ => Err((
+                workflow_error(
+                    "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
+                    "The confirmation execution plan does not match this workflow run.",
+                ),
+                None,
+            )),
+        };
+        let consume_confirmation = execution_result.is_ok()
+            || state
+                .task_service
+                .get_workflow_run(&run_request.task_id)
+                .is_none_or(|current| {
+                    current
+                        .pending_action
+                        .as_ref()
+                        .is_none_or(|pending| pending.id != request.action_id)
+                });
+        state
+            .confirmation_registry
+            .finish_claim(&request.action_id, consume_confirmation)?;
+        Ok(execution_result)
+    })?;
     match execution_result {
         Ok((completed, next)) => {
             dispatch_next(&state, next)?;
@@ -588,7 +633,26 @@ fn require_workflow_project(
             "Workflow does not belong to the asserted project.",
         ));
     }
+    let run = workflow_run(state, &request.task_id)?;
+    ensure_workflow_identity(&context, &run)?;
     Ok(context)
+}
+
+fn ensure_workflow_identity(
+    context: &crate::models::paths::ProjectContext,
+    run: &WorkflowRun,
+) -> Result<(), BackendError> {
+    let identity = crate::services::project_identity(&context.root)
+        .map_err(|message| workflow_error("WORKFLOW_IDENTITY_FAILED", message))?;
+    if run.canonical_identity_key != identity.canonical_identity_key
+        || run.identity_revision != identity.identity_revision
+    {
+        return Err(workflow_error(
+            "WORKFLOW_PROJECT_IDENTITY_CHANGED",
+            "The project folder identity changed after this workflow was created.",
+        ));
+    }
+    Ok(())
 }
 
 fn workflow_run(state: &AppState, task_id: &str) -> Result<WorkflowRun, BackendError> {

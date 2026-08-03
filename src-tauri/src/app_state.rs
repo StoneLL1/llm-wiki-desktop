@@ -7,6 +7,9 @@ use crate::models::confirmation::ConfirmationRegistry;
 use crate::models::layout::{resolve_layout, ProjectLayoutConfidence};
 use crate::models::paths::ProjectContext;
 use crate::models::project::{ProjectFilesystemAccess, ProjectTrustKind};
+use crate::models::workflow::{
+    WorkflowFilesystemAccess, WorkflowGitState, WorkflowPersistenceMode, WorkflowProjectTrust,
+};
 use crate::services::import_v2::capability_runtime::ImportCapabilityRuntime;
 use crate::services::import_v2::connector_session::ConnectorSessionService;
 use crate::services::import_v2::ImportV2Service;
@@ -402,10 +405,26 @@ impl AppState {
         &self,
         context: &ProjectContext,
     ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
+        self.with_workflow_access(context, Ok)
+    }
+
+    pub(crate) fn with_workflow_access<T>(
+        &self,
+        context: &ProjectContext,
+        operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
         let _transition = self
             .project_trust_transition
             .lock()
             .map_err(|_| trust_transition_locked())?;
+        let access = self.resolve_workflow_access_locked(context)?;
+        operation(access)
+    }
+
+    fn resolve_workflow_access_locked(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
         let mut authority = self
             .project_registry
             .resolve_authority(&context.project_id, &context.root)?;
@@ -418,6 +437,11 @@ impl AppState {
             if !durable_trust_is_current {
                 self.project_registry
                     .revoke_trust(&context.project_id, &context.root)?;
+                self.task_service
+                    .rebind_workflows_for_root(&context.root, None)
+                    .map_err(|message| {
+                        BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
+                    })?;
                 authority = self
                     .project_registry
                     .resolve_authority(&context.project_id, &context.root)?;
@@ -432,15 +456,32 @@ impl AppState {
             && self
                 .project_service
                 .has_writable_task_state_root(&authority.context);
-        crate::services::WorkflowAccessSnapshot::from_project_authority(
-            &authority.context,
-            &self.git_service,
-            trusted,
-            authority.trust_kind,
-            filesystem_access,
-            persistent,
-            authority.authority_revision,
-        )
+        let git = self.git_service.repository_status(&authority.context)?;
+        Ok(crate::services::WorkflowAccessSnapshot {
+            trust: if trusted {
+                WorkflowProjectTrust::Trusted
+            } else {
+                WorkflowProjectTrust::Untrusted
+            },
+            trust_kind: authority.trust_kind,
+            filesystem_access: match filesystem_access {
+                ProjectFilesystemAccess::Writable => WorkflowFilesystemAccess::Writable,
+                ProjectFilesystemAccess::ReadOnly => WorkflowFilesystemAccess::ReadOnly,
+            },
+            persistence: if persistent {
+                WorkflowPersistenceMode::Persistent
+            } else {
+                WorkflowPersistenceMode::MemoryOnly
+            },
+            git_state: if !git.is_repository {
+                WorkflowGitState::Unavailable
+            } else if git.has_changes {
+                WorkflowGitState::Dirty
+            } else {
+                WorkflowGitState::Clean
+            },
+            authority_revision: authority.authority_revision,
+        })
     }
 
     pub fn register_opened_project_authority(
@@ -504,7 +545,7 @@ impl AppState {
             &identity.canonical_identity_key,
             &identity.identity_revision,
         )?;
-        match self
+        let context = match self
             .project_registry
             .register_trusted_compatible_with_identity(
                 project_id.to_string(),
@@ -512,14 +553,20 @@ impl AppState {
                 &identity.canonical_identity_key,
                 &identity.identity_revision,
             ) {
-            Ok(context) => Ok(context),
+            Ok(context) => context,
             Err(error) => {
                 let _ = self
                     .project_service
                     .revoke_project_trust(&identity.canonical_root);
-                Err(error)
+                return Err(error);
             }
-        }
+        };
+        self.task_service
+            .rebind_workflows_for_root(&context.root, None)
+            .map_err(|message| {
+                BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
+            })?;
+        Ok(context)
     }
 
     pub fn revoke_project_trust(&self, project_id: &str, root: &Path) -> Result<(), BackendError> {
@@ -528,7 +575,13 @@ impl AppState {
             .lock()
             .map_err(|_| trust_transition_locked())?;
         self.project_registry.revoke_trust(project_id, root)?;
-        self.project_service.revoke_project_trust(root)
+        let durable_result = self.project_service.revoke_project_trust(root);
+        self.task_service
+            .rebind_workflows_for_root(root, None)
+            .map_err(|message| {
+                BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
+            })?;
+        durable_result
     }
 
     /// Preview a folder for the "Open folder as project" dialog (dlg-folder).
@@ -560,14 +613,18 @@ impl AppState {
 #[cfg(test)]
 mod project_registry_tests {
     use std::fs;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
 
     use super::{AppState, ProjectRegistry, ProjectTrustAuthority};
     use crate::errors::PROJECT_CONTEXT_MISMATCH;
     use crate::models::project::ProjectTrustKind;
     use crate::models::workflow::{
-        WorkflowFilesystemAccess, WorkflowGitState, WorkflowPersistenceMode, WorkflowProjectTrust,
+        HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
+        WorkflowKind, WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectTrust,
+        WorkflowRoute, WorkflowScope, WorkflowStartOutcome,
     };
-    use crate::services::ProjectService;
+    use crate::services::{workflow_stages, EnqueueWorkflow, ProjectService};
 
     fn temp_project(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -934,6 +991,63 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn explicit_native_revoke_rebinds_every_existing_workflow_to_memory_only() {
+        let (state, config) = state_with_temp_config("native-rebind-config");
+        let project = strict_native_project("native-rebind");
+        state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let mut task_ids = Vec::new();
+        for revision in ["prep-1", "prep-2"] {
+            let outcome = state
+                .workflow_service
+                .coordinator
+                .enqueue(
+                    &state.task_service,
+                    EnqueueWorkflow {
+                        project_id: "project-a".into(),
+                        project_root: project.clone(),
+                        task_state_root: Some(project.join(".app/tasks")),
+                        title: "Health Check".into(),
+                        kind: WorkflowKind::HealthCheck,
+                        scope: WorkflowScope::HealthCheck {
+                            mode: HealthCheckMode::LocalQuick,
+                        },
+                        route: Some(WorkflowRoute::Local {
+                            route_revision: "local-v1".into(),
+                        }),
+                        baseline_fingerprint: revision.into(),
+                        execution_options: WorkflowExecutionOptions {
+                            preparation_revision: revision.into(),
+                            ..WorkflowExecutionOptions::default()
+                        },
+                        stages: workflow_stages(&WorkflowKind::HealthCheck),
+                        retry: None,
+                    },
+                )
+                .unwrap();
+            let run = match outcome {
+                WorkflowStartOutcome::Created { run } => run,
+                WorkflowStartOutcome::Existing { .. } => panic!("workflow must be unique"),
+            };
+            task_ids.push(run.task_id);
+        }
+
+        state.revoke_project_trust("project-a", &project).unwrap();
+
+        for task_id in task_ids {
+            let run = state.task_service.get_workflow_run(&task_id).unwrap();
+            assert_eq!(run.persistence, WorkflowPersistenceMode::MemoryOnly);
+            assert_eq!(
+                run.persistence_transition,
+                Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
+            );
+        }
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
     fn untrusted_access_is_read_only_and_never_probes_or_creates_app_state() {
         let (state, config) = state_with_temp_config("untrusted-no-write-config");
         let project = compatible_project("untrusted-no-write");
@@ -1045,6 +1159,53 @@ mod project_registry_tests {
         assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
         assert_eq!(access.git_state, WorkflowGitState::Unavailable);
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn workflow_access_critical_section_blocks_concurrent_trust_revocation() {
+        let (state, config) = state_with_temp_config("workflow-access-transition-lock-config");
+        let state = Arc::new(state);
+        let project = strict_native_project("workflow-access-transition-lock");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_state = Arc::clone(&state);
+        let worker_context = context.clone();
+        let worker_entered = Arc::clone(&entered);
+        let worker_release = Arc::clone(&release);
+        let access_worker = std::thread::spawn(move || {
+            worker_state
+                .with_workflow_access(&worker_context, |access| {
+                    assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
+                    worker_entered.wait();
+                    worker_release.wait();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        entered.wait();
+
+        let revoke_state = Arc::clone(&state);
+        let revoke_project = project.clone();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_worker = std::thread::spawn(move || {
+            revoke_state
+                .revoke_project_trust("project-a", &revoke_project)
+                .unwrap();
+            revoked_tx.send(()).unwrap();
+        });
+        assert!(revoked_rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+        release.wait();
+        access_worker.join().unwrap();
+        revoked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        revoke_worker.join().unwrap();
+        let access = state.resolve_workflow_access(&context).unwrap();
+        assert_eq!(access.trust, WorkflowProjectTrust::Untrusted);
+        cleanup_paths(&[&project, &config]);
     }
 }
 

@@ -3,8 +3,9 @@ use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
 use llm_wiki_desktop_lib::models::task::BackendEventType;
 use llm_wiki_desktop_lib::models::workflow::{
     UpdateWikiMode, WorkflowArtifactType, WorkflowDisplayStatus, WorkflowExecutionOptions,
-    WorkflowKind, WorkflowPendingAction, WorkflowResult, WorkflowRoute, WorkflowScope,
-    WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
+    WorkflowKind, WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPersistenceTransition,
+    WorkflowResult, WorkflowRoute, WorkflowScope, WorkflowSourceVersionRef, WorkflowStage,
+    WorkflowStageStatus, WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{project_identity, EnqueueWorkflow, WorkflowCoordinator};
 use llm_wiki_desktop_lib::tasks::task_events::EventBus;
@@ -343,7 +344,12 @@ fn queued_cancel_and_undo_are_idempotent_and_retry_links_a_new_attempt() {
         .unwrap();
     let retry = created(
         coordinator
-            .retry(&service, &first.task_id, PathBuf::from(temp.path()))
+            .retry(
+                &service,
+                &first.task_id,
+                PathBuf::from(temp.path()),
+                Some(temp.path().join(".app/tasks")),
+            )
             .unwrap(),
     );
     assert_ne!(retry.task_id, first.task_id);
@@ -358,8 +364,236 @@ fn queued_cancel_and_undo_are_idempotent_and_retry_links_a_new_attempt() {
 
     let other_root = tempfile::tempdir().unwrap();
     assert!(coordinator
-        .retry(&service, &first.task_id, other_root.path().to_path_buf())
+        .retry(
+            &service,
+            &first.task_id,
+            other_root.path().to_path_buf(),
+            Some(other_root.path().join(".app/tasks")),
+        )
         .is_err());
+}
+
+#[test]
+fn retry_uses_new_memory_only_authority_without_updating_the_old_task_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let original = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v1", "b1"))
+            .unwrap(),
+    );
+    service
+        .start_workflow_stage(&original.task_id, "prepare")
+        .unwrap();
+    service
+        .fail_workflow_stage(
+            &original.task_id,
+            "prepare",
+            llm_wiki_desktop_lib::models::workflow::WorkflowErrorSummary {
+                code: "TEST".into(),
+                message_key: "test".into(),
+                recoverable: true,
+                user_action_required: false,
+                suggested_action: None,
+            },
+        )
+        .unwrap();
+    let old_path = temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", original.task_id));
+    coordinator
+        .apply_persistence_and_continue_queued(
+            &service,
+            &original.canonical_identity_key,
+            &original.identity_revision,
+            &[(original.task_id.clone(), None)],
+            false,
+        )
+        .unwrap();
+    let old_bytes = std::fs::read(&old_path).unwrap();
+
+    let retry = created(
+        coordinator
+            .retry(&service, &original.task_id, temp.path().to_path_buf(), None)
+            .unwrap(),
+    );
+    assert_eq!(
+        retry.persistence_transition,
+        Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
+    );
+    service
+        .start_workflow_stage(&retry.task_id, "prepare")
+        .unwrap();
+
+    assert_eq!(std::fs::read(old_path).unwrap(), old_bytes);
+    assert!(!temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", retry.task_id))
+        .exists());
+    assert!(service
+        .get_logs(&retry.task_id)
+        .unwrap()
+        .iter()
+        .any(|line| {
+            line.level == llm_wiki_desktop_lib::tasks::task_model::LogLevel::Warn
+                && line.message.contains("memory-only")
+        }));
+}
+
+#[test]
+fn retry_uses_new_unicode_persistence_root_without_backfilling_the_old_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let mut request = request(temp.path(), "p", "v1", "b1");
+    request.task_state_root = None;
+    let original = created(coordinator.enqueue(&service, request).unwrap());
+    service
+        .start_workflow_stage(&original.task_id, "prepare")
+        .unwrap();
+    service
+        .fail_workflow_stage(
+            &original.task_id,
+            "prepare",
+            llm_wiki_desktop_lib::models::workflow::WorkflowErrorSummary {
+                code: "TEST".into(),
+                message_key: "test".into(),
+                recoverable: true,
+                user_action_required: false,
+                suggested_action: None,
+            },
+        )
+        .unwrap();
+    assert!(!temp.path().join(".app").exists());
+    let new_root = temp.path().join(".app/任务");
+
+    let retry = created(
+        coordinator
+            .retry(
+                &service,
+                &original.task_id,
+                temp.path().to_path_buf(),
+                Some(new_root.clone()),
+            )
+            .unwrap(),
+    );
+
+    assert!(!new_root.join(format!("{}.json", original.task_id)).exists());
+    assert!(new_root.join(format!("{}.json", retry.task_id)).exists());
+    assert!(service
+        .get_logs(&retry.task_id)
+        .unwrap()
+        .iter()
+        .any(|line| {
+            line.level == llm_wiki_desktop_lib::tasks::task_model::LogLevel::Info
+                && line.message.contains("newly derived")
+        }));
+}
+
+#[test]
+fn continue_rebinds_queued_run_to_memory_only_before_eligibility_allows_claiming() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let active = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v1", "b1"))
+            .unwrap(),
+    );
+    let queued = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v2", "b2"))
+            .unwrap(),
+    );
+    service
+        .set_workflow_queue_state(&queued.task_id, queued.queue_position, true)
+        .unwrap();
+    let old_path = temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", queued.task_id));
+    let old_bytes = std::fs::read(&old_path).unwrap();
+
+    let (_runs, claimed) = coordinator
+        .apply_persistence_and_continue_queued(
+            &service,
+            &active.canonical_identity_key,
+            &active.identity_revision,
+            &[(queued.task_id.clone(), None)],
+            false,
+        )
+        .unwrap();
+
+    assert!(claimed.is_none());
+    let rebound = service.get_workflow_run(&queued.task_id).unwrap();
+    assert_eq!(rebound.persistence, WorkflowPersistenceMode::MemoryOnly);
+    assert_eq!(
+        rebound.persistence_transition,
+        Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
+    );
+    assert!(rebound.continuation_required);
+    coordinator.cancel(&service, &queued.task_id).unwrap();
+    assert_eq!(std::fs::read(old_path).unwrap(), old_bytes);
+}
+
+#[test]
+fn continue_upgrade_writes_the_continuation_transition_only_to_the_new_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let mut first_request = request(temp.path(), "p", "v1", "b1");
+    first_request.task_state_root = None;
+    let active = created(coordinator.enqueue(&service, first_request).unwrap());
+    let mut second_request = request(temp.path(), "p", "v2", "b2");
+    second_request.task_state_root = None;
+    let queued = created(coordinator.enqueue(&service, second_request).unwrap());
+    service
+        .set_workflow_queue_state(&queued.task_id, queued.queue_position, true)
+        .unwrap();
+    let new_root = temp.path().join(".app/new-tasks");
+    std::fs::create_dir_all(&new_root).unwrap();
+    let new_root = new_root.canonicalize().unwrap();
+    let new_path = new_root.join(format!("{}.json", queued.task_id));
+
+    let (_runs, claimed) = coordinator
+        .apply_persistence_and_continue_queued(
+            &service,
+            &active.canonical_identity_key,
+            &active.identity_revision,
+            &[(queued.task_id.clone(), Some(new_root))],
+            true,
+        )
+        .unwrap();
+
+    assert!(claimed.is_none());
+    assert!(new_path.exists());
+    assert!(!temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", queued.task_id))
+        .exists());
+    let rebound = service.get_workflow_run(&queued.task_id).unwrap();
+    assert_eq!(rebound.persistence, WorkflowPersistenceMode::Persistent);
+    assert_eq!(
+        rebound.persistence_transition,
+        Some(WorkflowPersistenceTransition::UpgradedToPersistent)
+    );
+    assert!(!rebound.continuation_required);
+
+    service
+        .start_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    service
+        .complete_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    let (_completed, claimed) = coordinator
+        .complete_and_claim_next(&service, &active.task_id, empty_update_wiki_result())
+        .unwrap();
+    assert_eq!(claimed.unwrap().task_id, queued.task_id);
+    assert!(new_path.exists());
 }
 
 #[test]

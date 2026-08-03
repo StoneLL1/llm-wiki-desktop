@@ -13,6 +13,7 @@ import {
   recoverTasksForProject,
   useTaskStore,
 } from "./taskStore";
+import { defaultProject, useProjectStore } from "./projectStore";
 
 function task(id: string, projectId: string): BackendTask {
   return {
@@ -55,6 +56,17 @@ beforeEach(() => {
     drawerOpen: false,
     runningCount: 0,
     tasksHydrated: false,
+    projectPersistence: null,
+    projectPersistenceReason: null,
+  });
+  useProjectStore.setState({
+    currentProject: {
+      ...defaultProject,
+      projectId: "project-a",
+      rootPath: "D:/project-a",
+    },
+    taskPersistence: null,
+    taskPersistenceReason: null,
   });
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 });
@@ -124,7 +136,17 @@ describe("recoverTasksForProject", () => {
 
   it("replaces the visible task list with only the selected project snapshot", async () => {
     const tasks = [task("task-b", "project-b")];
-    invokeMock.mockResolvedValueOnce(tasks);
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "project-b",
+        rootPath: "D:/project-b",
+      },
+    });
+    invokeMock.mockResolvedValueOnce({
+      tasks,
+      persistence: "persistent",
+    });
 
     await recoverTasksForProject("project-b", "D:/project-b");
 
@@ -133,6 +155,31 @@ describe("recoverTasksForProject", () => {
     });
     expect(useTaskStore.getState().tasks).toEqual(tasks);
     expect(useTaskStore.getState().selectedTaskId).toBeNull();
+    expect(useTaskStore.getState().projectPersistence).toBe("persistent");
+    expect(useTaskStore.getState().projectPersistenceReason).toBeNull();
+    expect(useProjectStore.getState().taskPersistence).toBe("persistent");
+  });
+
+  it("keeps a typed memory-only reason without inventing recovered tasks", async () => {
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "project-b",
+        rootPath: "D:/project-b",
+      },
+    });
+    invokeMock.mockResolvedValueOnce({
+      tasks: [],
+      persistence: "memory_only",
+      persistenceReason: "project_untrusted",
+    });
+
+    await recoverTasksForProject("project-b", "D:/project-b");
+
+    expect(useTaskStore.getState().tasks).toEqual([]);
+    expect(useTaskStore.getState().projectPersistence).toBe("memory_only");
+    expect(useTaskStore.getState().projectPersistenceReason).toBe("project_untrusted");
+    expect(useProjectStore.getState().taskPersistenceReason).toBe("project_untrusted");
   });
 
   it("ignores task events from background projects", () => {

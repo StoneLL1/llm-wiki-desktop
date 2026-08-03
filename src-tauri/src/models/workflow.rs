@@ -286,6 +286,20 @@ pub enum WorkflowPersistenceMode {
     MemoryOnly,
 }
 
+fn default_workflow_persistence_mode() -> WorkflowPersistenceMode {
+    // A recovered workflow necessarily came from a persisted task snapshot.
+    // New memory-only runs always set the mode explicitly at creation time.
+    WorkflowPersistenceMode::Persistent
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowPersistenceTransition {
+    Unchanged,
+    DowngradedToMemoryOnly,
+    UpgradedToPersistent,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowGitState {
@@ -437,6 +451,10 @@ pub struct WorkflowRun {
     pub route: Option<WorkflowRoute>,
     pub fingerprint: String,
     pub baseline_fingerprint: String,
+    #[serde(default = "default_workflow_persistence_mode")]
+    pub persistence: WorkflowPersistenceMode,
+    #[serde(default)]
+    pub persistence_transition: Option<WorkflowPersistenceTransition>,
     pub stages: Vec<WorkflowStage>,
     pub current_stage_id: Option<String>,
     pub queue_position: Option<u32>,
@@ -523,6 +541,10 @@ pub struct WorkflowExecutionState {
     pub route: Option<WorkflowRoute>,
     pub fingerprint: String,
     pub baseline_fingerprint: String,
+    #[serde(default = "default_workflow_persistence_mode")]
+    pub persistence: WorkflowPersistenceMode,
+    #[serde(default)]
+    pub persistence_transition: Option<WorkflowPersistenceTransition>,
     pub stages: Vec<WorkflowStage>,
     pub current_stage_id: Option<String>,
     pub queue_position: Option<u32>,
@@ -556,6 +578,8 @@ impl WorkflowExecutionState {
             route: self.route.clone(),
             fingerprint: self.fingerprint.clone(),
             baseline_fingerprint: self.baseline_fingerprint.clone(),
+            persistence: self.persistence.clone(),
+            persistence_transition: self.persistence_transition,
             stages: self.stages.clone(),
             current_stage_id: self.current_stage_id.clone(),
             queue_position: self.queue_position,

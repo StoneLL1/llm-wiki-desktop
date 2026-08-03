@@ -4,8 +4,9 @@ use std::sync::Mutex;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
     WorkflowErrorSummary, WorkflowExecutionOptions, WorkflowExecutionState, WorkflowKind,
-    WorkflowResult, WorkflowRetryLink, WorkflowRoute, WorkflowRun, WorkflowScope, WorkflowStage,
-    WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
+    WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowResult, WorkflowRetryLink,
+    WorkflowRoute, WorkflowRun, WorkflowScope, WorkflowStage, WorkflowStartOutcome,
+    WORKFLOW_SCHEMA_VERSION,
 };
 use crate::tasks::TaskService;
 use chrono::{Duration, Utc};
@@ -118,6 +119,12 @@ impl WorkflowCoordinator {
             route: request.route,
             fingerprint,
             baseline_fingerprint: request.baseline_fingerprint,
+            persistence: if task_state_root.is_some() {
+                WorkflowPersistenceMode::Persistent
+            } else {
+                WorkflowPersistenceMode::MemoryOnly
+            },
+            persistence_transition: None,
             stages: request.stages,
             current_stage_id: None,
             queue_position: Some(queued_count + 1),
@@ -196,10 +203,49 @@ impl WorkflowCoordinator {
         canonical_identity_key: &str,
         identity_revision: &str,
     ) -> Result<(Vec<WorkflowRun>, Option<WorkflowRun>), String> {
+        self.apply_persistence_and_continue_queued(
+            tasks,
+            canonical_identity_key,
+            identity_revision,
+            &[],
+            true,
+        )
+    }
+
+    pub fn apply_persistence_and_continue_queued(
+        &self,
+        tasks: &TaskService,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        bindings: &[(String, Option<PathBuf>)],
+        continue_queue: bool,
+    ) -> Result<(Vec<WorkflowRun>, Option<WorkflowRun>), String> {
         let _operation = self
             .operation_lock
             .lock()
             .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        for (task_id, task_state_root) in bindings {
+            let run = tasks
+                .get_workflow_run(task_id)
+                .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+            if run.canonical_identity_key != canonical_identity_key
+                || run.identity_revision != identity_revision
+            {
+                return Err(format!(
+                    "Workflow persistence binding does not belong to this queue: {task_id}"
+                ));
+            }
+            let project_root = tasks
+                .project_root_for_task(task_id)
+                .ok_or_else(|| format!("Workflow has no project root: {task_id}"))?;
+            tasks.rebind_workflow_persistence(task_id, &project_root, task_state_root.clone())?;
+        }
+        if !continue_queue {
+            return Ok((
+                self.owner_runs(tasks, canonical_identity_key, identity_revision),
+                None,
+            ));
+        }
         for run in self.owner_runs(tasks, canonical_identity_key, identity_revision) {
             if run.display_status == crate::models::workflow::WorkflowDisplayStatus::Queued
                 && run.continuation_required
@@ -401,6 +447,7 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         task_id: &str,
         project_root: PathBuf,
+        task_state_root: Option<PathBuf>,
     ) -> Result<WorkflowStartOutcome, String> {
         let original = tasks
             .get_workflow_run(task_id)
@@ -438,6 +485,10 @@ impl WorkflowCoordinator {
             .workflow_execution_options(task_id)
             .ok_or_else(|| format!("Workflow execution options missing: {task_id}"))?;
         let mut baseline_fingerprint = original.baseline_fingerprint.clone();
+        let was_persistent = tasks.workflow_persistence_dir(task_id).is_some()
+            || original.persistence_transition
+                == Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly);
+        let is_persistent = task_state_root.is_some();
         if completed_generate {
             let mut context = crate::models::paths::ProjectContext::new(
                 original.project_id.clone(),
@@ -462,12 +513,12 @@ impl WorkflowCoordinator {
                     .map_err(|error| error.message)?
                     .fingerprint;
         }
-        self.enqueue_locked(
+        let outcome = self.enqueue_locked(
             tasks,
             EnqueueWorkflow {
                 project_id: original.project_id.clone(),
                 project_root,
-                task_state_root: tasks.workflow_persistence_dir(task_id),
+                task_state_root,
                 title: format!("Retry {:?}", original.kind),
                 kind: original.kind,
                 scope: original.scope,
@@ -483,7 +534,22 @@ impl WorkflowCoordinator {
                 }),
             },
             false,
-        )
+        )?;
+        match outcome {
+            WorkflowStartOutcome::Created { run } => {
+                tasks.record_workflow_persistence_transition(
+                    &run.task_id,
+                    was_persistent,
+                    is_persistent,
+                )?;
+                Ok(WorkflowStartOutcome::Created {
+                    run: tasks.get_workflow_run(&run.task_id).ok_or_else(|| {
+                        format!("Workflow not found after retry: {}", run.task_id)
+                    })?,
+                })
+            }
+            existing => Ok(existing),
+        }
     }
 
     fn owner_runs(&self, tasks: &TaskService, key: &str, revision: &str) -> Vec<WorkflowRun> {

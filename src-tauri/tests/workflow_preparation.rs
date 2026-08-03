@@ -6,9 +6,9 @@ use llm_wiki_desktop_lib::models::workflow::{
     WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
-    project_identity, AgentService, PrepareWorkflowInput, SecretService, SettingsService,
-    WorkflowAccessSnapshot, WorkflowPreference, WorkflowPreferences,
-    WorkflowPreparationEnvironment, WorkflowRunner, WorkflowService,
+    project_identity, resolve_workflow_persistence_binding, AgentService, PrepareWorkflowInput,
+    SecretService, SettingsService, WorkflowAccessSnapshot, WorkflowPreference,
+    WorkflowPreferences, WorkflowPreparationEnvironment, WorkflowRunner, WorkflowService,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,6 +47,54 @@ fn local_health() -> PrepareWorkflowInput {
         }),
         route_selection: None,
     }
+}
+
+#[test]
+fn persistence_binding_consumes_layout_without_creating_state() {
+    let root = tempfile::tempdir().unwrap();
+    let mut context = ProjectContext::new("项目-一", root.path().to_path_buf());
+    context.layout.task_state_root = Some(".app/任务".into());
+
+    let binding =
+        resolve_workflow_persistence_binding(&context, WorkflowPersistenceMode::Persistent)
+            .unwrap();
+
+    assert_eq!(binding.mode, WorkflowPersistenceMode::Persistent);
+    assert_eq!(binding.task_state_root, Some(root.path().join(".app/任务")));
+    assert!(!root.path().join(".app").exists());
+}
+
+#[test]
+fn missing_layout_task_root_fails_closed_to_memory_only() {
+    let root = tempfile::tempdir().unwrap();
+    let mut context = ProjectContext::new("project", root.path().to_path_buf());
+    context.layout.task_state_root = None;
+
+    let binding =
+        resolve_workflow_persistence_binding(&context, WorkflowPersistenceMode::Persistent)
+            .unwrap();
+
+    assert_eq!(binding.mode, WorkflowPersistenceMode::MemoryOnly);
+    assert!(binding.task_state_root.is_none());
+    assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn trusted_read_only_authority_stays_memory_only_without_creating_task_state() {
+    let root = tempfile::tempdir().unwrap();
+    let mut context = ProjectContext::new("project", root.path().to_path_buf());
+    context.layout.task_state_root = Some(".app/tasks".into());
+    let access = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::ReadOnly,
+        WorkflowPersistenceMode::MemoryOnly,
+    );
+
+    let binding = resolve_workflow_persistence_binding(&context, access.persistence).unwrap();
+
+    assert_eq!(binding.mode, WorkflowPersistenceMode::MemoryOnly);
+    assert_eq!(binding.task_state_root, None);
+    assert!(!root.path().join(".app").exists());
 }
 
 fn prepare(
