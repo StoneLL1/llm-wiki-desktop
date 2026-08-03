@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 use crate::errors::BackendError;
 use crate::models::graph::{
@@ -121,14 +119,12 @@ impl GraphService {
         content_hash_for(pages)
     }
 
-    fn cache_path(context: &ProjectContext) -> PathBuf {
-        context.app_dir.join("graph-cache.json")
-    }
-
     /// Read the cached graph. Returns `None` when the cache is missing or
     /// corrupt so callers can rebuild transparently (corrupted-cache recovery).
     pub fn read_cache(&self, context: &ProjectContext) -> Option<GraphData> {
-        let path = Self::cache_path(context);
+        let path = context
+            .resolve_project_write_path(".app/graph-cache.json")
+            .ok()?;
         self.file_store.read_json_file::<GraphData>(&path).ok()
     }
 
@@ -138,12 +134,8 @@ impl GraphService {
         context: &ProjectContext,
         data: &GraphData,
     ) -> Result<(), BackendError> {
-        std::fs::create_dir_all(&context.app_dir).map_err(|err| {
-            BackendError::new("FILE_DIR_CREATE_FAILED", err.to_string(), true, false)
-                .with_details(serde_json::json!({ "path": context.app_dir.to_string_lossy() }))
-        })?;
         self.file_store
-            .write_json_atomic_absolute(&Self::cache_path(context), data)
+            .write_json_atomic(context, ".app/graph-cache.json", data)
     }
 
     /// Resolve the graph for a project: serve from cache when the content hash
@@ -298,6 +290,7 @@ mod tests {
     use super::*;
     use crate::models::paths::ProjectContext;
     use crate::models::wiki::{WikiPageMeta, WikiPageType};
+    use std::path::PathBuf;
 
     fn meta(path: &str, title: &str, page_type: WikiPageType) -> WikiPageMeta {
         WikiPageMeta {

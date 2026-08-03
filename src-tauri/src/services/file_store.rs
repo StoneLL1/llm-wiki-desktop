@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::errors::BackendError;
+use crate::models::layout::is_link_or_reparse;
 use crate::models::paths::ProjectContext;
 use crate::utils::path_utils::normalize_project_path;
 
@@ -34,7 +35,7 @@ impl FileStore {
         context: &ProjectContext,
         relative_path: &str,
     ) -> Result<(), BackendError> {
-        let path = context.resolve_project_path(relative_path)?;
+        let path = context.resolve_project_write_directory(relative_path)?;
         fs::create_dir_all(&path).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, &path))
     }
 
@@ -61,7 +62,7 @@ impl FileStore {
         relative_path: &str,
         contents: &str,
     ) -> Result<(), BackendError> {
-        let path = context.resolve_project_path(relative_path)?;
+        let path = context.resolve_project_write_path(relative_path)?;
         write_text(&path, contents)
     }
 
@@ -83,7 +84,7 @@ impl FileStore {
                     false,
                 )
             })?;
-        let path = context.resolve_project_path(relative_path)?;
+        let path = context.resolve_project_write_path(relative_path)?;
         self.verify_write_mode(&path, relative_path, mode.clone())?;
         write_text(&path, contents)?;
         // The hash check and atomic rename cannot form an OS-level compare-and
@@ -128,7 +129,7 @@ impl FileStore {
                     false,
                 )
             })?;
-        let path = context.resolve_project_path(relative_path)?;
+        let path = context.resolve_project_write_path(relative_path)?;
         self.verify_write_mode(&path, relative_path, WriteMode::CreateNew)?;
         write_atomic_create_new(&path, relative_path, contents.as_bytes())
     }
@@ -178,7 +179,7 @@ impl FileStore {
                     false,
                 )
             })?;
-        let path = context.resolve_project_path(relative_path)?;
+        let path = context.resolve_project_write_path(relative_path)?;
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
         })?;
@@ -203,7 +204,7 @@ impl FileStore {
                     false,
                 )
             })?;
-        let path = context.resolve_project_path(relative_path)?;
+        let path = context.resolve_project_write_path(relative_path)?;
         self.verify_write_mode(&path, relative_path, mode)?;
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
@@ -487,15 +488,18 @@ fn walk_markdown(current: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if is_link_or_reparse(&metadata) {
+            continue;
+        }
+        if metadata.is_dir() {
             let name = entry.file_name();
             // Skip Obsidian and hidden app state when enumerating wiki content.
             if name == ".obsidian" || name == ".git" || name == ".app" {
                 continue;
             }
             walk_markdown(&path, results)?;
-        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+        } else if metadata.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
         {
             results.push(path);
         }
@@ -582,6 +586,30 @@ mod tests {
             );
         }
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn json_writes_reject_linked_state_directories() {
+        let (context, root) = tmp_context("json-linked-state");
+        let store = FileStore;
+        let outside = tempfile::tempdir().unwrap();
+        create_directory_link(outside.path(), &context.app_dir).unwrap();
+
+        let err = store
+            .write_json_atomic(
+                &context,
+                ".app/settings.json",
+                &Sample {
+                    name: "unsafe".into(),
+                    count: 1,
+                },
+            )
+            .expect_err("linked app state must not be writable");
+        assert_eq!(err.code, "PATH_OUTSIDE_PROJECT");
+        assert!(!outside.path().join("settings.json").exists());
+
+        remove_directory_link(&context.app_dir);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -822,5 +850,36 @@ mod tests {
         assert!(!relative.iter().any(|p| p.contains(".app")));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        }
+    }
+
+    fn remove_directory_link(link: &std::path::Path) {
+        let _ = std::fs::remove_dir(link);
     }
 }

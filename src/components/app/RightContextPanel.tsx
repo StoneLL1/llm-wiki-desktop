@@ -34,6 +34,7 @@ export function RightContextPanel() {
   const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
   const closeWikiAssistant = useNavigationStore((state) => state.closeWikiAssistant);
   const currentProject = useProjectStore((state) => state.currentProject);
+  const authority = useProjectStore((state) => state.authority);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const tasks = useTaskStore((state) => state.tasks);
   const importSession = useImportStore((state) => state.session);
@@ -72,6 +73,28 @@ export function RightContextPanel() {
   const [chatCopied, setChatCopied] = useState(false);
 
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
+
+  if (!currentProject.projectId || !currentProject.rootPath) {
+    return (
+      <aside
+        id="right-context-panel"
+        aria-label={t("noProject.context.title")}
+        className="right-panel"
+      >
+        <RightPanelHeader title={t("noProject.context.title")} />
+        <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-3 text-[12px]">
+            <dt className="font-medium text-[var(--text-muted)]">{t("noProject.context.state")}</dt>
+            <dd className="m-0 text-[var(--text-primary)]">{t("noProject.switcher")}</dd>
+            <dt className="font-medium text-[var(--text-muted)]">{t("noProject.context.storage")}</dt>
+            <dd className="m-0 text-[var(--text-secondary)]">{t("noProject.context.storageValue")}</dd>
+            <dt className="font-medium text-[var(--text-muted)]">{t("noProject.context.policy")}</dt>
+            <dd className="m-0 leading-5 text-[var(--text-secondary)]">{t("noProject.context.policyValue")}</dd>
+          </dl>
+        </div>
+      </aside>
+    );
+  }
 
   if (activeView === "workflows") {
     return <WorkflowsRightPanel />;
@@ -445,6 +468,7 @@ export function RightContextPanel() {
 
   const health = currentProject.health;
   const pendingCount = pendingAction ? 1 : 0;
+  const inventoryState = currentProject.inventoryState ?? "ready";
 
   const gitBranch = status?.git?.branch ?? null;
   const gitHead = status?.git?.head ?? null;
@@ -464,6 +488,36 @@ export function RightContextPanel() {
       <RightPanelHeader title={t("shell.projectInfo")} />
 
       <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        {authority ? (
+          <div className="border-b border-[var(--border-subtle)] py-3">
+            <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
+              {t("projectAssessment.title")}
+            </h4>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-[12px]">
+              <dt className="font-medium text-[var(--text-muted)]">{t("projectAssessment.dimension.format")}</dt>
+              <dd className="m-0 text-right text-[var(--text-secondary)]">{t(`projectAssessment.format.${authority.format}`)}</dd>
+              <dt className="font-medium text-[var(--text-muted)]">{t("projectAssessment.dimension.trust")}</dt>
+              <dd className="m-0 text-right text-[var(--text-secondary)]">{t(`projectAssessment.trust.${authority.trust}`)}</dd>
+              <dt className="font-medium text-[var(--text-muted)]">{t("projectAssessment.dimension.filesystem")}</dt>
+              <dd className="m-0 text-right text-[var(--text-secondary)]">{t(`projectAssessment.filesystem.${authority.filesystemAccess}`)}</dd>
+              <dt className="font-medium text-[var(--text-muted)]">{t("projectAssessment.dimension.health")}</dt>
+              <dd className="m-0 text-right text-[var(--text-secondary)]">{t(`projectAssessment.health.${authority.health}`)}</dd>
+              <dt className="font-medium text-[var(--text-muted)]">{t("projectAssessment.dimension.git")}</dt>
+              <dd className="m-0 text-right text-[var(--text-secondary)]">{t(authority.git.isRepository ? "projectAssessment.git.repository" : "projectAssessment.git.none")}</dd>
+            </dl>
+            {authority.layoutWarnings.filter((warning) => warning.code === "UNSAFE_ENTRY_SKIPPED").map((warning) => (
+              <div
+                key={warning.code + ":" + (warning.path ?? warning.message)}
+                className="mt-2 rounded-[var(--radius-sm)] border border-[var(--warning)] bg-[var(--warning-soft)] px-2.5 py-2 text-[11px] leading-4 text-[var(--text-secondary)]"
+                role="status"
+              >
+                {t("projectAssessment.layoutUnsafeEntrySkipped", {
+                  path: warning.path ?? t("projectAssessment.layoutUnsafeEntryUnknown"),
+                })}
+              </div>
+            ))}
+          </div>
+        ) : null}
         {/* 路径 */}
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.paths")}</h4>
@@ -486,7 +540,11 @@ export function RightContextPanel() {
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.indexState")}</h4>
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-[12px]">
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.pages")}</dt>
-            <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">{currentProject.wikiPageCount}</dd>
+            <dd className="m-0 font-mono text-[11.5px] text-[var(--text-primary)]">
+              {inventoryState === "ready"
+                ? currentProject.wikiPageCount
+                : t(`status.inventory.${inventoryState}`)}
+            </dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.index.index")}</dt>
             <dd className="m-0 rounded-[var(--radius-pill)] bg-[var(--accent-soft)] px-2 py-0.5 text-[var(--accent-hover)]" style={{ display: "inline-block" }}>
               {t(`status.indexState.${currentProject.indexState as IndexState}`)}
