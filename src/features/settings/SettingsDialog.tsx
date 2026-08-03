@@ -11,6 +11,7 @@ import type {
   ProviderTestResult,
 } from "../../types/llm";
 import type { ProjectSummary } from "../../types/project";
+import type { SettingsSectionKey } from "../../stores/navigationStore";
 import type { ImportWorkflow } from "../import/importWorkflow";
 
 // Settings is a secondary control surface, not a workspace destination, so it
@@ -21,6 +22,7 @@ const SettingsView = lazy(() =>
 
 interface SettingsDialogProps {
   open: boolean;
+  initialSection?: SettingsSectionKey;
   onClose: () => void;
   project: ProjectSummary;
   providers: ProviderStatus[];

@@ -11,6 +11,7 @@ use crate::models::task::{
 use crate::models::workflow::{
     WorkflowErrorSummary, WorkflowExecutionState, WorkflowPendingAction, WorkflowPersistenceMode,
     WorkflowPersistenceTransition, WorkflowResult, WorkflowRun, WorkflowStageStatus,
+    WORKFLOW_SCHEMA_VERSION,
 };
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
@@ -41,6 +42,102 @@ struct PersistedTaskEntry {
     activities: Vec<TaskActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workflow: Option<WorkflowExecutionState>,
+}
+
+type RecoveredTaskSnapshot = (
+    BackendTask,
+    Vec<LogLine>,
+    Vec<TaskActivity>,
+    Option<WorkflowExecutionState>,
+);
+
+fn parse_persisted_task(json: &str, persisted_id: &str) -> Result<RecoveredTaskSnapshot, String> {
+    let value = serde_json::from_str::<serde_json::Value>(json)
+        .map_err(|error| format!("Invalid task JSON: {error}"))?;
+    let is_wrapper = value
+        .as_object()
+        .is_some_and(|object| object.contains_key("task"));
+    if !is_wrapper {
+        let snapshot = serde_json::from_value::<BackendTask>(value)
+            .map(|task| (task, Vec::new(), Vec::new(), None))
+            .map_err(|error| format!("Invalid legacy task snapshot: {error}"))?;
+        validate_recovered_task_id(&snapshot.0.id, persisted_id)?;
+        return Ok(snapshot);
+    }
+
+    // Once a document identifies itself as a wrapper it must never fall back
+    // to the raw legacy shape. Otherwise malformed or future wrapper fields
+    // could be silently ignored by BackendTask's permissive deserializer.
+    let entry = serde_json::from_value::<PersistedTaskEntry>(value)
+        .map_err(|error| format!("Invalid persisted task wrapper: {error}"))?;
+    if !matches!(entry.schema_version, 1 | PERSISTED_TASK_SCHEMA_VERSION) {
+        return Err(format!(
+            "Unsupported persisted task schema version: {}",
+            entry.schema_version
+        ));
+    }
+    if let Some(workflow) = entry.workflow.as_ref() {
+        if workflow.schema_version != WORKFLOW_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported workflow execution schema version: {}",
+                workflow.schema_version
+            ));
+        }
+    }
+    let snapshot = (
+        entry.task,
+        entry.log_lines,
+        entry.activities,
+        entry.workflow,
+    );
+    validate_recovered_task_id(&snapshot.0.id, persisted_id)?;
+    Ok(snapshot)
+}
+
+fn validate_recovered_task_id(task_id: &str, persisted_id: &str) -> Result<(), String> {
+    validate_task_persistence_id(task_id)?;
+    validate_task_persistence_id(persisted_id)?;
+    if task_id != persisted_id {
+        return Err(format!(
+            "Persisted task id does not match its file name: {task_id} != {persisted_id}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_task_persistence_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || matches!(id, "." | "..") {
+        return Err("Task persistence id is empty or reserved".into());
+    }
+    if id
+        .chars()
+        .any(|character| character.is_control() || r#"<>:"/\|?*"#.contains(character))
+    {
+        return Err("Task persistence id contains an unsafe file-name character".into());
+    }
+    if id
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, ' ' | '.'))
+    {
+        return Err("Task persistence id has an unsafe trailing character".into());
+    }
+    let base = id
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || base
+            .strip_prefix("COM")
+            .or_else(|| base.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            });
+    if reserved {
+        return Err("Task persistence id is a reserved Windows file name".into());
+    }
+    Ok(())
 }
 
 pub struct TaskService {
@@ -1682,21 +1779,13 @@ impl TaskService {
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 let path = validate_existing_project_file(project_root, &path)
                     .map_err(|error| format!("Task persistence entry is unsafe: {error}"))?;
+                let persisted_id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| "Task persistence file name is not valid Unicode".to_string())?;
                 match std::fs::read_to_string(&path) {
                     Ok(json) => {
-                        let parsed = serde_json::from_str::<PersistedTaskEntry>(&json)
-                            .map(|entry| {
-                                (
-                                    entry.task,
-                                    entry.log_lines,
-                                    entry.activities,
-                                    entry.workflow,
-                                )
-                            })
-                            .or_else(|_| {
-                                serde_json::from_str::<BackendTask>(&json)
-                                    .map(|task| (task, Vec::new(), Vec::new(), None))
-                            });
+                        let parsed = parse_persisted_task(&json, persisted_id);
                         match parsed {
                             Ok((mut task, log_lines, activities, mut workflow)) => {
                                 if let Some(project_id) = current_project_id {
@@ -1872,11 +1961,25 @@ fn write_persisted_task(
     id: &str,
     persisted: &PersistedTaskEntry,
 ) -> Result<PathBuf, String> {
+    validate_task_persistence_id(id)?;
     let persistence_dir = ensure_project_directory(project_root, persistence_dir)
         .map_err(|error| format!("Task persistence path is unsafe: {error}"))?;
     let persistence_dir = validate_existing_project_directory(project_root, &persistence_dir)
         .map_err(|error| format!("Task persistence path is unsafe: {error}"))?;
     let path = persistence_dir.join(format!("{id}.json"));
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            validate_existing_project_file(project_root, &path)
+                .map_err(|error| format!("Task persistence entry is unsafe: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Task persistence entry is unavailable {}: {error}",
+                path.display()
+            ));
+        }
+    }
 
     // Revalidation is intentionally adjacent to the atomic writer. The
     // path-based FileStore API cannot make every parent traversal atomic with
@@ -2872,6 +2975,58 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unsafe"));
+    }
+
+    #[test]
+    fn recovery_rejects_task_ids_that_do_not_match_the_safe_file_stem() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks_dir = root.path().join(".app").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let (source, _) = make_service();
+        let mut task = source.create_task(
+            TaskType::Import,
+            Some("project".into()),
+            "malicious".into(),
+            true,
+        );
+        task.id = "../../outside".into();
+        std::fs::write(
+            tasks_dir.join("malicious.json"),
+            serde_json::to_vec_pretty(&task).unwrap(),
+        )
+        .unwrap();
+
+        let (restarted, _) = make_service();
+        let recovered = restarted.recover_tasks(root.path()).unwrap();
+
+        assert!(recovered.is_empty());
+        assert!(!root.path().join("outside.json").exists());
+    }
+
+    #[test]
+    fn recovery_accepts_a_cjk_task_id_with_a_matching_safe_file_stem() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks_dir = root.path().join(".app").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let (source, _) = make_service();
+        let mut task = source.create_task(
+            TaskType::Import,
+            Some("project".into()),
+            "unicode".into(),
+            true,
+        );
+        task.id = "任务-一".into();
+        std::fs::write(
+            tasks_dir.join("任务-一.json"),
+            serde_json::to_vec_pretty(&task).unwrap(),
+        )
+        .unwrap();
+
+        let (restarted, _) = make_service();
+        let recovered = restarted.recover_tasks(root.path()).unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, "任务-一");
     }
 
     #[test]

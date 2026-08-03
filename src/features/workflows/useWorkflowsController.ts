@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
+import { i18next } from "../../i18n";
+
 import { registerTaskEventListener } from "../../hooks/useTaskEvents";
 import {
   cancelWorkflowRun,
@@ -26,6 +28,7 @@ import type {
   WorkflowProjectAccessSummary,
   WorkflowPrerequisiteAction,
   WorkflowRouteSelection,
+  WorkflowPreparation,
   WorkflowRun,
   WorkflowScope,
   WorkflowStartOutcome,
@@ -91,11 +94,51 @@ export interface WorkflowsController {
   backToOverview: () => void;
 }
 
+export type WorkflowProjectPrerequisiteAction = Extract<
+  WorkflowPrerequisiteAction,
+  | "open_or_create_project"
+  | "trust_project"
+  | "make_writable"
+  | "configure_git"
+  | "resolve_dirty_git"
+>;
+
+export interface WorkflowProjectPrerequisiteContext {
+  project: ProjectSummary;
+  preparation: WorkflowPreparation | null;
+  prepareAgain: () => Promise<void>;
+}
+
+export interface WorkflowsControllerOptions {
+  onProjectPrerequisite?: (
+    action: WorkflowProjectPrerequisiteAction,
+    context: WorkflowProjectPrerequisiteContext,
+  ) => Promise<void> | void;
+}
+
+const PROJECT_PREREQUISITE_ACTIONS = new Set<WorkflowPrerequisiteAction>([
+  "open_or_create_project",
+  "trust_project",
+  "make_writable",
+  "configure_git",
+  "resolve_dirty_git",
+]);
+
+function routeSelectionOf(
+  route: WorkflowPreparation["route"] | WorkflowRun["route"],
+): WorkflowRouteSelection | null {
+  if (route?.kind === "agent") return { kind: "agent", agent: route.agent };
+  if (route?.kind === "byok") return { kind: "byok", provider: route.provider };
+  return null;
+}
+
 export function useWorkflowsController(
   project: ProjectSummary,
   enabled: boolean,
+  options?: WorkflowsControllerOptions,
 ): WorkflowsController {
   const projectKey = `${project.projectId}\0${project.rootPath}`;
+  const onProjectPrerequisite = options?.onProjectPrerequisite;
   const activeKeyRef = useRef(projectKey);
   const refreshRequestRef = useRef(0);
   const refreshInFlightRef = useRef<Map<string, number>>(new Map());
@@ -141,8 +184,7 @@ export function useWorkflowsController(
       ]);
       const latest = useWorkflowStore.getState();
       if (latest.projectKey !== expectedKey || latest.requestEpoch !== epoch || refreshRequestRef.current !== refreshRequest) return;
-      latest.setOverview(overview);
-      latest.replaceRuns(page.runs);
+      latest.setProjectSnapshot(overview, page.runs, page.nextCursor);
       if (overview.projectAccess) {
         const pendingEvents = [...pendingEventsRef.current.values()];
         pendingEventsRef.current.clear();
@@ -154,7 +196,6 @@ export function useWorkflowsController(
         pendingRefreshVersionRef.current.delete(projectKey);
         attemptedPendingRefreshVersionRef.current.delete(projectKey);
       }
-      latest.setHistoryCursor(page.nextCursor);
     } catch (error) {
       const latest = useWorkflowStore.getState();
       if (latest.projectKey === expectedKey && latest.requestEpoch === epoch && refreshRequestRef.current === refreshRequest) {
@@ -340,14 +381,25 @@ export function useWorkflowsController(
         perform(() => reorderQueuedWorkflow({ ...request(), taskId, beforeTaskId })),
       retry: (taskId) => perform(() => retryWorkflow({ ...request(), taskId })),
       adjustAndPrepare: async (run, openSettingsAfter = false) => {
-        const routeSelection =
-          run.route?.kind === "agent"
-            ? { kind: "agent" as const, agent: run.route.agent }
-            : run.route?.kind === "byok"
-              ? { kind: "byok" as const, provider: run.route.provider }
-              : null;
+        const routeSelection = routeSelectionOf(run.route);
+        if (openSettingsAfter) {
+          openSettings("ai", {
+            projectId: project.projectId,
+            projectRootPath: project.rootPath,
+            kind: run.kind,
+            scope: run.scope,
+            routeSelection,
+            source: "adjust",
+            expectedSurface: "detail",
+            expectedCanonicalIdentityKey: run.canonicalIdentityKey,
+            expectedIdentityRevision: run.identityRevision,
+            expectedPreparationId: null,
+            expectedPreparationRevision: null,
+            expectedTaskId: run.taskId,
+          });
+          return;
+        }
         await prepareKind(run.kind, run.scope, routeSelection);
-        if (openSettingsAfter) openSettings();
       },
       openRun: async (taskId) => {
         const state = useWorkflowStore.getState();
@@ -382,7 +434,69 @@ export function useWorkflowsController(
           return;
         }
         if (action === "configure_execution_route" || action === "choose_execution_route") {
-          openSettings();
+          const preparation = useWorkflowStore.getState().preparation;
+          if (!preparation) {
+            void refresh();
+            return;
+          }
+          openSettings("ai", {
+            projectId: project.projectId,
+            projectRootPath: project.rootPath,
+            kind: preparation.kind,
+            scope: preparation.scope,
+            routeSelection: routeSelectionOf(preparation.route),
+            source: "prerequisite",
+            expectedSurface: "preparation",
+            expectedCanonicalIdentityKey:
+              preparation.projectAccess.canonicalIdentityKey,
+            expectedIdentityRevision: preparation.projectAccess.identityRevision,
+            expectedPreparationId: preparation.preparationId,
+            expectedPreparationRevision: preparation.preparationRevision,
+            expectedTaskId: null,
+          });
+          return;
+        }
+        if (action === "prepare_again") {
+          const preparation = useWorkflowStore.getState().preparation;
+          if (preparation) {
+            void prepareKind(
+              preparation.kind,
+              preparation.scope,
+              routeSelectionOf(preparation.route),
+            );
+          } else {
+            void refresh();
+          }
+          return;
+        }
+        if (PROJECT_PREREQUISITE_ACTIONS.has(action)) {
+          const preparation = useWorkflowStore.getState().preparation;
+          const projectAction = action as WorkflowProjectPrerequisiteAction;
+          if (onProjectPrerequisite) {
+            void Promise.resolve(
+              onProjectPrerequisite(projectAction, {
+                project,
+                preparation,
+                prepareAgain: async () => {
+                  if (preparation) {
+                    await prepareKind(
+                      preparation.kind,
+                      preparation.scope,
+                      routeSelectionOf(preparation.route),
+                    );
+                  } else {
+                    await refresh();
+                  }
+                },
+              }),
+            ).catch((error) => {
+              useWorkflowStore.getState().setError(messageOf(error));
+            });
+          } else {
+            useWorkflowStore
+              .getState()
+              .setError(i18next.t("workflows.prerequisite.projectActionUnavailable"));
+          }
           return;
         }
         void refresh();
@@ -394,6 +508,16 @@ export function useWorkflowsController(
         state.setSurface("overview");
       },
     }),
-    [loadHistoryMore, openSettings, perform, prepareKind, refresh, request, setActiveView],
+    [
+      loadHistoryMore,
+      openSettings,
+      onProjectPrerequisite,
+      perform,
+      prepareKind,
+      project,
+      refresh,
+      request,
+      setActiveView,
+    ],
   );
 }

@@ -1,6 +1,6 @@
 # Workflows 迁移落差与实施路线
 
-> 状态：Workflows Batch 0–7 已实施并提交；Batch 8 尚未提交、双审尚未闭环，且 First-run / Project-open 外部依赖 B1–B4 尚未落地。旧 Agent 主界面的当前工作树退休改动仍待 Batch 8 最终收口，技术 Agent 能力继续保留。
+> 状态：Workflows Batch 0–8 与 First-run / Project-open authority closure A–G 已实施、验证并按独立提交记录；Batch 8 的双审和完整门禁已闭环。实施证据见 [`../../docs/qa/workflows-batch8-closure-evidence.md`](../../docs/qa/workflows-batch8-closure-evidence.md)、`SPEC/progress.txt` 与 Git 历史；技术 Agent 能力继续保留。
 > 唯一产品与交互权威：[`../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md)。
 > 项目访问权威：[`../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。Workflows 不创建项目上下文；外部 AI/Agent/Skill 需要已信任项目，写入还需要可写能力与真实 Git 策略。
 > 分批执行计划：[`../../docs/superpowers/plans/2026-07-30-workflows-panel-implementation.md`](../../docs/superpowers/plans/2026-07-30-workflows-panel-implementation.md)。

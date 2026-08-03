@@ -806,7 +806,10 @@ mod tests {
         assert!(resolution.layout.wiki_write_root.is_none());
         assert!(resolution.layout.workflow_state_root.is_none());
         assert_eq!(
-            resolution.layout.purpose_context.and_then(|value| value.read_path),
+            resolution
+                .layout
+                .purpose_context
+                .and_then(|value| value.read_path),
             Some("purpose.md".into())
         );
         fs::remove_dir(root.join(".app")).ok();

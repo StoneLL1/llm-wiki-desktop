@@ -316,12 +316,14 @@ fn queued_cancel_and_undo_are_idempotent_and_retry_links_a_new_attempt() {
             .task_id,
         queued.task_id
     );
-    let restored = coordinator.undo_cancel(&service, &queued.task_id).unwrap();
+    let (restored, claimed) = coordinator.undo_cancel(&service, &queued.task_id).unwrap();
     assert_eq!(restored.display_status, WorkflowDisplayStatus::Queued);
+    assert!(claimed.is_none());
     assert_eq!(
         coordinator
             .undo_cancel(&service, &queued.task_id)
             .unwrap()
+            .0
             .task_id,
         queued.task_id
     );
@@ -727,6 +729,65 @@ fn cancelled_or_terminal_workflows_reject_stale_stage_updates() {
         .finish_cancelled_and_claim_next(&service, &running.task_id)
         .unwrap();
     assert!(coordinator.undo_cancel(&service, &running.task_id).is_err());
+}
+
+#[test]
+fn undo_after_the_active_run_finishes_claims_the_restored_queue_item() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let active = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v1", "b1"))
+            .unwrap(),
+    );
+    let queued = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v2", "b2"))
+            .unwrap(),
+    );
+    coordinator.cancel(&service, &queued.task_id).unwrap();
+    service
+        .start_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    let (_, next) = coordinator
+        .fail_stage_and_claim_next(
+            &service,
+            &active.task_id,
+            "prepare",
+            llm_wiki_desktop_lib::models::workflow::WorkflowErrorSummary {
+                code: "TEST".into(),
+                message_key: "test".into(),
+                recoverable: true,
+                user_action_required: false,
+                suggested_action: None,
+            },
+        )
+        .unwrap();
+    assert!(next.is_none());
+
+    let (restored, claimed) = coordinator.undo_cancel(&service, &queued.task_id).unwrap();
+    assert_eq!(restored.display_status, WorkflowDisplayStatus::Running);
+    assert_eq!(restored.queue_position, None);
+    assert_eq!(
+        claimed.as_ref().map(|run| run.task_id.as_str()),
+        Some(queued.task_id.as_str())
+    );
+
+    // An IPC retry after dispatch observes the already-restored run and must
+    // not claim or dispatch it a second time.
+    let (replayed, replay_claim) = coordinator.undo_cancel(&service, &queued.task_id).unwrap();
+    assert_eq!(replayed.display_status, WorkflowDisplayStatus::Running);
+    assert_eq!(replayed.queue_position, None);
+    assert!(replay_claim.is_none());
+
+    let later = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v3", "b3"))
+            .unwrap(),
+    );
+    assert_eq!(later.display_status, WorkflowDisplayStatus::Queued);
+    assert_eq!(later.queue_position, Some(1));
 }
 
 #[test]

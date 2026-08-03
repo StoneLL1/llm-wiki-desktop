@@ -104,10 +104,7 @@ pub fn run() {
                                 }
                             };
                             let _ = identity;
-                            let access = match services::WorkflowAccessSnapshot::legacy_fail_closed(
-                                &context,
-                                &state.git_service,
-                            ) {
+                            let access = match state.resolve_workflow_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
                                     fail_dispatch(&error.code, error.message);
@@ -230,10 +227,7 @@ pub fn run() {
                                 }
                             };
                             let _ = identity;
-                            let access = match services::WorkflowAccessSnapshot::legacy_fail_closed(
-                                &context,
-                                &state.git_service,
-                            ) {
+                            let access = match state.resolve_workflow_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
                                     fail_dispatch(&error.code, error.message);
@@ -345,10 +339,7 @@ pub fn run() {
                                     return;
                                 }
                             }
-                            let access = match services::WorkflowAccessSnapshot::legacy_fail_closed(
-                                &context,
-                                &state.git_service,
-                            ) {
+                            let access = match state.resolve_workflow_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
                                     fail_dispatch(&error.code, error.message);

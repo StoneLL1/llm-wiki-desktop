@@ -2,7 +2,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BackendEvent } from "../../types/task";
-import type { WorkflowRun, WorkflowsOverview } from "../../types/workflow";
+import type { WorkflowPreparation, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useWorkflowStore } from "../../stores/workflowStore";
 
 const mocks = vi.hoisted(() => ({
@@ -55,14 +56,49 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+const preparation: WorkflowPreparation = {
+  schemaVersion: 1,
+  preparationId: "prep-a",
+  preparationRevision: "revision-1",
+  projectAccess: overview.projectAccess!,
+  kind: "health_check",
+  scope: { kind: "health_check", mode: "complete" },
+  baseline: {
+    fingerprint: "baseline-a",
+    capturedAt: "2026-08-01T00:00:00Z",
+    itemCount: 1,
+  },
+  route: {
+    kind: "byok",
+    provider: "ollama",
+    model: "qwen",
+    routeRevision: "route-1",
+  },
+  prerequisites: [],
+  output: {
+    labelKey: "workflows.output.session",
+    location: null,
+    mayChangeWiki: false,
+  },
+  gitPolicy: "not_required",
+  requiresScopeConfirmation: false,
+  quickRerunEligible: false,
+};
 
 describe("useWorkflowsController", () => {
   beforeEach(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
     useWorkflowStore.getState().reset();
+    useNavigationStore.setState({
+      activeView: "workflows",
+      settingsOpen: false,
+      settingsSection: "general",
+      workflowSettingsReturnIntent: null,
+    });
     mocks.listener = null;
     mocks.getOverview.mockReset().mockResolvedValue(overview);
     mocks.listRuns.mockReset().mockResolvedValue({ runs: [], nextCursor: null });
+    mocks.prepare.mockReset().mockResolvedValue(preparation);
   });
   afterEach(() => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
@@ -281,6 +317,46 @@ describe("useWorkflowsController", () => {
     await act(async () => pendingA.resolve(overview));
   });
 
+  it("does not let an older same-root refresh restore a replaced identity", async () => {
+    const oldOverview = deferred<WorkflowsOverview>();
+    const newOverview = {
+      ...overview,
+      projectAccess: {
+        ...overview.projectAccess!,
+        canonicalIdentityKey: "identity-b",
+        identityRevision: "revision-b",
+      },
+    };
+    mocks.getOverview
+      .mockReset()
+      .mockReturnValueOnce(oldOverview.promise)
+      .mockResolvedValueOnce(newOverview);
+    mocks.listRuns
+      .mockReset()
+      .mockResolvedValueOnce({ runs: [{ ...run, taskId: "old-run" }], nextCursor: null })
+      .mockResolvedValueOnce({
+        runs: [{
+          ...run,
+          taskId: "new-run",
+          canonicalIdentityKey: "identity-b",
+          identityRevision: "revision-b",
+        }],
+        nextCursor: null,
+      });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(1));
+
+    await act(() => result.current.refresh());
+    await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("new-run"));
+    await act(async () => oldOverview.resolve(overview));
+
+    expect(useWorkflowStore.getState().overview?.projectAccess).toMatchObject({
+      canonicalIdentityKey: "identity-b",
+      identityRevision: "revision-b",
+    });
+    expect(useWorkflowStore.getState().runs.map((item) => item.taskId)).toEqual(["new-run"]);
+  });
+
   it("loads workflow history through the backend cursor", async () => {
     mocks.listRuns
       .mockResolvedValueOnce({ runs: [run], nextCursor: "cursor-a" })
@@ -291,5 +367,84 @@ describe("useWorkflowsController", () => {
     expect(mocks.listRuns).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "cursor-a", limit: 100 }));
     expect(useWorkflowStore.getState().runs.map((item) => item.taskId)).toContain("run-b");
     expect(useWorkflowStore.getState().historyCursor).toBeNull();
+  });
+
+  it("opens AI Settings with the run scope and route instead of preparing first", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    useWorkflowStore.setState({
+      surface: "detail",
+      selectedTaskId: run.taskId,
+    });
+
+    await act(() => result.current.adjustAndPrepare({
+      ...run,
+      route: {
+        kind: "byok",
+        provider: "ollama",
+        model: "qwen",
+        routeRevision: "route-1",
+      },
+    }, true));
+
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(useNavigationStore.getState()).toMatchObject({
+      settingsOpen: true,
+      settingsSection: "ai",
+      workflowSettingsReturnIntent: {
+        projectId: project.projectId,
+        projectRootPath: project.rootPath,
+        kind: "health_check",
+        scope: run.scope,
+        routeSelection: { kind: "byok", provider: "ollama" },
+        source: "adjust",
+        expectedSurface: "detail",
+        expectedTaskId: run.taskId,
+      },
+    });
+  });
+
+  it("re-prepares the current structured preparation for prepare_again", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    useWorkflowStore.setState({ preparation, surface: "preparation" });
+
+    act(() => result.current.handlePrerequisite("prepare_again"));
+
+    await waitFor(() => expect(mocks.prepare).toHaveBeenCalledWith({
+      projectId: project.projectId,
+      projectRootPath: project.rootPath,
+      kind: preparation.kind,
+      scope: preparation.scope,
+      routeSelection: { kind: "byok", provider: "ollama" },
+    }));
+  });
+
+  it("delegates project authority prerequisites without pretending to grant access", async () => {
+    const onProjectPrerequisite = vi.fn();
+    const { result } = renderHook(() =>
+      useWorkflowsController(project, true, { onProjectPrerequisite }),
+    );
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    useWorkflowStore.setState({ preparation, surface: "preparation" });
+
+    act(() => result.current.handlePrerequisite("trust_project"));
+
+    expect(onProjectPrerequisite).toHaveBeenCalledWith(
+      "trust_project",
+      expect.objectContaining({ project, preparation, prepareAgain: expect.any(Function) }),
+    );
+    expect(mocks.prepare).not.toHaveBeenCalled();
+  });
+
+  it("reports an honest project-flow recovery when no authority handler is connected", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    useWorkflowStore.setState({ preparation, surface: "preparation", error: null });
+
+    act(() => result.current.handlePrerequisite("configure_git"));
+
+    expect(useWorkflowStore.getState().error).toBeTruthy();
+    expect(mocks.prepare).not.toHaveBeenCalled();
   });
 });

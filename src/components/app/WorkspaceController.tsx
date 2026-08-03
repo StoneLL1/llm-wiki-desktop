@@ -1,11 +1,13 @@
 import { History, PanelRightOpen } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { RunAgentDialog } from "../../features/agent/RunAgentDialog";
-import { useAgentWorkflow } from "../../features/agent/useAgentWorkflow";
-import { useWorkflowsController } from "../../features/workflows/useWorkflowsController";
-import { ProjectAuthorityDialog } from "../../features/project/ProjectAuthorityDialog";
+import {
+  useWorkflowsController,
+  type WorkflowProjectPrerequisiteAction,
+  type WorkflowProjectPrerequisiteContext,
+} from "../../features/workflows/useWorkflowsController";
+import { ProjectAuthorityDialog, type ProjectAuthorityAction } from "../../features/project/ProjectAuthorityDialog";
 import { useImportWorkflow } from "../../features/import/useImportWorkflow";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { useProviderWorkflow } from "../../features/settings/useProviderWorkflow";
@@ -28,34 +30,51 @@ export function WorkspaceController() {
   );
   const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
   const settingsOpen = useNavigationStore((state) => state.settingsOpen);
+  const settingsSection = useNavigationStore((state) => state.settingsSection);
+  const workflowSettingsReturnIntent = useNavigationStore(
+    (state) => state.workflowSettingsReturnIntent,
+  );
+  const clearWorkflowSettingsReturnIntent = useNavigationStore(
+    (state) => state.clearWorkflowSettingsReturnIntent,
+  );
   const workflowLaunchIntent = useNavigationStore((state) => state.workflowLaunchIntent);
   const clearWorkflowLaunchIntent = useNavigationStore(
     (state) => state.clearWorkflowLaunchIntent,
   );
   const closeSettings = useNavigationStore((state) => state.closeSettings);
-  const setActiveView = useNavigationStore((state) => state.setActiveView);
-  const tasks = useTaskStore((state) => state.tasks);
-  const activities = useTaskStore((state) => state.activities);
-  const taskOutputs = useTaskStore((state) => state.taskOutputs);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const setWorkflowsSurface = useWorkflowStore((state) => state.setSurface);
-  const [projectAuthorityProject, setProjectAuthorityProject] = useState<
-    Pick<ProjectSummary, "projectId" | "rootPath"> | null
-  >(null);
+  const [projectAuthorityRequest, setProjectAuthorityRequest] = useState<{
+    action: ProjectAuthorityAction;
+    project: Pick<ProjectSummary, "projectId" | "rootPath">;
+    context?: WorkflowProjectPrerequisiteContext;
+    workflowRequestEpoch?: number;
+  } | null>(null);
+  const onProjectPrerequisite = useCallback((
+    action: WorkflowProjectPrerequisiteAction,
+    context: WorkflowProjectPrerequisiteContext,
+  ) => {
+    setProjectAuthorityRequest({
+      action,
+      project: context.project,
+      context,
+      workflowRequestEpoch: useWorkflowStore.getState().requestEpoch,
+    });
+  }, []);
 
   useEffect(() => {
     if (
-      projectAuthorityProject
-      && (projectAuthorityProject.projectId !== currentProject.projectId
-        || projectAuthorityProject.rootPath !== currentProject.rootPath)
+      projectAuthorityRequest
+      && (projectAuthorityRequest.project.projectId !== currentProject.projectId
+        || projectAuthorityRequest.project.rootPath !== currentProject.rootPath)
     ) {
-      setProjectAuthorityProject(null);
+      setProjectAuthorityRequest(null);
     }
-  }, [currentProject.projectId, currentProject.rootPath, projectAuthorityProject]);
+  }, [currentProject.projectId, currentProject.rootPath, projectAuthorityRequest]);
 
   const capabilities = useAiCapabilities(
     currentProject,
-    activeView === "agent" || activeView === "wiki" || settingsOpen,
+    activeView === "wiki" || settingsOpen,
   );
   const taskLauncher = useTaskLauncher(currentProject);
   const importWorkflow = useImportWorkflow(
@@ -64,15 +83,12 @@ export function WorkspaceController() {
     taskLauncher,
   );
   const providerWorkflow = useProviderWorkflow(currentProject, capabilities);
-  const agentWorkflow = useAgentWorkflow(
-    currentProject,
-    capabilities,
-    taskLauncher,
-  );
   const workflowsController = useWorkflowsController(
     currentProject,
     activeView === "workflows",
+    { onProjectPrerequisite },
   );
+  const settingsWasOpenRef = useRef(settingsOpen);
 
   useEffect(() => {
     if (!workflowLaunchIntent) return;
@@ -98,6 +114,65 @@ export function WorkspaceController() {
     workflowsController,
   ]);
 
+  useEffect(() => {
+    const wasOpen = settingsWasOpenRef.current;
+    settingsWasOpenRef.current = settingsOpen;
+    if (!wasOpen || settingsOpen || !workflowSettingsReturnIntent) return;
+
+    clearWorkflowSettingsReturnIntent();
+    const state = useWorkflowStore.getState();
+    const expectedProjectKey = `${currentProject.projectId}\0${currentProject.rootPath}`;
+    const selectedRun = state.runs.find(
+      (run) => run.taskId === state.selectedTaskId,
+    );
+    const currentIdentity =
+      workflowSettingsReturnIntent.expectedSurface === "preparation"
+        ? state.preparation?.projectAccess
+        : selectedRun;
+    if (
+      workflowSettingsReturnIntent.projectId !== currentProject.projectId ||
+      workflowSettingsReturnIntent.projectRootPath !== currentProject.rootPath ||
+      activeView !== "workflows" ||
+      state.projectKey !== expectedProjectKey ||
+      state.surface !== workflowSettingsReturnIntent.expectedSurface ||
+      currentIdentity?.canonicalIdentityKey !==
+        workflowSettingsReturnIntent.expectedCanonicalIdentityKey ||
+      currentIdentity?.identityRevision !==
+        workflowSettingsReturnIntent.expectedIdentityRevision
+    ) {
+      return;
+    }
+    if (
+      workflowSettingsReturnIntent.expectedSurface === "preparation" &&
+      (state.preparation?.preparationId !==
+        workflowSettingsReturnIntent.expectedPreparationId ||
+        state.preparation?.preparationRevision !==
+          workflowSettingsReturnIntent.expectedPreparationRevision)
+    ) {
+      return;
+    }
+    if (
+      workflowSettingsReturnIntent.expectedSurface === "detail" &&
+      state.selectedTaskId !== workflowSettingsReturnIntent.expectedTaskId
+    ) {
+      return;
+    }
+
+    void workflowsController.prepare(
+      workflowSettingsReturnIntent.kind,
+      workflowSettingsReturnIntent.scope,
+      workflowSettingsReturnIntent.routeSelection,
+    );
+  }, [
+    activeView,
+    clearWorkflowSettingsReturnIntent,
+    currentProject.projectId,
+    currentProject.rootPath,
+    settingsOpen,
+    workflowSettingsReturnIntent,
+    workflowsController,
+  ]);
+
   const workspaceClass =
     activeView === "wiki" ||
     activeView === "graph" ||
@@ -118,13 +193,12 @@ export function WorkspaceController() {
         </div>
         {activeView === "workflows" ? (
           <button
-            aria-label={t("workflows.history.title")}
-            className="icon-button ml-auto"
+            className="btn btn--secondary ml-auto"
             onClick={() => setWorkflowsSurface("history")}
-            title={t("workflows.history.title")}
             type="button"
           >
-            <History aria-hidden="true" size={16} />
+            <History aria-hidden="true" size={14} />
+            {t("workflows.history.title")}
           </button>
         ) : null}
         {!rightPanelOpen && workspaceFocus === null ? (
@@ -146,33 +220,15 @@ export function WorkspaceController() {
         <WorkspaceRouter
           activeView={activeView}
           capabilities={capabilities}
-          taskLauncher={taskLauncher}
           importWorkflow={importWorkflow}
-          agentWorkflow={agentWorkflow}
           workflowsController={workflowsController}
-          tasks={tasks}
-          activities={activities}
-          taskOutputs={taskOutputs}
           onOpenTask={openTaskDrawer}
-          onNavigate={setActiveView}
         />
       </div>
-
-      <RunAgentDialog
-        key={`agent:${currentProject.projectId}\0${currentProject.rootPath}`}
-        open={agentWorkflow.dialogOpen}
-        onClose={agentWorkflow.closeRunDialog}
-        onRun={(options) => {
-          void agentWorkflow.runAgent(options);
-        }}
-        agents={agentWorkflow.agents}
-        providers={capabilities.providers}
-        defaultAgentKind={agentWorkflow.defaultAgentKind}
-        presetSkill={agentWorkflow.dialogPreset}
-      />
       <SettingsDialog
         key={`settings:${currentProject.projectId}\0${currentProject.rootPath}`}
         open={settingsOpen}
+        initialSection={settingsSection}
         onClose={closeSettings}
         project={currentProject}
         providers={providerWorkflow.providers}
@@ -185,15 +241,42 @@ export function WorkspaceController() {
         onTestProvider={providerWorkflow.testProvider}
         onManageProjectAuthority={() => {
           closeSettings();
-          setProjectAuthorityProject(currentProject);
+          setProjectAuthorityRequest({ action: "manage", project: currentProject });
         }}
       />
-      {projectAuthorityProject ? (
+      {projectAuthorityRequest ? (
         <ProjectAuthorityDialog
-          action="manage"
-          project={projectAuthorityProject}
-          onClose={() => setProjectAuthorityProject(null)}
-          onSatisfied={() => undefined}
+          key={`${projectAuthorityRequest.project.projectId}\0${projectAuthorityRequest.project.rootPath}:${projectAuthorityRequest.action}`}
+          action={projectAuthorityRequest.action}
+          project={projectAuthorityRequest.project}
+          onClose={() => setProjectAuthorityRequest(null)}
+          onSatisfied={() => {
+            const context = projectAuthorityRequest.context;
+            const project = useProjectStore.getState().currentProject;
+            if (
+              projectAuthorityRequest.project.projectId !== project.projectId
+              || projectAuthorityRequest.project.rootPath !== project.rootPath
+            ) {
+              return;
+            }
+            if (!context) return;
+            const workflow = useWorkflowStore.getState();
+            const expected = context.preparation;
+            if (
+              workflow.projectKey !== `${project.projectId}\0${project.rootPath}`
+              || workflow.requestEpoch !== projectAuthorityRequest.workflowRequestEpoch
+              || !expected
+              || workflow.preparation?.preparationId !== expected.preparationId
+              || workflow.preparation?.preparationRevision !== expected.preparationRevision
+              || workflow.preparation?.projectAccess.canonicalIdentityKey
+                !== expected.projectAccess.canonicalIdentityKey
+              || workflow.preparation?.projectAccess.identityRevision
+                !== expected.projectAccess.identityRevision
+            ) {
+              return;
+            }
+            return context.prepareAgain();
+          }}
         />
       ) : null}
     </section>

@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import type { WorkflowKind, WorkflowScopePreset } from "../types/workflow";
+import type {
+  WorkflowKind,
+  WorkflowRouteSelection,
+  WorkflowScope,
+  WorkflowScopePreset,
+} from "../types/workflow";
 import {
   type ResizablePaneId,
   PANE_WIDTH_LIMITS,
@@ -14,7 +19,6 @@ export type AppView =
   | "wiki"
   | "chat"
   | "graph"
-  | "agent"
   | "workflows"
   | "import"
   | "lint"
@@ -23,6 +27,16 @@ export type AppView =
 export type RightPanelMode = "default" | "wikiAssistant";
 
 export type WorkspaceFocus = "exportPreview";
+
+export type SettingsSectionKey =
+  | "general"
+  | "appearance"
+  | "language"
+  | "ai"
+  | "security"
+  | "compatibility"
+  | "background"
+  | "updates";
 
 export type WorkflowLaunchOrigin =
   | "workflows"
@@ -40,6 +54,21 @@ export interface WorkflowLaunchIntent {
   scopePreset: WorkflowScopePreset | null;
 }
 
+export interface WorkflowSettingsReturnIntent {
+  projectId: string;
+  projectRootPath: string;
+  kind: WorkflowKind;
+  scope: WorkflowScope;
+  routeSelection: WorkflowRouteSelection | null;
+  source: "prerequisite" | "adjust";
+  expectedSurface: "preparation" | "detail";
+  expectedCanonicalIdentityKey: string;
+  expectedIdentityRevision: string;
+  expectedPreparationId: string | null;
+  expectedPreparationRevision: string | null;
+  expectedTaskId: string | null;
+}
+
 export interface NavigationState {
   activeView: AppView;
   rightPanelOpen: boolean;
@@ -50,6 +79,8 @@ export interface NavigationState {
   sidebarCollapsed: boolean;
   paneSizes: Record<ResizablePaneId, number>;
   settingsOpen: boolean;
+  settingsSection: SettingsSectionKey;
+  workflowSettingsReturnIntent: WorkflowSettingsReturnIntent | null;
   workflowLaunchIntent: WorkflowLaunchIntent | null;
   setActiveView: (view: AppView) => void;
   setRightPanelOpen: (open: boolean) => void;
@@ -62,9 +93,13 @@ export interface NavigationState {
   toggleSidebarCollapsed: () => void;
   setPaneSize: (pane: ResizablePaneId, width: number) => void;
   resetPaneSize: (pane: ResizablePaneId) => void;
-  openSettings: () => void;
+  openSettings: (
+    section?: SettingsSectionKey,
+    workflowReturnIntent?: WorkflowSettingsReturnIntent | null,
+  ) => void;
   closeSettings: () => void;
   toggleSettings: () => void;
+  clearWorkflowSettingsReturnIntent: () => void;
   requestWorkflowLaunch: (intent: WorkflowLaunchIntent) => void;
   clearWorkflowLaunchIntent: () => void;
 }
@@ -81,6 +116,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   sidebarCollapsed: initialLayoutPreferences.sidebarCollapsed,
   paneSizes: initialLayoutPreferences.paneSizes,
   settingsOpen: false,
+  settingsSection: "general",
+  workflowSettingsReturnIntent: null,
   workflowLaunchIntent: null,
   setActiveView: (activeView) =>
     set((state) => {
@@ -214,9 +251,18 @@ export const useNavigationStore = create<NavigationState>((set) => ({
         paneSizes: snapshot.paneSizes,
       };
     }),
-  openSettings: () => set({ settingsOpen: true }),
+  openSettings: (settingsSection = "general", workflowSettingsReturnIntent = null) =>
+    set({ settingsOpen: true, settingsSection, workflowSettingsReturnIntent }),
   closeSettings: () => set({ settingsOpen: false }),
-  toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
+  toggleSettings: () =>
+    set((state) => ({
+      settingsOpen: !state.settingsOpen,
+      settingsSection: state.settingsOpen ? state.settingsSection : "general",
+      workflowSettingsReturnIntent: state.settingsOpen
+        ? state.workflowSettingsReturnIntent
+        : null,
+    })),
+  clearWorkflowSettingsReturnIntent: () => set({ workflowSettingsReturnIntent: null }),
   requestWorkflowLaunch: (workflowLaunchIntent) =>
     set({ workflowLaunchIntent, activeView: "workflows" }),
   clearWorkflowLaunchIntent: () => set({ workflowLaunchIntent: null }),

@@ -3,21 +3,18 @@ import { useTranslation } from "react-i18next";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
-import { useTaskLauncher } from "../../hooks/useTaskLauncher";
 import { useLintStore } from "../../stores/lintStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
-import type { LintIssue, LintIssueType, LintRoutePreference } from "../../types/lint";
+import type { LintIssue, LintIssueType } from "../../types/lint";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
 import { LintHistoryList } from "./LintHistoryList";
 import { LintIssueDetails } from "./LintIssueDetails";
 import { LintIssueList } from "./LintIssueList";
 import { LintPassedSection } from "./LintPassedSection";
 import { LintSummaryCards } from "./LintSummaryCards";
-
-const ROUTE_PREFERENCE: LintRoutePreference = "auto";
 
 /** Local deterministic rules that earn a "passed" badge when absent. */
 const PASSED_RULES: LintIssueType[] = [
@@ -80,7 +77,6 @@ export function LintView() {
   const tasks = useTaskStore((state) => state.tasks);
 
   const { projectId, rootPath } = currentProject;
-  const taskLauncher = useTaskLauncher(currentProject);
   const layoutStyle = {
     "--lint-details-w-current": `${paneSizes.lintDetails}px`,
   } as CSSProperties;
@@ -177,15 +173,13 @@ export function LintView() {
   }, [deepTask, projectId, rootPath, loadDeepReport, clearDeepTask]);
 
   const triggerRecompile = () => {
-    void taskLauncher
-      .startCompile({
-        route: ROUTE_PREFERENCE,
-        agent: null,
-        provider: null,
-      })
-      .catch(() => {
-        /* recompile is best-effort; failures surface in the task drawer */
-      });
+    requestWorkflowLaunch({
+      projectId,
+      projectRootPath: rootPath,
+      kind: "update_wiki",
+      origin: "lint",
+      scopePreset: null,
+    });
   };
 
   const refreshAfterFix = (applied: boolean) => {

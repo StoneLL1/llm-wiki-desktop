@@ -2,7 +2,6 @@ import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GraphInspector } from "../../features/graph/GraphInspector";
 import { ImportRightPanel } from "../../features/import/ImportRightPanel";
-import { AgentRightPanel } from "../../features/agent/AgentRightPanel";
 import { WorkflowsRightPanel } from "../../features/workflows/WorkflowsRightPanel";
 import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { SourceRightPanel } from "../../features/wiki/SourceRightPanel";
@@ -440,18 +439,6 @@ export function RightContextPanel() {
         onPreviewMarkdown={(itemId) => useImportStore.getState().openPreview(itemId)}
         onPrimaryAction={(action, itemId) =>
           useImportStore.getState().requestAction(itemId, action)}
-      />
-    );
-  }
-
-  if (activeView === "agent") {
-    const agentsFromStatus = status?.agents ?? [];
-    return (
-      <AgentRightPanel
-        agents={agentsFromStatus}
-        onRunIngest={() => {
-          setActiveView("agent");
-        }}
       />
     );
   }

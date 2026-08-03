@@ -17,6 +17,7 @@ export function LeftSidebar() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const openSettings = useNavigationStore((state) => state.openSettings);
   const currentProject = useProjectStore((state) => state.currentProject);
   const recentPages = useWikiStore((state) => state.recentPages);
   const wikiTree = useWikiStore((state) => state.tree);
@@ -210,7 +211,7 @@ export function LeftSidebar() {
         <button
           aria-label={t("shell.agentTooltip")}
           className="btn btn--ghost btn--icon btn--sm shrink-0"
-          onClick={() => setActiveView("agent")}
+          onClick={() => openSettings("ai")}
           title={t("shell.agentTooltip")}
           type="button"
         >

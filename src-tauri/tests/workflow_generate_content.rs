@@ -413,23 +413,31 @@ async fn existing_target_gets_checkpoint_then_waits_and_a_racing_edit_becomes_co
     );
 
     let restarted = TaskService::default();
-    restarted.recover_tasks(&fixture.context.root).unwrap();
+    let reopened_context =
+        ProjectContext::new("reopened-runtime-project", fixture.context.root.clone());
+    restarted
+        .set_project_context(
+            reopened_context.project_id.clone(),
+            reopened_context.root.clone(),
+            reopened_context.app_dir.join("tasks"),
+        )
+        .unwrap();
     let recovered = restarted.get_workflow_run(&task_id).unwrap();
     assert_eq!(
         recovered.display_status,
         WorkflowDisplayStatus::WaitingForConfirmation
     );
-    let restarted_registry = ConfirmationRegistry::default();
     restore_generate_content_confirmation(
-        &fixture.context,
+        &reopened_context,
         &recovered,
         &restarted,
-        &restarted_registry,
+        &fixture.confirmations,
     )
     .unwrap();
     assert!(matches!(
-        restarted_registry.peek(&pending.id).unwrap().execution,
-        Some(ConfirmationExecution::GenerateContentOverwrite { .. })
+        fixture.confirmations.peek(&pending.id).unwrap().execution,
+        Some(ConfirmationExecution::GenerateContentOverwrite { project_id, .. })
+            if project_id == reopened_context.project_id
     ));
     let descriptor = std::env::temp_dir()
         .join("llm-wiki-desktop-generate-content")

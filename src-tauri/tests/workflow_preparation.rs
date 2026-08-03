@@ -1,9 +1,11 @@
+use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
+use llm_wiki_desktop_lib::models::settings::Settings;
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, WorkflowArtifactType, WorkflowFilesystemAccess, WorkflowGitState,
-    WorkflowKind, WorkflowPersistenceMode, WorkflowProjectTrust, WorkflowRun, WorkflowScope,
-    WorkflowStartOutcome,
+    WorkflowKind, WorkflowPersistenceMode, WorkflowPrerequisiteAction, WorkflowProjectTrust,
+    WorkflowRun, WorkflowScope, WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
     project_identity, resolve_workflow_persistence_binding, AgentService, PrepareWorkflowInput,
@@ -132,6 +134,19 @@ impl WorkflowRunner for CountingRunner {
     }
 }
 
+#[derive(Default)]
+struct GenerateCountingRunner(AtomicUsize);
+
+impl WorkflowRunner for GenerateCountingRunner {
+    fn kind(&self) -> WorkflowKind {
+        WorkflowKind::GenerateContent
+    }
+
+    fn start(&self, _run: WorkflowRun) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[test]
 fn overview_is_fixed_order_and_no_project_is_actionable() {
     let service = WorkflowService::default();
@@ -179,6 +194,53 @@ fn overview_is_fixed_order_and_no_project_is_actionable() {
             .map(|item| &item.action),
         Some(&llm_wiki_desktop_lib::models::workflow::WorkflowPrerequisiteAction::ImportSources)
     );
+}
+
+#[test]
+fn empty_project_surfaces_import_and_update_prerequisites_without_inventing_content() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".app")).unwrap();
+    let context = ProjectContext::new("empty-project", root.path().to_path_buf());
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    let overview = WorkflowService::default()
+        .project_overview(
+            &context,
+            access(
+                WorkflowProjectTrust::Untrusted,
+                WorkflowFilesystemAccess::ReadOnly,
+                WorkflowPersistenceMode::MemoryOnly,
+            ),
+            &settings,
+            &SecretService::memory(),
+            &AgentService::default(),
+            &TaskService::default(),
+        )
+        .unwrap();
+
+    assert_eq!(overview.rows.len(), 3);
+    assert_eq!(
+        overview.rows[0]
+            .prerequisite
+            .as_ref()
+            .map(|item| &item.action),
+        Some(&WorkflowPrerequisiteAction::ImportSources)
+    );
+    assert_eq!(
+        overview.rows[1]
+            .prerequisite
+            .as_ref()
+            .map(|item| &item.action),
+        Some(&WorkflowPrerequisiteAction::ImportSources)
+    );
+    assert_eq!(
+        overview.rows[2]
+            .prerequisite
+            .as_ref()
+            .map(|item| &item.action),
+        Some(&WorkflowPrerequisiteAction::UpdateWiki)
+    );
+    assert!(!root.path().join("wiki").exists());
 }
 
 #[test]
@@ -565,6 +627,119 @@ fn changed_baseline_or_access_invalidates_the_token() {
         )
         .unwrap_err();
     assert_eq!(error.code, "WORKFLOW_PREPARATION_STALE");
+}
+
+#[test]
+fn dirty_git_blocks_overwrite_until_the_host_supplies_remediated_access_and_reprepares() {
+    let (root, context) = project();
+    let output_path = "exports/html/beautiful-read.html";
+    std::fs::create_dir_all(root.path().join("exports/html")).unwrap();
+    std::fs::write(root.path().join(output_path), "existing artifact").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    settings
+        .save_settings(
+            &context,
+            &Settings {
+                llm_providers: vec![LlmProviderConfig {
+                    provider: LlmProviderKind::Ollama,
+                    model: "qwen".into(),
+                    base_url: "http://127.0.0.1:11434".into(),
+                    context_window: 8192,
+                    enabled: true,
+                }],
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+    let secrets = SecretService::memory();
+    let agents = AgentService::default();
+    let service = WorkflowService::default();
+    let runner = Arc::new(GenerateCountingRunner::default());
+    service.register_runner(runner.clone()).unwrap();
+    let tasks = TaskService::default();
+    let mut dirty = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::Writable,
+        WorkflowPersistenceMode::Persistent,
+    );
+    dirty.git_state = WorkflowGitState::Dirty;
+    let input = PrepareWorkflowInput {
+        kind: WorkflowKind::GenerateContent,
+        scope: Some(WorkflowScope::GenerateContent {
+            artifact_type: WorkflowArtifactType::BeautifulRead,
+            page_paths: vec!["wiki/概览.md".into()],
+            output_path: Some(output_path.into()),
+        }),
+        route_selection: None,
+    };
+    let blocked = service
+        .prepare(
+            &WorkflowPreparationEnvironment {
+                context: &context,
+                access: dirty.clone(),
+                settings_service: &settings,
+                secret_service: &secrets,
+                agent_service: &agents,
+            },
+            input.clone(),
+        )
+        .unwrap();
+    assert!(blocked.prerequisites.iter().any(|item| {
+        item.action == WorkflowPrerequisiteAction::ResolveDirtyGit && item.blocking
+    }));
+    let error = service
+        .start(
+            &context,
+            dirty,
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &blocked.preparation_id,
+            &blocked.preparation_revision,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "WORKFLOW_PREREQUISITES_BLOCKING");
+    assert_eq!(runner.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(output_path)).unwrap(),
+        "existing artifact"
+    );
+    assert!(!root.path().join(".git").exists());
+
+    let clean = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::Writable,
+        WorkflowPersistenceMode::Persistent,
+    );
+    let ready = service
+        .prepare(
+            &WorkflowPreparationEnvironment {
+                context: &context,
+                access: clean.clone(),
+                settings_service: &settings,
+                secret_service: &secrets,
+                agent_service: &agents,
+            },
+            input,
+        )
+        .unwrap();
+    assert!(ready.prerequisites.is_empty());
+    let outcome = service
+        .start(
+            &context,
+            clean,
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &ready.preparation_id,
+            &ready.preparation_revision,
+        )
+        .unwrap();
+    assert!(matches!(outcome, WorkflowStartOutcome::Created { .. }));
+    assert_eq!(runner.0.load(Ordering::SeqCst), 1);
 }
 
 #[test]

@@ -197,6 +197,45 @@ impl ConfirmationRegistry {
         Ok(())
     }
 
+    /// Restore a persisted confirmation, replacing only a matching pending
+    /// entry's runtime execution binding. This is required when the same
+    /// canonical project root is reopened under a new runtime project id.
+    pub fn restore_with_execution(
+        &self,
+        action: PendingAction,
+        execution: ConfirmationExecution,
+    ) -> Result<(), BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        let executing = self.executing.lock().map_err(|_| registry_locked())?;
+        if executing.contains(&action.id) {
+            return Err(confirmation_in_use(&action.id));
+        }
+        if let Some(existing) = actions.get_mut(&action.id) {
+            if existing.action.action_type != action.action_type
+                || existing.action.risk_level != action.risk_level
+                || existing.action.affected_paths != action.affected_paths
+                || existing.action.checkpoint_hash != action.checkpoint_hash
+                || !restoration_binding_matches(existing.execution.as_ref(), &execution)
+            {
+                return Err(confirmation_id_conflict(&action.id));
+            }
+
+            // The persisted action remains authoritative. Reopening the same
+            // canonical root may only refresh the runtime project id carried
+            // by an otherwise identical execution binding.
+            existing.execution = Some(execution);
+            return Ok(());
+        }
+        actions.insert(
+            action.id.clone(),
+            StoredPendingAction {
+                action,
+                execution: Some(execution),
+            },
+        );
+        Ok(())
+    }
+
     pub fn confirm(
         &self,
         action_id: &str,
@@ -360,6 +399,58 @@ fn confirmation_in_use(action_id: &str) -> BackendError {
     .with_details(serde_json::json!({ "actionId": action_id }))
 }
 
+fn confirmation_id_conflict(action_id: &str) -> BackendError {
+    BackendError::new(
+        "CONFIRMATION_ID_CONFLICT",
+        "A different confirmation with this action id is already pending.",
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({ "actionId": action_id }))
+}
+
+fn restoration_binding_matches(
+    existing: Option<&ConfirmationExecution>,
+    replacement: &ConfirmationExecution,
+) -> bool {
+    let same_root_and_task = |existing_root: &str, existing_task: &str, root: &str, task: &str| {
+        existing_task == task && canonical_roots_match(existing_root, root)
+    };
+    match (existing, replacement) {
+        (
+            Some(ConfirmationExecution::GenerateContentOverwrite {
+                root_path: existing_root,
+                task_id: existing_task,
+                ..
+            }),
+            ConfirmationExecution::GenerateContentOverwrite {
+                root_path, task_id, ..
+            },
+        ) => same_root_and_task(existing_root, existing_task, root_path, task_id),
+        (
+            Some(ConfirmationExecution::UpdateWikiReview {
+                root_path: existing_root,
+                task_id: existing_task,
+                ..
+            }),
+            ConfirmationExecution::UpdateWikiReview {
+                root_path, task_id, ..
+            },
+        ) => same_root_and_task(existing_root, existing_task, root_path, task_id),
+        _ => false,
+    }
+}
+
+fn canonical_roots_match(left: &str, right: &str) -> bool {
+    let Ok(left) = std::fs::canonicalize(left) else {
+        return false;
+    };
+    let Ok(right) = std::fs::canonicalize(right) else {
+        return false;
+    };
+    left == right
+}
+
 fn reject_if_expired(action: &PendingAction) -> Result<(), BackendError> {
     let Some(expires_at) = action.expires_at.as_ref() else {
         return Ok(());
@@ -383,8 +474,8 @@ fn reject_if_expired(action: &PendingAction) -> Result<(), BackendError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionPreview, ConfirmationRegistry, ConfirmationStatus, PendingAction, PendingActionType,
-        RiskLevel,
+        ActionPreview, ConfirmationExecution, ConfirmationRegistry, ConfirmationStatus,
+        PendingAction, PendingActionType, RiskLevel,
     };
     use serde_json::json;
 
@@ -538,5 +629,202 @@ mod tests {
             .confirm("claimed-action", ConfirmationStatus::Confirmed)
             .expect_err("deferred cancellation should consume the action");
         assert_eq!(err.code, "CONFIRMATION_NOT_FOUND");
+    }
+
+    #[test]
+    fn failed_claimed_execution_keeps_the_approval_retryable() {
+        let registry = ConfirmationRegistry::default();
+        let action = PendingAction {
+            id: "retryable-claim".to_string(),
+            action_type: PendingActionType::EnableCompatibleProject,
+            title: "Enable compatibility".to_string(),
+            message: "Enable compatibility".to_string(),
+            risk_level: RiskLevel::High,
+            affected_paths: vec![".app/compat/purpose.md".to_string()],
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: None,
+        };
+        registry.register(action).unwrap();
+
+        registry.claim("retryable-claim").unwrap();
+        registry.finish_claim("retryable-claim", false).unwrap();
+        registry
+            .claim("retryable-claim")
+            .expect("a failed side effect must not consume approval");
+        registry.finish_claim("retryable-claim", true).unwrap();
+
+        assert_eq!(
+            registry.claim("retryable-claim").unwrap_err().code,
+            "CONFIRMATION_NOT_FOUND"
+        );
+    }
+
+    fn workflow_action(id: &str) -> PendingAction {
+        PendingAction {
+            id: id.into(),
+            action_type: PendingActionType::OverwriteFile,
+            title: "Original title".into(),
+            message: "Original message".into(),
+            risk_level: RiskLevel::High,
+            affected_paths: vec!["wiki/page.md".into()],
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: Some("checkpoint".into()),
+        }
+    }
+
+    #[test]
+    fn workflow_confirmation_restore_rebinds_only_project_id_for_same_root_and_task() {
+        let root = tempfile::tempdir().unwrap();
+        let alias = root.path().join(".");
+        for (id, original, replacement) in [
+            (
+                "generate",
+                ConfirmationExecution::GenerateContentOverwrite {
+                    project_id: "runtime-a".into(),
+                    root_path: root.path().to_string_lossy().into_owned(),
+                    task_id: "task-generate".into(),
+                },
+                ConfirmationExecution::GenerateContentOverwrite {
+                    project_id: "runtime-b".into(),
+                    root_path: alias.to_string_lossy().into_owned(),
+                    task_id: "task-generate".into(),
+                },
+            ),
+            (
+                "update",
+                ConfirmationExecution::UpdateWikiReview {
+                    project_id: "runtime-a".into(),
+                    root_path: root.path().to_string_lossy().into_owned(),
+                    task_id: "task-update".into(),
+                },
+                ConfirmationExecution::UpdateWikiReview {
+                    project_id: "runtime-b".into(),
+                    root_path: alias.to_string_lossy().into_owned(),
+                    task_id: "task-update".into(),
+                },
+            ),
+        ] {
+            let registry = ConfirmationRegistry::default();
+            let original_action = workflow_action(id);
+            registry
+                .register_with_execution(original_action.clone(), Some(original))
+                .unwrap();
+            let mut reconstructed = original_action.clone();
+            reconstructed.title = "Reconstructed title".into();
+            reconstructed.message = "Reconstructed message".into();
+            registry
+                .restore_with_execution(reconstructed, replacement.clone())
+                .unwrap();
+
+            let restored = registry.peek(id).unwrap();
+            assert_eq!(restored.action, original_action);
+            assert_eq!(restored.execution, Some(replacement));
+        }
+    }
+
+    #[test]
+    fn workflow_confirmation_restore_rejects_root_task_and_variant_mismatch_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let other_root = tempfile::tempdir().unwrap();
+        for (id, original, mismatches) in [
+            (
+                "generate",
+                ConfirmationExecution::GenerateContentOverwrite {
+                    project_id: "runtime-a".into(),
+                    root_path: root.path().to_string_lossy().into_owned(),
+                    task_id: "task-generate".into(),
+                },
+                vec![
+                    ConfirmationExecution::GenerateContentOverwrite {
+                        project_id: "runtime-b".into(),
+                        root_path: other_root.path().to_string_lossy().into_owned(),
+                        task_id: "task-generate".into(),
+                    },
+                    ConfirmationExecution::GenerateContentOverwrite {
+                        project_id: "runtime-b".into(),
+                        root_path: root.path().to_string_lossy().into_owned(),
+                        task_id: "other-task".into(),
+                    },
+                    ConfirmationExecution::UpdateWikiReview {
+                        project_id: "runtime-b".into(),
+                        root_path: root.path().to_string_lossy().into_owned(),
+                        task_id: "task-generate".into(),
+                    },
+                ],
+            ),
+            (
+                "update",
+                ConfirmationExecution::UpdateWikiReview {
+                    project_id: "runtime-a".into(),
+                    root_path: root.path().to_string_lossy().into_owned(),
+                    task_id: "task-update".into(),
+                },
+                vec![
+                    ConfirmationExecution::UpdateWikiReview {
+                        project_id: "runtime-b".into(),
+                        root_path: other_root.path().to_string_lossy().into_owned(),
+                        task_id: "task-update".into(),
+                    },
+                    ConfirmationExecution::UpdateWikiReview {
+                        project_id: "runtime-b".into(),
+                        root_path: root.path().to_string_lossy().into_owned(),
+                        task_id: "other-task".into(),
+                    },
+                    ConfirmationExecution::GenerateContentOverwrite {
+                        project_id: "runtime-b".into(),
+                        root_path: root.path().to_string_lossy().into_owned(),
+                        task_id: "task-update".into(),
+                    },
+                ],
+            ),
+        ] {
+            for mismatch in mismatches {
+                let registry = ConfirmationRegistry::default();
+                let action = workflow_action(id);
+                registry
+                    .register_with_execution(action.clone(), Some(original.clone()))
+                    .unwrap();
+                let error = registry
+                    .restore_with_execution(action.clone(), mismatch)
+                    .unwrap_err();
+                assert_eq!(error.code, "CONFIRMATION_ID_CONFLICT");
+                let unchanged = registry.peek(id).unwrap();
+                assert_eq!(unchanged.action, action);
+                assert_eq!(unchanged.execution, Some(original.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_confirmation_restore_rejects_an_executing_action() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = ConfirmationRegistry::default();
+        let action = workflow_action("executing");
+        let original = ConfirmationExecution::UpdateWikiReview {
+            project_id: "runtime-a".into(),
+            root_path: root.path().to_string_lossy().into_owned(),
+            task_id: "task-update".into(),
+        };
+        registry
+            .register_with_execution(action.clone(), Some(original.clone()))
+            .unwrap();
+        registry.claim(&action.id).unwrap();
+
+        let error = registry
+            .restore_with_execution(
+                action.clone(),
+                ConfirmationExecution::UpdateWikiReview {
+                    project_id: "runtime-b".into(),
+                    root_path: root.path().to_string_lossy().into_owned(),
+                    task_id: "task-update".into(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "CONFIRMATION_IN_USE");
+        let claimed = registry.peek(&action.id).unwrap();
+        assert_eq!(claimed.action, action);
+        assert_eq!(claimed.execution, Some(original));
     }
 }

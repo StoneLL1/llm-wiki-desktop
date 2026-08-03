@@ -824,9 +824,6 @@ pub fn restore_update_wiki_confirmation(
             true,
         )
     })?;
-    if registry.peek(&pending.id).is_ok() {
-        return Ok(());
-    }
     let workflow = tasks
         .workflow_execution_state(&run.task_id)
         .ok_or_else(|| {
@@ -854,7 +851,7 @@ pub fn restore_update_wiki_confirmation(
                 true,
             )
         })?;
-    registry.register_with_execution(
+    registry.restore_with_execution(
         PendingAction {
             id: pending.id.clone(),
             action_type: pending.action_type.clone(),
@@ -873,11 +870,11 @@ pub fn restore_update_wiki_confirmation(
             expires_at: pending.expires_at.clone(),
             checkpoint_hash: pending.checkpoint_hash.clone(),
         },
-        Some(ConfirmationExecution::UpdateWikiReview {
+        ConfirmationExecution::UpdateWikiReview {
             project_id: context.project_id.clone(),
             root_path: context.root.to_string_lossy().into_owned(),
             task_id: run.task_id.clone(),
-        }),
+        },
     )
 }
 

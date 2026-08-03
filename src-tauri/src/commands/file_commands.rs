@@ -133,54 +133,9 @@ pub fn confirm_pending_action(
     state: State<'_, AppState>,
     request: ConfirmPendingActionRequest,
 ) -> Result<ConfirmedAction, BackendError> {
-    if state
-        .confirmation_registry
-        .peek(&request.action_id)?
-        .execution
-        .is_some_and(|execution| {
-            matches!(execution, ConfirmationExecution::UpdateWikiReview { .. })
-        })
-    {
-        return Err(BackendError::new(
-            "CONFIRMATION_COMMAND_INVALID",
-            "Update Wiki review must be handled by confirm_workflow_action or discard_workflow_result.",
-            true,
-            true,
-        ));
-    }
+    let pending = state.confirmation_registry.peek(&request.action_id)?;
+    reject_workflow_owned_generic_confirmation(&pending)?;
     if request.status == ConfirmationStatus::Confirmed {
-        let pending = state.confirmation_registry.peek(&request.action_id)?;
-        if let Some(ConfirmationExecution::GenerateContentOverwrite {
-            project_id,
-            root_path,
-            ..
-        }) = pending.execution.as_ref()
-        {
-            let context = state.resolve_project_context(&project_id, &root_path)?;
-            let access = crate::services::WorkflowAccessSnapshot::legacy_fail_closed(
-                &context,
-                &state.git_service,
-            )?;
-            if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
-                return Err(BackendError::new(
-                    "WORKFLOW_PROJECT_UNTRUSTED",
-                    "Generate Content confirmation requires a trusted project.",
-                    true,
-                    true,
-                ));
-            }
-            if access.filesystem_access
-                != crate::models::workflow::WorkflowFilesystemAccess::Writable
-            {
-                return Err(BackendError::new(
-                    "WORKFLOW_PROJECT_READ_ONLY",
-                    "Generate Content confirmation requires writable project access.",
-                    true,
-                    true,
-                ));
-            }
-        }
-
         if matches!(
             pending.execution.as_ref(),
             Some(
@@ -254,7 +209,7 @@ pub fn confirm_pending_action(
                     &stored.action,
                     &file_hashes,
                 )?;
-            state.project_registry.register(
+            state.project_registry.register_trusted_native(
                 project_summary.project_id.clone(),
                 &PathBuf::from(&project_summary.root_path),
             )?;
@@ -364,6 +319,29 @@ pub fn confirm_pending_action(
     }
 }
 
+fn reject_workflow_owned_generic_confirmation(
+    pending: &StoredPendingAction,
+) -> Result<(), BackendError> {
+    let message = match pending.execution.as_ref() {
+        Some(ConfirmationExecution::GenerateContentOverwrite { .. }) => Some(
+            "Generate Content review must be handled by confirm_workflow_action or discard_workflow_result.",
+        ),
+        Some(ConfirmationExecution::UpdateWikiReview { .. }) => Some(
+            "Update Wiki review must be handled by confirm_workflow_action or discard_workflow_result.",
+        ),
+        _ => None,
+    };
+    if let Some(message) = message {
+        return Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            message,
+            true,
+            true,
+        ));
+    }
+    Ok(())
+}
+
 fn execute_claimed_project_authority_action(
     state: &AppState,
     stored: StoredPendingAction,
@@ -468,13 +446,11 @@ fn execute_claimed_project_authority_action(
                 expected_head.as_deref(),
                 &expected_paths,
             )?;
-            let status = state
-                .git_service
-                .initialize_repository_from_snapshot(
-                    &context,
-                    "Initialize local knowledge base history",
-                    &expected_paths,
-                )?;
+            let status = state.git_service.initialize_repository_from_snapshot(
+                &context,
+                "Initialize local knowledge base history",
+                &expected_paths,
+            )?;
             state
                 .project_assessment_service
                 .invalidate(&assessment_id)?;
@@ -685,5 +661,32 @@ mod tests {
         assert!(root.join(".app/compat/schema.md").is_file());
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn generic_confirmation_rejects_workflow_owned_generate_content_actions() {
+        let pending = StoredPendingAction {
+            action: PendingAction {
+                id: "generate-review".into(),
+                action_type: PendingActionType::OverwriteFile,
+                title: "Review".into(),
+                message: "Review".into(),
+                risk_level: RiskLevel::High,
+                affected_paths: vec!["exports/report.html".into()],
+                preview: None,
+                expires_at: None,
+                checkpoint_hash: Some("checkpoint".into()),
+            },
+            execution: Some(ConfirmationExecution::GenerateContentOverwrite {
+                project_id: "project-a".into(),
+                root_path: "D:/project-a".into(),
+                task_id: "task-a".into(),
+            }),
+        };
+
+        let error = reject_workflow_owned_generic_confirmation(&pending).unwrap_err();
+
+        assert_eq!(error.code, "CONFIRMATION_COMMAND_INVALID");
+        assert!(error.message.contains("confirm_workflow_action"));
     }
 }

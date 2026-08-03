@@ -354,7 +354,11 @@ impl WorkflowCoordinator {
         }
     }
 
-    pub fn undo_cancel(&self, tasks: &TaskService, task_id: &str) -> Result<WorkflowRun, String> {
+    pub fn undo_cancel(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
         let _operation = self
             .operation_lock
             .lock()
@@ -362,8 +366,12 @@ impl WorkflowCoordinator {
         let run = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
-        if run.display_status == crate::models::workflow::WorkflowDisplayStatus::Queued {
-            return Ok(run);
+        if matches!(
+            run.display_status,
+            crate::models::workflow::WorkflowDisplayStatus::Queued
+                | crate::models::workflow::WorkflowDisplayStatus::Running
+        ) {
+            return Ok((run, None));
         }
         let restored = tasks.mutate_workflow(task_id, |task, workflow| {
             let unexpired = workflow
@@ -383,7 +391,14 @@ impl WorkflowCoordinator {
         })?;
         tasks.reset_workflow_cancellation(task_id)?;
         self.renumber(tasks, &run.canonical_identity_key, &run.identity_revision)?;
-        Ok(restored)
+        let claimed =
+            self.claim_next_locked(tasks, &run.canonical_identity_key, &run.identity_revision)?;
+        let current = if claimed.as_ref().is_some_and(|next| next.task_id == task_id) {
+            claimed.as_ref().cloned().unwrap_or(restored)
+        } else {
+            restored
+        };
+        Ok((current, claimed))
     }
 
     pub fn reorder_queued(

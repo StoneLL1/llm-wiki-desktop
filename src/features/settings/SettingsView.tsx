@@ -16,6 +16,7 @@ import {
 import type { AgentInfo } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
 import type { ProjectSummary } from "../../types/project";
+import type { SettingsSectionKey } from "../../stores/navigationStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { AiSettings } from "./AiSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
@@ -27,6 +28,7 @@ import { ImportCompatibilitySettings } from "./ImportCompatibilitySettings";
 import type { ImportWorkflow } from "../import/importWorkflow";
 
 export interface SettingsViewProps {
+  initialSection?: SettingsSectionKey;
   project: ProjectSummary;
   providers: ProviderStatus[];
   agents: AgentInfo[];
@@ -38,16 +40,6 @@ export interface SettingsViewProps {
   importWorkflow?: ImportWorkflow;
   onManageProjectAuthority?: () => void;
 }
-
-type SettingsSectionKey =
-  | "general"
-  | "appearance"
-  | "language"
-  | "ai"
-  | "security"
-  | "compatibility"
-  | "background"
-  | "updates";
 
 interface SettingsNavItem {
   key: SettingsSectionKey;
@@ -96,6 +88,7 @@ const hasTauri = (): boolean =>
 const providerKinds: readonly LlmProviderKind[] = ["open_ai", "anthropic", "google", "ollama", "custom"];
 
 export function SettingsView({
+  initialSection = "general",
   project,
   providers,
   agents,
@@ -108,7 +101,7 @@ export function SettingsView({
   onManageProjectAuthority,
 }: SettingsViewProps) {
   const { t } = useTranslation();
-  const [activeSection, setActiveSection] = useState<SettingsSectionKey>("general");
+  const [activeSection, setActiveSection] = useState<SettingsSectionKey>(initialSection);
   const [secretStatus, setSecretStatus] = useState<Record<LlmProviderKind, string | null>>({
     open_ai: null,
     anthropic: null,
