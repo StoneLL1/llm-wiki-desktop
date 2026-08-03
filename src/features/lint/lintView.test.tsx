@@ -1,9 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
 import { useLintStore } from "../../stores/lintStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { LintIssueDetails } from "./LintIssueDetails";
 import { LintView } from "./LintView";
@@ -26,6 +27,10 @@ describe("LintView", () => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue({ ignored: [] });
     useLintStore.getState().reset();
+    useNavigationStore.setState({
+      activeView: "lint",
+      workflowLaunchIntent: null,
+    });
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {},
       configurable: true,
@@ -97,6 +102,66 @@ describe("LintView", () => {
     useProjectStore.setState({ currentProject: PROJECT } as never);
     render(<LintView />);
     expect(screen.getByRole("button", { name: /Auto-fix \(1\)/i })).toBeEnabled();
+  });
+
+  it("opens Update Wiki preparation after a requested post-fix recompile", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_lint_ignores") return Promise.resolve({ ignored: [] });
+      if (command === "list_lint_history") {
+        return Promise.resolve({ version: 1, entries: [] });
+      }
+      if (command === "apply_lint_fix") {
+        return Promise.resolve({
+          kind: "applied",
+          affectedPaths: ["wiki/a.md"],
+          checkpoint: "checkpoint-a",
+        });
+      }
+      if (command === "run_local_lint") {
+        return Promise.resolve({
+          issues: [],
+          generatedAt: "2026-08-02T00:00:00Z",
+          scannedPages: 1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    useLintStore.setState({
+      safetyPrefs: { checkpoint: true, commitAfter: true, recompile: true },
+      localReport: {
+        issues: [{
+          id: "missing_frontmatter:wiki/a.md",
+          source: "local",
+          severity: "warning",
+          issueType: "missing_frontmatter",
+          path: "wiki/a.md",
+          message: "No frontmatter",
+          fixability: "safe",
+          scanHash: "hash-a",
+        }],
+        generatedAt: "2026-08-01T00:00:00Z",
+        scannedPages: 1,
+      },
+    });
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+
+    render(<LintView />);
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
+
+    await waitFor(() => expect(useNavigationStore.getState()).toMatchObject({
+      activeView: "workflows",
+      workflowLaunchIntent: {
+        projectId: PROJECT.projectId,
+        projectRootPath: PROJECT.rootPath,
+        kind: "update_wiki",
+        origin: "lint",
+        scopePreset: null,
+      },
+    }));
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "start_workflow",
+      expect.anything(),
+    );
   });
 
   it("renders the four-up summary cards and passed checks when a report exists", () => {

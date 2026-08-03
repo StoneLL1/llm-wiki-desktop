@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowLeft, ArrowUp, RotateCcw, Square } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkflowRun } from "../../types/workflow";
@@ -21,6 +21,7 @@ export function WorkflowTaskDetail({
   const { t } = useTranslation();
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [retryMenuOpen, setRetryMenuOpen] = useState(false);
+  const retryOptionsId = useId();
   const [undoClock, setUndoClock] = useState(() => Date.now());
   const queueIndex = queuedRuns.findIndex((candidate) => candidate.taskId === run.taskId);
   const retryable = run.displayStatus === "failed" || run.displayStatus === "interrupted";
@@ -149,12 +150,26 @@ export function WorkflowTaskDetail({
         {undoAvailable ? <button className="btn btn--secondary" onClick={() => void controller.undoCancel(run.taskId)} type="button"><RotateCcw aria-hidden="true" size={13} />{t("workflows.action.undoCancel")}</button> : null}
         {retryable || rerunnable ? (
           <div>
-            <button className="btn btn--secondary" onClick={() => setRetryMenuOpen((open) => !open)} type="button"><RotateCcw aria-hidden="true" size={13} />{t(rerunnable ? "workflows.action.runAgain" : "workflows.action.retry")}</button>
+            <button
+              aria-controls={retryOptionsId}
+              aria-expanded={retryMenuOpen}
+              className="btn btn--secondary"
+              onClick={() => setRetryMenuOpen((open) => !open)}
+              type="button"
+            >
+              <RotateCcw aria-hidden="true" size={13} />
+              {t(rerunnable ? "workflows.action.runAgain" : "workflows.action.retry")}
+            </button>
             {retryMenuOpen ? (
-              <div className="workflow-retry-menu" role="menu">
-                {retryable ? <button type="button" role="menuitem" onClick={() => void controller.retry(run.taskId)}>{t("workflows.retry.sameSettings")}</button> : null}
-                <button type="button" role="menuitem" onClick={() => void controller.adjustAndPrepare(run)}>{t("workflows.retry.adjustSettings")}</button>
-                <button type="button" role="menuitem" onClick={() => void controller.adjustAndPrepare(run, true)}>{t("workflows.retry.openSettings")}</button>
+              <div
+                aria-label={t("workflows.retry.options")}
+                className="workflow-retry-menu"
+                id={retryOptionsId}
+                role="group"
+              >
+                {retryable ? <button type="button" onClick={() => { setRetryMenuOpen(false); void controller.retry(run.taskId); }}>{t("workflows.retry.sameSettings")}</button> : null}
+                <button type="button" onClick={() => { setRetryMenuOpen(false); void controller.adjustAndPrepare(run); }}>{t("workflows.retry.adjustSettings")}</button>
+                <button type="button" onClick={() => { setRetryMenuOpen(false); void controller.adjustAndPrepare(run, true); }}>{t("workflows.retry.openSettings")}</button>
               </div>
             ) : null}
           </div>

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { WorkflowRun } from "../types/workflow";
+import type { WorkflowRun, WorkflowsOverview } from "../types/workflow";
 import { useWorkflowStore } from "./workflowStore";
 
 function run(taskId: string, updatedAt: string): WorkflowRun {
@@ -77,4 +77,53 @@ describe("workflowStore", () => {
     ]);
     expect(useWorkflowStore.getState().runs[0]?.decisionReview).toEqual(decisionReview);
   });
+
+  it("atomically clears project-scoped presentation when the canonical identity rotates", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const firstOverview = overview("identity-a", "revision-a");
+    useWorkflowStore.getState().setProjectSnapshot(
+      firstOverview,
+      [run("old-run", "2026-08-01T03:00:00Z")],
+      "old-cursor",
+    );
+    useWorkflowStore.setState({
+      preparation: {} as never,
+      selectedTaskId: "old-run",
+      surface: "detail",
+    });
+
+    useWorkflowStore.getState().setProjectSnapshot(
+      overview("identity-b", "revision-b"),
+      [{
+        ...run("new-run", "2026-08-01T04:00:00Z"),
+        canonicalIdentityKey: "identity-b",
+        identityRevision: "revision-b",
+      }],
+      null,
+    );
+
+    expect(useWorkflowStore.getState()).toMatchObject({
+      runs: [expect.objectContaining({ taskId: "new-run" })],
+      preparation: null,
+      selectedTaskId: null,
+      surface: "overview",
+      historyCursor: null,
+    });
+  });
 });
+
+function overview(canonicalIdentityKey: string, identityRevision: string): WorkflowsOverview {
+  return {
+    schemaVersion: 1,
+    projectAccess: {
+      projectId: "project-a",
+      canonicalIdentityKey,
+      identityRevision,
+      trust: "trusted",
+      filesystemAccess: "writable",
+      persistence: "persistent",
+      gitState: "clean",
+    },
+    rows: [],
+  };
+}

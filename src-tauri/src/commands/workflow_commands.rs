@@ -302,11 +302,13 @@ pub fn undo_cancel_queued_workflow(
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
     require_workflow_project(&state, &request)?;
-    state
+    let (run, claimed) = state
         .workflow_service
         .coordinator
         .undo_cancel(&state.task_service, &request.task_id)
-        .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))
+        .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))?;
+    dispatch_next(&state, claimed)?;
+    Ok(run)
 }
 
 #[tauri::command]

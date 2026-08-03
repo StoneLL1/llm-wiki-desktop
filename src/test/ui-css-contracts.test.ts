@@ -8,7 +8,7 @@ const stylesPath = join(process.cwd(), "src", "styles.css");
 const styles = readFileSync(stylesPath, "utf8");
 const rightPanelSourcePaths = [
   join(process.cwd(), "src", "components", "app", "RightContextPanel.tsx"),
-  join(process.cwd(), "src", "features", "agent", "AgentRightPanel.tsx"),
+  join(process.cwd(), "src", "features", "workflows", "WorkflowsRightPanel.tsx"),
   join(process.cwd(), "src", "features", "chat", "PageChatPanel.tsx"),
   join(process.cwd(), "src", "features", "import", "ImportRightPanel.tsx"),
   join(process.cwd(), "src", "features", "wiki", "RelatedPagesPanel.tsx"),

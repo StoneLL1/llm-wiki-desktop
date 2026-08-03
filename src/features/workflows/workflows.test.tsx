@@ -1,5 +1,14 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const i18nMocks = vi.hoisted(() => ({
+  t: (key: string) => key,
+}));
+
+vi.mock("react-i18next", () => ({
+  initReactI18next: { type: "3rdParty", init: vi.fn() },
+  useTranslation: () => ({ t: (key: string) => i18nMocks.t(key) }),
+}));
 
 import type { WorkflowPreparation, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
 import { WorkflowPipeline } from "./WorkflowPipeline";
@@ -8,6 +17,9 @@ import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowsOverviewView } from "./WorkflowsOverview";
 import { attentionRun, groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workflowPresentation";
+import { WorkflowsRightPanel } from "./WorkflowsRightPanel";
+import { useProjectStore } from "../../stores/projectStore";
+import { useWorkflowStore } from "../../stores/workflowStore";
 
 const overview: WorkflowsOverview = {
   schemaVersion: 1,
@@ -26,6 +38,11 @@ const overview: WorkflowsOverview = {
     { kind: "generate_content", state: "needs_prerequisite", recommended: false, activeTaskId: null, lastCompletedAt: null, prerequisite: null },
   ],
 };
+
+afterEach(() => {
+  i18nMocks.t = (key: string) => key;
+  useWorkflowStore.getState().reset();
+});
 
 describe("Workflows overview", () => {
   it("renders exactly the three fixed workflows and a single recommendation", () => {
@@ -82,6 +99,57 @@ describe("Workflows overview", () => {
     expect(attentionRun([base])?.taskId).toBe("running");
   });
 
+  it("keeps an explicitly selected completed run ahead of another attention run", () => {
+    const completed = {
+      schemaVersion: 1, taskId: "selected-completed", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "completed",
+      scope: { kind: "health_check", mode: "local_quick" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
+      stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null, error: null,
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
+    } satisfies WorkflowRun;
+    const waiting = {
+      ...completed,
+      taskId: "waiting-attention",
+      displayStatus: "waiting_for_confirmation" as const,
+      updatedAt: "2026-08-01T00:02:00Z",
+      completedAt: null,
+    };
+    useProjectStore.setState({ currentProject: projectSummary });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({ runs: [waiting, completed], selectedTaskId: completed.taskId });
+
+    render(<WorkflowsRightPanel />);
+
+    expect(screen.getByText("selected")).toBeInTheDocument();
+    expect(screen.queryByText("waiting-")).not.toBeInTheDocument();
+    expect(screen.getByText("workflows.context.selection")).toBeInTheDocument();
+  });
+
+  it("keeps long English context labels and actions keyboard reachable at 200 percent text size", () => {
+    const longTitle = "Workflow context for a knowledge base with unusually descriptive English labels";
+    i18nMocks.t = (key: string) => key === "workflows.context.title" ? longTitle : key;
+    useProjectStore.setState({ currentProject: {
+      ...projectSummary,
+      name: "A very long English knowledge base name that must remain available to assistive technology",
+    } });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({ runs: [{
+      schemaVersion: 1, taskId: "long-label-run", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "running",
+      scope: { kind: "health_check", mode: "local_quick" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
+      stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null, error: null,
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
+    }] });
+
+    const view = render(<div style={{ fontSize: "200%" }}><WorkflowsRightPanel /></div>);
+    const panel = view.container.querySelector("#right-context-panel");
+    const buttons = screen.getAllByRole("button");
+
+    expect(panel).toHaveAttribute("aria-label", longTitle);
+    expect(screen.getByText(longTitle)).toBeInTheDocument();
+    expect(buttons.length).toBeGreaterThan(0);
+    buttons[0]?.focus();
+    expect(buttons[0]).toHaveFocus();
+  });
+
   it("renders the no-project state without inventing a workflow", () => {
     render(<WorkflowsOverviewView overview={null} runs={[]} onPrepare={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getByRole("heading", { name: "workflows.noProject.title" })).toBeInTheDocument();
@@ -119,6 +187,31 @@ describe("Workflows overview", () => {
     expect(controller.startPrepared).not.toHaveBeenCalled();
   });
 
+  it("exposes retry choices as a disclosed button group", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const failed = {
+      schemaVersion: 1, taskId: "failed-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "failed",
+      scope: { kind: "health_check", mode: "complete" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
+      stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null,
+      error: { code: "FAILED", messageKey: "failed", recoverable: true, userActionRequired: false, suggestedAction: null },
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
+    } satisfies WorkflowRun;
+
+    render(<WorkflowTaskDetail run={failed} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    const disclosure = screen.getByRole("button", { name: "workflows.action.retry" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(disclosure);
+
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    const options = screen.getByRole("group", { name: "workflows.retry.options" });
+    expect(disclosure).toHaveAttribute("aria-controls", options.id);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.retry.sameSettings" }));
+    expect(controller.retry).toHaveBeenCalledWith("failed-a");
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("groups retries under their original attempt", () => {
     const base = {
       taskId: "first",
@@ -133,3 +226,10 @@ describe("Workflows overview", () => {
     expect(groups[0]?.runs.map((run) => run.taskId)).toEqual(["first", "retry"]);
   });
 });
+
+const projectSummary = {
+  projectId: "project-a", name: "Project A", rootPath: "D:/a", template: "general" as const,
+  wikiPageCount: 1, sourceCount: 1, taskCount: 0, indexState: "indexed" as const,
+  graphState: "cached" as const, agentRoute: "byok" as const,
+  health: { isWikiProject: true, hasPurpose: true, hasSchema: true, hasAppState: true, hasObsidian: false, missingPaths: [] },
+};

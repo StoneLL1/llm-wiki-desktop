@@ -25,6 +25,11 @@ interface WorkflowState {
   requestEpoch: number;
   activateProject: (projectKey: string) => number;
   reset: () => void;
+  setProjectSnapshot: (
+    overview: WorkflowsOverview,
+    runs: WorkflowRun[],
+    historyCursor: string | null,
+  ) => void;
   setOverview: (overview: WorkflowsOverview | null) => void;
   replaceRuns: (runs: WorkflowRun[]) => void;
   upsertRun: (run: WorkflowRun) => void;
@@ -60,6 +65,29 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     return requestEpoch;
   },
   reset: () => set((state) => ({ ...initialState, requestEpoch: state.requestEpoch + 1 })),
+  setProjectSnapshot: (overview, runs, historyCursor) =>
+    set((state) => {
+      const previousAccess = state.overview?.projectAccess;
+      const nextAccess = overview.projectAccess;
+      const identityChanged = Boolean(
+        previousAccess
+          && nextAccess
+          && (previousAccess.canonicalIdentityKey !== nextAccess.canonicalIdentityKey
+            || previousAccess.identityRevision !== nextAccess.identityRevision),
+      );
+      return {
+        overview,
+        runs: sortRuns(mergeRunSnapshots(identityChanged ? [] : state.runs, runs)),
+        historyCursor,
+        ...(identityChanged
+          ? {
+              preparation: null,
+              selectedTaskId: null,
+              surface: "overview" as WorkflowsSurface,
+            }
+          : {}),
+      };
+    }),
   setOverview: (overview) => set({ overview }),
   replaceRuns: (runs) =>
     set((state) => ({ runs: sortRuns(mergeRunSnapshots(state.runs, runs)) })),

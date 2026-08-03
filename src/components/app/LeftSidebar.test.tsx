@@ -122,6 +122,16 @@ describe("LeftSidebar favorites", () => {
     expect(agentFooter).toHaveClass("shrink-0");
   });
 
+  it("opens Settings from the preserved Agent status footer", () => {
+    render(<LeftSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
+
+    expect(useNavigationStore.getState().settingsOpen).toBe(true);
+    expect(useNavigationStore.getState().settingsSection).toBe("ai");
+    expect(useNavigationStore.getState().activeView).toBe("dashboard");
+  });
+
   it("keeps favorite and recent page icons from shrinking beside long titles", () => {
     const longTitle =
       "A very long page title that should truncate without squeezing the leading file icon";

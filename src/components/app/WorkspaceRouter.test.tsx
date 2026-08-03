@@ -2,8 +2,6 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
-import type { TaskLauncher } from "../../hooks/useTaskLauncher";
-import type { AgentWorkflow } from "../../features/agent/useAgentWorkflow";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
 import type { WorkflowsController } from "../../features/workflows/useWorkflowsController";
 
@@ -12,12 +10,6 @@ const capabilities: AiCapabilitiesWorkflow = {
   providers: [],
   refreshing: false,
   refresh: vi.fn(),
-};
-const taskLauncher: TaskLauncher = {
-  startCompile: vi.fn(),
-  startDeepLint: vi.fn(),
-  startExport: vi.fn(),
-  cancel: vi.fn(),
 };
 const importWorkflow: ImportWorkflow = {
   projectKey: "project-a\0D:/wiki/project-a",
@@ -84,16 +76,6 @@ const importWorkflow: ImportWorkflow = {
   resumeMigration: vi.fn(),
   listHistory: vi.fn(),
 };
-const agentWorkflow: AgentWorkflow = {
-  agents: [],
-  defaultAgentKind: null,
-  dialogOpen: false,
-  dialogPreset: undefined,
-  openRunDialog: vi.fn(),
-  closeRunDialog: vi.fn(),
-  setDefaultAgent: vi.fn(),
-  runAgent: vi.fn(),
-};
 const workflowsController: WorkflowsController = {
   refresh: vi.fn(),
   prepare: vi.fn(),
@@ -135,9 +117,6 @@ function installViewMocks() {
   vi.doMock("../../features/import/ImportView", () => ({
     ImportView: () => <div data-testid="import-view" />,
   }));
-  vi.doMock("../../features/agent/AgentView", () => ({
-    AgentView: () => <div data-testid="agent-view" />,
-  }));
   vi.doMock("../../features/workflows/WorkflowsView", () => ({
     WorkflowsView: () => <div data-testid="workflows-view" />,
   }));
@@ -145,13 +124,9 @@ function installViewMocks() {
 
 const sharedProps = {
   capabilities,
-  taskLauncher,
   importWorkflow,
-  agentWorkflow,
   workflowsController,
-  tasks: [],
   onOpenTask: vi.fn(),
-  onNavigate: vi.fn(),
 };
 
 afterEach(() => {
@@ -175,7 +150,6 @@ describe("WorkspaceRouter", () => {
       "lint",
       "exports",
       "import",
-      "agent",
       "workflows",
     ] as const) {
       rerender(<WorkspaceRouter activeView={view} {...sharedProps} />);

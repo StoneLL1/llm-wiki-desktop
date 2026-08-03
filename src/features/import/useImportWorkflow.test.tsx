@@ -135,9 +135,6 @@ function session(projectId: string, items: ImportItem[] = []): ImportSession {
 
 function launcher(): TaskLauncher {
   return {
-    startCompile: vi.fn(),
-    startDeepLint: vi.fn(),
-    startExport: vi.fn(),
     cancel: vi.fn().mockResolvedValue(true),
   };
 }
@@ -1110,7 +1107,6 @@ describe("useImportWorkflow", () => {
 
       await waitFor(() => expect(scan).toHaveBeenCalledTimes(1));
       expect(result.current.completion).toBeNull();
-      expect(taskLauncher.startCompile).not.toHaveBeenCalled();
     } finally {
       useWikiStore.setState({ scan: originalScan });
     }
@@ -1208,7 +1204,6 @@ describe("useImportWorkflow", () => {
 
     expect(result.current.isConfirming).toBe(true);
     expect(result.current.completion).toBeNull();
-    expect(taskLauncher.startCompile).not.toHaveBeenCalled();
 
     const completedTask: BackendTask = {
       ...confirmTask,
@@ -1235,7 +1230,6 @@ describe("useImportWorkflow", () => {
 
     await waitFor(() => expect(result.current.completion).toEqual(completion));
     expect(result.current.isConfirming).toBe(false);
-    expect(taskLauncher.startCompile).not.toHaveBeenCalled();
   });
 
   it("unlocks the commit bar when a confirmation task finished before IPC returned", async () => {
@@ -1537,7 +1531,6 @@ describe("useImportWorkflow", () => {
         "wiki/sources/local/资料甲.md",
       );
       expect(useNavigationStore.getState().activeView).toBe("wiki");
-      expect(taskLauncher.startCompile).not.toHaveBeenCalled();
     } finally {
       useWikiStore.setState({ scan: originalScan, openPage: originalOpenPage });
     }
@@ -1551,7 +1544,6 @@ describe("useImportWorkflow", () => {
 
     await act(async () => result.current.updateWiki(completion));
 
-    expect(taskLauncher.startCompile).not.toHaveBeenCalled();
     expect(useNavigationStore.getState().workflowLaunchIntent).toEqual({
       projectId: projectA.projectId,
       projectRootPath: projectA.rootPath,

@@ -10,17 +10,18 @@ use llm_wiki_desktop_lib::models::compile::{
     CompileAction, CompileCandidate, CompileConsumptionRecord, CompileFile, CompileManifest,
     CompilePageType, CompilePlan, CompilePlanItem, CompileRoute, ResolvedCompileRoute,
 };
+use llm_wiki_desktop_lib::models::confirmation::ConfirmationExecution;
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::workflow::{
     UpdateWikiMode, WorkflowDisplayStatus, WorkflowExecutionOptions, WorkflowKind, WorkflowRoute,
     WorkflowScope, WorkflowSourceVersionRef, WorkflowStageStatus,
 };
 use llm_wiki_desktop_lib::services::{
-    confirm_update_wiki_review, persist_update_wiki_review, run_update_wiki,
-    update_wiki_candidate_is_valid, update_wiki_decision_review, workflow_baseline_for_scope,
-    workflow_stages, AgentInvocation, AgentService, BookmarkService, CompileExecutionServices,
-    CompileService, EnqueueWorkflow, FileStore, GitService, LlmService, ProcessRunner,
-    SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
+    confirm_update_wiki_review, persist_update_wiki_review, restore_update_wiki_confirmation,
+    run_update_wiki, update_wiki_candidate_is_valid, update_wiki_decision_review,
+    workflow_baseline_for_scope, workflow_stages, AgentInvocation, AgentService, BookmarkService,
+    CompileExecutionServices, CompileService, EnqueueWorkflow, FileStore, GitService, LlmService,
+    ProcessRunner, SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
     WorkflowCoordinator, WorkflowStageSink,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
@@ -658,6 +659,28 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
         .file_diffs
         .iter()
         .any(|diff| diff.path == "wiki/concepts/新名称.md"));
+    tasks.persist_task(&run.task_id, &context.root).unwrap();
+    let reopened_context = ProjectContext::new("reopened-update-wiki", context.root.clone());
+    let restarted = TaskService::default();
+    restarted
+        .set_project_context(
+            reopened_context.project_id.clone(),
+            reopened_context.root.clone(),
+            reopened_context.app_dir.join("tasks"),
+        )
+        .unwrap();
+    let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        recovered.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    restore_update_wiki_confirmation(&reopened_context, &recovered, &restarted, &confirmations)
+        .unwrap();
+    assert!(matches!(
+        confirmations.peek(&pending.id).unwrap().execution,
+        Some(ConfirmationExecution::UpdateWikiReview { project_id, .. })
+            if project_id == reopened_context.project_id
+    ));
     fs::remove_dir_all(candidate_workspace).ok();
     fs::remove_dir_all(root).ok();
 }

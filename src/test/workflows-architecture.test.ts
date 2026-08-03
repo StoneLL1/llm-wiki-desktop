@@ -288,27 +288,41 @@ describe("Workflows architecture", () => {
       join(root, "src", "components", "app", "WorkspaceRouter.tsx"),
       "utf8",
     );
-    const dialog = readFileSync(
-      join(root, "src", "features", "agent", "RunAgentDialog.tsx"),
+    const controller = readFileSync(
+      join(root, "src", "components", "app", "WorkspaceController.tsx"),
+      "utf8",
+    );
+    const rightPanel = readFileSync(
+      join(root, "src", "components", "app", "RightContextPanel.tsx"),
       "utf8",
     );
     const launcher = readFileSync(
       join(root, "src", "hooks", "useTaskLauncher.ts"),
       "utf8",
     );
+    const lintView = readFileSync(
+      join(root, "src", "features", "lint", "LintView.tsx"),
+      "utf8",
+    );
 
-    expect(navigation).toContain('| "agent"');
+    expect(navigation).not.toContain('| "agent"');
     expect(navigation).toContain("workflowLaunchIntent");
     expect(navigation).toContain("requestWorkflowLaunch");
     expect(navigation).toContain('| "workflows"');
-    expect(router).toContain('case "agent"');
-    expect(router).toContain("features/agent/AgentView");
+    expect(router).not.toContain('case "agent"');
+    expect(router).not.toContain("features/agent/AgentView");
     expect(router).toContain('case "workflows"');
     expect(router).toContain("features/workflows/WorkflowsView");
-    expect(dialog).toContain('"wiki-ingest"');
-    expect(dialog).toContain('"html-project-report"');
-    expect(launcher).toContain('"start_wiki_compile"');
-    expect(launcher).toContain('"start_deep_lint"');
-    expect(launcher).toContain('"start_export"');
+    expect(controller).not.toContain("RunAgentDialog");
+    expect(controller).not.toContain("useAgentWorkflow");
+    expect(rightPanel).not.toContain("AgentRightPanel");
+    expect(existsSync(join(root, "src", "features", "agent", "AgentView.tsx"))).toBe(false);
+    expect(existsSync(join(root, "src", "features", "agent", "RunAgentDialog.tsx"))).toBe(false);
+    expect(launcher).not.toContain('"start_wiki_compile"');
+    expect(launcher).not.toContain('"start_deep_lint"');
+    expect(launcher).not.toContain('"start_export"');
+    expect(lintView).not.toContain("startCompile");
+    expect(lintView).toContain('kind: "update_wiki"');
+    expect(lintView).toContain("requestWorkflowLaunch");
   });
 });

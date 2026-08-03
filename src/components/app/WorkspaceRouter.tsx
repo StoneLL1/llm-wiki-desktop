@@ -1,13 +1,10 @@
 import { lazy, Suspense } from "react";
 
-import type { AgentWorkflow } from "../../features/agent/useAgentWorkflow";
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
 import type { WorkflowsController } from "../../features/workflows/useWorkflowsController";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
-import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { AppView } from "../../stores/navigationStore";
-import type { BackendTask, TaskActivity } from "../../types/task";
 import { ViewErrorBoundary } from "./ViewErrorBoundary";
 import { ViewFallback } from "./ViewFallback";
 
@@ -41,11 +38,6 @@ const WikiView = lazy(() =>
     default: module.WikiView,
   })),
 );
-const AgentView = lazy(() =>
-  import("../../features/agent/AgentView").then((module) => ({
-    default: module.AgentView,
-  })),
-);
 const WorkflowsView = lazy(() =>
   import("../../features/workflows/WorkflowsView").then((module) => ({
     default: module.WorkflowsView,
@@ -55,29 +47,17 @@ const WorkflowsView = lazy(() =>
 interface WorkspaceRouterProps {
   activeView: AppView;
   capabilities: AiCapabilitiesWorkflow;
-  taskLauncher: TaskLauncher;
   importWorkflow: ImportWorkflow;
-  agentWorkflow: AgentWorkflow;
   workflowsController: WorkflowsController;
-  tasks: BackendTask[];
-  activities?: Record<string, TaskActivity[]>;
-  taskOutputs?: Record<string, string>;
   onOpenTask: (taskId: string) => void;
-  onNavigate: (view: AppView) => void;
 }
 
 export function WorkspaceRouter({
   activeView,
   capabilities,
-  taskLauncher,
   importWorkflow,
-  agentWorkflow,
   workflowsController,
-  tasks,
-  activities = {},
-  taskOutputs = {},
   onOpenTask,
-  onNavigate,
 }: WorkspaceRouterProps) {
   const renderActiveView = () => {
     switch (activeView) {
@@ -95,29 +75,6 @@ export function WorkspaceRouter({
         return <ExportsView />;
       case "import":
         return <ImportView workflow={importWorkflow} capabilities={capabilities} />;
-      case "agent":
-        return (
-          <AgentView
-            agents={agentWorkflow.agents}
-            providers={capabilities.providers}
-            tasks={tasks.filter(
-              (task) =>
-                task.taskType === "wiki_compile" ||
-                task.taskType === "agent_run" ||
-                task.taskType === "llm_request" ||
-                task.taskType === "deep_lint" ||
-                task.taskType === "export",
-            )}
-            activities={activities}
-            taskOutputs={taskOutputs}
-            onOpenTask={onOpenTask}
-            onDetect={capabilities.refresh}
-            onRunAgent={agentWorkflow.openRunDialog}
-            onSetDefault={agentWorkflow.setDefaultAgent}
-            onCancelTask={taskLauncher.cancel}
-            onNavigate={onNavigate}
-          />
-        );
       case "workflows":
         return <WorkflowsView controller={workflowsController} onOpenTask={onOpenTask} />;
     }

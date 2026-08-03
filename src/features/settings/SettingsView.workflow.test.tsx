@@ -31,6 +31,14 @@ beforeEach(() => {
 });
 
 describe("SettingsView workflow ownership", () => {
+  it("opens directly to the requested AI section", async () => {
+    render(<SettingsView initialSection="ai" project={{ ...defaultProject, projectId: "p1", name: "P1", rootPath: "/p1" }} providers={[]} agents={[]}
+      onRefreshCapabilities={mocks.refresh} onSaveProvider={vi.fn()} onSaveSecret={mocks.saveSecret}
+      onDeleteSecret={vi.fn()} onTestProvider={vi.fn()} />);
+
+    expect(await screen.findByRole("button", { name: "Save workflow secret" })).toBeInTheDocument();
+  });
+
   it("lets the provider workflow own the single capability refresh after secret save", async () => {
     render(<SettingsView project={{ ...defaultProject, projectId: "p1", name: "P1", rootPath: "/p1" }} providers={[]} agents={[]}
       onRefreshCapabilities={mocks.refresh} onSaveProvider={vi.fn()} onSaveSecret={mocks.saveSecret}

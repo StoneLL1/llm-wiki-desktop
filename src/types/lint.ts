@@ -249,7 +249,7 @@ export interface LintSafetyPrefs {
   checkpoint: boolean;
   /** Commit immediately after the fix — fused with the checkpoint commit. */
   commitAfter: boolean;
-  /** Run a wiki recompile after a successful fix. */
+  /** Open Update Wiki preparation after a successful fix. */
   recompile: boolean;
 }
 

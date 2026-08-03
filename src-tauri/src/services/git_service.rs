@@ -734,10 +734,20 @@ fn collect_initial_commit_paths(
         return Err(initial_commit_preview_too_large());
     }
     for entry in fs::read_dir(current).map_err(|error| {
-        BackendError::new("GIT_INITIALIZATION_PREVIEW_FAILED", error.to_string(), true, true)
+        BackendError::new(
+            "GIT_INITIALIZATION_PREVIEW_FAILED",
+            error.to_string(),
+            true,
+            true,
+        )
     })? {
         let entry = entry.map_err(|error| {
-            BackendError::new("GIT_INITIALIZATION_PREVIEW_FAILED", error.to_string(), true, true)
+            BackendError::new(
+                "GIT_INITIALIZATION_PREVIEW_FAILED",
+                error.to_string(),
+                true,
+                true,
+            )
         })?;
         *entries_seen += 1;
         if *entries_seen > MAX_INITIAL_COMMIT_PREVIEW_ENTRIES {
@@ -748,22 +758,21 @@ fn collect_initial_commit_paths(
             continue;
         }
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            BackendError::new("GIT_INITIALIZATION_PREVIEW_FAILED", error.to_string(), true, true)
+            BackendError::new(
+                "GIT_INITIALIZATION_PREVIEW_FAILED",
+                error.to_string(),
+                true,
+                true,
+            )
         })?;
         if metadata.is_dir() {
             if validate_existing_project_directory(root, &path).is_ok() {
-                collect_initial_commit_paths(
-                    root,
-                    &path,
-                    depth + 1,
-                    entries_seen,
-                    paths,
-                )?;
+                collect_initial_commit_paths(root, &path, depth + 1, entries_seen, paths)?;
             }
         } else if metadata.is_file() && validate_existing_project_file(root, &path).is_ok() {
-            let relative = path.strip_prefix(root).map_err(|_| git_path_unsafe(
-                "Initial commit candidate escaped the project root".into(),
-            ))?;
+            let relative = path.strip_prefix(root).map_err(|_| {
+                git_path_unsafe("Initial commit candidate escaped the project root".into())
+            })?;
             paths.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }
@@ -851,9 +860,7 @@ fn run_git_bounded(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| {
-            BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false)
-        })?;
+        .map_err(|error| BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false))?;
     let stdout = child.stdout.take().expect("piped Git stdout");
     let stderr = child.stderr.take().expect("piped Git stderr");
     let stdout_reader = spawn_bounded_reader(stdout);
@@ -932,8 +939,10 @@ fn bounded_optional_git_value(
     if !output.success {
         return Ok(None);
     }
-    Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| !value.is_empty()))
+    Ok(
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty()),
+    )
 }
 
 fn git_assessment_timeout() -> BackendError {

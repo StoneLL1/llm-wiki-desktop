@@ -1,8 +1,8 @@
 # Workflows Panel Implementation Plan
 
-> **Status:** In progress — Batches 0–7 are committed; Batch 8 is pending its First-run / Project-open dependencies, independent review, and closure.
+> **Status:** Implemented — Batches 0–8 and the First-run / Project-open authority closure A–G are complete. Batch 8 acceptance evidence is recorded in [`../../qa/workflows-batch8-closure-evidence.md`](../../qa/workflows-batch8-closure-evidence.md).
 >
-> **Progress signal:** The checklist count—253 unchecked boxes at the 2026-08-02 audit baseline—is not implementation status. Commit history plus `SPEC/progress.txt` are authoritative: Batches 0–7 are committed; Batch 8 remains uncommitted, its required review is not closed, and its First-run / Project-open dependencies are still pending.
+> **Progress signal:** The checklist count—253 unchecked boxes at the 2026-08-02 audit baseline—is not implementation status. Commit history, `SPEC/progress.txt`, the closure plan, and the acceptance evidence are authoritative: Batch 8's legacy cutover, authority dependencies, two-review closure, and final full gate are complete.
 >
 > **Product and interaction authority:** [`../specs/2026-07-30-workflows-panel-redesign.md`](../specs/2026-07-30-workflows-panel-redesign.md)
 >
@@ -1082,6 +1082,8 @@ feat(workflows): add scoped notifications and route disclosure
 ---
 
 ## Batch 8 — Cut over, retire legacy UI, and complete release verification
+
+> **Completion evidence (2026-08-03):** Implemented and independently reviewed through [`2026-08-02-first-run-authority-and-workflows-batch8-closure.md`](2026-08-02-first-run-authority-and-workflows-batch8-closure.md) Batches A–G. The 18-scenario matrix, detector-hash disclosure, accepted review fixes, and final gate are recorded in [`../../qa/workflows-batch8-closure-evidence.md`](../../qa/workflows-batch8-closure-evidence.md). Git history plus `SPEC/progress.txt` carry the independent commit evidence; the historical checkboxes below remain an execution checklist rather than the progress signal.
 
 **Purpose:** Remove the superseded Agent surface only after every replacement path is green, then perform final code, visual, accessibility, safety, and documentation closure.
 

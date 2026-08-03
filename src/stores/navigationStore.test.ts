@@ -19,6 +19,9 @@ describe("navigationStore layout preferences", () => {
         exportsList: 360,
         lintDetails: 320,
       },
+      settingsOpen: false,
+      settingsSection: "general",
+      workflowSettingsReturnIntent: null,
       workflowLaunchIntent: null,
     });
   });
@@ -44,6 +47,40 @@ describe("navigationStore layout preferences", () => {
     expect(useNavigationStore.getState().rightPanelMode).toBe("default");
     expect(useNavigationStore.getState().wikiAssistantPagePath).toBeNull();
     expect(useNavigationStore.getState().workspaceFocus).toBeNull();
+  });
+
+  it("opens Settings at an explicit section without changing the workspace view", () => {
+    useNavigationStore.getState().openSettings("ai");
+
+    expect(useNavigationStore.getState()).toMatchObject({
+      activeView: "dashboard",
+      settingsOpen: true,
+      settingsSection: "ai",
+    });
+  });
+
+  it("keeps a structured workflow return only for the Settings session that requested it", () => {
+    const returnIntent = {
+      projectId: "project-a",
+      projectRootPath: "D:/wiki-a",
+      kind: "health_check" as const,
+      scope: { kind: "health_check" as const, mode: "complete" as const },
+      routeSelection: null,
+      source: "prerequisite" as const,
+      expectedSurface: "preparation" as const,
+      expectedCanonicalIdentityKey: "identity-a",
+      expectedIdentityRevision: "identity-revision-a",
+      expectedPreparationId: "prep-a",
+      expectedPreparationRevision: "revision-1",
+      expectedTaskId: null,
+    };
+
+    useNavigationStore.getState().openSettings("ai", returnIntent);
+    expect(useNavigationStore.getState().workflowSettingsReturnIntent).toEqual(returnIntent);
+
+    useNavigationStore.getState().closeSettings();
+    useNavigationStore.getState().openSettings("general");
+    expect(useNavigationStore.getState().workflowSettingsReturnIntent).toBeNull();
   });
 
   it("opens the wiki assistant for a page", () => {

@@ -268,3 +268,96 @@ fn legacy_non_workflow_recovery_behavior_remains_compatible() {
     assert_eq!(recovered.status, TaskStatus::Failed);
     assert_eq!(recovered.error.unwrap().code, "TASK_RECOVERY");
 }
+
+#[test]
+fn legacy_v1_wrapper_migrates_and_current_wrapper_is_accepted() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = WorkflowCoordinator::default();
+    let service = TaskService::default();
+    let run = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "base"))
+            .unwrap(),
+    );
+    let path = temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", run.task_id));
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["workflow"]["schemaVersion"], 1);
+    value["schemaVersion"] = 1.into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    drop(service);
+
+    let restarted = TaskService::default();
+    restarted.recover_tasks(temp.path()).unwrap();
+    assert!(restarted.get_workflow_run(&run.task_id).is_some());
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(migrated["schemaVersion"], 2);
+    assert_eq!(migrated["workflow"]["schemaVersion"], 1);
+}
+
+#[test]
+fn future_wrapper_and_workflow_schemas_are_skipped_without_rewriting_bytes() {
+    for nested_workflow in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = WorkflowCoordinator::default();
+        let service = TaskService::default();
+        let run = created(
+            coordinator
+                .enqueue(&service, request(temp.path(), "base"))
+                .unwrap(),
+        );
+        let path = temp
+            .path()
+            .join(".app/tasks")
+            .join(format!("{}.json", run.task_id));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if nested_workflow {
+            value["workflow"]["schemaVersion"] = 999.into();
+        } else {
+            value["schemaVersion"] = 999.into();
+        }
+        let original_bytes = serde_json::to_vec_pretty(&value).unwrap();
+        std::fs::write(&path, &original_bytes).unwrap();
+        drop(service);
+
+        let restarted = TaskService::default();
+        assert!(restarted.recover_tasks(temp.path()).unwrap().is_empty());
+        assert!(restarted.get_workflow_run(&run.task_id).is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+    }
+}
+
+#[test]
+fn malformed_wrapper_never_falls_back_to_a_valid_raw_task_shape() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = WorkflowCoordinator::default();
+    let service = TaskService::default();
+    let run = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "base"))
+            .unwrap(),
+    );
+    let path = temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", run.task_id));
+    let wrapper: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut raw_task = wrapper["task"].as_object().unwrap().clone();
+    raw_task.insert("task".into(), serde_json::Value::String("malformed".into()));
+    raw_task.insert("schemaVersion".into(), 2.into());
+    let original_bytes = serde_json::to_vec_pretty(&raw_task).unwrap();
+    std::fs::write(&path, &original_bytes).unwrap();
+    drop(service);
+
+    let restarted = TaskService::default();
+    assert!(restarted.recover_tasks(temp.path()).unwrap().is_empty());
+    assert!(restarted.get_task(&run.task_id).is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+}
