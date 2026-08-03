@@ -21,6 +21,7 @@ impl SearchService {
         contents: &str,
         expected_hash: Option<String>,
     ) -> Result<SaveWikiPageResponse, BackendError> {
+        context.resolve_wiki_write_path(relative_path)?;
         let mode = match expected_hash {
             Some(hash) => WriteMode::OverwriteIfHashMatches(hash),
             None => WriteMode::CreateNew,
@@ -52,15 +53,7 @@ impl SearchService {
         context: &ProjectContext,
         request: &CreateWikiPageRequest,
     ) -> Result<SaveWikiPageResponse, BackendError> {
-        let absolute = context.resolve_project_path(&request.relative_path)?;
-        if absolute.strip_prefix(&context.wiki_dir).is_err() {
-            return Err(BackendError::new(
-                "PATH_OUTSIDE_PROJECT",
-                "New wiki pages must live under the wiki/ directory.".to_string(),
-                false,
-                true,
-            ));
-        }
+        let absolute = context.resolve_wiki_write_path(&request.relative_path)?;
 
         let stem = absolute
             .file_stem()
@@ -123,19 +116,8 @@ impl SearchService {
         relative_path: &str,
         new_relative_path: &str,
     ) -> Result<RenameWikiPageResponse, BackendError> {
-        let old_absolute = context.resolve_project_path(relative_path)?;
-        let new_absolute = context.resolve_project_path(new_relative_path)?;
-        // Both endpoints must live under wiki/.
-        if old_absolute.strip_prefix(&context.wiki_dir).is_err()
-            || new_absolute.strip_prefix(&context.wiki_dir).is_err()
-        {
-            return Err(BackendError::new(
-                "PATH_OUTSIDE_PROJECT",
-                "Wiki renames must keep both paths under wiki/.".to_string(),
-                false,
-                true,
-            ));
-        }
+        let old_absolute = context.resolve_wiki_write_path(relative_path)?;
+        let new_absolute = context.resolve_wiki_write_path(new_relative_path)?;
         if !old_absolute.exists() || !old_absolute.is_file() {
             return Err(BackendError::new(
                 "FILE_NOT_FOUND",
@@ -188,17 +170,21 @@ impl SearchService {
             // The renamed page itself is handled separately below; rewriting it
             // in-place before the move would race with the rename, so skip it
             // here and rewrite its body as part of the move.
-            if file_absolute == &old_absolute {
+            if file_absolute
+                .canonicalize()
+                .is_ok_and(|path| path == old_absolute)
+            {
                 continue;
             }
-            let body = std::fs::read_to_string(file_absolute)
-                .map_err(|err| file_read_error(err, file_absolute))?;
+            let project_relative = context.to_project_relative(file_absolute)?;
+            let writable_path = context.resolve_wiki_write_path(&project_relative)?;
+            let body = std::fs::read_to_string(&writable_path)
+                .map_err(|err| file_read_error(err, &writable_path))?;
             let (rewritten, n) = rewrite_wikilinks(&body, &old_stem, &new_stem);
             if n > 0 {
-                std::fs::write(file_absolute, rewritten.as_bytes())
-                    .map_err(|err| io_write_error(err, file_absolute))?;
-                let project_relative = context.to_project_relative(file_absolute)?;
                 snapshots.push((project_relative.clone(), body.into_bytes()));
+                std::fs::write(&writable_path, rewritten.as_bytes())
+                    .map_err(|err| io_write_error(err, &writable_path))?;
                 updated_references.push(project_relative);
             }
         }
@@ -231,7 +217,7 @@ impl SearchService {
             // drop the half-written new file. Git checkpoint from the caller
             // remains the long-term safety net.
             for (rel, bytes) in &snapshots {
-                if let Ok(abs) = context.resolve_project_path(rel) {
+                if let Ok(abs) = context.resolve_project_write_path(rel) {
                     if let Some(parent) = abs.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
@@ -311,15 +297,7 @@ impl SearchService {
     ) -> Result<bool, BackendError> {
         use crate::models::git::CheckpointPurpose;
 
-        let absolute = context.resolve_project_path(target_path)?;
-        if absolute.strip_prefix(&context.wiki_dir).is_err() {
-            return Err(BackendError::new(
-                "PATH_OUTSIDE_PROJECT",
-                "Only wiki pages can be deleted here.".to_string(),
-                false,
-                true,
-            ));
-        }
+        let absolute = context.resolve_wiki_write_path(target_path)?;
         if !absolute.exists() || !absolute.is_file() {
             return Err(BackendError::new(
                 "FILE_NOT_FOUND",
@@ -377,8 +355,9 @@ impl SearchService {
             std::fs::remove_file(&absolute).map_err(|err| io_write_error(err, &absolute))?;
             // Drop the deleted page from the graph cache so a stale node
             // doesn't linger; scan will rebuild it. Best-effort.
-            let graph_cache = context.app_dir.join("graph-cache.json");
-            let _ = std::fs::remove_file(&graph_cache);
+            if let Ok(graph_cache) = context.resolve_project_write_path(".app/graph-cache.json") {
+                let _ = std::fs::remove_file(&graph_cache);
+            }
             // Commit the deletion itself so the change lands in history and is
             // recoverable (PRD-GIT-003: 成功操作后提交最终结果).
             git_service.create_scoped_checkpoint(
@@ -401,7 +380,9 @@ impl SearchService {
     }
 
     fn invalidate_graph_cache(&self, context: &ProjectContext) -> bool {
-        let path = context.app_dir.join("graph-cache.json");
+        let Ok(path) = context.resolve_project_write_path(".app/graph-cache.json") else {
+            return false;
+        };
         if path.exists() {
             std::fs::remove_file(&path).is_ok()
         } else {
@@ -410,7 +391,9 @@ impl SearchService {
     }
 
     fn append_save_log(&self, context: &ProjectContext, relative_path: &str) {
-        let log_path = context.wiki_dir.join("log.md");
+        let Ok(log_path) = context.resolve_wiki_write_path("wiki/log.md") else {
+            return;
+        };
         if !log_path.exists() {
             return;
         }
@@ -521,6 +504,36 @@ mod tests {
             .expect_err("create-new must reject existing file");
         assert_eq!(err.code, "FILE_ALREADY_EXISTS");
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_page_rejects_a_page_discovered_through_an_internal_read_link() {
+        let (context, root) = tmp_context("save-linked-page");
+        std::fs::create_dir_all(context.wiki_dir.clone()).unwrap();
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("linked.md"), "# Linked").unwrap();
+        let link = context.wiki_dir.join("linked");
+        create_directory_link(&shared, &link).unwrap();
+
+        // The layout walker reports the physical `shared/linked.md` path for
+        // a contained read link. It is readable, but must not be a save target.
+        let err = SearchService::default()
+            .save_page(
+                &context,
+                "shared/linked.md",
+                "# Modified",
+                Some("hash".to_string()),
+            )
+            .expect_err("read-only linked page must not become writable by its physical path");
+        assert_eq!(err.code, "PATH_OUTSIDE_PROJECT");
+        assert_eq!(
+            std::fs::read_to_string(shared.join("linked.md")).unwrap(),
+            "# Linked"
+        );
+
+        remove_directory_link(&link);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -904,10 +917,9 @@ mod tests {
     }
 
     #[test]
-    fn rename_page_rolls_back_referrers_when_move_fails() {
-        // If the file move fails after referrers were rewritten, every touched
-        // file must be restored to its pre-rename content so the wiki is not
-        // left with [[new]] pointing at a non-existent page.
+    fn rename_page_keeps_referrers_unchanged_when_destination_is_unsafe() {
+        // An invalid destination must not leave the wiki pointing at a
+        // non-existent renamed page.
         let (context, root) = tmp_context("rename-rollback");
         seed_sample_vault(&context);
         let service = SearchService::default();
@@ -930,8 +942,9 @@ mod tests {
                 "wiki/concepts/blocker/sub/never.md",
             )
             .expect_err("rename whose destination parent cannot be created must fail");
-        // The failure surfaces via io_write_error (create_dir_all path).
-        assert_eq!(err.code, "FILE_WRITE_FAILED");
+        // The strict write resolver rejects the file-as-directory component
+        // before it can publish a move. Referrers are still unchanged.
+        assert_eq!(err.code, "PATH_OUTSIDE_PROJECT");
 
         // The referrer must be restored to its original bytes (not left with
         // [[react-pattern]] stripped/rewritten to the new stem).
@@ -993,5 +1006,36 @@ mod tests {
         assert!(out.contains("[[AI助手]]"));
         assert!(out.contains("[[AI助手|AI Agent]]"));
         assert!(out.contains("[[AI助手#概述]]"));
+    }
+
+    #[cfg(unix)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        }
+    }
+
+    fn remove_directory_link(link: &std::path::Path) {
+        let _ = std::fs::remove_dir(link);
     }
 }

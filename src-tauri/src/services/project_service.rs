@@ -1,25 +1,32 @@
+use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use sha2::{Digest, Sha256};
 
 use crate::errors::BackendError;
-use crate::models::confirmation::{
-    ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
+use crate::models::graph::GraphData;
+use crate::models::layout::{
+    canonical_internal_read_path, is_link_or_reparse, project_descendant_path_enters_link,
+    ProjectMarkdownRootRole,
 };
-use crate::models::git::CheckpointPurpose;
 use crate::models::paths::ProjectContext;
 use crate::models::project::{
     AgentRoute, GraphState, IndexState, OpenProjectResponse, ProjectFilesystemAccess,
-    ProjectHealthReport, ProjectSummary, ProjectTemplate, ProjectTrustKind, RecentProject,
+    ProjectHealthReport, ProjectInventoryState, ProjectRepairOperation, ProjectRepairOperationType,
+    ProjectRepairPlan, ProjectSummary, ProjectTemplate, ProjectTrustKind, RecentProject,
 };
 use crate::services::file_store::FileStore;
 use crate::services::git_service::GitService;
 use crate::utils::path_safety::{
-    validate_existing_project_directory, validate_existing_project_file,
-    validate_existing_project_root,
+    ensure_project_directory_with_created, validate_existing_project_directory,
+    validate_existing_project_file, validate_existing_project_root,
 };
 
 pub(crate) mod assessment;
+mod decision_store;
 mod trust_store;
 
 pub use assessment::{assess_project_folder, ProjectAssessmentService};
@@ -37,7 +44,25 @@ const BUSINESS_PURPOSE: &str = include_str!("../../templates/projects/business/p
 const BUSINESS_SCHEMA: &str = include_str!("../../templates/projects/business/schema.md");
 
 const RECENT_PROJECT_FILE: &str = "recent-projects.json";
+const NATIVE_PROJECT_ID_FILE: &str = ".app/project.json";
 const MAX_RECENT_PROJECTS: usize = 20;
+const PROJECT_CREATION_STAGING_PREFIX: &str = ".llm-wiki-create-";
+const PROJECT_CREATION_BACKUP_PREFIX: &str = ".llm-wiki-create-backup-";
+const MAX_REPAIR_GRAPH_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Compatibility enablement is a mutation into a folder that may not yet
+/// have app-owned state. Serializing it prevents two commands from our own
+/// process from racing on the same `.app/compat` paths. This is deliberately
+/// not presented as a cross-process file lock: every path-based write still
+/// revalidates immediately before use, and an external actor can race any
+/// path-based filesystem API.
+static COMPATIBILITY_GUIDANCE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PROJECT_REPAIR_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+/// Recent-project history is a global app file. This mutex avoids redundant
+/// contention in one process; every mutation also takes the configuration
+/// directory's OS-backed mutation lock so separate LLM Wiki processes cannot
+/// overwrite each other's read-modify-write cycles.
+static RECENT_PROJECT_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub struct ProjectService {
     config_dir: PathBuf,
@@ -92,6 +117,22 @@ impl ProjectService {
         self.trust_store.revoke(root)
     }
 
+    /// Prepares only the app-owned container used by the first-run project
+    /// dialog. It deliberately never creates a project or changes a folder
+    /// supplied by the user through the directory picker.
+    pub(crate) fn prepare_default_project_parent(&self) -> Result<String, BackendError> {
+        let documents = dirs::document_dir().ok_or_else(|| {
+            BackendError::new(
+                "PROJECT_DEFAULT_PARENT_UNAVAILABLE",
+                "The system Documents directory is unavailable. Choose a parent folder instead.",
+                true,
+                true,
+            )
+        })?;
+        prepare_default_project_parent_at(&documents)
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
     pub(crate) fn filesystem_access(
         &self,
         context: &ProjectContext,
@@ -129,96 +170,104 @@ impl ProjectService {
         context: &ProjectContext,
         template: ProjectTemplate,
     ) -> Result<Vec<String>, BackendError> {
-        let root = validate_existing_project_root(&context.root).map_err(|message| {
-            BackendError::new(
-                "PROJECT_COMPAT_PATH_UNSAFE",
+        let _write_guard = compatibility_guidance_write_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _initial_root = validate_existing_project_root(&context.root).map_err(|message| {
+            compatibility_path_unsafe_error(
                 "Compatibility guidance cannot be written to an unsafe project path.",
-                true,
-                true,
+                message,
             )
-            .with_details(serde_json::json!({ "error": message }))
         })?;
-        let app_dir = root.join(".app");
-        let compat_dir = app_dir.join("compat");
-        let mut created_dirs = Vec::new();
+        let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
+        let root = validate_existing_project_root(&context.root).map_err(|message| {
+            compatibility_path_unsafe_error(
+                "Compatibility guidance project path changed while waiting for the write lock.",
+                message,
+            )
+        })?;
+        let compat_dir = root.join(".app").join("compat");
+        let (compat_dir, created_dirs) = ensure_project_directory_with_created(&root, &compat_dir)
+            .map_err(|message| {
+                compatibility_path_unsafe_error(
+                    "Compatibility guidance cannot use a linked or unsafe directory.",
+                    message,
+                )
+            })?;
         let mut created_files = Vec::new();
 
         let result = (|| {
-            for directory in [&app_dir, &compat_dir] {
-                if directory.exists() {
-                    validate_existing_project_directory(&root, directory).map_err(|message| {
-                        BackendError::new(
-                            "PROJECT_COMPAT_PATH_UNSAFE",
-                            "Compatibility guidance cannot use a linked or unsafe directory.",
-                            true,
-                            true,
-                        )
-                        .with_details(serde_json::json!({ "error": message }))
-                    })?;
-                    continue;
-                }
-                fs::create_dir(directory).map_err(|error| {
-                    BackendError::new(
-                        "PROJECT_COMPAT_DIRECTORY_CREATE_FAILED",
-                        "Compatibility guidance directory could not be created.",
-                        true,
-                        true,
-                    )
-                    .with_details(serde_json::json!({
-                        "path": directory.to_string_lossy(),
-                        "error": error.to_string(),
-                    }))
-                })?;
-                validate_existing_project_directory(&root, directory).map_err(|message| {
-                    BackendError::new(
-                        "PROJECT_COMPAT_PATH_UNSAFE",
-                        "Compatibility guidance cannot use a linked or unsafe directory.",
-                        true,
-                        true,
-                    )
-                    .with_details(serde_json::json!({ "error": message }))
-                })?;
-                created_dirs.push(directory.to_path_buf());
-            }
-
             for (name, contents) in [
                 ("purpose.md", template_purpose(template)),
                 ("schema.md", template_schema(template)),
             ] {
+                // Path checks are intentionally repeated close to each file
+                // operation. `ensure_project_directory_with_created` also
+                // re-walked these components after creation, but neither
+                // check can turn a path-based filesystem API into a
+                // cross-process atomic no-follow operation.
+                validate_existing_project_directory(&root, &compat_dir).map_err(|message| {
+                    compatibility_path_unsafe_error(
+                        "Compatibility guidance cannot use a linked or unsafe directory.",
+                        message,
+                    )
+                })?;
                 let target = compat_dir.join(name);
-                if fs::symlink_metadata(&target).is_ok() {
-                    let safe_target =
-                        validate_existing_project_file(&root, &target).map_err(|message| {
+                match fs::symlink_metadata(&target) {
+                    Ok(_) => {
+                        let safe_target =
+                            validate_existing_project_file(&root, &target).map_err(|message| {
+                                compatibility_path_unsafe_error(
+                                    "Compatibility guidance cannot use a linked or unsafe file.",
+                                    message,
+                                )
+                            })?;
+                        let existing = fs::read(&safe_target).map_err(|error| {
                             BackendError::new(
-                                "PROJECT_COMPAT_PATH_UNSAFE",
-                                "Compatibility guidance cannot use a linked or unsafe file.",
+                                "PROJECT_COMPAT_GUIDANCE_READ_FAILED",
+                                "Existing compatibility guidance could not be verified.",
                                 true,
                                 true,
                             )
-                            .with_details(serde_json::json!({ "error": message }))
+                            .with_details(serde_json::json!({ "error": error.to_string() }))
                         })?;
-                    let existing = fs::read(&safe_target).map_err(|error| {
-                        BackendError::new(
+                        validate_existing_project_file(&root, &target).map_err(|message| {
+                            compatibility_path_unsafe_error(
+                                "Compatibility guidance changed while it was being verified.",
+                                message,
+                            )
+                        })?;
+                        if existing == contents.as_bytes() {
+                            continue;
+                        }
+                        return Err(BackendError::new(
+                            "PROJECT_COMPAT_GUIDANCE_EXISTS",
+                            "Existing compatibility guidance will not be overwritten.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({
+                            "path": format!(".app/compat/{name}"),
+                        })));
+                    }
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(BackendError::new(
                             "PROJECT_COMPAT_GUIDANCE_READ_FAILED",
                             "Existing compatibility guidance could not be verified.",
                             true,
                             true,
                         )
-                        .with_details(serde_json::json!({ "error": error.to_string() }))
-                    })?;
-                    if existing == contents.as_bytes() {
-                        continue;
+                        .with_details(serde_json::json!({ "error": error.to_string() })));
                     }
-                    return Err(BackendError::new(
-                        "PROJECT_COMPAT_GUIDANCE_EXISTS",
-                        "Existing compatibility guidance will not be overwritten.",
-                        true,
-                        true,
-                    )
-                    .with_details(serde_json::json!({
-                        "path": format!(".app/compat/{name}"),
-                    })));
                 }
+
+                validate_existing_project_directory(&root, &compat_dir).map_err(|message| {
+                    compatibility_path_unsafe_error(
+                        "Compatibility guidance cannot use a linked or unsafe directory.",
+                        message,
+                    )
+                })?;
                 let temporary = compat_dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
                 let write_result = (|| {
                     let mut file = fs::OpenOptions::new()
@@ -234,6 +283,12 @@ impl ProjectService {
                             )
                             .with_details(serde_json::json!({ "error": error.to_string() }))
                         })?;
+                    validate_existing_project_file(&root, &temporary).map_err(|message| {
+                        compatibility_path_unsafe_error(
+                            "Compatibility guidance temporary file became unsafe before writing.",
+                            message,
+                        )
+                    })?;
                     file.write_all(contents.as_bytes()).map_err(|error| {
                         BackendError::new(
                             "PROJECT_COMPAT_GUIDANCE_WRITE_FAILED",
@@ -252,6 +307,12 @@ impl ProjectService {
                         )
                         .with_details(serde_json::json!({ "error": error.to_string() }))
                     })?;
+                    validate_existing_project_directory(&root, &compat_dir).map_err(|message| {
+                        compatibility_path_unsafe_error(
+                            "Compatibility guidance directory changed before commit.",
+                            message,
+                        )
+                    })?;
                     fs::rename(&temporary, &target).map_err(|error| {
                         BackendError::new(
                             "PROJECT_COMPAT_GUIDANCE_COMMIT_FAILED",
@@ -261,10 +322,16 @@ impl ProjectService {
                         )
                         .with_details(serde_json::json!({ "error": error.to_string() }))
                     })?;
+                    validate_existing_project_file(&root, &target).map_err(|message| {
+                        compatibility_path_unsafe_error(
+                            "Compatibility guidance target became unsafe after commit.",
+                            message,
+                        )
+                    })?;
                     Ok::<(), BackendError>(())
                 })();
                 if write_result.is_err() {
-                    let _ = fs::remove_file(&temporary);
+                    remove_compatible_file_if_safe(&root, &temporary);
                 }
                 write_result?;
                 created_files.push(target);
@@ -274,10 +341,10 @@ impl ProjectService {
 
         if let Err(error) = result {
             for file in created_files.iter().rev() {
-                let _ = fs::remove_file(file);
+                remove_compatible_file_if_safe(&root, file);
             }
             for directory in created_dirs.iter().rev() {
-                let _ = fs::remove_dir(directory);
+                remove_compatible_directory_if_safe(&root, directory);
             }
             return Err(error);
         }
@@ -288,6 +355,157 @@ impl ProjectService {
         ])
     }
 
+    /// Prepares the only currently supported automatic recovery: replacing an
+    /// invalid graph cache with a known empty cache after preserving the exact
+    /// invalid bytes. The preparation phase is read-only and intentionally
+    /// refuses every other corrupt `.app` JSON file because those files may
+    /// contain user preferences, bookmarks, or workflow state that cannot be
+    /// reconstructed without guessing.
+    pub(crate) fn prepare_graph_cache_repair_plan(
+        &self,
+        context: &ProjectContext,
+        canonical_identity_key: String,
+        identity_revision: String,
+        expected_git_head: Option<String>,
+        expected_git_paths: Vec<String>,
+    ) -> Result<ProjectRepairPlan, BackendError> {
+        let root = repair_safe_root(context)?;
+        let target = root.join(".app").join("graph-cache.json");
+        let bytes = read_invalid_graph_cache(&root, &target)?;
+        let repair_plan_id = uuid::Uuid::new_v4().to_string();
+        let backup_path =
+            format!(".app/recovery-backups/graph-cache.{repair_plan_id}.invalid.json");
+
+        Ok(ProjectRepairPlan {
+            repair_plan_id,
+            canonical_identity_key,
+            identity_revision,
+            expected_git_head,
+            expected_git_paths,
+            operations: vec![ProjectRepairOperation {
+                operation_type: ProjectRepairOperationType::RegenerateGraphCache,
+                target_path: ".app/graph-cache.json".into(),
+                backup_path,
+                expected_hash: sha256_hex(&bytes),
+            }],
+            protected_paths: vec![
+                "raw/".into(),
+                "wiki/".into(),
+                "purpose.md".into(),
+                "schema.md".into(),
+            ],
+            external_links_remain_blocked: true,
+        })
+    }
+
+    /// Executes an already-confirmed recovery plan. The caller must revalidate
+    /// assessment identity and Git state immediately before this method; this
+    /// layer then revalidates the exact file hash and every project-owned path
+    /// it touches. A failed replacement leaves the original cache and, once
+    /// written, its standalone backup intact for manual recovery.
+    pub(crate) fn apply_graph_cache_repair_plan(
+        &self,
+        context: &ProjectContext,
+        plan: &ProjectRepairPlan,
+    ) -> Result<Vec<String>, BackendError> {
+        let _write_guard = project_repair_write_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _initial_root = repair_safe_root(context)?;
+        let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
+        let root = repair_safe_root(context)?;
+        let [operation] = plan.operations.as_slice() else {
+            return Err(BackendError::new(
+                "PROJECT_REPAIR_PLAN_UNSUPPORTED",
+                "The repair plan contains unsupported operations.",
+                true,
+                true,
+            ));
+        };
+        if operation.operation_type != ProjectRepairOperationType::RegenerateGraphCache
+            || operation.target_path != ".app/graph-cache.json"
+            || !operation
+                .backup_path
+                .starts_with(".app/recovery-backups/graph-cache.")
+            || !operation.backup_path.ends_with(".invalid.json")
+        {
+            return Err(BackendError::new(
+                "PROJECT_REPAIR_PLAN_UNSUPPORTED",
+                "The repair plan contains an unsafe operation.",
+                true,
+                true,
+            ));
+        }
+
+        let target = root.join(".app").join("graph-cache.json");
+        let bytes = read_invalid_graph_cache(&root, &target)?;
+        if sha256_hex(&bytes) != operation.expected_hash {
+            return Err(BackendError::new(
+                "PROJECT_REPAIR_TARGET_CHANGED",
+                "The corrupt cache changed after the repair preview. Prepare repair again.",
+                true,
+                true,
+            ));
+        }
+
+        let backup = root.join(&operation.backup_path);
+        let backup_directory = backup.parent().ok_or_else(|| {
+            BackendError::new(
+                "PROJECT_REPAIR_PLAN_UNSUPPORTED",
+                "The repair backup path is invalid.",
+                false,
+                true,
+            )
+        })?;
+        ensure_project_directory_with_created(&root, backup_directory).map_err(|message| {
+            repair_path_unsafe_error(
+                "Repair backup cannot be created in an unsafe project path.",
+                message,
+            )
+        })?;
+        validate_existing_project_directory(&root, backup_directory).map_err(|message| {
+            repair_path_unsafe_error("Repair backup directory became unsafe.", message)
+        })?;
+        match fs::symlink_metadata(&backup) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(BackendError::new(
+                    "PROJECT_REPAIR_BACKUP_EXISTS",
+                    "The prepared recovery backup path is no longer empty. Prepare repair again.",
+                    true,
+                    true,
+                ));
+            }
+            Err(error) => {
+                return Err(BackendError::new(
+                    "PROJECT_REPAIR_BACKUP_UNAVAILABLE",
+                    "The recovery backup path could not be verified.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "error": error.to_string() })));
+            }
+        }
+        write_repair_backup(&root, &backup, &bytes)?;
+
+        let replacement =
+            serde_json::to_vec_pretty(&GraphData::empty(String::new())).map_err(|error| {
+                BackendError::new(
+                    "PROJECT_REPAIR_WRITE_FAILED",
+                    "The regenerated graph cache could not be serialized.",
+                    false,
+                    false,
+                )
+                .with_details(serde_json::json!({ "error": error.to_string() }))
+            })?;
+        replace_graph_cache_atomically(&root, &target, &replacement)?;
+
+        Ok(vec![
+            operation.backup_path.clone(),
+            operation.target_path.clone(),
+        ])
+    }
+
     pub fn create_project(
         &self,
         root_path: &str,
@@ -295,38 +513,80 @@ impl ProjectService {
         template: ProjectTemplate,
     ) -> Result<ProjectSummary, BackendError> {
         let root = validate_root_for_creation(root_path)?;
+        validate_project_name(name)?;
+        let root_existed = root.exists();
+        // Build every project privately first, including when the user chose
+        // an empty existing directory. This prevents a concurrent write from
+        // turning an initially empty target into a partially initialized one.
+        let build_root = create_project_staging_root(&root)?;
         let project_id = uuid::Uuid::new_v4().to_string();
-        let context = ProjectContext::new(project_id.clone(), root.clone());
+        let context = ProjectContext::new(project_id.clone(), build_root.clone());
         let store = FileStore;
 
-        self.ensure_skeleton(&context, &store)?;
+        let build_result = self.populate_new_project(&context, &store, name, template);
+        if let Err(error) = build_result {
+            return Err(project_creation_failure(
+                error,
+                &root,
+                &build_root,
+                root_existed,
+            ));
+        }
 
-        store.write_markdown(&context, "purpose.md", template_purpose(template))?;
-        store.write_markdown(&context, "schema.md", template_schema(template))?;
-        store.write_markdown(&context, "wiki/index.md", &starter_index(name))?;
-        store.write_markdown(&context, "wiki/log.md", &starter_log(name))?;
-        store.write_markdown(&context, "wiki/overview.md", &starter_overview(name))?;
+        if let Err(error) = install_staged_project(&root, &build_root, root_existed) {
+            return Err(project_creation_failure(
+                error,
+                &root,
+                &build_root,
+                root_existed,
+            ));
+        }
 
-        let project_settings = ProjectSettings { template };
-        store.write_json_atomic(&context, ".app/settings.json", &project_settings)?;
-        store.write_json_atomic(&context, ".app/agent-config.json", &serde_json::json!({}))?;
-        store.write_json_atomic(&context, ".app/bookmarks.json", &serde_json::json!([]))?;
-        store.write_json_atomic(
-            &context,
-            ".app/graph-cache.json",
-            &serde_json::json!({ "nodes": [], "edges": [] }),
-        )?;
-        store.write_json_atomic(
-            &context,
-            ".app/import-conflicts.json",
-            &serde_json::json!({ "conflicts": [] }),
-        )?;
-        GitService.initialize_repository(&context, "Initial wiki project")?;
-
-        let mut summary = self.scan_project(&context, Some(name));
+        let final_context = ProjectContext::new(project_id, root.clone());
+        let mut summary = self.scan_project(&final_context, Some(name));
         summary.template = template;
         summary.health.is_wiki_project = true;
         Ok(summary)
+    }
+
+    fn populate_new_project(
+        &self,
+        context: &ProjectContext,
+        store: &FileStore,
+        name: &str,
+        template: ProjectTemplate,
+    ) -> Result<(), BackendError> {
+        self.ensure_skeleton(context, store)?;
+
+        store.write_markdown(context, "purpose.md", template_purpose(template))?;
+        store.write_markdown(context, "schema.md", template_schema(template))?;
+        store.write_markdown(context, "wiki/index.md", &starter_index(name))?;
+        store.write_markdown(context, "wiki/log.md", &starter_log(name))?;
+        store.write_markdown(context, "wiki/overview.md", &starter_overview(name))?;
+
+        store.write_json_atomic(
+            context,
+            NATIVE_PROJECT_ID_FILE,
+            &NativeProjectIdentityFile {
+                project_id: context.project_id.clone(),
+            },
+        )?;
+        let project_settings = ProjectSettings { template };
+        store.write_json_atomic(context, ".app/settings.json", &project_settings)?;
+        store.write_json_atomic(context, ".app/agent-config.json", &serde_json::json!({}))?;
+        store.write_json_atomic(context, ".app/bookmarks.json", &serde_json::json!([]))?;
+        store.write_json_atomic(
+            context,
+            ".app/graph-cache.json",
+            &GraphData::empty(String::new()),
+        )?;
+        store.write_json_atomic(
+            context,
+            ".app/import-conflicts.json",
+            &serde_json::json!({ "conflicts": [] }),
+        )?;
+        GitService.initialize_repository(context, "Initial wiki project")?;
+        Ok(())
     }
 
     fn ensure_skeleton(
@@ -365,7 +625,10 @@ impl ProjectService {
         let health = self.health_report(&root);
 
         if health.is_wiki_project {
-            let context = ProjectContext::new(uuid::Uuid::new_v4().to_string(), root.clone());
+            let project_id = self
+                .stable_native_project_id(&root)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let context = ProjectContext::new(project_id, root.clone()).with_resolved_layout()?;
             let name = root
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -374,8 +637,15 @@ impl ProjectService {
             return Ok(OpenProjectResponse::opened(summary));
         }
 
-        let pending = self.plan_folder_initialization(&root)?;
-        Ok(OpenProjectResponse::needs_confirmation(pending))
+        Err(BackendError::new(
+            "PROJECT_OPEN_REQUIRES_ASSESSMENT",
+            "This folder is not a directly openable knowledge base. Assess it before choosing whether to open it as a knowledge base or create a separate knowledge base for its materials.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "path": root.to_string_lossy(),
+        })))
     }
 
     pub fn scan_project(
@@ -383,19 +653,114 @@ impl ProjectService {
         context: &ProjectContext,
         name_override: Option<&str>,
     ) -> ProjectSummary {
-        let store = FileStore;
-        let wiki_base = if context.wiki_dir.exists() {
-            context.wiki_dir.clone()
-        } else {
-            context.root.clone()
-        };
+        let wiki_page_count = layout_markdown_count(
+            context,
+            &[
+                ProjectMarkdownRootRole::Wiki,
+                ProjectMarkdownRootRole::Mixed,
+            ],
+        );
+        let source_count = layout_source_count(context);
+        let task_count = layout_task_count(context);
+        self.project_summary(
+            context,
+            name_override,
+            wiki_page_count,
+            source_count,
+            task_count,
+            ProjectInventoryState::Ready,
+        )
+    }
 
-        let wiki_page_count = store
-            .list_markdown_files(&wiki_base)
-            .map(|files| files.len())
-            .unwrap_or(0);
-        let source_count = count_files_recursive(&context.raw_dir.join("sources"));
-        let task_count = count_files(&context.app_dir.join("tasks"));
+    /// Returns only metadata that is cheap to obtain when a folder has just
+    /// been opened. The complete file inventory is deliberately performed by
+    /// a cancellable background task so large vaults can enter the workbench
+    /// immediately.
+    pub fn quick_project_summary(
+        &self,
+        context: &ProjectContext,
+        name_override: Option<&str>,
+    ) -> ProjectSummary {
+        self.project_summary(
+            context,
+            name_override,
+            0,
+            0,
+            0,
+            ProjectInventoryState::Scanning,
+        )
+    }
+
+    /// Performs a read-only, cancellation-aware inventory. Markdown page
+    /// counts may traverse only contained descendant links using the same
+    /// read-only policy as the index; source and task state never do.
+    pub fn scan_project_inventory<C, P>(
+        &self,
+        context: &ProjectContext,
+        name_override: Option<&str>,
+        cancelled: C,
+        mut on_progress: P,
+    ) -> ProjectSummary
+    where
+        C: Fn() -> bool,
+        P: FnMut(u64, String),
+    {
+        let wiki_pages = count_inventory_markdown_roles(
+            context,
+            &[
+                ProjectMarkdownRootRole::Wiki,
+                ProjectMarkdownRootRole::Mixed,
+            ],
+            &cancelled,
+            &mut on_progress,
+        );
+        if wiki_pages.cancelled {
+            return self.project_summary(
+                context,
+                name_override,
+                wiki_pages.count,
+                0,
+                0,
+                ProjectInventoryState::Partial,
+            );
+        }
+
+        let sources = count_inventory_sources(context, &cancelled, &mut on_progress);
+        if sources.cancelled {
+            return self.project_summary(
+                context,
+                name_override,
+                wiki_pages.count,
+                sources.count,
+                0,
+                ProjectInventoryState::Partial,
+            );
+        }
+
+        let tasks = count_inventory_tasks(context, &cancelled, &mut on_progress);
+        self.project_summary(
+            context,
+            name_override,
+            wiki_pages.count,
+            sources.count,
+            tasks.count,
+            if tasks.cancelled {
+                ProjectInventoryState::Partial
+            } else {
+                ProjectInventoryState::Ready
+            },
+        )
+    }
+
+    fn project_summary(
+        &self,
+        context: &ProjectContext,
+        name_override: Option<&str>,
+        wiki_page_count: usize,
+        source_count: usize,
+        task_count: usize,
+        inventory_state: ProjectInventoryState,
+    ) -> ProjectSummary {
         let index_state = if context.wiki_dir.join("index.md").exists()
             || context.root.join("index.md").exists()
         {
@@ -432,6 +797,7 @@ impl ProjectService {
             index_state,
             graph_state,
             agent_route: AgentRoute::Unconfigured,
+            inventory_state,
             health: self.health_report(&context.root),
         }
     }
@@ -463,7 +829,16 @@ impl ProjectService {
             entry.graph_state = GraphState::Missing;
             return entry;
         }
-        let context = ProjectContext::new(entry.project_id.clone(), root);
+        let Ok(context) =
+            ProjectContext::new(entry.project_id.clone(), root).with_resolved_layout()
+        else {
+            entry.wiki_page_count = 0;
+            entry.source_count = 0;
+            entry.task_count = 0;
+            entry.index_state = IndexState::Missing;
+            entry.graph_state = GraphState::Missing;
+            return entry;
+        };
         let summary = self.scan_project(&context, Some(&entry.name));
         entry.name = summary.name;
         entry.root_path = summary.root_path;
@@ -481,18 +856,26 @@ impl ProjectService {
         &self,
         project: RecentProject,
     ) -> Result<Vec<RecentProject>, BackendError> {
+        let _write_guard = recent_project_write_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
         fs::create_dir_all(&self.config_dir).map_err(|err| {
             BackendError::new("PROJECT_CONFIG_DIR_FAILED", err.to_string(), true, false)
                 .with_details(serde_json::json!({ "path": self.config_dir.to_string_lossy() }))
         })?;
 
-        let mut projects = self.list_recent_projects().unwrap_or_default();
+        let store = FileStore;
+        let mut projects =
+            match store.read_json_file::<RecentProjectsFile>(&self.recent_projects_path()) {
+                Ok(file) => file.projects,
+                Err(_) => Vec::new(),
+            };
         let normalized_root = normalize_root_key(&project.root_path);
         projects.retain(|entry| normalize_root_key(&entry.root_path) != normalized_root);
         projects.insert(0, project);
         projects.truncate(MAX_RECENT_PROJECTS);
 
-        let store = FileStore;
         store.write_json_atomic_absolute(
             &self.recent_projects_path(),
             &RecentProjectsFile {
@@ -502,234 +885,181 @@ impl ProjectService {
         Ok(projects)
     }
 
-    pub fn plan_folder_initialization(&self, root: &Path) -> Result<PendingAction, BackendError> {
-        let loose_files = loose_top_level_files(root);
-        let affected_paths: Vec<String> =
-            loose_files.iter().map(|(name, _)| name.clone()).collect();
-
-        let summary = if loose_files.is_empty() {
-            "Folder is empty; only the project structure will be created.".to_string()
-        } else {
-            format!(
-                "{} file(s) will be organized into raw/ by type. No files will be moved until you confirm.",
-                loose_files.len()
-            )
-        };
-
-        let preview_detail = loose_files
-            .iter()
-            .map(|(name, target)| format!("- {name} -> {target}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(PendingAction {
-            id: uuid::Uuid::new_v4().to_string(),
-            action_type: PendingActionType::InitializeFolder,
-            title: "Initialize folder as project".to_string(),
-            message: "This folder is not a wiki project yet. Confirming will create the project structure (purpose.md, schema.md, raw/, wiki/, .app/, exports/) and organize existing files by type. Raw sources stay immutable after import.".to_string(),
-            risk_level: RiskLevel::Medium,
-            affected_paths,
-            preview: Some(ActionPreview {
-                summary,
-                before: None,
-                after: Some(preview_detail),
-                diff: None,
-            }),
-            expires_at: None,
-            checkpoint_hash: None,
-        })
-    }
-
-    pub fn confirm_folder_initialization(
+    /// Forgetting a recent entry only updates the global application list. The
+    /// root path is part of the selector so a stale project ID cannot remove a
+    /// different folder's entry.
+    pub fn remove_recent_project(
         &self,
-        root: &Path,
-        pending_action: &PendingAction,
-        expected_hashes: &[(String, String)],
-    ) -> Result<(ProjectSummary, bool), BackendError> {
-        let current_files = loose_top_level_files(root);
-        let current_paths: Vec<String> =
-            current_files.iter().map(|(path, _)| path.clone()).collect();
-        let mut expected_paths = pending_action.affected_paths.clone();
-        let mut sorted_current = current_paths.clone();
-        expected_paths.sort();
-        sorted_current.sort();
-        if expected_paths != sorted_current {
-            return Err(BackendError::new(
-                "CONFIRMATION_STATE_MISMATCH",
-                "The folder changed after confirmation was requested. Review it again before continuing.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({
-                "expectedPaths": expected_paths,
-                "currentPaths": sorted_current,
-            })));
+        project_id: &str,
+        root_path: &str,
+    ) -> Result<Vec<RecentProject>, BackendError> {
+        let _write_guard = recent_project_write_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
+        let path = self.recent_projects_path();
+        if !path.exists() {
+            return Ok(Vec::new());
         }
-
-        let context = ProjectContext::new(uuid::Uuid::new_v4().to_string(), root.to_path_buf());
-        self.verify_initialization_hashes(&context, expected_hashes)?;
-
-        let git = GitService;
-        let pre_state = git.initialize_repository(&context, "Before folder initialization")?;
-        if pre_state.has_changes {
-            let _ = git.create_checkpoint(
-                &context,
-                CheckpointPurpose::HighRiskOperation,
-                "Before folder initialization",
-            )?;
-        }
-        self.ensure_skeleton(&context, &FileStore)?;
-        self.write_missing_project_files(&context)?;
-        self.archive_loose_files(&context, &current_files)?;
-        let _ = git.create_checkpoint(
-            &context,
-            CheckpointPurpose::FinalResult,
-            "Initialize wiki project structure",
-        )?;
-
-        let mut summary = self.scan_project(&context, None);
-        summary.health.is_wiki_project = true;
-        let checkpoint_exists = git.repository_status(&context)?.head.is_some();
-        Ok((summary, checkpoint_exists))
-    }
-
-    pub fn folder_initialization_execution(
-        &self,
-        root: &Path,
-        pending_action: &PendingAction,
-    ) -> Result<ConfirmationExecution, BackendError> {
-        let context = ProjectContext::new(uuid::Uuid::new_v4().to_string(), root.to_path_buf());
         let store = FileStore;
-        let mut file_hashes = Vec::new();
-        for relative_path in &pending_action.affected_paths {
-            file_hashes.push((
-                relative_path.clone(),
-                store.file_hash(&context, relative_path)?,
+        let mut file = store.read_json_file::<RecentProjectsFile>(&path)?;
+        let normalized_root = normalize_root_key(root_path);
+        let entry_count = file.projects.len();
+        file.projects.retain(|entry| {
+            entry.project_id != project_id
+                || normalize_root_key(&entry.root_path) != normalized_root
+        });
+        if file.projects.len() != entry_count {
+            store.write_json_atomic_absolute(&path, &file)?;
+        }
+        Ok(file.projects)
+    }
+
+    /// Returns the project ID generated during native knowledge-base creation.
+    /// Legacy and compatible folders intentionally return `None`: their
+    /// existing layout cannot safely prove that a later folder is a move of
+    /// the same knowledge base.
+    pub fn stable_native_project_id(&self, root: &Path) -> Option<String> {
+        let identity_path = root.join(NATIVE_PROJECT_ID_FILE);
+        let safe_path = validate_existing_project_file(root, &identity_path).ok()?;
+        let record = FileStore
+            .read_json_file::<NativeProjectIdentityFile>(&safe_path)
+            .ok()?;
+        uuid::Uuid::parse_str(&record.project_id)
+            .ok()
+            .map(|id| id.to_string())
+    }
+
+    /// Reads a newly-created native project's durable identity for a
+    /// user-requested relocation. Unlike the normal open fallback, missing,
+    /// malformed, or linked identity data fails closed here so picker success
+    /// cannot be mistaken for proof of the same project.
+    pub fn require_stable_native_project_id(&self, root: &Path) -> Result<String, BackendError> {
+        let identity_path = root.join(NATIVE_PROJECT_ID_FILE);
+        let safe_path = validate_existing_project_file(root, &identity_path).map_err(|error| {
+            BackendError::new(
+                "PROJECT_RELOCATION_ID_UNAVAILABLE",
+                "The selected native knowledge base has no safe durable identity for relocation.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "error": error }))
+        })?;
+        let record = FileStore
+            .read_json_file::<NativeProjectIdentityFile>(&safe_path)
+            .map_err(|error| {
+                BackendError::new(
+                    "PROJECT_RELOCATION_ID_INVALID",
+                    "The selected native knowledge base has an invalid durable identity.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "error": error }))
+            })?;
+        uuid::Uuid::parse_str(&record.project_id)
+            .map(|id| id.to_string())
+            .map_err(|_| {
+                BackendError::new(
+                    "PROJECT_RELOCATION_ID_INVALID",
+                    "The selected native knowledge base has an invalid durable identity.",
+                    true,
+                    true,
+                )
+            })
+    }
+
+    /// Atomically replaces one exact recent entry after the command layer has
+    /// proven that the selected native root owns the same durable project ID.
+    /// It only updates global app configuration and never scans or writes a
+    /// project directory.
+    pub fn relocate_recent_project(
+        &self,
+        previous_project_id: &str,
+        previous_root_path: &str,
+        relocated: RecentProject,
+    ) -> Result<Vec<RecentProject>, BackendError> {
+        if relocated.project_id != previous_project_id {
+            return Err(BackendError::new(
+                "PROJECT_RELOCATION_ID_MISMATCH",
+                "The selected knowledge base does not match the recent project identity.",
+                true,
+                true,
             ));
         }
-        Ok(ConfirmationExecution::InitializeFolder {
-            root_path: root.to_string_lossy().to_string(),
-            file_hashes,
-        })
-    }
-
-    fn verify_initialization_hashes(
-        &self,
-        context: &ProjectContext,
-        expected_hashes: &[(String, String)],
-    ) -> Result<(), BackendError> {
-        let store = FileStore;
-        for (relative_path, expected_hash) in expected_hashes {
-            let current_hash = store.file_hash(context, relative_path)?;
-            if &current_hash != expected_hash {
+        let _write_guard = recent_project_write_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
+        match fs::symlink_metadata(previous_root_path) {
+            Ok(_) => {
                 return Err(BackendError::new(
-                    "CONFIRMATION_STATE_MISMATCH",
-                    "A file changed after confirmation was requested. Review the action again.",
+                    "PROJECT_RELOCATION_SOURCE_AVAILABLE",
+                    "The original recent knowledge-base path is still available and cannot be relocated.",
+                    true,
+                    true,
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BackendError::new(
+                    "PROJECT_RELOCATION_SOURCE_UNVERIFIABLE",
+                    "The original recent knowledge-base path cannot be verified as missing.",
                     true,
                     true,
                 )
-                .with_details(serde_json::json!({
-                    "path": relative_path,
-                    "expectedHash": expected_hash,
-                    "currentHash": current_hash,
-                })));
+                .with_details(serde_json::json!({ "error": error.to_string() })));
             }
         }
-        Ok(())
-    }
-
-    fn write_missing_project_files(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        let verified_project_id =
+            self.require_stable_native_project_id(Path::new(&relocated.root_path))?;
+        if verified_project_id != previous_project_id {
+            return Err(BackendError::new(
+                "PROJECT_RELOCATION_ID_MISMATCH",
+                "The selected knowledge base does not match the recent project identity.",
+                true,
+                true,
+            ));
+        }
+        let path = self.recent_projects_path();
         let store = FileStore;
-        if !context.root.join("purpose.md").exists() {
-            store.write_markdown(
-                context,
-                "purpose.md",
-                template_purpose(ProjectTemplate::General),
-            )?;
-        }
-        if !context.root.join("schema.md").exists() {
-            store.write_markdown(
-                context,
-                "schema.md",
-                template_schema(ProjectTemplate::General),
-            )?;
-        }
-        for (path, contents) in [
-            ("wiki/index.md", starter_index("Wiki Project")),
-            ("wiki/log.md", starter_log("Wiki Project")),
-            ("wiki/overview.md", starter_overview("Wiki Project")),
-        ] {
-            if !context.resolve_project_path(path)?.exists() {
-                store.write_markdown(context, path, &contents)?;
-            }
-        }
-        store.write_json_atomic(
-            context,
-            ".app/settings.json",
-            &ProjectSettings {
-                template: ProjectTemplate::General,
-            },
-        )?;
-        store.write_json_atomic(context, ".app/agent-config.json", &serde_json::json!({}))?;
-        store.write_json_atomic(context, ".app/bookmarks.json", &serde_json::json!([]))?;
-        store.write_json_atomic(
-            context,
-            ".app/graph-cache.json",
-            &serde_json::json!({ "nodes": [], "edges": [] }),
-        )?;
-        store.write_json_atomic(
-            context,
-            ".app/import-conflicts.json",
-            &serde_json::json!({ "conflicts": [] }),
-        )?;
-        Ok(())
-    }
-
-    fn archive_loose_files(
-        &self,
-        context: &ProjectContext,
-        files: &[(String, String)],
-    ) -> Result<(), BackendError> {
-        for (relative_source, target_dir) in files {
-            let source = context.resolve_project_path(relative_source)?;
-            if !source.exists() {
-                return Err(BackendError::new(
-                    "CONFIRMATION_STATE_MISMATCH",
-                    "A file listed in the pending action no longer exists.",
+        let mut file = store
+            .read_json_file::<RecentProjectsFile>(&path)
+            .map_err(|_| {
+                BackendError::new(
+                    "PROJECT_RECENT_RELOCATION_NOT_FOUND",
+                    "The original recent knowledge-base entry is no longer available.",
                     true,
                     true,
-                )
-                .with_details(serde_json::json!({ "path": relative_source })));
-            }
-            let file_name = source
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .ok_or_else(|| {
-                    BackendError::new(
-                        "FILE_NAME_INVALID",
-                        "Cannot archive a path without a file name.",
-                        true,
-                        true,
-                    )
-                })?;
-            let target_relative = unique_archive_target(context, target_dir, &file_name)?;
-            let target = context.resolve_project_path(&target_relative)?;
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    BackendError::new("FILE_DIR_CREATE_FAILED", err.to_string(), true, false)
-                        .with_details(serde_json::json!({ "path": parent.to_string_lossy() }))
-                })?;
-            }
-            fs::rename(&source, &target).map_err(|err| {
-                BackendError::new("FILE_MOVE_FAILED", err.to_string(), true, false).with_details(
-                    serde_json::json!({
-                        "from": source.to_string_lossy(),
-                        "to": target.to_string_lossy(),
-                    }),
                 )
             })?;
+        let previous_root = normalize_root_key(previous_root_path);
+        let previous_index = file.projects.iter().position(|entry| {
+            entry.project_id == previous_project_id
+                && normalize_root_key(&entry.root_path) == previous_root
+        });
+        let Some(previous_index) = previous_index else {
+            return Err(BackendError::new(
+                "PROJECT_RECENT_RELOCATION_NOT_FOUND",
+                "The original recent knowledge-base entry is no longer available.",
+                true,
+                true,
+            ));
+        };
+        let relocated_root = normalize_root_key(&relocated.root_path);
+        if file.projects.iter().enumerate().any(|(index, entry)| {
+            index != previous_index && normalize_root_key(&entry.root_path) == relocated_root
+        }) {
+            return Err(BackendError::new(
+                "PROJECT_RECENT_RELOCATION_TARGET_CONFLICT",
+                "Another recent knowledge-base entry already uses the selected folder.",
+                true,
+                true,
+            ));
         }
-        Ok(())
+        file.projects.remove(previous_index);
+        file.projects.insert(0, relocated);
+        store.write_json_atomic_absolute(&path, &file)?;
+        Ok(file.projects)
     }
 
     fn recent_projects_path(&self) -> PathBuf {
@@ -779,6 +1109,239 @@ impl ProjectService {
             missing_paths,
         }
     }
+}
+
+fn compatibility_guidance_write_lock() -> &'static Mutex<()> {
+    COMPATIBILITY_GUIDANCE_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn recent_project_write_lock() -> &'static Mutex<()> {
+    RECENT_PROJECT_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn compatibility_path_unsafe_error(message: &str, error: String) -> BackendError {
+    BackendError::new("PROJECT_COMPAT_PATH_UNSAFE", message, true, true)
+        .with_details(serde_json::json!({ "error": error }))
+}
+
+/// Roll back only a file whose current path still passes the same descendant
+/// no-link checks required for normal project writes. If the path changed
+/// underneath us, leaving the artifact is safer than deleting somebody else's
+/// file through a redirected path.
+fn remove_compatible_file_if_safe(root: &Path, file: &Path) {
+    if validate_existing_project_file(root, file).is_ok() {
+        let _ = fs::remove_file(file);
+    }
+}
+
+/// See [`remove_compatible_file_if_safe`]. `remove_dir` is intentionally
+/// non-recursive, so it cannot remove unplanned content if another process
+/// populated the directory while compatibility enablement was failing.
+fn remove_compatible_directory_if_safe(root: &Path, directory: &Path) {
+    if validate_existing_project_directory(root, directory).is_ok() {
+        let _ = fs::remove_dir(directory);
+    }
+}
+
+fn project_repair_write_lock() -> &'static Mutex<()> {
+    PROJECT_REPAIR_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn repair_safe_root(context: &ProjectContext) -> Result<PathBuf, BackendError> {
+    validate_existing_project_root(&context.root).map_err(|message| {
+        repair_path_unsafe_error(
+            "Recovery repair cannot use an unsafe project path.",
+            message,
+        )
+    })
+}
+
+fn repair_path_unsafe_error(message: &str, error: String) -> BackendError {
+    BackendError::new("PROJECT_REPAIR_PATH_UNSAFE", message, true, true)
+        .with_details(serde_json::json!({ "error": error }))
+}
+
+fn read_invalid_graph_cache(root: &Path, target: &Path) -> Result<Vec<u8>, BackendError> {
+    let safe_target = validate_existing_project_file(root, target).map_err(|message| {
+        repair_path_unsafe_error(
+            "The graph cache is not a safe regular file inside this project.",
+            message,
+        )
+    })?;
+    let metadata = fs::metadata(&safe_target).map_err(|error| {
+        BackendError::new(
+            "PROJECT_REPAIR_TARGET_UNAVAILABLE",
+            "The graph cache could not be inspected for recovery.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "error": error.to_string() }))
+    })?;
+    if metadata.len() > MAX_REPAIR_GRAPH_CACHE_BYTES {
+        return Err(BackendError::new(
+            "PROJECT_REPAIR_TARGET_TOO_LARGE",
+            "The corrupt graph cache is too large for safe automatic recovery.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "path": ".app/graph-cache.json",
+            "maxBytes": MAX_REPAIR_GRAPH_CACHE_BYTES,
+        })));
+    }
+    let bytes = fs::read(&safe_target).map_err(|error| {
+        BackendError::new(
+            "PROJECT_REPAIR_TARGET_UNAVAILABLE",
+            "The graph cache could not be read for recovery.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "error": error.to_string() }))
+    })?;
+    if serde_json::from_slice::<GraphData>(&bytes).is_ok() {
+        return Err(BackendError::new(
+            "PROJECT_REPAIR_NOT_NEEDED",
+            "The graph cache has a valid schema and does not need this recovery action.",
+            true,
+            true,
+        ));
+    }
+    Ok(bytes)
+}
+
+fn write_repair_backup(root: &Path, backup: &Path, bytes: &[u8]) -> Result<(), BackendError> {
+    let parent = backup.parent().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_REPAIR_PLAN_UNSUPPORTED",
+            "The repair backup path is invalid.",
+            false,
+            true,
+        )
+    })?;
+    validate_existing_project_directory(root, parent).map_err(|message| {
+        repair_path_unsafe_error("Repair backup directory became unsafe.", message)
+    })?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(backup)
+        .map_err(|error| {
+            BackendError::new(
+                "PROJECT_REPAIR_BACKUP_WRITE_FAILED",
+                "The corrupt graph cache could not be backed up.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "error": error.to_string() }))
+        })?;
+    validate_existing_project_file(root, backup).map_err(|message| {
+        repair_path_unsafe_error("Repair backup path became unsafe before writing.", message)
+    })?;
+    file.write_all(bytes).map_err(|error| {
+        BackendError::new(
+            "PROJECT_REPAIR_BACKUP_WRITE_FAILED",
+            "The corrupt graph cache backup could not be written.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "error": error.to_string() }))
+    })?;
+    file.sync_all().map_err(|error| {
+        BackendError::new(
+            "PROJECT_REPAIR_BACKUP_WRITE_FAILED",
+            "The corrupt graph cache backup could not be synchronized.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "error": error.to_string() }))
+    })
+}
+
+fn replace_graph_cache_atomically(
+    root: &Path,
+    target: &Path,
+    replacement: &[u8],
+) -> Result<(), BackendError> {
+    let parent = target.parent().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_REPAIR_PLAN_UNSUPPORTED",
+            "The graph cache path is invalid.",
+            false,
+            true,
+        )
+    })?;
+    validate_existing_project_directory(root, parent).map_err(|message| {
+        repair_path_unsafe_error(
+            "Graph cache directory became unsafe before repair.",
+            message,
+        )
+    })?;
+    let temporary = parent.join(format!(".graph-cache.{}.repair.tmp", uuid::Uuid::new_v4()));
+    let write_result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| {
+                BackendError::new(
+                    "PROJECT_REPAIR_WRITE_FAILED",
+                    "The regenerated graph cache could not be prepared.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "error": error.to_string() }))
+            })?;
+        validate_existing_project_file(root, &temporary).map_err(|message| {
+            repair_path_unsafe_error("Graph cache temporary path became unsafe.", message)
+        })?;
+        file.write_all(replacement).map_err(|error| {
+            BackendError::new(
+                "PROJECT_REPAIR_WRITE_FAILED",
+                "The regenerated graph cache could not be written.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "error": error.to_string() }))
+        })?;
+        file.sync_all().map_err(|error| {
+            BackendError::new(
+                "PROJECT_REPAIR_WRITE_FAILED",
+                "The regenerated graph cache could not be synchronized.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "error": error.to_string() }))
+        })?;
+        validate_existing_project_directory(root, parent).map_err(|message| {
+            repair_path_unsafe_error(
+                "Graph cache directory changed before repair commit.",
+                message,
+            )
+        })?;
+        fs::rename(&temporary, target).map_err(|error| {
+            BackendError::new(
+                "PROJECT_REPAIR_COMMIT_FAILED",
+                "The regenerated graph cache could not replace the corrupt cache.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "error": error.to_string() }))
+        })?;
+        validate_existing_project_file(root, target).map_err(|message| {
+            repair_path_unsafe_error("Graph cache target became unsafe after repair.", message)
+        })?;
+        Ok::<(), BackendError>(())
+    })();
+    if write_result.is_err() {
+        remove_compatible_file_if_safe(root, &temporary);
+    }
+    write_result
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn probe_writable_directory(directory: &Path) -> bool {
@@ -862,6 +1425,12 @@ struct ProjectSettings {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeProjectIdentityFile {
+    project_id: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
 struct RecentProjectsFile {
     #[serde(default)]
     projects: Vec<RecentProject>,
@@ -903,6 +1472,286 @@ fn starter_overview(name: &str) -> String {
     )
 }
 
+fn create_project_staging_root(root: &Path) -> Result<PathBuf, BackendError> {
+    let parent = root.parent().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_PATH_INVALID",
+            "A new knowledge base must have a parent directory.",
+            true,
+            true,
+        )
+    })?;
+    for _ in 0..8 {
+        let staging = parent.join(format!(
+            "{PROJECT_CREATION_STAGING_PREFIX}{}",
+            uuid::Uuid::new_v4()
+        ));
+        match fs::create_dir(&staging) {
+            Ok(()) => return Ok(staging),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(BackendError::new(
+                    "PROJECT_CREATION_STAGE_FAILED",
+                    "A private staging directory could not be created for the new knowledge base.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "parentPath": parent.to_string_lossy(),
+                    "error": error.to_string(),
+                })));
+            }
+        }
+    }
+    Err(BackendError::new(
+        "PROJECT_CREATION_STAGE_FAILED",
+        "A unique private staging directory could not be created for the new knowledge base.",
+        true,
+        true,
+    ))
+}
+
+fn create_project_backup_path(root: &Path) -> Result<PathBuf, BackendError> {
+    let parent = root.parent().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_PATH_INVALID",
+            "A new knowledge base must have a parent directory.",
+            true,
+            true,
+        )
+    })?;
+    for _ in 0..8 {
+        let backup = parent.join(format!(
+            "{PROJECT_CREATION_BACKUP_PREFIX}{}",
+            uuid::Uuid::new_v4()
+        ));
+        if !backup.exists() {
+            return Ok(backup);
+        }
+    }
+    Err(BackendError::new(
+        "PROJECT_CREATION_STAGE_FAILED",
+        "A unique private backup path could not be reserved for the new knowledge base.",
+        true,
+        true,
+    ))
+}
+
+fn install_staged_project(
+    root: &Path,
+    staging: &Path,
+    root_existed: bool,
+) -> Result<(), BackendError> {
+    if !root_existed {
+        if root.exists() {
+            return Err(BackendError::new(
+                "PROJECT_DIR_APPEARED",
+                "The selected project directory appeared while the project was being created.",
+                true,
+                true,
+            ));
+        }
+        return fs::rename(staging, root).map_err(|error| {
+            BackendError::new(
+                "PROJECT_CREATION_INSTALL_FAILED",
+                "The prepared knowledge base could not be installed at the selected location.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "rootPath": root.to_string_lossy(),
+                "stagingPath": staging.to_string_lossy(),
+                "error": error.to_string(),
+            }))
+        });
+    }
+
+    let backup = create_project_backup_path(root)?;
+    fs::rename(root, &backup).map_err(|error| {
+        BackendError::new(
+            "PROJECT_CREATION_TARGET_CLAIM_FAILED",
+            "The selected empty directory could not be reserved for project creation.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "rootPath": root.to_string_lossy(),
+            "backupPath": backup.to_string_lossy(),
+            "error": error.to_string(),
+        }))
+    })?;
+
+    let still_empty = normal_empty_directory(&backup).unwrap_or(false);
+    if !still_empty {
+        let restored = fs::rename(&backup, root).is_ok();
+        return Err(BackendError::new(
+            "PROJECT_DIR_CHANGED_DURING_CREATION",
+            "The selected directory changed while the knowledge base was being prepared.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "rootPath": root.to_string_lossy(),
+            "backupPath": backup.to_string_lossy(),
+            "targetRestored": restored,
+            "nextAction": "Review the selected directory and retry project creation.",
+        })));
+    }
+
+    if let Err(error) = fs::rename(staging, root) {
+        let restored = fs::rename(&backup, root).is_ok();
+        return Err(BackendError::new(
+            "PROJECT_CREATION_INSTALL_FAILED",
+            "The prepared knowledge base could not be installed at the selected location.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "rootPath": root.to_string_lossy(),
+            "stagingPath": staging.to_string_lossy(),
+            "backupPath": backup.to_string_lossy(),
+            "targetRestored": restored,
+            "error": error.to_string(),
+        })));
+    }
+
+    // The original target was verified empty immediately after its atomic
+    // move. Use non-recursive removal only; if another process wrote there,
+    // preserve that data rather than deleting it.
+    let _ = fs::remove_dir(&backup);
+    Ok(())
+}
+
+fn project_creation_failure(
+    mut error: BackendError,
+    root: &Path,
+    build_root: &Path,
+    root_existed: bool,
+) -> BackendError {
+    let mut remaining_paths = Vec::new();
+    let rollback = match remove_owned_staging_root(build_root) {
+        Ok(()) => "staging_removed",
+        Err(reason) => {
+            remaining_paths.push(build_root.to_string_lossy().into_owned());
+            let existing = error.details.take();
+            error.details = Some(serde_json::json!({
+                "original": existing,
+                "recovery": {
+                    "rootPath": root.to_string_lossy(),
+                    "stagingPath": build_root.to_string_lossy(),
+                    "targetExistedBeforeCreation": root_existed,
+                    "rollback": "staging_retained",
+                    "remainingPaths": remaining_paths,
+                    "reason": reason,
+                },
+            }));
+            return error;
+        }
+    };
+
+    let existing = error.details.take();
+    error.details = Some(serde_json::json!({
+        "original": existing,
+        "recovery": {
+            "rootPath": root.to_string_lossy(),
+            "stagingPath": build_root.to_string_lossy(),
+            "targetExistedBeforeCreation": root_existed,
+            "rollback": rollback,
+            "remainingPaths": remaining_paths,
+        },
+    }));
+    error
+}
+
+fn remove_owned_staging_root(staging: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(staging).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err("The staging path is no longer a normal directory.".into());
+    }
+    let file_name = staging
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if !file_name.starts_with(PROJECT_CREATION_STAGING_PREFIX) {
+        return Err(
+            "The staging directory name no longer matches the private creation prefix.".into(),
+        );
+    }
+    fs::remove_dir_all(staging).map_err(|error| error.to_string())
+}
+
+fn validate_project_name(name: &str) -> Result<(), BackendError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(BackendError::new(
+            "PROJECT_NAME_REQUIRED",
+            "Knowledge base name is required.",
+            true,
+            true,
+        ));
+    }
+    if name.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
+    }) {
+        return Err(BackendError::new(
+            "PROJECT_NAME_INVALID",
+            "Knowledge base name contains characters that are not valid in a folder name.",
+            true,
+            true,
+        ));
+    }
+    if name.ends_with(['.', ' ']) {
+        return Err(BackendError::new(
+            "PROJECT_NAME_INVALID",
+            "Knowledge base name cannot end with a dot or space.",
+            true,
+            true,
+        ));
+    }
+    let normalized = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(
+        normalized.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        return Err(BackendError::new(
+            "PROJECT_NAME_RESERVED",
+            "Knowledge base name is reserved by Windows and cannot be used.",
+            true,
+            true,
+        ));
+    }
+    Ok(())
+}
+
 fn validate_root_for_creation(root_path: &str) -> Result<PathBuf, BackendError> {
     if root_path.trim().is_empty() {
         return Err(BackendError::new(
@@ -913,6 +1762,15 @@ fn validate_root_for_creation(root_path: &str) -> Result<PathBuf, BackendError> 
         ));
     }
     let root = PathBuf::from(root_path);
+    if root.to_string_lossy().chars().count() > 240 {
+        return Err(BackendError::new(
+            "PROJECT_PATH_TOO_LONG",
+            "The final knowledge base path is too long.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": root.to_string_lossy() })));
+    }
     let parent = root
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
@@ -926,13 +1784,19 @@ fn validate_root_for_creation(root_path: &str) -> Result<PathBuf, BackendError> 
             )
             .with_details(serde_json::json!({ "path": parent.to_string_lossy() })));
         }
+        if !parent.is_dir() {
+            return Err(BackendError::new(
+                "PROJECT_PARENT_INVALID",
+                "The selected project parent is not a directory.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": parent.to_string_lossy() })));
+        }
     }
 
     if root.exists() {
-        let is_non_empty = fs::read_dir(&root)
-            .map(|mut iter| iter.next().is_some())
-            .unwrap_or(false);
-        if is_non_empty {
+        if !normal_empty_directory(&root).unwrap_or(false) {
             return Err(BackendError::new(
                 "PROJECT_DIR_NOT_EMPTY",
                 "The selected directory is not empty. Create a project in an empty folder or open it as an existing project.",
@@ -943,6 +1807,97 @@ fn validate_root_for_creation(root_path: &str) -> Result<PathBuf, BackendError> 
         }
     }
     Ok(root)
+}
+
+fn prepare_default_project_parent_at(documents: &Path) -> Result<PathBuf, BackendError> {
+    let documents = documents.canonicalize().map_err(|error| {
+        BackendError::new(
+            "PROJECT_DEFAULT_PARENT_UNAVAILABLE",
+            "The system Documents directory is unavailable. Choose a parent folder instead.",
+            true,
+            true,
+        )
+        .with_details(
+            serde_json::json!({ "path": documents.to_string_lossy(), "error": error.to_string() }),
+        )
+    })?;
+    if !documents.is_dir() {
+        return Err(BackendError::new(
+            "PROJECT_DEFAULT_PARENT_UNAVAILABLE",
+            "The system Documents directory is unavailable. Choose a parent folder instead.",
+            true,
+            true,
+        ));
+    }
+
+    let parent = documents.join("LLM Wiki");
+    match fs::symlink_metadata(&parent) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(BackendError::new(
+                "PROJECT_DEFAULT_PARENT_UNAVAILABLE",
+                "Documents/LLM Wiki is not a normal directory. Choose a parent folder instead.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": parent.to_string_lossy() })));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::create_dir(&parent).map_err(|error| {
+                BackendError::new(
+                    "PROJECT_DEFAULT_PARENT_CREATE_FAILED",
+                    "The default Documents/LLM Wiki folder could not be created. Choose a parent folder instead.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": parent.to_string_lossy(), "error": error.to_string() }))
+            })?;
+            let metadata = fs::symlink_metadata(&parent).map_err(|error| {
+                BackendError::new(
+                    "PROJECT_DEFAULT_PARENT_CREATE_FAILED",
+                    "The default Documents/LLM Wiki folder could not be verified. Choose a parent folder instead.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": parent.to_string_lossy(), "error": error.to_string() }))
+            })?;
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(BackendError::new(
+                    "PROJECT_DEFAULT_PARENT_UNAVAILABLE",
+                    "Documents/LLM Wiki is not a normal directory. Choose a parent folder instead.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": parent.to_string_lossy() })));
+            }
+        }
+        Err(error) => {
+            return Err(BackendError::new(
+                "PROJECT_DEFAULT_PARENT_UNAVAILABLE",
+                "The default Documents/LLM Wiki folder could not be inspected. Choose a parent folder instead.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": parent.to_string_lossy(), "error": error.to_string() })));
+        }
+    }
+    parent.canonicalize().map_err(|error| {
+        BackendError::new(
+            "PROJECT_DEFAULT_PARENT_UNAVAILABLE",
+            "The default Documents/LLM Wiki folder could not be resolved. Choose a parent folder instead.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": parent.to_string_lossy(), "error": error.to_string() }))
+    })
+}
+
+fn normal_empty_directory(path: &Path) -> Result<bool, std::io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    Ok(fs::read_dir(path)?.next().is_none())
 }
 
 fn canonicalize_root(path: &str) -> Result<PathBuf, BackendError> {
@@ -971,54 +1926,263 @@ fn canonicalize_root(path: &str) -> Result<PathBuf, BackendError> {
         })
 }
 
-fn count_files(dir: &Path) -> usize {
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
-                .count()
-        })
+fn layout_markdown_count(context: &ProjectContext, roles: &[ProjectMarkdownRootRole]) -> usize {
+    context
+        .list_markdown_files_for_roles(roles)
+        .map(|files| files.len())
         .unwrap_or(0)
 }
 
-fn count_files_recursive(dir: &Path) -> usize {
-    let mut count = 0;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
+fn layout_source_count(context: &ProjectContext) -> usize {
+    let never_cancelled = || false;
+    let mut no_progress = |_, _| {};
+    count_inventory_sources(context, &never_cancelled, &mut no_progress).count
+}
+
+fn layout_task_count(context: &ProjectContext) -> usize {
+    let never_cancelled = || false;
+    let mut no_progress = |_, _| {};
+    count_inventory_tasks(context, &never_cancelled, &mut no_progress).count
+}
+
+#[derive(Default)]
+struct InventoryFileCount {
+    count: usize,
+    cancelled: bool,
+}
+
+fn layout_root_path(context: &ProjectContext, relative: &str) -> Option<PathBuf> {
+    if relative == "." {
+        Some(context.root.clone())
+    } else {
+        context.resolve_project_path(relative).ok()
+    }
+}
+
+fn count_inventory_markdown_roles<C, P>(
+    context: &ProjectContext,
+    roles: &[ProjectMarkdownRootRole],
+    cancelled: &C,
+    on_progress: &mut P,
+) -> InventoryFileCount
+where
+    C: Fn() -> bool,
+    P: FnMut(u64, String),
+{
+    let mut combined = InventoryFileCount::default();
+    for markdown_root in &context.layout.markdown_roots {
+        if !roles.contains(&markdown_root.role) {
+            continue;
+        }
+        let Some(root) = layout_root_path(context, &markdown_root.path) else {
+            continue;
+        };
+        let result = count_inventory_files(
+            &context.root,
+            &root,
+            true,
+            true,
+            markdown_root.path != ".",
+            cancelled,
+            on_progress,
+        );
+        combined.count += result.count;
+        if result.cancelled {
+            combined.cancelled = true;
+            return combined;
+        }
+    }
+    combined
+}
+
+fn count_inventory_sources<C, P>(
+    context: &ProjectContext,
+    cancelled: &C,
+    on_progress: &mut P,
+) -> InventoryFileCount
+where
+    C: Fn() -> bool,
+    P: FnMut(u64, String),
+{
+    // Native libraries retain their source-artifact contract: `raw/sources`
+    // contains originals of any type, not only Markdown. Compatible vaults
+    // have no app-owned evidence root, so their discovered Source roots are
+    // counted with the same Markdown policy used by the index.
+    let Some(evidence_root) = context.layout.evidence_root.as_deref() else {
+        return count_inventory_markdown_roles(
+            context,
+            &[ProjectMarkdownRootRole::Source],
+            cancelled,
+            on_progress,
+        );
+    };
+    let Some(root) = layout_root_path(context, &format!("{evidence_root}/sources")) else {
+        return InventoryFileCount::default();
+    };
+    count_inventory_files(
+        &context.root,
+        &root,
+        false,
+        false,
+        true,
+        cancelled,
+        on_progress,
+    )
+}
+
+fn count_inventory_tasks<C, P>(
+    context: &ProjectContext,
+    cancelled: &C,
+    on_progress: &mut P,
+) -> InventoryFileCount
+where
+    C: Fn() -> bool,
+    P: FnMut(u64, String),
+{
+    let Some(task_root) = context.layout.task_state_root.as_deref() else {
+        return InventoryFileCount::default();
+    };
+    let Some(root) = layout_root_path(context, task_root) else {
+        return InventoryFileCount::default();
+    };
+    count_inventory_files(
+        &context.root,
+        &root,
+        false,
+        false,
+        true,
+        cancelled,
+        on_progress,
+    )
+}
+
+fn count_inventory_files<C, P>(
+    project_root: &Path,
+    dir: &Path,
+    markdown_only: bool,
+    follow_contained_links: bool,
+    recursive: bool,
+    cancelled: &C,
+    on_progress: &mut P,
+) -> InventoryFileCount
+where
+    C: Fn() -> bool,
+    P: FnMut(u64, String),
+{
+    let mut result = InventoryFileCount::default();
+    let mut visited = 0_u64;
+    let canonical_root = if follow_contained_links {
+        match project_root.canonicalize() {
+            Ok(root) => Some(root),
+            Err(_) => return result,
+        }
+    } else {
+        None
+    };
+    let initial_entered_via_link = match canonical_root.as_ref() {
+        Some(_) => match project_descendant_path_enters_link(project_root, dir) {
+            Ok(entered_via_link) => entered_via_link,
+            Err(_) => return result,
+        },
+        None => match fs::symlink_metadata(dir) {
+            Ok(metadata) if inventory_metadata_is_link_or_reparse(&metadata) => return result,
+            Ok(_) => false,
+            Err(_) => return result,
+        },
+    };
+    let initial = match canonical_root.as_ref() {
+        Some(root) => match canonical_internal_read_path(root, dir, initial_entered_via_link) {
+            Ok(Some(path)) => path,
+            Ok(None) | Err(_) => return result,
+        },
+        None => dir.to_path_buf(),
+    };
+    let mut seen_directories = HashSet::new();
+    let mut seen_files = HashSet::new();
+    let mut stack = vec![(initial, initial_entered_via_link)];
+    while let Some((current, entered_via_link)) = stack.pop() {
+        if cancelled() {
+            result.cancelled = true;
+            return result;
+        }
+        if !seen_directories.insert(current.clone()) {
+            continue;
+        }
         let entries = match fs::read_dir(&current) {
             Ok(entries) => entries,
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            match entry.file_type() {
-                Ok(file_type) if file_type.is_file() => count += 1,
-                Ok(file_type) if file_type.is_dir() => stack.push(entry.path()),
-                _ => {}
+            if cancelled() {
+                result.cancelled = true;
+                return result;
+            }
+            visited += 1;
+            if visited % 64 == 0 {
+                on_progress(visited, "Inventorying project files".into());
+            }
+            let path = entry.path();
+            let Ok(link_metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let entered_via_link = entered_via_link || is_link_or_reparse(&link_metadata);
+            let path = if let Some(root) = canonical_root.as_ref() {
+                let Ok(Some(path)) = canonical_internal_read_path(root, &path, entered_via_link)
+                else {
+                    continue;
+                };
+                path
+            } else {
+                // Source and task-state inventory are not content-index
+                // readers, so descendants stay strict no-follow.
+                if inventory_metadata_is_link_or_reparse(&link_metadata) {
+                    continue;
+                }
+                path
+            };
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() && recursive {
+                stack.push((path, entered_via_link));
+            } else if metadata.is_file()
+                && (!markdown_only
+                    || path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("md")))
+                && seen_files.insert(path)
+            {
+                result.count += 1;
             }
         }
     }
-    count
+    on_progress(visited, "Inventory complete".into());
+    result
+}
+
+fn inventory_metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn graph_cache_has_content(path: &Path) -> bool {
     let Ok(contents) = fs::read_to_string(path) else {
         return false;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+    let Ok(graph) = serde_json::from_str::<GraphData>(&contents) else {
         return false;
     };
-    let nodes = value
-        .get("nodes")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
-    let edges = value
-        .get("edges")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
-    nodes > 0 || edges > 0
+    !graph.nodes.is_empty() || !graph.edges.is_empty()
 }
 
 fn has_child_named(root: &Path, expected: &str) -> bool {
@@ -1032,102 +2196,18 @@ fn has_child_named(root: &Path, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn loose_top_level_files(root: &Path) -> Vec<(String, String)> {
-    // Recursively enumerate loose files so the PendingAction preview reports the
-    // full set of files a later "organize" step would relocate — never just the
-    // top level. Skips dotfiles/dotdirs (e.g. .git, .obsidian, .app) everywhere.
-    let mut mapped = Vec::new();
-    let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
-    while let Some((dir, rel_prefix)) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if file_name.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            let rel = if rel_prefix.is_empty() {
-                file_name.clone()
-            } else {
-                format!("{rel_prefix}/{file_name}")
-            };
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if is_dir {
-                stack.push((path, rel));
-                continue;
-            }
-            if !path.is_file() {
-                continue;
-            }
-            mapped.push((rel, archive_target_for(&path)));
-        }
-    }
-    mapped.sort();
-    mapped
-}
-
-fn archive_target_for(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "pdf" => "raw/sources/pdfs/".to_string(),
-        "doc" | "docx" | "rtf" | "odt" => "raw/sources/docs/".to_string(),
-        "ppt" | "pptx" => "raw/sources/slides/".to_string(),
-        "xls" | "xlsx" | "csv" | "tsv" => "raw/sources/sheets/".to_string(),
-        "md" | "markdown" | "txt" => "raw/sources/markdown/".to_string(),
-        "url" | "webloc" => "raw/sources/links/".to_string(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" => "raw/assets/".to_string(),
-        _ => "raw/sources/other/".to_string(),
-    }
-}
-
-fn unique_archive_target(
-    context: &ProjectContext,
-    target_dir: &str,
-    file_name: &str,
-) -> Result<String, BackendError> {
-    let clean_dir = target_dir.trim_end_matches('/');
-    let candidate = format!("{clean_dir}/{file_name}");
-    if !context.resolve_project_path(&candidate)?.exists() {
-        return Ok(candidate);
-    }
-
-    let source_name = Path::new(file_name);
-    let stem = source_name
-        .file_stem()
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_name.to_string());
-    let extension = source_name
-        .extension()
-        .map(|value| format!(".{}", value.to_string_lossy()))
-        .unwrap_or_default();
-
-    for index in 1..1000 {
-        let candidate = format!("{clean_dir}/{stem}-{index}{extension}");
-        if !context.resolve_project_path(&candidate)?.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err(BackendError::new(
-        "FILE_ARCHIVE_TARGET_UNAVAILABLE",
-        "Could not find a safe archive target for the file.",
-        true,
-        true,
-    )
-    .with_details(serde_json::json!({ "fileName": file_name })))
-}
-
 fn normalize_root_key(path: &str) -> String {
-    path.trim_end_matches(['/', '\\'])
-        .replace('\\', "/")
-        .to_ascii_lowercase()
+    let mut normalized = path.trim_end_matches(['/', '\\']).replace('\\', "/");
+    if cfg!(windows) {
+        if let Some(without_device_prefix) = normalized.strip_prefix("//?/") {
+            normalized = without_device_prefix.to_string();
+            if let Some(unc_path) = normalized.strip_prefix("unc/") {
+                normalized = format!("//{unc_path}");
+            }
+        }
+        normalized = normalized.to_ascii_lowercase();
+    }
+    normalized
 }
 
 pub(crate) fn default_config_dir() -> PathBuf {
@@ -1146,15 +2226,15 @@ pub(crate) fn default_config_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::ProjectService;
-    use crate::models::confirmation::ConfirmationExecution;
-    use crate::models::confirmation::{PendingActionType, RiskLevel};
+    use crate::models::graph::GraphData;
     use crate::models::paths::ProjectContext;
     use crate::models::project::{
-        GraphState, IndexState, ProjectFilesystemAccess, ProjectTemplate,
+        GraphState, IndexState, ProjectFilesystemAccess, ProjectInventoryState, ProjectTemplate,
     };
-    use crate::services::GitService;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let stamp = std::time::SystemTime::now()
@@ -1169,6 +2249,44 @@ mod tests {
     fn service_in_temp() -> (ProjectService, PathBuf) {
         let config = unique_temp_dir("config");
         (ProjectService::with_config_dir(config.clone()), config)
+    }
+
+    #[test]
+    fn default_project_parent_creates_only_the_app_owned_documents_container() {
+        let documents = unique_temp_dir("documents");
+        let existing = documents.join("unrelated-notes.md");
+        fs::write(&existing, "leave me alone").unwrap();
+
+        let parent = super::prepare_default_project_parent_at(&documents).unwrap();
+
+        assert_eq!(parent, documents.join("LLM Wiki").canonicalize().unwrap());
+        assert!(parent.is_dir());
+        assert_eq!(fs::read_to_string(existing).unwrap(), "leave me alone");
+        assert_eq!(
+            fs::read_dir(&documents)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>()
+                .len(),
+            2
+        );
+
+        fs::remove_dir_all(documents).unwrap();
+    }
+
+    #[test]
+    fn default_project_parent_never_reuses_a_file_or_link_like_container() {
+        let documents = unique_temp_dir("documents-invalid");
+        fs::write(documents.join("LLM Wiki"), "not a directory").unwrap();
+
+        let error = super::prepare_default_project_parent_at(&documents).unwrap_err();
+
+        assert_eq!(error.code, "PROJECT_DEFAULT_PARENT_UNAVAILABLE");
+        assert_eq!(
+            fs::read_to_string(documents.join("LLM Wiki")).unwrap(),
+            "not a directory"
+        );
+        fs::remove_dir_all(documents).unwrap();
     }
 
     fn expected_dirs() -> &'static [&'static str] {
@@ -1203,6 +2321,7 @@ mod tests {
             "wiki/log.md",
             "wiki/overview.md",
             ".app/settings.json",
+            ".app/project.json",
             ".app/agent-config.json",
             ".app/bookmarks.json",
             ".app/graph-cache.json",
@@ -1355,19 +2474,166 @@ mod tests {
         assert!(purpose.contains("Research knowledge base"));
         let schema = fs::read_to_string(target.join("schema.md")).unwrap();
         assert!(schema.contains("research"));
+        let graph_cache: GraphData =
+            serde_json::from_slice(&fs::read(target.join(".app/graph-cache.json")).unwrap())
+                .expect("new projects must write the current empty graph cache schema");
+        assert!(graph_cache.nodes.is_empty());
+        assert!(graph_cache.edges.is_empty());
 
         assert_eq!(summary.template, ProjectTemplate::Research);
+        assert_eq!(
+            service.stable_native_project_id(&target),
+            Some(summary.project_id.clone()),
+            "new native knowledge bases persist the ID used for future relocation"
+        );
         assert_eq!(summary.wiki_page_count, 3); // index.md, log.md, overview.md
         assert!(summary.health.is_wiki_project);
         assert!(
             target.join(".git").exists(),
             "new projects must initialize Git"
         );
+        assert!(
+            fs::read_dir(&root).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(super::PROJECT_CREATION_STAGING_PREFIX)),
+            "successful creation must not leave a staging sibling"
+        );
 
         let recents = service.list_recent_projects().unwrap_or_default();
         let _ = recents;
         fs::remove_dir_all(config).ok();
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn project_creation_failure_removes_an_owned_staging_directory_and_reports_it() {
+        let parent = unique_temp_dir("create-rollback");
+        let target = parent.join("target");
+        let staging = parent.join(format!("{}test", super::PROJECT_CREATION_STAGING_PREFIX));
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("partial.md"), "partial").unwrap();
+
+        let error = super::project_creation_failure(
+            crate::errors::BackendError::new("PROJECT_TEST_FAILURE", "test", true, true),
+            &target,
+            &staging,
+            false,
+        );
+
+        assert!(!staging.exists());
+        assert_eq!(error.code, "PROJECT_TEST_FAILURE");
+        assert_eq!(
+            error.details.unwrap()["recovery"]["rollback"],
+            serde_json::json!("staging_removed")
+        );
+        fs::remove_dir_all(parent).ok();
+    }
+
+    #[test]
+    fn project_creation_failure_never_removes_a_preexisting_empty_target() {
+        let parent = unique_temp_dir("create-preexisting-recovery");
+        let target = parent.join("target");
+        let staging = parent.join(format!("{}test", super::PROJECT_CREATION_STAGING_PREFIX));
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&staging).unwrap();
+        let error = super::project_creation_failure(
+            crate::errors::BackendError::new("PROJECT_TEST_FAILURE", "test", true, true),
+            &target,
+            &staging,
+            true,
+        );
+
+        assert!(target.exists());
+        assert!(!staging.exists());
+        assert_eq!(
+            error.details.unwrap()["recovery"]["rollback"],
+            serde_json::json!("staging_removed")
+        );
+        fs::remove_dir_all(parent).ok();
+    }
+
+    #[test]
+    fn create_project_uses_staging_for_a_preexisting_empty_target() {
+        let (service, config) = service_in_temp();
+        let parent = unique_temp_dir("create-existing-empty");
+        let target = parent.join("target");
+        fs::create_dir(&target).unwrap();
+
+        service
+            .create_project(
+                target.to_string_lossy().as_ref(),
+                "Existing empty",
+                ProjectTemplate::General,
+            )
+            .expect("an empty explicit target should be created transactionally");
+
+        assert!(target.join(".git").exists());
+        assert!(target.join("wiki/index.md").exists());
+        assert!(fs::read_dir(&parent).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.starts_with(super::PROJECT_CREATION_STAGING_PREFIX)
+                && !name.starts_with(super::PROJECT_CREATION_BACKUP_PREFIX)
+        }));
+
+        fs::remove_dir_all(parent).ok();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn staging_install_restores_a_target_that_changed_after_initial_validation() {
+        let parent = unique_temp_dir("create-race-recovery");
+        let target = parent.join("target");
+        fs::create_dir(&target).unwrap();
+        let staging = parent.join(format!("{}test", super::PROJECT_CREATION_STAGING_PREFIX));
+        fs::create_dir(&staging).unwrap();
+        fs::write(target.join("concurrent.txt"), "external write").unwrap();
+
+        let error = super::install_staged_project(&target, &staging, true)
+            .expect_err("a changed target must not be replaced");
+
+        assert_eq!(error.code, "PROJECT_DIR_CHANGED_DURING_CREATION");
+        assert_eq!(
+            fs::read_to_string(target.join("concurrent.txt")).unwrap(),
+            "external write"
+        );
+        assert!(
+            staging.exists(),
+            "caller retains staging until recovery reporting runs"
+        );
+        super::remove_owned_staging_root(&staging).unwrap();
+        fs::remove_dir_all(parent).ok();
+    }
+
+    #[test]
+    fn create_project_rejects_invalid_or_windows_reserved_names_before_writing() {
+        let (service, config) = service_in_temp();
+        let root = unique_temp_dir("invalid-project-name");
+        let invalid_target = root.join("clean-target");
+        let invalid = service
+            .create_project(
+                invalid_target.to_string_lossy().as_ref(),
+                "invalid*name",
+                ProjectTemplate::General,
+            )
+            .expect_err("invalid names must be rejected before creating files");
+        assert_eq!(invalid.code, "PROJECT_NAME_INVALID");
+        assert!(!invalid_target.exists());
+
+        let reserved_target = root.join("reserved-target");
+        let reserved = service
+            .create_project(
+                reserved_target.to_string_lossy().as_ref(),
+                "CON",
+                ProjectTemplate::General,
+            )
+            .expect_err("Windows-reserved names must be rejected on every platform");
+        assert_eq!(reserved.code, "PROJECT_NAME_RESERVED");
+        assert!(!reserved_target.exists());
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(config).ok();
     }
 
     #[test]
@@ -1418,7 +2684,7 @@ mod tests {
     }
 
     #[test]
-    fn open_project_returns_pending_action_for_ordinary_folder_without_moving() {
+    fn open_project_rejects_ordinary_folder_without_creating_or_moving_files() {
         let (service, _config) = service_in_temp();
         let root = unique_temp_dir("ordinary");
         fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
@@ -1427,142 +2693,18 @@ mod tests {
         fs::create_dir_all(root.join("notes")).unwrap();
         fs::write(root.join("notes").join("deep.docx"), "doc").unwrap();
 
-        let outcome = service
+        let err = service
             .open_project(root.to_string_lossy().as_ref())
-            .unwrap();
-        let pending = match outcome {
-            crate::models::project::OpenProjectResponse {
-                kind: crate::models::project::OpenProjectKind::NeedsConfirmation,
-                pending_action: Some(pending_action),
-                ..
-            } => pending_action,
-            _ => panic!("ordinary folder should require confirmation"),
-        };
+            .expect_err("ordinary folders must be routed through read-only assessment");
 
-        assert_eq!(pending.action_type, PendingActionType::InitializeFolder);
-        assert_eq!(pending.risk_level, RiskLevel::Medium);
-        assert!(pending.affected_paths.contains(&"report.pdf".to_string()));
-        assert!(pending.affected_paths.contains(&"note.md".to_string()));
-        // Nested files must appear so the preview never understates what a later
-        // organize step would relocate.
-        assert!(pending
-            .affected_paths
-            .contains(&"notes/deep.docx".to_string()));
-        // Critical: nothing moved before confirmation.
+        assert_eq!(err.code, "PROJECT_OPEN_REQUIRES_ASSESSMENT");
         assert!(root.join("report.pdf").exists());
         assert!(root.join("note.md").exists());
+        assert!(root.join("photo.png").exists());
+        assert!(root.join("notes/deep.docx").exists());
         assert!(!root.join("raw").exists());
-
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn confirm_folder_initialization_revalidates_state_and_initializes_git_project() {
-        let (service, _config) = service_in_temp();
-        let root = unique_temp_dir("confirm-ordinary");
-        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
-        fs::create_dir_all(root.join("notes")).unwrap();
-        fs::write(root.join("notes").join("deep.docx"), "doc").unwrap();
-
-        let pending = service.plan_folder_initialization(&root).unwrap();
-        let execution = service
-            .folder_initialization_execution(&root, &pending)
-            .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
-            unreachable!()
-        };
-        let (summary, checkpoint_exists) = service
-            .confirm_folder_initialization(&root, &pending, &file_hashes)
-            .expect("confirmation should initialize the folder");
-
-        assert!(checkpoint_exists);
-        assert!(root.join(".git").exists());
-        assert!(root.join("purpose.md").exists());
-        assert!(root.join("raw/sources/pdfs/report.pdf").exists());
-        assert!(root.join("raw/sources/docs/deep.docx").exists());
-        assert!(!root.join("report.pdf").exists());
-        assert!(summary.health.is_wiki_project);
-
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn confirm_folder_initialization_rejects_state_mismatch() {
-        let (service, _config) = service_in_temp();
-        let root = unique_temp_dir("confirm-mismatch");
-        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
-        let pending = service.plan_folder_initialization(&root).unwrap();
-        let execution = service
-            .folder_initialization_execution(&root, &pending)
-            .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
-            unreachable!()
-        };
-        fs::write(root.join("new.md"), "# new").unwrap();
-
-        let err = service
-            .confirm_folder_initialization(&root, &pending, &file_hashes)
-            .expect_err("changed folder state must fail safely");
-        assert_eq!(err.code, "CONFIRMATION_STATE_MISMATCH");
-        assert!(root.join("report.pdf").exists());
-        assert!(root.join("new.md").exists());
-
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn confirm_folder_initialization_rejects_same_path_content_change() {
-        let (service, _config) = service_in_temp();
-        let root = unique_temp_dir("confirm-content-mismatch");
-        fs::write(root.join("report.pdf"), "first").unwrap();
-        let pending = service.plan_folder_initialization(&root).unwrap();
-        let execution = service
-            .folder_initialization_execution(&root, &pending)
-            .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
-            unreachable!()
-        };
-        fs::write(root.join("report.pdf"), "changed").unwrap();
-
-        let err = service
-            .confirm_folder_initialization(&root, &pending, &file_hashes)
-            .expect_err("same-path content changes must fail safely");
-        assert_eq!(err.code, "CONFIRMATION_STATE_MISMATCH");
-        assert!(root.join("report.pdf").exists());
-
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn confirm_folder_initialization_checkpoints_existing_dirty_repo_before_changes() {
-        let (service, _config) = service_in_temp();
-        let root = unique_temp_dir("confirm-dirty-repo");
-        fs::write(root.join("existing.md"), "# existing").unwrap();
-        let context = ProjectContext::new("project-1", root.clone());
-        GitService
-            .initialize_repository(&context, "Initial external repo")
-            .unwrap();
-        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
-
-        let pending = service.plan_folder_initialization(&root).unwrap();
-        let execution = service
-            .folder_initialization_execution(&root, &pending)
-            .unwrap();
-        let ConfirmationExecution::InitializeFolder { file_hashes, .. } = execution else {
-            unreachable!()
-        };
-        service
-            .confirm_folder_initialization(&root, &pending, &file_hashes)
-            .unwrap();
-
-        let log = std::process::Command::new("git")
-            .args(["log", "--oneline", "--format=%s"])
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        let subjects = String::from_utf8_lossy(&log.stdout);
-        assert!(subjects.contains("Before folder initialization"));
-        assert!(subjects.contains("Initialize wiki project structure"));
+        assert!(!root.join(".app").exists());
+        assert!(!root.join(".git").exists());
 
         fs::remove_dir_all(root).ok();
     }
@@ -1645,7 +2787,7 @@ mod tests {
         fs::write(root.join("raw/sources/docs/brief.docx"), "doc").unwrap();
         fs::write(
             root.join(".app/graph-cache.json"),
-            "{\n  \"nodes\": [],\n  \"edges\": []\n}",
+            serde_json::to_string(&GraphData::empty(String::new())).unwrap(),
         )
         .unwrap();
 
@@ -1657,12 +2799,174 @@ mod tests {
 
         fs::write(
             root.join(".app/graph-cache.json"),
-            "{\n  \"nodes\": [{\"id\":\"a\"}],\n  \"edges\": []\n}",
+            r#"{
+  "nodes": [{
+    "id": "a",
+    "path": "wiki/a.md",
+    "label": "A",
+    "type": "concept",
+    "tags": [],
+    "starred": false,
+    "degree": 0
+  }],
+  "edges": [],
+  "contentHash": "hash",
+  "builtAt": "2026-08-03T00:00:00Z"
+}"#,
         )
         .unwrap();
         let summary = service.scan_project(&context, Some("Metadata"));
         assert_eq!(summary.graph_state, GraphState::Cached);
 
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn post_open_inventory_is_read_only_and_reports_ready_counts() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("background-inventory");
+        fs::create_dir_all(root.join("wiki/nested")).unwrap();
+        fs::create_dir_all(root.join("raw/sources/pdfs")).unwrap();
+        fs::create_dir_all(root.join(".app/tasks")).unwrap();
+        fs::write(root.join("wiki/index.md"), "# Index").unwrap();
+        fs::write(root.join("wiki/nested/notes.MD"), "# Notes").unwrap();
+        fs::write(root.join("wiki/nested/ignore.txt"), "not markdown").unwrap();
+        fs::write(root.join("raw/sources/pdfs/report.pdf"), "pdf").unwrap();
+        fs::write(root.join(".app/tasks/previous.json"), "{}").unwrap();
+        let context = ProjectContext::new("inventory", root.clone());
+
+        let opening = service.quick_project_summary(&context, Some("Inventory"));
+        assert_eq!(opening.inventory_state, ProjectInventoryState::Scanning);
+        assert_eq!(opening.wiki_page_count, 0);
+
+        let summary =
+            service.scan_project_inventory(&context, Some("Inventory"), || false, |_, _| {});
+        assert_eq!(summary.inventory_state, ProjectInventoryState::Ready);
+        assert_eq!(summary.wiki_page_count, 2);
+        assert_eq!(summary.source_count, 1);
+        assert_eq!(summary.task_count, 1);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compatible_layout_summary_and_inventory_follow_resolved_roles() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("compatible-layout-inventory");
+        fs::create_dir_all(root.join("pages")).unwrap();
+        fs::create_dir_all(root.join("sources")).unwrap();
+        fs::create_dir_all(root.join(".app/compat")).unwrap();
+        fs::write(root.join("index.md"), "# Root index").unwrap();
+        fs::write(root.join("pages/page.md"), "# Page").unwrap();
+        fs::write(root.join("sources/source.md"), "# Source").unwrap();
+        fs::write(root.join(".app/compat/purpose.md"), "compat purpose").unwrap();
+        fs::write(root.join(".app/compat/schema.md"), "compat schema").unwrap();
+        let context = ProjectContext::new("compatible-inventory", root.clone())
+            .with_resolved_layout()
+            .expect("compatible layout should resolve");
+
+        let summary = service.scan_project(&context, Some("Compatible"));
+        assert_eq!(summary.wiki_page_count, 2, "root + pages Markdown only");
+        assert_eq!(summary.source_count, 1, "Source role is counted separately");
+        assert_eq!(summary.task_count, 0, "compatible layout has no task root");
+
+        let inventory =
+            service.scan_project_inventory(&context, Some("Compatible"), || false, |_, _| {});
+        assert_eq!(inventory.inventory_state, ProjectInventoryState::Ready);
+        assert_eq!(inventory.wiki_page_count, 2);
+        assert_eq!(inventory.source_count, 1);
+        assert_eq!(inventory.task_count, 0);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn post_open_inventory_returns_partial_counts_when_cancelled() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("cancelled-inventory");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        for index in 0..96 {
+            fs::write(root.join("wiki").join(format!("page-{index}.md")), "# Page").unwrap();
+        }
+        let context = ProjectContext::new("inventory", root.clone());
+        let cancelled = AtomicBool::new(false);
+        let summary = service.scan_project_inventory(
+            &context,
+            None,
+            || cancelled.load(Ordering::SeqCst),
+            |current, _| {
+                if current >= 64 {
+                    cancelled.store(true, Ordering::SeqCst);
+                }
+            },
+        );
+
+        assert_eq!(summary.inventory_state, ProjectInventoryState::Partial);
+        assert!(summary.wiki_page_count < 96);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_open_inventory_does_not_follow_windows_junctions() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("inventory-junction-root");
+        let external = unique_temp_dir("inventory-junction-external");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/index.md"), "# Index").unwrap();
+        fs::write(external.join("outside.md"), "# Outside").unwrap();
+        let junction = root.join("wiki").join("linked");
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                junction.to_string_lossy().as_ref(),
+                external.to_string_lossy().as_ref(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "junction setup failed");
+
+        let context = ProjectContext::new("inventory", root.clone());
+        let summary = service.scan_project_inventory(&context, None, || false, |_, _| {});
+        assert_eq!(summary.wiki_page_count, 1);
+
+        fs::remove_dir(junction).ok();
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(external).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_open_inventory_counts_markdown_through_contained_windows_junctions_once() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("inventory-contained-junction-root");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::create_dir_all(root.join("shared")).unwrap();
+        fs::write(root.join("wiki/index.md"), "# Index").unwrap();
+        fs::write(root.join("shared/linked.md"), "# Linked").unwrap();
+        let junction = root.join("wiki").join("linked");
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(root.join("shared"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "junction setup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let context = ProjectContext::new("inventory", root.clone());
+        let summary = service.scan_project_inventory(&context, None, || false, |_, _| {});
+        assert_eq!(summary.wiki_page_count, 2);
+
+        fs::remove_dir(junction).ok();
         fs::remove_dir_all(root).ok();
     }
 
@@ -1690,6 +2994,265 @@ mod tests {
         assert_eq!(listed[0].project_id, "missing");
         assert!(listed[0].missing);
         assert!(service.recent_projects_path().exists());
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn removing_a_recent_project_only_updates_the_matching_global_entry() {
+        let (service, config) = service_in_temp();
+        let root_a = unique_temp_dir("recent-remove-a");
+        let root_b = unique_temp_dir("recent-remove-b");
+        let entry_a = crate::models::project::RecentProject {
+            project_id: "project-a".into(),
+            name: "A".into(),
+            root_path: root_a.to_string_lossy().into_owned(),
+            template: ProjectTemplate::General,
+            opened_at: "2026-08-03T00:00:00Z".into(),
+            wiki_page_count: 0,
+            source_count: 0,
+            task_count: 0,
+            index_state: IndexState::Missing,
+            graph_state: GraphState::Missing,
+            missing: false,
+        };
+        let entry_b = crate::models::project::RecentProject {
+            project_id: "project-b".into(),
+            name: "B".into(),
+            root_path: root_b.to_string_lossy().into_owned(),
+            ..entry_a.clone()
+        };
+        service.remember_recent_project(entry_a.clone()).unwrap();
+        service.remember_recent_project(entry_b.clone()).unwrap();
+        fs::remove_dir(&root_b).unwrap();
+
+        let remaining = service
+            .remove_recent_project(&entry_a.project_id, &entry_a.root_path)
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].project_id, entry_b.project_id);
+        assert!(
+            !remaining[0].missing,
+            "removal must not re-assess another project"
+        );
+        assert!(root_a.exists());
+        assert!(!root_b.exists());
+
+        let wrong_root = service
+            .remove_recent_project(&entry_b.project_id, root_a.to_string_lossy().as_ref())
+            .unwrap();
+        assert_eq!(wrong_root.len(), 1);
+        assert_eq!(wrong_root[0].project_id, entry_b.project_id);
+        fs::remove_dir_all(root_a).ok();
+        fs::remove_dir_all(root_b).ok();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn relocating_a_recent_project_replaces_only_the_verified_exact_entry() {
+        let (service, config) = service_in_temp();
+        let old_root = config.join("missing-native");
+        let new_root = unique_temp_dir("recent-relocated-native");
+        let other_root = unique_temp_dir("recent-relocated-other");
+        let old_entry = crate::models::project::RecentProject {
+            project_id: uuid::Uuid::new_v4().to_string(),
+            name: "Moved native".into(),
+            root_path: old_root.to_string_lossy().into_owned(),
+            template: ProjectTemplate::General,
+            opened_at: "2026-08-03T00:00:00Z".into(),
+            wiki_page_count: 0,
+            source_count: 0,
+            task_count: 0,
+            index_state: IndexState::Missing,
+            graph_state: GraphState::Missing,
+            missing: true,
+        };
+        let other_entry = crate::models::project::RecentProject {
+            project_id: uuid::Uuid::new_v4().to_string(),
+            name: "Other".into(),
+            root_path: other_root.to_string_lossy().into_owned(),
+            ..old_entry.clone()
+        };
+        service
+            .remember_recent_project(other_entry.clone())
+            .unwrap();
+        service.remember_recent_project(old_entry.clone()).unwrap();
+        let relocated = crate::models::project::RecentProject {
+            root_path: new_root.to_string_lossy().into_owned(),
+            opened_at: "2026-08-03T00:00:01Z".into(),
+            missing: false,
+            ..old_entry.clone()
+        };
+        fs::create_dir_all(new_root.join(".app")).unwrap();
+        fs::write(
+            new_root.join(super::NATIVE_PROJECT_ID_FILE),
+            format!(r#"{{"projectId":"{}"}}"#, old_entry.project_id),
+        )
+        .unwrap();
+        fs::create_dir_all(other_root.join(".app")).unwrap();
+        fs::write(
+            other_root.join(super::NATIVE_PROJECT_ID_FILE),
+            format!(r#"{{"projectId":"{}"}}"#, old_entry.project_id),
+        )
+        .unwrap();
+
+        fs::create_dir_all(&old_root).unwrap();
+        let source_available = service
+            .relocate_recent_project(
+                &old_entry.project_id,
+                &old_entry.root_path,
+                relocated.clone(),
+            )
+            .expect_err("an available old root must not be treated as missing");
+        assert_eq!(source_available.code, "PROJECT_RELOCATION_SOURCE_AVAILABLE");
+        fs::remove_dir_all(&old_root).unwrap();
+
+        fs::write(
+            new_root.join(super::NATIVE_PROJECT_ID_FILE),
+            format!(r#"{{"projectId":"{}"}}"#, uuid::Uuid::new_v4()),
+        )
+        .unwrap();
+        let id_changed = service
+            .relocate_recent_project(
+                &old_entry.project_id,
+                &old_entry.root_path,
+                relocated.clone(),
+            )
+            .expect_err("the durable ID must be checked again immediately before write");
+        assert_eq!(id_changed.code, "PROJECT_RELOCATION_ID_MISMATCH");
+        assert_eq!(service.list_recent_projects().unwrap().len(), 2);
+        fs::write(
+            new_root.join(super::NATIVE_PROJECT_ID_FILE),
+            format!(r#"{{"projectId":"{}"}}"#, old_entry.project_id),
+        )
+        .unwrap();
+
+        let projects = service
+            .relocate_recent_project(&old_entry.project_id, &old_entry.root_path, relocated)
+            .unwrap();
+
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].project_id, old_entry.project_id);
+        assert_eq!(projects[0].root_path, new_root.to_string_lossy());
+        assert_eq!(projects[1].project_id, other_entry.project_id);
+        assert!(!old_root.exists());
+        assert!(new_root.exists());
+        assert!(other_root.exists());
+
+        let conflict = crate::models::project::RecentProject {
+            root_path: other_root.to_string_lossy().into_owned(),
+            ..old_entry.clone()
+        };
+        fs::remove_dir_all(&new_root).unwrap();
+        let error = service
+            .relocate_recent_project(&old_entry.project_id, &new_root.to_string_lossy(), conflict)
+            .expect_err("a different recent entry must not be replaced");
+        assert_eq!(error.code, "PROJECT_RECENT_RELOCATION_TARGET_CONFLICT");
+
+        fs::remove_dir_all(new_root).ok();
+        fs::remove_dir_all(other_root).ok();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn recent_root_normalization_only_folds_case_on_windows() {
+        let upper = super::normalize_root_key("D:/Knowledge/Foo");
+        let lower = super::normalize_root_key("D:/Knowledge/foo");
+        if cfg!(windows) {
+            assert_eq!(upper, lower);
+        } else {
+            assert_ne!(upper, lower);
+        }
+    }
+
+    #[test]
+    fn native_relocation_identity_fails_closed_without_a_valid_uuid_file() {
+        let (service, config) = service_in_temp();
+        let root = unique_temp_dir("recent-relocation-identity");
+        fs::create_dir_all(root.join(".app")).unwrap();
+
+        let missing = service
+            .require_stable_native_project_id(&root)
+            .expect_err("missing identity must not prove a move");
+        assert_eq!(missing.code, "PROJECT_RELOCATION_ID_UNAVAILABLE");
+
+        fs::write(
+            root.join(super::NATIVE_PROJECT_ID_FILE),
+            r#"{"projectId":"not-a-uuid"}"#,
+        )
+        .unwrap();
+        let invalid = service
+            .require_stable_native_project_id(&root)
+            .expect_err("malformed identity must not prove a move");
+        assert_eq!(invalid.code, "PROJECT_RELOCATION_ID_INVALID");
+
+        let expected = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            root.join(super::NATIVE_PROJECT_ID_FILE),
+            format!(r#"{{"projectId":"{expected}"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            service.require_stable_native_project_id(&root).unwrap(),
+            expected
+        );
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn concurrent_recent_remember_and_remove_keep_both_updates() {
+        let (service, config) = service_in_temp();
+        let service = Arc::new(service);
+        let root_a = unique_temp_dir("recent-concurrent-a");
+        let root_b = unique_temp_dir("recent-concurrent-b");
+        let entry_a = crate::models::project::RecentProject {
+            project_id: "project-a".into(),
+            name: "A".into(),
+            root_path: root_a.to_string_lossy().into_owned(),
+            template: ProjectTemplate::General,
+            opened_at: "2026-08-03T00:00:00Z".into(),
+            wiki_page_count: 0,
+            source_count: 0,
+            task_count: 0,
+            index_state: IndexState::Missing,
+            graph_state: GraphState::Missing,
+            missing: false,
+        };
+        let entry_b = crate::models::project::RecentProject {
+            project_id: "project-b".into(),
+            name: "B".into(),
+            root_path: root_b.to_string_lossy().into_owned(),
+            opened_at: "2026-08-03T00:00:01Z".into(),
+            ..entry_a.clone()
+        };
+        service.remember_recent_project(entry_a.clone()).unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let remover_service = Arc::clone(&service);
+        let remover_barrier = Arc::clone(&barrier);
+        let remover_entry = entry_a.clone();
+        let remover = std::thread::spawn(move || {
+            remover_barrier.wait();
+            remover_service
+                .remove_recent_project(&remover_entry.project_id, &remover_entry.root_path)
+        });
+        let remember_service = Arc::clone(&service);
+        let remember_barrier = Arc::clone(&barrier);
+        let rememberer = std::thread::spawn(move || {
+            remember_barrier.wait();
+            remember_service.remember_recent_project(entry_b)
+        });
+        barrier.wait();
+
+        remover.join().unwrap().unwrap();
+        rememberer.join().unwrap().unwrap();
+        let projects = service.list_recent_projects().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].project_id, "project-b");
+
+        fs::remove_dir_all(root_a).ok();
+        fs::remove_dir_all(root_b).ok();
         fs::remove_dir_all(config).ok();
     }
 
@@ -1803,6 +3366,166 @@ mod tests {
         assert_eq!(
             fs::read(root.join(".app/compat/schema.md")).unwrap(),
             schema
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compatible_guidance_serializes_same_process_enablement() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("compatible-concurrent");
+        let context = ProjectContext::new("compatible", root.clone());
+
+        std::thread::scope(|scope| {
+            let first = scope
+                .spawn(|| service.enable_compatible_guidance(&context, ProjectTemplate::Business));
+            let second = scope
+                .spawn(|| service.enable_compatible_guidance(&context, ProjectTemplate::Business));
+
+            assert!(first.join().unwrap().is_ok());
+            assert!(second.join().unwrap().is_ok());
+        });
+
+        assert_eq!(
+            fs::read_to_string(root.join(".app/compat/purpose.md")).unwrap(),
+            super::template_purpose(ProjectTemplate::Business)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".app/compat/schema.md")).unwrap(),
+            super::template_schema(ProjectTemplate::Business)
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn graph_cache_repair_preserves_invalid_bytes_and_regenerates_only_cache() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("graph-cache-repair");
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        let invalid = b"{ graph cache is corrupt";
+        fs::write(root.join(".app/graph-cache.json"), invalid).unwrap();
+        fs::write(root.join("wiki/notes.md"), "# Preserve me\n").unwrap();
+        let context = ProjectContext::new("recovery", root.clone());
+
+        let plan = service
+            .prepare_graph_cache_repair_plan(
+                &context,
+                "identity".into(),
+                "revision".into(),
+                Some("head".into()),
+                Vec::new(),
+            )
+            .unwrap();
+        let changed = service
+            .apply_graph_cache_repair_plan(&context, &plan)
+            .unwrap();
+
+        assert_eq!(changed.len(), 2);
+        let operation = plan.operations.first().unwrap();
+        assert_eq!(
+            fs::read(root.join(&operation.backup_path)).unwrap(),
+            invalid
+        );
+        let repaired: crate::models::graph::GraphData =
+            serde_json::from_slice(&fs::read(root.join(".app/graph-cache.json")).unwrap()).unwrap();
+        assert!(repaired.nodes.is_empty());
+        assert!(repaired.edges.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/notes.md")).unwrap(),
+            "# Preserve me\n"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn graph_cache_repair_can_follow_a_required_git_checkpoint() {
+        let (service, config) = service_in_temp();
+        let root = unique_temp_dir("graph-cache-repair-checkpoint");
+        let target = root.join("knowledge-base");
+        let summary = service
+            .create_project(
+                target.to_string_lossy().as_ref(),
+                "Knowledge Base",
+                ProjectTemplate::General,
+            )
+            .unwrap();
+        let context = ProjectContext::new(summary.project_id, target.clone());
+        let invalid = b"{ invalid graph cache";
+        fs::write(target.join(".app/graph-cache.json"), invalid).unwrap();
+
+        let git = crate::services::git_service::GitService;
+        let status = git.repository_status(&context).unwrap();
+        let expected_paths = git.changed_paths(&context).unwrap();
+        let plan = service
+            .prepare_graph_cache_repair_plan(
+                &context,
+                "identity".into(),
+                "revision".into(),
+                status.head.clone(),
+                expected_paths.clone(),
+            )
+            .unwrap();
+        git.verify_checkpoint_state(&context, status.head.as_deref(), &expected_paths)
+            .unwrap();
+        let checkpoint = git
+            .create_checkpoint(
+                &context,
+                crate::models::git::CheckpointPurpose::HighRiskOperation,
+                "Checkpoint before project recovery repair",
+            )
+            .unwrap();
+        assert!(checkpoint.created);
+        assert!(checkpoint
+            .affected_paths
+            .contains(&".app/graph-cache.json".to_string()));
+
+        service
+            .apply_graph_cache_repair_plan(&context, &plan)
+            .unwrap();
+        let operation = plan.operations.first().unwrap();
+        assert_eq!(
+            fs::read(target.join(&operation.backup_path)).unwrap(),
+            invalid
+        );
+        let repaired: GraphData =
+            serde_json::from_slice(&fs::read(target.join(".app/graph-cache.json")).unwrap())
+                .unwrap();
+        assert!(repaired.nodes.is_empty());
+        assert!(repaired.edges.is_empty());
+
+        fs::remove_dir_all(config).ok();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn graph_cache_repair_refuses_a_target_changed_after_preview() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("graph-cache-repair-stale");
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::write(root.join(".app/graph-cache.json"), "{ invalid").unwrap();
+        let context = ProjectContext::new("recovery", root.clone());
+        let plan = service
+            .prepare_graph_cache_repair_plan(
+                &context,
+                "identity".into(),
+                "revision".into(),
+                Some("head".into()),
+                Vec::new(),
+            )
+            .unwrap();
+        fs::write(root.join(".app/graph-cache.json"), "{ changed").unwrap();
+
+        let error = service
+            .apply_graph_cache_repair_plan(&context, &plan)
+            .unwrap_err();
+
+        assert_eq!(error.code, "PROJECT_REPAIR_TARGET_CHANGED");
+        assert!(!root.join(".app/recovery-backups").exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".app/graph-cache.json")).unwrap(),
+            "{ changed"
         );
         fs::remove_dir_all(root).ok();
     }

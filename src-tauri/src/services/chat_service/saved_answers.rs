@@ -86,7 +86,7 @@ impl ChatService {
             None => format!("wiki/queries/{fallback_slug}.md"),
         };
 
-        let absolute = context.resolve_project_path(&resolved)?;
+        let absolute = context.resolve_wiki_write_path(&resolved)?;
         let exists = absolute.exists();
 
         let (mode, checkpoint) = if !exists {
@@ -141,6 +141,10 @@ impl ChatService {
             )
         };
 
+        // The checkpoint can take time; revalidate the semantic write root
+        // immediately before the mutation so a linked wiki descendant cannot
+        // become a write target between the initial preflight and this write.
+        context.resolve_wiki_write_path(&resolved)?;
         self.file_store
             .write_markdown_checked(context, &resolved, markdown, mode)?;
         invalidate_graph_cache(context);
@@ -203,14 +207,18 @@ fn validate_query_path(path: &str) -> Result<String, BackendError> {
 }
 
 fn invalidate_graph_cache(context: &ProjectContext) {
-    let path = context.app_dir.join("graph-cache.json");
+    let Ok(path) = context.resolve_project_write_path(".app/graph-cache.json") else {
+        return;
+    };
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
 }
 
 fn append_save_log(context: &ProjectContext, relative_path: &str) {
-    let log_path = context.wiki_dir.join("log.md");
+    let Ok(log_path) = context.resolve_wiki_write_path("wiki/log.md") else {
+        return;
+    };
     if !log_path.exists() {
         return;
     }

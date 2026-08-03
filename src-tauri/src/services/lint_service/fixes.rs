@@ -50,6 +50,7 @@ impl LintService {
             )
             .with_details(serde_json::json!({ "path": issue.path })));
         }
+        context.resolve_wiki_write_path(&issue.path)?;
         if matches!(
             issue.issue_type,
             LintIssueType::MissingFrontmatter | LintIssueType::DeadLink | LintIssueType::IndexDrift
@@ -246,6 +247,7 @@ impl LintService {
             .with_details(serde_json::json!({ "path": path }))
         })?;
         validate_scan_hash(issue, expected)?;
+        context.resolve_wiki_write_path(path)?;
         let raw = self.file_store.read_markdown(context, path)?;
         let split = split_frontmatter(&raw);
         // Don't double-add if a frontmatter block appeared between scan and fix.
@@ -288,6 +290,7 @@ impl LintService {
             shared_checkpoint,
             "Before applying wiki lint fix",
         )?;
+        context.resolve_wiki_write_path(path)?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -308,7 +311,10 @@ impl LintService {
                 attach_post_write_hashes(error, &expected_after)
             });
         }
-        if context.app_dir.join("graph-cache.json").exists() {
+        if context
+            .resolve_project_write_path(".app/graph-cache.json")
+            .is_ok_and(|path| path.exists())
+        {
             expected_after.insert(".app/graph-cache.json".into(), None);
         }
         if let Err(error) = append_fix_log(context, path, "added frontmatter") {
@@ -354,6 +360,7 @@ impl LintService {
             .with_details(serde_json::json!({ "path": path }))
         })?;
         validate_scan_hash(issue, expected)?;
+        context.resolve_wiki_write_path(path)?;
 
         let raw = self.file_store.read_markdown(context, path)?;
         if target_exists(context, &target)? {
@@ -397,6 +404,7 @@ impl LintService {
             )
             .with_details(serde_json::json!({ "path": path, "target": target })));
         }
+        context.resolve_wiki_write_path(path)?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -461,6 +469,7 @@ impl LintService {
             )
         })?;
         validate_scan_hash(issue, expected)?;
+        context.resolve_wiki_write_path(path)?;
         let new_contents = regenerate_index(context, self)?;
         let affected_paths = fix_affected_paths(context, path);
         let mut expected_after = self.capture_path_hashes(context, &affected_paths)?;
@@ -471,6 +480,7 @@ impl LintService {
             shared_checkpoint,
             "Before applying wiki lint fix",
         )?;
+        context.resolve_wiki_write_path(path)?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -795,6 +805,7 @@ impl LintService {
                 )
                 .with_details(serde_json::json!({ "path": issue.path })));
             }
+            context.resolve_wiki_write_path(&issue.path)?;
             match issue.issue_type {
                 LintIssueType::MissingFrontmatter => {
                     if issue.fixability != crate::models::lint::Fixability::Safe {
@@ -1448,10 +1459,16 @@ fn page_type_name(page_type: WikiPageType) -> &'static str {
 
 fn fix_affected_paths(context: &ProjectContext, path: &str) -> Vec<String> {
     let mut paths = vec![path.to_string()];
-    if context.wiki_dir.join("log.md").exists() {
+    if context
+        .resolve_wiki_write_path("wiki/log.md")
+        .is_ok_and(|path| path.exists())
+    {
         paths.push("wiki/log.md".to_string());
     }
-    if context.app_dir.join("graph-cache.json").exists() {
+    if context
+        .resolve_project_write_path(".app/graph-cache.json")
+        .is_ok_and(|path| path.exists())
+    {
         paths.push(".app/graph-cache.json".to_string());
     }
     paths
@@ -1507,7 +1524,7 @@ fn target_exists(context: &ProjectContext, target: &str) -> Result<bool, Backend
 }
 
 fn invalidate_graph_cache(context: &ProjectContext) -> Result<(), BackendError> {
-    let path = context.app_dir.join("graph-cache.json");
+    let path = context.resolve_project_write_path(".app/graph-cache.json")?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|err| {
             BackendError::new(
@@ -1526,7 +1543,7 @@ fn append_fix_log(
     relative_path: &str,
     action: &str,
 ) -> Result<(), BackendError> {
-    let log_path = context.wiki_dir.join("log.md");
+    let log_path = context.resolve_wiki_write_path("wiki/log.md")?;
     if !log_path.exists() {
         return Ok(());
     }

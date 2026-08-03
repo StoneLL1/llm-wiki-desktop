@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +132,13 @@ pub struct ProjectLayoutResolution {
     pub warnings: Vec<ProjectLayoutWarning>,
 }
 
+/// A bounded quick assessment must be able to stop compatible-layout
+/// discovery before exploring a large ordinary materials directory.
+pub struct LayoutDiscoveryBudget<'a> {
+    pub deadline: Instant,
+    pub cancelled: &'a AtomicBool,
+}
+
 impl ProjectLayout {
     pub fn native() -> Self {
         Self {
@@ -191,9 +200,13 @@ impl ProjectLayout {
         project_root: &Path,
         roles: &[ProjectMarkdownRootRole],
     ) -> Result<Vec<PathBuf>, BackendError> {
+        let canonical_root = project_root
+            .canonicalize()
+            .map_err(|error| layout_io_error(error, project_root))?;
         let wanted = roles.iter().copied().collect::<HashSet<_>>();
         let legacy_native_scan = self.app_state_root.is_some() && self.evidence_root.is_some();
-        let mut seen = HashSet::new();
+        let mut seen_files = HashSet::new();
+        let mut seen_directories = HashSet::new();
         let mut files = Vec::new();
         for markdown_root in &self.markdown_roots {
             if !wanted.contains(&markdown_root.role) {
@@ -203,6 +216,7 @@ impl ProjectLayout {
             if !scan_root.exists() {
                 continue;
             }
+            let entered_via_link = project_descendant_path_enters_link(project_root, &scan_root)?;
             let excludes = markdown_root
                 .exclude
                 .as_deref()
@@ -211,12 +225,14 @@ impl ProjectLayout {
                 .map(|path| normalize_project_path(path))
                 .collect::<Vec<_>>();
             walk_markdown_root(
-                project_root,
+                &canonical_root,
                 &scan_root,
+                entered_via_link,
                 &excludes,
                 markdown_root.path != ".",
                 legacy_native_scan,
-                &mut seen,
+                &mut seen_directories,
+                &mut seen_files,
                 &mut files,
             )?;
         }
@@ -226,6 +242,14 @@ impl ProjectLayout {
 }
 
 pub fn resolve_layout(root: &Path) -> Result<ProjectLayoutResolution, BackendError> {
+    resolve_layout_with_budget(root, None)
+}
+
+pub fn resolve_layout_with_budget(
+    root: &Path,
+    budget: Option<&LayoutDiscoveryBudget<'_>>,
+) -> Result<ProjectLayoutResolution, BackendError> {
+    check_discovery_budget(budget)?;
     if native_markers_present(root) {
         return Ok(ProjectLayoutResolution {
             layout: ProjectLayout::native(),
@@ -233,10 +257,13 @@ pub fn resolve_layout(root: &Path) -> Result<ProjectLayoutResolution, BackendErr
             warnings: Vec::new(),
         });
     }
-    discover_compatible_layout(root)
+    discover_compatible_layout(root, budget)
 }
 
-fn discover_compatible_layout(root: &Path) -> Result<ProjectLayoutResolution, BackendError> {
+fn discover_compatible_layout(
+    root: &Path,
+    budget: Option<&LayoutDiscoveryBudget<'_>>,
+) -> Result<ProjectLayoutResolution, BackendError> {
     let mut warnings = Vec::new();
     let entries = fs::read_dir(root).map_err(|error| layout_io_error(error, root))?;
     let mut root_excludes = Vec::new();
@@ -246,6 +273,7 @@ fn discover_compatible_layout(root: &Path) -> Result<ProjectLayoutResolution, Ba
     let mut truncated = false;
 
     for (index, entry) in entries.enumerate() {
+        check_discovery_budget(budget)?;
         if index >= MAX_TOP_LEVEL_ENTRIES {
             truncated = true;
             break;
@@ -279,7 +307,7 @@ fn discover_compatible_layout(root: &Path) -> Result<ProjectLayoutResolution, Ba
         if ignored_compatible_directory(&name) {
             continue;
         }
-        if bounded_markdown_signal(&path)? {
+        if bounded_markdown_signal(&path, budget)? {
             directory_roots.push(ProjectMarkdownRoot {
                 path: normalize_project_path(&name),
                 role: compatible_role(&name),
@@ -416,13 +444,21 @@ fn ignored_compatible_directory(name: &str) -> bool {
         )
 }
 
-fn bounded_markdown_signal(directory: &Path) -> Result<bool, BackendError> {
-    bounded_markdown_signal_at_depth(directory, 0)
+fn bounded_markdown_signal(
+    directory: &Path,
+    budget: Option<&LayoutDiscoveryBudget<'_>>,
+) -> Result<bool, BackendError> {
+    bounded_markdown_signal_at_depth(directory, 0, budget)
 }
 
-fn bounded_markdown_signal_at_depth(directory: &Path, depth: usize) -> Result<bool, BackendError> {
+fn bounded_markdown_signal_at_depth(
+    directory: &Path,
+    depth: usize,
+    budget: Option<&LayoutDiscoveryBudget<'_>>,
+) -> Result<bool, BackendError> {
     let entries = fs::read_dir(directory).map_err(|error| layout_io_error(error, directory))?;
     for (index, entry) in entries.enumerate() {
+        check_discovery_budget(budget)?;
         if index >= MAX_SIGNAL_ENTRIES_PER_DIRECTORY {
             break;
         }
@@ -442,7 +478,7 @@ fn bounded_markdown_signal_at_depth(directory: &Path, depth: usize) -> Result<bo
         if depth == 0
             && metadata.is_dir()
             && !ignored_scan_directory(&entry.file_name().to_string_lossy(), false)
-            && bounded_markdown_signal_at_depth(&path, depth + 1)?
+            && bounded_markdown_signal_at_depth(&path, depth + 1, budget)?
         {
             return Ok(true);
         }
@@ -450,43 +486,81 @@ fn bounded_markdown_signal_at_depth(directory: &Path, depth: usize) -> Result<bo
     Ok(false)
 }
 
+fn check_discovery_budget(budget: Option<&LayoutDiscoveryBudget<'_>>) -> Result<(), BackendError> {
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    if budget.cancelled.load(Ordering::SeqCst) {
+        return Err(BackendError::new(
+            "PROJECT_ASSESSMENT_CANCELLED",
+            "Project assessment was cancelled.",
+            true,
+            false,
+        ));
+    }
+    if Instant::now() >= budget.deadline {
+        return Err(BackendError::new(
+            "PROJECT_ASSESSMENT_TIMEOUT",
+            "Project assessment exceeded its bounded discovery budget.",
+            true,
+            false,
+        ));
+    }
+    Ok(())
+}
+
 fn walk_markdown_root(
-    project_root: &Path,
+    canonical_root: &Path,
     current: &Path,
+    entered_via_link: bool,
     excludes: &[String],
     recursive: bool,
     legacy_native_scan: bool,
-    seen: &mut HashSet<PathBuf>,
+    seen_directories: &mut HashSet<PathBuf>,
+    seen_files: &mut HashSet<PathBuf>,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), BackendError> {
-    let metadata =
-        fs::symlink_metadata(current).map_err(|error| layout_io_error(error, current))?;
-    if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+    let Some(canonical_current) =
+        canonical_internal_read_path(canonical_root, current, entered_via_link)?
+    else {
+        return Ok(());
+    };
+    let metadata = fs::metadata(&canonical_current)
+        .map_err(|error| layout_io_error(error, &canonical_current))?;
+    if !metadata.is_dir() || !seen_directories.insert(canonical_current.clone()) {
         return Ok(());
     }
-    for entry in fs::read_dir(current).map_err(|error| layout_io_error(error, current))? {
-        let entry = entry.map_err(|error| layout_io_error(error, current))?;
+    let mut entries = fs::read_dir(&canonical_current)
+        .map_err(|error| layout_io_error(error, &canonical_current))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| layout_io_error(error, &canonical_current))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let path = entry.path();
-        let relative = path.strip_prefix(project_root).map_err(|_| {
-            BackendError::new(
-                "PROJECT_LAYOUT_PATH_OUTSIDE_ROOT",
-                "A discovered Markdown path is outside the project root.",
-                false,
-                true,
-            )
-        })?;
-        let normalized = normalize_project_path(&relative.to_string_lossy());
-        if excluded(&normalized, excludes) {
-            continue;
-        }
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(layout_io_error(error, &path)),
         };
-        if is_link_or_reparse(&metadata) {
+        let entry_is_link = is_link_or_reparse(&metadata);
+        let entered_via_link = entered_via_link || entry_is_link;
+        let Some(canonical_path) =
+            canonical_internal_read_path(canonical_root, &path, entered_via_link)?
+        else {
+            continue;
+        };
+        let relative = canonical_path
+            .strip_prefix(canonical_root)
+            .expect("contained canonical path");
+        let normalized = normalize_project_path(&relative.to_string_lossy());
+        if excluded(&normalized, excludes) {
             continue;
         }
+        let metadata = match fs::metadata(&canonical_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(layout_io_error(error, &canonical_path)),
+        };
         if metadata.is_dir() {
             if !recursive {
                 continue;
@@ -496,22 +570,113 @@ fn walk_markdown_root(
                 continue;
             }
             walk_markdown_root(
-                project_root,
-                &path,
+                canonical_root,
+                &canonical_path,
+                entered_via_link,
                 excludes,
                 true,
                 legacy_native_scan,
-                seen,
+                seen_directories,
+                seen_files,
                 files,
             )?;
         } else if metadata.is_file()
-            && is_markdown_path(&path, !legacy_native_scan)
-            && seen.insert(path.clone())
+            && is_markdown_path(&canonical_path, !legacy_native_scan)
+            && seen_files.insert(canonical_path.clone())
         {
-            files.push(path);
+            files.push(canonical_path);
         }
     }
     Ok(())
+}
+
+/// Resolve a read candidate through a descendant link only after proving that
+/// its final physical location remains below the canonical project root. The
+/// returned path is canonical, so a link loop or multiple aliases collapse to
+/// the same visited directory/file. This is deliberately read-only: write
+/// paths continue to use the stricter no-link helpers in `path_safety`.
+pub(crate) fn canonical_internal_read_path(
+    canonical_root: &Path,
+    candidate: &Path,
+    entered_via_link: bool,
+) -> Result<Option<PathBuf>, BackendError> {
+    let canonical = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(layout_io_error(error, candidate)),
+    };
+    if !canonical.starts_with(canonical_root)
+        || (entered_via_link
+            && (canonical == canonical_root
+                || canonical_read_target_is_sensitive(canonical_root, &canonical)))
+    {
+        return Ok(None);
+    }
+    Ok(Some(canonical))
+}
+
+/// Whether reaching a project-descendant path requires crossing a link or a
+/// Windows reparse point. A selected project root may itself be a link; the
+/// caller has already canonicalized that root during project admission, so the
+/// root component is intentionally not inspected here.
+pub(crate) fn project_descendant_path_enters_link(
+    project_root: &Path,
+    candidate: &Path,
+) -> Result<bool, BackendError> {
+    let relative = candidate.strip_prefix(project_root).map_err(|_| {
+        BackendError::new(
+            "PROJECT_LAYOUT_PATH_INVALID",
+            "Project layout paths must stay below the selected project root.",
+            false,
+            true,
+        )
+    })?;
+    let mut current = project_root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(BackendError::new(
+                "PROJECT_LAYOUT_PATH_INVALID",
+                "Project layout paths must be project-relative.",
+                false,
+                true,
+            ));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if is_link_or_reparse(&metadata) => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(layout_io_error(error, &current)),
+        }
+    }
+    Ok(false)
+}
+
+/// App/runtime state and native output roots are not Markdown discovery input,
+/// even when a user-created link points back to them from a readable root.
+/// That prevents an internal link from bypassing native layout boundaries.
+fn canonical_read_target_is_sensitive(canonical_root: &Path, candidate: &Path) -> bool {
+    candidate
+        .strip_prefix(canonical_root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .is_some_and(|name| {
+            matches!(
+                name.as_str(),
+                ".app"
+                    | ".git"
+                    | ".obsidian"
+                    | "raw"
+                    | "exports"
+                    | "skills"
+                    | "node_modules"
+                    | "target"
+            )
+        })
 }
 
 fn resolve_layout_path(project_root: &Path, relative: &str) -> Result<PathBuf, BackendError> {
@@ -586,7 +751,7 @@ fn layout_io_error(error: std::io::Error, path: &Path) -> BackendError {
         .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
 }
 
-fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -634,6 +799,25 @@ mod tests {
     }
 
     #[test]
+    fn bounded_layout_discovery_stops_before_reading_entries_when_cancelled() {
+        let root = temp_root("cancelled-discovery");
+        fs::create_dir_all(root.join("large-materials")).unwrap();
+        let cancelled = AtomicBool::new(true);
+
+        let error = resolve_layout_with_budget(
+            &root,
+            Some(&LayoutDiscoveryBudget {
+                deadline: Instant::now() + std::time::Duration::from_secs(1),
+                cancelled: &cancelled,
+            }),
+        )
+        .expect_err("cancelled assessment must stop layout discovery");
+
+        assert_eq!(error.code, "PROJECT_ASSESSMENT_CANCELLED");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn compatible_obsidian_discovery_is_read_only_and_role_aware() {
         let root = temp_root("obsidian");
         fs::create_dir_all(root.join(".obsidian")).unwrap();
@@ -677,10 +861,16 @@ mod tests {
                 ],
             )
             .unwrap();
+        let canonical_root = root.canonicalize().unwrap();
         let relative = files
             .iter()
             .map(|path| {
-                normalize_project_path(&path.strip_prefix(&root).unwrap().to_string_lossy())
+                normalize_project_path(
+                    &path
+                        .strip_prefix(&canonical_root)
+                        .unwrap()
+                        .to_string_lossy(),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -745,10 +935,16 @@ mod tests {
             .layout
             .list_markdown_files(&root, &[ProjectMarkdownRootRole::Mixed])
             .unwrap();
+        let canonical_root = root.canonicalize().unwrap();
         let relative = files
             .iter()
             .map(|path| {
-                normalize_project_path(&path.strip_prefix(&root).unwrap().to_string_lossy())
+                normalize_project_path(
+                    &path
+                        .strip_prefix(&canonical_root)
+                        .unwrap()
+                        .to_string_lossy(),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -817,6 +1013,98 @@ mod tests {
         fs::remove_dir_all(outside).ok();
     }
 
+    #[test]
+    fn internal_markdown_links_are_read_once_while_external_and_sensitive_targets_stay_hidden() {
+        let root = temp_root("internal-markdown-links");
+        let outside = temp_root("internal-markdown-links-outside");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::create_dir_all(root.join("shared")).unwrap();
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::create_dir_all(root.join("raw").join("extracted")).unwrap();
+        write(&root, "wiki/visible.md");
+        write(&root, "shared/internal.md");
+        write(&root, ".app/hidden.md");
+        write(&root, ".obsidian/plugin.md");
+        write(&root, "raw/extracted/source.md");
+        write(&outside, "external.md");
+        create_directory_link(&root.join("shared"), &root.join("wiki").join("internal")).unwrap();
+        create_directory_link(&outside, &root.join("wiki").join("external")).unwrap();
+        create_directory_link(&root.join(".app"), &root.join("wiki").join("app-state")).unwrap();
+        create_directory_link(&root.join(".obsidian"), &root.join("wiki").join("obsidian"))
+            .unwrap();
+        create_directory_link(
+            &root.join("raw").join("extracted"),
+            &root.join("wiki").join("raw"),
+        )
+        .unwrap();
+        create_directory_link(&root, &root.join("wiki").join("root")).unwrap();
+        create_directory_link(&root.join("wiki"), &root.join("wiki").join("loop")).unwrap();
+
+        let canonical_root = root.canonicalize().unwrap();
+        let files = ProjectLayout::native()
+            .list_markdown_files(&root, &[ProjectMarkdownRootRole::Wiki])
+            .unwrap();
+        let relative = files
+            .iter()
+            .map(|path| {
+                normalize_project_path(
+                    &path
+                        .strip_prefix(&canonical_root)
+                        .unwrap()
+                        .to_string_lossy(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(relative, vec!["shared/internal.md", "wiki/visible.md"]);
+
+        let source_files = ProjectLayout::native()
+            .list_markdown_files(&root, &[ProjectMarkdownRootRole::Source])
+            .unwrap();
+        let source_relative = source_files
+            .iter()
+            .map(|path| {
+                normalize_project_path(
+                    &path
+                        .strip_prefix(&canonical_root)
+                        .unwrap()
+                        .to_string_lossy(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(source_relative, vec!["raw/extracted/source.md"]);
+
+        fs::remove_dir(root.join("wiki").join("internal")).ok();
+        fs::remove_dir(root.join("wiki").join("external")).ok();
+        fs::remove_dir(root.join("wiki").join("app-state")).ok();
+        fs::remove_dir(root.join("wiki").join("obsidian")).ok();
+        fs::remove_dir(root.join("wiki").join("raw")).ok();
+        fs::remove_dir(root.join("wiki").join("root")).ok();
+        fs::remove_dir(root.join("wiki").join("loop")).ok();
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside).ok();
+    }
+
+    #[test]
+    fn linked_markdown_root_cannot_bypass_sensitive_root_filtering() {
+        let root = temp_root("linked-markdown-root");
+        fs::create_dir_all(root.join(".app")).unwrap();
+        write(&root, ".app/hidden.md");
+        create_directory_link(&root.join(".app"), &root.join("wiki")).unwrap();
+
+        let files = ProjectLayout::native()
+            .list_markdown_files(&root, &[ProjectMarkdownRootRole::Wiki])
+            .unwrap();
+        assert!(
+            files.is_empty(),
+            "linked wiki root must not expose .app Markdown"
+        );
+
+        fs::remove_dir(root.join("wiki")).ok();
+        fs::remove_dir_all(root).ok();
+    }
+
     #[cfg(unix)]
     fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(target, link)
@@ -824,6 +1112,23 @@ mod tests {
 
     #[cfg(windows)]
     fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_dir(target, link)
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "mklink /J failed for `{}` -> `{}`: {} {}",
+                link.display(),
+                target.display(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim(),
+            )))
+        }
     }
 }

@@ -1036,7 +1036,7 @@ impl CompileService {
             .collect::<HashMap<_, _>>();
         let global_risk = broad_rewrite || !plan.global_risk_flags.is_empty();
         for file in &manifest.files {
-            let target = context.resolve_project_path(&file.path)?;
+            let target = context.resolve_wiki_write_path(&file.path)?;
             let expected = baseline.get(&file.path);
             if expected.is_none()
                 && baseline_casefold
@@ -1077,7 +1077,7 @@ impl CompileService {
             }
         }
         for deletion in &manifest.deletions {
-            let target = context.resolve_project_path(deletion)?;
+            let target = context.resolve_wiki_write_path(deletion)?;
             match baseline.get(deletion) {
                 Some(expected)
                     if target.is_file() && store.file_hash(context, deletion)? == *expected =>
@@ -1350,7 +1350,7 @@ impl CompileService {
         let mut affected_paths = Vec::new();
         let mut conflicts = Vec::new();
         for file in &manifest.files {
-            let target = context.resolve_project_path(&file.path)?;
+            let target = context.resolve_wiki_write_path(&file.path)?;
             if let Some(expected) = baseline.get(&file.path) {
                 let needs_confirmation =
                     if !target.exists() || store.file_hash(context, &file.path)? != *expected {
@@ -1444,7 +1444,7 @@ impl CompileService {
         let store = FileStore;
         let mut affected = Vec::new();
         for file in &manifest.files {
-            let target = context.resolve_project_path(&file.path)?;
+            let target = context.resolve_wiki_write_path(&file.path)?;
             match expected_current_hashes.get(&file.path) {
                 Some(expected)
                     if !target.exists() || store.file_hash(context, &file.path)? != *expected =>
@@ -1468,7 +1468,7 @@ impl CompileService {
             }
         }
         for deletion in &manifest.deletions {
-            let target = context.resolve_project_path(deletion)?;
+            let target = context.resolve_wiki_write_path(deletion)?;
             match expected_current_hashes.get(deletion) {
                 Some(expected)
                     if !target.exists() || store.file_hash(context, deletion)? != *expected =>
@@ -1500,7 +1500,7 @@ impl CompileService {
                     true,
                 ));
             }
-            let target = context.resolve_project_path(&file.path)?;
+            let target = context.resolve_wiki_write_path(&file.path)?;
             let mode = match expected_current_hashes.get(&file.path) {
                 Some(expected) => WriteMode::OverwriteIfHashMatches(expected.clone()),
                 None if !target.exists() => WriteMode::CreateNew,
@@ -1522,7 +1522,7 @@ impl CompileService {
                     true,
                 ));
             }
-            let target = context.resolve_project_path(deletion)?;
+            let target = context.resolve_wiki_write_path(deletion)?;
             let Some(expected) = expected_current_hashes.get(deletion) else {
                 debug_assert!(!target.exists());
                 continue;
@@ -1654,7 +1654,7 @@ impl CompileService {
         paths.dedup();
         let mut entries = Vec::with_capacity(paths.len());
         for relative in paths {
-            let absolute = context.resolve_project_path(&relative)?;
+            let absolute = resolve_compile_mutation_path(context, &relative)?;
             let bytes = if absolute.exists() {
                 Some(
                     std::fs::read(&absolute)
@@ -1673,7 +1673,7 @@ impl CompileService {
         backup: &CompileBackup,
     ) -> Result<(), BackendError> {
         for (relative, bytes) in &backup.entries {
-            let absolute = context.resolve_project_path(relative)?;
+            let absolute = resolve_compile_mutation_path(context, relative)?;
             match bytes {
                 Some(bytes) => {
                     if let Some(parent) = absolute.parent() {
@@ -1717,7 +1717,7 @@ impl CompileService {
             if !applied.contains(relative.as_str()) {
                 continue;
             }
-            let absolute = context.resolve_project_path(relative)?;
+            let absolute = resolve_compile_mutation_path(context, relative)?;
             if relative.starts_with(".app/") {
                 restore_backup_path(&absolute, baseline.as_deref())?;
                 continue;
@@ -2164,6 +2164,17 @@ pub(crate) fn is_safe_wiki_markdown(raw: &str) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn resolve_compile_mutation_path(
+    context: &ProjectContext,
+    relative: &str,
+) -> Result<std::path::PathBuf, BackendError> {
+    if relative.starts_with("wiki/") {
+        context.resolve_wiki_write_path(relative)
+    } else {
+        context.resolve_project_write_path(relative)
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -6,16 +6,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::app_state::ProjectRegistry;
 use crate::errors::BackendError;
 use crate::models::git::GitRepositoryStatus;
-use crate::models::layout::{resolve_layout, ProjectLayoutConfidence};
+use crate::models::graph::GraphData;
+use crate::models::layout::{
+    canonical_internal_read_path, is_link_or_reparse, project_descendant_path_enters_link,
+    resolve_layout_with_budget, LayoutDiscoveryBudget, ProjectLayoutConfidence,
+};
 use crate::models::paths::ProjectContext;
 use crate::models::project::{
     AssessmentId, AssessmentOperationId, AssessmentOperationStatus, ProjectAssessmentOperation,
     ProjectAssessmentWarning, ProjectCapability, ProjectFilesystemAccess, ProjectFormat,
-    ProjectHealth, ProjectMarker, ProjectOpenAssessment, ProjectTrustKind, ProjectTrustState,
-    StartProjectOpenAssessmentResult,
+    ProjectHealth, ProjectMarker, ProjectOpenAssessment, ProjectOpenIntent, ProjectTrustKind,
+    ProjectTrustState, StartProjectOpenAssessmentResult,
 };
 use crate::services::{project_identity, GitService, ProjectService};
 use crate::utils::path_safety::{
@@ -23,11 +29,14 @@ use crate::utils::path_safety::{
     validate_existing_project_root,
 };
 
+use super::decision_store::ProjectOpenDecisionStore;
+
 const ASSESSMENT_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_ASSESSMENTS: usize = 64;
 const MAX_OPERATIONS: usize = 64;
 const MAX_ASSESSMENT_MARKDOWN_ENTRIES: usize = 4_096;
 const MAX_ASSESSMENT_MARKDOWN_DEPTH: usize = 16;
+const MAX_ASSESSMENT_PATH_NAME_ENTRIES: usize = 4_096;
 const MAX_APP_STATE_JSON_BYTES: u64 = 1024 * 1024;
 const ASSESSMENT_SCAN_BUDGET: Duration = Duration::from_secs(2);
 
@@ -35,6 +44,7 @@ const ASSESSMENT_SCAN_BUDGET: Duration = Duration::from_secs(2);
 pub struct ProjectAssessmentService {
     inner: Arc<AssessmentRegistry>,
     config_dir: PathBuf,
+    decision_store: Arc<ProjectOpenDecisionStore>,
 }
 
 struct AssessmentRegistry {
@@ -74,6 +84,7 @@ impl ProjectAssessmentService {
                 operations: Mutex::new(HashMap::new()),
                 assessments: Mutex::new(HashMap::new()),
             }),
+            decision_store: Arc::new(ProjectOpenDecisionStore::new(&config_dir)),
             config_dir,
         }
     }
@@ -108,6 +119,17 @@ impl ProjectAssessmentService {
         Ok(StartProjectOpenAssessmentResult {
             assessment_operation_id: operation_id,
         })
+    }
+
+    /// Performs the same bounded, read-only inspection used by the background
+    /// project-open flow when a backend command needs a current authority
+    /// snapshot. This does not register an assessment token and must not be
+    /// used for a user-facing long-running scan.
+    pub fn inspect_current(&self, path: &str) -> Result<ProjectOpenAssessment, BackendError> {
+        let cancelled = AtomicBool::new(false);
+        let mut assessment = assess_project_folder(path, &self.config_dir, &cancelled)?;
+        self.attach_remembered_intent(&mut assessment);
+        Ok(assessment)
     }
 
     pub fn get_operation(
@@ -197,7 +219,74 @@ impl ProjectAssessmentService {
             ));
         }
         current.assessment_id = previous.assessment_id;
+        self.attach_remembered_intent(&mut current);
         Ok(current)
+    }
+
+    pub fn remember_ambiguous_intent(
+        &self,
+        assessment_id: &AssessmentId,
+        intent: ProjectOpenIntent,
+    ) -> Result<ProjectOpenAssessment, BackendError> {
+        let mut assessment = self.resolve_current(assessment_id)?;
+        if assessment.format != ProjectFormat::AmbiguousMarkdown {
+            return Err(BackendError::new(
+                "PROJECT_OPEN_INTENT_UNAVAILABLE",
+                "Only an ambiguous Markdown assessment can receive a remembered open decision.",
+                true,
+                true,
+            ));
+        }
+        self.decision_store.remember(
+            &assessment.canonical_identity_key,
+            &assessment.identity_revision,
+            intent,
+        )?;
+        assessment.remembered_open_intent = Some(intent);
+        self.update_cached_assessment(assessment_id, &assessment)?;
+        Ok(assessment)
+    }
+
+    /// Clears an explicit ambiguous-folder decision from global app settings.
+    /// The selected Markdown folder remains strictly read-only throughout this
+    /// operation, so the next assessment will ask the user again.
+    pub fn clear_ambiguous_intent(
+        &self,
+        assessment_id: &AssessmentId,
+    ) -> Result<ProjectOpenAssessment, BackendError> {
+        let mut assessment = self.resolve_current(assessment_id)?;
+        if assessment.format != ProjectFormat::AmbiguousMarkdown {
+            return Err(BackendError::new(
+                "PROJECT_OPEN_INTENT_UNAVAILABLE",
+                "Only an ambiguous Markdown assessment can clear a remembered open decision.",
+                true,
+                true,
+            ));
+        }
+        self.decision_store.forget(
+            &assessment.canonical_identity_key,
+            &assessment.identity_revision,
+        )?;
+        assessment.remembered_open_intent = None;
+        self.update_cached_assessment(assessment_id, &assessment)?;
+        Ok(assessment)
+    }
+
+    fn update_cached_assessment(
+        &self,
+        assessment_id: &AssessmentId,
+        assessment: &ProjectOpenAssessment,
+    ) -> Result<(), BackendError> {
+        let mut assessments = self
+            .inner
+            .assessments
+            .lock()
+            .map_err(|_| registry_locked())?;
+        let stored = assessments
+            .get_mut(assessment_id)
+            .ok_or_else(|| unknown_assessment(assessment_id))?;
+        stored.assessment = assessment.clone();
+        Ok(())
     }
 
     pub fn invalidate(&self, assessment_id: &AssessmentId) -> Result<(), BackendError> {
@@ -225,7 +314,8 @@ impl ProjectAssessmentService {
             return;
         }
         match outcome {
-            Ok(assessment) => {
+            Ok(mut assessment) => {
+                self.attach_remembered_intent(&mut assessment);
                 if let Ok(mut assessments) = self.inner.assessments.lock() {
                     prune_assessments(&mut assessments);
                     assessments.insert(
@@ -241,6 +331,18 @@ impl ProjectAssessmentService {
             }
             Err(error) => entry.state = OperationState::Failed(error),
         }
+    }
+
+    fn attach_remembered_intent(&self, assessment: &mut ProjectOpenAssessment) {
+        assessment.remembered_open_intent = if assessment.format == ProjectFormat::AmbiguousMarkdown
+        {
+            self.decision_store.lookup(
+                &assessment.canonical_identity_key,
+                &assessment.identity_revision,
+            )
+        } else {
+            None
+        };
     }
 }
 
@@ -262,9 +364,15 @@ pub fn assess_project_folder(
         )
         .with_details(serde_json::json!({ "error": message }))
     })?;
-    let resolution = resolve_layout(&canonical_root)?;
-    check_cancelled(cancelled)?;
     let assessment_deadline = Instant::now() + ASSESSMENT_SCAN_BUDGET;
+    let resolution = resolve_layout_with_budget(
+        &canonical_root,
+        Some(&LayoutDiscoveryBudget {
+            deadline: assessment_deadline,
+            cancelled,
+        }),
+    )?;
+    check_cancelled(cancelled)?;
 
     let format = classify_format(&canonical_root, resolution.confidence, &resolution.layout);
     let project_service = ProjectService::with_config_dir(config_dir.to_path_buf());
@@ -313,8 +421,16 @@ pub fn assess_project_folder(
         assessment_deadline,
     )?;
     check_cancelled(cancelled)?;
+    let collision_scan =
+        bounded_path_name_collisions(&canonical_root, cancelled, assessment_deadline)?;
+    check_cancelled(cancelled)?;
     let app_state_corrupt = app_state_is_corrupt(&canonical_root, cancelled)?;
-    let health = derive_health(format, markdown_scan.readable, app_state_corrupt);
+    let health = health_with_path_collisions(
+        derive_health(format, markdown_scan.readable, app_state_corrupt),
+        &collision_scan.warnings,
+    );
+    let repair_available =
+        health == ProjectHealth::Recovery && graph_cache_needs_repair(&canonical_root);
     let markers = collect_markers(&canonical_root);
     let mut warnings = assessment_warnings(format, health, resolution.confidence);
     if let Some(warning) = git_warning {
@@ -324,6 +440,15 @@ pub fn assess_project_folder(
         warnings.push(ProjectAssessmentWarning {
             code: "PROJECT_ASSESSMENT_SCAN_LIMIT".into(),
             message: "Markdown readability inspection reached its bounded scan limit.".into(),
+            path: None,
+        });
+    }
+    warnings.extend(collision_scan.warnings);
+    if collision_scan.limited {
+        warnings.push(ProjectAssessmentWarning {
+            code: "PROJECT_ASSESSMENT_COLLISION_SCAN_LIMIT".into(),
+            message: "Portable filename collision inspection reached its bounded scan limit."
+                .into(),
             path: None,
         });
     }
@@ -343,9 +468,11 @@ pub fn assess_project_folder(
         canonical_identity_key: identity.canonical_identity_key,
         identity_revision: identity.identity_revision,
         format,
+        remembered_open_intent: None,
         trust,
         filesystem_access,
         health,
+        repair_available,
         layout: resolution.layout,
         confidence: resolution.confidence,
         markers,
@@ -464,13 +591,37 @@ fn app_state_is_corrupt(root: &Path, cancelled: &AtomicBool) -> Result<bool, Bac
         {
             continue;
         }
-        if bytes.len() as u64 > MAX_APP_STATE_JSON_BYTES
-            || serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
-        {
+        let is_corrupt = bytes.len() as u64 > MAX_APP_STATE_JSON_BYTES
+            || if path
+                .file_name()
+                .is_some_and(|name| name == "graph-cache.json")
+            {
+                serde_json::from_slice::<GraphData>(&bytes).is_err()
+            } else {
+                serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
+            };
+        if is_corrupt {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Recovery is deliberately narrower than detection: a damaged app-state file
+/// may make the project recoverable without being safe to rewrite. Today only
+/// the fully derived graph cache is eligible for automatic repair.
+fn graph_cache_needs_repair(root: &Path) -> bool {
+    let target = root.join(".app").join("graph-cache.json");
+    let Ok(safe_target) = validate_existing_project_file(root, &target) else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(&safe_target) else {
+        return false;
+    };
+    if metadata.len() > MAX_APP_STATE_JSON_BYTES {
+        return false;
+    }
+    fs::read(safe_target).is_ok_and(|bytes| serde_json::from_slice::<GraphData>(&bytes).is_err())
 }
 
 struct MarkdownReadability {
@@ -484,16 +635,33 @@ fn bounded_markdown_readability(
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<MarkdownReadability, BackendError> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        BackendError::new(
+            "PROJECT_ASSESSMENT_READ_FAILED",
+            "Project Markdown roots could not be inspected.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "error": error.to_string() }))
+    })?;
     let mut queue = VecDeque::new();
+    let mut seen_directories = HashSet::new();
     for markdown_root in &layout.markdown_roots {
-        let scan_root = if markdown_root.path == "." {
+        // Preserve the configured (logical) path long enough to detect a
+        // linked ancestor. Building from `canonical_root` would hide a
+        // `raw` junction to `.app` before the sensitive-root guard runs.
+        let configured_scan_root = if markdown_root.path == "." {
             root.to_path_buf()
         } else {
             root.join(&markdown_root.path)
         };
-        if scan_root == root || validate_existing_project_directory(root, &scan_root).is_ok() {
+        let entered_via_link = project_descendant_path_enters_link(root, &configured_scan_root)?;
+        if let Some(scan_root) =
+            canonical_internal_read_path(&canonical_root, &configured_scan_root, entered_via_link)?
+        {
             queue.push_back((
                 scan_root,
+                entered_via_link,
                 0_usize,
                 markdown_root.path != ".",
                 markdown_root.exclude.clone().unwrap_or_default(),
@@ -502,13 +670,16 @@ fn bounded_markdown_readability(
     }
 
     let mut inspected = 0_usize;
-    while let Some((directory, depth, recursive, excludes)) = queue.pop_front() {
+    while let Some((directory, entered_via_link, depth, recursive, excludes)) = queue.pop_front() {
         check_cancelled(cancelled)?;
         if inspected >= MAX_ASSESSMENT_MARKDOWN_ENTRIES || Instant::now() >= deadline {
             return Ok(MarkdownReadability {
                 readable: false,
                 limited: true,
             });
+        }
+        if !seen_directories.insert(directory.clone()) {
+            continue;
         }
         let Ok(entries) = fs::read_dir(&directory) else {
             continue;
@@ -526,8 +697,17 @@ fn bounded_markdown_readability(
                 continue;
             };
             let path = entry.path();
+            let Ok(link_metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let entered_via_link = entered_via_link || is_link_or_reparse(&link_metadata);
+            let Some(path) =
+                canonical_internal_read_path(&canonical_root, &path, entered_via_link)?
+            else {
+                continue;
+            };
             let relative = path
-                .strip_prefix(root)
+                .strip_prefix(&canonical_root)
                 .ok()
                 .map(|value| value.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
@@ -536,7 +716,7 @@ fn bounded_markdown_readability(
             }) {
                 continue;
             }
-            let Ok(metadata) = fs::symlink_metadata(&path) else {
+            let Ok(metadata) = fs::metadata(&path) else {
                 continue;
             };
             if metadata.is_dir() {
@@ -547,15 +727,12 @@ fn bounded_markdown_readability(
                 if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target") {
                     continue;
                 }
-                if validate_existing_project_directory(root, &path).is_ok() {
-                    queue.push_back((path, depth + 1, true, excludes.clone()));
-                }
+                queue.push_back((path, entered_via_link, depth + 1, true, excludes.clone()));
             } else if metadata.is_file()
                 && path
                     .extension()
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-                && validate_existing_project_file(root, &path)
-                    .is_ok_and(|safe_path| fs::File::open(safe_path).is_ok())
+                && fs::File::open(&path).is_ok()
             {
                 return Ok(MarkdownReadability {
                     readable: true,
@@ -570,6 +747,129 @@ fn bounded_markdown_readability(
     })
 }
 
+struct PathCollisionScan {
+    warnings: Vec<ProjectAssessmentWarning>,
+    limited: bool,
+}
+
+fn bounded_path_name_collisions(
+    root: &Path,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<PathCollisionScan, BackendError> {
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut seen = HashMap::<String, String>::new();
+    let mut warnings = Vec::new();
+    let mut visited = 0usize;
+
+    while let Some((directory, depth)) = queue.pop_front() {
+        check_cancelled(cancelled)?;
+        if Instant::now() >= deadline || visited >= MAX_ASSESSMENT_PATH_NAME_ENTRIES {
+            return Ok(PathCollisionScan {
+                warnings,
+                limited: true,
+            });
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        let parent = directory
+            .strip_prefix(root)
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| ".".into());
+        for entry in entries {
+            check_cancelled(cancelled)?;
+            if Instant::now() >= deadline || visited >= MAX_ASSESSMENT_PATH_NAME_ENTRIES {
+                return Ok(PathCollisionScan {
+                    warnings,
+                    limited: true,
+                });
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            visited += 1;
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let display_path = if parent == "." {
+                name.clone()
+            } else {
+                format!("{parent}/{name}")
+            };
+            record_path_name_collision(&mut seen, &mut warnings, &parent, &name, &display_path);
+
+            if metadata.is_dir()
+                && depth < MAX_ASSESSMENT_MARKDOWN_DEPTH
+                && !ignored_assessment_directory(&name)
+                && validate_existing_project_directory(root, &path).is_ok()
+            {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+
+    Ok(PathCollisionScan {
+        warnings,
+        limited: false,
+    })
+}
+
+fn record_path_name_collision(
+    seen: &mut HashMap<String, String>,
+    warnings: &mut Vec<ProjectAssessmentWarning>,
+    parent: &str,
+    name: &str,
+    display_path: &str,
+) {
+    let key = format!("{parent}\0{}", portable_path_name_key(name));
+    if let Some(previous) = seen.get(&key) {
+        if previous != display_path {
+            warnings.push(ProjectAssessmentWarning {
+                code: "PROJECT_PATH_NAME_COLLISION".into(),
+                message: "Two paths collide under portable case or Unicode filename rules. Rename one before enabling writes."
+                    .into(),
+                path: Some(format!("{previous} | {display_path}")),
+            });
+        }
+        return;
+    }
+    seen.insert(key, display_path.to_string());
+}
+
+fn portable_path_name_key(name: &str) -> String {
+    name.nfc()
+        .collect::<String>()
+        .trim_end_matches(['.', ' '])
+        .to_lowercase()
+}
+
+fn ignored_assessment_directory(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with('.') || matches!(lower.as_str(), "node_modules" | "target")
+}
+
+fn health_with_path_collisions(
+    health: ProjectHealth,
+    collisions: &[ProjectAssessmentWarning],
+) -> ProjectHealth {
+    if health == ProjectHealth::Healthy && !collisions.is_empty() {
+        // A portable-name collision is readable but unsafe to write: Windows
+        // and macOS may fold names that Linux keeps distinct. Keep content
+        // available while routing mutations through the repair path.
+        ProjectHealth::Repairable
+    } else {
+        health
+    }
+}
+
 fn metadata_filesystem_access(root: &Path) -> ProjectFilesystemAccess {
     let Ok(metadata) = fs::metadata(root) else {
         return ProjectFilesystemAccess::ReadOnly;
@@ -581,10 +881,18 @@ fn metadata_filesystem_access(root: &Path) -> ProjectFilesystemAccess {
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o222 != 0 {
-            return ProjectFilesystemAccess::Writable;
+            ProjectFilesystemAccess::Writable
+        } else {
+            ProjectFilesystemAccess::ReadOnly
         }
     }
-    ProjectFilesystemAccess::ReadOnly
+    #[cfg(not(unix))]
+    {
+        // Windows does not expose POSIX write bits. The read-only attribute is
+        // the non-mutating signal available during a quick assessment; actual
+        // mutations still revalidate access in the backend service.
+        ProjectFilesystemAccess::Writable
+    }
 }
 
 fn collect_markers(root: &Path) -> Vec<ProjectMarker> {
@@ -652,7 +960,7 @@ fn assessment_warnings(
     warnings
 }
 
-fn derive_capabilities(
+pub(crate) fn derive_capabilities(
     format: ProjectFormat,
     trust: ProjectTrustState,
     access: ProjectFilesystemAccess,
@@ -670,11 +978,13 @@ fn derive_capabilities(
             ProjectCapability::LocalHealthCheck,
         ]);
     }
-    if trust == ProjectTrustState::Trusted && markdown_readable {
+    if trust == ProjectTrustState::Trusted && markdown_readable && health == ProjectHealth::Healthy
+    {
         capabilities.push(ProjectCapability::ExternalAi);
     }
     if trust == ProjectTrustState::Trusted
         && access == ProjectFilesystemAccess::Writable
+        && health == ProjectHealth::Healthy
         && (layout.source_write_root.is_some()
             || layout.wiki_write_root.is_some()
             || layout.export_root.is_some())
@@ -784,6 +1094,7 @@ fn unknown_assessment(id: &AssessmentId) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::layout::resolve_layout;
 
     fn temp_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("assessment-{name}-{}", uuid::Uuid::new_v4()));
@@ -852,6 +1163,36 @@ mod tests {
     }
 
     #[test]
+    fn detects_graph_cache_json_that_does_not_match_the_cache_schema() {
+        let root = temp_root("graph-cache-schema");
+        fs::create_dir_all(root.join(".app")).unwrap();
+        // This was the old new-project placeholder. It is JSON, but cannot be
+        // read by GraphService as GraphData and therefore needs recovery.
+        fs::write(
+            root.join(".app/graph-cache.json"),
+            r#"{"nodes": [], "edges": []}"#,
+        )
+        .unwrap();
+
+        assert!(app_state_is_corrupt(&root, &AtomicBool::new(false)).unwrap());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn accepts_the_current_empty_graph_cache_schema() {
+        let root = temp_root("graph-cache-current");
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::write(
+            root.join(".app/graph-cache.json"),
+            serde_json::to_vec(&GraphData::empty(String::new())).unwrap(),
+        )
+        .unwrap();
+
+        assert!(!app_state_is_corrupt(&root, &AtomicBool::new(false)).unwrap());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn empty_obsidian_vault_is_not_reported_as_readable_markdown() {
         let root = temp_root("empty-obsidian");
         let config = temp_root("empty-obsidian-config");
@@ -870,6 +1211,85 @@ mod tests {
             .contains(&ProjectCapability::ReadMarkdown));
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(config).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readability_accepts_markdown_through_a_contained_windows_junction() {
+        let root = temp_root("contained-junction-readability");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::create_dir_all(root.join("shared")).unwrap();
+        fs::write(root.join("shared/linked.md"), "# Linked").unwrap();
+        let junction = root.join("wiki").join("linked");
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(root.join("shared"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "junction setup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let readability = bounded_markdown_readability(
+            &root,
+            &crate::models::layout::ProjectLayout::native(),
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(readability.readable);
+        assert!(!readability.limited);
+
+        fs::remove_dir(junction).ok();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readability_rejects_a_sensitive_target_reached_through_a_linked_ancestor() {
+        let root = temp_root("sensitive-ancestor-junction-readability");
+        for directory in [".app/extracted", "wiki", "exports", "skills"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        fs::write(root.join("purpose.md"), "purpose").unwrap();
+        fs::write(root.join("schema.md"), "schema").unwrap();
+        fs::write(
+            root.join(".app/extracted/readable.md"),
+            "# Must stay hidden",
+        )
+        .unwrap();
+        let junction = root.join("raw");
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(root.join(".app"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "junction setup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let readability = bounded_markdown_readability(
+            &root,
+            &crate::models::layout::ProjectLayout::native(),
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!readability.readable);
+        assert!(!readability.limited);
+
+        fs::remove_dir(junction).ok();
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -898,10 +1318,56 @@ mod tests {
         );
 
         assert!(!untrusted.contains(&ProjectCapability::ExternalAi));
-        assert!(trusted_read_only.contains(&ProjectCapability::ExternalAi));
+        assert!(!trusted_read_only.contains(&ProjectCapability::ExternalAi));
         assert!(!trusted_read_only.contains(&ProjectCapability::GitCheckpoint));
         assert!(!trusted_read_only.contains(&ProjectCapability::ProjectWrite));
         assert_eq!(format, ProjectFormat::MarkdownVault);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn portable_name_collisions_block_writes_without_hiding_readable_content() {
+        let mut seen = HashMap::new();
+        let mut warnings = Vec::new();
+        record_path_name_collision(
+            &mut seen,
+            &mut warnings,
+            "notes",
+            "Guide.md",
+            "notes/Guide.md",
+        );
+        record_path_name_collision(
+            &mut seen,
+            &mut warnings,
+            "notes",
+            "guide.md",
+            "notes/guide.md",
+        );
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "PROJECT_PATH_NAME_COLLISION");
+        assert_eq!(
+            portable_path_name_key("é.md"),
+            portable_path_name_key("e\u{301}.md")
+        );
+        assert_eq!(
+            health_with_path_collisions(ProjectHealth::Healthy, &warnings),
+            ProjectHealth::Repairable
+        );
+        assert_eq!(
+            health_with_path_collisions(ProjectHealth::Unreadable, &warnings),
+            ProjectHealth::Unreadable
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn writable_windows_directory_is_not_misclassified_from_missing_posix_bits() {
+        let root = temp_root("windows-metadata-access");
+        assert_eq!(
+            metadata_filesystem_access(&root),
+            ProjectFilesystemAccess::Writable
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -1051,6 +1517,61 @@ mod tests {
         assert_eq!(refreshed.assessment_id, id);
         assert_eq!(refreshed.format, ProjectFormat::OrdinaryMaterials);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn remembers_an_ambiguous_folder_choice_by_identity_without_writing_the_folder() {
+        let config = temp_root("remember-intent-config");
+        let service = ProjectAssessmentService::new(config.clone());
+        let root = temp_root("remember-intent-root");
+        fs::write(root.join("note.md"), "# Note").unwrap();
+        let assessment = assess_project_folder(
+            root.to_string_lossy().as_ref(),
+            &config,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(assessment.format, ProjectFormat::AmbiguousMarkdown);
+        let id = assessment.assessment_id.clone();
+        service.inner.assessments.lock().unwrap().insert(
+            id.clone(),
+            AssessmentEntry {
+                created_at: Instant::now(),
+                expires_at: Instant::now() + ASSESSMENT_TTL,
+                assessment,
+            },
+        );
+
+        let remembered = service
+            .remember_ambiguous_intent(&id, ProjectOpenIntent::CreateFromMaterials)
+            .unwrap();
+        assert_eq!(
+            remembered.remembered_open_intent,
+            Some(ProjectOpenIntent::CreateFromMaterials)
+        );
+        assert!(!root.join(".app").exists());
+        assert!(!root.join(".git").exists());
+
+        let fresh_service = ProjectAssessmentService::new(config.clone());
+        let refreshed = fresh_service
+            .inspect_current(root.to_string_lossy().as_ref())
+            .unwrap();
+        assert_eq!(
+            refreshed.remembered_open_intent,
+            Some(ProjectOpenIntent::CreateFromMaterials)
+        );
+
+        let cleared = service.clear_ambiguous_intent(&id).unwrap();
+        assert_eq!(cleared.remembered_open_intent, None);
+        assert!(!root.join(".app").exists());
+        assert!(!root.join(".git").exists());
+
+        let cleared_freshly = ProjectAssessmentService::new(config.clone())
+            .inspect_current(root.to_string_lossy().as_ref())
+            .unwrap();
+        assert_eq!(cleared_freshly.remembered_open_intent, None);
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(config).ok();
     }
 
     #[test]

@@ -206,10 +206,8 @@ impl LintService {
         report_id: &str,
     ) -> Result<(), BackendError> {
         reject_report_id(report_id)?;
-        let path = context
-            .app_dir
-            .join("lint-reports")
-            .join(format!("{report_id}.json"));
+        let path =
+            context.resolve_project_write_path(&format!("{LINT_REPORTS_DIR}/{report_id}.json"))?;
         if path.is_file() {
             std::fs::remove_file(&path).map_err(|error| {
                 BackendError::new(
@@ -296,13 +294,10 @@ impl LintService {
         context: &ProjectContext,
         removed_ids: &[String],
     ) -> Result<(), BackendError> {
-        let report_dir = context.app_dir.join("lint-reports");
-        if !report_dir.exists() {
-            return Ok(());
-        }
         for id in removed_ids {
             reject_report_id(id)?;
-            let path = report_dir.join(format!("{id}.json"));
+            let path =
+                context.resolve_project_write_path(&format!("{LINT_REPORTS_DIR}/{id}.json"))?;
             if path.exists() {
                 std::fs::remove_file(&path).map_err(|err| {
                     BackendError::new(

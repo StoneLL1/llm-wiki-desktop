@@ -1466,7 +1466,7 @@ fn discard_new_artifact_if_unchanged(
     if actual != expected_hash {
         return;
     }
-    if let Ok(path) = context.resolve_project_path(output_path) {
+    if let Ok(path) = context.resolve_project_write_path(output_path) {
         let _ = std::fs::remove_file(path);
     }
 }

@@ -151,7 +151,7 @@ impl ChatService {
     ) -> Result<(), BackendError> {
         let lock = self.session_lock(context, session_id);
         let _guard = lock.lock().map_err(|_| session_lock_error())?;
-        let path = context.resolve_project_path(&session_path(session_id))?;
+        let path = context.resolve_project_write_path(&session_path(session_id))?;
         if path.exists() {
             std::fs::remove_file(&path).map_err(|err| {
                 BackendError::new("CHAT_DELETE_FAILED", err.to_string(), true, false)
@@ -502,6 +502,27 @@ mod tests {
     }
 
     #[test]
+    fn delete_session_rejects_a_linked_chat_state_root() {
+        let (context, root) = tmp_context("delete-linked-state");
+        let source_root = root.join("raw/sources");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let original = source_root.join("original.json");
+        std::fs::write(&original, "source bytes").unwrap();
+        let chats = root.join(".app/chats");
+        std::fs::create_dir_all(chats.parent().unwrap()).unwrap();
+        create_directory_link(&source_root, &chats).unwrap();
+
+        let error = ChatService::default()
+            .delete_session(&context, "original")
+            .expect_err("a linked chat state root must not become a delete target");
+        assert_eq!(error.code, "PATH_OUTSIDE_PROJECT");
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "source bytes");
+
+        remove_directory_link(&chats);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rename_rejects_empty_title() {
         let (context, root) = tmp_context("empty-title");
         let service = ChatService::default();
@@ -546,5 +567,42 @@ mod tests {
         assert_eq!(err.code, "CHAT_PARSE_FAILED");
         assert!(err.recoverable);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let quote_path = |path: &std::path::Path| {
+            format!(r#"'{}'"#, path.display().to_string().replace('\'', "''"))
+        };
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command"])
+            .arg(format!(
+                "New-Item -ItemType Junction -Path {} -Target {} | Out-Null",
+                quote_path(link),
+                quote_path(target)
+            ))
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        }
+    }
+
+    fn remove_directory_link(link: &std::path::Path) {
+        let _ = std::fs::remove_dir(link);
     }
 }
