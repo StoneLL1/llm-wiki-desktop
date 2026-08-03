@@ -25,9 +25,9 @@ pub(crate) use persistence::recover_workflow;
 pub use persistence::{project_identity, ProjectWorkflowIdentity};
 pub use preferences::{WorkflowPreference, WorkflowPreferences};
 pub use preparation::{
-    overview_prerequisites, workflow_baseline_for_scope, workflow_stages, PrepareWorkflowInput,
-    ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowPreparationEnvironment,
-    WorkflowPreparationService,
+    overview_prerequisites, resolve_workflow_persistence_binding, workflow_baseline_for_scope,
+    workflow_stages, PrepareWorkflowInput, ValidatedWorkflowStart, WorkflowAccessSnapshot,
+    WorkflowPersistenceBinding, WorkflowPreparationEnvironment, WorkflowPreparationService,
 };
 pub use runners::generate_content::{
     cancel_generate_content_confirmation, confirm_generate_content_overwrite,

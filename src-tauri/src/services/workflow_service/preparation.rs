@@ -11,7 +11,7 @@ use crate::models::compile::SourceVersionRef;
 use crate::models::export::ExportType;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
-use crate::models::project::{ProjectFilesystemAccess, ProjectTrustKind};
+use crate::models::project::ProjectTrustKind;
 use crate::models::workflow::{
     HealthCheckMode, UpdateWikiMode, WorkflowArtifactType, WorkflowBaselineSummary,
     WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitPolicy, WorkflowGitState,
@@ -21,8 +21,7 @@ use crate::models::workflow::{
     WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::services::{
-    AgentService, CompileService, ExportService, FileStore, GitService, SecretService,
-    SettingsService,
+    AgentService, CompileService, ExportService, FileStore, SecretService, SettingsService,
 };
 
 use super::fingerprint::{canonical_json, hex_sha256};
@@ -43,43 +42,32 @@ pub struct WorkflowAccessSnapshot {
     pub authority_revision: String,
 }
 
-impl WorkflowAccessSnapshot {
-    pub fn from_project_authority(
-        context: &ProjectContext,
-        git_service: &GitService,
-        trusted: bool,
-        trust_kind: Option<ProjectTrustKind>,
-        filesystem_access: ProjectFilesystemAccess,
-        persistent: bool,
-        authority_revision: String,
-    ) -> Result<Self, BackendError> {
-        let git = git_service.repository_status(context)?;
-        Ok(Self {
-            trust: if trusted {
-                WorkflowProjectTrust::Trusted
-            } else {
-                WorkflowProjectTrust::Untrusted
-            },
-            trust_kind,
-            filesystem_access: match filesystem_access {
-                ProjectFilesystemAccess::Writable => WorkflowFilesystemAccess::Writable,
-                ProjectFilesystemAccess::ReadOnly => WorkflowFilesystemAccess::ReadOnly,
-            },
-            persistence: if persistent {
-                WorkflowPersistenceMode::Persistent
-            } else {
-                WorkflowPersistenceMode::MemoryOnly
-            },
-            git_state: if !git.is_repository {
-                WorkflowGitState::Unavailable
-            } else if git.has_changes {
-                WorkflowGitState::Dirty
-            } else {
-                WorkflowGitState::Clean
-            },
-            authority_revision,
-        })
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPersistenceBinding {
+    pub mode: WorkflowPersistenceMode,
+    pub task_state_root: Option<std::path::PathBuf>,
+}
+
+pub fn resolve_workflow_persistence_binding(
+    context: &ProjectContext,
+    mode: WorkflowPersistenceMode,
+) -> Result<WorkflowPersistenceBinding, BackendError> {
+    if mode == WorkflowPersistenceMode::MemoryOnly {
+        return Ok(WorkflowPersistenceBinding {
+            mode,
+            task_state_root: None,
+        });
     }
+    let Some(relative_root) = context.layout.task_state_root.as_deref() else {
+        return Ok(WorkflowPersistenceBinding {
+            mode: WorkflowPersistenceMode::MemoryOnly,
+            task_state_root: None,
+        });
+    };
+    Ok(WorkflowPersistenceBinding {
+        mode,
+        task_state_root: Some(context.resolve_project_path(relative_root)?),
+    })
 }
 
 pub struct WorkflowPreparationEnvironment<'a> {
@@ -376,12 +364,11 @@ impl WorkflowPreparationService {
             execution_options: record.execution_options,
             stages: workflow_stages(&record.preparation.kind),
             title: workflow_title(&record.preparation.kind).into(),
-            task_state_root: match record.preparation.project_access.persistence {
-                WorkflowPersistenceMode::Persistent => {
-                    Some(environment.context.app_dir.join("tasks"))
-                }
-                WorkflowPersistenceMode::MemoryOnly => None,
-            },
+            task_state_root: resolve_workflow_persistence_binding(
+                environment.context,
+                record.preparation.project_access.persistence.clone(),
+            )?
+            .task_state_root,
             preparation_fingerprint: record.preparation_fingerprint,
         })
     }

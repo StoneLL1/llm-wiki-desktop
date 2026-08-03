@@ -311,7 +311,12 @@ async fn new_artifact_completes_exactly_nine_stages_without_git_and_is_exports_r
         .is_ok());
     let retry = fixture
         .coordinator
-        .retry(&fixture.tasks, &task_id, fixture.context.root.clone())
+        .retry(
+            &fixture.tasks,
+            &task_id,
+            fixture.context.root.clone(),
+            Some(fixture.context.app_dir.join("tasks")),
+        )
         .unwrap();
     let retry = match retry {
         WorkflowStartOutcome::Created { run } => run,

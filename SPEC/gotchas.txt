@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Authority resolution and authority-sensitive Workflow mutation are one transaction — Root cause: resolving trust/persistence and releasing the transition lock before enqueue, retry, queue claim, or confirmation lets a concurrent revoke finish before the new task or filesystem mutation exists, so root-wide rebinding can miss it — How to avoid: hold the project trust transition lock across backend access derivation and the authority-sensitive coordinator/confirmation mutation, keep TaskService lock order one-way beneath it, and dispatch background runners only after releasing the authority lock.
+
 Read-only Git assessment can still mutate or execute project-controlled programs — Root cause: ordinary `git status` may take optional locks and honor repository-local `core.fsmonitor` or hook configuration even when the application only intends to inspect an untrusted folder — How to avoid: use a bounded assessment-only Git runner with optional locks, fsmonitor, hooks, prompts, and pagers disabled; cap output and cancellation cleanup independently from mutation-capable Git commands.
 
 Project-bound confirmation actions can outlive the screen that requested them — Root cause: an authority request may return after a project switch, or an already-visible action may remain confirmable while its backend cancellation is still in flight — How to avoid: bind every action to project id/root plus action id, clear it synchronously on switch, cancel the backend registration, and cancel delayed stale responses instead of merely ignoring them.

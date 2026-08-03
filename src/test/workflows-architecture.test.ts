@@ -64,6 +64,72 @@ const workflowApiExports = [
   "discardWorkflowResult",
 ] as const;
 
+const rustAuthoritySources = (): SourceFile[] => [
+  join(root, "src-tauri", "src", "commands", "task_commands.rs"),
+  join(root, "src-tauri", "src", "commands", "workflow_commands.rs"),
+  join(root, "src-tauri", "src", "tasks", "task_service.rs"),
+  ...readdirSync(join(root, "src-tauri", "src", "services", "workflow_service"), {
+    recursive: true,
+    withFileTypes: true,
+  })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".rs"))
+    .map((entry) => join(entry.parentPath, entry.name)),
+].map((path) => ({
+  path: relative(root, path).replaceAll("\\", "/"),
+  source: readFileSync(path, "utf8"),
+}));
+
+const rustWorkflowCommandSource = (): string =>
+  readFileSync(
+    join(root, "src-tauri", "src", "commands", "workflow_commands.rs"),
+    "utf8",
+  );
+
+const commandBody = (source: string, name: string, nextName: string): string => {
+  const start = source.indexOf(`pub fn ${name}(`);
+  const end = source.indexOf(`pub fn ${nextName}(`, start + 1);
+  return start >= 0 && end > start ? source.slice(start, end) : "";
+};
+
+const workflowAuthorityViolations = (files: SourceFile[]): string[] => {
+  const violations: string[] = [];
+  const forbiddenAuthorityCalls = /\b(?:grant_compatible_project_trust|revoke_project_trust|register_trusted_native|register_trusted_compatible(?:_with_identity)?|revoke_trust|initialize_git_repository|initialize_repository|start_project_open_assessment|assess_project_folder)\s*\(/g;
+  const forbiddenAuthorityDerivation = /\b(?:resolve_authority|filesystem_access|has_writable_task_state_root)\s*\(|\b(?:ProjectTrustAuthority|ProjectFilesystemAccess|ProjectTrustState)::|permissions\(\)\.readonly\(\)/g;
+  const forbiddenGitDerivation = /\brepository_status(?:_for_assessment)?\s*\(/g;
+  for (const file of files) {
+    const { path, source } = file;
+    const productionSource = source.split(/\r?\n#\[cfg\(test\)\]\r?\n/, 1)[0];
+    if (forbiddenAuthorityCalls.test(productionSource)) {
+      violations.push(`${path}: derives or mutates project authority`);
+    }
+    forbiddenAuthorityCalls.lastIndex = 0;
+    const allowsCheckpointRevalidation = path.endsWith(
+      "src-tauri/src/services/workflow_service/runners/update_wiki.rs",
+    );
+    if (
+      forbiddenAuthorityDerivation.test(productionSource) ||
+      (!allowsCheckpointRevalidation && forbiddenGitDerivation.test(productionSource))
+    ) {
+      violations.push(`${path}: derives trust, writability, or Git state`);
+    }
+    forbiddenAuthorityDerivation.lastIndex = 0;
+    forbiddenGitDerivation.lastIndex = 0;
+    if (
+      path.endsWith("task_commands.rs")
+      && /(?:app_dir\.join\(\s*"tasks"\s*\)|join\(\s*"\.app"\s*\)\.join\(\s*"tasks"\s*\))/.test(source)
+    ) {
+      violations.push(`${path}: hand-built task persistence root`);
+    }
+    if (
+      path.endsWith("coordinator.rs")
+      && /task_state_root:\s*tasks\.workflow_persistence_dir\(task_id\)/.test(source)
+    ) {
+      violations.push(`${path}: retry reuses prior task persistence root`);
+    }
+  }
+  return violations;
+};
+
 const workflowApiViolations = (source: string): string[] => {
   const violations: string[] = [];
   const invokeCalls = [...source.matchAll(/\binvoke(?:<[^>]+>)?\s*\(/g)];
@@ -162,7 +228,58 @@ describe("Workflows architecture", () => {
     ]);
   });
 
-  it("adds the Workflows route while preserving the legacy Agent compatibility surface", () => {
+  it("keeps project trust, writability, Git, assessment, and persistence derivation outside Workflows", () => {
+    expect(workflowAuthorityViolations(rustAuthoritySources())).toEqual([]);
+  });
+
+  it("keeps authority-sensitive start and confirmation inside the project transition lock", () => {
+    const source = rustWorkflowCommandSource();
+    expect(commandBody(source, "start_workflow", "list_workflow_runs")).toContain(
+      "with_workflow_access",
+    );
+    expect(commandBody(source, "confirm_workflow_action", "discard_workflow_result")).toContain(
+      "with_workflow_access",
+    );
+  });
+
+  it("rejects authority mutation and cached persistence reuse in synthetic Rust sources", () => {
+    expect(workflowAuthorityViolations([
+      {
+        path: "src-tauri/src/services/workflow_service/unsafe.rs",
+        source: "grant_compatible_project_trust();",
+      },
+      {
+        path: "src-tauri/src/services/workflow_service/derived.rs",
+        source: "filesystem_access(); repository_status();",
+      },
+      {
+        path: "src-tauri/src/tasks/task_service.rs",
+        source: "ProjectTrustAuthority::TrustedNative;",
+      },
+      {
+        path: "src-tauri/src/commands/task_commands.rs",
+        source: 'let root = context.app_dir.join("tasks"); resolve_authority();',
+      },
+      {
+        path: "src-tauri/src/commands/workflow_commands.rs",
+        source: 'ProjectTrustAuthority::TrustedNative; permissions().readonly(); repository_status();',
+      },
+      {
+        path: "src-tauri/src/services/workflow_service/coordinator.rs",
+        source: "task_state_root: tasks.workflow_persistence_dir(task_id),",
+      },
+    ])).toEqual([
+      "src-tauri/src/services/workflow_service/unsafe.rs: derives or mutates project authority",
+      "src-tauri/src/services/workflow_service/derived.rs: derives trust, writability, or Git state",
+      "src-tauri/src/tasks/task_service.rs: derives trust, writability, or Git state",
+      "src-tauri/src/commands/task_commands.rs: derives trust, writability, or Git state",
+      "src-tauri/src/commands/task_commands.rs: hand-built task persistence root",
+      "src-tauri/src/commands/workflow_commands.rs: derives trust, writability, or Git state",
+      "src-tauri/src/services/workflow_service/coordinator.rs: retry reuses prior task persistence root",
+    ]);
+  });
+
+  it("keeps Workflows as the only user-facing workflow route", () => {
     const navigation = readFileSync(
       join(root, "src", "stores", "navigationStore.ts"),
       "utf8",

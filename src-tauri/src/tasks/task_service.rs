@@ -9,8 +9,8 @@ use crate::models::task::{
     BackendTask, StreamDelta, TaskActivity, TaskProgress, TaskResult, TaskStatus, TaskType,
 };
 use crate::models::workflow::{
-    WorkflowErrorSummary, WorkflowExecutionState, WorkflowPendingAction, WorkflowResult,
-    WorkflowRun, WorkflowStageStatus,
+    WorkflowErrorSummary, WorkflowExecutionState, WorkflowPendingAction, WorkflowPersistenceMode,
+    WorkflowPersistenceTransition, WorkflowResult, WorkflowRun, WorkflowStageStatus,
 };
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
@@ -369,6 +369,183 @@ impl TaskService {
             .cloned()
     }
 
+    pub(crate) fn rebind_workflow_persistence(
+        &self,
+        id: &str,
+        project_root: &Path,
+        task_state_root: Option<PathBuf>,
+    ) -> Result<WorkflowPersistenceTransition, String> {
+        let task = self
+            .get_task(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if task.task_type != TaskType::Workflow {
+            return Err(format!("Task is not a workflow: {id}"));
+        }
+        if !self.task_belongs_to_root(id, project_root) {
+            return Err(format!(
+                "Workflow task does not belong to the asserted project: {id}"
+            ));
+        }
+        let task_state_root = task_state_root
+            .map(|root| validate_persistence_dir(project_root, &root))
+            .transpose()?;
+        self.rebind_workflow_persistence_ids(&[id.to_string()], task_state_root)
+            .map(|mut transitions| transitions.pop().expect("one workflow transition").1)
+    }
+
+    pub(crate) fn rebind_workflows_for_root(
+        &self,
+        project_root: &Path,
+        task_state_root: Option<PathBuf>,
+    ) -> Result<Vec<(String, WorkflowPersistenceTransition)>, String> {
+        let task_state_root = task_state_root
+            .map(|root| validate_persistence_dir(project_root, &root))
+            .transpose()?;
+        let expected = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let ids = self
+            .task_roots
+            .read()
+            .expect("lock poisoned")
+            .iter()
+            .filter_map(|(id, root)| {
+                let actual = root.canonicalize().unwrap_or_else(|_| root.clone());
+                (actual == expected).then(|| id.clone())
+            })
+            .collect::<Vec<_>>();
+        self.rebind_workflow_persistence_ids(&ids, task_state_root)
+    }
+
+    fn rebind_workflow_persistence_ids(
+        &self,
+        ids: &[String],
+        task_state_root: Option<PathBuf>,
+    ) -> Result<Vec<(String, WorkflowPersistenceTransition)>, String> {
+        let mut task_updates = Vec::new();
+        let mut log_events = Vec::new();
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let mut persistence = self.task_persistence_dirs.write().expect("lock poisoned");
+        let mut transitions = Vec::new();
+        for id in ids {
+            let Some(entry) = tasks.get_mut(id) else {
+                continue;
+            };
+            if entry.task.task_type != TaskType::Workflow {
+                continue;
+            }
+            let workflow = entry
+                .workflow
+                .as_mut()
+                .ok_or_else(|| format!("Workflow task state missing: {id}"))?;
+            let previous = persistence.get(id);
+            let transition = persistence_transition(previous, task_state_root.as_ref());
+            match task_state_root.as_ref() {
+                Some(root) => {
+                    persistence.insert(id.clone(), root.clone());
+                    workflow.persistence = WorkflowPersistenceMode::Persistent;
+                }
+                None => {
+                    persistence.remove(id);
+                    workflow.persistence = WorkflowPersistenceMode::MemoryOnly;
+                }
+            }
+            transitions.push((id.clone(), transition));
+            let Some((level, message)) = persistence_transition_log(transition) else {
+                continue;
+            };
+            workflow.persistence_transition = Some(transition);
+            let line = LogLine {
+                timestamp: Utc::now().to_rfc3339(),
+                level,
+                message: message.into(),
+            };
+            entry.log_lines.push(line.clone());
+            entry.task.updated_at = Utc::now().to_rfc3339();
+            let project_id = entry.task.project_id.clone();
+            let run = workflow
+                .to_run(&entry.task)
+                .ok_or_else(|| format!("Workflow task has no project id: {id}"))?;
+            log_events.push((project_id.clone(), id.clone(), line));
+            task_updates.push((project_id, id.clone(), run));
+        }
+        drop(persistence);
+        drop(tasks);
+        for (project_id, task_id, line) in log_events {
+            self.emit(
+                crate::models::task::BackendEventType::TaskLog,
+                project_id,
+                Some(task_id),
+                line,
+            );
+        }
+        for (project_id, task_id, run) in task_updates {
+            self.emit(
+                crate::models::task::BackendEventType::WorkflowUpdated,
+                project_id,
+                Some(task_id),
+                run,
+            );
+        }
+        Ok(transitions)
+    }
+
+    pub(crate) fn record_workflow_persistence_transition(
+        &self,
+        id: &str,
+        was_persistent: bool,
+        is_persistent: bool,
+    ) -> Result<(), String> {
+        let transition = match (was_persistent, is_persistent) {
+            (true, false) => WorkflowPersistenceTransition::DowngradedToMemoryOnly,
+            (false, true) => WorkflowPersistenceTransition::UpgradedToPersistent,
+            _ => WorkflowPersistenceTransition::Unchanged,
+        };
+        let Some((level, message)) = persistence_transition_log(transition) else {
+            return Ok(());
+        };
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        let workflow = entry
+            .workflow
+            .as_mut()
+            .ok_or_else(|| format!("Task is not a workflow: {id}"))?;
+        workflow.persistence = if is_persistent {
+            WorkflowPersistenceMode::Persistent
+        } else {
+            WorkflowPersistenceMode::MemoryOnly
+        };
+        workflow.persistence_transition = Some(transition);
+        let line = LogLine {
+            timestamp: Utc::now().to_rfc3339(),
+            level,
+            message: message.into(),
+        };
+        entry.log_lines.push(line.clone());
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        let project_id = entry.task.project_id.clone();
+        let task_id = entry.task.id.clone();
+        let run = workflow
+            .to_run(&entry.task)
+            .ok_or_else(|| format!("Workflow task has no project id: {id}"))?;
+        drop(tasks);
+        self.emit(
+            crate::models::task::BackendEventType::TaskLog,
+            project_id.clone(),
+            Some(task_id.clone()),
+            line,
+        );
+        self.emit(
+            crate::models::task::BackendEventType::WorkflowUpdated,
+            project_id,
+            Some(task_id),
+            run,
+        );
+        Ok(())
+    }
+
     pub(crate) fn workflow_execution_options(
         &self,
         id: &str,
@@ -428,12 +605,6 @@ impl TaskService {
     where
         F: FnOnce(&mut BackendTask, &mut WorkflowExecutionState) -> Result<(), String>,
     {
-        let persistence_dir = self
-            .task_persistence_dirs
-            .read()
-            .expect("lock poisoned")
-            .get(id)
-            .cloned();
         let project_root = self
             .task_roots
             .read()
@@ -441,6 +612,15 @@ impl TaskService {
             .get(id)
             .cloned();
         let mut tasks = self.tasks.write().expect("lock poisoned");
+        // Hold the task write lock while reading its persistence binding. A
+        // concurrent authority rebind takes the same locks in this order, so
+        // it cannot return while an in-flight mutation still owns an old dir.
+        let persistence_dir = self
+            .task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
         let entry = tasks
             .get_mut(id)
             .ok_or_else(|| format!("Task not found: {id}"))?;
@@ -1440,26 +1620,39 @@ impl TaskService {
     }
 
     fn persist_current_task(&self, id: &str) -> Result<(), String> {
-        let persistence_dir = self
-            .task_persistence_dirs
+        let project_root = self
+            .task_roots
             .read()
             .expect("lock poisoned")
             .get(id)
             .cloned();
-        match persistence_dir {
-            Some(dir) => {
-                let project_root = self
-                    .task_roots
-                    .read()
-                    .expect("lock poisoned")
-                    .get(id)
-                    .cloned()
-                    .ok_or_else(|| format!("Task has no project root: {id}"))?;
-                let dir = validate_persistence_dir(&project_root, &dir)?;
-                self.persist_task_to_dir(id, &project_root, &dir)
-            }
-            None => Ok(()),
+        let Some(project_root) = project_root else {
+            return Ok(());
+        };
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let persistence = self.task_persistence_dirs.read().expect("lock poisoned");
+        let Some(dir) = persistence.get(id) else {
+            return Ok(());
+        };
+        let entry = tasks
+            .get(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        let persisted = PersistedTaskEntry {
+            schema_version: PERSISTED_TASK_SCHEMA_VERSION,
+            task: entry.task.clone(),
+            log_lines: entry.log_lines.clone(),
+            activities: entry.activities.clone(),
+            workflow: entry.workflow.clone(),
+        };
+        let dir = validate_persistence_dir(&project_root, dir)?;
+        let path = write_persisted_task(&project_root, &dir, id, &persisted)?;
+
+        drop(persistence);
+        drop(tasks);
+        if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+            entry.persisted_path = Some(path);
         }
+        Ok(())
     }
 
     pub fn recover_tasks(&self, project_root: &Path) -> Result<Vec<BackendTask>, String> {
@@ -1643,6 +1836,36 @@ fn validate_persistence_dir(
         .map_err(|error| format!("Task persistence path is unsafe: {error}"))
 }
 
+fn persistence_transition(
+    previous: Option<&PathBuf>,
+    next: Option<&PathBuf>,
+) -> WorkflowPersistenceTransition {
+    match (previous, next) {
+        (None, None) => WorkflowPersistenceTransition::Unchanged,
+        (Some(previous), Some(next)) if previous == next => {
+            WorkflowPersistenceTransition::Unchanged
+        }
+        (Some(_), None) => WorkflowPersistenceTransition::DowngradedToMemoryOnly,
+        (None, Some(_)) | (Some(_), Some(_)) => WorkflowPersistenceTransition::UpgradedToPersistent,
+    }
+}
+
+fn persistence_transition_log(
+    transition: WorkflowPersistenceTransition,
+) -> Option<(LogLevel, &'static str)> {
+    match transition {
+        WorkflowPersistenceTransition::DowngradedToMemoryOnly => Some((
+            LogLevel::Warn,
+            "Project authority changed; this workflow is now memory-only and its prior task file will no longer be updated.",
+        )),
+        WorkflowPersistenceTransition::UpgradedToPersistent => Some((
+            LogLevel::Info,
+            "Project authority changed; future workflow state will use the newly derived task-state root without backfilling prior history.",
+        )),
+        WorkflowPersistenceTransition::Unchanged => None,
+    }
+}
+
 fn write_persisted_task(
     project_root: &Path,
     persistence_dir: &Path,
@@ -1677,9 +1900,172 @@ fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> R
 mod tests {
     use super::*;
     use crate::models::task::BackendEventType;
+    use crate::models::workflow::{
+        HealthCheckMode, WorkflowExecutionOptions, WorkflowKind, WorkflowRoute, WorkflowScope,
+        WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
+    };
+    use crate::services::{EnqueueWorkflow, WorkflowCoordinator};
     use crate::tasks::task_events::CapturedEvent;
     use crate::tasks::task_model::LogLevel;
     use std::sync::{Arc, Mutex};
+
+    fn workflow_request(root: &Path, task_state_root: Option<PathBuf>) -> EnqueueWorkflow {
+        EnqueueWorkflow {
+            project_id: "project".into(),
+            project_root: root.to_path_buf(),
+            task_state_root,
+            title: "Health Check".into(),
+            kind: WorkflowKind::HealthCheck,
+            scope: WorkflowScope::HealthCheck {
+                mode: HealthCheckMode::LocalQuick,
+            },
+            route: Some(WorkflowRoute::Local {
+                route_revision: "local".into(),
+            }),
+            baseline_fingerprint: "baseline".into(),
+            execution_options: WorkflowExecutionOptions {
+                preparation_revision: "prep-1".into(),
+                ..WorkflowExecutionOptions::default()
+            },
+            stages: vec![WorkflowStage {
+                id: "read".into(),
+                ordinal: 1,
+                status: WorkflowStageStatus::Pending,
+                label_key: "read".into(),
+                started_at: None,
+                completed_at: None,
+                current_item: None,
+                progress: None,
+                decision: None,
+            }],
+            retry: None,
+        }
+    }
+
+    fn created_workflow(outcome: WorkflowStartOutcome) -> WorkflowRun {
+        match outcome {
+            WorkflowStartOutcome::Created { run } => run,
+            WorkflowStartOutcome::Existing { .. } => panic!("expected new workflow"),
+        }
+    }
+
+    #[test]
+    fn queued_rebind_to_memory_only_preserves_the_old_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let tasks_root = root.path().join(".app/tasks");
+        let run = created_workflow(
+            coordinator
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(tasks_root.clone())),
+                )
+                .unwrap(),
+        );
+        let old_path = tasks_root.join(format!("{}.json", run.task_id));
+        let old_bytes = std::fs::read(&old_path).unwrap();
+
+        assert_eq!(
+            service
+                .rebind_workflow_persistence(&run.task_id, root.path(), None)
+                .unwrap(),
+            WorkflowPersistenceTransition::DowngradedToMemoryOnly
+        );
+        service
+            .append_log(&run.task_id, LogLevel::Info, "memory-only log".into())
+            .unwrap();
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+
+        assert_eq!(std::fs::read(old_path).unwrap(), old_bytes);
+        let rebound = service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(rebound.persistence, WorkflowPersistenceMode::MemoryOnly);
+        assert_eq!(
+            rebound.persistence_transition,
+            Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
+        );
+        assert!(service.get_logs(&run.task_id).unwrap().iter().any(|line| {
+            line.level == LogLevel::Warn && line.message.contains("no longer be updated")
+        }));
+    }
+
+    #[test]
+    fn queued_rebind_to_persistent_waits_for_the_next_real_transition() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let run = created_workflow(
+            coordinator
+                .enqueue(&service, workflow_request(root.path(), None))
+                .unwrap(),
+        );
+        let tasks_root = root.path().join(".app/任务");
+        let task_path = tasks_root.join(format!("{}.json", run.task_id));
+
+        assert_eq!(
+            service
+                .rebind_workflow_persistence(&run.task_id, root.path(), Some(tasks_root.clone()),)
+                .unwrap(),
+            WorkflowPersistenceTransition::UpgradedToPersistent
+        );
+        assert!(!task_path.exists());
+
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        assert!(task_path.exists());
+        let rebound = service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(rebound.persistence, WorkflowPersistenceMode::Persistent);
+        assert_eq!(
+            rebound.persistence_transition,
+            Some(WorkflowPersistenceTransition::UpgradedToPersistent)
+        );
+        assert!(service.get_logs(&run.task_id).unwrap().iter().any(|line| {
+            line.level == LogLevel::Info && line.message.contains("newly derived")
+        }));
+    }
+
+    #[test]
+    fn project_authority_rebind_updates_every_workflow_for_the_same_root() {
+        let root = tempfile::tempdir().unwrap();
+        let other_root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let tasks_root = root.path().join(".app/tasks");
+        let first = created_workflow(
+            coordinator
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(tasks_root.clone())),
+                )
+                .unwrap(),
+        );
+        let mut second_request = workflow_request(root.path(), Some(tasks_root));
+        second_request.execution_options.preparation_revision = "prep-2".into();
+        second_request.baseline_fingerprint = "baseline-2".into();
+        let second = created_workflow(coordinator.enqueue(&service, second_request).unwrap());
+        let other = created_workflow(
+            coordinator
+                .enqueue(&service, workflow_request(other_root.path(), None))
+                .unwrap(),
+        );
+
+        let transitions = service
+            .rebind_workflows_for_root(root.path(), None)
+            .unwrap();
+
+        assert_eq!(transitions.len(), 2);
+        for id in [&first.task_id, &second.task_id] {
+            let run = service.get_workflow_run(id).unwrap();
+            assert_eq!(run.persistence, WorkflowPersistenceMode::MemoryOnly);
+            assert_eq!(
+                run.persistence_transition,
+                Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
+            );
+            assert_eq!(service.workflow_persistence_dir(id), None);
+        }
+        let other = service.get_workflow_run(&other.task_id).unwrap();
+        assert_eq!(other.persistence, WorkflowPersistenceMode::MemoryOnly);
+        assert_eq!(other.persistence_transition, None);
+    }
 
     #[test]
     fn cancellation_and_atomic_completion_never_leave_a_cancelled_result() {

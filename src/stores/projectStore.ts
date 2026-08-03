@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
 import type { ConfirmedAction } from "../types/backend";
+import type { TaskProjectPersistenceReason } from "../types/task";
+import type { WorkflowPersistenceMode } from "../types/workflow";
 import type {
   AgentRoute,
   ProjectAssessmentOperation,
@@ -32,11 +34,19 @@ interface ProjectState {
   initializing: boolean;
   initialized: boolean;
   error: string | null;
+  taskPersistence: WorkflowPersistenceMode | null;
+  taskPersistenceReason: TaskProjectPersistenceReason | null;
   setCurrentProject: (project: ProjectSummary) => void;
   setAgentRoute: (projectId: string, rootPath: string, agentRoute: AgentRoute) => void;
   clearCurrentProject: () => void;
   setRecentProjects: (projects: RecentProject[]) => void;
   setPendingAction: (action: OpenProjectResponse["pendingAction"]) => void;
+  setTaskPersistence: (
+    projectId: string,
+    rootPath: string,
+    persistence: WorkflowPersistenceMode | null,
+    reason: TaskProjectPersistenceReason | null,
+  ) => void;
   loadRecentProjects: () => Promise<RecentProject[]>;
   createProject: (payload: CreateProjectPayload) => Promise<ProjectSummary>;
   openProject: (path: string) => Promise<OpenProjectResponse>;
@@ -132,6 +142,22 @@ function bindPendingAction(
   pendingActionId = action?.id ?? null;
 }
 
+async function refreshTaskPersistence(
+  project: Pick<ProjectSummary, "projectId" | "rootPath">,
+): Promise<void> {
+  const current = useProjectStore.getState().currentProject;
+  if (
+    !project.projectId ||
+    !project.rootPath ||
+    current.projectId !== project.projectId ||
+    current.rootPath !== project.rootPath
+  ) {
+    return;
+  }
+  const { recoverTasksForProject } = await import("./taskStore");
+  await recoverTasksForProject(project.projectId, project.rootPath);
+}
+
 export const useProjectStore = create<ProjectState>((set, get) => ({
   currentProject: defaultProject,
   recentProjects: defaultRecentProjects,
@@ -143,6 +169,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   initializing: false,
   initialized: false,
   error: null,
+  taskPersistence: null,
+  taskPersistenceReason: null,
   setCurrentProject: (currentProject) => {
     const previous = get().currentProject;
     const changedProject =
@@ -162,6 +190,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       assessment: null,
       assessing: false,
       assessmentError: null,
+      taskPersistence: changedProject ? null : get().taskPersistence,
+      taskPersistenceReason: changedProject ? null : get().taskPersistenceReason,
     });
   },
   setAgentRoute: (projectId, rootPath, agentRoute) =>
@@ -190,6 +220,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       assessment: null,
       assessing: false,
       assessmentError: null,
+      taskPersistence: null,
+      taskPersistenceReason: null,
     });
   },
   setRecentProjects: (recentProjects) => set({ recentProjects }),
@@ -197,6 +229,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     bindPendingAction(pendingAction, get().currentProject);
     set({ pendingAction });
   },
+  setTaskPersistence: (projectId, rootPath, taskPersistence, taskPersistenceReason) =>
+    set((state) => {
+      if (
+        state.currentProject.projectId !== projectId ||
+        state.currentProject.rootPath !== rootPath
+      ) {
+        return state;
+      }
+      return { taskPersistence, taskPersistenceReason };
+    }),
   loadRecentProjects: async () => {
     if (!hasTauri()) {
       set({ recentProjects: [] });
@@ -218,7 +260,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (epoch === selectionEpoch) {
       invalidateProjectScope();
       resetProjectScopedStores();
-      set({ currentProject: summary, pendingAction: undefined, error: null });
+      set({
+        currentProject: summary,
+        pendingAction: undefined,
+        error: null,
+        taskPersistence: null,
+        taskPersistenceReason: null,
+      });
     }
     return summary;
   },
@@ -238,7 +286,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (response.summary) {
       invalidateProjectScope();
       resetProjectScopedStores();
-      set({ currentProject: response.summary, error: null });
+      set({
+        currentProject: response.summary,
+        error: null,
+        taskPersistence: null,
+        taskPersistenceReason: null,
+      });
     }
     bindPendingAction(response.pendingAction, response.summary ?? get().currentProject);
     set({ pendingAction: response.pendingAction });
@@ -310,6 +363,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       assessment: null,
       assessing: false,
       assessmentError: null,
+      taskPersistence: null,
+      taskPersistenceReason: null,
     });
     if (operationId && hasTauri()) {
       await invoke("cancel_project_open_assessment", {
@@ -385,6 +440,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       get().currentProject.rootPath === project.rootPath
     ) {
       set({ assessment });
+      await refreshTaskPersistence(project);
     }
     return assessment;
   },
@@ -497,6 +553,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         currentProject: confirmed.projectSummary ?? state.currentProject,
         pendingAction: undefined,
       });
+      if (
+        action.actionType === "trust_compatible_project" ||
+        action.actionType === "enable_compatible_project"
+      ) {
+        await refreshTaskPersistence(confirmed.projectSummary ?? requestProject);
+      }
     }
     return confirmed;
   },
@@ -552,6 +614,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         initializing: false,
         initialized: true,
         error: errorMessage(error),
+        taskPersistence: null,
+        taskPersistenceReason: null,
       });
     }
   },

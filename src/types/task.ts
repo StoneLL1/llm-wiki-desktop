@@ -103,6 +103,18 @@ export interface BackendTask {
   error: BackendError | null;
 }
 
+export type TaskProjectPersistenceReason =
+  | "no_project"
+  | "project_untrusted"
+  | "project_read_only"
+  | "task_state_root_unavailable";
+
+export interface SetActiveProjectResult {
+  tasks: BackendTask[];
+  persistence: import("./workflow").WorkflowPersistenceMode;
+  persistenceReason?: TaskProjectPersistenceReason;
+}
+
 export interface LogLine {
   timestamp: string;
   level: LogLevel;

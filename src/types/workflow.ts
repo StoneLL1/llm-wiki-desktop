@@ -142,6 +142,10 @@ export interface WorkflowBaselineSummary {
 export type WorkflowProjectTrust = "trusted" | "untrusted";
 export type WorkflowFilesystemAccess = "writable" | "read_only";
 export type WorkflowPersistenceMode = "persistent" | "memory_only";
+export type WorkflowPersistenceTransition =
+  | "unchanged"
+  | "downgraded_to_memory_only"
+  | "upgraded_to_persistent";
 export type WorkflowGitState = "clean" | "dirty" | "unavailable";
 
 export interface WorkflowProjectAccessSummary {
@@ -270,6 +274,8 @@ export interface WorkflowRun {
   route: WorkflowRoute | null;
   fingerprint: string;
   baselineFingerprint: string;
+  persistence?: WorkflowPersistenceMode;
+  persistenceTransition?: WorkflowPersistenceTransition | null;
   stages: WorkflowStage[];
   currentStageId: string | null;
   queuePosition: number | null;

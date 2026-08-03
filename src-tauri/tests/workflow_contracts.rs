@@ -70,6 +70,8 @@ fn sample_run() -> WorkflowRun {
         }),
         fingerprint: "fingerprint-1".into(),
         baseline_fingerprint: "baseline-1".into(),
+        persistence: WorkflowPersistenceMode::Persistent,
+        persistence_transition: None,
         stages: vec![WorkflowStage {
             id: "review".into(),
             ordinal: 1,

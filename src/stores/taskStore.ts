@@ -6,8 +6,12 @@ import type {
   TaskActivity,
   StreamDelta,
   LogLine,
+  SetActiveProjectResult,
+  TaskProjectPersistenceReason,
 } from "../types/task";
+import type { WorkflowPersistenceMode } from "../types/workflow";
 import { isTerminalStatus } from "../types/task";
+import { useProjectStore } from "./projectStore";
 
 interface TaskState {
   activeProjectId: string | null;
@@ -20,6 +24,8 @@ interface TaskState {
   selectedTaskId: string | null;
   runningCount: number;
   tasksHydrated: boolean;
+  projectPersistence: WorkflowPersistenceMode | null;
+  projectPersistenceReason: TaskProjectPersistenceReason | null;
 
   setTasks: (tasks: BackendTask[]) => void;
   upsertTask: (task: BackendTask) => void;
@@ -127,6 +133,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   selectedTaskId: null,
   runningCount: 0,
   tasksHydrated: false,
+  projectPersistence: null,
+  projectPersistenceReason: null,
 
   // Explicit recovery/project snapshots replace the visible task set while
   // preserving newer terminal state for task ids present in both snapshots.
@@ -334,10 +342,13 @@ export async function recoverTasksForProject(projectId: string, rootPath: string
     drawerOpen: false,
     runningCount: 0,
     tasksHydrated: false,
+    projectPersistence: null,
+    projectPersistenceReason: null,
   });
+  useProjectStore.getState().setTaskPersistence(projectId, rootPath, null, null);
   const { invoke } = await import("@tauri-apps/api/core");
   try {
-    const tasks = await invoke<BackendTask[]>("set_active_project", {
+    const result = await invoke<SetActiveProjectResult>("set_active_project", {
       request: { projectId, rootPath },
     });
     const state = useTaskStore.getState();
@@ -346,7 +357,17 @@ export async function recoverTasksForProject(projectId: string, rootPath: string
       state.activeProjectId !== projectId ||
       state.activeProjectRootPath !== rootPath
     ) return;
-    useTaskStore.getState().setTasks(tasks);
+    useTaskStore.setState({
+      projectPersistence: result.persistence,
+      projectPersistenceReason: result.persistenceReason ?? null,
+    });
+    useProjectStore.getState().setTaskPersistence(
+      projectId,
+      rootPath,
+      result.persistence,
+      result.persistenceReason ?? null,
+    );
+    useTaskStore.getState().setTasks(result.tasks);
   } finally {
     // Unknown task cards are only dismissible after the project task registry
     // has had a chance to hydrate; otherwise a restart race can hide a live
