@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-08-05] Batch B corrective dependency — Made workflow persistence rebinding validate every target before mutation, cancel active root-scoped workflows before trust revocation, and aligned repair-plan backup assertions with optional DTO paths — Key decision or open issue: queued runs remain subject to fresh backend authority checks at dispatch; this corrective change is committed separately from Batch C.
+
 [2026-08-05] Project compatibility remediation Batch B — Unified native-layout inspection with explicit Current/RepairableLegacy/IncompleteLegacy states, directory-only confirmed repair, post-repair authority refresh, and no-follow repair creation — Key decision or open issue: compatible/third-party markers and unsafe native markers fail closed; full `npm run check` passed and Graphify AST update completed.
 
 [2026-08-05] Project compatibility / Import backpressure Batch A completion — Re-ran the complete gate from the beginning after freezing expected-red contracts: frontend and Rust lanes passed, including 100/1,000/10,000 real discovery and BackendTask count witnesses; Graphify AST update also completed — Key decision or open issue: the 10,000-item Vitest witness has an explicit 15-second execution budget because its current intentionally unbatched path exceeds Vitest’s default 5 seconds; its 10,000-publication assertion and future <=100 green target remain unchanged for Batch F.

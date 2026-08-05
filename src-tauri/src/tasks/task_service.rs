@@ -524,18 +524,33 @@ impl TaskService {
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let mut persistence = self.task_persistence_dirs.write().expect("lock poisoned");
         let mut transitions = Vec::new();
-        for id in ids {
-            let Some(entry) = tasks.get_mut(id) else {
-                continue;
-            };
-            if entry.task.task_type != TaskType::Workflow {
-                continue;
-            }
+        // Validate every target before publishing any persistence mutation.
+        // A malformed later workflow must not leave earlier workflows rebound
+        // to a new root while the caller reports failure.
+        let targets = ids
+            .iter()
+            .filter_map(|id| tasks.get(id).map(|entry| (id, entry)))
+            .filter(|(_, entry)| entry.task.task_type == TaskType::Workflow)
+            .map(|(id, entry)| {
+                let workflow = entry
+                    .workflow
+                    .as_ref()
+                    .ok_or_else(|| format!("Workflow task state missing: {id}"))?;
+                workflow
+                    .to_run(&entry.task)
+                    .ok_or_else(|| format!("Workflow task has no project id: {id}"))?;
+                Ok(id.clone())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for id in targets {
+            let entry = tasks
+                .get_mut(&id)
+                .expect("validated workflow target must remain present while locked");
             let workflow = entry
                 .workflow
                 .as_mut()
-                .ok_or_else(|| format!("Workflow task state missing: {id}"))?;
-            let previous = persistence.get(id);
+                .expect("validated workflow target must retain workflow state while locked");
+            let previous = persistence.get(&id);
             let transition = persistence_transition(previous, task_state_root.as_ref());
             match task_state_root.as_ref() {
                 Some(root) => {
@@ -543,7 +558,7 @@ impl TaskService {
                     workflow.persistence = WorkflowPersistenceMode::Persistent;
                 }
                 None => {
-                    persistence.remove(id);
+                    persistence.remove(&id);
                     workflow.persistence = WorkflowPersistenceMode::MemoryOnly;
                 }
             }
@@ -562,7 +577,7 @@ impl TaskService {
             let project_id = entry.task.project_id.clone();
             let run = workflow
                 .to_run(&entry.task)
-                .ok_or_else(|| format!("Workflow task has no project id: {id}"))?;
+                .expect("validated workflow target must retain a project id while locked");
             log_events.push((project_id.clone(), id.clone(), line));
             task_updates.push((project_id, id.clone(), run));
         }
@@ -1147,6 +1162,37 @@ impl TaskService {
         }?;
         self.cancellation.cancel(id);
         Ok(updated)
+    }
+
+    /// Trust revocation cancels only active workflow execution for the
+    /// asserted project root. Queued runs remain queued and must pass a fresh
+    /// authority check before dispatch.
+    pub(crate) fn request_cancel_active_workflows_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        let expected = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let ids = self
+            .list_workflow_runs()
+            .into_iter()
+            .filter(|run| {
+                matches!(
+                    run.display_status,
+                    crate::models::workflow::WorkflowDisplayStatus::Running
+                        | crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+                ) && self
+                    .project_root_for_task(&run.task_id)
+                    .map(|root| root.canonicalize().unwrap_or(root) == expected)
+                    .unwrap_or(false)
+            })
+            .map(|run| run.task_id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.request_workflow_cancel(&id)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn reset_workflow_cancellation(&self, id: &str) -> Result<(), String> {
@@ -2050,6 +2096,67 @@ mod tests {
             WorkflowStartOutcome::Created { run } => run,
             WorkflowStartOutcome::Existing { .. } => panic!("expected new workflow"),
         }
+    }
+
+    #[test]
+    fn persistence_rebind_validates_all_workflows_before_mutating_any() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let first = created_workflow(
+            coordinator
+                .enqueue(&service, workflow_request(root.path(), None))
+                .unwrap(),
+        );
+        let mut second_request = workflow_request(root.path(), None);
+        second_request.baseline_fingerprint = "different-baseline".into();
+        let second = created_workflow(coordinator.enqueue(&service, second_request).unwrap());
+        service
+            .tasks
+            .write()
+            .unwrap()
+            .get_mut(&second.task_id)
+            .unwrap()
+            .workflow = None;
+
+        let error = service
+            .rebind_workflows_for_root(root.path(), Some(root.path().join(".app/compat/tasks")))
+            .unwrap_err();
+
+        assert!(error.contains("Workflow task state missing"));
+        assert!(service.workflow_persistence_dir(&first.task_id).is_none());
+    }
+
+    #[test]
+    fn trust_revocation_cancels_active_workflows_for_the_asserted_root() {
+        let root = tempfile::tempdir().unwrap();
+        let other_root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let active = created_workflow(
+            coordinator
+                .enqueue(&service, workflow_request(root.path(), None))
+                .unwrap(),
+        );
+        let unaffected = created_workflow(
+            coordinator
+                .enqueue(&service, workflow_request(other_root.path(), None))
+                .unwrap(),
+        );
+        service
+            .request_cancel_active_workflows_for_root(root.path())
+            .unwrap();
+
+        assert!(service.is_cancelled(&active.task_id));
+        assert_eq!(
+            service.get_task(&active.task_id).unwrap().status,
+            TaskStatus::Cancelling
+        );
+        assert!(!service.is_cancelled(&unaffected.task_id));
+        assert_eq!(
+            service.get_task(&unaffected.task_id).unwrap().status,
+            TaskStatus::Running
+        );
     }
 
     #[test]
