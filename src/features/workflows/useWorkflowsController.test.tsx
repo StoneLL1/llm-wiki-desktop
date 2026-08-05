@@ -40,6 +40,11 @@ const overview: WorkflowsOverview = {
   projectAccess: { projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", trust: "trusted", filesystemAccess: "writable", persistence: "persistent", gitState: "clean" },
   rows: [],
 };
+const noProjectOverview: WorkflowsOverview = {
+  schemaVersion: 1,
+  projectAccess: null,
+  rows: [],
+};
 const run: WorkflowRun = {
   schemaVersion: 1, taskId: "run-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a",
   kind: "health_check", displayStatus: "running", scope: { kind: "health_check", mode: "local_quick" }, route: { kind: "local", routeRevision: "local" },
@@ -112,6 +117,61 @@ describe("useWorkflowsController", () => {
     expect(useWorkflowStore.getState().runs).toEqual([]);
     act(() => mocks.listener?.({ eventId: "2", eventType: "workflow_updated", projectId: "project-a", taskId: "run-a", timestamp: run.updatedAt, payload: run }));
     expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("run-a");
+  });
+
+  it("loads the backend no-project overview instead of treating an empty project as uninitialized", async () => {
+    const emptyProject = { ...project, projectId: "", name: "", rootPath: "" };
+    mocks.getOverview.mockResolvedValueOnce(noProjectOverview);
+
+    renderHook(() => useWorkflowsController(emptyProject, true));
+
+    await waitFor(() => expect(useWorkflowStore.getState()).toMatchObject({
+      overview: noProjectOverview,
+      overviewStatus: "ready",
+    }));
+    expect(mocks.getOverview).toHaveBeenCalledWith({ projectId: "", projectRootPath: "" });
+    expect(mocks.listRuns).not.toHaveBeenCalled();
+  });
+
+  it("keeps workflow readiness available when run history fails", async () => {
+    mocks.listRuns.mockRejectedValueOnce(new Error("run history unavailable"));
+
+    renderHook(() => useWorkflowsController(project, true));
+
+    await waitFor(() => expect(useWorkflowStore.getState()).toMatchObject({
+      overview,
+      overviewStatus: "ready",
+    }));
+    await waitFor(() => expect(useWorkflowStore.getState().error).toContain("run history unavailable"));
+  });
+
+  it("rejects history from a different canonical identity in the same refresh", async () => {
+    mocks.listRuns.mockResolvedValueOnce({
+      runs: [{ ...run, canonicalIdentityKey: "stale-identity", identityRevision: "stale-revision" }],
+      nextCursor: "stale-cursor",
+    });
+
+    renderHook(() => useWorkflowsController(project, true));
+
+    await waitFor(() => expect(useWorkflowStore.getState()).toMatchObject({
+      overview,
+      overviewStatus: "ready",
+      runs: [],
+      historyCursor: null,
+    }));
+    await waitFor(() => expect(useWorkflowStore.getState().error).toBeTruthy());
+  });
+
+  it("exposes an overview load failure as a retryable error state", async () => {
+    mocks.getOverview.mockRejectedValueOnce(new Error("overview unavailable"));
+
+    renderHook(() => useWorkflowsController(project, true));
+
+    await waitFor(() => expect(useWorkflowStore.getState()).toMatchObject({
+      overview: null,
+      overviewStatus: "error",
+      error: "overview unavailable",
+    }));
   });
 
   it("buffers an event received before overview access and applies it after identity validation", async () => {
@@ -367,6 +427,51 @@ describe("useWorkflowsController", () => {
     expect(mocks.listRuns).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "cursor-a", limit: 100 }));
     expect(useWorkflowStore.getState().runs.map((item) => item.taskId)).toContain("run-b");
     expect(useWorkflowStore.getState().historyCursor).toBeNull();
+  });
+
+  it("rejects a paginated history page from a different canonical identity", async () => {
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: "cursor-a" })
+      .mockResolvedValueOnce({
+        runs: [{ ...run, taskId: "foreign-run", canonicalIdentityKey: "identity-b", identityRevision: "revision-b" }],
+        nextCursor: null,
+      });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a"));
+
+    await act(() => result.current.loadHistoryMore());
+
+    expect(useWorkflowStore.getState().runs.map((item) => item.taskId)).toEqual([run.taskId]);
+    expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a");
+    expect(useWorkflowStore.getState().error).toBeTruthy();
+  });
+
+  it("does not let a superseded history page overwrite a full refresh with the same cursor", async () => {
+    const pendingPage = deferred<{ runs: WorkflowRun[]; nextCursor: string | null }>();
+    const freshRun = { ...run, taskId: "fresh-run", updatedAt: "2026-08-01T02:00:00Z" };
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: "cursor-a" })
+      .mockReturnValueOnce(pendingPage.promise)
+      .mockResolvedValueOnce({ runs: [freshRun], nextCursor: "cursor-a" });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a"));
+
+    let loadMorePromise!: Promise<void>;
+    act(() => {
+      loadMorePromise = result.current.loadHistoryMore();
+    });
+    await waitFor(() => expect(mocks.listRuns).toHaveBeenCalledTimes(2));
+    await act(() => result.current.refresh());
+    await waitFor(() => expect(useWorkflowStore.getState().runs.some((item) => item.taskId === freshRun.taskId)).toBe(true));
+
+    await act(async () => {
+      pendingPage.resolve({ runs: [{ ...run, taskId: "superseded-page-run" }], nextCursor: null });
+      await loadMorePromise;
+    });
+
+    expect(useWorkflowStore.getState().runs.some((item) => item.taskId === "superseded-page-run")).toBe(false);
+    expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a");
+    expect(useWorkflowStore.getState().error).toBeNull();
   });
 
   it("opens AI Settings with the run scope and route instead of preparing first", async () => {

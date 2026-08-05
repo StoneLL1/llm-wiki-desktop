@@ -423,6 +423,28 @@ pub struct GlobalSettingsFile {
     pub remote_provider_disclosure_revision: Option<String>,
 }
 
+/// The no-project workbench may change only the small subset of global UI
+/// preferences that does not require a project context. Secrets, provider
+/// configuration, and project-scoped defaults remain unavailable here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalUiPreferences {
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default)]
+    pub theme: ThemePreference,
+}
+
+impl Default for GlobalUiPreferences {
+    fn default() -> Self {
+        let settings = Settings::default();
+        Self {
+            language: settings.language,
+            theme: settings.theme,
+        }
+    }
+}
+
 impl Default for GlobalSettingsFile {
     fn default() -> Self {
         let settings = Settings::default();

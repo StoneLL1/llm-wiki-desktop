@@ -9,6 +9,14 @@ export function BottomStatusBar() {
   const runningCount = useTaskStore((state) => state.runningCount);
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
+  if (!currentProject.projectId || !currentProject.rootPath) {
+    return (
+      <footer className="statusbar flex h-7 items-center border-t border-[var(--border)] bg-[var(--surface)] px-3 font-mono text-[11px] text-[var(--text-secondary)]">
+        {t("noProject.status")}
+      </footer>
+    );
+  }
+
   const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? null;
   const agentReady = defaultAgent?.state === "installed";
   const agentLabel = defaultAgent ? `${defaultAgent.kind} · ${defaultAgent.version ?? "—"}` : "—";
@@ -25,6 +33,18 @@ export function BottomStatusBar() {
 
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const languageLabel = activeLanguage === "zh-CN" ? t("language.zhCN") : t("language.en");
+  const wikiLabel = (() => {
+    switch (currentProject.inventoryState) {
+      case "scanning":
+        return t("status.inventory.scanning");
+      case "partial":
+        return t("status.inventory.partial", { count: currentProject.wikiPageCount });
+      case "failed":
+        return t("status.inventory.failed");
+      default:
+        return t("status.wikiPages", { count: currentProject.wikiPageCount });
+    }
+  })();
 
   return (
     <footer className="statusbar flex h-7 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-3 font-mono text-[11px] text-[var(--text-secondary)]">
@@ -37,7 +57,7 @@ export function BottomStatusBar() {
           {agentLabel}
         </span>
         <span className="statusbar__item statusbar__wiki">
-          {t("status.wikiPages", { count: currentProject.wikiPageCount })}
+          {wikiLabel}
         </span>
         <span className="statusbar__item statusbar__tasks">{t("status.tasks", { count: runningCount })}</span>
         <span className="statusbar__item statusbar__index">

@@ -1,7 +1,7 @@
 export type RiskLevel = "low" | "medium" | "high" | "destructive";
 
 export type PendingActionType =
-  | "initialize_folder"
+  | "repair_project"
   | "delete_file"
   | "overwrite_file"
   | "batch_rewrite"
@@ -10,6 +10,7 @@ export type PendingActionType =
   | "install_agent"
   | "run_skill"
   | "enable_compatible_project"
+  | "configure_compatible_layout"
   | "trust_compatible_project"
   | "initialize_git_repository"
   | "create_git_checkpoint";

@@ -289,7 +289,10 @@ fn activate_project_with_access(
                 BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", &msg, true, true)
             })?;
         return Ok(SetActiveProjectResult {
-            tasks: Vec::new(),
+            // Read-only projects still need to expose in-memory operations
+            // such as the cancellable post-open inventory. Do not persist or
+            // create `.app` state merely to make those task cards visible.
+            tasks: state.task_service.list_tasks_for_root(&context.root, None),
             persistence: WorkflowPersistenceMode::MemoryOnly,
             persistence_reason,
         });

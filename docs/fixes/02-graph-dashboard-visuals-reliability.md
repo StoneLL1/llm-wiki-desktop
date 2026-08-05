@@ -1,12 +1,14 @@
 # 02 Graph, Dashboard Visuals, and Reliability Specification
 
+> **历史修复规格：** 本文对应已完成的 batch 02，保留当时 Wiki-only 图谱实现的修复证据。当前 Graph 产品与访问边界以 [`../../SPEC/roadmap/graph.md`](../../SPEC/roadmap/graph.md) 和 [首次使用规范](../superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准：节点来自当前可读 Source/Wiki Markdown，不要求先编译；restricted/read-only 只返回内存结果，不写图谱缓存。
+
 本规范整合以下条目：图谱美化、图谱重新打开消失、概览界面丰富板块。
 
 ## 条目 A：图谱美化
 
 ## 1. 需求概述
 - 用户想要什么：知识图谱更清晰、更美观、更适合探索，节点、边、标签、图例、选中态和空/加载态都更专业。
-- 为什么：PRD 明确图谱是导入后的第一价值感；当前图谱虽已可用，但仍需要更稳定的视觉层次和探索效率。
+- 为什么：当时 PRD 把图谱称为导入后的第一价值感；当前统一口径已把“可读 Source”定义为首值，图谱仍是重要的后续探索价值，因此需要更稳定的视觉层次和探索效率。
 
 ## 2. 现状分析
 - 当前代码实现在哪里：审计报告定位到 `src/features/graph/GraphView.tsx`、`GraphControls.tsx`、`GraphCanvasControls.tsx`、`GraphInfo.tsx`、`GraphLegend.tsx`、`GraphInspector.tsx`、`legendEntries.ts`、`graphExport.ts`、`graphNeighbors.ts`、`src/stores/graphStore.ts`、`src/types/graph.ts`、`src/styles.css`。

@@ -54,7 +54,6 @@ export function ProjectStartView() {
   const recentProjects = useProjectStore((state) => state.recentProjects);
   const initializing = useProjectStore((state) => state.initializing);
   const storeError = useProjectStore((state) => state.error);
-  const openProject = useProjectStore((state) => state.openProject);
   const createProject = useProjectStore((state) => state.createProject);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const confirmPendingAction = useProjectStore((state) => state.confirmPendingAction);
@@ -68,9 +67,6 @@ export function ProjectStartView() {
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<Category>("all");
-  const [pendingLaunchIntent, setPendingLaunchIntent] = useState<
-    "open_existing" | "open_folder_as_project" | null
-  >(null);
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [newDialogOpen, setNewDialogOpen] = useState(false);
@@ -177,43 +173,24 @@ export function ProjectStartView() {
     }
   };
 
-  const chooseAndOpenProject = async (
-    intent: "open_existing" | "open_folder_as_project",
-  ) => {
-    setPendingLaunchIntent(intent);
+  const openAssessedPath = async (selected: string) => {
     await run(async () => {
-      const selected = await pickDirectory({
-        title: t(
-          intent === "open_existing"
-            ? "launch.quick.openExistingPicker"
-            : "launch.quick.openFolderPicker",
-        ),
-      });
-      if (!selected) return;
-      if (intent === "open_existing") {
-        const result = await assessProject(selected);
-        const canOpen = ![
-          "ambiguous_markdown",
-          "ordinary_materials",
-          "unknown",
-        ].includes(result.format) && result.health !== "unreadable";
-        if (canOpen) {
-          await openAssessedProject(result.assessmentId);
-        }
-      } else {
-        await openProject(selected);
+      const result = await assessProject(selected);
+      const canOpen = ![
+        "ambiguous_markdown",
+        "ordinary_materials",
+        "unknown",
+      ].includes(result.format) && result.health !== "unreadable";
+      if (canOpen) {
+        await openAssessedProject(result.assessmentId);
       }
     });
   };
 
-  const pendingActionForDisplay =
-    pendingAction && pendingLaunchIntent === "open_existing"
-      ? {
-          ...pendingAction,
-          title: t("launch.confirm.notExistingTitle"),
-          message: t("launch.confirm.notExistingMessage"),
-        }
-      : pendingAction;
+  const chooseAndOpenProject = async () => {
+    const selected = await pickDirectory({ title: t("launch.quick.openExistingPicker") });
+    if (selected) await openAssessedPath(selected);
+  };
 
   const availableAgents = agents.filter((a) => a.state === "installed").length;
 
@@ -230,7 +207,7 @@ export function ProjectStartView() {
         <nav className="launch__nav" aria-label={t("launch.nav.label")}>
           <button type="button" className="is-active">{t("launch.nav.recent")}</button>
           <button type="button" onClick={() => setNewDialogOpen(true)}>{t("launch.nav.new")}</button>
-          <button type="button" onClick={() => void chooseAndOpenProject("open_existing")}>{t("launch.nav.open")}</button>
+          <button type="button" onClick={() => void chooseAndOpenProject()}>{t("launch.nav.open")}</button>
           <button type="button" onClick={() => {
             if (sideOpen) {
               document.getElementById("launch-templates")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -322,12 +299,7 @@ export function ProjectStartView() {
               <h3 className="quickaction__title">{t("launch.quick.new")}</h3>
               <p className="quickaction__desc">{t("launch.quick.newDesc")}</p>
             </button>
-            <button type="button" className="quickaction" onClick={() => void chooseAndOpenProject("open_folder_as_project")}>
-              <span className="quickaction__icon"><FolderOpen size={20} aria-hidden="true" /></span>
-              <h3 className="quickaction__title">{t("launch.quick.openFolderAsProject")}</h3>
-              <p className="quickaction__desc">{t("launch.quick.openFolderAsProjectDesc")}</p>
-            </button>
-            <button type="button" className="quickaction" onClick={() => void chooseAndOpenProject("open_existing")}>
+            <button type="button" className="quickaction" onClick={() => void chooseAndOpenProject()}>
               <span className="quickaction__icon"><FolderOpen size={20} aria-hidden="true" /></span>
               <h3 className="quickaction__title">{t("launch.quick.openExisting")}</h3>
               <p className="quickaction__desc">{t("launch.quick.openExistingDesc")}</p>
@@ -347,7 +319,7 @@ export function ProjectStartView() {
                   className="projcard"
                   disabled={initializing || busy || entry.missing}
                   title={entry.missing ? t("launch.recent.missingTitle") : entry.rootPath}
-                  onClick={() => void run(() => openProject(entry.rootPath))}
+                  onClick={() => void openAssessedPath(entry.rootPath)}
                 >
                   <div className="projcard__head">
                     <div className="projcard__mark">{entry.name.slice(0, 1).toUpperCase()}</div>
@@ -472,9 +444,9 @@ export function ProjectStartView() {
         />
       ) : null}
 
-      {pendingActionForDisplay ? (
+      {pendingAction ? (
         <ConfirmationDialog
-          action={pendingActionForDisplay}
+          action={pendingAction}
           checkpointExists={false}
           onCancel={() => void run(cancelPendingAction)}
           onConfirm={() => void run(confirmPendingAction)}

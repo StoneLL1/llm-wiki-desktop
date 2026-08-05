@@ -14,8 +14,6 @@ use crate::services::FileStore;
 use crate::utils::path_utils::normalize_project_path;
 use crate::utils::time_utils::now_rfc3339;
 
-const BOOKMARKS_PATH: &str = ".app/bookmarks.json";
-
 #[derive(Default)]
 pub struct BookmarkService {
     file_store: FileStore,
@@ -23,14 +21,15 @@ pub struct BookmarkService {
 
 impl BookmarkService {
     pub fn read_file(&self, context: &ProjectContext) -> Result<BookmarkFile, BackendError> {
-        let path = context.app_dir.join("bookmarks.json");
+        let bookmarks_path = bookmarks_path(context)?;
+        let path = context.resolve_project_path(bookmarks_path)?;
         if !path.exists() {
             return Ok(BookmarkFile::default());
         }
 
         let raw = fs::read_to_string(&path).map_err(|err| {
             BackendError::new("BOOKMARK_READ_FAILED", err.to_string(), true, false)
-                .with_details(serde_json::json!({ "path": BOOKMARKS_PATH }))
+                .with_details(serde_json::json!({ "path": bookmarks_path }))
         })?;
         parse_bookmark_file(&raw)
     }
@@ -134,7 +133,7 @@ impl BookmarkService {
 
     fn persist(&self, context: &ProjectContext, file: &BookmarkFile) -> Result<(), BackendError> {
         self.file_store
-            .write_json_atomic(context, BOOKMARKS_PATH, file)
+            .write_json_atomic(context, bookmarks_path(context)?, file)
     }
 }
 
@@ -310,7 +309,17 @@ fn export_entry_id(export_record_id: &str) -> String {
 
 fn bookmark_parse_error(err: serde_json::Error) -> BackendError {
     BackendError::new("BOOKMARK_PARSE_FAILED", err.to_string(), true, false)
-        .with_details(serde_json::json!({ "path": BOOKMARKS_PATH }))
+}
+
+fn bookmarks_path(context: &ProjectContext) -> Result<&str, BackendError> {
+    context.layout.bookmarks_path.as_deref().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_LAYOUT_STATE_UNAVAILABLE",
+            "Project bookmark state is unavailable until compatible features are enabled.",
+            true,
+            true,
+        )
+    })
 }
 
 #[cfg(test)]

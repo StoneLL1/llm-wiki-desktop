@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, ProjectWriteRootKind};
 use crate::errors::BackendError;
 use crate::models::compile::{
     CompileConsumptionRecord, CompileManifest, CompileRequest, CompileResult, CompileRoute,
@@ -74,6 +74,9 @@ pub fn start_wiki_compile(
     request: CompileRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_project_write_access(&context)?;
+    state.require_project_content_write_root(&context, ProjectWriteRootKind::Source)?;
+    state.require_project_content_write_root(&context, ProjectWriteRootKind::Wiki)?;
     let task = state
         .task_service
         .create_project_task(
@@ -114,6 +117,9 @@ async fn run_compile(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
+    state.require_project_write_access(context)?;
+    state.require_project_content_write_root(context, ProjectWriteRootKind::Source)?;
+    state.require_project_content_write_root(context, ProjectWriteRootKind::Wiki)?;
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)

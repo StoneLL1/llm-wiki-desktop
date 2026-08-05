@@ -9,10 +9,12 @@ import type {
 } from "../types/workflow";
 
 export type WorkflowsSurface = "overview" | "preparation" | "detail" | "history";
+export type WorkflowOverviewStatus = "idle" | "loading" | "ready" | "error";
 
 interface WorkflowState {
   projectKey: string;
   overview: WorkflowsOverview | null;
+  overviewStatus: WorkflowOverviewStatus;
   runs: WorkflowRun[];
   preparation: WorkflowPreparation | null;
   selectedTaskId: string | null;
@@ -30,7 +32,8 @@ interface WorkflowState {
     runs: WorkflowRun[],
     historyCursor: string | null,
   ) => void;
-  setOverview: (overview: WorkflowsOverview | null) => void;
+  setOverviewSnapshot: (overview: WorkflowsOverview) => void;
+  setOverviewStatus: (status: WorkflowOverviewStatus) => void;
   replaceRuns: (runs: WorkflowRun[]) => void;
   upsertRun: (run: WorkflowRun) => void;
   setPreparation: (preparation: WorkflowPreparation | null) => void;
@@ -45,6 +48,7 @@ interface WorkflowState {
 const initialState = {
   projectKey: "",
   overview: null,
+  overviewStatus: "idle" as WorkflowOverviewStatus,
   runs: [] as WorkflowRun[],
   preparation: null,
   selectedTaskId: null,
@@ -67,16 +71,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   reset: () => set((state) => ({ ...initialState, requestEpoch: state.requestEpoch + 1 })),
   setProjectSnapshot: (overview, runs, historyCursor) =>
     set((state) => {
-      const previousAccess = state.overview?.projectAccess;
-      const nextAccess = overview.projectAccess;
-      const identityChanged = Boolean(
-        previousAccess
-          && nextAccess
-          && (previousAccess.canonicalIdentityKey !== nextAccess.canonicalIdentityKey
-            || previousAccess.identityRevision !== nextAccess.identityRevision),
-      );
+      const identityChanged = workflowIdentityChanged(state.overview, overview);
       return {
         overview,
+        overviewStatus: "ready" as WorkflowOverviewStatus,
         runs: sortRuns(mergeRunSnapshots(identityChanged ? [] : state.runs, runs)),
         historyCursor,
         ...(identityChanged
@@ -88,7 +86,24 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           : {}),
       };
     }),
-  setOverview: (overview) => set({ overview }),
+  setOverviewSnapshot: (overview) =>
+    set((state) => {
+      const identityChanged = workflowIdentityChanged(state.overview, overview);
+      return {
+        overview,
+        overviewStatus: "ready" as WorkflowOverviewStatus,
+        ...(identityChanged
+          ? {
+              runs: [],
+              historyCursor: null,
+              preparation: null,
+              selectedTaskId: null,
+              surface: "overview" as WorkflowsSurface,
+            }
+          : {}),
+      };
+    }),
+  setOverviewStatus: (overviewStatus) => set({ overviewStatus }),
   replaceRuns: (runs) =>
     set((state) => ({ runs: sortRuns(mergeRunSnapshots(state.runs, runs)) })),
   upsertRun: (run) =>
@@ -112,6 +127,15 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
 }));
+
+function workflowIdentityChanged(
+  previous: WorkflowsOverview | null,
+  next: WorkflowsOverview,
+): boolean {
+  if (!previous) return false;
+  return previous.projectAccess?.canonicalIdentityKey !== next.projectAccess?.canonicalIdentityKey
+    || previous.projectAccess?.identityRevision !== next.projectAccess?.identityRevision;
+}
 
 function sortRuns(runs: WorkflowRun[]): WorkflowRun[] {
   return [...runs].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));

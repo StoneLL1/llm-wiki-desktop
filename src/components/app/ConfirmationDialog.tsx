@@ -14,7 +14,7 @@ interface ConfirmationDialogProps {
 }
 
 const confirmLabelKeys: Record<PendingAction["actionType"], string> = {
-  initialize_folder: "confirmation.confirm.initialize_folder",
+  repair_project: "confirmation.confirm.repair_project",
   delete_file: "confirmation.confirm.delete_file",
   overwrite_file: "confirmation.confirm.overwrite_file",
   batch_rewrite: "confirmation.confirm.batch_rewrite",
@@ -23,13 +23,16 @@ const confirmLabelKeys: Record<PendingAction["actionType"], string> = {
   install_agent: "confirmation.confirm.install_agent",
   run_skill: "confirmation.confirm.run_skill",
   enable_compatible_project: "confirmation.confirm.enable_compatible_project",
+  configure_compatible_layout: "confirmation.confirm.configure_compatible_layout",
   trust_compatible_project: "confirmation.confirm.trust_compatible_project",
   initialize_git_repository: "confirmation.confirm.initialize_git_repository",
   create_git_checkpoint: "confirmation.confirm.create_git_checkpoint",
 };
 
 const localizedAuthorityActions = new Set<PendingAction["actionType"]>([
+  "repair_project",
   "enable_compatible_project",
+  "configure_compatible_layout",
   "trust_compatible_project",
   "initialize_git_repository",
   "create_git_checkpoint",

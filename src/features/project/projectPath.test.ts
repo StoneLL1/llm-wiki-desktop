@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildProjectRootPath, sanitizeProjectFolderName } from "./projectPath";
+import { buildProjectRootPath, sanitizeProjectFolderName, validateProjectName } from "./projectPath";
 
 describe("sanitizeProjectFolderName", () => {
   it("keeps CJK names and trims whitespace", () => {
@@ -30,5 +30,17 @@ describe("buildProjectRootPath", () => {
   it("does not duplicate trailing separators", () => {
     expect(buildProjectRootPath("D:\\资料\\", "知识库")).toBe("D:\\资料\\知识库");
     expect(buildProjectRootPath("/tmp/wiki/", "agent")).toBe("/tmp/wiki/agent");
+  });
+});
+
+describe("validateProjectName", () => {
+  it("accepts CJK and emoji names", () => {
+    expect(validateProjectName("知识库 ✨")).toBeNull();
+  });
+
+  it("rejects operating-system-invalid and Windows-reserved names before creation", () => {
+    expect(validateProjectName("agent/wiki")).toBe("invalid");
+    expect(validateProjectName("CON")).toBe("reserved");
+    expect(validateProjectName("report. ")).toBe("invalid");
   });
 });

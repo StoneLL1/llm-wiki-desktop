@@ -1,5 +1,7 @@
 # LLM Wiki Desktop 对抗式产品审计
 
+> **历史审计快照：** 本文记录 2026-07-05 当时的规格与实现张力，不再定义首次使用、项目打开或 Import 的目标行为。当前分别以 [首次使用与打开已有知识库规范](../superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 和 [Import / Source / Media 规范](../superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准；下文出现的“导入后编译”等表述只能作为当时问题证据。
+
 日期：2026-07-05
 
 审计目标：从用户第一性原理出发，检查当前项目距离“把个人资料变成可信、可维护、可追溯的 Markdown Wiki 桌面应用”还缺什么，哪些细节会伤害体验，哪些实现与规格存在张力。

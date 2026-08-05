@@ -16,6 +16,7 @@ import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowsOverviewView } from "./WorkflowsOverview";
+import { WorkflowsView } from "./WorkflowsView";
 import { attentionRun, groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workflowPresentation";
 import { WorkflowsRightPanel } from "./WorkflowsRightPanel";
 import { useProjectStore } from "../../stores/projectStore";
@@ -47,7 +48,7 @@ afterEach(() => {
 describe("Workflows overview", () => {
   it("renders exactly the three fixed workflows and a single recommendation", () => {
     const prepare = vi.fn();
-    render(<WorkflowsOverviewView overview={overview} runs={[]} onPrepare={prepare} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={overview} overviewStatus="ready" error={null} runs={[]} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
     expect(screen.getAllByText("workflows.recommended")).toHaveLength(1);
     fireEvent.click(screen.getAllByRole("button", { name: "workflows.action.prepare" })[1]!);
@@ -150,10 +151,84 @@ describe("Workflows overview", () => {
     expect(buttons[0]).toHaveFocus();
   });
 
-  it("renders the no-project state without inventing a workflow", () => {
-    render(<WorkflowsOverviewView overview={null} runs={[]} onPrepare={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
-    expect(screen.getByRole("heading", { name: "workflows.noProject.title" })).toBeInTheDocument();
-    expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
+  it("does not mislabel a pending overview as no project", () => {
+    render(<WorkflowsOverviewView overview={null} overviewStatus="loading" error={null} runs={[]} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("heading", { name: "workflows.loading.title" })).toBeInTheDocument();
+    expect(screen.queryByText("workflows.noProject.title")).not.toBeInTheDocument();
+  });
+
+  it("shows an actionable error when the overview request fails", () => {
+    const retry = vi.fn();
+    render(<WorkflowsOverviewView overview={null} overviewStatus="error" error="overview unavailable" runs={[]} onRetry={retry} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("overview unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("renders the backend no-project overview as fixed workflow prerequisites", () => {
+    const handlePrerequisite = vi.fn();
+    const prerequisite = { code: "WORKFLOW_PROJECT_REQUIRED", messageKey: "workflows.prerequisite.openOrCreateProject", blocking: true, action: "open_or_create_project" as const };
+    const noProjectOverview: WorkflowsOverview = {
+      schemaVersion: 1,
+      projectAccess: null,
+      rows: overview.rows.map((row) => ({ ...row, state: "needs_prerequisite", recommended: false, prerequisite })),
+    };
+    render(<WorkflowsOverviewView overview={noProjectOverview} overviewStatus="ready" error={null} runs={[]} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.queryByText("workflows.prerequisite.openOrCreateProject")).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "workflows.action.openOrCreateProject" })[0]!);
+    expect(handlePrerequisite).toHaveBeenCalledWith("open_or_create_project");
+  });
+
+  it("prepares project-present route and acknowledgement prerequisites before resolving them", () => {
+    const prepare = vi.fn();
+    const handlePrerequisite = vi.fn();
+    const actions = [
+      "configure_execution_route",
+      "acknowledge_remote_provider",
+      "acknowledge_restricted_content",
+    ] as const;
+    const view = render(<div />);
+
+    for (const action of actions) {
+      const blockedOverview: WorkflowsOverview = {
+        ...overview,
+        rows: overview.rows.map((row) => row.kind === "update_wiki" ? {
+          ...row,
+          state: "needs_prerequisite",
+          prerequisite: { code: action, messageKey: `workflows.prerequisite.${action}`, blocking: true, action },
+        } : row),
+      };
+      view.rerender(<WorkflowsOverviewView overview={blockedOverview} overviewStatus="ready" error={null} runs={[]} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+      fireEvent.click(screen.getAllByRole("button", { name: "workflows.action.prepare" })[0]!);
+    }
+
+    expect(prepare).toHaveBeenCalledTimes(actions.length);
+    expect(prepare).toHaveBeenCalledWith("update_wiki");
+    expect(handlePrerequisite).not.toHaveBeenCalled();
+  });
+
+  it("keeps an overview load failure visible after switching to history", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    useWorkflowStore.setState({ surface: "history", overview: null, overviewStatus: "error", error: "overview unavailable" });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("overview unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
+    expect(controller.refresh).toHaveBeenCalledOnce();
+  });
+
+  it("offers refresh when a cached overview refresh fails", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    useWorkflowStore.setState({ surface: "overview", overview, overviewStatus: "error", error: "refresh unavailable" });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("refresh unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.refresh" }));
+    expect(controller.refresh).toHaveBeenCalledOnce();
   });
 
   it("shows complete confirmation evidence and valid queue actions", () => {

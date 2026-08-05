@@ -1,103 +1,108 @@
-# LLM Wiki Desktop 实施路线图（Roadmap）
+# LLM Wiki Desktop 实施路线图
 
-> 本目录是一份**落差审计 + 实施计划**，对照源是 `UI-Frontend-design/` 设计稿与 `SPEC/PRD.md` 功能清单；最初审计时点是 2026-06-21、历史审计分支为 `task1-backend-contracts`，当前状态以各 living roadmap 的后续更新与当前源码为准。
-> 目的：让**别的对话**能照着这里的每个板块文件，逐块认领、修复或补齐功能，无需重新调研。
+本目录记录当前代码与有效产品规范之间的落差。它用于排期和实施，不取代上层规范。
 
-> **2026-07-11 架构迁移说明：**本目录是持续更新的路线图。旧的 `src-tauri/src/services/{import,search,lint,chat}_service.rs` 单文件证据现分别对应 `import_service/`、`search_service/`、`lint_service/`、`chat_service/` 目录模块；四个 service facade、Tauri command、DTO 与持久化契约保持不变，`chat_convenience_service.rs` 与 `wiki_index.rs` 仍是独立边界。前端 `AppShell` 只负责布局、pane 与全局壳层接线，项目级编排由 `WorkspaceController` 组合 `useImportWorkflow` / `useAgentWorkflow` / `useProviderWorkflow` 等 hook，视图 lazy dispatch 由 `WorkspaceRouter` 负责。`docs/audits/` 下的 dated audits 保留为当时的历史证据，不按当前路径回写。
+## 权威顺序
 
----
+发生冲突时按以下顺序处理：
 
-## 如何使用本路线图（给后续对话）
+1. `AGENTS.md` / `CLAUDE.md` 的安全与工程硬边界；
+2. 专题确认规范：
+   - [首次使用与打开已有知识库](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)；
+   - [Import / Source / Media](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)；
+   - [Workflows](../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md)；
+3. `PRD.md`、`SPEC.md`、`APP_flow.md`、`TECH_STACK.md`、`BACKEND_STRUCTURE.md`；
+4. 本目录的 living roadmaps；
+5. `SPEC/plans/`、`docs/fixes/`、旧 dated specs/plans/audits，仅作为历史证据。
 
-1. **认领粒度 = 一个板块文件**。每个 `*.md` 自包含：现状摘要 → 区块/组件清单（带 `文件:行号` 和状态/优先级）→ PRD 功能落差 → 视觉 token 落差 → 交互/可访问性落差 → 建议实施顺序。
-2. **挑一个 P0 项**开工。优先级约定：`P0` = 阻塞核心流程或违反 CLAUDE.md 硬边界；`P1` = MVP 期内应补齐；`P2` = 打磨。
-3. **状态记号**：`✅已完成` / `🟡部分实现` / `❌缺失`。改动后请同步更新对应板块文件的表格与本 README 的总览表。
-4. **硬边界不可越过**。开工前必读 `CLAUDE.md` 的"必读硬边界"：本地优先/无数据库、Git 检查点、API Key 只进系统凭据、路径安全+CJK、Agent 默认优先/BYOK 兜底、长任务可取消/可后台、i18n 含 Agent 生成内容语言偏好。
-5. **每个任务完成后**按 `CLAUDE.md` 的"任务完成检查清单"跑 `npm run test` + `npm run lint`，并追加一条 `SPEC/progress.txt` 记录。
-6. **后端契约**：历史 `task1-backend-contracts` 审计表明后端 service 骨架（Git/Secret/Agent/Task/Path 安全/PendingAction）整体已落地且测试覆盖较好；当前 Wiki create/rename/request-delete 命令与 PDF/Office 提取均已实现。剩余 P0 主要集中在**前端 UI 与设计稿对齐**，以及少数跨切面缺口（如 Import checkpoint 预操作时序、i18n prompt 注入）。
+`UI-Frontend-design/` 约束壳层、视觉密度、组件结构和交互细节。其旧启动页、Import 编译行为和 Agent 主入口不覆盖上述专题规范。
 
----
+## 使用方式
 
-## 总览：各板块完成度
+- 一次认领一个模块或一组有明确依赖的 P0。
+- 开工前先看对应专题规范与模块 roadmap，随后核对当前源码；不要把 roadmap 的旧行号当作事实。
+- 完成 executable code 后按 `AGENTS.md` 选择 `npm run check:quick` 或 `npm run check`，并更新 roadmap 的实现证据。
+- 文档、研究和计划类修改无需 npm gate，但仍要做链接、矛盾和 `git diff --check` 校验。
+- 每个重要里程碑在根目录 `progress.txt` 顶部追加；只有重复、隐蔽或易复发的问题写入 `gotchas.txt`。
 
-| 板块 | 完成度估计 | P0 数 | 文件 | 最关键缺口 |
-|---|---|---|---|---|
-| Graph（图谱） | ~65% | 1 | [graph.md](graph.md) | 画布内图例/信息卡悬浮层、6 类型筛选、SVG/PNG 导出 |
-| Cross-cutting（跨切面） | 高（多数✅） | 2 | [cross-cutting.md](cross-cutting.md) | **Import checkpoint 仍在确认写入之后**、**i18n 生成内容语言偏好**；confirmation DTO 与 7 种 executable continuation 已厘清 |
-| Lint | ~55% | 2 | [lint.md](lint.md) | **批量自动修复编排**、**severity 分级 + lint-ignore**、UI 摘要卡/分段控件 |
-| Chat | ~55% | 1 | [chat.md](chat.md) | **流式输出**、消息 Markdown 渲染/avatar/citation 角标、Agent/BYOK 路由切换器 |
-| Settings | ~55% | 1 | [settings.md](settings.md) | 多 section 内容错位/缺失、`formrow`/`seg`/`toggle` 样式族、更新检查 mock；Provider 行/掩码/状态与 Ollama 可达性已实现 |
-| Shell + Dashboard + 启动页 | ~55% | 2 | [shell-dashboard.md](shell-dashboard.md) | **Dashboard 退化为状态表**（缺健康行/统计/时间线/快速操作）、**启动页未对齐三栏布局**；关闭拦截与托盘启动时本地化已实现，菜单语言热更新需重启（P2） |
-| Wiki | ~50% | 4 | [wiki.md](wiki.md) | **frontmatter 卡片化**、**Milkdown 工具条**、**新建/重命名/删除前端 UI 接线**、**冲突 Diff 对话框**；后端生命周期命令已注册，HTML 预览第三态仍缺 |
-| Exports | ~45% | 1 | [exports.md](exports.md) | **新建导出对话框**、已生成列表表格化/失败重试、模板选择端到端参数传递 |
-| Agent | ~40% | 1 | [agent.md](agent.md) | **运行 Agent 的 checkpoint/background 选项尚未接入实际任务**、核心操作四宫格、BYOK 卡片化、右面板 Agent 配置区、CLI 行/任务行样式族 |
-| Import | 后端~75% / 前端~35% | 1 | [import.md](import.md) | **导入 checkpoint 发生在写入之后**、**"打开文件夹为项目"对话框**与预览 UI 落差；PDF/Office 文本提取已实现 |
+## 当前模块总览
 
-> 完成度是子代理基于"真功能 vs 空壳 vs 缺失"的粗估，仅供排期参考，不是精确指标。
+| 模块 | 当前重点 | 路线图 |
+|---|---|---|
+| 壳层、无项目工作台、Dashboard | 持久工作台；仅新建/打开两条首屏路径；类型化评估、信任、兼容、恢复；Dashboard 统一状态 | [shell-dashboard.md](shell-dashboard.md) |
+| Import / Source | Import 只向当前知识库复制资料；预览、确认、可读 Source、媒体处理；不承担打开或恢复项目 | [专题规范](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) / [历史审计](import.md) |
+| Workflows | 三个内建工作流、统一准备页、项目级串行队列；app state 可写时持久确认/恢复，否则只读检查为 non-persistent | [agent.md](agent.md) / [实施计划](../../docs/superpowers/plans/2026-07-30-workflows-panel-implementation.md) |
+| Wiki | 阅读、编辑、frontmatter、生命周期命令、外部修改冲突和兼容/只读能力 | [wiki.md](wiki.md) |
+| Chat | Source 或 Wiki 上下文、流式输出、引用、明确 AI 路由和信任边界 | [chat.md](chat.md) |
+| Graph | 从可读 Markdown 建图；受限内存索引；部分扫描；筛选、检查器、导出 | [graph.md](graph.md) |
+| Lint | 本地只读检查、深度检查、批量修复、severity、ignore 与 Git 安全 | [lint.md](lint.md) |
+| Exports | 生成准备、任务状态、结果列表、预览、重试和覆盖确认 | [exports.md](exports.md) |
+| Settings | Agent/Provider/模型/密钥、外观、语言与应用行为；不承载已固定的启动策略或项目模板切换 | [settings.md](settings.md) |
+| 跨切面 | IPC、任务、Git、秘密、路径、信任、i18n、性能和兼容策略 | [cross-cutting.md](cross-cutting.md) |
 
----
+## 全局 P0
 
-## 全局 P0 红线清单（MVP 前必须关闭）
+1. **首次使用与安全打开**
+   - 完整壳层中的两张主卡；
+   - 新建默认父目录/模板并进入 Import；
+   - 零写入类型化评估；
+   - 普通资料文件夹另建知识库后复制；
+   - 受限、信任、只读、兼容、Git、修复、恢复和深度扫描。
+2. **Import 写入安全**
+   - 确认前不写入；
+   - 任何需要 Git 检查点的导入写入，必须先成功创建检查点；
+   - 原始资料默认不可变。
+3. **Workflows 项目访问与任务模型**
+   - 无项目不创建任务；
+   - 外部 AI/Agent/Skill 需要信任；
+   - 写入需要可写与真实 Git 策略；
+   - 项目级串行队列、去重、持久确认和重启恢复。
+4. **Wiki 生命周期与冲突**
+   - 新建、重命名、请求删除的 UI 接线；
+   - frontmatter 结构化编辑、Milkdown 工具栏；
+   - 外部修改与 Agent 结果的三路 Diff。
+5. **Lint 批量修复与分级**
+   - 本地只读 Lint 可在受限模式工作；
+   - 深度/外部检查需信任；
+   - 自动修复需可写、确认和 Git 检查点。
+6. **生成内容语言与密钥安全**
+   - Chat/Compile/Lint/Export/Workflows 使用用户语言偏好；
+   - API Key 仅进 OS 凭据存储，绝不进入项目文件、日志或导出。
 
-按"违反硬边界 / 阻塞核心流程"程度排序。括号内为所属板块文件。
+## 建议波次
 
-1. **i18n：Agent/LLM 生成内容未按用户语言偏好输出** `[cross-cutting]`
-   chat/compile/export/lint 五个 prompt 构造点全是英文 system instruction，未读 `settings.language`。托盘菜单的启动时本地化已完成，不属于此 P0；该缺口仍违反 `CLAUDE.md` "i18n：Agent 生成内容按用户语言偏好输出"。
-2. **Wiki：新建/重命名/删除页面 + Git 检查点** `[wiki]`
-   后端 `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page` 已实现并注册；剩余 P0 是把文件树的新建/重命名/删除 UI 接到现有 store/commands 与 `ConfirmationDialog`。
-3. **Wiki：frontmatter 卡片化 + Milkdown 工具条** `[wiki]`
-   阅读视图 frontmatter 是裸 `<pre>` YAML；编辑器真接入 Milkdown 但无格式工具条（加粗/斜体/标题/链接/代码/引用/撤销重做）。
-4. **Wiki：编译冲突 Markdown Diff 对话框** `[wiki]`
-   外部修改冲突仅 banner + reload，缺三路 diff（baseline / 外部 / agent）+ 三选项确认。后端 `FILE_HASH_MISMATCH` 需返回 baseline 文本。
-5. **Agent：运行选项未接通任务语义** `[agent]`
-   `RunAgentDialog` 与 Skill/route dispatch 已存在，但 `useAgentWorkflow` 未消费 `checkpoint` / `background`，两个开关目前不影响实际任务。
-6. **Lint：批量自动修复编排 + severity 分级** `[lint]`
-   设计稿顶栏"自动修复 (N)"主 CTA 无实现，只能逐条 Apply（每条各做一次 Git 检查点）；后端从不发 `error` 级（死链目前是 warning），severity 分级形同虚设；缺 lint-ignore 持久化。
-7. **Import：Git checkpoint 时序违反预操作要求** `[import]`
-   动作条与 checkbox 已实现，但 `confirm_import_preview` 先写入导入结果和 conflict JSON，之后才创建 checkpoint；checkpoint 失败不能阻止前置写盘。
-8. **Settings：PRD-SET-005 更新检查是 mock** `[settings]`
-    `window.confirm` 假弹窗，不真正查更新源。
+### 波次 1：访问与写入红线
 
----
+- `shell-dashboard`：类型化项目评估、全局信任与持久工作台；
+- `cross-cutting`：项目访问策略、路径身份、外部链接、Git 与任务隔离；
+- `import`：检查点前置与只向当前项目复制；
+- `settings`：移除旧启动策略目标，补齐真实配置能力。
 
-## 建议实施顺序（按依赖与性价比）
+### 波次 2：首个 Source 到可组织知识
 
-### 第 1 波：硬边界红线（并行可做，互相独立）
-- `cross-cutting` P0-1 i18n prompt 注入（5 个构造点；托盘启动时本地化已完成）
-- `agent` P0 将 RunAgentDialog 的 checkpoint/background 选项接入真实任务语义
-- `import` P0 把 checkpoint 移到任何 confirm import 写入之前
-- `settings` P0 更新检查去 mock（小而独立）
+- 新建知识库后进入 Import；
+- 预览、确认、提交首个可阅读 Source；
+- Wiki 生命周期、编辑工具栏和冲突处理；
+- Graph/Chat 对空状态、Source-only 和部分索引给出明确下一步。
 
-### 第 2 波：Wiki 生命周期（串行，互相依赖）
-- `wiki` P0 frontmatter 卡片化 + `.prose` token 迁移（低成本、立竿见影）
-- `wiki` P0 Milkdown 工具条
-- `wiki` P0 新建/重命名/删除前端 UI 接线（复用已注册后端命令、Git 检查点与 wikilink 同步）
-- `wiki` P0 冲突 Diff 对话框（依赖后端 `FILE_HASH_MISMATCH` 返回 baseline）
+### 波次 3：统一 Workflows
 
-### 第 3 波：核心功能补全
-- `agent` 对话框与 Skill/route dispatch 已存在；剩余 P0 是 checkpoint/background 选项语义
-- `lint` P0 批量修复编排 + severity 分级 + lint-ignore
-- `import` P0 前端 UI 重构对齐设计稿
+- 先落后端项目访问、队列、指纹和恢复契约；
+- 再实现 Update Wiki、Health Check、Generate Content；
+- 最后迁移 Dashboard、Import、Wiki、Lint、Exports 的共享入口并退役旧 Agent UI。
 
-### 第 4 波：体验打磨
-- `chat` 流式输出 + 消息渲染富化
-- `graph` 画布悬浮层（图例/信息卡）+ 6 类型筛选 + SVG/PNG 导出
-- `exports` 新建导出对话框 + 失败重试
-- `shell-dashboard` Dashboard 信息密度 + 启动页三栏布局
-- `settings` 样式族（`formrow`/`seg`/`toggle`）+ section 内容归位
-- `wiki` P1 HTML 预览第三态（依赖 `skills/html-*`）
+### 波次 4：体验与可访问性
 
----
+- Dashboard 信息密度和恢复状态；
+- Chat 流式渲染、Graph 检查器/导出、Exports 结果体验；
+- 全局键盘、焦点、屏幕阅读器、缩放、主题和跨平台路径回归。
 
-## 与其他 SPEC 文档的衔接
+## 关键禁区
 
-| 想了解 | 去看 |
-|---|---|
-| 产品需求条目编号（PRD-XXX）的含义 | `SPEC/PRD.md` |
-| 视图/数据流/确认规则 | `SPEC/APP_flow.md` |
-| 后端 service 架构与命令清单 | `SPEC/BACKEND_STRUCTURE.md` |
-| 前端设计系统（字号/间距/组件高度/section 标签）权威 | `UI-Frontend-design/assets/app.css` + `CLAUDE.md` "前端设计对齐原则" |
-| 已踩过的坑 | `SPEC/gotchas.txt` |
-| 历史进度记录 | `SPEC/progress.txt` |
-
-> 本路线图只描述"落差与计划"，不复制上述文档内容。实现时仍以原文档为准；若发现路线图与原文档冲突，**以原文档为准并回改路线图**。
+- 不恢复独立启动页、三张首屏操作卡、最近项目画廊或首屏 Agent/BYOK/模板墙。
+- 不把“导入资料”作为无项目第三入口；Import 只能在当前知识库内工作。
+- 不把普通资料文件夹原地初始化、移动、重命名或创建项目标记。
+- 不要求先编译才能看到 Source、Graph 或使用有足够 Source 上下文的 Chat。
+- 不把 `ProjectRegistry` 路径登记当成用户信任。
+- 不让前端决定文件、Git、信任、Agent 路由、密钥或任务安全。
+- 不把旧计划、修复记录或审计快照中的未完成项直接当作当前需求执行。

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
-  OpenProjectResponse,
+  OpenedProject,
   ProjectOpenAssessment,
+  ProjectSessionAuthority,
   ProjectSummary,
   RecentProject,
 } from "../types/project";
@@ -69,6 +70,26 @@ const assessment: ProjectOpenAssessment = {
   git: { isRepository: false, branch: null, head: null, hasChanges: false },
 };
 
+const authority: ProjectSessionAuthority = {
+  projectId: summary.projectId,
+  canonicalRootPath: recent.rootPath,
+  canonicalIdentityKey: assessment.canonicalIdentityKey,
+  identityRevision: assessment.identityRevision,
+  authorityRevision: "authority-a",
+  format: assessment.format,
+  trust: assessment.trust,
+  filesystemAccess: assessment.filesystemAccess,
+  health: assessment.health,
+  layout: assessment.layout,
+  confidence: assessment.confidence,
+  capabilities: assessment.capabilities,
+  warnings: assessment.warnings,
+  layoutWarnings: assessment.layoutWarnings,
+  git: assessment.git,
+};
+
+const openedAssessed: OpenedProject = { summary, authority };
+
 beforeEach(() => {
   invokeMock.mockReset();
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -77,6 +98,7 @@ beforeEach(() => {
   });
   useProjectStore.setState({
     currentProject: defaultProject,
+    authority: null,
     recentProjects: [],
     pendingAction: undefined,
     assessmentOperationId: null,
@@ -92,10 +114,17 @@ beforeEach(() => {
 
 describe("projectStore bootstrap", () => {
   it("keeps operation and completed assessment IDs in separate command scopes", async () => {
-    invokeMock
-      .mockResolvedValueOnce({ assessmentOperationId: "operation-a" })
-      .mockResolvedValueOnce({ assessmentOperationId: "operation-a", status: "completed", assessment })
-      .mockResolvedValueOnce(summary);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "start_project_open_assessment") {
+        return Promise.resolve({ assessmentOperationId: "operation-a" });
+      }
+      if (command === "get_project_open_assessment") {
+        return Promise.resolve({ assessmentOperationId: "operation-a", status: "completed", assessment });
+      }
+      if (command === "open_assessed_project") return Promise.resolve(openedAssessed);
+      if (command === "start_project_inventory") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
 
     const result = await useProjectStore.getState().assessProject(recent.rootPath);
     await useProjectStore.getState().openAssessedProject(result.assessmentId);
@@ -104,7 +133,149 @@ describe("projectStore bootstrap", () => {
       ["start_project_open_assessment", { request: { path: recent.rootPath } }],
       ["get_project_open_assessment", { request: { assessmentOperationId: "operation-a" } }],
       ["open_assessed_project", { request: { assessmentId: "assessment-a" } }],
+      ["start_project_inventory", {
+        request: { projectId: summary.projectId, projectRootPath: summary.rootPath },
+      }],
     ]);
+    expect(useProjectStore.getState().authority).toEqual(authority);
+  });
+
+  it("refreshes the authority snapshot after an explicit project change", async () => {
+    useProjectStore.getState().setCurrentProject(summary);
+    const refreshed = { ...authority, trust: "trusted" as const, authorityRevision: "authority-b" };
+    invokeMock.mockResolvedValueOnce(refreshed);
+
+    await expect(useProjectStore.getState().refreshProjectAuthority()).resolves.toEqual(refreshed);
+    expect(invokeMock).toHaveBeenCalledWith("get_project_session_authority", {
+      request: { projectId: summary.projectId, projectRootPath: summary.rootPath },
+    });
+    expect(useProjectStore.getState().authority).toEqual(refreshed);
+  });
+
+  it("opens an ambiguous Markdown folder only through the explicit typed choice", async () => {
+    useProjectStore.setState({ assessment });
+    invokeMock.mockResolvedValueOnce(openedAssessed);
+
+    await expect(
+      useProjectStore.getState().resolveAmbiguousAssessedProject(assessment.assessmentId),
+    ).resolves.toEqual(summary);
+
+    expect(invokeMock).toHaveBeenCalledWith("resolve_ambiguous_assessed_project", {
+      request: { assessmentId: assessment.assessmentId, intent: "open_as_markdown_vault" },
+    });
+    expect(useProjectStore.getState().authority).toEqual(authority);
+  });
+
+  it("remembers the create-from-materials choice without opening the folder", async () => {
+    const remembered = {
+      ...assessment,
+      rememberedOpenIntent: "create_from_materials" as const,
+    };
+    useProjectStore.setState({ assessment });
+    invokeMock.mockResolvedValueOnce(remembered);
+
+    await expect(
+      useProjectStore
+        .getState()
+        .rememberAmbiguousProjectIntent(assessment.assessmentId, "create_from_materials"),
+    ).resolves.toEqual(remembered);
+
+    expect(invokeMock).toHaveBeenCalledWith("remember_ambiguous_project_intent", {
+      request: { assessmentId: assessment.assessmentId, intent: "create_from_materials" },
+    });
+    expect(useProjectStore.getState().currentProject).toEqual(defaultProject);
+    expect(useProjectStore.getState().assessment).toEqual(remembered);
+  });
+
+  it("clears a remembered ambiguous-folder choice without opening the folder", async () => {
+    const remembered = {
+      ...assessment,
+      rememberedOpenIntent: "create_from_materials" as const,
+    };
+    const cleared = { ...assessment, rememberedOpenIntent: undefined };
+    useProjectStore.setState({ assessment: remembered });
+    invokeMock.mockResolvedValueOnce(cleared);
+
+    await expect(
+      useProjectStore.getState().clearAmbiguousProjectIntent(assessment.assessmentId),
+    ).resolves.toEqual(cleared);
+
+    expect(invokeMock).toHaveBeenCalledWith("clear_ambiguous_project_intent", {
+      request: { assessmentId: assessment.assessmentId },
+    });
+    expect(useProjectStore.getState().currentProject).toEqual(defaultProject);
+    expect(useProjectStore.getState().assessment).toEqual(cleared);
+  });
+
+  it("removes a recent-project entry without changing the current project", async () => {
+    const remaining = [{ ...recent, projectId: "project-b", rootPath: "D:/knowledge/project-b" }];
+    useProjectStore.setState({ recentProjects: [recent, ...remaining] });
+    invokeMock.mockResolvedValueOnce(remaining);
+
+    await expect(
+      useProjectStore.getState().removeRecentProject(recent.projectId, recent.rootPath),
+    ).resolves.toEqual(remaining);
+
+    expect(invokeMock).toHaveBeenCalledWith("remove_recent_project", {
+      request: { projectId: recent.projectId, rootPath: recent.rootPath },
+    });
+    expect(useProjectStore.getState().currentProject).toEqual(defaultProject);
+    expect(useProjectStore.getState().recentProjects).toEqual(remaining);
+  });
+
+  it("opens a relocated project only through the backend identity-verified command", async () => {
+    const relocatedRoot = "D:/knowledge/relocated-project-a";
+    const relocatedSummary = { ...summary, rootPath: relocatedRoot };
+    const relocatedAuthority = { ...authority, canonicalRootPath: relocatedRoot };
+    const relocatedRecent = { ...recent, rootPath: relocatedRoot, missing: false };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "relocate_recent_project") {
+        return Promise.resolve({ summary: relocatedSummary, authority: relocatedAuthority });
+      }
+      if (command === "start_project_inventory") return Promise.resolve(undefined);
+      if (command === "list_recent_projects") return Promise.resolve([relocatedRecent]);
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    await expect(
+      useProjectStore
+        .getState()
+        .relocateRecentProject(assessment.assessmentId, recent.projectId, recent.rootPath),
+    ).resolves.toEqual(relocatedSummary);
+
+    expect(invokeMock).toHaveBeenCalledWith("relocate_recent_project", {
+      request: {
+        assessmentId: assessment.assessmentId,
+        previousProjectId: recent.projectId,
+        previousRootPath: recent.rootPath,
+      },
+    });
+    expect(useProjectStore.getState()).toMatchObject({
+      currentProject: relocatedSummary,
+      authority: relocatedAuthority,
+      assessment: null,
+      recentProjects: [relocatedRecent],
+    });
+  });
+
+  it("releases the current project while preserving a completed assessment for its decision screen", () => {
+    useProjectStore.setState({
+      currentProject: summary,
+      authority,
+      assessmentOperationId: "operation-a",
+      assessment,
+    });
+
+    useProjectStore.getState().showAssessedProjectSelection();
+
+    expect(useProjectStore.getState()).toMatchObject({
+      currentProject: defaultProject,
+      authority: null,
+      assessmentOperationId: "operation-a",
+      assessment,
+      assessing: false,
+      assessmentError: null,
+    });
   });
 
   it("cancels only with the operation ID and clears the completed snapshot", async () => {
@@ -286,21 +457,36 @@ describe("projectStore bootstrap", () => {
     expect(isProjectScopeCurrent(scope)).toBe(true);
   });
 
-  it("opens the most recent project so the backend registers its context before rendering it", async () => {
-    const opened: OpenProjectResponse = { kind: "opened", summary };
-    invokeMock.mockResolvedValueOnce([recent]).mockResolvedValueOnce(opened);
+  it("reassesses the most recent project before registering its open context", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_recent_projects") return Promise.resolve([recent]);
+      if (command === "start_project_open_assessment") {
+        return Promise.resolve({ assessmentOperationId: "operation-a" });
+      }
+      if (command === "get_project_open_assessment") {
+        return Promise.resolve({ assessmentOperationId: "operation-a", status: "completed", assessment });
+      }
+      if (command === "open_assessed_project") return Promise.resolve(openedAssessed);
+      if (command === "start_project_inventory") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
 
     await useProjectStore.getState().bootstrap();
 
     expect(invokeMock.mock.calls).toEqual([
       ["list_recent_projects"],
-      ["open_project", { request: { path: recent.rootPath } }],
+      ["start_project_open_assessment", { request: { path: recent.rootPath } }],
+      ["get_project_open_assessment", { request: { assessmentOperationId: "operation-a" } }],
+      ["open_assessed_project", { request: { assessmentId: assessment.assessmentId } }],
+      ["start_project_inventory", {
+        request: { projectId: summary.projectId, projectRootPath: summary.rootPath },
+      }],
     ]);
     expect(useProjectStore.getState().currentProject).toEqual(summary);
     expect(useProjectStore.getState().initialized).toBe(true);
   });
 
-  it("skips missing recents during automatic bootstrap", async () => {
+  it("keeps the workspace empty when the latest recent project is missing", async () => {
     const missing: RecentProject = {
       ...recent,
       projectId: "missing-project",
@@ -312,22 +498,18 @@ describe("projectStore bootstrap", () => {
       graphState: "missing",
       missing: true,
     };
-    const opened: OpenProjectResponse = { kind: "opened", summary };
-    invokeMock.mockResolvedValueOnce([missing, recent]).mockResolvedValueOnce(opened);
+    invokeMock.mockResolvedValueOnce([missing, recent]);
 
     await useProjectStore.getState().bootstrap();
 
-    expect(invokeMock.mock.calls).toEqual([
-      ["list_recent_projects"],
-      ["open_project", { request: { path: recent.rootPath } }],
-    ]);
-    expect(useProjectStore.getState().currentProject).toEqual(summary);
-    expect(useProjectStore.getState().error).toBeNull();
+    expect(invokeMock.mock.calls).toEqual([["list_recent_projects"]]);
+    expect(useProjectStore.getState().currentProject).toEqual(defaultProject);
+    expect(useProjectStore.getState().error).toContain(missing.rootPath);
   });
 
   it("never lets a delayed automatic reopen overwrite an explicit project selection", async () => {
-    let resolveAutomatic!: (value: OpenProjectResponse) => void;
-    const automatic = new Promise<OpenProjectResponse>((resolve) => {
+    let resolveAutomatic!: (value: OpenedProject) => void;
+    const automatic = new Promise<OpenedProject>((resolve) => {
       resolveAutomatic = resolve;
     });
     const selected = {
@@ -338,17 +520,22 @@ describe("projectStore bootstrap", () => {
     };
     invokeMock.mockImplementation((command: string, args?: { request?: { path?: string } }) => {
       if (command === "list_recent_projects") return Promise.resolve([recent]);
-      if (command === "open_project" && args?.request?.path === recent.rootPath) return automatic;
-      if (command === "open_project" && args?.request?.path === selected.rootPath) {
-        return Promise.resolve({ kind: "opened", summary: selected });
+      if (command === "start_project_open_assessment" && args?.request?.path === recent.rootPath) {
+        return Promise.resolve({ assessmentOperationId: "operation-a" });
       }
+      if (command === "get_project_open_assessment") {
+        return Promise.resolve({ assessmentOperationId: "operation-a", status: "completed", assessment });
+      }
+      if (command === "open_assessed_project") return automatic;
       return Promise.reject(new Error(`Unexpected command: ${command}`));
     });
 
     const bootstrapping = useProjectStore.getState().bootstrap();
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
-    await useProjectStore.getState().openProject(selected.rootPath);
-    resolveAutomatic({ kind: "opened", summary });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("open_assessed_project", {
+      request: { assessmentId: assessment.assessmentId },
+    }));
+    useProjectStore.getState().setCurrentProject(selected);
+    resolveAutomatic(openedAssessed);
     await bootstrapping;
 
     expect(useProjectStore.getState().currentProject).toEqual(selected);

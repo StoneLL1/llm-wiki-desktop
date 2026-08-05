@@ -13,10 +13,9 @@ use crate::services::file_store::FileStore;
 use crate::services::import_v2::source_registry::SourceManifest;
 use crate::services::SearchService;
 use crate::utils::path_utils::normalize_project_path;
+use crate::utils::path_safety::validate_existing_project_directory;
 use crate::utils::time_utils::now_rfc3339;
 
-const EXPORTS_HTML_DIR: &str = "exports/html";
-const EXPORTS_INDEX_PATH: &str = ".app/exports.json";
 const PAGE_EXCERPT_CHARS: usize = 600;
 const MAX_EXPORT_HTML_BYTES: usize = 8 * 1024 * 1024;
 static EXPORT_RECORD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -33,6 +32,17 @@ fn export_record_guard() -> Result<std::sync::MutexGuard<'static, ()>, BackendEr
                 false,
             )
         })
+}
+
+fn export_record_path(context: &ProjectContext) -> Result<&str, BackendError> {
+    context.layout.export_record_path.as_deref().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_LAYOUT_STATE_UNAVAILABLE",
+            "Project export history is unavailable until compatible features are enabled.",
+            true,
+            true,
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,7 +474,26 @@ impl ExportService {
         &self,
         context: &ProjectContext,
     ) -> Result<String, BackendError> {
-        context.to_project_relative(&context.exports_dir.join("html"))
+        let export_root = context.layout.export_root.as_deref().ok_or_else(|| {
+            BackendError::new(
+                "PROJECT_LAYOUT_ROOT_UNAVAILABLE",
+                "The project layout does not provide an export root.",
+                true,
+                true,
+            )
+        })?;
+        let absolute_root = context.resolve_project_path(export_root)?;
+        if context.layout.app_state_root.as_deref() == Some(".app/compat")
+            && validate_existing_project_directory(&context.root, &absolute_root).is_err()
+        {
+            return Err(BackendError::new(
+                "PROJECT_LAYOUT_ROOT_UNAVAILABLE",
+                "The configured compatible export root is no longer an existing safe directory.",
+                true,
+                true,
+            ));
+        }
+        context.to_project_relative(&absolute_root)
     }
 
     pub fn workflow_baseline_entries(
@@ -619,8 +648,9 @@ impl ExportService {
     /// The filename is derived entirely from the export type / source — the UI
     /// never supplies it. Defense-in-depth: the result is asserted to stay
     /// inside `exports/html/` with no traversal.
-    pub fn build_output_relative_path(
+    pub fn build_output_relative_path_for(
         &self,
+        context: &ProjectContext,
         export_type: ExportType,
         source_path: Option<&str>,
     ) -> Result<String, BackendError> {
@@ -640,8 +670,44 @@ impl ExportService {
             })
         };
         let stamp = compact_timestamp();
-        let path = format!("{EXPORTS_HTML_DIR}/{slug}-{stamp}.html");
-        if !path.starts_with("exports/html/") || path.contains("..") {
+        let export_root = self.workflow_export_root_relative(context)?;
+        let path = format!("{export_root}/{slug}-{stamp}.html");
+        if !path.starts_with(&format!("{export_root}/")) || path.contains("..") {
+            return Err(BackendError::new(
+                "EXPORT_PATH_INVALID",
+                "Resolved export path escaped exports/html/.",
+                true,
+                true,
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Legacy, path-only helper retained for callers that only need a native
+    /// fixture name. Production export commands must call
+    /// `build_output_relative_path_for`, which derives the root from
+    /// `ProjectLayout`; any later compatible write through this legacy string
+    /// still fails the layout-root validation instead of creating exports/.
+    pub fn build_output_relative_path(
+        &self,
+        export_type: ExportType,
+        source_path: Option<&str>,
+    ) -> Result<String, BackendError> {
+        let slug = if export_type == ExportType::ProjectReport {
+            export_type
+                .skill_folder()
+                .trim_start_matches("html-")
+                .to_string()
+        } else {
+            source_path.map(slug_from_source).unwrap_or_else(|| {
+                export_type
+                    .skill_folder()
+                    .trim_start_matches("html-")
+                    .to_string()
+            })
+        };
+        let path = format!("exports/html/{slug}-{}.html", compact_timestamp());
+        if path.contains("..") {
             return Err(BackendError::new(
                 "EXPORT_PATH_INVALID",
                 "Resolved export path escaped exports/html/.",
@@ -744,7 +810,7 @@ impl ExportService {
         let mut records = self.list_records(context)?;
         records.insert(0, record);
         self.file_store
-            .write_json_atomic(context, EXPORTS_INDEX_PATH, &records)
+            .write_json_atomic(context, export_record_path(context)?, &records)
     }
 
     pub fn remove_record_if_matches(
@@ -769,7 +835,7 @@ impl ExportService {
             return Ok(false);
         }
         self.file_store
-            .write_json_atomic(context, EXPORTS_INDEX_PATH, &records)?;
+            .write_json_atomic(context, export_record_path(context)?, &records)?;
         Ok(true)
     }
 
@@ -778,10 +844,11 @@ impl ExportService {
         &self,
         context: &ProjectContext,
     ) -> Result<Vec<ExportRecord>, BackendError> {
-        if !self.file_store.exists(context, EXPORTS_INDEX_PATH) {
+        let export_record_path = export_record_path(context)?;
+        if !self.file_store.exists(context, export_record_path) {
             return Ok(Vec::new());
         }
-        self.file_store.read_json(context, EXPORTS_INDEX_PATH)
+        self.file_store.read_json(context, export_record_path)
     }
 
     pub fn list_records_with_bookmarks(
@@ -1531,45 +1598,53 @@ mod tests {
 
     #[test]
     fn output_path_is_scoped_under_exports_html() {
+        let (context, root) = tmp_context("output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path(ExportType::BeautifulRead, Some("wiki/concepts/Agent.md"))
+            .build_output_relative_path_for(&context, ExportType::BeautifulRead, Some("wiki/concepts/Agent.md"))
             .unwrap();
         assert!(path.starts_with("exports/html/"), "got {path}");
         assert!(path.ends_with(".html"));
         assert!(path.contains("agent"));
         assert!(!path.contains(".."));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn output_path_for_project_type_has_no_source_slug() {
+        let (context, root) = tmp_context("project-output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path(ExportType::ProjectReport, None)
+            .build_output_relative_path_for(&context, ExportType::ProjectReport, None)
             .unwrap();
         assert!(path.starts_with("exports/html/project-report-"));
         assert!(path.ends_with(".html"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn output_path_cjk_and_spaces_collapse_to_slug() {
+        let (context, root) = tmp_context("cjk-output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path(ExportType::KnowledgeCard, Some("wiki/概念/My Page!.md"))
+            .build_output_relative_path_for(&context, ExportType::KnowledgeCard, Some("wiki/概念/My Page!.md"))
             .unwrap();
         let file = path.rsplit('/').next().unwrap();
         assert!(file.starts_with("my-page"));
         assert!(file.ends_with(".html"));
         assert!(!file.contains(' '));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn slug_falls_back_for_empty_names() {
+        let (context, root) = tmp_context("empty-output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path(ExportType::KnowledgeCard, Some("wiki/!!!.md"))
+            .build_output_relative_path_for(&context, ExportType::KnowledgeCard, Some("wiki/!!!.md"))
             .unwrap();
         assert!(path.starts_with("exports/html/export-"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1618,9 +1693,10 @@ mod tests {
     fn build_output_relative_path_ignores_source_for_project_report() {
         // ProjectReport is project-wide; the slug should fall back to the skill
         // folder name, not the source path the UI might still send.
+        let (context, root) = tmp_context("report-output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path(ExportType::ProjectReport, Some("wiki/concepts/agent.md"))
+            .build_output_relative_path_for(&context, ExportType::ProjectReport, Some("wiki/concepts/agent.md"))
             .expect("project report path");
         assert!(
             path.starts_with("exports/html/project-report-"),
@@ -1628,6 +1704,7 @@ mod tests {
         );
         assert!(path.ends_with(".html"));
         assert!(!path.contains("agent"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2149,7 +2226,8 @@ mod tests {
     #[test]
     fn workflow_custom_export_layout_writes_records_and_resolves_preview() {
         let (mut context, root) = tmp_context("workflow-custom-export-layout");
-        context.exports_dir = root.join("published");
+        context.exports_dir = root.join("published/html");
+        context.layout.export_root = Some("published/html".into());
         let service = ExportService::default();
         let output = "published/html/自定义.html";
         let artifact = service

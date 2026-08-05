@@ -12,9 +12,9 @@ use crate::errors::BackendError;
 use crate::models::git::GitRepositoryStatus;
 use crate::models::graph::GraphData;
 use crate::models::layout::{
-    canonical_internal_read_path, is_link_or_reparse, project_descendant_path_enters_link,
-    inspect_native_layout, resolve_layout_with_budget, LayoutDiscoveryBudget, NativeLayoutInspection,
-    NativeLayoutState, ProjectLayoutConfidence,
+    canonical_internal_read_path, inspect_native_layout, is_link_or_reparse,
+    project_descendant_path_enters_link, resolve_layout_with_budget, LayoutDiscoveryBudget,
+    NativeLayoutInspection, NativeLayoutState, ProjectLayoutConfidence,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::project::{

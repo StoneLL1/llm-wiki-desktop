@@ -2,20 +2,21 @@
 
 > 对照源：UI-Frontend-design/chat.html + assets/app.css + SPEC/PRD.md（§8.6 / §9.6 / Phase 3）
 > 当前实现：src/features/chat/、src/stores/chatStore.ts、src/types/{chat,llm}.ts、src-tauri/src/services/chat_service/、src-tauri/src/commands/chat_commands.rs
+> 项目访问与首次价值边界：[`../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。Chat 在有可读 Source **或** Wiki 且有可用 AI 路径时即可回答；不要求先编译 Wiki 或先建立 Graph。未信任项目不得把内容交给外部 AI/Agent/Skill。
 
 ## 0. 现状摘要
 
 Chat 板块已具备端到端可用的最小闭环，不是空 UI 壳：
 
 - **会话管理**：CRUD 完整，持久化到 `.app/chats/{id}.json`，支持空标题校验、损坏文件隔离、按 updatedAt 倒序。
-- **真接入模型**（非 mock）：`send_chat_message` 创建可取消后台 Task → `ChatService::build_retrieval_context` 用 SearchService 取本地 Top-6 页面+excerpts+purpose.md+最近 8 轮历史组装 prompt → `resolve_route` 按 auto/agent/byok 路由到 AgentService 或 LlmService.complete（OpenAI/Anthropic/Google/Ollama/Custom 全打通） → 落盘 assistant 消息+citations。
+- **真接入模型**（非 mock）：`send_chat_message` 创建可取消后台 Task → `ChatService::build_retrieval_context` 当前主要用 SearchService 取本地 Top-6 Wiki 页面+excerpts+purpose.md+最近 8 轮历史组装 prompt → `resolve_route` 当前按 auto/agent/byok 路由到 AgentService 或 LlmService.complete（OpenAI/Anthropic/Google/Ollama/Custom 全打通） → 落盘 assistant 消息+citations。只检索 Wiki 是当前落差：目标必须在 Wiki 为空时检索已提交的可读 Source。`auto` 是现状，不是目标：后续按设置默认或单次显式覆盖执行，所选路径不可用时不得静默回退。
 - **引用**：citations 由本地检索结果直接生成（不从模型输出解析），CitationPanel 接入 RightContextPanel，可跳转 Wiki。
 - **保存到 wiki/queries/**：含 Git checkpoint + hash 匹配 + 二次确认对话框，路径强制 wiki/ 子树。
 - **取消**：chat_commands.rs:200-210 100ms 轮询 `is_cancelled`；前端 ChatView 监听终态自动 reload。
 
 但与设计稿相比明显缺位：**流式输出 / 多模型 segment 切换 / 模型 badge / 附加资料与引用页面按钮 / Skill 选择器（`/`） / 消息内嵌引用编号 / 右侧面板原始资料+执行路径+操作区 / Markdown 渲染（现仅 whitespace-pre-wrap 纯文本）/ 保存按钮反馈 "已保存到 wiki/queries/" 的路径回显**。
 
-PRD P0/P1 的 5 条中：CHAT-001~004 已达标，CHAT-005 由"全局搜索不调模型"的边界规则保证，无显式测试。
+按旧的 Wiki-only 验收口径，CHAT-001/003/004 主链路已落地；按当前“首次价值 = 可读 Source”口径，CHAT-002 仍是 P0 部分实现，因为 Source-only 项目尚不能进入同一检索与类型化引用链路。CHAT-005 由“全局搜索不调模型”的边界规则保证，但仍缺显式测试。
 
 ## 1. 区块 / 组件清单
 
@@ -40,15 +41,16 @@ PRD P0/P1 的 5 条中：CHAT-001~004 已达标，CHAT-005 由"全局搜索不�
 | 右面板 "执行路径"（路径/版本/窗口/检索/耗时/Token） | 元信息 dl | 完全缺失 | ❌缺失 | P2 | src-tauri/src/models/chat.rs |
 | 右面板 "操作"（保存/复制 MD/生成卡片/标记问题） | 4 按钮 | 仅 "保存到 wiki/queries"（且按钮在 ChatView 而非右面板） | ❌缺失 | P1 | src/features/chat/ChatView.tsx:132-140 |
 | 状态栏 Chat 行（.app/chats/xx.json · N 条 · tokens） | 多 segment | 无 Chat 状态栏行 | ❌缺失 | P2 | src/components/app/StatusStrip.tsx（待查） |
-| Agent vs BYOK 路由 | auto/agent/byok 三态 | 后端 resolve_route 完整；前端无选择器，固定 auto | 🟡部分实现 | P1 | src-tauri/src/commands/chat_commands.rs:272-315、ChatView.tsx:13 |
+| Agent vs BYOK 路由 | 使用设置默认值，允许单次显式 Agent/BYOK 覆盖，不静默回退 | 后端 resolve_route 完整；前端固定 legacy auto | 🟡部分实现 | P1 | src-tauri/src/commands/chat_commands.rs:272-315、ChatView.tsx:13 |
 | 会话标题自动生成 | 新会话应自动命名 | 后端 `ChatService::create_session` 默认 "New chat"，前端无"按首条问题改名" | 🟡部分实现 | P2 | `src-tauri/src/services/chat_service/sessions.rs` |
 
 ## 2. 功能落差（PRD 对照）
 
-- [ ] **PRD-CHAT-002 基于 Wiki 生成回答 / Markdown 渲染**：现状回答以纯文本 `whitespace-pre-wrap` 显示，设计稿示例含 `<strong>` `<em>` 有序列表与 `<sup>` 角标 → 目标：接入 remark-gfm+remark-math+rehype-katex+rehype-highlight（已用于 Wiki 视图） → 涉及 `src/features/chat/ChatView.tsx:118`、新建 `MessageContent.tsx` → 验收：回答正确渲染加粗/列表/代码/数学公式。
-- [ ] **PRD-CHAT-003 引用角标可点击跳转**：现状 citations 只在右面板列表 → 目标：AI 消息正文末尾追加 `<sup>N</sup>` 序号、消息下方追加 citation 卡片（编号+标题+路径）、角标点击切到 Wiki 视图 → 涉及 `src/features/chat/ChatView.tsx:106-144` → 验收：点击角标/卡片打开对应页面。
+- [ ] **PRD-CHAT-002 基于 Source 或 Wiki 生成回答 / Markdown 渲染**：现状检索主要依赖 Wiki，回答以纯文本 `whitespace-pre-wrap` 显示 → 目标：检索层统一返回 Source/Wiki 类型化 citation；没有 Wiki 但存在可读 Source 时仍可回答；同时接入 remark-gfm+remark-math+rehype-katex+rehype-highlight → 涉及 `src-tauri/src/services/chat_service/`、`src/features/chat/ChatView.tsx:118`、新建 `MessageContent.tsx` → 验收：Source-only 项目可得到带来源的回答，且加粗/列表/代码/数学公式正确渲染。
+- [ ] **PRD-CHAT-003 引用角标可点击跳转**：现状 citations 只在右面板列表 → 目标：AI 消息正文末尾追加 `<sup>N</sup>` 序号、消息下方追加 citation 卡片（编号+标题+路径+Source/Wiki 类型）、角标按类型打开 Source 或 Wiki 对应页面 → 涉及 `src/features/chat/ChatView.tsx:106-144` → 验收：点击角标/卡片打开被引用的 Source/Wiki 文档。
 - [ ] **流式输出**：现状 BYOK 整段返回，Agent 走 stdout stream 但前端只看终态 → 目标：BYOK 改 SSE/Anthropic stream；Agent 沿用 task log stream；前端订阅 task 日志增量追加到临时 assistant 气泡 → 涉及 `src-tauri/src/services/llm_service.rs:141`、`src-tauri/src/commands/chat_commands.rs:182-214`、`src/stores/chatStore.ts:209-233`、`src/features/chat/ChatView.tsx:145-157` → 验收：生成中可见逐字、可中途停止、最终内容与落盘一致。
-- [ ] **模型/路由切换 UI**：现状前端固定 `auto` → 目标：主区头 `seg` 三态切换（Auto/Agent/BYOK-Anthropic）显示当前活跃模型 badge → 涉及 `src/features/chat/ChatView.tsx:13`、新增 segment 组件 → 验收：切换后下次 send 携带显式 route，badge 反映 lastResolvedRoute。
+- [ ] **模型/路由切换 UI**：现状前端固定 legacy `auto` → 目标：默认读取 Settings，允许显式 Agent/BYOK 单次覆盖并显示当前活跃模型 badge → 涉及 `src/features/chat/ChatView.tsx:13`、新增 segment 组件 → 验收：覆盖后下次 send 携带显式 route，badge 反映 lastResolvedRoute；不可用时显示配置动作，不自动换路。
+- [ ] **项目信任与能力门禁**：无项目或既无可读 Source 也无 Wiki 时解释下一步；restricted 项目允许本地浏览但禁用外部 Chat，并提供“信任知识库”；trusted 项目即使没有 Git 也可进行不写项目内容的 Chat。项目 app state 不可写时，会话和消息使用明确标记为 non-persistent 的内存状态；“保存到 Wiki”另需 writable，并在覆盖时执行 Git checkpoint 与确认。前端返回配置/信任流程后保留草稿，不自动发送。
 - [ ] **右面板操作区**：现状右面板仅 citations 列表 → 目标：补 "复制回答 Markdown / 生成知识卡片 / 标记问题回答" 按钮及 "原始资料 + 执行路径（tokens/耗时/检索数）" 元信息 → 涉及 `src/features/chat/CitationPanel.tsx`、扩展 `ChatMessage`/`ChatCitation` 携带 rawRefs、timing、tokenUsage → 验收：每项可点击产生预期副作用（剪贴板/跳 Exports/标记 persisted flag）。
 - [ ] **会话搜索**：左侧无搜索框 → 目标：列表头加 28px 搜索框，按 title 模糊过滤 → 涉及 `src/features/chat/ChatSessionList.tsx:43` → 验收：输入即时过滤。
 - [ ] **PRD-CHAT-005 边界保护测试**：现状无显式用例证明全局搜索不调模型 → 目标：加一条 e2e/单元测试断言 SearchService 不触发 LlmService/AgentService → 涉及 `src-tauri/tests/mvp_flow.rs` → 验收：测试常绿。
@@ -79,11 +81,12 @@ PRD P0/P1 的 5 条中：CHAT-001~004 已达标，CHAT-005 由"全局搜索不�
 
 ## 5. 建议实施顺序
 
-1. **P0 消息渲染升级**：抽 `MessageContent` 复用 Wiki 渲染管线，让 AI 回答支持 Markdown/列表/代码/数学；同步补 avatar + time + model badge（解决最显眼的落差，不涉及后端）。
-2. **P1 流式输出**：BYOK 改 streaming，Agent 沿用 task log，前端 chatStore 增量 append；保留终态 reload 作幂等兜底。
-3. **P1 引用角标 + 消息内 citation 卡片**：在每条 assistant 消息上渲染 `<sup>N</sup>` 和底部卡片，点击切到 Wiki。
-4. **P1 模型/路由 segment**：主区头加 Auto/Agent/BYOK 三态，反映并控制 resolve_route；同步会话头 toolbar（标题/保存/重命名/删除）。
-5. **P1 右面板操作区 + 执行路径**：补按钮组，扩展 DTO 带回 tokens/耗时/检索数；补"原始资料"需先在 citations 模型加 rawRefs 字段。
-6. **P1 会话搜索 + meta 行**：列表头加搜索框、行加 "时间·N 条" 副行。
-7. **P2 Skill `/` 选择器 + 顶栏历史 + 状态栏 Chat 行 + 路径回显**：增量打磨，依赖前序组件落地。
-8. **P2 a11y 扫尾**：aria-live、键盘菜单、错误重试。
+1. **P0 Source/Wiki 上下文与项目门禁**：统一类型化 citation，支持 Source-only；接入 trust/access/writable 校验，配置或信任返回不自动发送。
+2. **P0 消息渲染升级**：抽 `MessageContent` 复用 Wiki 渲染管线，让 AI 回答支持 Markdown/列表/代码/数学；同步补 avatar + time + model badge。
+3. **P1 流式输出**：BYOK 改 streaming，Agent 沿用 task log，前端 chatStore 增量 append；保留终态 reload 作幂等兜底。
+4. **P1 引用角标 + 消息内 citation 卡片**：在每条 assistant 消息上渲染 `<sup>N</sup>` 和底部卡片，按 Source/Wiki 类型导航。
+5. **P1 模型/路由 segment**：主区头显示 Settings 默认值并允许 Agent/BYOK 单次覆盖，反映并控制 resolve_route；同步会话头 toolbar（标题/保存/重命名/删除）。
+6. **P1 右面板操作区 + 执行路径**：补按钮组，扩展 DTO 带回 tokens/耗时/检索数与 rawRefs。
+7. **P1 会话搜索 + meta 行**：列表头加搜索框、行加“时间·N 条”副行。
+8. **P2 Skill `/` 选择器 + 顶栏历史 + 状态栏 Chat 行 + 路径回显**：增量打磨；Skill 同样受 trust gate。
+9. **P2 a11y 扫尾**：aria-live、键盘菜单、错误重试。

@@ -1,12 +1,15 @@
 # LLM Wiki Desktop — Graphify code map
 
-This directory is a local, code-first knowledge graph produced with Graphify on 2026-08-05.
-The extraction used `graphify extract . --code-only --max-workers 4`, so parsing was local and
-deterministic: no source files or project documentation were sent to an LLM.
+This directory is a core-product knowledge graph produced with Graphify on 2026-08-05. It combines
+local AST extraction for code with model-assisted semantic extraction for product documents.
+The semantic layer preserves `EXTRACTED`, `INFERRED`, and `AMBIGUOUS` confidence labels rather than
+presenting model inferences as code facts.
 
 ## Start here
 
-- Open `GRAPH_TREE.html` for a lightweight, searchable file-and-symbol tree.
+- Open `GRAPH_TREE_SEMANTIC.html` for the current lightweight, searchable file-and-symbol tree.
+- `GRAPH_TREE.html` is the preserved code-only tree from the pre-semantic Git checkpoint.
+- Read `GRAPH_REPORT.md` for graph-wide communities, high-connectivity nodes and suggested queries.
 - Query `graph.json` from the repository root:
 
   ```powershell
@@ -43,13 +46,13 @@ layer. On the frontend, `useProjectStore` connects the shell and most feature vi
 
 ## Scope and refresh policy
 
-The current graph contains 11,147 nodes and 32,745 edges from 686 code files. It intentionally
-does **not** semantically index the repository's Markdown, PDFs, images or video; Graphify
-skipped 619 such files in this run. Configuration formats without supported parsers and 41 files
-that produced no AST nodes are also absent. Treat this as a code relationship map, not a substitute
-for the authoritative specifications in `SPEC/` and `docs/superpowers/specs/`.
+The current semantic build is scoped by `.graphifyignore` to core product material: root project
+documents, `SPEC/`, `docs/`, `src/`, `src-tauri/` and `capabilities/`. It excludes `wiki/`, test
+fixtures, UI prototype assets and media. This pass semantically indexes 174 documents; 50 core
+images are deliberately deferred to a separate vision pass so they do not overwhelm architecture
+relationships. Configuration formats without supported parsers remain absent.
 
 To refresh after code changes, run `graphify update .` and then regenerate the tree. Those commands
 overwrite the generated graph, so follow this repository's Git-checkpoint policy first and never
-overwrite a graph you need to preserve. Do not install Graphify hooks or its Codex integration
-unless the team explicitly wants persistent automation; both modify repository configuration.
+overwrite a graph you need to preserve. The project-scoped Codex integration is installed: future
+agents should query the graph before broad source exploration.

@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 
 import { AppShell } from "../components/app/AppShell";
-import { ProjectStartView } from "../features/project/ProjectStartView";
 import { useChatStream } from "../hooks/useChatStream";
 import { useTaskEvents } from "../hooks/useTaskEvents";
 import "../i18n";
@@ -25,5 +24,5 @@ export function App() {
     }
   }, [currentProject.projectId, currentProject.rootPath, loadSettings]);
 
-  return currentProject.projectId && currentProject.rootPath ? <AppShell /> : <ProjectStartView />;
+  return <AppShell />;
 }

@@ -1533,7 +1533,9 @@ pub(crate) fn committed_update_wiki_result(
             return None;
         }
     } else {
-        let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
+        let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf())
+            .with_resolved_layout()
+            .ok()?;
         let head = GitService.repository_status(&context).ok()?.head?;
         if checkpoint_hash.as_deref() == Some(head.as_str())
             || GitService::head_subject(&context).as_deref()
@@ -1543,10 +1545,13 @@ pub(crate) fn committed_update_wiki_result(
         }
         *final_commit = Some(head);
     }
-    project_root
-        .join(".app")
-        .join("compile")
-        .join(format!("{task_id}.json"))
+    let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf())
+        .with_resolved_layout()
+        .ok()?;
+    let compile_root = context.layout.compile_state_root.as_deref()?;
+    context
+        .resolve_project_path(&format!("{compile_root}/{task_id}.json"))
+        .ok()?
         .is_file()
         .then_some(result)
 }
@@ -1556,7 +1561,9 @@ pub fn update_wiki_decision_review(
     project_root: &std::path::Path,
 ) -> Option<WorkflowDecisionReview> {
     let descriptor = load_valid_update_wiki_candidate(task_id, project_root)?;
-    let context = ProjectContext::new("workflow-review", project_root.to_path_buf());
+    let context = ProjectContext::new("workflow-review", project_root.to_path_buf())
+        .with_resolved_layout()
+        .ok()?;
     let summary = CompileService::classify_workflow_changes(
         &context,
         &descriptor.candidate.manifest,
@@ -1645,7 +1652,11 @@ pub fn update_wiki_candidate_is_valid_for_workflow(
     if expected_sources != persisted_sources {
         return false;
     }
-    let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
+    let Ok(context) = ProjectContext::new("workflow-recovery", project_root.to_path_buf())
+        .with_resolved_layout()
+    else {
+        return false;
+    };
     if CompileService::resolve_source_versions(&context, &descriptor.source_versions).is_err() {
         return false;
     }

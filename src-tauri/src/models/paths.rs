@@ -49,6 +49,23 @@ impl ProjectContext {
         self.layout = resolution.layout;
         self.layout_confidence = resolution.confidence;
         self.layout_warnings = resolution.warnings;
+        // Legacy service facades still expose these fields.  Keep them pointed
+        // at the resolved adapter roots so compatible projects never fall back
+        // to a silently created native `raw/`, `wiki/`, `exports/`, or `.app/`.
+        // Calls using relative strings are handled by `resolve_project_path`
+        // below with the same fail-closed policy.
+        if let Some(path) = self.layout.app_state_root.as_deref() {
+            self.app_dir = self.resolve_project_path_unmapped(path)?;
+        }
+        if let Some(path) = self.layout.source_write_root.as_deref() {
+            self.raw_dir = self.resolve_project_path_unmapped(path)?;
+        }
+        if let Some(path) = self.layout.wiki_write_root.as_deref() {
+            self.wiki_dir = self.resolve_project_path_unmapped(path)?;
+        }
+        if let Some(path) = self.layout.export_root.as_deref() {
+            self.exports_dir = self.resolve_project_path_unmapped(path)?;
+        }
         Ok(self)
     }
 
@@ -60,6 +77,11 @@ impl ProjectContext {
     }
 
     pub fn resolve_project_path(&self, relative_path: &str) -> Result<PathBuf, BackendError> {
+        let relative_path = self.remap_legacy_layout_path(relative_path)?;
+        self.resolve_project_path_unmapped(&relative_path)
+    }
+
+    fn resolve_project_path_unmapped(&self, relative_path: &str) -> Result<PathBuf, BackendError> {
         validate_project_relative_path(relative_path)?;
 
         let normalized = normalize_project_path(relative_path);
@@ -72,6 +94,48 @@ impl ProjectContext {
         self.ensure_no_detectable_escape(&resolved)?;
 
         Ok(resolved)
+    }
+
+    /// Route old native root prefixes through the active layout adapter.  This
+    /// is intentionally enabled only for compatible layouts; native and legacy
+    /// native projects retain their declared on-disk layout.  A missing mapped
+    /// content root is an error, never permission to create the old root.
+    fn remap_legacy_layout_path(&self, relative_path: &str) -> Result<String, BackendError> {
+        validate_project_relative_path(relative_path)?;
+        let normalized = normalize_project_path(relative_path);
+        if self.layout.app_state_root.as_deref() != Some(".app/compat") {
+            return Ok(normalized);
+        }
+        let (legacy_root, mapped_root) = if normalized == ".app" || normalized.starts_with(".app/") {
+            (".app", self.layout.app_state_root.as_deref())
+        } else if normalized == "raw" || normalized.starts_with("raw/") {
+            ("raw", self.layout.source_write_root.as_deref())
+        } else if normalized == "wiki" || normalized.starts_with("wiki/") {
+            ("wiki", self.layout.wiki_write_root.as_deref())
+        } else if normalized == "exports" || normalized.starts_with("exports/") {
+            ("exports", self.layout.export_root.as_deref())
+        } else {
+            return Ok(normalized);
+        };
+        let mapped_root = mapped_root.ok_or_else(|| {
+            BackendError::new(
+                "PROJECT_LAYOUT_ROOT_UNAVAILABLE",
+                "The compatible project does not provide the requested content root.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "legacyRoot": legacy_root }))
+        })?;
+        // An adapter-aware caller may already use the mapped state root.
+        if normalized == mapped_root || normalized.starts_with(&format!("{mapped_root}/")) {
+            return Ok(normalized);
+        }
+        let suffix = normalized.strip_prefix(legacy_root).unwrap_or_default().trim_start_matches('/');
+        Ok(if suffix.is_empty() {
+            mapped_root.to_string()
+        } else {
+            format!("{mapped_root}/{suffix}")
+        })
     }
 
     /// Resolve a path for a mutating operation. Unlike the read resolver,
@@ -384,6 +448,42 @@ mod tests {
             .is_err());
 
         remove_directory_link(&link);
+    }
+
+    #[test]
+    fn compatible_context_routes_legacy_native_prefixes_to_configured_roots() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [".app/compat", "笔记", "资料", "导出"] {
+            std::fs::create_dir_all(root.path().join(path)).unwrap();
+        }
+        std::fs::write(root.path().join(".app/compat/purpose.md"), "# Purpose").unwrap();
+        std::fs::write(root.path().join(".app/compat/schema.md"), "# Schema").unwrap();
+        std::fs::write(
+            root.path().join(".app/compat/layout.json"),
+            r#"{"schemaVersion":1,"wikiWriteRoot":"笔记","sourceWriteRoot":"资料","exportRoot":"导出"}"#,
+        )
+        .unwrap();
+        let context = ProjectContext::new("compatible", root.path().to_path_buf())
+            .with_resolved_layout()
+            .unwrap();
+        assert_eq!(context.resolve_project_path(".app/chats/a.json").unwrap(), root.path().join(".app/compat/chats/a.json"));
+        assert_eq!(context.resolve_project_path("wiki/页面.md").unwrap(), root.path().join("笔记/页面.md"));
+        assert_eq!(context.resolve_project_path("raw/source.md").unwrap(), root.path().join("资料/source.md"));
+        assert_eq!(context.resolve_project_path("exports/html/card.html").unwrap(), root.path().join("导出/html/card.html"));
+    }
+
+    #[test]
+    fn compatible_context_rejects_legacy_content_roots_without_mapping() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app/compat")).unwrap();
+        std::fs::write(root.path().join(".app/compat/purpose.md"), "# Purpose").unwrap();
+        std::fs::write(root.path().join(".app/compat/schema.md"), "# Schema").unwrap();
+        let context = ProjectContext::new("compatible", root.path().to_path_buf())
+            .with_resolved_layout()
+            .unwrap();
+        for path in ["wiki/page.md", "raw/source.md", "exports/html/card.html"] {
+            assert_eq!(context.resolve_project_path(path).unwrap_err().code, "PROJECT_LAYOUT_ROOT_UNAVAILABLE");
+        }
     }
 
     #[cfg(unix)]

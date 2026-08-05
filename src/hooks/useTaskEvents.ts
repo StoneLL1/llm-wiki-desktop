@@ -12,6 +12,7 @@ import {
   recoverTasksForProject,
 } from "../stores/taskStore";
 import type { BackendEvent } from "../types/task";
+import type { ProjectSummary } from "../types/project";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -48,6 +49,14 @@ export function notifyTaskEventListeners(event: BackendEvent): void {
   for (const listener of taskEventListeners) listener(event);
 }
 
+function isProjectSummary(payload: unknown): payload is ProjectSummary {
+  return typeof payload === "object"
+    && payload !== null
+    && "projectId" in payload
+    && "rootPath" in payload
+    && "inventoryState" in payload;
+}
+
 export function isTaskEventForProject(event: BackendEvent, projectId: string): boolean {
   return event.projectId === projectId;
 }
@@ -71,7 +80,11 @@ export function useTaskEvents(): void {
       listen<BackendEvent>(channel, (evt) => {
         const event = evt.payload as BackendEvent;
         if (event.eventType === "workflow_updated") void notifyTaskEvent(event);
-        if (!isTaskEventForProject(event, currentProject.projectId)) return;
+        const activeProject = useProjectStore.getState().currentProject;
+        if (!isTaskEventForProject(event, activeProject.projectId)) return;
+        if (event.eventType === "project_refreshed" && isProjectSummary(event.payload)) {
+          useProjectStore.getState().setCurrentProject(event.payload);
+        }
         handleTaskEvent(event);
         notifyTaskEventListeners(event);
         if (event.eventType !== "workflow_updated") void notifyTaskEvent(event);
@@ -101,7 +114,7 @@ export function useTaskEvents(): void {
       cancelled = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, [currentProject.projectId]);
+  }, [pushToast]);
 
   // Recover persisted tasks whenever the active project root changes.
   useEffect(() => {

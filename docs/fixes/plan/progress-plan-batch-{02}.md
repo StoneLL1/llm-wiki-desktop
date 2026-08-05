@@ -1,5 +1,7 @@
 # Progress - Graph Dashboard Visuals Reliability Implementation Plan
 
+> **历史完成记录：** 下方步骤与命令只证明 batch 02 当时完成；当前 Graph 输入与访问合同见 [`../../../SPEC/roadmap/graph.md`](../../../SPEC/roadmap/graph.md)。
+
 Plan: D:\Users\Aletta\Desktop\Works\llm-wiki-desktop\docs\fixes\plan\plan-batch-{02}.md
 Status: completed
 Started: 2026-07-04 19:51

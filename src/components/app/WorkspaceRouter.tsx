@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 
 import { DashboardView } from "../../features/dashboard/DashboardView";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
+import { NoProjectWorkspace } from "../../features/project/NoProjectWorkspace";
 import type { WorkflowsController } from "../../features/workflows/useWorkflowsController";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import type { AppView } from "../../stores/navigationStore";
@@ -44,21 +45,34 @@ const WorkflowsView = lazy(() =>
   })),
 );
 
-interface WorkspaceRouterProps {
+interface ProjectWorkspaceRouterProps {
   activeView: AppView;
   capabilities: AiCapabilitiesWorkflow;
   importWorkflow: ImportWorkflow;
   workflowsController: WorkflowsController;
   onOpenTask: (taskId: string) => void;
+  noProject?: false;
 }
 
-export function WorkspaceRouter({
-  activeView,
-  capabilities,
-  importWorkflow,
-  workflowsController,
-  onOpenTask,
-}: WorkspaceRouterProps) {
+interface NoProjectWorkspaceRouterProps {
+  activeView: AppView;
+  noProject: true;
+}
+
+type WorkspaceRouterProps = ProjectWorkspaceRouterProps | NoProjectWorkspaceRouterProps;
+
+export function WorkspaceRouter(props: WorkspaceRouterProps) {
+  if (props.noProject) {
+    return <NoProjectWorkspace activeView={props.activeView} />;
+  }
+
+  const {
+    activeView,
+    capabilities,
+    importWorkflow,
+    workflowsController,
+    onOpenTask,
+  } = props;
   const renderActiveView = () => {
     switch (activeView) {
       case "dashboard":

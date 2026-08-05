@@ -3,7 +3,7 @@ use std::process::Command;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, ProjectWriteRootKind};
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
@@ -67,6 +67,9 @@ pub fn start_export(
     request: StartExportRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    state.require_project_write_access(&context)?;
+    state.require_project_content_write_root(&context, ProjectWriteRootKind::Export)?;
     require_restricted_export_acknowledgement(
         &state,
         &context,
@@ -102,6 +105,9 @@ pub fn regenerate_export(
     request: RegenerateExportRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    state.require_project_write_access(&context)?;
+    state.require_project_content_write_root(&context, ProjectWriteRootKind::Export)?;
     require_restricted_export_acknowledgement(
         &state,
         &context,
@@ -193,7 +199,7 @@ fn run_export_task(
                 let title = title_for(&context, failed_type, failed_source.as_deref());
                 if let Ok(output_path) = state
                     .export_service
-                    .build_output_relative_path(failed_type, failed_source.as_deref())
+                    .build_output_relative_path_for(&context, failed_type, failed_source.as_deref())
                 {
                     let record = ExportService::new_failed_record(
                         failed_type,
@@ -260,6 +266,8 @@ async fn run_export(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
+    state.require_external_ai_access(context)?;
+    state.require_project_write_access(context)?;
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
@@ -365,7 +373,7 @@ async fn run_export(
 
     let output_path = state
         .export_service
-        .build_output_relative_path(directive.export_type, directive.source_path.as_deref())?;
+        .build_output_relative_path_for(context, directive.export_type, directive.source_path.as_deref())?;
     state.export_service.write_html_checked(
         context,
         &output_path,

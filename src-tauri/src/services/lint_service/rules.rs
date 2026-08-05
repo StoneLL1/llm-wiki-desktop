@@ -557,11 +557,7 @@ pub fn health_source_paths(context: &ProjectContext) -> Result<Vec<String>, Back
             crate::models::layout::ProjectMarkdownRootRole::Mixed,
         ])?
         .into_iter()
-        .filter_map(|path| {
-            path.strip_prefix(&context.root)
-                .ok()
-                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-        })
+        .filter_map(|path| context.to_project_relative(&path).ok())
         .filter(|path| !structural_paths.contains(path.as_str()))
         .collect::<Vec<_>>();
     paths.sort();

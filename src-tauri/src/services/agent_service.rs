@@ -229,7 +229,9 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
     }
 
     pub fn load_config(context: &ProjectContext) -> Result<AgentConfig, BackendError> {
-        let path = ".app/agent-config.json";
+        let Some(path) = context.layout.agent_config_path.as_deref() else {
+            return Ok(AgentConfig::default());
+        };
         if !context.resolve_project_path(path)?.exists() {
             return Ok(AgentConfig::default());
         }
@@ -237,7 +239,15 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
     }
 
     pub fn save_config(context: &ProjectContext, config: &AgentConfig) -> Result<(), BackendError> {
-        FileStore.write_json_atomic(context, ".app/agent-config.json", config)
+        let path = context.layout.agent_config_path.as_deref().ok_or_else(|| {
+            BackendError::new(
+                "PROJECT_LAYOUT_STATE_UNAVAILABLE",
+                "Project Agent configuration is unavailable until compatible features are enabled.",
+                true,
+                true,
+            )
+        })?;
+        FileStore.write_json_atomic(context, path, config)
     }
 
     pub fn detect_agents(&self, default_agent: Option<AgentKind>) -> Vec<AgentInfo> {

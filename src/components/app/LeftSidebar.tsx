@@ -30,6 +30,7 @@ export function LeftSidebar() {
   const localReport = useLintStore((state) => state.localReport);
   const lintIssueCount = localReport?.issues.length ?? 0;
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
+  const hasProject = Boolean(currentProject.projectId && currentProject.rootPath);
 
   const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? null;
   const agentReady = defaultAgent?.state === "installed";
@@ -203,21 +204,27 @@ export function LeftSidebar() {
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
-        <span className="flex min-w-0 flex-1 items-center gap-2">
-          <span className={`inline-block h-[7px] w-[7px] shrink-0 rounded-full ${agentDot}`} aria-hidden="true" />
-          <span className="app-sidebar__agent-name truncate font-mono text-[var(--text-secondary)]">{agentLabel}</span>
-        </span>
-        <button
-          aria-label={t("shell.agentTooltip")}
-          className="btn btn--ghost btn--icon btn--sm shrink-0"
-          onClick={() => openSettings("ai")}
-          title={t("shell.agentTooltip")}
-          type="button"
-        >
-          <ChevronRight aria-hidden="true" size={14} />
-        </button>
-      </div>
+      {hasProject ? (
+        <div className="flex shrink-0 items-center gap-2 border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <span className={`inline-block h-[7px] w-[7px] shrink-0 rounded-full ${agentDot}`} aria-hidden="true" />
+            <span className="app-sidebar__agent-name truncate font-mono text-[var(--text-secondary)]">{agentLabel}</span>
+          </span>
+          <button
+            aria-label={t("shell.agentTooltip")}
+            className="btn btn--ghost btn--icon btn--sm shrink-0"
+            onClick={() => openSettings("ai")}
+            title={t("shell.agentTooltip")}
+            type="button"
+          >
+            <ChevronRight aria-hidden="true" size={14} />
+          </button>
+        </div>
+      ) : (
+        <div className="app-sidebar__no-project-foot border-t border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--text-muted)]">
+          {t("noProject.switcher")}
+        </div>
+      )}
     </aside>
   );
 }

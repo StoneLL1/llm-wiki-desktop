@@ -1,8 +1,12 @@
-# LLM Wiki Desktop — 板块修复 /loop 提示词集
+# 历史 `/loop` 提示词集（禁止直接执行）
 
-> 历史提示词集：不得直接使用其中与 Import 相关的旧提示词恢复自动编译或编译期 OCR。Import 的当前决策以 [`../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。
+> 本文件中的提示词是旧路线图快照，不能整段复制执行。执行任何条目之前，必须重新对照当前源码、[`README.md`](README.md) 的权威顺序，以及 [首次使用/打开已有知识库](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)、[Import / Source / Media](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)、[Workflows](../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) 三份专题规范。
+>
+> 其中独立启动页、三入口/最近项目画廊、首屏 Agent/BYOK/模板墙、普通文件夹原地初始化或移动、导入后编译、编译期 OCR、旧 Agent 卡片墙等提示词均已失效。
 
-> 本文档收录所有板块修复的 `/loop`（自定步调）提示词。每条提示词自包含，可直接整段贴进 `/loop`。
+## 原始提示词快照
+
+> 原文收录了板块修复的 `/loop`（自定步调）提示词；它们只用于追溯，不能直接粘贴执行。
 >
 > 执行模型：`/loop` 自定步调（dynamic）—— Claude 自己用 `ScheduleWakeup` 续跑，全部 P0+P1 项 `verified` 后停止调度、自动结束 loop。
 >
@@ -24,7 +28,7 @@
 4. `chat-BE` → `chat-FE`
 5. `lint-BE` → `lint-FE`
 6. **`cross-cutting-FE`**
-7. `agent`（单 loop）
+7. `workflows`（跨前后端高风险迁移，单 loop）
 8. **`exports`（单 loop**）
 9. `shell-dashboard`（单 loop；注意也会动 `lib.rs` 托盘，与第 1 步错开）
 10. **`settings`（单 loop）**
@@ -64,7 +68,7 @@ SPEC/plans/wiki-be.md（不存在则创建：从 roadmap 摘本 loop 范围内�
 4. status→done，记改动 文件:行号。
 5. cargo test（后端）+ npm run test + npm run lint 全绿（失败→修→重跑），确认无残留 console.log，status→verified。
 6. 对【仅本项】改动的文件 git add + commit（conventional message，不 --no-verify，不 push）。
-7. 追加一条 SPEC/progress.txt（时间倒序）。
+7. 在根目录 progress.txt 顶部追加一条（时间倒序）。
 8. 还有未 verified 项 → 按 /loop 规则安排下次唤醒；没有 → 进【收敛】。
 
 # 收敛（全部 verified 后执行一次，然后终止 loop）
@@ -112,7 +116,7 @@ SPEC/plans/wiki-fe.md（不存在则从头做计划）。status: pending|in_prog
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿（失败→修→重跑），清残留 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -153,7 +157,7 @@ SPEC/plans/import-be.md（不存在则从 roadmap 摘 P0/P1 建条目）。statu
 4. status→done，记文件:行号。
 5. cargo test + npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -166,8 +170,8 @@ SPEC/plans/import-be.md（不存在则从 roadmap 摘 P0/P1 建条目）。statu
 scope：
 • P0 PDF/Office 解析适配器（PRD-IMP-001）：ExtractionService 当前直接返回 Unsupported，需产出文本/页数/字数/图片落盘（可用 pdf-extract / docx 解析 crate；OCR/视觉理解不在本层）
 • P0/P1 "打开文件夹为项目"后端支持（dlg-folder 对应的命令/校验）
-• 导入后自动触发 Wiki 编译的后端 hook（可由 import-FE 触发，本 loop 只确保命令链路通）
-⚠️ 硬约束：导入层只无损保留（原文件/提取文本/图片/来源元数据）；OCR/视觉理解交给编译 Agent/Skill，不在导入层判断图片价值。Readability URL 抓取已成熟，别重写。
+• 导入完成摘要只提供独立的“用这些来源更新 Wiki”入口；确认导入不得自动调用编译
+⚠️ 硬约束：OCR / ASR 是导入阶段按正文缺口、由用户主动启用的能力；图片视觉理解不在首版。Readability URL 抓取已成熟，别重写。
 ```
 
 ### 2B. import-FE — 前端壳
@@ -192,7 +196,7 @@ SPEC/plans/import-fe.md（不存在则自己撰写计划）。status: pending|in
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -204,7 +208,7 @@ SPEC/plans/import-fe.md（不存在则自己撰写计划）。status: pending|in
 # 本 loop 特定说明
 scope：
 • P0 前端 UI 重构对齐设计稿：卡片网格 + 文件表 + 右面板 + 底部确认条（当前是 Tab + 单行输入 + 左右双栏）
-• P0/P1 "打开文件夹为项目"对话框 UI（dlg-folder）+ 导入后自动触发编译的前端流
+• P0/P1 “打开文件夹为项目”确认 UI + 导入完成后显式进入统一 Update Wiki 准备模型；不得自动编译
 • 消费 import-BE 的 PDF/Office 解析结果做预览
 ⚠️ 导入层 UI 只做无损保留的呈现，不做图片价值判断。
 ```
@@ -231,7 +235,7 @@ SPEC/plans/chat-be.md（不存在则从 roadmap 摘 P0/P1 建条目）。status:
 4. status→done，记文件:行号。
 5. cargo test + npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -244,7 +248,7 @@ SPEC/plans/chat-be.md（不存在则从 roadmap 摘 P0/P1 建条目）。status:
 scope：
 • P0 BYOK 流式 API：LlmService::complete 改流式（SSE/流式 channel），compile/chat 消费（当前一次性 POST）
 • P0 Agent 终态改流式呈现（run_task_streaming 透传增量行）
-• route 路由：Auto/Agent/BYOK 的后端判别与可显式指定
+• route 路由：读取 Settings 默认值，允许 Agent/BYOK 单次显式覆盖；所选路径不可用时返回配置动作，不静默回退
 ⚠️ i18n（prompt 注入语言偏好）归 cross-cutting-BE，本 loop 不动 prompt 的语言指令，只做流式与路由。
 ⚠️ 必须在 cross-cutting-BE 之后再跑（避免抢改 chat_service.rs）。
 ```
@@ -271,7 +275,7 @@ SPEC/plans/chat-fe.md（不存在则从 roadmap 摘 P0/P1 建条目）。status:
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -283,7 +287,7 @@ SPEC/plans/chat-fe.md（不存在则从 roadmap 摘 P0/P1 建条目）。status:
 # 本 loop 特定说明
 scope：
 • P0 消息渲染富化：Markdown 渲染 + avatar + time + model badge + citation <sup> 角标 + 消息内 citation 卡片（当前纯文本 whitespace-pre-wrap）
-• P0/P1 Agent/BYOK route segment 切换器（消费 chat-BE 的显式路由）
+• P0/P1 Settings 默认路径 + Agent/BYOK 单次覆盖控件（消费 chat-BE 的显式路由）
 • P0 流式 UI：消费 chat-BE 的流式 channel，逐字呈现 + cursor
 • P1 右面板补"原始资料 / 执行路径 / 操作（复制 MD/卡片/标记问题）"三段
 ⚠️ 硬约束：普通全局搜索不调模型；自然语言问答才走 Chat。
@@ -311,7 +315,7 @@ SPEC/plans/lint-be.md（不存在则从 roadmap 摘 P0/P1 建条目）。status:
 4. status→done，记文件:行号。
 5. cargo test + npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -350,7 +354,7 @@ SPEC/plans/lint-fe.md（不存在则从 roadmap 摘 P0/P1 建条目）。status:
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -389,7 +393,7 @@ SPEC/plans/cross-cutting-be.md（不存在则从 roadmap 第 2 节摘 P0/P1 建�
 4. status→done，记文件:行号。
 5. cargo test + npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -429,7 +433,7 @@ SPEC/plans/cross-cutting-fe.md（不存在则从 roadmap 摘前端相关 P0/P1 �
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -449,45 +453,48 @@ scope：
 
 ---
 
-## 二、单 loop 板块（后端轻 / 已就绪）
+## 二、单 loop 板块
 
-### 6. agent（前端壳为主）
+### 6. workflows（跨前后端迁移）
 
 ```
-你在 /loop 自定步调模式下工作。本轮唯一目标：把 agent 板块的 P0+P1 全部修复并通过验证。不碰 P2，不碰其它板块。
-范围：主要动 src/；仅在本板块需要时做必要的 src-tauri 类型/接线微调（后端 spawn/checkpoint/cancel 已就绪，勿重写）。
+你在 /loop 自定步调模式下工作。本轮唯一目标：按已确认设计把 legacy Agent 主页面迁移为 Workflows，并完成 SPEC/roadmap/agent.md 的 P0+P1。不碰其它板块的独立视觉重构。
+范围：Workflows 所需的 src/、src-tauri/、typed DTO、任务测试和共享入口接线。这是任务安全与文件写入相关的跨层变更。
 
 # 对照源（动手前必读）
+- docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md（唯一产品/交互权威）
+- docs/superpowers/plans/2026-07-30-workflows-panel-implementation.md（分批执行、合同、测试与交付门）
 - SPEC/roadmap/agent.md
-- SPEC/PRD.md（PRD-AGENT-XXX / PRD-WIKI-XXX）
-- UI-Frontend-design/agent.html + assets/app.css（只读，禁改）
-- CLAUDE.md
+- SPEC/{PRD,SPEC,APP_flow,TECH_STACK,BACKEND_STRUCTURE,FRONTEND_GUIDELINES}.md
+- UI-Frontend-design/assets/app.css（只读，仅用于 token 与密度）
+- AGENTS.md + CLAUDE.md
 
 # 进度账本
-SPEC/plans/agent.md（不存在则从 roadmap 摘 P0/P1 建条目）。status: pending|in_progress|done|verified。
+直接使用 docs/superpowers/plans/2026-07-30-workflows-panel-implementation.md 的 batch 与 checkbox；SPEC/plans/agent.md 是 legacy 历史记录，不得改成当前目标。status: pending|in_progress|done|verified|blocked。
 
 # 每次唤醒
-1. 读账本，找第一个非 verified 项；无 → 【收敛】。
-2. 对照 agent.html + app.css + PRD 确认意图，账本记决策。
-3. 实施。守硬边界。
+1. 读分批执行计划，锁定依赖已满足的当前 batch，并找第一个非 verified 项；无 → 进入下一 batch 或【收敛】。
+2. 对照 Workflows 设计规范与 roadmap 确认意图，账本记决策。
+3. 严格按 Batch 0–8 实施最小完整切片：合同基线 → 项目级任务/队列/恢复 → 总览与准备 → 三个 runner → React 主界面 → 共享入口与安全恢复 → legacy cutover。不得提前暴露只有部分 runner 可用的页面。
 4. status→done，记文件:行号。
-5. npm run test + npm run lint 全绿（若动了 src-tauri/ 则加 cargo test），清 console.log，status→verified。
+5. 运行与切片风险相称的定向测试，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加里程碑；只有遇到可复现陷阱时才写 gotchas.txt。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
-全部 P0/P1 verified + 完整 test/lint 全绿 + 账本顶部"✅ 本轮完成 @ 2026-06-21"+摘要+文件清单 + progress 里程碑 + 不再调度。
+全部 P0/P1 verified；按 AGENTS.md 完成两轮代码审查并修复有效问题；从头运行完整 npm run check；记录结果和里程碑；不再调度。
 
 # 硬纪律
-只修本板块 P0+P1；别板块/P2 记 roadmap 不动手。不改 UI-Frontend-design/。不自动改后端核心 service（spawn/checkpoint/cancel 已就绪）。冲突以 PRD/设计稿为准回改 roadmap。不静默安装 Agent。
+不改 UI-Frontend-design/。不静默安装 Agent。不跨项目展示或操作任务。不把任意 prompt / Skill 选择器放回主页面。不静默切换执行路径。低风险自动应用必须先有 Git checkpoint；删除、覆盖、广泛重写和冲突必须等待确认。
 
 # 本 loop 特定说明
 scope：
-• P0 "运行 Agent"对话框：Skill 选择 / 执行路径 / Git 检查点提示 / 后台 toggle（当前 AgentView 只有一个"编译 Wiki"按钮直触发）
-• P0 核心操作四宫格 + BYOK 卡片化 + 右面板 Agent 配置区（设计稿核心三块全缺）
-• P0/P1 CLI 行 / 任务行样式族（.cli-row / .ingest-card / .dotstatus / .sumcard）；terminal 日志 level 染色 + 复制/清空/全屏；进度条补 aria 属性
-⚠️ 后端 Agent CLI spawn / Git 检查点 / 冲突确认 / 取消全已就绪，本 loop 主要补前端壳。
+• P0 导航改名、知识处理分组、Workflow 图标、无 badge，保留 Agent status foot
+• P0 三个内建工作流、完整准备页、项目级串行队列/输入去重、结构化阶段、异步确认、取消/重试/interrupted
+• P0 六个入口进入同一准备与 task model
+• P1 右侧上下文、项目内历史、首次远程数据披露、i18n/a11y
+⚠️ Settings、Lint、Exports 页面首轮保持现状；AgentService / BYOK / Compile / Lint / Export 是可复用执行能力，不因页面迁移而机械重写。
 ```
 
 ### 7. exports（FE + 轻后端）
@@ -512,7 +519,7 @@ SPEC/plans/exports.md（不存在则自己做计划）。status: pending|in_prog
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿（动 src-tauri/ 加 cargo test），清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -551,7 +558,7 @@ SPEC/plans/shell-dashboard.md（不存在则从 roadmap 摘 P0/P1 建条目）�
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿（动 src-tauri/ 加 cargo test），清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -591,7 +598,7 @@ SPEC/plans/settings.md（不存在则从 roadmap 摘 P0/P1 建条目）。status
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿（动 src-tauri/ 加 cargo test），清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛
@@ -630,7 +637,7 @@ SPEC/plans/graph.md（不存在则从 roadmap 摘 P0/P1 建条目）。status: p
 4. status→done，记文件:行号。
 5. npm run test + npm run lint 全绿，清 console.log，status→verified。
 6. 对【仅本项】改动 git add + commit（conventional，不 --no-verify，不 push）。
-7. 追加 SPEC/progress.txt。
+7. 在根目录 progress.txt 顶部追加。
 8. 未完 → 安排下次唤醒；完 → 【收敛】。
 
 # 收敛

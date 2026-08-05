@@ -270,6 +270,42 @@ impl TaskService {
         )
     }
 
+    /// A project-scoped read-only operation that must never create `.app`
+    /// state. Used for restricted compatible-vault inventory work.
+    pub fn create_memory_project_task(
+        &self,
+        task_type: TaskType,
+        project_id: String,
+        project_root: PathBuf,
+        title: String,
+        cancellable: bool,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            task_type,
+            Some(project_id),
+            Some(project_root),
+            title,
+            cancellable,
+            None,
+            false,
+            None,
+            None,
+        )
+    }
+
+    pub fn emit_project_refreshed<T: serde::Serialize + Clone + Send + Sync + 'static>(
+        &self,
+        project_id: String,
+        summary: T,
+    ) {
+        self.emit(
+            crate::models::task::BackendEventType::ProjectRefreshed,
+            Some(project_id),
+            None,
+            summary,
+        );
+    }
+
     /// Create a project task associated with one user-level operation. The
     /// identity is persisted with the task so the UI can restore and control
     /// parallel import batches after navigation or application restart.

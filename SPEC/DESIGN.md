@@ -1,6 +1,8 @@
 # Design System Inspired by OpenAI
 
 > Scope: this file is a high-level visual reference. Confirmed Import / Source product flows, information architecture, states, copy, media actions, and AI 整理 behavior are defined by [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md).
+> Confirmed Workflows navigation, information architecture, task presentation, pipelines, safety, and interaction behavior are defined by [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md). This file supplies visual tone only and does not preserve the legacy Agent page.
+> Confirmed first-run and project-open structure is defined by [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md). The no-project state remains inside the full desktop shell and uses exactly two compact task cards; legacy launch-page composition is not a target.
 
 > Category: AI & LLM
 > Calm, near-monochrome system anchored in deep teal-black with generous white space and editorial typography.
@@ -113,6 +115,7 @@ The shape system is uniformly soft: 8px–12px radii, 9999px pills for tags and 
 - Radius: 16px
 - Padding: 24px–32px
 - Shadow: none by default; on hover `0 4px 16px rgba(13,13,13,0.06)`
+- The two no-project task cards are an explicit compact-workbench exception: use the canonical app tokens and dense pane rhythm, not generic 24–32px marketing-card padding, large illustrations, or a hero composition.
 
 ### Inputs
 - Background: `#ffffff`

@@ -1,5 +1,7 @@
 # Graph Dashboard Visuals Reliability Implementation Plan
 
+> **历史已完成计划：** 本计划实现的是当时的 Wiki-only 图谱读取与缓存修复，不应被用来覆盖当前 Source/Wiki 输入、restricted/read-only 内存图和 conditional cache 合同。当前路线见 [`../../../SPEC/roadmap/graph.md`](../../../SPEC/roadmap/graph.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver batch 02 by making the graph view visually clearer, making graph cache/loading behavior reliable across reopen/project switch/corrupt cache cases, and adding a compact dashboard graph overview aligned with the Codex-like desktop design.

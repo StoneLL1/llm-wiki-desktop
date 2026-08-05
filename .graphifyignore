@@ -1,0 +1,13 @@
+# Graphify's project knowledge graph is intentionally scoped to core product material.
+graphify-out/
+wiki/
+test-fixtures/
+tests/
+UI-Frontend-design/
+node_modules/
+dist/
+target/
+target-*/
+worktrees/
+.worktrees/
+tmp/

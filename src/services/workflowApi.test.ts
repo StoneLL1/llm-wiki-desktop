@@ -107,7 +107,6 @@ const parsePendingAction = (value: unknown): void => {
   if (
     typeof value.id !== "string" ||
     !isOneOf(value.actionType, [
-      "initialize_folder",
       "delete_file",
       "overwrite_file",
       "batch_rewrite",

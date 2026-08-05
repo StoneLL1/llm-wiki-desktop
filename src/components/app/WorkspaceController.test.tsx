@@ -232,6 +232,26 @@ describe("WorkspaceController", () => {
     expect(useWorkflowStore.getState().surface).toBe("history");
   });
 
+  it("returns an open-project workflow prerequisite to the project workbench", () => {
+    render(<WorkspaceController />);
+    const options = mocks.useWorkflowsController.mock.calls.at(-1)?.[2] as {
+      onProjectPrerequisite: (action: string, context: {
+        project: typeof project;
+        preparation: null;
+        prepareAgain: () => void;
+      }) => void;
+    };
+
+    act(() => options.onProjectPrerequisite("open_or_create_project", {
+      project,
+      preparation: null,
+      prepareAgain: vi.fn(),
+    }));
+
+    expect(useProjectStore.getState().currentProject).toEqual(defaultProject);
+    expect(screen.queryByTestId("project-authority-dialog")).not.toBeInTheDocument();
+  });
+
   it("opens Settings at the requested AI section", () => {
     useNavigationStore.setState({ settingsOpen: true, settingsSection: "ai" });
 

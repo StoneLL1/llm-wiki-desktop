@@ -1,5 +1,7 @@
 # Project Task Health UX Implementation Plan
 
+> **历史批次计划（项目打开相关步骤禁止直接执行）：** 本文是旧修复批次快照。涉及独立启动页、三入口、普通文件夹原地初始化/移动、项目打开分类、信任、兼容或恢复的步骤，已由 [首次使用与打开已有知识库规范](../../superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 取代。执行其他条目前也必须重新核对当前源码与 living roadmaps。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement batch 05 from `docs/fixes/05-project-task-health-ux.md`: task log time sorting, durable Lint history, a compact project start page, and native folder pickers for opening and creating projects.

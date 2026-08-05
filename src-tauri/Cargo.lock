@@ -2091,6 +2091,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "csv",
+ "dirs",
  "encoding_rs",
  "flate2",
  "futures-util",

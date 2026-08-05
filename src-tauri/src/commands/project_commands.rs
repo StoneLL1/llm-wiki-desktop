@@ -5,6 +5,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
+use crate::models::layout::{CompatibleLayoutMapping, COMPATIBLE_LAYOUT_MAPPING_PATH};
 use crate::models::project::{
     AppSummary, AssessmentId, AssessmentOperationId, CreateProjectRequest, OpenProjectRequest,
     OpenProjectResponse, OpenedProject, ProjectAssessmentOperation, ProjectCapability,
@@ -413,6 +414,108 @@ pub fn enable_compatible_full_features(
     Ok(action)
 }
 
+/// Previews an explicit compatible-vault mapping.  Preparation is read-only:
+/// it validates only existing, contained directories and captures the current
+/// app-owned mapping hash for a compare-and-swap write after confirmation.
+#[tauri::command]
+pub fn configure_compatible_layout(
+    state: State<'_, AppState>,
+    request: ConfigureCompatibleLayoutRequest,
+) -> Result<crate::models::confirmation::PendingAction, BackendError> {
+    let current = AssessedCurrentProjectRequest {
+        assessment_id: request.assessment_id.clone(),
+        project_id: request.project_id.clone(),
+        project_root_path: request.project_root_path.clone(),
+    };
+    let assessment = revalidate_current_project_assessment(&state, &current)?;
+    ensure_compatible_trust_candidate(&assessment)?;
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if context.layout.app_state_root.as_deref() != Some(".app/compat") {
+        return Err(BackendError::new(
+            "PROJECT_COMPAT_LAYOUT_ENABLE_REQUIRED",
+            "Enable compatible features before configuring functional directories.",
+            true,
+            true,
+        ));
+    }
+    let mapping = CompatibleLayoutMapping::validated(
+        &context.root,
+        request.wiki_root,
+        request.source_root,
+        request.export_root,
+    )?;
+    let expected_hash = state
+        .file_store
+        .file_hash_if_exists(&context, COMPATIBLE_LAYOUT_MAPPING_PATH)?;
+    if expected_hash.is_some() && !assessment.git.is_repository {
+        return Err(BackendError::new(
+            "PROJECT_COMPAT_LAYOUT_GIT_REQUIRED",
+            "Changing an existing compatible layout mapping requires a local Git checkpoint.",
+            true,
+            true,
+        ));
+    }
+    if expected_hash.is_some() {
+        let status = state.git_service.repository_status(&context)?;
+        if !state
+            .git_service
+            .is_path_tracked(&context, COMPATIBLE_LAYOUT_MAPPING_PATH)?
+        {
+            return Err(BackendError::new(
+                "PROJECT_COMPAT_LAYOUT_GIT_TRACKING_REQUIRED",
+                "Changing a compatible layout mapping requires its existing app-owned mapping file to be tracked by Git.",
+                true,
+                true,
+            ));
+        }
+        if status.has_changes {
+            return Err(BackendError::new(
+                "PROJECT_COMPAT_LAYOUT_DIRTY_WORKTREE",
+                "Changing a compatible layout mapping requires a clean Git worktree so the checkpoint can remain scoped to the mapping.",
+                true,
+                true,
+            ));
+        }
+    }
+    let mut affected_paths = vec![COMPATIBLE_LAYOUT_MAPPING_PATH.to_string()];
+    if let Some(wiki_root) = mapping.wiki_write_root.as_ref() {
+        affected_paths.push(wiki_root.clone());
+    }
+    if let Some(source_root) = mapping.source_write_root.as_ref() {
+        affected_paths.push(source_root.clone());
+    }
+    if let Some(export_root) = mapping.export_root.as_ref() {
+        affected_paths.push(export_root.clone());
+    }
+    let action = crate::models::confirmation::PendingAction {
+        id: uuid::Uuid::new_v4().to_string(),
+        action_type: crate::models::confirmation::PendingActionType::ConfigureCompatibleLayout,
+        title: "Use compatible functional directories".into(),
+        message: "Save only an app-owned mapping to the existing selected directories.".into(),
+        risk_level: crate::models::confirmation::RiskLevel::High,
+        affected_paths,
+        preview: Some(crate::models::confirmation::ActionPreview {
+            summary: "No Markdown, raw source, or functional directory will be created, moved, or rewritten.".into(),
+            before: expected_hash.as_ref().map(|_| "Existing compatible layout mapping".into()),
+            after: Some(".app/compat/layout.json will point to the confirmed existing directories.".into()),
+            diff: None,
+        }),
+        expires_at: None,
+        checkpoint_hash: None,
+    };
+    state.confirmation_registry.register_with_execution(
+        action.clone(),
+        Some(crate::models::confirmation::ConfirmationExecution::ConfigureCompatibleLayout {
+            assessment_id: request.assessment_id,
+            project_id: request.project_id,
+            root_path: request.project_root_path,
+            mapping,
+            expected_hash,
+        }),
+    )?;
+    Ok(action)
+}
+
 /// Prepares a bounded Recovery repair as a pending confirmation. Preparation
 /// is read-only: it snapshots identity, Git state, and the exact corrupt cache
 /// hash; all writes (checkpoint, backup, replacement) occur only after the
@@ -423,7 +526,10 @@ pub fn prepare_assessed_project_repair(
     request: AssessedCurrentProjectRequest,
 ) -> Result<crate::models::confirmation::PendingAction, BackendError> {
     let assessment = revalidate_current_project_assessment(&state, &request)?;
-    if !matches!(assessment.health, ProjectHealth::Recovery | ProjectHealth::Repairable) {
+    if !matches!(
+        assessment.health,
+        ProjectHealth::Recovery | ProjectHealth::Repairable
+    ) {
         return Err(BackendError::new(
             "PROJECT_REPAIR_UNAVAILABLE",
             "This knowledge base has no safe repairable state.",
@@ -477,11 +583,16 @@ pub fn prepare_assessed_project_repair(
         ));
     }
     let directory_only = plan.operations.iter().all(|operation| {
-        operation.operation_type == crate::models::project::ProjectRepairOperationType::CreateDirectory
+        operation.operation_type
+            == crate::models::project::ProjectRepairOperationType::CreateDirectory
     });
-    let affected_paths = plan.operations.iter().flat_map(|operation| {
-        std::iter::once(operation.target_path.clone()).chain(operation.backup_path.clone())
-    }).collect::<Vec<_>>();
+    let affected_paths = plan
+        .operations
+        .iter()
+        .flat_map(|operation| {
+            std::iter::once(operation.target_path.clone()).chain(operation.backup_path.clone())
+        })
+        .collect::<Vec<_>>();
     let action = crate::models::confirmation::PendingAction {
         id: plan.repair_plan_id.clone(),
         action_type: crate::models::confirmation::PendingActionType::RepairProject,
@@ -573,6 +684,20 @@ pub struct EnableCompatibleFullFeaturesRequest {
     pub template: ProjectTemplate,
     #[serde(default = "default_true")]
     pub initialize_git: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigureCompatibleLayoutRequest {
+    pub assessment_id: AssessmentId,
+    pub project_id: String,
+    pub project_root_path: String,
+    #[serde(default)]
+    pub wiki_root: Option<String>,
+    #[serde(default)]
+    pub source_root: Option<String>,
+    #[serde(default)]
+    pub export_root: Option<String>,
 }
 
 fn default_true() -> bool {

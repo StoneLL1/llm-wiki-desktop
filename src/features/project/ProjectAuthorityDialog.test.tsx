@@ -176,4 +176,53 @@ describe("ProjectAuthorityDialog", () => {
     expect(screen.queryByText(/did not change/i)).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it("previews a compatible directory mapping without giving the UI filesystem authority", async () => {
+    queueAssessment(
+      {
+        ...baseAssessment,
+        trust: "trusted",
+        filesystemAccess: "writable",
+        layout: { appStateRoot: ".app/compat", markdownRoots: [{ path: ".", role: "mixed" }] },
+      },
+      "operation-layout",
+    );
+    invokeMock.mockResolvedValueOnce({
+      id: "layout-action",
+      actionType: "configure_compatible_layout",
+      title: "Map directories",
+      message: "Map directories",
+      riskLevel: "high",
+      affectedPaths: [".app/compat/layout.json", "知识库"],
+      preview: null,
+      expiresAt: null,
+    });
+
+    render(
+      <ProjectAuthorityDialog
+        action="manage"
+        project={useProjectStore.getState().currentProject}
+        onClose={vi.fn()}
+        onSatisfied={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByText("Configure functional directories"));
+    fireEvent.change(screen.getByLabelText("Wiki directory"), { target: { value: "知识库" } });
+    fireEvent.change(screen.getByLabelText("Source directory (optional)"), { target: { value: "资料" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review directory mapping" }));
+
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.find(([command]) => command === "configure_compatible_layout")?.[1],
+      ).toEqual({
+        request: {
+          assessmentId: "assessment-a",
+          projectId: "project-a",
+          projectRootPath: "D:/知识库/project-a",
+          wikiRoot: "知识库",
+          sourceRoot: "资料",
+        },
+      }),
+    );
+  });
 });

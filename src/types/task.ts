@@ -8,6 +8,7 @@ export type TaskType =
   | "auto_fix"
   | "export"
   | "source_ai_organize"
+  | "project_inventory"
   | "workflow";
 
 export type TaskStatus =
@@ -183,6 +184,7 @@ export const TASK_TYPE_LABELS: Record<TaskType, string> = {
   auto_fix: "task.type.autoFix",
   export: "task.type.export",
   source_ai_organize: "task.type.sourceAiOrganize",
+  project_inventory: "task.type.projectInventory",
   workflow: "task.type.workflow",
 };
 

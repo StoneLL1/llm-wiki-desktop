@@ -141,6 +141,7 @@ pub fn confirm_pending_action(
             Some(
                 ConfirmationExecution::RepairProject { .. }
                     | ConfirmationExecution::EnableCompatibleProject { .. }
+                    | ConfirmationExecution::ConfigureCompatibleLayout { .. }
                     | ConfirmationExecution::TrustCompatibleProject { .. }
                     | ConfirmationExecution::InitializeAssessedGit { .. }
                     | ConfirmationExecution::CheckpointAssessedGit { .. }
@@ -203,6 +204,7 @@ pub fn confirm_pending_action(
         Some(
             ConfirmationExecution::RepairProject { .. }
             | ConfirmationExecution::EnableCompatibleProject { .. }
+            | ConfirmationExecution::ConfigureCompatibleLayout { .. }
             | ConfirmationExecution::TrustCompatibleProject { .. }
             | ConfirmationExecution::InitializeAssessedGit { .. }
             | ConfirmationExecution::CheckpointAssessedGit { .. },
@@ -343,8 +345,7 @@ fn execute_claimed_project_authority_action(
                 assessment.health,
                 crate::models::project::ProjectHealth::Recovery
                     | crate::models::project::ProjectHealth::Repairable
-            )
-                || assessment.canonical_identity_key != plan.canonical_identity_key
+            ) || assessment.canonical_identity_key != plan.canonical_identity_key
                 || assessment.identity_revision != plan.identity_revision
             {
                 return Err(BackendError::new(
@@ -399,9 +400,9 @@ fn execute_claimed_project_authority_action(
             state
                 .project_assessment_service
                 .invalidate(&assessment_id)?;
-            let repaired = state.project_assessment_service.inspect_current(
-                context.root.to_string_lossy().as_ref(),
-            )?;
+            let repaired = state
+                .project_assessment_service
+                .inspect_current(context.root.to_string_lossy().as_ref())?;
             if directory_only {
                 if repaired.format != crate::models::project::ProjectFormat::NativeCurrent
                     || repaired.health != crate::models::project::ProjectHealth::Healthy
@@ -470,6 +471,77 @@ fn execute_claimed_project_authority_action(
             state
                 .project_assessment_service
                 .invalidate(&assessment_id)?;
+            Ok(ConfirmedAction {
+                action,
+                status: ConfirmationStatus::Confirmed,
+                checkpoint_exists,
+                project_summary: None,
+            })
+        }
+        Some(ConfirmationExecution::ConfigureCompatibleLayout {
+            assessment_id,
+            project_id,
+            root_path,
+            mapping,
+            expected_hash,
+        }) => {
+            let assessment = crate::commands::project_commands::revalidate_project_assessment(
+                state,
+                &assessment_id,
+            )?;
+            crate::commands::project_commands::ensure_compatible_trust_candidate(&assessment)?;
+            let context = state.resolve_project_context(&project_id, &root_path)?;
+            let assessed_root = PathBuf::from(&assessment.canonical_root_path)
+                .canonicalize()
+                .map_err(|_| assessed_project_context_mismatch())?;
+            if context.root != assessed_root {
+                return Err(assessed_project_context_mismatch());
+            }
+            state.require_project_write_access(&context)?;
+            let checkpoint_exists = if expected_hash.is_some() {
+                let status = state.git_service.repository_status(&context)?;
+                if !status.is_repository {
+                    return Err(BackendError::new(
+                        "PROJECT_COMPAT_LAYOUT_GIT_REQUIRED",
+                        "Changing an existing compatible layout mapping requires a local Git checkpoint.",
+                        true,
+                        true,
+                    ));
+                }
+                if !state.git_service.is_path_tracked(
+                    &context,
+                    crate::models::layout::COMPATIBLE_LAYOUT_MAPPING_PATH,
+                )? {
+                    return Err(BackendError::new(
+                        "PROJECT_COMPAT_LAYOUT_GIT_TRACKING_REQUIRED",
+                        "Changing a compatible layout mapping requires its existing app-owned mapping file to be tracked by Git.",
+                        true,
+                        true,
+                    ));
+                }
+                if status.has_changes {
+                    return Err(BackendError::new(
+                        "PROJECT_COMPAT_LAYOUT_DIRTY_WORKTREE",
+                        "Changing a compatible layout mapping requires a clean Git worktree so the checkpoint can remain scoped to the mapping.",
+                        true,
+                        true,
+                    ));
+                }
+                state.git_service.create_scoped_checkpoint(
+                    &context,
+                    crate::models::git::CheckpointPurpose::HighRiskOperation,
+                    "Checkpoint before compatible layout mapping update",
+                    &[crate::models::layout::COMPATIBLE_LAYOUT_MAPPING_PATH.to_string()],
+                )?.commit_hash.is_some()
+            } else {
+                false
+            };
+            state.project_service.write_compatible_layout_mapping(
+                &context,
+                &mapping,
+                expected_hash.as_deref(),
+            )?;
+            state.project_assessment_service.invalidate(&assessment_id)?;
             Ok(ConfirmedAction {
                 action,
                 status: ConfirmationStatus::Confirmed,

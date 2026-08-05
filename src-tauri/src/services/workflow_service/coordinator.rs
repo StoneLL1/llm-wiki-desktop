@@ -505,20 +505,17 @@ impl WorkflowCoordinator {
                 == Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly);
         let is_persistent = task_state_root.is_some();
         if completed_generate {
-            let mut context = crate::models::paths::ProjectContext::new(
+            let context = crate::models::paths::ProjectContext::new(
                 original.project_id.clone(),
                 project_root.clone(),
-            );
+            )
+            .with_resolved_layout()
+            .map_err(|error| error.message)?;
             if let WorkflowScope::GenerateContent {
                 output_path: Some(output_path),
                 ..
             } = &original.scope
             {
-                let output_parent = std::path::Path::new(output_path)
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .ok_or_else(|| "Generate Content retry output root is invalid".to_string())?;
-                context.exports_dir = context.root.join(output_parent);
                 execution_options.existing_target_hash = crate::services::FileStore
                     .file_hash_if_exists(&context, output_path)
                     .map_err(|error| error.message)?;

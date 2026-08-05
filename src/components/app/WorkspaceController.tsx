@@ -8,6 +8,7 @@ import {
   type WorkflowProjectPrerequisiteContext,
 } from "../../features/workflows/useWorkflowsController";
 import { ProjectAuthorityDialog, type ProjectAuthorityAction } from "../../features/project/ProjectAuthorityDialog";
+import { NoProjectSettingsDialog } from "../../features/project/NoProjectSettingsDialog";
 import { useImportWorkflow } from "../../features/import/useImportWorkflow";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { useProviderWorkflow } from "../../features/settings/useProviderWorkflow";
@@ -20,9 +21,10 @@ import { useWorkflowStore } from "../../stores/workflowStore";
 import type { ProjectSummary } from "../../types/project";
 import { WorkspaceRouter } from "./WorkspaceRouter";
 
-export function WorkspaceController() {
+function ProjectWorkspaceController() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
+  const authority = useProjectStore((state) => state.authority);
   const activeView = useNavigationStore((state) => state.activeView);
   const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
   const setRightPanelOpen = useNavigationStore(
@@ -41,6 +43,10 @@ export function WorkspaceController() {
   const clearWorkflowLaunchIntent = useNavigationStore(
     (state) => state.clearWorkflowLaunchIntent,
   );
+  const importSuccessNotice = useNavigationStore((state) => state.importSuccessNotice);
+  const clearImportSuccessNotice = useNavigationStore((state) => state.clearImportSuccessNotice);
+  const pendingImportPath = useNavigationStore((state) => state.pendingImportPath);
+  const clearPendingImportPath = useNavigationStore((state) => state.clearPendingImportPath);
   const closeSettings = useNavigationStore((state) => state.closeSettings);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const setWorkflowsSurface = useWorkflowStore((state) => state.setSurface);
@@ -54,6 +60,10 @@ export function WorkspaceController() {
     action: WorkflowProjectPrerequisiteAction,
     context: WorkflowProjectPrerequisiteContext,
   ) => {
+    if (action === "open_or_create_project") {
+      useProjectStore.getState().clearCurrentProject();
+      return;
+    }
     setProjectAuthorityRequest({
       action,
       project: context.project,
@@ -89,6 +99,37 @@ export function WorkspaceController() {
     { onProjectPrerequisite },
   );
   const settingsWasOpenRef = useRef(settingsOpen);
+
+  useEffect(() => {
+    if (
+      activeView !== "import" ||
+      !pendingImportPath ||
+      pendingImportPath.projectId !== currentProject.projectId ||
+      !currentProject.rootPath
+    ) {
+      return;
+    }
+    const source = pendingImportPath.path;
+    let active = true;
+    void importWorkflow.addPaths([source]).then(
+      () => {
+        if (active && useNavigationStore.getState().pendingImportPath?.path === source) {
+          clearPendingImportPath();
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      active = false;
+    };
+  }, [
+    activeView,
+    clearPendingImportPath,
+    currentProject.projectId,
+    currentProject.rootPath,
+    importWorkflow.addPaths,
+    pendingImportPath,
+  ]);
 
   useEffect(() => {
     if (!workflowLaunchIntent) return;
@@ -216,7 +257,31 @@ export function WorkspaceController() {
         ) : null}
       </header>
 
+      {authority?.health === "recovery" ? (
+        <div className="mx-4 mt-3 flex flex-wrap items-center gap-2 border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[12px] text-[var(--text-secondary)]" role="status">
+          <div className="min-w-0 flex-1">
+            <strong className="font-medium text-[var(--text-primary)]">{t("projectRecovery.banner.title")}</strong>
+            <span className="ml-2">{t("projectRecovery.banner.detail")}</span>
+          </div>
+          <button
+            className="btn btn--secondary btn--sm"
+            onClick={() => setProjectAuthorityRequest({ action: "repair_project", project: currentProject })}
+            type="button"
+          >
+            {t("projectRecovery.banner.repair")}
+          </button>
+        </div>
+      ) : null}
+
       <div className={workspaceClass}>
+        {activeView === "import" && importSuccessNotice?.projectId === currentProject.projectId ? (
+          <div className="import-handoff-notice" role="status">
+            <span>{t("noProject.importCreated", { name: importSuccessNotice.name })}</span>
+            <button className="btn btn--ghost btn--sm" onClick={clearImportSuccessNotice} type="button">
+              {t("noProject.dismiss")}
+            </button>
+          </div>
+        ) : null}
         <WorkspaceRouter
           activeView={activeView}
           capabilities={capabilities}
@@ -281,4 +346,49 @@ export function WorkspaceController() {
       ) : null}
     </section>
   );
+}
+
+function NoProjectWorkspaceController() {
+  const { t } = useTranslation();
+  const activeView = useNavigationStore((state) => state.activeView);
+  const rightPanelOpen = useNavigationStore((state) => state.rightPanelOpen);
+  const setRightPanelOpen = useNavigationStore((state) => state.setRightPanelOpen);
+  const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
+  const settingsOpen = useNavigationStore((state) => state.settingsOpen);
+  const closeSettings = useNavigationStore((state) => state.closeSettings);
+
+  return (
+    <section className="flex h-full flex-col">
+      <header className="workspace-header">
+        <div>
+          <h1 className="m-0 text-[16px] font-semibold tracking-[-0.01em]">{t("noProject.workspace.title")}</h1>
+          <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("noProject.workspace.subtitle")}</p>
+        </div>
+        {!rightPanelOpen && workspaceFocus === null ? (
+          <button
+            aria-controls="right-context-panel"
+            aria-expanded="false"
+            aria-label={t("shell.contextPanel.open")}
+            className="icon-button ml-auto"
+            onClick={() => setRightPanelOpen(true)}
+            title={t("shell.contextPanel.open")}
+            type="button"
+          >
+            <PanelRightOpen aria-hidden="true" size={16} />
+          </button>
+        ) : null}
+      </header>
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <WorkspaceRouter activeView={activeView} noProject />
+      </div>
+      <NoProjectSettingsDialog open={settingsOpen} onClose={closeSettings} />
+    </section>
+  );
+}
+
+export function WorkspaceController() {
+  const currentProject = useProjectStore((state) => state.currentProject);
+  return currentProject.projectId && currentProject.rootPath
+    ? <ProjectWorkspaceController />
+    : <NoProjectWorkspaceController />;
 }

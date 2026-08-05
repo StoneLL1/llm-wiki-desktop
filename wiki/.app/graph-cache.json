@@ -2668,15 +2668,6 @@
       "degree": 0
     },
     {
-      "id": "wiki/raw/GitHubDaily/.github/issue_template.md",
-      "path": "wiki/raw/GitHubDaily/.github/issue_template.md",
-      "label": "issue_template",
-      "type": "other",
-      "tags": [],
-      "starred": false,
-      "degree": 0
-    },
-    {
       "id": "wiki/raw/GitHubDaily/2018.md",
       "path": "wiki/raw/GitHubDaily/2018.md",
       "label": "2018",
@@ -22837,6 +22828,1732 @@
       "weight": 1
     }
   ],
-  "contentHash": "24b7aa3c6e3432aaa3c9609137f0063e7dcf02d12873c89d57511d449ae52a01",
-  "builtAt": "2026-06-21T01:48:46.087476700+00:00"
+  "contentHash": "a6e288c5273ce1ec9baeeb26a829c36511e2e03269413dac41486468822c0767",
+  "builtAt": "2026-08-03T14:39:55.920989400+00:00",
+  "layout": {
+    "positions": {
+      "wiki/raw/articles/2026-06-03-claude-code-self-check-deep-dive.md": [
+        978.0101928710938,
+        587.1478881835938
+      ],
+      "wiki/entities/rowboat.md": [
+        -199.2884979248047,
+        -312.2530212402344
+      ],
+      "wiki/entities/mirage.md": [
+        5.775914192199707,
+        -381.3850708007813
+      ],
+      "wiki/raw/GitHubDaily/2021.md": [
+        648.2562866210938,
+        -936.4550170898438
+      ],
+      "wiki/log.md": [
+        -146.15650939941406,
+        -34.436161041259766
+      ],
+      "wiki/raw/articles/2026-04-21-claude-code-1m-context-management-guide.md": [
+        -1092.3404541015625,
+        325.4276428222656
+      ],
+      "wiki/entities/fiona-fung.md": [
+        -308.1622619628906,
+        100.74429321289062
+      ],
+      "wiki/raw/articles/2026-05-13-kami-ai-document-typography.md": [
+        1106.994140625,
+        -210.3704376220703
+      ],
+      "wiki/entities/frontend-design-workflow.md": [
+        -166.82057189941406,
+        284.397216796875
+      ],
+      "wiki/entities/openclaw.md": [
+        -227.10385131835935,
+        -26.64218521118164
+      ],
+      "wiki/entities/manim.md": [
+        -431.3233337402344,
+        136.64036560058594
+      ],
+      "wiki/raw/articles/2026-04-20-5-low-key-awesome-github-projects.md": [
+        -227.7471160888672,
+        1118.7254638671875
+      ],
+      "wiki/raw/articles/2026-05-24-jason-liu-getting-most-out-of-codex.md": [
+        -1038.8897705078125,
+        -472.7806091308594
+      ],
+      "wiki/raw/articles/2026-05-25-guangguang-github-claude-plugins-official.md": [
+        369.3743896484375,
+        1075.53271484375
+      ],
+      "wiki/concepts/context-compression-pipeline.md": [
+        232.5970916748047,
+        -98.49581146240234
+      ],
+      "wiki/raw/articles/2026-05-14-anthropic-financial-skills.md": [
+        728.51611328125,
+        868.8801879882812
+      ],
+      "wiki/raw/articles/2026-05-07-effective-harnesses-for-long-running-agents.md": [
+        921.21484375,
+        -673.66455078125
+      ],
+      "wiki/raw/GitHub/dominikmartn-hue.md": [
+        591.72607421875,
+        969.6161499023438
+      ],
+      "wiki/raw/articles/2026-04-19-claude-design-system-prompt-bilingual.md": [
+        -993.5715942382812,
+        560.1338500976562
+      ],
+      "wiki/entities/wechat-article-skills.md": [
+        22.08552360534668,
+        326.8726501464844
+      ],
+      "wiki/raw/articles/2026-04-18-github-open-source-control-computer-skill.md": [
+        1036.07763671875,
+        -481.0626831054687
+      ],
+      "wiki/raw/articles/2026-06-05-anthropic-95-percent-data-analytics-claude.md": [
+        1124.076171875,
+        -69.98704528808594
+      ],
+      "wiki/entities/claude-plugins-official.md": [
+        -206.1192626953125,
+        109.32335662841795
+      ],
+      "wiki/entities/dirty-frag.md": [
+        -314.1258850097656,
+        -127.04983520507812
+      ],
+      "wiki/raw/GitHub/LearnPrompt-ai-news-radar.md": [
+        -1043.8062744140625,
+        458.5561218261719
+      ],
+      "wiki/concepts/claude-code-self-check.md": [
+        212.9334259033203,
+        -7.5859375
+      ],
+      "wiki/entities/agentmemory.md": [
+        279.5464172363281,
+        64.32218933105469
+      ],
+      "wiki/entities/kimi-k25.md": [
+        -377.7984619140625,
+        -90.84247589111328
+      ],
+      "wiki/entities/overleaf.md": [
+        -28.55838966369629,
+        197.44503784179688
+      ],
+      "wiki/raw/GitHubDaily/2023.md": [
+        -1089.8050537109375,
+        -330.7048034667969
+      ],
+      "wiki/raw/articles/2026-04-18-ai-agent-stata-guide.md": [
+        -338.98052978515625,
+        -1085.8265380859375
+      ],
+      "wiki/raw/articles/2026-04-18-karpathy-knowledge-compilation.md": [
+        -617.14453125,
+        958.8345947265624
+      ],
+      "wiki/raw/articles/2026-04-18-everything-claude-code-plugin-library.md": [
+        -769.5091552734375,
+        -838.4453125
+      ],
+      "wiki/raw/articles/2026-06-03-claude-code-dynamic-workflow-harness.md": [
+        -584.94482421875,
+        980.43603515625
+      ],
+      "wiki/concepts/codeact.md": [
+        114.03952026367188,
+        -309.85650634765625
+      ],
+      "wiki/entities/mcp.md": [
+        -104.5925521850586,
+        -169.97708129882812
+      ],
+      "wiki/raw/articles/2026-06-04-claude-code-boris-write-loops-not-prompts.md": [
+        -1104.19775390625,
+        285.17230224609375
+      ],
+      "wiki/entities/kami.md": [
+        -168.44143676757812,
+        343.5910949707031
+      ],
+      "wiki/raw/articles/2026-06-08-claude-code-parallel-agents-comparison.md": [
+        -1135.35205078125,
+        -99.56430053710938
+      ],
+      "wiki/concepts/claude-context-continuity.md": [
+        169.42965698242188,
+        112.39959716796876
+      ],
+      "wiki/entities/stop-slop.md": [
+        10.235028266906738,
+        391.8649291992187
+      ],
+      "wiki/entities/finance-skills.md": [
+        99.4518814086914,
+        98.21321868896484
+      ],
+      "wiki/raw/articles/2026-04-18-58-website-styles-10days-40k-stars.md": [
+        -1047.502685546875,
+        -445.4468688964844
+      ],
+      "wiki/raw/articles/2026-04-18-11-hot-github-projects-this-week.md": [
+        372.3408203125,
+        -1084.8970947265625
+      ],
+      "wiki/entities/pencil.md": [
+        -218.5552673339844,
+        257.8894348144531
+      ],
+      "wiki/entities/ds4.md": [
+        -332.02056884765625,
+        -258.66717529296875
+      ],
+      "wiki/entities/bb-browser.md": [
+        -339.4966125488281,
+        -136.9228057861328
+      ],
+      "wiki/comparisons/claude-code-vs-openclaw-vs-hermes.md": [
+        -364.1138610839844,
+        -33.46872329711914
+      ],
+      "wiki/concepts/ai-slop-design.md": [
+        74.77654266357422,
+        -7.488924026489258
+      ],
+      "wiki/entities/asm.md": [
+        44.260196685791016,
+        363.7919921875
+      ],
+      "wiki/raw/articles/2026-04-18-zero-human-coding-ai-native-dev-handbook.md": [
+        -1123.197265625,
+        -222.95379638671875
+      ],
+      "wiki/raw/articles/2026-05-29-claude-opus-48-dynamic-workflow涓€娆℃€у苟琛屼笂鐧句釜subagents.md": [
+        -1139.275634765625,
+        -39.34229278564453
+      ],
+      "wiki/raw/GitHubDaily/articles/浜氶┈閫婂厤璐瑰澶栧紑鏀捐绠楁満缂栫▼璇撅紒.md": [
+        188.9100341796875,
+        1124.0751953125
+      ],
+      "wiki/entities/peekdesktop.md": [
+        262.79315185546875,
+        215.86038208007812
+      ],
+      "wiki/entities/stata-skill.md": [
+        29.926549911499023,
+        63.4870719909668
+      ],
+      "wiki/entities/taxhacker.md": [
+        341.55267333984375,
+        109.0073471069336
+      ],
+      "wiki/raw/articles/2026-05-26-a-stock-data-agent-a-share.md": [
+        698.142578125,
+        -907.6544799804688
+      ],
+      "wiki/raw/articles/2026-04-18-multi-ai-sdd-coding-practice.md": [
+        1090.8729248046875,
+        -331.24078369140625
+      ],
+      "wiki/entities/ai-to-earn.md": [
+        -184.2567138671875,
+        324.816650390625
+      ],
+      "wiki/entities/andrej-karpathy.md": [
+        -189.45033264160156,
+        84.09053802490234
+      ],
+      "wiki/concepts/agent-memory-systems.md": [
+        94.0235824584961,
+        -271.2934875488281
+      ],
+      "wiki/entities/kronos.md": [
+        47.609840393066406,
+        -277.7972412109375
+      ],
+      "wiki/concepts/rag.md": [
+        46.13605880737305,
+        -389.6645202636719
+      ],
+      "wiki/concepts/karpathy-knowledge-compilation.md": [
+        198.18255615234375,
+        -231.1534118652344
+      ],
+      "wiki/raw/articles/2026-04-21-turix-cua-agent-skill.md": [
+        1118.87109375,
+        -152.3126678466797
+      ],
+      "wiki/raw/articles/2026-06-03-claude-code-self-check-feedback-loop.md": [
+        283.41436767578125,
+        -1111.2781982421875
+      ],
+      "wiki/entities/deep-tutor.md": [
+        -28.38762664794922,
+        -321.13385009765625
+      ],
+      "wiki/entities/discord.md": [
+        -71.20081329345703,
+        116.72989654541016
+      ],
+      "wiki/entities/lance-martin.md": [
+        -266.4800720214844,
+        91.58447265625
+      ],
+      "wiki/entities/andrej-karpathy-skills.md": [
+        282.02691650390625,
+        148.5060272216797
+      ],
+      "wiki/raw/articles/2026-05-20-designmd-sh-design-registry.md": [
+        904.303955078125,
+        -685.4592895507812
+      ],
+      "wiki/entities/conard-li.md": [
+        -120.2971649169922,
+        311.8620300292969
+      ],
+      "wiki/entities/last30days-skill.md": [
+        -179.81964111328125,
+        -77.07245635986328
+      ],
+      "wiki/raw/GitHub/ginobefun-BestBlogs.md": [
+        -674.0338134765625,
+        -918.6636962890624
+      ],
+      "wiki/entities/hv-analysis.md": [
+        252.7454376220703,
+        -167.01658630371094
+      ],
+      "wiki/raw/articles/2026-05-13-skill-engineering-design.md": [
+        157.85140991210938,
+        1129.1715087890625
+      ],
+      "wiki/raw/articles/2026-04-18-ai-logo-icon-generation-skill.md": [
+        1126.6800537109375,
+        -174.54652404785156
+      ],
+      "wiki/entities/ai-scientist-v2.md": [
+        -29.873355865478516,
+        -117.63218688964844
+      ],
+      "wiki/entities/vibevoice.md": [
+        -306.01776123046875,
+        -307.8706970214844
+      ],
+      "wiki/concepts/multi-agent-collaboration.md": [
+        -155.7915802001953,
+        -253.6842498779297
+      ],
+      "wiki/raw/GitHubDaily/2024.md": [
+        -657.3904418945312,
+        921.66357421875
+      ],
+      "wiki/raw/articles/2026-04-18-westlake-university-ai-paper-drawing.md": [
+        343.6971740722656,
+        -1081.9844970703125
+      ],
+      "wiki/raw/articles/2026-04-18-github-hot-10-open-source-projects.md": [
+        1104.6348876953125,
+        -302.59307861328125
+      ],
+      "wiki/raw/articles/2026-04-18-vibe-design-frontend-ui.md": [
+        -1110.2679443359375,
+        -234.09559631347656
+      ],
+      "wiki/raw/articles/2026-05-02-claude-code-gemma4-mac-image-manager.md": [
+        -884.8167114257812,
+        719.3558959960938
+      ],
+      "wiki/entities/skillopt.md": [
+        263.033203125,
+        -9.028531074523926
+      ],
+      "wiki/entities/cursor.md": [
+        -199.6235809326172,
+        -55.21537399291992
+      ],
+      "wiki/entities/ffmpeg.md": [
+        -446.84564208984375,
+        111.4781723022461
+      ],
+      "wiki/entities/turix-cua.md": [
+        -310.0619201660156,
+        -40.54517364501953
+      ],
+      "wiki/raw/articles/2026-05-29-openclawhermesai-agent.md": [
+        84.36266326904297,
+        -1139.459716796875
+      ],
+      "wiki/concepts/claude-code-folder-structure.md": [
+        298.0777893066406,
+        118.77527618408205
+      ],
+      "wiki/raw/articles/2026-05-07-open-slide-replace-powerpoint.md": [
+        935.9737548828124,
+        -647.1701049804688
+      ],
+      "wiki/entities/claude-code-dynamic-workflow.md": [
+        98.90901947021484,
+        24.51835823059082
+      ],
+      "wiki/raw/GitHubDaily/2020.md": [
+        1020.3995971679688,
+        -506.8530578613281
+      ],
+      "wiki/concepts/claude-code-session-management.md": [
+        27.942861557006836,
+        -233.0767517089844
+      ],
+      "wiki/raw/GitHub/Thysrael-Horizon.md": [
+        -1062.8099365234375,
+        -409.6430969238281
+      ],
+      "wiki/concepts/academic-paper-integrity.md": [
+        313.78564453125,
+        -31.643983840942383
+      ],
+      "wiki/SCHEMA.md": [
+        454.7487487792969,
+        -1053.2523193359375
+      ],
+      "wiki/concepts/harness-engineering.md": [
+        142.74339294433594,
+        -34.48204803466797
+      ],
+      "wiki/entities/english-level-up-tips.md": [
+        273.61956787109375,
+        -218.507080078125
+      ],
+      "wiki/entities/gpt-researcher.md": [
+        121.15606689453124,
+        -183.03948974609375
+      ],
+      "wiki/entities/everything-claude-code.md": [
+        -247.3293914794922,
+        18.74678611755371
+      ],
+      "wiki/raw/GitHubDaily/2018.md": [
+        -894.0882568359375,
+        -704.2936401367188
+      ],
+      "wiki/raw/GitHubDaily/articles/瀛︿笉浼氳璁℃ā寮忥紝鏄洜涓轰綘杩樻病鐢ㄨ繃杩欎釜绁炲鐨勭綉绔欙紒.md": [
+        885.7492065429688,
+        -715.4390258789062
+      ],
+      "wiki/entities/stitch.md": [
+        -370.1504211425781,
+        157.29928588867188
+      ],
+      "wiki/entities/langchain.md": [
+        238.8316192626953,
+        52.10774612426758
+      ],
+      "wiki/raw/articles/2026-04-18-claude-code-creator-15-hidden-features.md": [
+        1101.820068359375,
+        -274.2610778808594
+      ],
+      "wiki/raw/articles/2026-04-18-five-skills-paper-writing.md": [
+        -1127.131591796875,
+        170.64065551757812
+      ],
+      "wiki/raw/articles/2026-04-18-xhs-claude-code-terminal-setup.md": [
+        1132.38427734375,
+        174.24183654785156
+      ],
+      "wiki/raw/articles/2026-04-19-claude-design-impact-on-ai-design-vendors.md": [
+        171.92054748535156,
+        -1129.458740234375
+      ],
+      "wiki/concepts/document-first-system.md": [
+        -153.087646484375,
+        -145.3979034423828
+      ],
+      "wiki/entities/career-ops.md": [
+        240.03518676757812,
+        176.1243896484375
+      ],
+      "wiki/entities/mcp-ecosystem.md": [
+        -5.544858455657959,
+        -351.06298828125
+      ],
+      "wiki/entities/remotion.md": [
+        -475.08782958984375,
+        121.8053741455078
+      ],
+      "wiki/raw/articles/2026-04-22-aigc-rewriter-open-source-model.md": [
+        1140.483642578125,
+        -79.81034851074219
+      ],
+      "wiki/raw/articles/2026-04-18-claude-code-research-skills.md": [
+        -795.0674438476562,
+        818.3258666992188
+      ],
+      "wiki/entities/gemma-4.md": [
+        -417.8482971191406,
+        -64.2015380859375
+      ],
+      "wiki/raw/articles/2026-04-18-xhs-gpt-editable-publication-figures.md": [
+        1122.7099609375,
+        200.46029663085935
+      ],
+      "wiki/raw/articles/2026-05-11-bole-skill-ai-news-radar.md": [
+        -863.47802734375,
+        -741.3244018554688
+      ],
+      "wiki/raw/articles/2026-05-21-datawhale-ai-agent-learning-roadmap.md": [
+        497.2831726074219,
+        -1025.6768798828125
+      ],
+      "wiki/raw/GitHub/Picrew-LLM-Harness.md": [
+        -491.7751159667969,
+        1032.7138671875
+      ],
+      "wiki/raw/articles/2026-04-18-ai-knowledge-base-tutorial.md": [
+        1063.6463623046875,
+        -405.80120849609375
+      ],
+      "wiki/entities/knowledge-compilation.md": [
+        197.304931640625,
+        -284.1698913574219
+      ],
+      "wiki/raw/articles/2026-04-18-hermes-agent-lobster-hermes.md": [
+        603.0706176757812,
+        -965.799072265625
+      ],
+      "wiki/entities/recordly.md": [
+        -484.9088745117187,
+        141.25233459472656
+      ],
+      "wiki/concepts/ai-research-workflow.md": [
+        51.57925796508789,
+        -167.3505859375
+      ],
+      "wiki/raw/articles/2026-04-27-claude-code-agent-teams-best-practices.md": [
+        -1121.2200927734375,
+        207.8824157714844
+      ],
+      "wiki/entities/pinme.md": [
+        -57.41473388671875,
+        242.41017150878903
+      ],
+      "wiki/entities/agent-teams.md": [
+        -133.13668823242188,
+        -304.8924255371094
+      ],
+      "wiki/entities/opentoonz.md": [
+        -476.0785827636719,
+        84.39469146728516
+      ],
+      "wiki/raw/articles/2026-05-26-skillopt-microsoft-train-skill-like-nn.md": [
+        1129.3427734375,
+        55.6795539855957
+      ],
+      "wiki/entities/timesfm.md": [
+        -288.094482421875,
+        -280.4112243652344
+      ],
+      "wiki/entities/academic-research-skills.md": [
+        64.83352661132812,
+        324.1717834472656
+      ],
+      "wiki/entities/jason-liu.md": [
+        -263.66552734375,
+        50.027854919433594
+      ],
+      "wiki/entities/browser-use.md": [
+        -349.9854736328125,
+        0.7602978348731995
+      ],
+      "wiki/raw/articles/2026-06-09-openai-codex-best-practices-guide.md": [
+        327.9866943359375,
+        -1096.72607421875
+      ],
+      "wiki/entities/vibe-coding-course.md": [
+        -196.39111328125,
+        -180.87640380859375
+      ],
+      "wiki/entities/autowiki.md": [
+        -31.47700309753418,
+        -273.8759460449219
+      ],
+      "wiki/entities/minicpm5-1b.md": [
+        -333.43707275390625,
+        -220.05325317382812
+      ],
+      "wiki/entities/logo-generator-skill.md": [
+        -77.143798828125,
+        349.1685485839844
+      ],
+      "wiki/raw/GitHubDaily/2022.md": [
+        409.6055603027344,
+        -1057.280517578125
+      ],
+      "wiki/entities/manus.md": [
+        -312.9344787597656,
+        -72.06505584716797
+      ],
+      "wiki/entities/design-md.md": [
+        30.05823135375977,
+        8.760685920715332
+      ],
+      "wiki/concepts/anti-slop-writing.md": [
+        -40.60661315917969,
+        151.7421112060547
+      ],
+      "wiki/raw/GitHubDaily/README.md": [
+        -1106.6114501953125,
+        -270.8684387207031
+      ],
+      "wiki/entities/chen-xiwei.md": [
+        -244.5201416015625,
+        142.10260009765625
+      ],
+      "wiki/entities/ghostty.md": [
+        193.73464965820312,
+        251.16799926757812
+      ],
+      "wiki/raw/articles/2026-04-18-claude-code-10-more-worthwhile-skills.md": [
+        522.3643188476562,
+        1012.4443359375
+      ],
+      "wiki/entities/anthropic.md": [
+        -281.7066345214844,
+        -20.940324783325195
+      ],
+      "wiki/entities/playwright.md": [
+        -165.3307342529297,
+        139.68614196777344
+      ],
+      "wiki/concepts/long-running-agent.md": [
+        193.4207000732422,
+        -53.01912689208984
+      ],
+      "wiki/raw/articles/2026-04-18-stop-vibe-coding-shit-mountain.md": [
+        -1083.4342041015625,
+        -359.6561584472656
+      ],
+      "wiki/entities/wps365-cli.md": [
+        332.59149169921875,
+        52.045108795166016
+      ],
+      "wiki/raw/articles/2026-05-30-harness-research-reflection.md": [
+        1133.220703125,
+        -135.27816772460938
+      ],
+      "wiki/raw/articles/2026-04-18-claude-code-session-management.md": [
+        -550.1023559570312,
+        1000.7412109375
+      ],
+      "wiki/concepts/agent-learning-roadmap.md": [
+        10.895109176635742,
+        -197.35340881347656
+      ],
+      "wiki/entities/holmesgpt.md": [
+        -273.74163818359375,
+        -154.84812927246094
+      ],
+      "wiki/_archive/entities/codex-openai.md": [
+        -235.3447265625,
+        -204.2102508544922
+      ],
+      "wiki/entities/agent-skills-addyosmani.md": [
+        309.6281433105469,
+        77.58252716064453
+      ],
+      "wiki/raw/articles/2026-04-21-hermes-multi-agent-collaboration-guide.md": [
+        -796.3258056640625,
+        -812.5549926757812
+      ],
+      "wiki/raw/GitHub/santifer-career-ops.md": [
+        -1142.3341064453125,
+        8.363966941833496
+      ],
+      "wiki/raw/GitHub/bergside-design-md-chrome.md": [
+        1059.2451171875,
+        414.4343872070313
+      ],
+      "wiki/entities/video-use.md": [
+        -384.9175109863281,
+        67.8171157836914
+      ],
+      "wiki/entities/oh-my-codex.md": [
+        -178.62680053710938,
+        -331.6338195800781
+      ],
+      "wiki/raw/articles/2026-04-18-openclaw-xiaohongshu-sop.md": [
+        -456.8190002441406,
+        1049.7618408203125
+      ],
+      "wiki/raw/articles/2026-06-03-claude-code-ai-native-engineering-org.md": [
+        1107.0228271484375,
+        -180.4059906005859
+      ],
+      "wiki/entities/chandra.md": [
+        -51.13530731201172,
+        -297.4817199707031
+      ],
+      "wiki/entities/garden-skills.md": [
+        -67.73873901367188,
+        300.5853576660156
+      ],
+      "wiki/entities/md2pdf-skill.md": [
+        -13.75446319580078,
+        413.7177734375
+      ],
+      "wiki/raw/articles/2026-04-18-claude-code-mobile-remote.md": [
+        -968.5457153320312,
+        601.4822387695312
+      ],
+      "wiki/concepts/reflection-pattern.md": [
+        162.0673370361328,
+        -305.74627685546875
+      ],
+      "wiki/raw/articles/2026-04-18-20-ai-creation-skills.md": [
+        -637.5910034179688,
+        951.6205444335938
+      ],
+      "wiki/raw/articles/2026-04-20-10-claude-code-best-practices.md": [
+        223.2985687255859,
+        -1113.8253173828125
+      ],
+      "wiki/raw/articles/2026-04-18-agent-skills-four-words.md": [
+        1097.5313720703125,
+        297.878173828125
+      ],
+      "wiki/raw/GitHub/alibaba-open-code-review.md": [
+        -1137.5697021484375,
+        -70.9012680053711
+      ],
+      "wiki/entities/feishu.md": [
+        -41.52212142944336,
+        43.44545364379883
+      ],
+      "wiki/entities/letta.md": [
+        175.30386352539062,
+        -207.94000244140625
+      ],
+      "wiki/entities/tencentdb-agent-memory.md": [
+        -110.08051300048828,
+        -241.44854736328125
+      ],
+      "wiki/entities/agent-browser.md": [
+        -72.33716583251953,
+        -135.52212524414062
+      ],
+      "wiki/raw/articles/2026-04-18-hermes-agent-chinese-community-feishu.md": [
+        1086.1524658203125,
+        -302.40655517578125
+      ],
+      "wiki/raw/articles/2026-05-22-tencent-agent-memory-token-saving-mermaid.md": [
+        467.6628112792969,
+        1032.1785888671875
+      ],
+      "wiki/entities/lovart.md": [
+        -199.49066162109375,
+        348.1019287109375
+      ],
+      "wiki/entities/ai-hedge-fund.md": [
+        -93.61255645751952,
+        -310.0506591796875
+      ],
+      "wiki/concepts/context-rot.md": [
+        276.4112854003906,
+        -77.40550231933594
+      ],
+      "wiki/entities/computer-use-agent.md": [
+        -341.0741882324219,
+        -63.19306182861328
+      ],
+      "wiki/entities/bestblogs.md": [
+        -324.3336486816406,
+        -102.5409698486328
+      ],
+      "wiki/entities/voxcpm.md": [
+        -336.1897277832031,
+        -302.5890808105469
+      ],
+      "wiki/raw/articles/2026-04-18-deep-research-prompt.md": [
+        1081.1453857421875,
+        -357.7701110839844
+      ],
+      "wiki/concepts/state-aware-runtime.md": [
+        243.606201171875,
+        -51.891475677490234
+      ],
+      "wiki/entities/hue.md": [
+        -36.72739791870117,
+        340.1805725097656
+      ],
+      "wiki/raw/articles/2026-05-31-4-interesting-low-star-github-projects.md": [
+        -67.95062255859375,
+        1138.6676025390625
+      ],
+      "wiki/entities/guizang-ppt-skill.md": [
+        -75.11433410644531,
+        391.5123291015625
+      ],
+      "wiki/raw/articles/2026-04-18-mineru-pdf-conversion-tool.md": [
+        1118.0631103515625,
+        -112.62106323242188
+      ],
+      "wiki/raw/articles/OPEN-SOURCE-PROJECTS-INDEX.md": [
+        -918.108154296875,
+        -672.4999389648438
+      ],
+      "wiki/raw/articles/2026-04-23-xhs-autowiki-paper-knowledge-base.md": [
+        -542.9176635742188,
+        340.9879455566406
+      ],
+      "wiki/raw/GitHub/wps365-open-cli.md": [
+        229.6632843017578,
+        1113.533935546875
+      ],
+      "wiki/entities/onyx.md": [
+        73.24144744873047,
+        -239.94235229492188
+      ],
+      "wiki/entities/ruflo.md": [
+        -238.02828979492188,
+        -256.3856201171875
+      ],
+      "wiki/entities/codebuddy.md": [
+        121.23865509033205,
+        229.6455078125
+      ],
+      "wiki/entities/ai-news-radar.md": [
+        -252.7604522705078,
+        -59.961814880371094
+      ],
+      "wiki/entities/mineru.md": [
+        -33.17798614501953,
+        -358.9673156738281
+      ],
+      "wiki/raw/articles/2026-04-18-ai-agents-stata-skills-econometrics.md": [
+        -0.5755531787872314,
+        1140.8123779296875
+      ],
+      "wiki/raw/articles/2026-06-05-codex-goal-command-guide.md": [
+        201.42884826660156,
+        -1126.5274658203125
+      ],
+      "wiki/entities/excalidraw-diagram-skill.md": [
+        -108.91573333740234,
+        362.2182312011719
+      ],
+      "wiki/entities/claude-code-slash-commands.md": [
+        -183.09683227539065,
+        -157.8568878173828
+      ],
+      "wiki/raw/articles/2026-04-18-figma-vs-pencil-claude-code.md": [
+        749.492919921875,
+        -856.6397705078125
+      ],
+      "wiki/raw/articles/2026-04-18-github-33k-knowledge-base-ai-brain.md": [
+        810.8666381835938,
+        -799.2108154296875
+      ],
+      "wiki/raw/articles/2026-04-18-stop-slop-remove-ai-flavor-skill.md": [
+        -963.990478515625,
+        -605.5025634765625
+      ],
+      "wiki/raw/GitHub/anthropics-claude-plugins-official.md": [
+        -830.1781616210938,
+        -777.486083984375
+      ],
+      "wiki/entities/khazix-mac-cleaner.md": [
+        2.316208839416504,
+        348.9476013183594
+      ],
+      "wiki/concepts/plan-and-execute-pattern.md": [
+        146.33421325683594,
+        -270.5740661621094
+      ],
+      "wiki/raw/articles/2026-04-18-anthropic-skill-best-practices.md": [
+        -762.8307495117188,
+        851.4949951171875
+      ],
+      "wiki/raw/articles/2026-04-19-claude-design-system-prompt-leak-analysis.md": [
+        -854.5928344726562,
+        755.0191040039062
+      ],
+      "wiki/entities/aigc-rewriter.md": [
+        -93.40564727783205,
+        250.21397399902344
+      ],
+      "wiki/entities/sooul-md.md": [
+        -292.94085693359375,
+        -97.9669189453125
+      ],
+      "wiki/raw/articles/2026-06-03-browseract-playwright-replacement.md": [
+        -518.457763671875,
+        1016.6484985351562
+      ],
+      "wiki/entities/superpowers.md": [
+        -193.20802307128903,
+        130.53021240234375
+      ],
+      "wiki/raw/articles/2026-04-18-lovart-brand-design-features.md": [
+        1133.0242919921875,
+        -12.388778686523438
+      ],
+      "wiki/raw/articles/2026-04-21-github-top10-weekly-stars.md": [
+        -1132.4949951171875,
+        -136.61172485351562
+      ],
+      "wiki/entities/aider.md": [
+        -280.0605163574219,
+        -119.61785125732422
+      ],
+      "wiki/entities/claude-code.md": [
+        -146.77708435058594,
+        60.01383972167969
+      ],
+      "wiki/index.md": [
+        -106.8721923828125,
+        -2.641235589981079
+      ],
+      "wiki/raw/articles/2026-06-03-karpathy-learning-methodology.md": [
+        1139.574951171875,
+        8.416544914245605
+      ],
+      "wiki/entities/boris-cherny.md": [
+        -298.28741455078125,
+        60.61470031738281
+      ],
+      "wiki/raw/articles/2026-06-07-anthropic-internal-skills-practices.md": [
+        867.3915405273438,
+        -737.0994873046875
+      ],
+      "wiki/entities/claude-opus-48.md": [
+        -148.05136108398438,
+        -347.1745300292969
+      ],
+      "wiki/raw/articles/2026-05-27-agent-harness-engineering-survey-datawhale.md": [
+        1098.573974609375,
+        -243.4319000244141
+      ],
+      "wiki/raw/articles/2026-04-21-chandra-ocr-handwriting-recognition.md": [
+        843.3297119140625,
+        -764.5653686523438
+      ],
+      "wiki/raw/articles/2026-04-18-aris-auto-experiment-paper.md": [
+        -914.7312622070312,
+        680.4541625976562
+      ],
+      "wiki/concepts/gpt-editable-figures.md": [
+        79.15087890625,
+        -198.6608428955078
+      ],
+      "wiki/entities/archon.md": [
+        265.77410888671875,
+        107.35107421875
+      ],
+      "wiki/entities/khazix-writer.md": [
+        -102.02418518066406,
+        281.62420654296875
+      ],
+      "wiki/entities/openscreen.md": [
+        -456.9515380859375,
+        176.24514770507812
+      ],
+      "wiki/raw/articles/2026-05-19-claude-code-slash-commands-guide.md": [
+        368.159423828125,
+        -1066.6822509765625
+      ],
+      "wiki/raw/articles/2026-04-26-githubdaily-open-source-projects.md": [
+        1002.2761840820312,
+        530.7684326171875
+      ],
+      "wiki/raw/articles/2026-04-21-xhs-scientific-research-skills-open-source.md": [
+        1129.046142578125,
+        161.9864959716797
+      ],
+      "wiki/raw/articles/2026-05-12-10-new-open-source-github-projects.md": [
+        -746.22509765625,
+        -859.869384765625
+      ],
+      "wiki/entities/open-slide.md": [
+        -258.1795349121094,
+        298.7678527832031
+      ],
+      "wiki/entities/gsd2.md": [
+        -94.48796844482422,
+        62.44429016113281
+      ],
+      "wiki/concepts/llm-wiki-methodology.md": [
+        233.60557556152344,
+        -244.21424865722656
+      ],
+      "wiki/entities/claude-md.md": [
+        -79.146240234375,
+        -83.93834686279297
+      ],
+      "wiki/raw/articles/2026-04-18-ppt-master-ai-editable-pptx.md": [
+        1117.479248046875,
+        -255.63233947753903
+      ],
+      "wiki/raw/articles/2026-04-21-5-treasure-github-projects.md": [
+        1118.942138671875,
+        -228.92718505859375
+      ],
+      "wiki/raw/articles/2026-05-08-obsidian-coding-agent-long-term-memory.md": [
+        1049.767578125,
+        -433.0589904785156
+      ],
+      "wiki/raw/articles/2026-06-03-claude-workflow-harness-design-patterns.md": [
+        -1137.4853515625,
+        29.435300827026367
+      ],
+      "wiki/raw/articles/2026-06-03-sensenova-skills-open-source.md": [
+        244.9364471435547,
+        -1119.1676025390625
+      ],
+      "wiki/raw/articles/2026-04-18-onyx-self-hosted-chatgpt-guide.md": [
+        1069.21337890625,
+        386.0602416992187
+      ],
+      "wiki/concepts/skill-engineering.md": [
+        147.35585021972656,
+        46.17781448364258
+      ],
+      "wiki/entities/huashu-skills.md": [
+        -41.99249267578125,
+        379.1379699707031
+      ],
+      "wiki/entities/multica.md": [
+        -126.1053695678711,
+        -272.908935546875
+      ],
+      "wiki/entities/openai-codex.md": [
+        -139.10546875,
+        -103.46713256835938
+      ],
+      "wiki/entities/skills.md": [
+        -85.28813934326172,
+        156.32028198242188
+      ],
+      "wiki/raw/articles/2026-05-19-codex-goals-guide.md": [
+        268.2840576171875,
+        -1101.3018798828125
+      ],
+      "wiki/raw/GitHubDaily/2019.md": [
+        254.9619140625,
+        1115.1715087890625
+      ],
+      "wiki/raw/articles/2026-05-11-x-how-to-build-first-ai-agent-10k-plus.md": [
+        980.9776000976562,
+        562.615234375
+      ],
+      "wiki/raw/articles/2026-04-18-harness-engineering-source-code.md": [
+        1137.0428466796875,
+        -105.97185516357422
+      ],
+      "wiki/raw/articles/2026-04-18-multi-agent-collaboration-guide.md": [
+        398.88421630859375,
+        -1073.751708984375
+      ],
+      "wiki/raw/articles/2026-04-18-build-ai-agent-framework.md": [
+        -1021.7665405273438,
+        -508.2326965332031
+      ],
+      "wiki/entities/figma.md": [
+        -331.6003112792969,
+        147.141845703125
+      ],
+      "wiki/entities/codex-goals.md": [
+        67.33257293701172,
+        -132.08082580566406
+      ],
+      "wiki/entities/mano-p.md": [
+        -346.006103515625,
+        18.246618270874023
+      ],
+      "wiki/concepts/agent-seven-core-modules.md": [
+        298.9256896972656,
+        -111.0261688232422
+      ],
+      "wiki/entities/markitdown.md": [
+        -15.027735710144045,
+        -399.10699462890625
+      ],
+      "wiki/raw/articles/2026-04-18-academic-paper-auto-writing-skill.md": [
+        128.671630859375,
+        1132.2410888671875
+      ],
+      "wiki/raw/articles/2026-04-18-ai-skill-architecture-diagrams.md": [
+        305.268798828125,
+        -1093.63525390625
+      ],
+      "wiki/raw/articles/2026-04-18-wechat-article-unknown-title-1.md": [
+        921.7094116210938,
+        661.0654907226562
+      ],
+      "wiki/raw/articles/2026-05-12-claude-code-feishu-agent-workflows.md": [
+        1124.6451416015625,
+        -37.0440788269043
+      ],
+      "wiki/raw/articles/2026-05-17-8-github-open-source-projects.md": [
+        1044.789306640625,
+        447.5978088378906
+      ],
+      "wiki/concepts/vertical-industry-agents.md": [
+        187.91339111328125,
+        -166.88519287109375
+      ],
+      "wiki/raw/articles/2026-05-21-pinme-skill-one-click-deploy.md": [
+        139.06869506835938,
+        -1134.7117919921875
+      ],
+      "wiki/raw/articles/2026-06-02-garden-skills-7k-stars.md": [
+        434.54144287109375,
+        -1049.3447265625
+      ],
+      "wiki/raw/articles/2026-04-21-video-use-claude-code-video-editing.md": [
+        -294.4781799316406,
+        -1098.266357421875
+      ],
+      "wiki/raw/articles/2026-05-19-beautiful-practical-frontend-guide.md": [
+        -830.9613647460938,
+        779.716796875
+      ],
+      "wiki/entities/claude-design.md": [
+        -306.1139831542969,
+        208.6142578125
+      ],
+      "wiki/entities/hermes-agent.md": [
+        -174.8580780029297,
+        -104.73259735107422
+      ],
+      "wiki/entities/claude-managed-agents.md": [
+        -283.0159912109375,
+        -67.30201721191406
+      ],
+      "wiki/entities/awesome-agentic-ai-zh.md": [
+        -178.10716247558594,
+        -204.17100524902344
+      ],
+      "wiki/entities/ppt-master.md": [
+        -272.6663818359375,
+        265.50091552734375
+      ],
+      "wiki/entities/sensetime.md": [
+        -130.78143310546875,
+        241.16482543945312
+      ],
+      "wiki/entities/claude-code-hooks.md": [
+        236.0735321044922,
+        124.42250061035156
+      ],
+      "wiki/entities/thariq-shihipar.md": [
+        -253.25747680664065,
+        72.22161102294922
+      ],
+      "wiki/entities/oh-my-claudecode.md": [
+        -212.05734252929688,
+        -247.5342254638672
+      ],
+      "wiki/raw/articles/2026-04-18-openclaw-discord-ai-research-team.md": [
+        -713.5164184570312,
+        -887.8389282226562
+      ],
+      "wiki/raw/articles/2026-04-18-xhs-claude-no-compact-two-methods.md": [
+        1124.767822265625,
+        188.0720367431641
+      ],
+      "wiki/concepts/prompt-engineering.md": [
+        226.67941284179688,
+        -188.6842498779297
+      ],
+      "wiki/raw/articles/2026-05-21-xhs-agent-projects-recommendation.md": [
+        -702.0580444335938,
+        899.0355834960938
+      ],
+      "wiki/entities/deepseek.md": [
+        -327.83294677734375,
+        -173.66238403320312
+      ],
+      "wiki/entities/nousresearch.md": [
+        -372.86871337890625,
+        -9.451744079589844
+      ],
+      "wiki/entities/scientific-research-skills.md": [
+        -10.4546537399292,
+        295.0596008300781
+      ],
+      "wiki/entities/vercel-ai-deploy.md": [
+        25.624614715576172,
+        -32.105655670166016
+      ],
+      "wiki/raw/GitHub/ConardLi-garden-skills.md": [
+        645.7368774414062,
+        933.9586791992188
+      ],
+      "wiki/raw/articles/2026-04-18-claude-code-stata-econometrics-guide.md": [
+        1079.0875244140625,
+        358.056396484375
+      ],
+      "wiki/raw/articles/2026-05-28-codex-best-practices-openai-official.md": [
+        416.2279968261719,
+        1057.55029296875
+      ],
+      "wiki/concepts/context-engineering.md": [
+        -54.60746383666992,
+        -206.4636383056641
+      ],
+      "wiki/entities/autofigure-edit.md": [
+        -173.06991577148438,
+        241.7952423095703
+      ],
+      "wiki/entities/open-code-review.md": [
+        54.71821975708008,
+        180.9320526123047
+      ],
+      "wiki/entities/token-speed.md": [
+        -59.68223571777344,
+        -380.9785461425781
+      ],
+      "wiki/raw/GitHubDaily/articles/鍙堜竴绁炰功闈笘锛氥€婃棤闇€璁＄畻鏈虹殑璁＄畻鏈虹瀛︺€嬶紒.md": [
+        696.7991943359375,
+        -892.43115234375
+      ],
+      "wiki/concepts/vibe-coding.md": [
+        -226.92755126953125,
+        -80.62181091308594
+      ],
+      "wiki/raw/articles/2026-05-11-harness-engineering-knowledge.md": [
+        1087.511474609375,
+        326.248046875
+      ],
+      "wiki/concepts/ai-native-development.md": [
+        -209.0238800048828,
+        -121.51921844482422
+      ],
+      "wiki/concepts/react-pattern.md": [
+        117.46265411376952,
+        -240.0840606689453
+      ],
+      "wiki/entities/a-stock-data-agent.md": [
+        -114.96775817871094,
+        -74.36666107177734
+      ],
+      "wiki/entities/aris.md": [
+        30.8997802734375,
+        277.4622497558594
+      ],
+      "wiki/entities/ui-tars-desktop.md": [
+        -448.9669494628906,
+        48.19822311401367
+      ],
+      "wiki/raw/GitHub/browser-act-skills.md": [
+        448.0751647949219,
+        1046.396240234375
+      ],
+      "wiki/entities/browser-act.md": [
+        -215.87042236328125,
+        92.6520004272461
+      ],
+      "wiki/entities/obsidian.md": [
+        -16.20962142944336,
+        -170.40533447265625
+      ],
+      "wiki/entities/khoj.md": [
+        99.5129165649414,
+        -370.85052490234375
+      ],
+      "wiki/raw/articles/2026-06-09-agent-context-compression-strategies-comparison.md": [
+        -747.3789672851562,
+        853.8330688476562
+      ],
+      "wiki/raw/articles/2026-04-18-claude-research-10x-better.md": [
+        1069.0709228515625,
+        -380.0948181152344
+      ],
+      "wiki/concepts/agent-loop.md": [
+        115.8375015258789,
+        -81.77872467041016
+      ],
+      "wiki/concepts/agent-building-tutorial.md": [
+        2.459810256958008,
+        -144.29095458984375
+      ],
+      "wiki/entities/cheat-on-content.md": [
+        42.777732849121094,
+        399.1449279785156
+      ],
+      "wiki/entities/yazi.md": [
+        158.2899932861328,
+        272.2055358886719
+      ],
+      "wiki/comparisons/claude-design-vs-traditional-tools.md": [
+        -456.6982421875,
+        77.17073822021484
+      ],
+      "wiki/raw/articles/2026-06-05-how-to-write-skills-ultimate-guide.md": [
+        -667.0311279296875,
+        934.3067016601562
+      ],
+      "wiki/raw/articles/2026-06-03-khazix-mac-cleaner-skill.md": [
+        1132.9453125,
+        -191.73681640625
+      ],
+      "wiki/raw/articles/2026-04-18-overleaf-claude-code-latex-paper.md": [
+        -427.3542785644531,
+        267.4413757324219
+      ],
+      "wiki/comparisons/vibe-coding-vs-ai-native.md": [
+        -242.04249572753903,
+        -146.00369262695312
+      ],
+      "wiki/entities/local-deep-research.md": [
+        -171.07814025878906,
+        102.79779815673828
+      ],
+      "wiki/entities/pliny-the-liberator.md": [
+        -231.74310302734375,
+        160.63856506347656
+      ],
+      "wiki/entities/typeui-design-md-extractor.md": [
+        109.68912506103516,
+        184.58090209960935
+      ],
+      "wiki/entities/claude-howto.md": [
+        -161.8955078125,
+        -183.7226104736328
+      ],
+      "wiki/entities/claude-model-family.md": [
+        -164.0221405029297,
+        -292.8627624511719
+      ],
+      "wiki/entities/zero-native.md": [
+        327.1708984375,
+        143.37835693359375
+      ],
+      "wiki/entities/horizon.md": [
+        -242.7916259765625,
+        -182.8793029785156
+      ],
+      "wiki/entities/claude-mem.md": [
+        17.826818466186523,
+        -111.5553970336914
+      ],
+      "wiki/entities/openspec.md": [
+        157.2015838623047,
+        208.4504547119141
+      ],
+      "wiki/raw/articles/2026-05-24-openai-codex-tips-jason-liu.md": [
+        -1075.777099609375,
+        377.3345642089844
+      ],
+      "wiki/raw/articles/2026-04-18-claude-code-hidden-commands.md": [
+        1143.2174072265625,
+        -42.36542510986328
+      ],
+      "wiki/raw/articles/2026-05-26-minicpm5-1b-openbmb.md": [
+        1024.536376953125,
+        488.9934387207031
+      ],
+      "wiki/raw/articles/2026-05-26-ai-vercel-deploy-website-yupi.md": [
+        -778.2882080078125,
+        843.301025390625
+      ],
+      "wiki/concepts/vibe-design.md": [
+        -294.2648010253906,
+        26.93539810180664
+      ],
+      "wiki/raw/articles/2026-04-24-guizang-ppt-skill-10-year-design-experience.md": [
+        -935.0257568359376,
+        653.4661254882812
+      ],
+      "wiki/raw/articles/2026-05-07-anthropic-harness-guide-dead-weight.md": [
+        -1098.602783203125,
+        -304.6994323730469
+      ],
+      "wiki/raw/articles/2026-04-18-beautiful-pdf-typesetting-skill.md": [
+        491.1585388183594,
+        1030.3402099609375
+      ],
+      "wiki/raw/articles/2026-04-18-kazike-creative-skill-open-source.md": [
+        -1140.720947265625,
+        59.552467346191406
+      ],
+      "wiki/concepts/spec-driven-development.md": [
+        153.07534790039062,
+        -118.14083862304688
+      ],
+      "wiki/entities/nexus4cc.md": [
+        -264.783203125,
+        -166.5164337158203
+      ],
+      "wiki/raw/articles/2026-04-18-gsd2-auto-dev-tool.md": [
+        1121.99267578125,
+        172.54542541503906
+      ],
+      "wiki/entities/sensenova-skills.md": [
+        -199.5850372314453,
+        289.7084655761719
+      ],
+      "wiki/raw/articles/2026-04-18-asm-ai-coding-assistant-manager.md": [
+        1041.931640625,
+        -456.6262817382813
+      ],
+      "wiki/entities/codex-plus-plus.md": [
+        -246.6489715576172,
+        3.6509196758270264
+      ]
+    },
+    "communities": {
+      "wiki/raw/articles/2026-05-21-xhs-agent-projects-recommendation.md": 114,
+      "wiki/raw/articles/2026-05-31-4-interesting-low-star-github-projects.md": 128,
+      "wiki/entities/computer-use-agent.md": 2,
+      "wiki/raw/GitHub/santifer-career-ops.md": 15,
+      "wiki/concepts/plan-and-execute-pattern.md": 3,
+      "wiki/entities/autowiki.md": 2,
+      "wiki/entities/vibe-coding-course.md": 2,
+      "wiki/entities/everything-claude-code.md": 2,
+      "wiki/entities/excalidraw-diagram-skill.md": 4,
+      "wiki/entities/oh-my-codex.md": 1,
+      "wiki/entities/deep-tutor.md": 1,
+      "wiki/entities/timesfm.md": 1,
+      "wiki/log.md": 2,
+      "wiki/concepts/llm-wiki-methodology.md": 3,
+      "wiki/raw/articles/2026-04-23-xhs-autowiki-paper-knowledge-base.md": 1,
+      "wiki/entities/jason-liu.md": 1,
+      "wiki/raw/articles/2026-05-24-openai-codex-tips-jason-liu.md": 117,
+      "wiki/entities/figma.md": 2,
+      "wiki/raw/articles/2026-05-26-ai-vercel-deploy-website-yupi.md": 120,
+      "wiki/raw/articles/2026-05-11-bole-skill-ai-news-radar.md": 99,
+      "wiki/raw/articles/2026-05-07-effective-harnesses-for-long-running-agents.md": 96,
+      "wiki/raw/articles/2026-04-18-ppt-master-ai-editable-pptx.md": 71,
+      "wiki/raw/articles/2026-05-21-datawhale-ai-agent-learning-roadmap.md": 112,
+      "wiki/raw/articles/2026-04-18-claude-code-mobile-remote.md": 46,
+      "wiki/entities/voxcpm.md": 1,
+      "wiki/concepts/skill-engineering.md": 3,
+      "wiki/concepts/vertical-industry-agents.md": 3,
+      "wiki/raw/articles/2026-04-21-xhs-scientific-research-skills-open-source.md": 58,
+      "wiki/raw/articles/2026-06-03-sensenova-skills-open-source.md": 138,
+      "wiki/raw/articles/2026-04-18-claude-code-stata-econometrics-guide.md": 49,
+      "wiki/concepts/vibe-coding.md": 2,
+      "wiki/entities/oh-my-claudecode.md": 1,
+      "wiki/raw/articles/2026-04-18-lovart-brand-design-features.md": 64,
+      "wiki/raw/articles/2026-06-09-openai-codex-best-practices-guide.md": 146,
+      "wiki/raw/articles/2026-04-18-claude-code-session-management.md": 48,
+      "wiki/raw/articles/2026-04-24-guizang-ppt-skill-10-year-design-experience.md": 91,
+      "wiki/entities/browser-act.md": 2,
+      "wiki/raw/articles/2026-04-18-aris-auto-experiment-paper.md": 39,
+      "wiki/raw/articles/2026-05-08-obsidian-coding-agent-long-term-memory.md": 98,
+      "wiki/raw/articles/2026-05-07-anthropic-harness-guide-dead-weight.md": 95,
+      "wiki/entities/hermes-agent.md": 2,
+      "wiki/entities/claude-code-hooks.md": 3,
+      "wiki/raw/articles/2026-05-24-jason-liu-getting-most-out-of-codex.md": 116,
+      "wiki/entities/tencentdb-agent-memory.md": 1,
+      "wiki/entities/hue.md": 4,
+      "wiki/entities/token-speed.md": 1,
+      "wiki/entities/ai-scientist-v2.md": 1,
+      "wiki/entities/cheat-on-content.md": 4,
+      "wiki/entities/codebuddy.md": 4,
+      "wiki/raw/GitHubDaily/2021.md": 20,
+      "wiki/raw/articles/2026-05-28-codex-best-practices-openai-official.md": 124,
+      "wiki/entities/stitch.md": 2,
+      "wiki/comparisons/vibe-coding-vs-ai-native.md": 2,
+      "wiki/entities/skills.md": 4,
+      "wiki/entities/pencil.md": 4,
+      "wiki/raw/GitHub/ConardLi-garden-skills.md": 5,
+      "wiki/raw/GitHubDaily/2019.md": 18,
+      "wiki/entities/ppt-master.md": 4,
+      "wiki/entities/typeui-design-md-extractor.md": 4,
+      "wiki/entities/manim.md": 2,
+      "wiki/entities/wps365-cli.md": 3,
+      "wiki/entities/markitdown.md": 2,
+      "wiki/raw/articles/2026-04-18-ai-agent-stata-guide.md": 33,
+      "wiki/entities/ruflo.md": 1,
+      "wiki/raw/articles/2026-04-22-aigc-rewriter-open-source-model.md": 90,
+      "wiki/concepts/spec-driven-development.md": 3,
+      "wiki/entities/claude-opus-48.md": 1,
+      "wiki/raw/articles/2026-04-18-11-hot-github-projects-this-week.md": 28,
+      "wiki/raw/articles/2026-04-18-anthropic-skill-best-practices.md": 38,
+      "wiki/raw/articles/2026-05-02-claude-code-gemma4-mac-image-manager.md": 94,
+      "wiki/entities/claude-managed-agents.md": 1,
+      "wiki/comparisons/claude-code-vs-openclaw-vs-hermes.md": 2,
+      "wiki/raw/articles/2026-04-18-claude-code-hidden-commands.md": 45,
+      "wiki/raw/articles/2026-05-30-harness-research-reflection.md": 127,
+      "wiki/concepts/academic-paper-integrity.md": 3,
+      "wiki/entities/obsidian.md": 2,
+      "wiki/entities/aigc-rewriter.md": 4,
+      "wiki/raw/articles/2026-06-03-khazix-mac-cleaner-skill.md": 137,
+      "wiki/entities/archon.md": 3,
+      "wiki/entities/claude-code-slash-commands.md": 2,
+      "wiki/entities/peekdesktop.md": 2,
+      "wiki/entities/lance-martin.md": 1,
+      "wiki/raw/articles/2026-04-18-xhs-gpt-editable-publication-figures.md": 58,
+      "wiki/raw/GitHubDaily/2023.md": 22,
+      "wiki/raw/GitHub/wps365-open-cli.md": 16,
+      "wiki/raw/articles/2026-04-18-openclaw-xiaohongshu-sop.md": 70,
+      "wiki/raw/articles/2026-04-18-claude-research-10x-better.md": 50,
+      "wiki/entities/design-md.md": 3,
+      "wiki/raw/articles/2026-04-20-5-low-key-awesome-github-projects.md": 82,
+      "wiki/raw/GitHubDaily/articles/瀛︿笉浼氳璁℃ā寮忥紝鏄洜涓轰綘杩樻病鐢ㄨ繃杩欎釜绁炲鐨勭綉绔欙紒.md": 26,
+      "wiki/raw/articles/2026-04-18-onyx-self-hosted-chatgpt-guide.md": 68,
+      "wiki/entities/thariq-shihipar.md": 1,
+      "wiki/raw/articles/2026-04-18-github-hot-10-open-source-projects.md": 56,
+      "wiki/raw/articles/2026-05-20-designmd-sh-design-registry.md": 111,
+      "wiki/index.md": 2,
+      "wiki/_archive/entities/codex-openai.md": 1,
+      "wiki/entities/ui-tars-desktop.md": 2,
+      "wiki/raw/articles/2026-04-18-everything-claude-code-plugin-library.md": 52,
+      "wiki/entities/onyx.md": 1,
+      "wiki/concepts/document-first-system.md": 2,
+      "wiki/raw/articles/2026-05-22-tencent-agent-memory-token-saving-mermaid.md": 115,
+      "wiki/SCHEMA.md": 0,
+      "wiki/raw/articles/2026-05-26-minicpm5-1b-openbmb.md": 121,
+      "wiki/entities/logo-generator-skill.md": 4,
+      "wiki/raw/articles/2026-04-18-figma-vs-pencil-claude-code.md": 53,
+      "wiki/entities/pinme.md": 4,
+      "wiki/entities/a-stock-data-agent.md": 2,
+      "wiki/entities/agent-skills-addyosmani.md": 3,
+      "wiki/entities/hv-analysis.md": 3,
+      "wiki/concepts/context-compression-pipeline.md": 3,
+      "wiki/entities/garden-skills.md": 4,
+      "wiki/raw/GitHub/Thysrael-Horizon.md": 8,
+      "wiki/raw/articles/2026-04-18-beautiful-pdf-typesetting-skill.md": 41,
+      "wiki/entities/sensenova-skills.md": 4,
+      "wiki/raw/articles/2026-05-14-anthropic-financial-skills.md": 106,
+      "wiki/entities/manus.md": 1,
+      "wiki/entities/openai-codex.md": 2,
+      "wiki/raw/GitHub/browser-act-skills.md": 12,
+      "wiki/entities/andrej-karpathy-skills.md": 3,
+      "wiki/raw/articles/2026-04-18-ai-agents-stata-skills-econometrics.md": 34,
+      "wiki/raw/articles/2026-06-09-agent-context-compression-strategies-comparison.md": 145,
+      "wiki/entities/guizang-ppt-skill.md": 4,
+      "wiki/entities/turix-cua.md": 2,
+      "wiki/raw/articles/2026-04-18-hermes-agent-chinese-community-feishu.md": 60,
+      "wiki/entities/mano-p.md": 2,
+      "wiki/concepts/prompt-engineering.md": 3,
+      "wiki/raw/GitHub/ginobefun-BestBlogs.md": 14,
+      "wiki/concepts/claude-context-continuity.md": 3,
+      "wiki/raw/articles/2026-04-18-multi-agent-collaboration-guide.md": 66,
+      "wiki/entities/video-use.md": 2,
+      "wiki/raw/articles/2026-06-03-claude-code-self-check-feedback-loop.md": 134,
+      "wiki/raw/articles/2026-04-21-github-top10-weekly-stars.md": 86,
+      "wiki/entities/khazix-writer.md": 4,
+      "wiki/concepts/ai-slop-design.md": 3,
+      "wiki/raw/articles/2026-04-18-build-ai-agent-framework.md": 42,
+      "wiki/concepts/claude-code-folder-structure.md": 3,
+      "wiki/entities/stata-skill.md": 4,
+      "wiki/concepts/gpt-editable-figures.md": 3,
+      "wiki/raw/GitHub/LearnPrompt-ai-news-radar.md": 6,
+      "wiki/raw/GitHub/dominikmartn-hue.md": 13,
+      "wiki/entities/agent-teams.md": 1,
+      "wiki/entities/cursor.md": 2,
+      "wiki/concepts/multi-agent-collaboration.md": 1,
+      "wiki/entities/openscreen.md": 2,
+      "wiki/raw/GitHubDaily/articles/浜氶┈閫婂厤璐瑰澶栧紑鏀捐绠楁満缂栫▼璇撅紒.md": 25,
+      "wiki/raw/articles/2026-04-18-58-website-styles-10days-40k-stars.md": 30,
+      "wiki/raw/articles/2026-04-18-claude-code-10-more-worthwhile-skills.md": 43,
+      "wiki/entities/md2pdf-skill.md": 4,
+      "wiki/entities/claude-md.md": 2,
+      "wiki/entities/langchain.md": 3,
+      "wiki/raw/articles/2026-04-18-github-33k-knowledge-base-ai-brain.md": 55,
+      "wiki/raw/articles/2026-04-18-openclaw-discord-ai-research-team.md": 69,
+      "wiki/raw/articles/2026-04-19-claude-design-system-prompt-leak-analysis.md": 80,
+      "wiki/raw/articles/2026-05-13-kami-ai-document-typography.md": 104,
+      "wiki/raw/articles/2026-04-21-5-treasure-github-projects.md": 83,
+      "wiki/raw/GitHubDaily/2024.md": 23,
+      "wiki/raw/articles/2026-04-18-deep-research-prompt.md": 51,
+      "wiki/raw/articles/2026-06-08-claude-code-parallel-agents-comparison.md": 144,
+      "wiki/raw/articles/2026-06-05-codex-goal-command-guide.md": 141,
+      "wiki/raw/articles/2026-04-18-asm-ai-coding-assistant-manager.md": 40,
+      "wiki/raw/articles/2026-05-26-skillopt-microsoft-train-skill-like-nn.md": 122,
+      "wiki/concepts/vibe-design.md": 2,
+      "wiki/entities/ai-news-radar.md": 2,
+      "wiki/raw/articles/2026-04-18-harness-engineering-source-code.md": 59,
+      "wiki/raw/articles/2026-05-19-claude-code-slash-commands-guide.md": 109,
+      "wiki/entities/rowboat.md": 1,
+      "wiki/concepts/anti-slop-writing.md": 4,
+      "wiki/entities/deepseek.md": 1,
+      "wiki/entities/english-level-up-tips.md": 3,
+      "wiki/entities/minicpm5-1b.md": 2,
+      "wiki/raw/articles/2026-05-19-beautiful-practical-frontend-guide.md": 108,
+      "wiki/raw/articles/2026-05-11-x-how-to-build-first-ai-agent-10k-plus.md": 101,
+      "wiki/raw/articles/2026-06-03-claude-code-ai-native-engineering-org.md": 131,
+      "wiki/entities/gemma-4.md": 2,
+      "wiki/entities/agentmemory.md": 3,
+      "wiki/raw/articles/2026-04-19-claude-design-system-prompt-bilingual.md": 79,
+      "wiki/concepts/agent-seven-core-modules.md": 3,
+      "wiki/raw/articles/2026-04-18-five-skills-paper-writing.md": 54,
+      "wiki/entities/conard-li.md": 4,
+      "wiki/concepts/karpathy-knowledge-compilation.md": 3,
+      "wiki/entities/wechat-article-skills.md": 4,
+      "wiki/raw/articles/2026-05-12-claude-code-feishu-agent-workflows.md": 103,
+      "wiki/raw/articles/2026-05-11-harness-engineering-knowledge.md": 100,
+      "wiki/entities/boris-cherny.md": 1,
+      "wiki/raw/articles/2026-04-18-20-ai-creation-skills.md": 29,
+      "wiki/raw/articles/2026-04-18-overleaf-claude-code-latex-paper.md": 1,
+      "wiki/raw/articles/2026-06-04-claude-code-boris-write-loops-not-prompts.md": 139,
+      "wiki/raw/articles/2026-04-18-academic-paper-auto-writing-skill.md": 31,
+      "wiki/entities/local-deep-research.md": 1,
+      "wiki/raw/articles/2026-04-18-github-open-source-control-computer-skill.md": 57,
+      "wiki/raw/articles/2026-05-26-a-stock-data-agent-a-share.md": 119,
+      "wiki/entities/asm.md": 4,
+      "wiki/raw/articles/2026-04-18-vibe-design-frontend-ui.md": 74,
+      "wiki/entities/sooul-md.md": 2,
+      "wiki/entities/anthropic.md": 1,
+      "wiki/entities/career-ops.md": 3,
+      "wiki/raw/articles/2026-04-21-video-use-claude-code-video-editing.md": 89,
+      "wiki/entities/claude-model-family.md": 1,
+      "wiki/entities/claude-code.md": 2,
+      "wiki/raw/GitHubDaily/articles/鍙堜竴绁炰功闈笘锛氥€婃棤闇€璁＄畻鏈虹殑璁＄畻鏈虹瀛︺€嬶紒.md": 27,
+      "wiki/raw/articles/2026-05-13-skill-engineering-design.md": 105,
+      "wiki/entities/openclaw.md": 2,
+      "wiki/entities/bb-browser.md": 2,
+      "wiki/entities/remotion.md": 2,
+      "wiki/entities/claude-mem.md": 2,
+      "wiki/entities/kronos.md": 3,
+      "wiki/raw/articles/2026-04-19-claude-design-impact-on-ai-design-vendors.md": 78,
+      "wiki/entities/ai-hedge-fund.md": 1,
+      "wiki/entities/stop-slop.md": 4,
+      "wiki/raw/articles/2026-06-03-claude-code-self-check-deep-dive.md": 133,
+      "wiki/entities/autofigure-edit.md": 4,
+      "wiki/raw/articles/2026-06-03-claude-workflow-harness-design-patterns.md": 135,
+      "wiki/entities/gpt-researcher.md": 3,
+      "wiki/concepts/harness-engineering.md": 3,
+      "wiki/entities/horizon.md": 2,
+      "wiki/entities/knowledge-compilation.md": 3,
+      "wiki/entities/letta.md": 3,
+      "wiki/raw/articles/2026-06-03-karpathy-learning-methodology.md": 136,
+      "wiki/entities/andrej-karpathy.md": 1,
+      "wiki/entities/scientific-research-skills.md": 4,
+      "wiki/entities/fiona-fung.md": 1,
+      "wiki/entities/pliny-the-liberator.md": 1,
+      "wiki/entities/taxhacker.md": 3,
+      "wiki/raw/articles/2026-04-18-ai-logo-icon-generation-skill.md": 36,
+      "wiki/entities/kami.md": 4,
+      "wiki/entities/nexus4cc.md": 2,
+      "wiki/entities/claude-plugins-official.md": 2,
+      "wiki/entities/khoj.md": 1,
+      "wiki/concepts/ai-native-development.md": 2,
+      "wiki/entities/sensetime.md": 4,
+      "wiki/entities/kimi-k25.md": 2,
+      "wiki/entities/openspec.md": 4,
+      "wiki/raw/GitHubDaily/2020.md": 19,
+      "wiki/entities/codex-goals.md": 3,
+      "wiki/entities/dirty-frag.md": 2,
+      "wiki/raw/articles/2026-06-07-anthropic-internal-skills-practices.md": 143,
+      "wiki/entities/gsd2.md": 2,
+      "wiki/concepts/ai-research-workflow.md": 3,
+      "wiki/entities/aider.md": 2,
+      "wiki/entities/open-code-review.md": 4,
+      "wiki/entities/codex-plus-plus.md": 2,
+      "wiki/raw/articles/2026-05-19-codex-goals-guide.md": 110,
+      "wiki/concepts/agent-building-tutorial.md": 3,
+      "wiki/entities/mirage.md": 1,
+      "wiki/raw/articles/2026-04-18-hermes-agent-lobster-hermes.md": 61,
+      "wiki/raw/articles/2026-04-18-gsd2-auto-dev-tool.md": 58,
+      "wiki/raw/articles/2026-04-18-ai-skill-architecture-diagrams.md": 37,
+      "wiki/raw/articles/2026-04-18-karpathy-knowledge-compilation.md": 62,
+      "wiki/raw/articles/2026-04-18-stop-slop-remove-ai-flavor-skill.md": 72,
+      "wiki/entities/overleaf.md": 2,
+      "wiki/concepts/state-aware-runtime.md": 3,
+      "wiki/raw/articles/2026-04-18-westlake-university-ai-paper-drawing.md": 76,
+      "wiki/raw/articles/2026-05-21-pinme-skill-one-click-deploy.md": 113,
+      "wiki/entities/chen-xiwei.md": 1,
+      "wiki/entities/ffmpeg.md": 2,
+      "wiki/concepts/agent-learning-roadmap.md": 3,
+      "wiki/entities/mcp-ecosystem.md": 1,
+      "wiki/entities/chandra.md": 2,
+      "wiki/entities/yazi.md": 4,
+      "wiki/entities/bestblogs.md": 2,
+      "wiki/entities/holmesgpt.md": 2,
+      "wiki/raw/articles/2026-05-25-guangguang-github-claude-plugins-official.md": 118,
+      "wiki/entities/huashu-skills.md": 4,
+      "wiki/raw/GitHubDaily/2018.md": 17,
+      "wiki/raw/articles/2026-04-21-chandra-ocr-handwriting-recognition.md": 84,
+      "wiki/raw/articles/2026-05-29-claude-opus-48-dynamic-workflow涓€娆℃€у苟琛屼笂鐧句釜subagents.md": 125,
+      "wiki/raw/articles/2026-06-02-garden-skills-7k-stars.md": 129,
+      "wiki/raw/articles/2026-06-03-browseract-playwright-replacement.md": 130,
+      "wiki/concepts/react-pattern.md": 3,
+      "wiki/entities/last30days-skill.md": 2,
+      "wiki/raw/articles/2026-04-18-claude-code-research-skills.md": 47,
+      "wiki/raw/articles/2026-04-26-githubdaily-open-source-projects.md": 92,
+      "wiki/concepts/claude-code-self-check.md": 3,
+      "wiki/concepts/agent-loop.md": 3,
+      "wiki/entities/ds4.md": 1,
+      "wiki/raw/GitHub/Picrew-LLM-Harness.md": 7,
+      "wiki/raw/articles/OPEN-SOURCE-PROJECTS-INDEX.md": 147,
+      "wiki/concepts/long-running-agent.md": 3,
+      "wiki/raw/GitHub/anthropics-claude-plugins-official.md": 10,
+      "wiki/raw/GitHub/bergside-design-md-chrome.md": 11,
+      "wiki/raw/articles/2026-04-18-agent-skills-four-words.md": 32,
+      "wiki/raw/articles/2026-04-18-multi-ai-sdd-coding-practice.md": 67,
+      "wiki/entities/zero-native.md": 3,
+      "wiki/raw/GitHubDaily/2022.md": 21,
+      "wiki/raw/articles/2026-04-18-ai-knowledge-base-tutorial.md": 35,
+      "wiki/entities/open-slide.md": 4,
+      "wiki/entities/claude-code-dynamic-workflow.md": 1,
+      "wiki/entities/opentoonz.md": 2,
+      "wiki/raw/articles/2026-06-05-anthropic-95-percent-data-analytics-claude.md": 140,
+      "wiki/raw/articles/2026-04-20-10-claude-code-best-practices.md": 81,
+      "wiki/raw/articles/2026-05-17-8-github-open-source-projects.md": 107,
+      "wiki/entities/playwright.md": 2,
+      "wiki/raw/articles/2026-04-18-xhs-claude-code-terminal-setup.md": 58,
+      "wiki/entities/ai-to-earn.md": 4,
+      "wiki/raw/articles/2026-05-07-open-slide-replace-powerpoint.md": 97,
+      "wiki/entities/vercel-ai-deploy.md": 2,
+      "wiki/entities/finance-skills.md": 4,
+      "wiki/raw/articles/2026-04-18-stop-vibe-coding-shit-mountain.md": 73,
+      "wiki/raw/articles/2026-05-12-10-new-open-source-github-projects.md": 102,
+      "wiki/entities/claude-design.md": 2,
+      "wiki/raw/articles/2026-04-21-turix-cua-agent-skill.md": 88,
+      "wiki/entities/browser-use.md": 2,
+      "wiki/entities/claude-howto.md": 2,
+      "wiki/entities/skillopt.md": 3,
+      "wiki/entities/superpowers.md": 2,
+      "wiki/concepts/codeact.md": 3,
+      "wiki/raw/articles/2026-04-18-wechat-article-unknown-title-1.md": 75,
+      "wiki/concepts/reflection-pattern.md": 3,
+      "wiki/raw/articles/2026-04-18-kazike-creative-skill-open-source.md": 63,
+      "wiki/raw/articles/2026-04-21-claude-code-1m-context-management-guide.md": 85,
+      "wiki/raw/articles/2026-04-18-mineru-pdf-conversion-tool.md": 65,
+      "wiki/raw/articles/2026-06-03-claude-code-dynamic-workflow-harness.md": 132,
+      "wiki/entities/discord.md": 2,
+      "wiki/entities/mineru.md": 2,
+      "wiki/entities/frontend-design-workflow.md": 4,
+      "wiki/entities/multica.md": 1,
+      "wiki/raw/articles/2026-04-18-xhs-claude-no-compact-two-methods.md": 58,
+      "wiki/entities/feishu.md": 2,
+      "wiki/raw/articles/2026-06-05-how-to-write-skills-ultimate-guide.md": 142,
+      "wiki/entities/academic-research-skills.md": 4,
+      "wiki/raw/GitHub/alibaba-open-code-review.md": 9,
+      "wiki/entities/mcp.md": 1,
+      "wiki/raw/articles/2026-04-18-claude-code-creator-15-hidden-features.md": 44,
+      "wiki/raw/articles/2026-05-27-agent-harness-engineering-survey-datawhale.md": 123,
+      "wiki/raw/articles/2026-04-21-hermes-multi-agent-collaboration-guide.md": 87,
+      "wiki/raw/articles/2026-05-29-openclawhermesai-agent.md": 126,
+      "wiki/raw/GitHubDaily/README.md": 24,
+      "wiki/entities/nousresearch.md": 2,
+      "wiki/entities/aris.md": 4,
+      "wiki/concepts/context-engineering.md": 2,
+      "wiki/entities/ghostty.md": 4,
+      "wiki/entities/khazix-mac-cleaner.md": 4,
+      "wiki/entities/awesome-agentic-ai-zh.md": 2,
+      "wiki/entities/lovart.md": 4,
+      "wiki/concepts/agent-memory-systems.md": 3,
+      "wiki/entities/vibevoice.md": 1,
+      "wiki/raw/articles/2026-04-18-zero-human-coding-ai-native-dev-handbook.md": 77,
+      "wiki/comparisons/claude-design-vs-traditional-tools.md": 2,
+      "wiki/concepts/claude-code-session-management.md": 3,
+      "wiki/concepts/rag.md": 1,
+      "wiki/concepts/context-rot.md": 3,
+      "wiki/entities/agent-browser.md": 2,
+      "wiki/raw/articles/2026-04-27-claude-code-agent-teams-best-practices.md": 93,
+      "wiki/entities/recordly.md": 2
+    }
+  }
 }

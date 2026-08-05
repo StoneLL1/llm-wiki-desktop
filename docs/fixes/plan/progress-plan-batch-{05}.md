@@ -1,5 +1,7 @@
 # Progress - plan-batch-{05}
 
+> **历史完成记录：** 下方“启动页 / 三入口 / 打开文件夹为项目”只描述 batch 05 当时落地的实现，不是当前目标。当前行为以 [首次使用与打开已有知识库规范](../../superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准。
+
 Plan: D:\Users\Aletta\Desktop\Works\llm-wiki-desktop\docs\fixes\plan\plan-batch-{05}.md
 Status: completed
 Started: 2026-07-05 02:19

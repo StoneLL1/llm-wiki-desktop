@@ -2,19 +2,21 @@
 
 > Import V2、来源库、媒体、OCR / ASR、平台登录态和 Source AI 整理的规范入口为 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文件只保留总规格摘要；发生冲突时以前述已确认设计为准。
 > §19 的 32 条场景、review §12.2 的 26 条合同、14 类真实夹具与 9 条禁止关闭方式统一登记在 [`../docs/qa/import-source-media-flow-batch9-evidence.json`](../docs/qa/import-source-media-flow-batch9-evidence.json)。
+> 工作流主导航、内建工作流、准备页、项目隔离队列、可观察流水线、确认与恢复行为的规范入口为 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md)。本文件只保留跨模块总规格；发生冲突时以前述已确认设计为准。
+> 无项目工作台、新建知识库、打开原生 / 兼容知识库、目录评估、受限 / 信任 / 只读、兼容启用、修复与 Import 交接的规范入口为 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。普通资料文件夹不得原地初始化；与本文旧摘要冲突时以前述已确认设计为准。
 
 ## 1. 产品定位
 
 **LLM Wiki Desktop** 是一款本地优先的跨平台桌面应用，用于把个人资料、网页、文档和笔记自动整理成结构化、互相链接、可探索的 Markdown 知识库。
 
-产品遵循 Karpathy 的 LLM Wiki 模式：**Raw Sources（原始资料） → Wiki（结构化页面） → Schema（规则与配置）**。与传统 RAG 不同，知识会被持续编译成可阅读、可维护、可版本化的 Wiki，而不是每次提问时临时检索和拼接。
+产品遵循 Karpathy 的 LLM Wiki 模式：**Raw Sources（原始资料） → Sources（可读来源） → Wiki（结构化页面） → Schema（规则与配置）**。与传统 RAG 不同，用户显式运行“更新 Wiki”后，知识会持续沉淀为可阅读、可维护、可版本化的页面，而不是导入后自动编译，或只在每次提问时临时检索和拼接。
 
 首版优先服务 **个人知识管理者**，兼顾研究者。核心体验目标是：
 
-1. 导入资料后，应用生成可浏览的 Wiki 页面。
-2. 用户立即看到美观、可探索的知识图谱。
-3. 用户可以基于 Wiki 问答、导出 HTML/卡片/报告。
-4. Agent CLI 提供高级编排能力；Source 已形成后，未配置 Agent 时可使用 BYOK API 完成 AI 整理、Wiki 编译和 Chat。
+1. 用户始终处在完整桌面工作台中，通过“新建知识库”或“打开已有知识库”开始。
+2. 导入确认后立即读到可浏览 Source；这就是首次价值，不依赖 Wiki 编译、图谱或 Chat。
+3. 用户随后可以更新 Wiki、探索知识图谱、基于 Source / Wiki 问答并导出 HTML / 卡片 / 报告。
+4. Agent CLI 提供高级编排能力；Source 已形成后，未配置 Agent 时可使用 BYOK API 完成适用的 AI 整理、Wiki 更新和 Chat。
 
 ## 2. MVP 范围与验收标准
 
@@ -22,11 +24,11 @@
 
 ### 2.1 必须跑通的闭环
 
-- 新建项目、打开已有项目、把普通资料文件夹初始化为项目。
+- 新建知识库、打开已有原生 / 兼容知识库；普通资料文件夹通过创建独立知识库并导入进入，不原地初始化。
 - 导入多格式资料与媒体，预览最终 Source，确认后写入来源库；编译由用户另行启动。
 - 生成 Wiki 页面、索引、概览和页面间链接。
 - 查看知识图谱，支持页面类型着色、社区聚类、布局缓存。
-- 基于 Wiki 内容 Chat 问答，并展示引用来源。
+- 基于可读 Source 或 Wiki 内容 Chat 问答，并展示引用来源。
 - 生成单篇 HTML 辅助阅读页、知识卡片、项目级 HTML 报告。
 - Source 已形成后的 AI 整理、Wiki 编译和 Chat 可走 Agent CLI 或 BYOK API；Import 解析恢复只走用户触发的本地 Agent。
 - Git 自动检查点、冲突合并、Lint 自动修复、后台任务都可跑通。
@@ -69,6 +71,8 @@
 
 ### 5.1 项目结构
 
+以下目录树只定义**新建的原生知识库**。打开兼容知识库时，页面根、Source 根、元数据位置和可用能力由 `ProjectContext.layout` / capabilities 返回；不得用是否存在根 `purpose.md`、`schema.md` 或原生 `wiki/` 作为唯一可用性判断。
+
 ```text
 project-root/
 ├── purpose.md              # 知识库目标、关键问题、研究方向
@@ -107,18 +111,27 @@ project-root/
 
 ### 5.2 两种文件夹入口
 
-- **打开为项目**：该文件夹本身成为 LLM Wiki 项目。应用持续跟踪项目内的 `raw/`、`wiki/`、配置、Git 状态和后台任务。
-- **导入到当前项目**：把能够形成可读来源的内容提交到当前项目的 `raw/` 与 `wiki/sources/`，导入完成后不再跟踪原始路径。
+- **打开已有知识库**：从无项目工作台选择一个目录，后端先只读评估。原生或兼容 Markdown 知识库可以直接或受限打开；普通资料目录不因此变成项目。
+- **导入**：只在当前知识库内发生，把文件、文件夹、链接或粘贴文本转成布局定义的 evidence 与 Source；新建原生知识库映射为 `raw/` 与 `wiki/sources/`。导入完成后不持续跟踪原始路径。
 
-### 5.3 普通文件夹初始化为项目
+“新建知识库”是另一项首屏动作，不属于文件夹打开或 Import：它选择父级保存位置并用知识库名称生成新的子目录。
 
-当用户把普通资料文件夹“打开为项目”时，应用先确认项目初始化，再创建项目结构并进入统一导入会话。文件通过发现、提取、必要的 OCR / ASR、候选预览和确认后，才以 `sourceId` 为原子边界写入 raw 证据与 `wiki/sources/`；不支持或失败文件不创建占位 Source。
+### 5.3 普通资料文件夹
 
-同名或疑似重复文件处理规则：
+当“打开已有知识库”的只读评估判定所选目录只是普通资料时，应用提供“用这些资料新建知识库”。用户另选项目名称和父级位置后，应用创建独立项目，再进入统一导入会话。原资料目录不写入 `.app/`，不移动或重命名文件，也不创建 `purpose.md` / `schema.md`。
 
-- 完全相同文件可跳过或保留一份。
-- 不同内容但同名时全部保留并自动重命名。
-- 冲突、失败和重命名写入 `.app/import-conflicts.json`，稍后由用户处理。
+文件通过发现、提取、必要的 OCR / ASR、候选预览和确认后，才以 `sourceId` 为原子边界复制 / 归档到新项目的 raw 证据与 `wiki/sources/`；不支持、失败或未确认文件不创建占位 Source。去重、同名冲突和来源版本规则继续以 Import / Source 权威设计为准。
+
+### 5.4 兼容知识库状态
+
+- 打开评估先执行无写入快速扫描，再在已打开工作台中执行可取消深度扫描。
+- 快速评估启动返回 application-scoped `assessmentOperationId`；取消只接受该 opaque ID，不创建项目任务并丢弃未完成快照。完成后返回独立、短期有效的 `assessmentId`，供打开、信任、兼容启用与修复重验。
+- 目录格式（当前原生、旧版原生、`nashsu`、Obsidian、普通 Markdown、歧义、普通资料、未知）、信任（受信任、尚未信任）、文件系统访问（可写、只读）与健康（healthy、repairable、recovery、unreadable）分别建模；`repairable` 表示布局仍一致且存在可预览的有界修复计划，`recovery` 表示应用状态损坏但 Markdown 仍可读，`受限` 是能力摘要，Recovery 不是目录格式。
+- 健康的旧版 LLM Wiki / `nashsu` 进入兼容 Dashboard；未信任的 Obsidian 或可识别 Markdown vault 默认受限；健康且已信任的兼容知识库直接进入 Dashboard。
+- 受限模式允许可读 Markdown、目录树、本地搜索、内存图谱和后台只读盘点；禁用外部 AI、Agent、Skill、项目命令、写入型任务和任何自动修改。
+- 信任按 canonical 目录身份存应用全局配置，不通过项目 marker 表示；移动或替换目录后重新确认。
+- 兼容启用写入 `.app/` 与 `.app/compat/{purpose.md,schema.md}`，不得把兼容配置写成根目录 `purpose.md` / `schema.md`，也不新增 `.app/project.json` manifest。
+- 修复可以自动准备安全的派生状态计划，但任何磁盘写入必须先展示完整确认页；Markdown 可读时允许不修复并保持受限 / 只读。
 
 ## 6. 核心架构
 
@@ -127,15 +140,16 @@ project-root/
 ```text
 Raw（不可变证据）
   -> Sources（当前可读来源）
-  -> Wiki pages（用户另行触发编译的派生页面）
-  -> Graph / Chat / HTML Reports（可探索、可问答、可导出）
+     ├-> Wiki pages（用户另行触发编译的派生页面）
+     ├-> Graph / Chat（Source-only 即可探索、可问答）
+     └-> 与 Wiki pages 一起进入 Graph / Chat / HTML Reports
 ```
 
 ### 6.2 Agent/BYOK 双路径
 
 ```text
 Tauri 桌面窗口
-  ├─ Dashboard / 文章 / Chat / 图谱 / 导入 / Agent 面板 / 设置
+  ├─ Dashboard / 文章 / Chat / 图谱 / 工作流 / 导入 / Lint / Exports / 设置
   ↓ Tauri IPC
 Rust 后端
   ├─ 文件系统与 Git 管理
@@ -148,7 +162,7 @@ Rust 后端
       └─ LLM APIs: OpenAI / Anthropic / Google / Ollama / Custom
 ```
 
-Agent 优先；未配置 Agent 时允许临时使用 BYOK API。
+工作流是面向用户的产品入口；Agent CLI、BYOK API 与本地规则是可替换的执行路径。默认执行路径由设置决定，单次运行可显式覆盖，缺少所选路径时不得静默回退。
 
 - **Agent CLI**：负责高级 Skill、多文件维护、Lint 自动修复、HTML/报告生成、复杂编译。
 - **BYOK API**：Source 已经形成后，支持 AI 整理、Wiki 编译、问答和引用生成；不参与导入解析或恢复。
@@ -201,23 +215,24 @@ SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发�
 - 统计卡片：文章数、实体数、概念数、来源数、链接数、最近任务数。
 - 主题分布：按页面类型展示饼图或环形图。
 - 知识图谱预览：显示缩略图谱，可点击进入完整图谱。
-- 最近活动：读取 `wiki/log.md` 和 `.app/tasks/`。
-- 快速操作：导入资料、运行 Lint、开始问答、生成 HTML 报告。
+- 最近活动：读取布局定义的活动日志与任务状态根目录；新建原生知识库映射为 `wiki/log.md` 和 `.app/tasks/`。受限/只读项目允许的本地只读任务只显示本次运行的内存结果。
+- 快速操作：导入资料、更新 Wiki、运行健康检查、开始问答、生成内容；工作流类入口进入统一准备与任务模型。
 
 ### 7.2 文章浏览、阅读与编辑
 
 文件树：
 
-- 按 `wiki/` 目录结构展示所有页面。
+- 按 `ProjectContext.layout.pageRoots` 展示所有可读 Markdown 页面；新建原生项目对应 `wiki/`，兼容 vault 保留其原目录结构。
 - 支持标题、全文关键词、标签、类型、来源过滤。
 - 节点显示页面类型、星标状态和文件图标。
+- restricted/read-only/recovery 状态继续允许浏览，但隐藏或禁用写操作并说明原因。
 
 阅读：
 
 - 渲染 GFM 表格、代码高亮、KaTeX、`[[wikilinks]]`。
 - 展示 YAML frontmatter 元数据。
 - 相关文章区域展示与当前页面有关的页面；首版不单独提供反向链接面板。
-- Sources 继续位于现有 Wiki 树；Source 顶部只新增“AI 整理”。
+- 对具有 Source roots 的项目，Sources 继续位于同一文件树；Source 顶部只新增“AI 整理”。纯外部 vault 不伪造 `wiki/sources/`。
 - Source 的原始稿、版本时间线、重新 OCR / ASR、更换字幕和刷新来源放在可开关右侧面板。
 - AI 整理在固定绑定启动项目、Source 与任务的非模态浮动工作台中运行，生成带唯一 `## 内容概览` 的候选；切页不改绑、切项目时隐藏，完成后默认显示只读最终稿，Diff 与过程按需查看，只有用户明确确认后才更新当前 Source。
 
@@ -226,46 +241,55 @@ SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发�
 - 文章页面支持阅读/编辑一键切换。
 - 编辑器采用 WYSIWYG，隐藏 Markdown 语法。
 - 首版不要求 wikilink 自动补全、frontmatter 可视化编辑、块引用面板或图谱拖线编辑。
-- 用户保存 Markdown 后，自动刷新索引、搜索缓存和图谱缓存。
+- 编辑、新建、重命名与删除要求 trusted writable，后端按 canonical identity、hash 和 Git 策略重验。
+- 用户保存 Markdown 后，自动刷新索引和图谱；只有允许持久化的项目才写搜索/图谱缓存。
 - 手动链接能力不作为首版重点，页面链接主要由 Agent 编译生成。
 
 ### 7.3 收藏与星标
 
-- 收藏：记录感兴趣文章，存储在 `.app/bookmarks.json`。
+- 收藏：记录感兴趣文章，在项目 app state 可写时存储到 layout-defined bookmarks state（原生映射为 `.app/bookmarks.json`）。
 - 星标：标记重要文章，在文件树、Dashboard 和图谱中突出显示。
 - 支持自定义收藏夹/分组。
 
-### 7.4 Agent 编排
+### 7.4 工作流与执行编排
 
-Agent 管理：
+`工作流 / Workflows` 是更新、检查和生成知识库的统一产品入口。首版固定提供三个内建工作流：
 
-- 自动检测 `claude`、`codex`、`openclaw`、`hermes` 等 CLI。
-- 显示安装状态、版本号、默认绑定。
+| 工作流 | 说明 | 执行方式 | 结果归属 |
+|---|---|---|---|
+| 更新 Wiki | 读取已确认且发生变化的 Source，生成或更新派生 Wiki 页面；不得写回布局定义的 Source 根目录 | Agent CLI 或 BYOK | 工作流任务详情与 Wiki |
+| 健康检查 | 首次运行在项目已信任且有具体 AI 路径时默认完整检查，否则默认本地快速检查；后续记住最近模式 | 本地规则 + Agent/BYOK | 现有 Lint 页面 |
+| 生成内容 | 生成单篇辅助阅读页、知识卡片、概念图或项目报告 | Agent Skill 或 BYOK | 现有 Exports 页面 |
+
+工作流界面：
+
+- 使用紧凑行列表和现有右侧上下文面板，不使用配置卡墙。
+- 总览优先展示运行中、等待确认或失败的任务；没有需关注任务时展示三个可用工作流。
+- 点击工作流进入占据主内容区的结构化准备页，不再打开“运行 Agent”对话框。
+- 首次运行要求确认范围；后续相同上下文可以快速重跑。更新 Wiki 默认自动选择变化的 Source，完整重编译只放在高级设置。
+- 主界面优先展示阶段、当前处理项、数量进度和安全动作；原始 stdout/stderr 只作为只读次级日志。
+- 工作流、任务、确认和历史按项目隔离。单项目内串行执行，重复的项目、工作流、范围和基线组合复用已有任务。
+- 任务支持排队、取消、重试和中断恢复说明。重试创建关联的新任务，不覆盖原记录；异常退出后的活动任务标记为“已中断”，不得伪装续跑。
+- 无项目时不创建工作流任务；restricted 项目禁止外部 AI/Agent/Skill；任何项目内容写入还要求 trusted writable，并按工作流声明的 Git 策略校验。
+- prepare 与 start 都在后端按 canonical project identity 重新校验 trust、access、writability、Git 状态和 baseline。进入设置或信任流程后返回准备页，但不自动运行。
+
+执行路径管理：
+
+- 自动检测 `claude`、`codex`、`openclaw`、`hermes` 等 CLI，并显示安装状态、版本号和默认绑定。
+- Agent CLI、BYOK、模型与 Provider 配置保留在设置页；工作流行不暴露执行器选择器。
 - 不静默安装 Agent；安装需用户明确确认。
-
-核心操作：
-
-| 操作 | 说明 | 执行方式 |
-|---|---|---|
-| Compile / Ingest | 读取已确认的 `wiki/sources/` 版本，生成或更新其他 Wiki 页面；不写回 Sources | Agent CLI 或 BYOK |
-| Lint | 检查 Wiki 健康并修复 | 本地规则 + Agent Skill |
-| Query | 基于 Wiki 问答 | Agent CLI 或 BYOK |
-| HTML 生成 | 单篇辅助阅读、知识卡片、项目报告 | Agent Skill |
-
-执行面板：
-
-- 实时 stdout/stderr。
-- 进度、状态、取消按钮。
-- 任务历史。
-- 后台运行与系统通知。
+- 缺少必需路径时，工作流仍可点击，但在准备页给出配置入口。
+- Query 不属于工作流列表；基于 Source 或 Wiki 的自然语言问答继续由 Chat 承担。
 
 ### 7.5 Chat 问答
 
 - 多会话：创建、重命名、删除。
-- 基于 Wiki 内容问答：先搜索相关页面，再由 Agent/BYOK 生成回答。
-- 引用溯源：回答中标注引用页面，可点击跳转。
-- 优质回答可保存到 `wiki/queries/`。
-- 普通全局搜索框不自动调用模型；自然语言问题应进入 Chat/Agent 问答入口。
+- 基于 Source 或 Wiki 内容问答：先本地搜索相关内容，再由明确的 Agent/BYOK 路径生成回答；不要求先编译。
+- 引用溯源：回答中标注 Source/Wiki 类型化引用，可点击跳转。
+- 外部问答要求项目已信任；没有 Git 不阻止纯问答。优质回答保存到 layout-defined queries root（原生为 `wiki/queries/`）时才要求可写，并执行覆盖/hash/Git 策略。
+- 缺少 AI 配置时提供“去配置”；返回后保留草稿，但不自动发送。
+- `ProjectLayout.chatStateRoot` 可写时会话持久化到该根目录（新建原生知识库映射为 `.app/chats/`）；文件系统只读或该路径缺失时只保留当前运行内存会话，并在 UI 明示不持久化。
+- 普通全局搜索框不自动调用模型；自然语言问题应进入 Chat。
 
 ### 7.6 HTML/卡片/报告生成
 
@@ -278,14 +302,14 @@ Agent 管理：
 
 - 所有 HTML/卡片/报告生成通过 `skills/html-*` 驱动。
 - HTML 模板只影响生成页面样式，不影响 Wiki schema、Lint 规则或 Agent 行为。
-- 输出默认存放在 `exports/html/`，纳入项目文件夹，便于版本管理。
+- 输出存放在 `ProjectContext.layout` 返回的导出根；新建原生项目默认解析为 `exports/html/`，兼容项目不得被强制改造成该目录结构。
 - 应用内 iframe 预览，支持打开导出文件所在位置。
 
 ### 7.7 知识图谱
 
-图谱参考 `llm-wiki` 的页面级模型：
+图谱参考 `llm-wiki` 的页面级模型，但输入扩展到当前访问模式允许的可读 Markdown：
 
-- 每个 Wiki 页面是一个节点。
+- 每个可读 Source/Wiki Markdown 文档是一个页面级节点；不要求先编译 Wiki。
 - 页面类型通过 frontmatter 或目录推断：entity、concept、source、synthesis、comparison、query 等。
 - 边来自 `[[wikilinks]]` 和多信号关联度模型。
 - 首版连线统一表示“相关”，不展示复杂关系类型和关系依据。
@@ -298,7 +322,8 @@ Agent 管理：
 - 悬停高亮相邻节点。
 - 点击节点跳转文章。
 - 缩放、拖拽、Fit-to-screen。
-- 布局缓存到 `.app/graph-cache.json`，避免每次重新布局。
+- trusted writable 项目把布局缓存到 `ProjectLayout.graphCachePath`（新建原生映射为 `.app/graph-cache.json`）；restricted/read-only 项目只保留内存布局，不写缓存。
+- 大型或兼容知识库的深度扫描可在后台继续；扫描未完成时图谱明确标注部分结果和覆盖范围。
 
 ### 7.8 导入系统
 
@@ -310,7 +335,7 @@ Agent 管理：
 | 本地图片 | PNG, JPEG, WebP, BMP, TIFF, HEIC/HEIF | 必须识别出有效文字才能生成 Source |
 | 本地音频 | MP3, WAV, M4A, AAC, FLAC, OGG, Opus, WMA | 伴随稿优先，否则由用户启用本地 ASR |
 | 本地视频 | MP4, MOV, MKV, WebM, AVI, M4V, WMV | 字幕优先；无字幕走 ASR，无有效语音时可走画面 OCR |
-| 文件夹 | 任意文件夹 | 可打开为项目，或导入到当前项目 |
+| 文件夹 | 普通资料文件夹 | 只导入到当前项目；知识库识别与打开不属于 Import |
 | URL/链接 | 普通网页、平台文章、图文、视频、集合 | 轻量抓取、浏览器渲染、平台能力或 Agent 修复分层处理 |
 | 剪贴板 | 文本/Markdown | 直接粘贴导入 |
 | 后续扩展 | 浏览器扩展、GitHub 仓库、RSS、图片视觉理解 | 非首版硬要求 |
@@ -322,10 +347,10 @@ Agent 管理：
 3. 自动执行安全扫描、类型识别、轻量抓取、确定性提取、字幕发现和质量验证。
 4. 缺少必要正文时等待用户主动登录、启用 OCR / ASR、安装能力或运行本地 Agent 修复。
 5. 展示最终 Source Markdown 预览、资源、质量、目标路径；更新项展示 Diff。
-6. 用户点击“导入到来源库”，后端以 `sourceId` 为原子单元写入 raw 证据、版本信息和 `wiki/sources/`。
+6. 用户点击“导入到来源库”，后端以 `sourceId` 为原子单元写入布局定义的 evidence、来源版本状态和 Source 页面；新建原生知识库映射为 `raw/`、`.app/sources/` 与 `wiki/sources/`。
 7. 导入完成后可查看 Sources，或另行点击“用这些来源更新 Wiki”启动独立编译。
 
-导入层负责无损证据与可读来源：
+导入层负责无损证据与可读来源；下列路径是新建原生知识库映射：
 
 - `raw/`：不可变原文件、页面证据、原始图片、字幕、OCR / ASR 原始输出和版本证据。
 - `wiki/sources/`：忠实、规范化、可阅读、可编辑的当前 Source。
@@ -338,7 +363,7 @@ OCR 和 ASR 属于导入阶段的按需能力；有可靠正文或字幕时不�
 - 原始页面或平台证据。
 - 可追溯资源、字幕或转录。
 - 来源元数据和质量信息。
-- `wiki/sources/` 中的可阅读 Source Markdown。
+- layout-defined Source root 中的可阅读 Source Markdown（新建原生映射为 `wiki/sources/`）。
 
 完整重复内容不创建第二个 Source；新的 URL 只作为别名。来源更新保存新 raw 版本，并通过 Diff 或三方合并保护人工编辑。
 
@@ -346,17 +371,20 @@ OCR 和 ASR 属于导入阶段的按需能力；有可靠正文或字幕时不�
 
 ### 7.9 项目管理
 
-- 创建新项目：选择项目模板，生成不同的 `purpose.md` 和 `schema.md`。
-- 项目模板不改变初始目录结构。
-- 打开已有项目：兼容 Karpathy LLM Wiki、`nashsu/llm_wiki` 风格目录和 Obsidian Markdown 库。
-- 最近项目列表：支持快速切换。
-- 启动行为：可在设置中选择，默认打开上次项目。
+- 无项目时仍渲染完整 shell；中心只显示“新建知识库”和“打开已有知识库”两个紧凑卡片，右侧只说明本地目录与打开策略。
+- 创建新项目：输入名称、选择父级位置与模板；默认父级为系统 Documents 下的 `LLM Wiki`，之后记住最近父级；目标是父目录下由名称生成的子目录。
+- 项目模板不改变初始目录结构，默认“通用”，只在创建时生成不同的 `purpose.md` 和 `schema.md`，创建后不提供切换。
+- 创建成功后自动进入当前项目的 Import 工作台，但不自动弹系统文件选择器。
+- 打开已有知识库：兼容 Karpathy LLM Wiki、`nashsu/llm_wiki` 风格目录、Obsidian 与普通 Markdown vault，并使用 typed assessment 表达分类、健康、权限、Git 和修复动作。
+- 歧义 Markdown 目录让用户选择“以 Markdown 知识库打开”或“用这些资料新建知识库”；选择保存在应用全局配置，不写目录 marker。
+- 普通资料目录只走“用这些资料新建知识库”，不在原目录初始化。
+- 最近知识库列表支持快速切换；有历史时应用启动自动打开最近知识库并固定落 Dashboard，无历史或路径失效时显示无项目工作台。
 
 项目模板：
 
 - 通用
 - 研究
-- 读书
+- 阅读
 - 个人成长
 - 商业
 
@@ -368,13 +396,13 @@ OCR 和 ASR 属于导入阶段的按需能力；有可靠正文或字幕时不�
 - 语言：中文 / English。
 - 上下文窗口：4K 到 1M tokens 可配置。
 - 外观：亮色 / 暗色主题。
-- 启动行为：上次项目、项目选择页、按条件自动打开。
+- 启动行为：有有效最近知识库时自动打开最近知识库并落 Dashboard；否则进入无项目工作台。设置不再提供跳过该固定规则的目标选项。
 - 后台任务：关闭窗口时是否最小化到托盘；默认最小化到托盘并继续任务。
 - 更新：支持检查更新；下载和安装必须由用户确认。
 
 ## 8. Git 版本、合并与恢复
 
-应用自动初始化和管理 Git，普通用户无需理解 Git。
+新建的原生知识库自动初始化并管理 Git，普通用户无需理解 Git。打开外部兼容知识库时，快速评估阶段绝不改动 Git；只有用户确认启用兼容且项目可写时，才按确认页策略初始化或使用仓库。已有 Git 仓库的脏状态不自动清理、暂存、提交、重置或 stash。
 
 ### 8.1 自动检查点策略
 
@@ -401,10 +429,12 @@ Wiki 页面是普通 Markdown，用户可能在应用内、Obsidian 或外部编
 - 永久删除进入专用二次确认页，展示 Source、raw、资源、字幕 / 转录、基线、全部版本、释放空间和引用页面。
 - 删除前自动创建 Git 检查点；派生 Wiki 页面不自动删除，由 Lint 标记缺失引用。
 
-### 8.4 Agent 修改确认
+### 8.4 工作流修改确认
 
 - 用户显式启动后，无冲突的普通编译可自动完成；导入不得自动启动编译。
-- 删除、覆盖、冲突操作必须确认。
+- Update Wiki 与 checkpoint-required 修复中的低风险、无冲突修改可在对应检查点成功后自动应用；Health Check 不修改文件或创建检查点；Generate Content 新建制品不要求检查点，覆盖既有制品才要求检查点与确认。
+- 删除、覆盖、广泛重写和冲突操作必须异步等待确认；确认入口展示影响摘要，并允许按需查看 Diff。
+- 用户可继续编辑 Markdown；写入前必须复核基线并执行三方合并或转入冲突确认。
 - 所有自动修复依靠 Git 检查点提供回滚。
 
 ## 9. Lint 健康检查
@@ -418,7 +448,7 @@ Lint 采用双层健康检查。
 - 死链。
 - 孤立页面。
 - 缺失 frontmatter。
-- `wiki/index.md` 与实际页面不一致。
+- 布局声明了 Wiki 索引入口时，该入口与实际 Wiki 页面不一致；没有 Wiki 根目录时该规则标记为不适用。
 - 空页面。
 - 重复文件名。
 - 路径大小写问题。
@@ -431,20 +461,21 @@ Lint 采用双层健康检查。
 - 重复主题。
 - 弱交叉引用。
 - 来源缺失。
-- 页面结构不符合 `schema.md`。
+- 页面结构不符合 `ProjectLayout.schemaContext` 解析出的适用规则；没有 schema 上下文时该规则标记为不适用。
 - 内容过期或明显需要更新。
 - 跨页面矛盾。
 
 ### 9.3 修复策略
 
+- 健康检查工作流本身只读；结果进入现有 Lint 页面，修复由用户从发现项另行启动。
 - 确定性问题可由应用一键修复。
-- Agent 可自动修复所有可处理问题。
+- 用户启动修复后，Agent 可处理适用问题，但不得绕过风险分级与确认。
 - 修复前创建 Git 检查点，修复后提交结果。
 - 高风险删除或冲突修改仍需用户确认。
 
 ## 10. 后台任务与通知
 
-- Agent 任务支持后台运行。
+- 工作流任务支持后台运行。
 - 导入下载、OCR、ASR 和能力准备属于可取消后台任务。
 - 关闭主窗口时默认最小化到系统托盘，任务继续。
 - 页面切换或最小化不停止导入任务；应用重启后耗时下载、OCR、ASR 保持“已暂停，可继续”，不自动恢复。
@@ -465,9 +496,9 @@ Lint 采用双层健康检查。
 │      │  · Dashboard                         │               │
 │ 图标 │  · 文章阅读 / 编辑                   │  · 元数据     │
 │      │  · Chat 对话                         │  · 引用来源   │
-│      │  · 知识图谱                          │  · Agent 输出 │
-│      │  · Agent 执行面板                    │  · 相关文章   │
-│      │  · HTML 预览                         │  · Diff 确认  │
+│      │  · 知识图谱                          │  · 执行上下文 │
+│      │  · 工作流总览 / 准备 / 任务详情      │  · 相关文章   │
+│      │  · Exports                           │  · Diff 确认  │
 │      │                                      │               │
 ├──────┴──────────────────────────────────────┴───────────────┤
 │ 底部状态栏（当前 Agent · 操作状态 · 后台任务 · 文章数）     │
@@ -480,20 +511,51 @@ Lint 采用双层健康检查。
 - 文件树 / 文章浏览
 - Chat 问答
 - 知识图谱
-- Agent 面板
+- 工作流
 - 导入
 - Lint
+- Exports
 - 设置
+
+侧栏中的原“工作流”分组更名为“知识处理”，其中工作流项使用 Lucide `Workflow` 图标且不显示状态徽标；侧栏底部既有 Agent 状态行保持不变。
 
 右侧面板按主视图切换职责：
 
+- 无项目：只显示本地保存、打开评估、兼容与信任原则；不显示 Agent / BYOK 设置。
 - Import：当前来源、一个主操作、候选预览、目标路径、质量、折叠技术详情和日志。
 - Source：来源信息、忠实原稿、版本时间线以及重新 OCR / ASR、换字幕、刷新来源。
 - 普通知识页面：元数据、引用来源和相关文章。
+- Workflows：项目工作流摘要、准备范围与路径、活动任务阶段、确认摘要或完成结果。
 
 ## 12. 数据流
 
+### 12.0 新建与打开
+
+```text
+应用启动
+-> 有有效最近知识库：打开该知识库并落 Dashboard
+-> 无有效最近知识库：完整 shell + 双入口工作台
+
+新建知识库
+  -> 名称 + 父级位置 + 创建时模板
+  -> 校验最终子目录
+  -> 创建结构 + 本地 Git 初始提交
+  -> 进入 Import（不自动弹选择器）
+
+打开已有知识库
+  -> 无写入快速评估
+  -> 原生健康：直接 Dashboard
+  -> 旧版 LLM Wiki / nashsu：兼容 Dashboard + 可取消深扫
+  -> 未信任 Obsidian / Markdown vault：受限兼容 Dashboard + 可取消深扫
+  -> 健康且已信任兼容库：Dashboard + 可取消深扫
+  -> 歧义：确认作为知识库打开，或新建并导入
+  -> 普通资料：新建独立知识库并导入
+  -> 损坏：展示修复计划；确认写入，或受限 / 只读打开
+```
+
 ### 12.1 导入与编译
+
+下图中的 `raw/`、`wiki/sources/` 和 `wiki/*` 路径是新建原生知识库的具体映射；兼容项目使用 `ProjectContext.layout` 提供的等价 roots，并继续受 trust/writable/Git 策略约束。
 
 ```text
 用户选择资料
@@ -507,7 +569,7 @@ Lint 采用双层健康检查。
   -> 展示完成摘要
   -> 用户可另行点击“用这些来源更新 Wiki”
   -> 创建 CompileChangeSet(sourceId + versionId)
-  -> 高风险编译写入前创建 Git 检查点
+  -> Update Wiki 应用任何正式写入前创建所需 Git 检查点
   -> Agent 或 BYOK 执行独立 Wiki 编译
   -> 生成或更新 wiki 页面、index.md、overview.md、log.md
   -> 禁止编译器写入 wiki/sources/
@@ -520,23 +582,23 @@ Lint 采用双层健康检查。
 
 ```text
 用户输入问题
-  -> 本地搜索相关 Wiki 页面
-  -> 组装 context（页面、引用、聊天历史、purpose.md）
-  -> Agent CLI 或 BYOK API 生成回答
-  -> 展示回答与引用
-  -> 用户可保存到 wiki/queries/
+  -> 本地搜索相关 Source / Wiki 页面
+  -> 组装 context（页面、类型化引用、聊天历史、layout-resolved purpose）
+  -> 已信任项目通过明确的 Agent CLI 或 BYOK API 路径生成回答
+  -> 展示回答与 Source/Wiki 引用
+  -> writable 项目可保存到 layout-defined queries root
 ```
 
 ### 12.3 Lint
 
 ```text
 用户运行 Lint
-  -> 本地快速 Lint
-  -> 可选 Agent 深度 Lint
+  -> 对可读 Markdown 执行本地快速 Lint（restricted 可内存运行）
+  -> 已信任时可选 Agent 深度 Lint
   -> 展示问题列表
-  -> 创建 Git 检查点
-  -> 自动修复可处理问题
-  -> 高风险修改请求确认
+  -> 用户在 trusted writable 项目选择修复
+  -> 危险 / 批量修复先创建 Git 检查点
+  -> 自动修复可处理问题；高风险修改请求确认
   -> 成功后提交并刷新 UI
 ```
 
@@ -551,14 +613,14 @@ Lint 采用双层健康检查。
 ## 14. 开发约束
 
 - 所有项目内容使用 Markdown、JSON 和本地文件存储，不引入数据库。
-- 应用自动管理 Git，但用户仍可用外部 Git 工具查看历史。
+- 新建原生知识库自动管理 Git；外部兼容知识库只有在用户确认启用时才初始化/使用 Git，且从不自动清理现有脏状态。
 - 目录结构兼容 LLM Wiki、`nashsu/llm_wiki` 和 Obsidian。
 - Agent 集成采用 CLI spawn 模式，不绑定特定 Agent。
 - Skill 系统遵循 SKILL.md 约定。
 - 优先使用本地能力，最小化云服务依赖。
 - 跨平台路径统一使用 `normalizePath()`，内部路径使用正斜杠。
 - 必须安全处理 Unicode 和 CJK 文件名。
-- 普通搜索只做关键词、标签、类型、来源过滤；语义问答交给 Chat/Agent。
+- 普通搜索只做关键词、标签、类型、来源过滤；基于 Source/Wiki 的语义问答交给 Chat 的明确 Agent/BYOK 路径。
 
 ## 15. 项目初始化
 
@@ -592,6 +654,7 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 
 - 当前仓库已是 Tauri v2 + React 19 + TypeScript + Vite 应用骨架，而不再只是文档与样本 Wiki。
 - 前端代码按 `components/app`、`components/ui`、`features/*`、`stores/*`、`types/*`、`hooks/*`、`services/*` 分层；领域视图已覆盖 Dashboard、Wiki、Chat、Graph、Agent、Import、Lint、Exports、Settings。
+- 上一条中的 `Agent` 是 2026-07-30 仍存在的实现基线，不是目标信息架构；后续需按工作流设计把该主视图迁移为 Workflows，同时保留 Agent 检测与执行服务。
 - 当前前端工作台的已实现调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter -> lazy feature views`。`AppShell` 持有桌面 shell 和全局覆盖层，`WorkspaceController` 组合项目级 workflow，`WorkspaceRouter` 只负责活动视图分发；除 Dashboard 外的 feature view 按需 lazy load。
 - 当前全局控制器是 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`，统一挂载在 `AppShell`，不由单个 feature view 重复持有。
 - 当前跨视图 workflow 是 `useAiCapabilities`、`useTaskLauncher`、`useImportWorkflow`、`useProviderWorkflow`、`useAgentWorkflow`；它们集中处理 AI 能力发现、任务启动、导入、Provider 配置和 Agent 编排，并以项目 key / epoch 阻止异步结果提交到错误项目。
@@ -610,15 +673,15 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 
 ### 16.3 Chat 与问答实现约束
 
-- Chat 会话持久化在 `.app/chats/{id}.json`，并允许可选 `contextPagePath`。该字段用于 Wiki 右侧 “Ask AI” 的页面级会话，不引入数据库或外部索引。
+- `ProjectLayout.chatStateRoot` 可写时，Chat 会话持久化在该根目录（新建原生映射为 `.app/chats/{id}.json`），并允许可选 `contextPagePath`。该字段用于 Wiki 右侧 “Ask AI” 的页面级会话，不引入数据库或外部索引；只读或缺失该路径的布局使用明确标记为非持久化的内存会话。
 - Wiki 页面侧栏 Chat 使用页面作用域会话：进入页面时只复用已有 `contextPagePath` 会话，不自动创建；首次发送或点击新建时才创建会话。快速切页必须通过 epoch/作用域守卫避免旧页面会话串到新页面。
 - 发送失败或未能创建会话时，输入草稿不得被清空。
 - 当前页作为 `pinnedPagePath` 进入检索上下文；固定页优先进入 prompt，且路径必须仍经过项目边界校验。
-- 检索命中、图邻居扩展和来源重叠扩展属于 diagnostics；持久化回答引用只来自模型实际输出中的 `[S#]` 标记。保存到 `wiki/queries/` 时只写入模型实际引用的来源。
+- 检索命中、图邻居扩展和来源重叠扩展属于 diagnostics；持久化回答引用只来自模型实际输出中的 `[S#]` 标记。保存到 layout-defined queries root 时只写入模型实际引用的来源。
 
 ### 16.4 搜索、索引与图谱实现约束
 
-- SearchService 继续是本地关键词/过滤检索，不自动调用模型；问答只能进入 Chat/Agent/BYOK 流程。
+- SearchService 继续是本地关键词/过滤检索，不自动调用模型；问答只能进入 Chat，并由 Chat 选择 Agent/BYOK 执行路径。
 - Wiki 索引已采用项目级内存快照缓存，按文件 mtime/size 复用条目，并按项目数量设上限。缓存不得把 bookmark join 状态写死，因为 `.app/bookmarks.json` 变化不一定改变页面文件 mtime。
 - 图谱展示已固定为安静、紧凑、可读的分析画布：节点和边尺寸集中在 `graphVisualScale`，默认边颜色/最小线宽必须保持可见，hover/selection/focus 改变 size 或 z-index 时必须触发完整 refresh。
 - 图谱移动时不得隐藏边；重建或布局刷新应优先保留可用画面和进度反馈，避免用整页刷新替代局部恢复。
@@ -632,8 +695,15 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 ### 16.6 任务、日志与审计约束
 
 - 后台任务、流式输出、取消、日志抽屉和通知已经成为核心交互的一部分。新增长任务必须接入统一 task 状态，而不是只在单个组件中放本地 loading。
-- `SPEC/progress.txt` 与 `SPEC/gotchas.txt` 是项目级协作账本。重要里程碑和易踩坑必须继续记录，并保持历史可追溯。
+- 工作流任务在前端只按当前项目展示；其他项目的持久任务可继续运行，但必须切换到对应项目后才可查看。Workflows 迁移需在现有 task 事件之上补齐结构化阶段、关联重试、输入指纹去重和“已中断”语义。
+- 根目录 `progress.txt` 与 `gotchas.txt` 是项目级协作账本。重要里程碑和易踩坑必须继续记录，并保持历史可追溯。
 - 样本 `wiki/wiki/` 仍是验证数据，不是应用源码；但其中 `.app/graph-cache.json` 等应用状态可作为测试真实项目行为的样本数据，提交前必须确认不含密钥或私人内容。
+
+### 16.7 首次使用与项目打开的当前差距
+
+- 截至 2026-07-30，当前 `App.tsx` 仍在无项目时分支到独立 `ProjectStartView`，当前项目服务也仍保留二元“是否项目 / 普通文件夹初始化”路径；这是实现现状，不是目标产品合同。
+- 目标实现必须保留完整 shell，并以 typed assessment 替换二元判断，覆盖目录分类、格式、健康、权限、Git、信任、修复和建议动作。
+- 在上述迁移真正落地并通过验收前，文档不得把首屏双卡、受限模式、全局信任或自动修复确认描述为已实现能力。
 
 ## 17. 参考方向
 

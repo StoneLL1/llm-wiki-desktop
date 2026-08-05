@@ -1,0 +1,69 @@
+{
+  "generated_at": "2026-08-05T06:15:20.099849+00:00",
+  "nodes": {
+    "src_tauri_src_services_import_v2_file_discovery_filediscoveryservice": {
+      "code_fingerprint": "7ae4e5f3c33d4b0823e2af0c9cd0f4a3d581cdf0ad144ed6f71c560c265ab0e5",
+      "label": "FileDiscoveryService",
+      "last": "2026-08-05T06:10:38.704537+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-05T06:10:38.704537+00:00",
+          "outcome": "useful",
+          "q": "从最小侵入原则和第一性原理出发，为审查结果撰写详细的修复计划markdown文档"
+        },
+        {
+          "date": "2026-08-05T05:46:00.449070+00:00",
+          "outcome": "useful",
+          "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
+        }
+      ],
+      "score": 1.999454301,
+      "source_file": "src-tauri/src/services/import_v2/file_discovery.rs",
+      "status": "preferred",
+      "uses": 2
+    },
+    "src_tauri_src_services_import_v2_session_store_sessionstore": {
+      "code_fingerprint": "281672ab546cb802516e1f2b52a5dfe1646bbd482ba6eb97491c7f4e7f52cf10",
+      "label": "SessionStore",
+      "last": "2026-08-05T06:10:38.704537+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-05T06:10:38.704537+00:00",
+          "outcome": "useful",
+          "q": "从最小侵入原则和第一性原理出发，为审查结果撰写详细的修复计划markdown文档"
+        },
+        {
+          "date": "2026-08-05T05:46:00.449070+00:00",
+          "outcome": "useful",
+          "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
+        }
+      ],
+      "score": 1.999454301,
+      "source_file": "src-tauri/src/services/import_v2/session_store.rs",
+      "status": "preferred",
+      "uses": 2
+    },
+    "src_tauri_src_services_workflow_service_preparation_workflowaccesssnapshot": {
+      "code_fingerprint": "caebdaaf4d58411dd622741cf57182efea90f05fe8028e7bd5bbca552d42e7dc",
+      "label": "WorkflowAccessSnapshot",
+      "last": "2026-08-05T06:10:38.704537+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-05T06:10:38.704537+00:00",
+          "outcome": "useful",
+          "q": "从最小侵入原则和第一性原理出发，为审查结果撰写详细的修复计划markdown文档"
+        },
+        {
+          "date": "2026-08-05T05:46:00.449070+00:00",
+          "outcome": "useful",
+          "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
+        }
+      ],
+      "score": 1.999454301,
+      "source_file": "src-tauri/src/services/workflow_service/preparation.rs",
+      "status": "preferred",
+      "uses": 2
+    }
+  },
+  "version": 1
+}

@@ -2,12 +2,14 @@
 
 > Import V2、来源版本、媒体处理、登录态、OCR / ASR 和独立编译的目标后端边界，以 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。本文中的 legacy `ImportService` 模块说明仅描述现状，不得覆盖新规范。
 > Batch 9 收口后，旧 `list_imported_sources` / `request_delete_source` / `request_replace_source` 不再注册为生产命令；Source 生命周期只经 typed `source_commands` 与 Import V2 服务。旧 compile index adapter 与 legacy asset fallback 仅为只读兼容边界，并有“不改写 legacy 文件”的独立测试。
+> Workflows 的项目隔离队列、状态、结构化阶段、确认、重试与恢复合同，以 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) 为准。本文区分当前任务 DTO 与待迁移目标，不能把现有 Agent 页面行为当成目标后端合同。
+> 无项目工作台、新建知识库、typed 打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的目标合同，以 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准。当前二元识别、打开即 Git 初始化和普通目录原地初始化仅是待迁移实现。
 
 ## 1. 文档目的
 
 本文面向后续开发 Agent / Claude Code，用来确定 LLM Wiki Desktop 的 Tauri / Rust 后端架构、目录结构、模块职责、IPC 边界、任务模型、错误模型和安全规则。
 
-本文是对当前已实现后端源码的权威结构说明。后续调整后端时，应同时核对：
+本文同时记录当前已实现后端结构事实与已确认的目标合同；两者冲突时，带日期的已确认设计决定目标行为，“当前实现”段落只用于迁移定位。后续调整后端时，应同时核对：
 
 - `PRD.md`
 - `SPEC.md`
@@ -22,14 +24,16 @@
 - Tauri command 层保持薄，业务逻辑放在 service 层。
 - 后端所有输入输出使用结构化 DTO，不用临时字符串承载复杂状态。
 - 项目内容保持 Markdown + JSON + 本地文件，不引入数据库。
-- 可以在内存中建立临时索引和缓存，但持久化仍落到项目文件夹。
+- 可以在内存中建立临时索引、缓存和受限/只读操作结果；需要持久化的项目状态只能落到 `ProjectLayout` 允许的项目内逻辑根，不能旁路写入用户目录。
 - 所有项目文件读写必须经过 `ProjectContext` 路径安全校验。
 - 长任务统一进入 `TaskService`，支持进度、日志、取消、后台运行和事件推送。
 - 高风险操作统一返回 `PendingAction`，由用户确认后继续执行。
 - 所有 command 使用统一错误模型 `BackendError`。
 - API Key 和访问令牌只进入系统凭据管理，不写入项目文件。
-- Agent CLI 默认优先；Source 已形成后的 AI 整理、Wiki 编译和 Chat 可由 BYOK 支撑，Import 解析恢复除外。
-- Git 检查点是数据安全边界，不是可选增强。
+- Agent CLI、BYOK 与本地规则是产品工作流背后的执行路径；默认值由设置决定，单次运行可显式覆盖，所选路径不可用时不得静默回退。Import 解析恢复仍不允许使用 BYOK。
+- Git 检查点是 checkpoint-required mutation 的强制安全边界；它不授权在评估或打开外部目录时初始化 Git。无 Git 时必须按能力降级。
+- 外部目录先做零写入 quick assessment，不创建 `.app`、Git、缓存或项目任务，不执行项目内容，也不发送外部 AI。
+- 格式、健康、权限和 Git 分别建模；受限 / 只读写保护必须在 command 与 service 执行点重新校验。
 
 ## 3. 当前目录结构
 
@@ -195,7 +199,7 @@ React shell / feature workflows
 - `src-tauri/tests/service_facade_contracts.rs` 保护 facade 的构造方式和选定公开契约。
 - `ChatConvenienceService` 与 `WikiIndex` 保持独立：前者承载 Chat 便捷写入的意图与变更审计，后者承载项目级只读内存索引；二者不并入四个 facade。
 - command 注册继续在 `lib.rs` 中通过 `tauri::generate_handler!` 显式维护。
-- 物理文件移动不改变 command DTO、公开 facade 或 `.app/*.json` 等持久化兼容性。
+- 物理文件移动不改变 command DTO、公开 facade 或 layout-defined app-state JSON（原生映射为 `.app/*.json`）的持久化兼容性。
 
 ## 5. Tauri IPC 规则
 
@@ -224,20 +228,43 @@ GUI command 模块由 `commands/mod.rs` 明确导出，并在 `lib.rs` 的 `taur
 
 ### 5.2 结构化输入输出
 
-每个 command 应有明确请求 / 响应类型，例如：
+每个 command 应有明确请求 / 响应类型。项目打开使用评估与执行两步，不使用一个 `open_project(path)` 隐式判断并写盘：
 
 ```rust
-pub struct OpenProjectRequest {
+pub struct StartProjectOpenAssessmentRequest {
     pub path: String,
 }
 
-pub struct OpenProjectResponse {
-    pub project_id: String,
-    pub root_path: String,
-    pub summary: ProjectSummary,
+pub struct StartProjectOpenAssessmentResponse {
+    pub assessment_operation_id: String,
+}
+
+pub struct CancelProjectOpenAssessmentRequest {
+    pub assessment_operation_id: String,
+}
+
+pub struct ProjectOpenAssessment {
+    pub assessment_id: String,
+    pub canonical_root: String,
+    pub format: ProjectFormat,
+    pub trust: ProjectTrustState,
+    pub filesystem_access: ProjectFilesystemAccess,
+    pub health: ProjectHealth,
+    pub layout: ProjectLayout,
+    pub git: ProjectGitAssessment,
+    pub capabilities: ProjectCapabilities,
     pub warnings: Vec<ProjectWarning>,
+    pub confidence: AssessmentConfidence,
+    pub recommended_actions: Vec<ProjectOpenAction>,
+}
+
+pub struct OpenAssessedProjectRequest {
+    pub assessment_id: String,
+    pub action: ProjectOpenAction,
 }
 ```
+
+`assessment_operation_id` 是应用级、可取消的运行句柄，不属于任何项目 Task；查询 / 取消只能使用该 opaque ID。取消会丢弃未完成快照并保持 no-project shell。完成后返回的 `assessment_id` 对应后端短期保存的评估快照。打开、信任、兼容启用或修复确认时必须重新校验 canonical identity、trust、filesystem access、Git 和相关文件 hash；前端回传的 assessment 对象不能作为执行依据。修复使用独立 `ProjectRepairPlan` / `repair_plan_id`，不要与 Lint 内容修复混用。
 
 不要使用 `HashMap<String, String>` 或自由 JSON 作为长期接口，除非该字段确实是插件或 provider 的开放配置。
 
@@ -268,7 +295,7 @@ pub struct OpenProjectResponse {
 
 ## 6. AppState 与依赖管理
 
-`AppState` 持有稳定 service facade、全局任务 / 确认运行态以及多项目可信根注册表。当前结构为：
+`AppState` 持有稳定 service facade、进程级任务 / 确认运行态以及多项目可信根注册表。进程级持有不等于跨项目可见：所有任务与确认操作仍必须按 `project_id` 授权和筛选。当前结构为：
 
 ```rust
 pub struct AppState {
@@ -294,7 +321,9 @@ pub struct AppState {
 }
 ```
 
-`ProjectRegistry` 把已打开项目的 `project_id` 映射到 canonical root；command 使用 `AppState::resolve_project_context` 校验调用方断言的 id / root 组合。需要并发共享的实现细节可以使用 `Arc`、`Mutex`、`RwLock` 或内部 channel，但不能让 command 绕过 facade 直接获取私有模块状态。
+当前 `ProjectRegistry` 把已打开项目的 `project_id` 映射到 canonical root；command 使用 `AppState::resolve_project_context` 校验调用方断言的 id / root 组合。目标条目还必须携带后端派生的 format、trust、filesystem access、health、layout 和 capabilities。路径注册只是运行时句柄授权，不等于用户已经信任该目录。
+
+全局 `ProjectTrustStore`（或等价持久层）保存 canonical identity 绑定的用户信任与歧义 Markdown 意图；`ProjectAssessmentRegistry` / repair registry 保存短期、可重校验的评估与计划。三者不能合并成一个“trusted ProjectRegistry”。需要并发共享的实现细节可以使用 `Arc`、`Mutex`、`RwLock` 或内部 channel，但不能让 command 绕过 facade 直接获取私有模块状态。
 
 规则：
 
@@ -314,20 +343,22 @@ pub struct AppState {
 pub struct ProjectContext {
     pub project_id: String,
     pub root: PathBuf,
-    pub app_dir: PathBuf,
-    pub raw_dir: PathBuf,
-    pub wiki_dir: PathBuf,
-    pub exports_dir: PathBuf,
-    pub skills_dir: PathBuf,
+    pub format: ProjectFormat,
+    pub health: ProjectHealth,
+    pub layout: ProjectLayout,
+    pub access: ProjectAccessPolicy,
+    pub capabilities: ProjectCapabilities,
 }
 ```
 
-所有项目文件读写必须通过 `ProjectContext` 解析路径。
+`ProjectAccessPolicy` 至少携带独立的 `trust: ProjectTrustState`、`filesystem_access: ProjectFilesystemAccess` 与后端派生 capabilities；health 和 layout 也参与授权。`trusted + read_only` 与 `untrusted + read_only` 都必须可表达。
+
+`ProjectLayout` 使用逻辑路径而不是固定目录假设，至少覆盖 app state、evidence、Markdown read roots（带 Source/Wiki/mixed role 与 exclusions）、Source/Wiki/query write roots、export root、workflow/task state、graph cache、Lint report 和 purpose/schema 上下文。原生项目映射到 `.app/`、`raw/`、`wiki/`、`exports/` 与 `skills/`；兼容 vault 不假设这些目录都存在。所有项目读取与写入必须通过 `ProjectContext` 解析路径，并在执行点检查所需 capability；缺少写根时返回 typed prerequisite。
 
 硬规则：
 
 - 前端不能让后端直接读写任意绝对路径。
-- 后端必须拒绝越界路径，例如 `../` 逃逸、符号链接逃逸、绝对路径注入。
+- 项目根本身可以是符号链接 / junction，但注册前必须 canonicalize。后端必须拒绝 `../`、绝对路径注入以及 canonical 目标逃逸；根内链接只在仍被根包含且无循环时读取，根外链接只展示，不跟随、不索引、不写入。
 - 内部逻辑使用规范化路径。
 - 对 UI 返回路径时可以返回展示路径和项目相对路径。
 - 项目相对路径统一使用正斜杠。
@@ -338,7 +369,7 @@ pub struct ProjectContext {
 ```rust
 impl ProjectContext {
     pub fn resolve_project_path(&self, relative_path: &str) -> Result<PathBuf, BackendError>;
-    pub fn resolve_wiki_path(&self, relative_path: &str) -> Result<PathBuf, BackendError>;
+    pub fn resolve_layout_path(&self, logical_root: ProjectLogicalRoot, relative_path: &str) -> Result<PathBuf, BackendError>;
     pub fn to_project_relative(&self, absolute_path: &Path) -> Result<String, BackendError>;
 }
 ```
@@ -394,7 +425,8 @@ pub struct BackendError {
 
 适用场景：
 
-- 打开普通文件夹并初始化为项目。
+- 对兼容知识库启用完整功能。
+- 应用项目打开修复计划。
 - 删除文件。
 - 覆盖文件。
 - 批量替换。
@@ -415,7 +447,15 @@ pub struct PendingAction {
     pub risk_level: RiskLevel,
     pub affected_paths: Vec<String>,
     pub preview: Option<ActionPreview>,
+    pub checkpoint_policy: CheckpointPolicy,
+    pub checkpoint_available: bool,
     pub expires_at: Option<String>,
+}
+
+pub enum CheckpointPolicy {
+    Required,
+    Optional,
+    None,
 }
 ```
 
@@ -427,8 +467,10 @@ pub struct PendingAction {
 4. 前端展示确认 UI。
 5. 用户确认后，前端调用 `confirm_pending_action(id)`。
 6. 后端再次校验当前状态。
-7. 后端创建 Git 检查点。
+7. 后端按保存的 `checkpoint_policy` 处理 Git：`Required` 必须成功创建；`Optional` 只在用户于确认模型中明确选择时创建；`None` 不创建。策略和用户选择都由后端保存并在确认时重验。
 8. 后端执行操作。
+
+兼容启用属于显式写入确认，但不等于所有情况都强制 Git：创建全新的 `.app/compat` 文件可使用 `Optional`，默认选择初始化本地 Git；用户拒绝后仍可完成已明确确认的兼容启用，但后续 checkpoint-required 写入保持禁用。删除、覆盖、批量重写、冲突合并等高风险动作使用 `Required`。
 
 不要让前端自己拼接危险操作的继续参数。继续执行必须由后端保存的 `PendingAction` 驱动。
 
@@ -438,16 +480,17 @@ pub struct PendingAction {
 
 后台任务包括：
 
+- 兼容知识库深度扫描（只读、可取消、持续发布 partial snapshot）。
 - 导入解析。
 - 媒体下载、OCR、ASR 和能力安装。
 - Source AI 整理、重新 OCR / ASR 和平台刷新。
-- Wiki 编译。
+- 更新 Wiki。
 - Agent 执行。
 - BYOK LLM 请求。
 - 图谱首次构建。
-- Agent 深度 Lint。
+- 健康检查。
 - 自动修复。
-- HTML / 卡片 / 报告导出。
+- 生成内容与 HTML / 卡片 / 报告导出。
 
 当前公开任务 DTO 定义在 `models/task.rs`，任务运行态、取消令牌和状态迁移定义在 `tasks/task_model.rs`；`TaskService` 通过 `tasks/mod.rs` re-export。公开 DTO 结构为：
 
@@ -482,6 +525,7 @@ pub struct BackendTask {
 任务要求：
 
 - 每个任务有稳定 id。
+- 项目 app state 可写时，任务状态和日志持久化到布局定义的 task state root（原生映射为 `.app/tasks/`）；restricted/read-only 允许的只读盘点与 Local Quick Check 使用相同 typed envelope，但仅在运行内存中存在并标记为 non-persistent。
 - 每个项目同一时间只有一个活动 `ImportSession`，其中可以有多个独立 `ImportItem`。
 - Import 后端细状态持久化，前端映射为发现、处理、需要操作、可确认、导入中、已导入、失败 / 取消七类。
 - 登录、OCR、ASR 和能力缺失是可恢复的等待状态，不是普通失败。
@@ -492,17 +536,44 @@ pub struct BackendTask {
 - 任务完成、失败或等待确认时触发系统通知。
 - 页面切换和最小化不停止任务；应用重启后耗时下载、OCR、ASR 进入暂停状态，由用户继续。
 - 已完成分片可复用；主动取消清理临时数据，之后重试从头开始。
+- `ProjectDeepScan` 始终只读、可取消，并持续发布已发现 Markdown 数、能力判断和 warning 的 partial snapshot；取消或失败后，已经可读的内容仍保持可浏览，不自动关闭项目。
+
+### 10.1 Workflows 目标任务合同
+
+上面的 `BackendTask` 是当前公开 DTO。Workflows 实现前必须以 typed DTO 扩展而不是自由 JSON 补齐以下语义：
+
+- 工作流任务的运行时 `project_id` 必填，并带后端派生的 `canonical_identity_key`、`identity_revision`、稳定 `workflow_kind`、输入范围、项目基线和输入指纹。
+- 用户可见状态统一为 `queued`、`running`、`waiting_for_confirmation`、`succeeded`、`failed`、`cancelled`、`interrupted`；`cancelling` 可以保留为内部过渡状态。
+- 任务进度包含工作流阶段 id、阶段顺序、当前处理项、已完成数、总数和结构化活动记录。原始 stdout/stderr 继续写日志，但不能承担主状态合同。
+- 每个项目维护独立串行工作流队列。不同项目可以并行执行，任何列表、确认、取消和历史 command 都必须验证项目归属；前端切换项目后才可操作该项目任务。
+- `canonical_identity_key + identity_revision + workflow_kind + scope + execution options + route + baseline` 生成持久稳定输入指纹；`project_id` 只作为当前进程句柄，不参与跨重开 dedupe。相同指纹的非终态或可复用任务应返回既有任务，不重复入队。
+- 重试必须创建新任务并通过 `attempt_of` 指向原任务；不得覆盖原任务、日志或错误。
+- 当布局提供可写 task state root 时，等待确认和排队任务持久化；排队任务重开后需要显式 continuation。进程异常退出时，原先持久化的运行中工作流映射为 `interrupted`，并记录已完成阶段和可复用产物；不得伪造进程级续跑。restricted/read-only 的 ephemeral 本地任务不承诺跨重启恢复。
+- Update Wiki、Health Check 与 Generate Content 的阶段顺序由工作流设计规范 §11 定义；后端发出阶段事件，React 只负责呈现。
+
+### 10.2 Workflows 编排边界
+
+- 工作流准备请求只传结构化类型、范围、选项和显式执行路径覆盖，不接受任意 prompt 或任意 shell 参数。
+- 启动时后端重新解析 `ProjectContext` access policy：外部 AI / Agent / Skill 要求 trusted，任何项目写入还要求 writable，checkpoint-required mutation 还要求可用 Git checkpoint。无项目、restricted 或 read-only 状态不得创建一个随后必然失败的写入工作流任务。
+- 路径默认值由 `SettingsService` 解析；不可用时返回结构化 prerequisite，不自动换用另一 Agent、Provider 或模型。
+- Update Wiki 与修复中的低风险、无冲突写入在所需 Git 检查点成功后自动应用；Generate Content 新建制品不要求检查点，覆盖既有制品则必须先建检查点并进入确认。删除、覆盖、广泛重写和冲突修改创建持久 `PendingAction`。
+- 确认是异步任务状态。用户可以离开页面继续工作；确认 command 必须再次校验项目、基线、计划和检查点。
+- 取消后不得把未确认的部分结果提升到正式 Wiki 或 Exports 路径。
+- 系统通知只在 `waiting_for_confirmation`、`succeeded` 和 `failed` 时触发。
 
 ## 11. ProjectService
 
 职责：
 
-- 创建项目。
-- 打开已有项目。
-- 判断目录是否是项目。
-- 判断普通文件夹是否需要初始化。
-- 初始化项目目录结构。
-- 生成 `purpose.md` 和 `schema.md`。
+- 事务式创建原生项目，生成创建时模板的 `purpose.md` 和 `schema.md`。
+- 对用户选择目录执行零写入 quick assessment。
+- 通过应用级 operation registry 发布 quick assessment 进度 / 结果并处理取消；不得为尚未打开的目录创建项目 Task，取消后不得保留可执行 assessment。
+- format 分类当前 / legacy 原生、`nashsu`、Obsidian、Markdown vault、歧义 Markdown、普通资料与 unknown；独立 health 返回 healthy、repairable、recovery 或 unreadable。
+- 组合 format、health、trust、filesystem access、layout、Git、capabilities、warnings、confidence 和建议动作。
+- 把歧义 Markdown 意图与普通资料“新建并导入”路由交给 typed response；不在原目录初始化或移动。
+- 按 canonical identity 查询 / 更新全局 trust，并把 trust、filesystem access、health、layout 与 capabilities 组合成 access policy；`trusted + read_only` 必须是一等组合，`restricted` 只是未信任能力集合的 UI 摘要。
+- 规划兼容 `.app/compat` 启用与应用级 repair；通过后端保存的 plan id 重校验并执行确认写入。
+- 编排可取消的只读深度扫描和 partial snapshot。
 - 管理最近项目。
 - 扫描项目摘要。
 
@@ -510,20 +581,26 @@ pub struct BackendTask {
 
 - 项目路径。
 - 项目名称。
-- 项目模板。
+- 创建时项目模板与父级保存位置。
+- assessment id、用户选择的打开动作或 repair plan id。
 
 主要输出：
 
 - `ProjectContext`
 - `ProjectSummary`
 - `ProjectHealthReport`
+- `ProjectOpenAssessment`
+- `ProjectRepairPlan`
 - `PendingAction`
 
 硬边界：
 
-- 项目模板只影响 `purpose.md` 和 `schema.md`。
-- 核心目录结构必须稳定。
-- 打开普通文件夹为项目必须走用户确认。
+- 项目模板只影响创建时原生根目录的 `purpose.md` 和 `schema.md`；创建后不提供切换。
+- 新建原生知识库的核心目录结构必须稳定；兼容知识库保留 `ProjectLayout` 返回的既有布局。
+- quick assessment 不得写盘、初始化 Git、创建项目任务、执行目录内容或发送外部 AI。
+- 普通资料目录不得原地初始化、移动、重命名或写 marker；创建新项目后由 Import 复制 / 归档用户确认的资料。
+- 兼容库的应用自有指导文件只写 `.app/compat/`；根目录同名文件始终视为用户内容。
+- trust、assessment 与 repair plan 是不同状态；任何写入确认都必须重新校验目录身份和输入 hash。
 - 初始化 Git 由 `GitService` 执行，`ProjectService` 只编排调用。
 
 ## 12. FileStore
@@ -583,23 +660,23 @@ pub struct BackendTask {
 - `ExtractionService`：确定性提取文档、网页、媒体、字幕、OCR / ASR 结果和资源。
 - `QualityGate`：验证正文覆盖、结构、资源和不确定区间。
 - `SourceCandidateService`：生成最终 Markdown 预览与更新 Diff。
-- `SourceCommitService`：以 `sourceId` 为原子边界提交 raw、`.app` 和 `wiki/sources/`。
+- `SourceCommitService`：以 `sourceId` 为原子边界提交 layout-defined evidence、app-state 与 Source write roots。
 - `SourceVersionService`：管理别名、版本、人工编辑基线、时间线和恢复。
 - `CompileService`：消费显式 `sourceId + versionId` change set，不属于导入提交事务。
 
-目标存储规则：
+目标存储规则（括号内路径均为新建原生知识库映射，兼容知识库使用 `ProjectLayout`）：
 
-- `raw/` 保存不可变原文件、网页 / 平台证据、原图、字幕、OCR / ASR 原始输出和版本证据。
-- `wiki/sources/` 保存忠实、规范化、可阅读、可编辑的当前 Source。
-- `.app/` 保存 `sourceId`、`versionId`、别名、hash、质量、基线、任务和编译消费记录。
-- `wiki/sources/` 物理路径按稳定来源渠道组织，例如 `local/`、`web/<host>/`；媒体类型写入元数据，不作为唯一目录分区。
+- evidence root（`raw/`）保存不可变原文件、网页 / 平台证据、原图、字幕、OCR / ASR 原始输出和版本证据。
+- Source write root（`wiki/sources/`）保存忠实、规范化、可阅读、可编辑的当前 Source。
+- app-state root（`.app/`）保存 `sourceId`、`versionId`、别名、hash、质量、基线、任务和编译消费记录。
+- 新建原生知识库的 `wiki/sources/` 物理路径按稳定来源渠道组织，例如 `local/`、`web/<host>/`；媒体类型写入元数据，不作为唯一目录分区。
 - Excel 等可使用一个逻辑来源、多个可读 Markdown 的来源包。
 
 硬边界：
 
 - 导入到当前项目使用复制，不持续跟踪原始路径。
-- 打开普通文件夹为项目可能移动或整理文件，必须确认。
-- 每个成功导入项都必须生成 `wiki/sources/` Source；失败项不得生成占位 Markdown。
+- 文件夹输入只表示把其中资料批量导入当前项目；打开知识库属于 ProjectService。普通资料目录不原地初始化或移动。
+- 每个成功导入项都必须在 layout-defined Source write root 生成 Source；失败项不得生成占位 Markdown。
 - URL、视频和图文不得因 `input.kind == Url` 跳过 Source 写入。
 - 完全重复项只追加别名，不创建新 Source。
 - 更新来源时保护人工编辑，并通过 Diff 或三方合并确认。
@@ -690,6 +767,9 @@ pub trait Extractor {
 硬边界：
 
 - Git 检查点失败时，高风险操作不能继续。
+- 新建原生知识库自动初始化 Git；quick assessment 和打开外部知识库绝不初始化、`git add`、提交或 stash。
+- 兼容知识库只在启用完整功能的确认页提供“初始化本地 Git”，默认勾选但可拒绝；拒绝后禁用所有要求 checkpoint 的写入能力。
+- 已有 dirty worktree 不自动处理。用户可以先自行处理，或明确授权把当前全部变更作为检查点；授权范围必须在确认页可见。
 - 普通用户不需要理解 Git，但开发实现不能绕开 Git 安全边界。
 
 ## 16. AgentService
@@ -715,18 +795,19 @@ pub trait Extractor {
 
 执行规则：
 
-- 配置可用 Agent 时，Agent CLI 是默认优先路径。
-- 用户可以在 Source 已经形成后的 AI 整理、编译和 Chat 中手动选择 BYOK API。
+- 默认执行路径由设置决定；工作流、Source AI 整理和 Chat 可以显式覆盖单次路径，但不得静默改变全局默认值。
+- 用户可以在 Source 已经形成后的 AI 整理、更新 Wiki、生成内容和 Chat 中手动选择 Agent CLI 或 BYOK API。
 - BYOK 不参与导入解析或失败恢复。
 - 应用不能静默安装 Agent。
 - 安装命令必须用户确认。
+- 所选执行路径不可用时返回 prerequisite，不得自动回退到另一 Agent、Provider 或模型。
 - Agent 输出修改文件前后必须受 GitService 和 PendingAction 保护。
 
 `import-recovery` 规则：
 
 - 仅本地 Agent，并且必须由用户主动触发。
 - 可在当前任务授权范围内使用浏览器、媒体、OCR / ASR 和临时脚本。
-- 只写隔离 staging 候选，不得直接修改 `raw/`、`wiki/` 或 Git。
+- 只写隔离 staging 候选，不得直接修改布局定义的 evidence、Source/Wiki roots 或 Git。
 - 不安装软件、不执行未知下载二进制、不接触原始 Cookie / API Key、不绕过访问控制。
 
 `source-rewrite` 规则：
@@ -765,7 +846,7 @@ Provider：
 硬边界：
 
 - API Key 必须从 `SecretService` 获取。
-- 不把密钥写入 `.app/settings.json`。
+- 不把密钥写入任何项目 app-state JSON（新建原生设置映射为 `.app/settings.json`）。
 - 普通搜索不能自动调用 LLM。
 - BYOK 只处理已经存在的 Source、Wiki 和 Chat 文本，不得成为 Import extractor 或 recovery route。
 
@@ -775,8 +856,8 @@ Provider：
 
 `SearchService` 是 `services/search_service/mod.rs` 中的稳定 facade，当前子模块为：
 
-- `catalog.rs`：扫描 Wiki、构建目录树和页面元数据目录。
-- `pages.rs`：Wiki 页面读取、创建、保存、重命名和删除请求。
+- `catalog.rs`：按 `ProjectContext.layout` 扫描 Source/Wiki Markdown roots，构建目录树和页面元数据目录。
+- `pages.rs`：Source/Wiki 页面读取，以及在 access policy 允许时创建、保存、重命名和删除 Wiki 页面。
 - `query.rs`：本地关键词、标签、类型和来源过滤查询。
 - `excerpts.rs`：受限检索片段和正文摘要。
 - `test_support.rs`：仅在 `cfg(test)` 下编译的目录、索引和 CJK fixture helper。
@@ -791,12 +872,12 @@ Provider：
 - 标签过滤。
 - 类型过滤。
 - 来源过滤。
-- 为 Chat 召回相关 Wiki 页面。
+- 为 Chat 召回相关 Source 或 Wiki 页面，并保留内容类型与可导航标识。
 
 存储策略：
 
 - 可以在内存中建立索引。
-- 可以将轻量缓存写入 `.app/`，但不要引入数据库。
+- trusted writable 项目可以将轻量缓存写入 `.app/`；restricted/read-only 项目只使用有界内存索引，不要引入数据库。
 - Markdown 文件仍是事实来源。
 
 边界：
@@ -821,29 +902,34 @@ Provider：
 
 - `ChatService` 负责会话、检索、引用和保存答案，不负责 Chat 便捷写入的授权、意图分类或 Git 变更审计。
 - `ChatConvenienceService` 保持独立 service，由 `AppState` 单独持有，不并入 `ChatService`。
-- Chat 的模型 / Agent 路由通过现有 command、`LlmService`、`AgentService` 和 `TaskService` 编排；物理拆分不得改变 Chat DTO 或 `.app/chats/*.json` 持久化兼容性。
+- Chat 的模型 / Agent 路由通过现有 command、`LlmService`、`AgentService` 和 `TaskService` 编排；物理拆分不得改变 Chat DTO 或 `ProjectLayout.chatStateRoot` records 的持久化兼容性（原生映射为 `.app/chats/*.json`）。
+- Chat retrieval 同时消费 Source/Wiki 结果，Source-only 项目不要求先编译。citations 必须带 content kind，后端只接受仍位于当前 layout roots 内的引用。
+- 外部 AI/Agent/Skill 调用前重验 canonical identity 与 trust；缺少 Git 不阻止纯问答。保存回答才要求 writable，并按 overwrite/hash/Git 策略执行。
+- 配置或信任 prerequisite 返回可恢复目的地；再次进入 Chat 时保留前端草稿，但后端不得自动重放原请求。
+- `ProjectLayout.chatStateRoot` 可写时使用该状态根目录（原生映射为 `.app/chats/*.json`）；文件系统只读或该路径缺失时只提供显式标记为 ephemeral 的内存会话，不尝试旁路写入用户目录。
 
 ## 19. GraphService
 
 职责：
 
-- 扫描 `wiki/` 页面。
+- 扫描 `ProjectContext.layout` 允许的 Source/Wiki Markdown roots。
 - 解析 frontmatter。
 - 解析 `[[wikilinks]]`。
 - 推断页面类型。
 - 构建节点和边。
 - 生成图谱数据。
-- 写入 `.app/graph-cache.json`。
+- 仅在 trusted writable 且 `ProjectLayout.graphCachePath` 可用时写入缓存（原生映射为 `.app/graph-cache.json`）；restricted/read-only 返回有界内存结果。
+- 深度扫描未完成时返回 partial 标记、覆盖计数和 task id。
 
 前后端分工：
 
-- 后端负责扫描、解析、缓存和提供图数据。
+- 后端负责扫描、解析、访问策略、可选缓存和提供图数据。
 - 前端使用 sigma.js / graphology 渲染和交互。
 - ForceAtlas2 和 Louvain 可以在前端或后端执行，具体取决于性能和库选择。
 
 首版规则：
 
-- 每个 Wiki 页面是节点。
+- 每个可读 Source/Wiki Markdown 文档是页面级节点；不要求先编译 Wiki。
 - 边来自 wikilinks 和多信号关联度。
 - 边统一表示“相关”。
 - 不实现复杂关系类型和证据系统。
@@ -875,7 +961,7 @@ Provider：
 - 死链。
 - 孤立页面。
 - 缺失 frontmatter。
-- `wiki/index.md` 与实际页面不一致。
+- 布局声明了 Wiki 索引入口时，该入口与实际 Wiki 页面不一致；没有 Wiki 根目录时该规则不适用。
 - 空页面。
 - 重复文件名。
 - 路径大小写问题。
@@ -892,7 +978,9 @@ Agent 深度 Lint：
 
 硬边界：
 
-- 修复前创建 Git 检查点。
+- 本地只读 Lint 可在 restricted 模式对有限深度 Markdown 运行，不写报告或缓存。
+- Agent 深度 Lint 要求项目已信任。
+- 任何修复要求 trusted writable；危险/批量修复前创建 Git 检查点。
 - 删除、覆盖、冲突修复必须确认。
 - Agent 深度 Lint 通过 `wiki-lint` Skill 驱动。
 
@@ -905,7 +993,7 @@ Agent 深度 Lint：
 - 生成单篇美化阅读页。
 - 生成知识卡片。
 - 生成项目级 HTML 报告。
-- 输出到 `exports/html/`。
+- 输出到 `ProjectContext.layout` 解析的导出根；原生项目默认是 `exports/html/`。
 - 提供预览路径。
 
 硬边界：
@@ -914,6 +1002,7 @@ Agent 深度 Lint：
 - HTML 模板不能改变 Wiki schema。
 - HTML 模板不能改变 Lint 规则。
 - HTML 生成不要硬编码为单一不可扩展流程。
+- 外部 Agent/Skill/Provider 生成需要项目已信任；写入布局定义的导出根需要 writable，覆盖既有制品还需要 checkpoint 与确认。
 
 ## 22. SettingsService
 
@@ -922,17 +1011,18 @@ Agent 深度 Lint：
 - 读取全局设置。
 - 读取项目设置。
 - 保存设置。
-- 管理启动行为。
+- 管理固定启动规则所需的最近项目与失效记录。
+- 管理最近创建父目录、歧义 Markdown 意图和 canonical 目录信任。
 - 管理语言和主题。
-- 管理 Agent 默认绑定。
+- 管理默认执行路径与默认 Agent 绑定。
 - 管理 LLM Provider 非密钥配置。
 - 管理后台任务关闭行为。
 - 管理更新检查配置。
 
 边界：
 
-- 项目级设置写入 `.app/settings.json`。
-- 全局设置写入应用配置目录。
+- 项目级设置写入可写的 `ProjectLayout.settingsPath`（原生映射为 `.app/settings.json`）。
+- 最近项目、最近创建父目录、歧义意图和 trust 写入应用配置目录，并可在无项目上下文读取；trust 不写入项目 marker。
 - 密钥只由 `SecretService` 管理。
 
 ## 23. SecretService
@@ -983,6 +1073,14 @@ Agent 深度 Lint：
 
 - `ProjectSummary`
 - `ProjectHealthReport`
+- `ProjectFormat`
+- `ProjectTrustState`
+- `ProjectFilesystemAccess`
+- `ProjectOpenAssessment`
+- `ProjectGitAssessment`
+- `ProjectCapabilities`
+- `ProjectTrustIdentity`
+- `ProjectRepairPlan`
 - `WikiPageMeta`
 - `ImportSession`
 - `ImportItem`
@@ -1044,7 +1142,10 @@ pub struct BackendEvent<T> {
 - 所有项目路径经过 `ProjectContext`。
 - 拒绝越界路径。
 - 拒绝未确认的覆盖和删除。
-- 处理符号链接时必须避免逃逸项目根目录。
+- 项目根符号链接 / junction 先 canonicalize；根内链接做包含性与循环保护，根外链接只展示、不跟随、不索引、不写入。
+- 大小写和 Unicode normalization 冲突只报告，不自动改名或改写链接。
+- restricted / read-only access policy 在每个写入、Agent、Skill、外部 AI 和任务启动点重新校验。
+- quick assessment 不执行项目内脚本、hook、Skill 或其他可执行内容。
 
 ### 26.2 密钥安全
 
@@ -1114,13 +1215,22 @@ pub struct BackendEvent<T> {
 适用：
 
 - 项目创建。
-- 普通文件夹初始化。
+- quick assessment 零写入、零 Git、零项目任务；operation id 可查询 / 取消，取消后没有可执行 assessment snapshot，重复取消幂等。
+- format 覆盖当前 / legacy 原生、`nashsu`、Obsidian、Markdown、歧义、普通资料与 unknown；独立 health 覆盖 healthy、repairable、recovery 与 unreadable。
+- 普通资料目录只返回新建并导入，原目录字节与结构不变。
+- trust × filesystem access × health 组合 access policy，至少覆盖 trusted writable、trusted read-only、untrusted writable、untrusted read-only 与 recovery。
+- `.app/compat` 写入且根级同名用户文件不覆盖。
+- trust 在目录移动、替换或身份变化后失效。
+- repair plan 确认时身份 / hash 重校验。
+- dirty Git 与拒绝初始化 Git 的能力降级。
+- 深度扫描取消及 partial snapshot。
 - 文件导入。
 - Git 检查点。
 - 文件覆盖冲突。
 - `.app/*.json` 写入。
 - CJK 文件名。
 - Windows 风格路径和大小写问题。
+- 根符号链接、内部循环链接、外部链接和 Unicode normalization 冲突。
 
 ### 28.3 Command 契约测试
 
@@ -1155,6 +1265,7 @@ Agent 和 LLM 应提供可替换 adapter：
 - 密钥不存在。
 - 导入解析部分失败。
 - 图谱缓存损坏。
+- quick assessment、信任、repair plan 和 deep-scan DTO 的向后兼容与防重放。
 
 ## 29. 当前后端演进规则
 
@@ -1162,8 +1273,10 @@ Agent 和 LLM 应提供可替换 adapter：
 2. 单文件 facade 变大时，可以按聚焦用例拆分目录和多个 `impl Service` block；不得改变 command / `AppState` 依赖面。
 3. `services/mod.rs` 只 re-export 跨 crate 真正需要的 facade 和选定契约，不为测试方便扩大私有 helper 可见性。
 4. facade 拆分或文件移动后，更新 `service_facade_contracts.rs` 或同级契约测试，验证构造方式和选定公开方法仍可用。
-5. DTO 序列化、错误码、事件类型和 `.app/*.json` 持久化结构必须保持兼容；仅移动物理文件不构成协议变更授权。
+5. DTO 序列化、错误码、事件类型和 layout-defined app-state JSON（原生映射为 `.app/*.json`）的持久化结构必须保持兼容；仅移动物理文件不构成协议变更授权。
 6. `ChatConvenienceService` 与 `WikiIndex` 继续作为独立边界；除非有单独设计批准，不并入四个聚焦 facade。
+7. `ProjectRegistry`、全局 trust store 与 assessment / repair registry 保持三个独立概念；注册 canonical root 不得被解释为用户信任。
+8. 项目上下文必须携带后端派生的 layout / access policy；command 与 service 不能仅凭前端 disabled 状态假设能力可用。
 
 ## 30. 后续开发 Agent 禁止事项
 
@@ -1177,5 +1290,8 @@ Agent 和 LLM 应提供可替换 adapter：
 - 不要让每个服务各自发明任务进度格式。
 - 不要让每个服务各自发明错误格式。
 - 不要让前端自己保存危险操作继续执行参数。
+- 不要把普通资料目录原地初始化、移动或写 marker。
+- 不要在 quick assessment 或打开外部目录时初始化 Git、创建 `.app`、执行项目内容或发送外部 AI。
+- 不要把路径注册当成用户信任，或绕过 restricted / read-only access policy。
 - 不要强行指定尚未验证的 PDF / Office 解析库。
 - 不要把样本 `wiki/wiki/` 当成应用源码。
