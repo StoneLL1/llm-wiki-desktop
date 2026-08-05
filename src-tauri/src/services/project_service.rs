@@ -188,13 +188,28 @@ impl ProjectService {
             )
         })?;
         let compat_dir = root.join(".app").join("compat");
-        let (compat_dir, created_dirs) = ensure_project_directory_with_created(&root, &compat_dir)
-            .map_err(|message| {
+        let (compat_dir, mut created_dirs) =
+            ensure_project_directory_with_created(&root, &compat_dir).map_err(|message| {
                 compatibility_path_unsafe_error(
                     "Compatibility guidance cannot use a linked or unsafe directory.",
                     message,
                 )
             })?;
+        // Persistence is a separate capability from content mutation.  These
+        // two empty app-owned roots are the minimum durable state needed for
+        // project-scoped tasks and workflow history; all user content roots
+        // remain absent for a state-only compatible vault.
+        for state_root in ["tasks", "workflows"] {
+            let (_, mut created) =
+                ensure_project_directory_with_created(&root, &compat_dir.join(state_root))
+                    .map_err(|message| {
+                        compatibility_path_unsafe_error(
+                            "Compatibility state cannot use a linked or unsafe directory.",
+                            message,
+                        )
+                    })?;
+            created_dirs.append(&mut created);
+        }
         let mut created_files = Vec::new();
 
         let result = (|| {
@@ -353,6 +368,8 @@ impl ProjectService {
         Ok(vec![
             ".app/compat/purpose.md".into(),
             ".app/compat/schema.md".into(),
+            ".app/compat/tasks".into(),
+            ".app/compat/workflows".into(),
         ])
     }
 
@@ -3652,7 +3669,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_guidance_only_adds_two_scoped_files_and_does_not_initialize_git() {
+    fn compatible_guidance_adds_only_scoped_state_and_does_not_initialize_git() {
         let (service, _config) = service_in_temp();
         let root = unique_temp_dir("compatible-guidance");
         fs::create_dir(root.join(".obsidian")).unwrap();
@@ -3668,10 +3685,17 @@ mod tests {
 
         assert_eq!(
             changed,
-            vec![".app/compat/purpose.md", ".app/compat/schema.md"]
+            vec![
+                ".app/compat/purpose.md",
+                ".app/compat/schema.md",
+                ".app/compat/tasks",
+                ".app/compat/workflows",
+            ]
         );
         assert!(root.join(".app/compat/purpose.md").is_file());
         assert!(root.join(".app/compat/schema.md").is_file());
+        assert!(root.join(".app/compat/tasks").is_dir());
+        assert!(root.join(".app/compat/workflows").is_dir());
         assert!(!root.join("purpose.md").exists());
         assert!(!root.join("schema.md").exists());
         assert!(!root.join(".git").exists());
@@ -3722,7 +3746,12 @@ mod tests {
 
         assert_eq!(
             changed,
-            vec![".app/compat/purpose.md", ".app/compat/schema.md"]
+            vec![
+                ".app/compat/purpose.md",
+                ".app/compat/schema.md",
+                ".app/compat/tasks",
+                ".app/compat/workflows",
+            ]
         );
         assert_eq!(
             fs::read(root.join(".app/compat/purpose.md")).unwrap(),

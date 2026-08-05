@@ -105,7 +105,6 @@ fn expected_red_evidence_is_unique_valid_json_and_keeps_green_targets_visible() 
     let expected_witnesses = [
         ("project_layout_authority_contract.rs", "legacy_native_layout_inspection_agrees_on_a_repairable_missing_task_root", true),
         ("project_layout_authority_contract.rs", "native_legacy_repairable_state_advertises_a_repair_plan", true),
-        ("workflow_compatible_layout.rs", "expected_red_compatible_enablement_has_no_task_state_root", true),
         ("import_v2_file_discovery.rs", "batch_a_expected_red_counts_one_discovery_callback_per_file", true),
         ("import_v2_scale_contract.rs", "expected_red_single_item_update_rewrites_every_persisted_item_file", true),
         ("import_v2_file_orchestration.rs", "batch_a_expected_red_task_service_creates_one_backend_task_per_item_at_scale", true),

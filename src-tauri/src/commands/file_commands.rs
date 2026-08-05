@@ -708,6 +708,8 @@ mod tests {
             affected_paths: vec![
                 ".app/compat/purpose.md".into(),
                 ".app/compat/schema.md".into(),
+                ".app/compat/tasks".into(),
+                ".app/compat/workflows".into(),
             ],
             preview: None,
             expires_at: None,
@@ -733,6 +735,8 @@ mod tests {
         assert!(!root.join(".git").exists());
         assert!(root.join(".app/compat/purpose.md").is_file());
         assert!(root.join(".app/compat/schema.md").is_file());
+        assert!(root.join(".app/compat/tasks").is_dir());
+        assert!(root.join(".app/compat/workflows").is_dir());
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(config).ok();
     }

@@ -266,6 +266,8 @@
   "workflows.prerequisite.openOrCreateProject": "Open or create a knowledge base.",
   "workflows.prerequisite.trustProject": "Trust this project before external execution.",
   "workflows.prerequisite.makeWritable": "Open the project with writable access.",
+  "workflows.prerequisite.wikiWriteRootRequired": "This compatible knowledge base has no configured Wiki write root.",
+  "workflows.prerequisite.exportRootRequired": "This compatible knowledge base has no configured export root.",
   "workflows.prerequisite.importSources": "Import at least one Source first.",
   "workflows.prerequisite.updateWiki": "Update the Wiki before generating content.",
   "workflows.prerequisite.configureGit": "Configure Git for checkpoint-protected writes.",

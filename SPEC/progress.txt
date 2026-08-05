@@ -1,5 +1,7 @@
 # 进度记录 (progress.txt)
 
+[2026-08-05] Batch C compatible app-state and Workflows — Added `.app/compat` task/workflow persistence roots without content write roots, layout-aware workflow prerequisites and output paths, root-specific backend write guards, and current expected-red-to-green contracts — Key decision or open issue: compatible state persistence never grants Markdown write authority; trust revocation cancels active workflows and fails closed if durable revocation cannot complete.
+
 [2026-08-05] Batch B corrective dependency — Made workflow persistence rebinding validate every target before mutation, cancel active root-scoped workflows before trust revocation, and aligned repair-plan backup assertions with optional DTO paths — Key decision or open issue: queued runs remain subject to fresh backend authority checks at dispatch; this corrective change is committed separately from Batch C.
 
 [2026-08-05] Project compatibility remediation Batch B — Unified native-layout inspection with explicit Current/RepairableLegacy/IncompleteLegacy states, directory-only confirmed repair, post-repair authority refresh, and no-follow repair creation — Key decision or open issue: compatible/third-party markers and unsafe native markers fail closed; full `npm run check` passed and Graphify AST update completed.

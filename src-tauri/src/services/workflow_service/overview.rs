@@ -1,11 +1,12 @@
 use crate::errors::BackendError;
+use crate::models::layout::ProjectMarkdownRootRole;
 use crate::models::paths::ProjectContext;
 use crate::models::workflow::{
     WorkflowDisplayStatus, WorkflowKind, WorkflowOverviewRow, WorkflowOverviewState,
     WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
     WorkflowsOverview, WORKFLOW_SCHEMA_VERSION,
 };
-use crate::services::{CompileService, FileStore};
+use crate::services::CompileService;
 use crate::tasks::TaskService;
 
 #[derive(Default)]
@@ -49,9 +50,12 @@ impl WorkflowOverviewService {
             .filter(|source| !source.already_consumed)
             .count();
         let readable_markdown = !source_versions.is_empty()
-            || !FileStore.list_markdown_files(&context.wiki_dir)?.is_empty()
-            || !FileStore
-                .list_markdown_files(&context.raw_dir.join("extracted"))?
+            || !context
+                .list_markdown_files_for_roles(&[
+                    ProjectMarkdownRootRole::Source,
+                    ProjectMarkdownRootRole::Wiki,
+                    ProjectMarkdownRootRole::Mixed,
+                ])?
                 .is_empty();
         let owner_runs = tasks
             .list_workflow_runs()

@@ -20,7 +20,7 @@ fn restricted_access() -> WorkflowAccessSnapshot {
 }
 
 #[test]
-fn expected_red_compatible_enablement_has_no_task_state_root() {
+fn compatible_enablement_uses_app_owned_state_roots_without_content_write_roots() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join(".obsidian")).unwrap();
     std::fs::create_dir_all(root.path().join(".app/compat")).unwrap();
@@ -31,9 +31,17 @@ fn expected_red_compatible_enablement_has_no_task_state_root() {
     let context = ProjectContext::new("compatible", root.path().to_path_buf())
         .with_resolved_layout()
         .unwrap();
-    assert_eq!(context.layout.app_state_root.as_deref(), Some(".app"));
-    assert!(context.layout.task_state_root.is_none());
+    assert_eq!(context.layout.app_state_root.as_deref(), Some(".app/compat"));
+    assert_eq!(
+        context.layout.task_state_root.as_deref(),
+        Some(".app/compat/tasks")
+    );
+    assert_eq!(
+        context.layout.workflow_state_root.as_deref(),
+        Some(".app/compat/workflows")
+    );
     assert!(context.layout.source_write_root.is_none());
+    assert!(context.layout.wiki_write_root.is_none());
 }
 
 #[test]
