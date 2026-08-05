@@ -16,6 +16,86 @@ use crate::utils::path_utils::normalize_project_path;
 const MAX_TOP_LEVEL_ENTRIES: usize = 512;
 const MAX_SIGNAL_ENTRIES_PER_DIRECTORY: usize = 512;
 
+/// The native layout is deliberately described in one place.  Opening,
+/// assessment, runtime authority, and repair planning all consume this
+/// descriptor so a directory cannot be considered native by one layer and
+/// non-native by another.
+pub const CURRENT_NATIVE_LAYOUT_VERSION: u32 = 1;
+
+const NATIVE_SEMANTIC_FILES: &[&str] = &["purpose.md", "schema.md"];
+
+const NATIVE_CURRENT_DIRECTORY_MARKERS: &[&str] = &[
+    "raw/sources",
+    "wiki",
+    ".app",
+    ".app/tasks",
+    "exports",
+    "skills",
+];
+
+/// Directories created for a newly created native project.  These are also
+/// the *only* directories a legacy-layout repair may create.  The list is
+/// intentionally paths, not a recursive `create_dir_all` policy: each target
+/// is revalidated individually by the repair executor.
+const NATIVE_REPAIR_DIRECTORY_ALLOWLIST: &[&str] = &[
+    "raw",
+    "raw/sources",
+    "raw/sources/pdfs",
+    "raw/sources/docs",
+    "raw/sources/slides",
+    "raw/sources/sheets",
+    "raw/sources/markdown",
+    "raw/sources/links",
+    "raw/sources/other",
+    "raw/extracted",
+    "raw/assets",
+    "wiki",
+    "wiki/entities",
+    "wiki/concepts",
+    "wiki/sources",
+    "wiki/queries",
+    "wiki/synthesis",
+    "wiki/comparisons",
+    "exports",
+    "exports/html",
+    "skills",
+    ".app",
+    ".app/chats",
+    ".app/tasks",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeLayoutRequirement {
+    Directory(&'static str),
+}
+
+impl NativeLayoutRequirement {
+    pub fn relative_path(&self) -> &'static str {
+        match self {
+            Self::Directory(path) => path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeLayoutGap {
+    MissingSemanticFile(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeLayoutState {
+    Current,
+    RepairableLegacy { missing: Vec<NativeLayoutRequirement> },
+    IncompleteLegacy { reasons: Vec<NativeLayoutGap> },
+    NotNative,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLayoutInspection {
+    pub version: u32,
+    pub state: NativeLayoutState,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectMarkdownRootRole {
@@ -250,7 +330,10 @@ pub fn resolve_layout_with_budget(
     budget: Option<&LayoutDiscoveryBudget<'_>>,
 ) -> Result<ProjectLayoutResolution, BackendError> {
     check_discovery_budget(budget)?;
-    if native_markers_present(root) {
+    if matches!(
+        inspect_native_layout(root).state,
+        NativeLayoutState::Current | NativeLayoutState::RepairableLegacy { .. }
+    ) {
         return Ok(ProjectLayoutResolution {
             layout: ProjectLayout::native(),
             confidence: ProjectLayoutConfidence::High,
@@ -415,14 +498,68 @@ fn discover_compatible_layout(
     })
 }
 
-fn native_markers_present(root: &Path) -> bool {
-    safe_file_marker(root, "purpose.md")
-        && safe_file_marker(root, "schema.md")
-        && safe_directory_marker(root, ".app")
-        && safe_directory_marker(root, "raw")
-        && safe_directory_marker(root, "wiki")
-        && safe_directory_marker(root, "exports")
-        && safe_directory_marker(root, "skills")
+/// Inspects the current native layout without writing.  A legacy candidate
+/// needs both semantic files and an existing native structural anchor; this
+/// prevents an ordinary materials folder from becoming native merely because
+/// a repair could create empty directories in it.
+pub fn inspect_native_layout(root: &Path) -> NativeLayoutInspection {
+    let missing_semantic = NATIVE_SEMANTIC_FILES
+        .iter()
+        .copied()
+        .filter(|relative| !safe_file_marker(root, relative))
+        .map(NativeLayoutGap::MissingSemanticFile)
+        .collect::<Vec<_>>();
+    let has_native_anchor = ["raw", "wiki", "exports", "skills"]
+        .iter()
+        .any(|relative| safe_directory_marker(root, relative));
+    let has_current_native_directories = NATIVE_CURRENT_DIRECTORY_MARKERS
+        .iter()
+        .all(|relative| safe_directory_marker(root, relative));
+    let has_unsafe_native_directory = NATIVE_CURRENT_DIRECTORY_MARKERS
+        .iter()
+        .any(|relative| native_directory_path_is_unsafe(root, relative));
+    // A native project may be opened in an editor that creates an Obsidian
+    // settings directory, so a complete current native layout remains native.
+    // A partial layout, however, must never use generic user files as a
+    // pretext to turn a compatible vault into a native repair candidate.
+    let recognized_compatible_layout = safe_directory_marker(root, ".obsidian")
+        || (safe_file_marker(root, ".app/compat/purpose.md")
+            && safe_file_marker(root, ".app/compat/schema.md"));
+
+    let state = if has_unsafe_native_directory {
+        NativeLayoutState::NotNative
+    } else if missing_semantic.is_empty() && has_current_native_directories {
+        NativeLayoutState::Current
+    } else if recognized_compatible_layout {
+        NativeLayoutState::NotNative
+    } else if !missing_semantic.is_empty() {
+        if has_native_anchor {
+            NativeLayoutState::IncompleteLegacy {
+                reasons: missing_semantic,
+            }
+        } else {
+            NativeLayoutState::NotNative
+        }
+    } else if !has_native_anchor {
+        NativeLayoutState::NotNative
+    } else {
+        let missing = NATIVE_REPAIR_DIRECTORY_ALLOWLIST
+            .iter()
+            .copied()
+            .filter(|relative| !safe_directory_marker(root, relative))
+            .map(NativeLayoutRequirement::Directory)
+            .collect::<Vec<_>>();
+        NativeLayoutState::RepairableLegacy { missing }
+    };
+
+    NativeLayoutInspection {
+        version: CURRENT_NATIVE_LAYOUT_VERSION,
+        state,
+    }
+}
+
+pub fn native_repair_directory_allowed(relative: &str) -> bool {
+    NATIVE_REPAIR_DIRECTORY_ALLOWLIST.contains(&relative)
 }
 
 fn compatible_role(name: &str) -> ProjectMarkdownRootRole {
@@ -736,6 +873,27 @@ fn is_markdown_path(path: &Path, case_insensitive: bool) -> bool {
 
 fn safe_directory_marker(root: &Path, relative: &str) -> bool {
     validate_existing_project_directory(root, &root.join(relative)).is_ok()
+}
+
+/// A missing native directory is a repair candidate, but a link, reparse
+/// point, or non-directory in its path is never a safe substitute. Keep those
+/// states outside the repair machine so a confirmation cannot turn an unsafe
+/// marker into a native write root.
+fn native_directory_path_is_unsafe(root: &Path, relative: &str) -> bool {
+    let mut current = root.to_path_buf();
+    for component in Path::new(relative).components() {
+        let std::path::Component::Normal(segment) = component else {
+            return true;
+        };
+        current.push(segment);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if is_link_or_reparse(&metadata) || !metadata.is_dir() => return true,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 fn safe_file_marker(root: &Path, relative: &str) -> bool {

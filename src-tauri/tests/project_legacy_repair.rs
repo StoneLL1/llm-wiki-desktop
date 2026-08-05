@@ -5,8 +5,14 @@ use llm_wiki_desktop_lib::services::assess_project_folder;
 
 fn assess_missing(required_path: &str) {
     let root = tempfile::tempdir().unwrap();
-    for directory in [".app", "raw", "raw/sources", "wiki", "exports", "skills"] {
-        if directory != required_path {
+    for directory in [
+        ".app/chats", ".app/tasks", "raw/sources/pdfs", "raw/sources/docs",
+        "raw/sources/slides", "raw/sources/sheets", "raw/sources/markdown",
+        "raw/sources/links", "raw/sources/other", "raw/extracted", "raw/assets",
+        "wiki/entities", "wiki/concepts", "wiki/sources", "wiki/queries", "wiki/synthesis",
+        "wiki/comparisons", "exports/html", "skills",
+    ] {
+        if directory != required_path && !directory.starts_with(&format!("{required_path}/")) {
             std::fs::create_dir_all(root.path().join(directory)).unwrap();
         }
     }
@@ -23,11 +29,11 @@ fn assess_missing(required_path: &str) {
     .unwrap();
     assert_eq!(assessment.format, ProjectFormat::NativeLegacy, "{required_path}");
     assert_eq!(assessment.health, ProjectHealth::Repairable, "{required_path}");
-    assert!(!assessment.repair_available, "{required_path}");
+    assert!(assessment.repair_available, "{required_path}");
 }
 
 #[test]
-fn expected_red_legacy_required_directory_gaps_have_no_supported_repair() {
+fn legacy_required_directory_gaps_have_supported_repair_plans() {
     assess_missing("raw/sources");
     assess_missing(".app/tasks");
 }

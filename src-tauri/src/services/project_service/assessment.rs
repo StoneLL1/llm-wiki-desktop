@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 
 use unicode_normalization::UnicodeNormalization;
 
-use crate::app_state::ProjectRegistry;
 use crate::errors::BackendError;
 use crate::models::git::GitRepositoryStatus;
 use crate::models::graph::GraphData;
 use crate::models::layout::{
     canonical_internal_read_path, is_link_or_reparse, project_descendant_path_enters_link,
-    resolve_layout_with_budget, LayoutDiscoveryBudget, ProjectLayoutConfidence,
+    inspect_native_layout, resolve_layout_with_budget, LayoutDiscoveryBudget, NativeLayoutInspection,
+    NativeLayoutState, ProjectLayoutConfidence,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::project::{
@@ -374,6 +374,7 @@ pub fn assess_project_folder(
     )?;
     check_cancelled(cancelled)?;
 
+    let native_inspection = inspect_native_layout(&canonical_root);
     let format = classify_format(&canonical_root, resolution.confidence, &resolution.layout);
     let project_service = ProjectService::with_config_dir(config_dir.to_path_buf());
     let restored_trust = project_service.restore_project_trust(&canonical_root)?;
@@ -426,11 +427,19 @@ pub fn assess_project_folder(
     check_cancelled(cancelled)?;
     let app_state_corrupt = app_state_is_corrupt(&canonical_root, cancelled)?;
     let health = health_with_path_collisions(
-        derive_health(format, markdown_scan.readable, app_state_corrupt),
+        derive_health(
+            format,
+            markdown_scan.readable,
+            app_state_corrupt,
+            &native_inspection,
+        ),
         &collision_scan.warnings,
     );
-    let repair_available =
-        health == ProjectHealth::Recovery && graph_cache_needs_repair(&canonical_root);
+    let repair_available = match (&native_inspection.state, health) {
+        (NativeLayoutState::RepairableLegacy { .. }, ProjectHealth::Repairable) => true,
+        (_, ProjectHealth::Recovery) => graph_cache_needs_repair(&canonical_root),
+        _ => false,
+    };
     let markers = collect_markers(&canonical_root);
     let mut warnings = assessment_warnings(format, health, resolution.confidence);
     if let Some(warning) = git_warning {
@@ -488,8 +497,13 @@ fn classify_format(
     confidence: ProjectLayoutConfidence,
     layout: &crate::models::layout::ProjectLayout,
 ) -> ProjectFormat {
-    if ProjectRegistry::is_strict_native_layout(root) {
-        return ProjectFormat::NativeCurrent;
+    let native_inspection = inspect_native_layout(root);
+    match native_inspection.state {
+        NativeLayoutState::Current => return ProjectFormat::NativeCurrent,
+        NativeLayoutState::RepairableLegacy { .. } | NativeLayoutState::IncompleteLegacy { .. } => {
+            return ProjectFormat::NativeLegacy;
+        }
+        NativeLayoutState::NotNative => {}
     }
     if safe_directory(root, "raw")
         && safe_directory(root, "wiki")
@@ -535,6 +549,7 @@ fn derive_health(
     format: ProjectFormat,
     markdown_readable: bool,
     app_state_corrupt: bool,
+    native_inspection: &NativeLayoutInspection,
 ) -> ProjectHealth {
     if matches!(
         format,
@@ -551,8 +566,10 @@ fn derive_health(
     if app_state_corrupt && markdown_readable {
         return ProjectHealth::Recovery;
     }
-    if format == ProjectFormat::NativeLegacy {
-        return ProjectHealth::Repairable;
+    match native_inspection.state {
+        NativeLayoutState::RepairableLegacy { .. } => return ProjectHealth::Repairable,
+        NativeLayoutState::IncompleteLegacy { .. } => return ProjectHealth::Recovery,
+        _ => {}
     }
     ProjectHealth::Healthy
 }
@@ -1157,7 +1174,15 @@ mod tests {
         fs::write(root.join("文档.md"), "# 可读").unwrap();
         fs::write(root.join(".app/settings.json"), "{").unwrap();
         assert_eq!(
-            derive_health(ProjectFormat::ObsidianVault, true, true),
+            derive_health(
+                ProjectFormat::ObsidianVault,
+                true,
+                true,
+                &NativeLayoutInspection {
+                    version: crate::models::layout::CURRENT_NATIVE_LAYOUT_VERSION,
+                    state: NativeLayoutState::NotNative,
+                },
+            ),
             ProjectHealth::Recovery
         );
     }

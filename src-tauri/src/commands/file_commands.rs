@@ -139,7 +139,8 @@ pub fn confirm_pending_action(
         if matches!(
             pending.execution.as_ref(),
             Some(
-                ConfirmationExecution::EnableCompatibleProject { .. }
+                ConfirmationExecution::RepairProject { .. }
+                    | ConfirmationExecution::EnableCompatibleProject { .. }
                     | ConfirmationExecution::TrustCompatibleProject { .. }
                     | ConfirmationExecution::InitializeAssessedGit { .. }
                     | ConfirmationExecution::CheckpointAssessedGit { .. }
@@ -199,29 +200,9 @@ pub fn confirm_pending_action(
     }
 
     match stored.execution {
-        Some(ConfirmationExecution::InitializeFolder {
-            root_path,
-            file_hashes,
-        }) => {
-            let (project_summary, checkpoint_exists) =
-                state.project_service.confirm_folder_initialization(
-                    &PathBuf::from(root_path),
-                    &stored.action,
-                    &file_hashes,
-                )?;
-            state.project_registry.register_trusted_native(
-                project_summary.project_id.clone(),
-                &PathBuf::from(&project_summary.root_path),
-            )?;
-            Ok(ConfirmedAction {
-                action: stored.action,
-                status: ConfirmationStatus::Confirmed,
-                checkpoint_exists,
-                project_summary: Some(project_summary),
-            })
-        }
         Some(
-            ConfirmationExecution::EnableCompatibleProject { .. }
+            ConfirmationExecution::RepairProject { .. }
+            | ConfirmationExecution::EnableCompatibleProject { .. }
             | ConfirmationExecution::TrustCompatibleProject { .. }
             | ConfirmationExecution::InitializeAssessedGit { .. }
             | ConfirmationExecution::CheckpointAssessedGit { .. },
@@ -348,6 +329,99 @@ fn execute_claimed_project_authority_action(
 ) -> Result<ConfirmedAction, BackendError> {
     let StoredPendingAction { action, execution } = stored;
     match execution {
+        Some(ConfirmationExecution::RepairProject {
+            assessment_id,
+            project_id,
+            root_path,
+            plan,
+        }) => {
+            let assessment = crate::commands::project_commands::revalidate_project_assessment(
+                state,
+                &assessment_id,
+            )?;
+            if !matches!(
+                assessment.health,
+                crate::models::project::ProjectHealth::Recovery
+                    | crate::models::project::ProjectHealth::Repairable
+            )
+                || assessment.canonical_identity_key != plan.canonical_identity_key
+                || assessment.identity_revision != plan.identity_revision
+            {
+                return Err(BackendError::new(
+                    "PROJECT_REPAIR_PLAN_STALE",
+                    "The project recovery state changed after the repair preview. Prepare repair again.",
+                    true,
+                    true,
+                ));
+            }
+            let context = state.resolve_project_context(&project_id, &root_path)?;
+            let assessed_root = PathBuf::from(&assessment.canonical_root_path)
+                .canonicalize()
+                .map_err(|_| assessed_project_context_mismatch())?;
+            if context.root != assessed_root {
+                return Err(assessed_project_context_mismatch());
+            }
+            if state.project_service.filesystem_access(&context, true)
+                != crate::models::project::ProjectFilesystemAccess::Writable
+            {
+                return Err(BackendError::new(
+                    "PROJECT_REPAIR_READ_ONLY",
+                    "Recovery repair requires writable project access.",
+                    true,
+                    true,
+                ));
+            }
+            let directory_only = plan.operations.iter().all(|operation| {
+                operation.operation_type
+                    == crate::models::project::ProjectRepairOperationType::CreateDirectory
+            });
+            let checkpoint_exists = if directory_only {
+                state
+                    .project_service
+                    .apply_native_layout_repair_plan(&context, &plan)?;
+                false
+            } else {
+                state.git_service.verify_checkpoint_state(
+                    &context,
+                    plan.expected_git_head.as_deref(),
+                    &plan.expected_git_paths,
+                )?;
+                let checkpoint = state.git_service.create_checkpoint(
+                    &context,
+                    crate::models::git::CheckpointPurpose::HighRiskOperation,
+                    "Checkpoint before project recovery repair",
+                )?;
+                state
+                    .project_service
+                    .apply_graph_cache_repair_plan(&context, &plan)?;
+                checkpoint.commit_hash.is_some()
+            };
+            state
+                .project_assessment_service
+                .invalidate(&assessment_id)?;
+            let repaired = state.project_assessment_service.inspect_current(
+                context.root.to_string_lossy().as_ref(),
+            )?;
+            if directory_only {
+                if repaired.format != crate::models::project::ProjectFormat::NativeCurrent
+                    || repaired.health != crate::models::project::ProjectHealth::Healthy
+                {
+                    return Err(BackendError::new(
+                        "PROJECT_NATIVE_REPAIR_STALE",
+                        "The repair did not produce a healthy current native layout.",
+                        true,
+                        true,
+                    ));
+                }
+                state.refresh_native_authority_after_repair(&project_id, &context.root)?;
+            }
+            Ok(ConfirmedAction {
+                action,
+                status: ConfirmationStatus::Confirmed,
+                checkpoint_exists,
+                project_summary: None,
+            })
+        }
         Some(ConfirmationExecution::EnableCompatibleProject {
             assessment_id,
             project_id,
@@ -579,7 +653,7 @@ mod tests {
     use crate::models::confirmation::{
         PendingAction, PendingActionType, RiskLevel, StoredPendingAction,
     };
-    use crate::models::project::{AssessmentOperationStatus, ProjectTemplate};
+    use crate::models::project::{AssessmentOperationStatus, ProjectHealth, ProjectTemplate};
     use crate::services::{ProjectAssessmentService, ProjectService};
     use std::fs;
     use std::time::Duration;
@@ -660,6 +734,111 @@ mod tests {
         assert!(root.join(".app/compat/purpose.md").is_file());
         assert!(root.join(".app/compat/schema.md").is_file());
         fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn confirmed_recovery_repair_checkpoints_then_preserves_and_regenerates_graph_cache() {
+        let parent = temp_root("recovery-repair");
+        let root = parent.join("recovery-project");
+        let config = temp_root("recovery-repair-config");
+        let project_service = ProjectService::with_config_dir(config.clone());
+        let summary = project_service
+            .create_project(
+                root.to_string_lossy().as_ref(),
+                "Recovery project",
+                ProjectTemplate::General,
+            )
+            .unwrap();
+        let invalid = b"{ invalid graph cache";
+        fs::write(root.join(".app/graph-cache.json"), invalid).unwrap();
+        let state = AppState {
+            project_service,
+            project_assessment_service: ProjectAssessmentService::new(config.clone()),
+            ..AppState::default()
+        };
+        state
+            .project_registry
+            .register_trusted_native(summary.project_id.clone(), &root)
+            .unwrap();
+        let started = state
+            .project_assessment_service
+            .start(root.to_string_lossy().into_owned())
+            .unwrap();
+        let mut completed = None;
+        for _ in 0..5_000 {
+            let operation = state
+                .project_assessment_service
+                .get_operation(&started.assessment_operation_id)
+                .unwrap();
+            if operation.status == AssessmentOperationStatus::Completed {
+                completed = operation.assessment;
+                break;
+            }
+            if operation.status == AssessmentOperationStatus::Failed {
+                panic!("assessment failed: {:?}", operation.error);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let assessment = completed.expect("assessment should complete");
+        assert_eq!(assessment.health, ProjectHealth::Recovery);
+        let context = state
+            .resolve_project_context(&summary.project_id, root.to_string_lossy().as_ref())
+            .unwrap();
+        let git = state.git_service.repository_status(&context).unwrap();
+        let plan = state
+            .project_service
+            .prepare_graph_cache_repair_plan(
+                &context,
+                assessment.canonical_identity_key.clone(),
+                assessment.identity_revision.clone(),
+                git.head,
+                state.git_service.changed_paths(&context).unwrap(),
+            )
+            .unwrap();
+        let backup_path = plan.operations[0].backup_path.clone();
+        let action = PendingAction {
+            id: plan.repair_plan_id.clone(),
+            action_type: PendingActionType::RepairProject,
+            title: "Repair".into(),
+            message: "Repair".into(),
+            risk_level: RiskLevel::High,
+            affected_paths: vec![".app/graph-cache.json".into(), backup_path.clone()],
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: None,
+        };
+
+        let confirmed = execute_claimed_project_authority_action(
+            &state,
+            StoredPendingAction {
+                action,
+                execution: Some(ConfirmationExecution::RepairProject {
+                    assessment_id: assessment.assessment_id,
+                    project_id: summary.project_id,
+                    root_path: root.to_string_lossy().into_owned(),
+                    plan,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(confirmed.status, ConfirmationStatus::Confirmed);
+        assert!(confirmed.checkpoint_exists);
+        assert_eq!(fs::read(root.join(backup_path)).unwrap(), invalid);
+        let repaired: crate::models::graph::GraphData =
+            serde_json::from_slice(&fs::read(root.join(".app/graph-cache.json")).unwrap()).unwrap();
+        assert!(repaired.nodes.is_empty());
+        assert!(repaired.edges.is_empty());
+        let log = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%s"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&log.stdout)
+            .contains("Checkpoint before project recovery repair"));
+
+        fs::remove_dir_all(parent).ok();
         fs::remove_dir_all(config).ok();
     }
 

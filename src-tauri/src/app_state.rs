@@ -4,7 +4,7 @@ use std::sync::{Mutex, RwLock};
 
 use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
 use crate::models::confirmation::ConfirmationRegistry;
-use crate::models::layout::{resolve_layout, ProjectLayoutConfidence};
+use crate::models::layout::{inspect_native_layout, resolve_layout, NativeLayoutState, ProjectLayoutConfidence};
 use crate::models::paths::ProjectContext;
 use crate::models::project::{ProjectFilesystemAccess, ProjectTrustKind};
 use crate::models::workflow::{
@@ -19,9 +19,6 @@ use crate::services::{
     SearchService, SecretService, SettingsService, WorkflowService,
 };
 use crate::tasks::TaskService;
-use crate::utils::path_safety::{
-    validate_existing_project_directory, validate_existing_project_file,
-};
 
 #[derive(Default)]
 pub struct AppState {
@@ -110,6 +107,66 @@ impl ProjectRegistry {
         root: &Path,
     ) -> Result<ProjectContext, BackendError> {
         self.register_with_authority(project_id, root, ProjectTrustAuthority::TrustedNative)
+    }
+
+    /// Rebinds a native project after an explicit recent-project relocation.
+    /// The caller must already have compared the app-owned durable project ID
+    /// at the new root. We still require the old registered root to match the
+    /// exact recent entry and revalidate the new strict-native layout before
+    /// changing this process's authority binding.
+    pub fn relocate_trusted_native<F>(
+        &self,
+        project_id: &str,
+        previous_root: &Path,
+        new_root: &Path,
+        update_recent: F,
+    ) -> Result<ProjectContext, BackendError>
+    where
+        F: FnOnce() -> Result<(), BackendError>,
+    {
+        let canonical_root = new_root.canonicalize().map_err(|error| {
+            BackendError::new(
+                PATH_INVALID,
+                "Relocated project root could not be resolved.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "error": error.to_string() }))
+        })?;
+        if !Self::is_strict_native_layout(&canonical_root) {
+            return Err(invalid_trust_authority(
+                "Only a backend-verified native project layout can be relocated.",
+            ));
+        }
+        let identity =
+            crate::services::project_identity(&canonical_root).map_err(project_identity_error)?;
+        let expected_previous_root = root_match_key(previous_root);
+        let mut projects = self.projects.write().map_err(|_| registry_locked())?;
+        if let Some(registered) = projects.get_mut(project_id) {
+            if root_match_key(&registered.root) != expected_previous_root {
+                return Err(context_mismatch());
+            }
+            // Commit the global entry before mutating authority. The closure
+            // performs the final durable-ID check and atomic recent write
+            // while this registry entry is still bound to its old root.
+            update_recent()?;
+            registered.root = canonical_root.clone();
+            registered.trust = ProjectTrustAuthority::TrustedNative;
+            registered.trusted_identity_revision = Some(identity.identity_revision);
+            registered.authority_revision = uuid::Uuid::new_v4().to_string();
+        } else {
+            update_recent()?;
+            projects.insert(
+                project_id.to_string(),
+                RegisteredProject {
+                    root: canonical_root.clone(),
+                    trust: ProjectTrustAuthority::TrustedNative,
+                    trusted_identity_revision: Some(identity.identity_revision),
+                    authority_revision: uuid::Uuid::new_v4().to_string(),
+                },
+            );
+        }
+        Ok(ProjectContext::new(project_id, canonical_root))
     }
 
     /// Registers a compatible vault only after a backend-owned caller has
@@ -326,19 +383,7 @@ impl ProjectRegistry {
     }
 
     pub fn is_strict_native_layout(root: &Path) -> bool {
-        ["purpose.md", "schema.md"]
-            .iter()
-            .all(|relative| validate_existing_project_file(root, &root.join(relative)).is_ok())
-            && [
-                "raw/sources",
-                "wiki",
-                ".app",
-                ".app/tasks",
-                "exports",
-                "skills",
-            ]
-            .iter()
-            .all(|relative| validate_existing_project_directory(root, &root.join(relative)).is_ok())
+        matches!(inspect_native_layout(root).state, NativeLayoutState::Current)
     }
 
     fn is_verified_compatible_layout(root: &Path) -> bool {
@@ -370,6 +415,23 @@ fn context_mismatch() -> BackendError {
         true,
         true,
     )
+}
+
+fn root_match_key(path: &Path) -> String {
+    let mut key = path
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .replace('\\', "/");
+    if cfg!(windows) {
+        if let Some(without_device_prefix) = key.strip_prefix("//?/") {
+            key = without_device_prefix.to_string();
+            if let Some(unc_path) = key.strip_prefix("unc/") {
+                key = format!("//{unc_path}");
+            }
+        }
+        key = key.to_ascii_lowercase();
+    }
+    key
 }
 
 fn registry_locked() -> BackendError {
@@ -406,6 +468,79 @@ impl AppState {
         context: &ProjectContext,
     ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
         self.with_workflow_access(context, Ok)
+    }
+
+    /// External AI and Agent execution is an explicit privacy boundary. A
+    /// registry entry alone is never sufficient: the project must retain a
+    /// current trusted authority after layout, identity, and health are
+    /// re-evaluated under the same transition lock used by Workflows.
+    pub fn require_external_ai_access(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        self.with_workflow_access(context, |access| {
+            let health = self
+                .project_assessment_service
+                .inspect_current(context.root.to_string_lossy().as_ref())?
+                .health;
+            if access.trust == WorkflowProjectTrust::Trusted
+                && health == crate::models::project::ProjectHealth::Healthy
+            {
+                return Ok(());
+            }
+            Err(BackendError::new(
+                "PROJECT_EXTERNAL_AI_REQUIRES_TRUST",
+                "Trust this knowledge base before sending its content to an external AI or Agent.",
+                true,
+                true,
+            ))
+        })
+    }
+
+    /// Project-scoped mutations may only use app state that the current
+    /// authority proved both trusted and writable. This prevents restricted,
+    /// Recovery, and read-only projects from creating `.app` state through a
+    /// command that happened to receive a registered canonical path.
+    pub fn require_project_write_access(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<(), BackendError> {
+        self.with_workflow_access(context, |access| {
+            let health = self
+                .project_assessment_service
+                .inspect_current(context.root.to_string_lossy().as_ref())?
+                .health;
+            if access.trust != WorkflowProjectTrust::Trusted {
+                return Err(BackendError::new(
+                    "PROJECT_WRITE_REQUIRES_TRUST",
+                    "Trust this knowledge base before changing project files.",
+                    true,
+                    true,
+                ));
+            }
+            if health != crate::models::project::ProjectHealth::Healthy {
+                return Err(BackendError::new(
+                    "PROJECT_WRITE_STATE_UNAVAILABLE",
+                    "Project health does not permit a safe write.",
+                    true,
+                    true,
+                ));
+            }
+            if access.filesystem_access != WorkflowFilesystemAccess::Writable {
+                return Err(BackendError::new(
+                    "PROJECT_WRITE_READ_ONLY",
+                    "This knowledge base is currently read-only.",
+                    true,
+                    true,
+                ));
+            }
+            if access.persistence != WorkflowPersistenceMode::Persistent {
+                return Err(BackendError::new(
+                    "PROJECT_WRITE_STATE_UNAVAILABLE",
+                    "Project application state is not available for a safe write.",
+                    true,
+                    true,
+                ));
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn with_workflow_access<T>(
@@ -447,7 +582,20 @@ impl AppState {
                     .resolve_authority(&context.project_id, &context.root)?;
             }
         }
-        let trusted = authority.trust != ProjectTrustAuthority::Untrusted;
+        // Recovery is readable-only until an explicit repair flow completes.
+        // Do not let a previously trusted registry record keep workflow, Git,
+        // or external-AI mutation access alive after the on-disk app state has
+        // become unhealthy.
+        let health = self
+            .project_assessment_service
+            .inspect_current(authority.context.root.to_string_lossy().as_ref())?
+            .health;
+        let trusted = authority.trust != ProjectTrustAuthority::Untrusted
+            && !matches!(
+                health,
+                crate::models::project::ProjectHealth::Recovery
+                    | crate::models::project::ProjectHealth::Repairable
+            );
         let filesystem_access = self
             .project_service
             .filesystem_access(&authority.context, trusted);
@@ -521,6 +669,52 @@ impl AppState {
         }
     }
 
+    /// Completes the authority transition after a confirmed legacy-native
+    /// directory repair.  The caller has already re-assessed the filesystem;
+    /// this method only grants native authority after the current layout is
+    /// proven and binds workflow persistence only to a safe writable task
+    /// directory.  If the bind fails, runtime trust is revoked rather than
+    /// leaving a half-refreshed authority behind.
+    pub(crate) fn refresh_native_authority_after_repair(
+        &self,
+        project_id: &str,
+        root: &Path,
+    ) -> Result<ProjectContext, BackendError> {
+        let _transition = self
+            .project_trust_transition
+            .lock()
+            .map_err(|_| trust_transition_locked())?;
+        if !ProjectRegistry::is_strict_native_layout(root) {
+            return Err(BackendError::new(
+                "PROJECT_NATIVE_REPAIR_STALE",
+                "The repaired project is not a complete current native layout.",
+                true,
+                true,
+            ));
+        }
+        let context = self
+            .project_registry
+            .register_trusted_native(project_id.to_string(), root)?;
+        let task_root = if self.project_service.has_writable_task_state_root(&context) {
+            context.layout.task_state_root.as_ref().map(|relative| context.root.join(relative))
+        } else {
+            None
+        };
+        if let Err(message) = self
+            .task_service
+            .rebind_workflows_for_root(&context.root, task_root)
+        {
+            let _ = self.project_registry.revoke_trust(project_id, &context.root);
+            return Err(BackendError::new(
+                "WORKFLOW_PERSISTENCE_REBIND_FAILED",
+                message,
+                true,
+                true,
+            ));
+        }
+        Ok(context)
+    }
+
     /// Batch E owns the confirming command/UI. This backend method performs
     /// the validated grant and durable write once that confirmation exists.
     pub fn grant_compatible_project_trust(
@@ -583,31 +777,6 @@ impl AppState {
             })?;
         durable_result
     }
-
-    /// Preview a folder for the "Open folder as project" dialog (dlg-folder).
-    ///
-    /// Returns whether the folder is an existing wiki project (`Opened` +
-    /// summary) or a plain folder (`NeedsConfirmation` + pending
-    /// `InitializeFolder` action). For the NeedsConfirmation case the pending
-    /// action is registered with its execution plan so the frontend can later
-    /// confirm via `confirm_pending_action` -> `confirm_folder_initialization`,
-    /// which creates the project structure, organizes files by type, and
-    /// creates the Git checkpoint. For the Opened case no Git/registry/recent
-    /// side effects run — this is a preview only.
-    pub fn preview_folder_as_project(
-        &self,
-        path: &str,
-    ) -> Result<crate::models::project::OpenProjectResponse, BackendError> {
-        let outcome = self.project_service.open_project(path)?;
-        if let Some(pending_action) = outcome.pending_action.as_ref() {
-            let execution = self
-                .project_service
-                .folder_initialization_execution(Path::new(path), pending_action)?;
-            self.confirmation_registry
-                .register_with_execution(pending_action.clone(), Some(execution))?;
-        }
-        Ok(outcome)
-    }
 }
 
 #[cfg(test)]
@@ -624,7 +793,9 @@ mod project_registry_tests {
         WorkflowKind, WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectTrust,
         WorkflowRoute, WorkflowScope, WorkflowStartOutcome,
     };
-    use crate::services::{workflow_stages, EnqueueWorkflow, ProjectService};
+    use crate::services::{
+        workflow_stages, EnqueueWorkflow, ProjectAssessmentService, ProjectService,
+    };
 
     fn temp_project(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -649,6 +820,7 @@ mod project_registry_tests {
         ] {
             fs::create_dir_all(path).unwrap();
         }
+        fs::write(root.join("wiki/index.md"), "# Index").unwrap();
         root
     }
 
@@ -662,6 +834,7 @@ mod project_registry_tests {
     fn state_with_temp_config(label: &str) -> (AppState, std::path::PathBuf) {
         let config = temp_project(label);
         let state = AppState {
+            project_assessment_service: ProjectAssessmentService::new(config.clone()),
             project_service: ProjectService::with_config_dir(config.clone()),
             ..AppState::default()
         };
@@ -761,6 +934,58 @@ mod project_registry_tests {
 
         assert_eq!(error.code, "PROJECT_TRUST_AUTHORITY_INVALID");
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn explicit_native_relocation_rebinds_only_the_matching_registered_root() {
+        let registry = ProjectRegistry::default();
+        let old_root = strict_native_project("relocate-old");
+        let new_root = strict_native_project("relocate-new");
+        registry
+            .register_trusted_native("native-project", &old_root)
+            .unwrap();
+
+        let context = registry
+            .relocate_trusted_native("native-project", &old_root, &new_root, || Ok(()))
+            .expect("the verified native project may be rebound after explicit relocation");
+
+        assert_eq!(context.root, new_root.canonicalize().unwrap());
+        assert!(registry.resolve("native-project", &old_root).is_err());
+        let authority = registry
+            .resolve_authority("native-project", &new_root)
+            .unwrap();
+        assert_eq!(authority.trust, ProjectTrustAuthority::TrustedNative);
+
+        fs::remove_dir_all(old_root).ok();
+        fs::remove_dir_all(new_root).ok();
+    }
+
+    #[test]
+    fn failed_recent_commit_keeps_the_registered_native_root_unchanged() {
+        let registry = ProjectRegistry::default();
+        let old_root = strict_native_project("relocate-rollback-old");
+        let new_root = strict_native_project("relocate-rollback-new");
+        registry
+            .register_trusted_native("native-project", &old_root)
+            .unwrap();
+
+        let error = registry
+            .relocate_trusted_native("native-project", &old_root, &new_root, || {
+                Err(crate::errors::BackendError::new(
+                    "RECENT_WRITE_FAILED",
+                    "Simulated recent write failure.",
+                    true,
+                    false,
+                ))
+            })
+            .expect_err("a failed recent write must not rebind authority");
+
+        assert_eq!(error.code, "RECENT_WRITE_FAILED");
+        assert!(registry.resolve("native-project", &old_root).is_ok());
+        assert!(registry.resolve("native-project", &new_root).is_err());
+
+        fs::remove_dir_all(old_root).ok();
+        fs::remove_dir_all(new_root).ok();
     }
 
     #[test]
@@ -1076,6 +1301,104 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn external_ai_access_requires_current_project_trust() {
+        let (state, config) = state_with_temp_config("external-ai-trust-config");
+        let project = compatible_project("external-ai-trust");
+        let context = state
+            .project_registry
+            .register("project-a", &project)
+            .unwrap();
+
+        let error = state.require_external_ai_access(&context).unwrap_err();
+        assert_eq!(error.code, "PROJECT_EXTERNAL_AI_REQUIRES_TRUST");
+        assert!(!project.join(".app").exists());
+
+        let trusted = state
+            .grant_compatible_project_trust("project-a", &project)
+            .unwrap();
+        state.require_external_ai_access(&trusted).unwrap();
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn recovery_state_revokes_external_ai_access_even_for_a_trusted_native_project() {
+        let (state, config) = state_with_temp_config("external-ai-recovery-config");
+        let project = strict_native_project("external-ai-recovery");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        fs::write(project.join(".app/graph-cache.json"), "{ invalid").unwrap();
+
+        let error = state.require_external_ai_access(&context).unwrap_err();
+        assert_eq!(error.code, "PROJECT_EXTERNAL_AI_REQUIRES_TRUST");
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn project_writes_require_trust_writable_state_and_healthy_layout() {
+        let (state, config) = state_with_temp_config("project-write-access-config");
+        let compatible = compatible_project("project-write-compatible");
+        let untrusted = state
+            .project_registry
+            .register("project-a", &compatible)
+            .unwrap();
+        assert_eq!(
+            state
+                .require_project_write_access(&untrusted)
+                .unwrap_err()
+                .code,
+            "PROJECT_WRITE_REQUIRES_TRUST"
+        );
+
+        let trusted_compatible = state
+            .grant_compatible_project_trust("project-a", &compatible)
+            .unwrap();
+        assert_eq!(
+            state
+                .require_project_write_access(&trusted_compatible)
+                .unwrap_err()
+                .code,
+            "PROJECT_WRITE_STATE_UNAVAILABLE"
+        );
+
+        let native = strict_native_project("project-write-native");
+        let trusted_native = state
+            .project_registry
+            .register_trusted_native("project-b", &native)
+            .unwrap();
+        state.require_project_write_access(&trusted_native).unwrap();
+        cleanup_paths(&[&compatible, &native, &config]);
+    }
+
+    #[test]
+    fn unreadable_native_project_keeps_general_workflow_state_but_cannot_execute_or_write() {
+        let (state, config) = state_with_temp_config("unreadable-native-access-config");
+        let project = strict_native_project("unreadable-native-access");
+        fs::remove_file(project.join("wiki/index.md")).unwrap();
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+
+        let access = state.resolve_workflow_access(&context).unwrap();
+        assert_eq!(access.trust, WorkflowProjectTrust::Trusted);
+        assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
+        assert_eq!(
+            state.require_external_ai_access(&context).unwrap_err().code,
+            "PROJECT_EXTERNAL_AI_REQUIRES_TRUST"
+        );
+        assert_eq!(
+            state
+                .require_project_write_access(&context)
+                .unwrap_err()
+                .code,
+            "PROJECT_WRITE_STATE_UNAVAILABLE"
+        );
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
     fn trusted_native_authority_revocation_rotates_epoch_and_cannot_self_restore() {
         let registry = ProjectRegistry::default();
         let project = strict_native_project("trusted-native");
@@ -1206,133 +1529,5 @@ mod project_registry_tests {
         let access = state.resolve_workflow_access(&context).unwrap();
         assert_eq!(access.trust, WorkflowProjectTrust::Untrusted);
         cleanup_paths(&[&project, &config]);
-    }
-}
-
-#[cfg(test)]
-mod folder_preview_tests {
-    use super::AppState;
-    use crate::models::confirmation::PendingActionType;
-    use crate::models::project::{OpenProjectKind, OpenProjectResponse};
-    use crate::services::ProjectService;
-    use std::fs;
-    use std::path::PathBuf;
-
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("llm-wiki-folder-preview-{label}-{stamp}"));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn app_state_in_temp() -> (AppState, PathBuf) {
-        let config = unique_temp_dir("config");
-        let state = AppState {
-            project_service: ProjectService::with_config_dir(config.clone()),
-            ..AppState::default()
-        };
-        (state, config)
-    }
-
-    fn cleanup(dirs: &[&PathBuf]) {
-        for dir in dirs {
-            fs::remove_dir_all(dir).ok();
-        }
-    }
-
-    #[test]
-    fn preview_plain_folder_registers_confirmable_initialize_action() {
-        let (state, config) = app_state_in_temp();
-        let root = unique_temp_dir("plain");
-        fs::write(root.join("report.pdf"), "%PDF-1.4").unwrap();
-        fs::write(root.join("note.md"), "# note").unwrap();
-
-        let outcome = state
-            .preview_folder_as_project(root.to_string_lossy().as_ref())
-            .unwrap();
-
-        let pending = match outcome {
-            OpenProjectResponse {
-                kind: OpenProjectKind::NeedsConfirmation,
-                pending_action: Some(pending),
-                ..
-            } => pending,
-            _ => panic!("plain folder must require confirmation"),
-        };
-        assert_eq!(pending.action_type, PendingActionType::InitializeFolder);
-        assert!(pending.affected_paths.contains(&"report.pdf".to_string()));
-        assert!(pending.affected_paths.contains(&"note.md".to_string()));
-        // Nothing moved before confirmation.
-        assert!(root.join("report.pdf").exists());
-        assert!(!root.join("raw").exists());
-
-        // The pending action is registered and confirmable via the registry,
-        // i.e. the dlg-folder -> confirm_pending_action chain is wired end to end.
-        let stored = state.confirmation_registry.peek(&pending.id).unwrap();
-        assert_eq!(stored.action.id, pending.id);
-        assert!(stored.execution.is_some());
-
-        cleanup(&[&root, &config]);
-    }
-
-    #[test]
-    fn preview_existing_wiki_folder_returns_opened_without_pending_action() {
-        let (state, config) = app_state_in_temp();
-        let root = unique_temp_dir("existing");
-        fs::write(root.join("schema.md"), "# schema").unwrap();
-        fs::write(root.join("index.md"), "# index").unwrap();
-        fs::create_dir_all(root.join("concepts")).unwrap();
-        fs::write(root.join("concepts").join("agent.md"), "# Agent").unwrap();
-
-        let outcome = state
-            .preview_folder_as_project(root.to_string_lossy().as_ref())
-            .unwrap();
-
-        match outcome {
-            OpenProjectResponse {
-                kind: OpenProjectKind::Opened,
-                summary: Some(summary),
-                pending_action: None,
-            } => {
-                assert!(summary.health.is_wiki_project);
-            }
-            _ => panic!("existing wiki folder should open without confirmation"),
-        }
-
-        // No confirmation was registered for an already-project folder.
-        let err = state
-            .confirmation_registry
-            .peek("nonexistent")
-            .expect_err("no pending action should be registered");
-        assert_eq!(err.code, "CONFIRMATION_NOT_FOUND");
-
-        cleanup(&[&root, &config]);
-    }
-
-    #[test]
-    fn preview_plain_folder_with_cjk_filename_is_organized_safely() {
-        let (state, config) = app_state_in_temp();
-        let root = unique_temp_dir("cjk");
-        fs::write(root.join("论文.pdf"), "%PDF-1.4").unwrap();
-
-        let outcome = state
-            .preview_folder_as_project(root.to_string_lossy().as_ref())
-            .unwrap();
-
-        let pending = match outcome {
-            OpenProjectResponse {
-                kind: OpenProjectKind::NeedsConfirmation,
-                pending_action: Some(pending),
-                ..
-            } => pending,
-            _ => panic!("CJK-named folder must require confirmation"),
-        };
-        assert!(pending.affected_paths.contains(&"论文.pdf".to_string()));
-        assert!(root.join("论文.pdf").exists());
-
-        cleanup(&[&root, &config]);
     }
 }
