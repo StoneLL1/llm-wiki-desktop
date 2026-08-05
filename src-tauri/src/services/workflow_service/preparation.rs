@@ -445,6 +445,7 @@ fn build_snapshot(
     let git_policy = git_policy(environment.context, &scope)?;
     let baseline = capture_baseline(environment.context, &scope, &source_versions)?;
     let mut prerequisites = prerequisites(
+        environment.context,
         &scope,
         &project_access,
         &route,
@@ -881,6 +882,7 @@ fn resolve_external_route(
 }
 
 fn prerequisites(
+    context: &ProjectContext,
     scope: &WorkflowScope,
     access: &WorkflowProjectAccessSummary,
     route: &Option<WorkflowRoute>,
@@ -896,71 +898,102 @@ fn prerequisites(
             mode: HealthCheckMode::LocalQuick
         }
     );
-    let mut push = |code: &str, action: WorkflowPrerequisiteAction| {
-        items.push(WorkflowPrerequisite {
+    let prerequisite = |code: &str, message_key: String, action: WorkflowPrerequisiteAction| {
+        WorkflowPrerequisite {
             code: code.into(),
-            message_key: prerequisite_message_key(&action).into(),
+            message_key,
             blocking: true,
             action,
-        });
+        }
     };
     if !local_quick && access.trust == WorkflowProjectTrust::Untrusted {
-        push(
+        items.push(prerequisite(
             "WORKFLOW_PROJECT_UNTRUSTED",
+            prerequisite_message_key(&WorkflowPrerequisiteAction::TrustProject).into(),
             WorkflowPrerequisiteAction::TrustProject,
-        );
+        ));
     }
     if matches!(
         scope,
         WorkflowScope::UpdateWiki { .. } | WorkflowScope::GenerateContent { .. }
     ) && access.filesystem_access == WorkflowFilesystemAccess::ReadOnly
     {
-        push(
+        items.push(prerequisite(
             "WORKFLOW_PROJECT_READ_ONLY",
+            prerequisite_message_key(&WorkflowPrerequisiteAction::MakeWritable).into(),
             WorkflowPrerequisiteAction::MakeWritable,
-        );
+        ));
+    }
+    match scope {
+        WorkflowScope::UpdateWiki { .. } if context.layout.wiki_write_root.is_none() => {
+            items.push(prerequisite(
+                "WORKFLOW_WIKI_WRITE_ROOT_REQUIRED",
+                "workflows.prerequisite.wikiWriteRootRequired".into(),
+                WorkflowPrerequisiteAction::MakeWritable,
+            ));
+        }
+        WorkflowScope::GenerateContent { .. } if context.layout.export_root.is_none() => {
+            items.push(prerequisite(
+                "WORKFLOW_EXPORT_ROOT_REQUIRED",
+                "workflows.prerequisite.exportRootRequired".into(),
+                WorkflowPrerequisiteAction::MakeWritable,
+            ));
+        }
+        _ => {}
     }
     if matches!(
         git_policy,
         WorkflowGitPolicy::RequiredBeforeWrite | WorkflowGitPolicy::RequiredBeforeOverwrite
     ) {
         match access.git_state {
-            WorkflowGitState::Unavailable => push(
+            WorkflowGitState::Unavailable => items.push(prerequisite(
                 "WORKFLOW_GIT_UNAVAILABLE",
+                prerequisite_message_key(&WorkflowPrerequisiteAction::ConfigureGit).into(),
                 WorkflowPrerequisiteAction::ConfigureGit,
-            ),
-            WorkflowGitState::Dirty => push(
+            )),
+            WorkflowGitState::Dirty => items.push(prerequisite(
                 "WORKFLOW_GIT_DIRTY",
+                prerequisite_message_key(&WorkflowPrerequisiteAction::ResolveDirtyGit).into(),
                 WorkflowPrerequisiteAction::ResolveDirtyGit,
-            ),
+            )),
             WorkflowGitState::Clean => {}
         }
     }
     match scope {
         WorkflowScope::UpdateWiki { .. } => {
             if sources.is_empty() {
-                push(
+                items.push(prerequisite(
                     "WORKFLOW_SOURCES_REQUIRED",
+                    prerequisite_message_key(&WorkflowPrerequisiteAction::ImportSources).into(),
                     WorkflowPrerequisiteAction::ImportSources,
-                );
+                ));
             }
         }
-        WorkflowScope::HealthCheck { .. } if wiki_pages.is_empty() && sources.is_empty() => push(
-            "WORKFLOW_MARKDOWN_REQUIRED",
-            WorkflowPrerequisiteAction::ImportSources,
-        ),
-        WorkflowScope::GenerateContent { .. } if wiki_pages.is_empty() => push(
+        WorkflowScope::HealthCheck { .. } if wiki_pages.is_empty() && sources.is_empty() => items
+            .push(prerequisite(
+                "WORKFLOW_MARKDOWN_REQUIRED",
+                prerequisite_message_key(&WorkflowPrerequisiteAction::ImportSources).into(),
+                WorkflowPrerequisiteAction::ImportSources,
+            )),
+        WorkflowScope::GenerateContent { .. } if wiki_pages.is_empty() => items.push(prerequisite(
             "WORKFLOW_WIKI_REQUIRED",
+            prerequisite_message_key(&WorkflowPrerequisiteAction::UpdateWiki).into(),
             WorkflowPrerequisiteAction::UpdateWiki,
-        ),
+        )),
         _ => {}
     }
     if !local_quick && route.is_none() {
-        push(
+        items.push(prerequisite(
             "WORKFLOW_ROUTE_REQUIRED",
+            prerequisite_message_key(
+                &route_prerequisite_action
+                    .clone()
+                    .unwrap_or(WorkflowPrerequisiteAction::ConfigureExecutionRoute),
+            )
+            .into(),
             route_prerequisite_action
                 .unwrap_or(WorkflowPrerequisiteAction::ConfigureExecutionRoute),
-        );
+        ));
     }
     items
 }
@@ -1037,9 +1070,14 @@ fn baseline_files(
         }
         _ => list_readable_markdown(context)?,
     };
-    for path in ["purpose.md", "schema.md"] {
-        if context.resolve_project_path(path)?.is_file() {
-            files.push(path.into());
+    for document in [
+        &context.layout.purpose_context,
+        &context.layout.schema_context,
+    ] {
+        if let Some(path) = document.as_ref().and_then(|item| item.read_path.as_deref()) {
+            if context.resolve_project_path(path)?.is_file() {
+                files.push(path.into());
+            }
         }
     }
     files.sort();
@@ -1054,7 +1092,7 @@ fn output_summary(
     match scope {
         WorkflowScope::UpdateWiki { .. } => Ok(WorkflowOutputSummary {
             label_key: "workflows.output.wiki".into(),
-            location: Some("wiki/".into()),
+            location: context.layout.wiki_write_root.clone(),
             may_change_wiki: true,
         }),
         WorkflowScope::HealthCheck { .. } => Ok(WorkflowOutputSummary {
@@ -1063,12 +1101,17 @@ fn output_summary(
             may_change_wiki: false,
         }),
         WorkflowScope::GenerateContent { output_path, .. } => {
-            if let Some(path) = output_path {
-                let _ = context.resolve_project_path(path)?;
-            }
+            let location = match (context.layout.export_root.as_deref(), output_path) {
+                (Some(_root), Some(path)) => {
+                    let _ = context.resolve_project_path(path)?;
+                    Some(path.clone())
+                }
+                (Some(root), None) => Some(root.into()),
+                (None, _) => None,
+            };
             Ok(WorkflowOutputSummary {
                 label_key: "workflows.output.export".into(),
-                location: output_path.clone(),
+                location,
                 may_change_wiki: false,
             })
         }

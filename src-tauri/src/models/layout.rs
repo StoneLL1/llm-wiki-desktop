@@ -85,8 +85,12 @@ pub enum NativeLayoutGap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeLayoutState {
     Current,
-    RepairableLegacy { missing: Vec<NativeLayoutRequirement> },
-    IncompleteLegacy { reasons: Vec<NativeLayoutGap> },
+    RepairableLegacy {
+        missing: Vec<NativeLayoutRequirement>,
+    },
+    IncompleteLegacy {
+        reasons: Vec<NativeLayoutGap>,
+    },
     NotNative,
 }
 
@@ -442,7 +446,11 @@ fn discover_compatible_layout(
     let compat_enabled = compat_purpose && compat_schema;
     Ok(ProjectLayoutResolution {
         layout: ProjectLayout {
-            app_state_root: compat_enabled.then(|| ".app".into()),
+            // Compatible vault state is intentionally isolated from the
+            // user's Markdown layout.  Having this root never grants a
+            // content-write capability: compatible adapters still expose no
+            // source/wiki/export write roots until a later explicit mapping.
+            app_state_root: compat_enabled.then(|| ".app/compat".into()),
             evidence_root: None,
             markdown_roots,
             source_write_root: None,
@@ -453,19 +461,19 @@ fn discover_compatible_layout(
             queries_write_root: None,
             export_root: None,
             skills_root: None,
-            import_state_root: None,
-            source_state_root: None,
-            compile_state_root: None,
-            chat_state_root: None,
-            task_state_root: None,
-            workflow_state_root: None,
-            graph_cache_path: None,
-            lint_report_root: None,
-            lint_ignore_path: None,
-            export_record_path: None,
-            bookmarks_path: None,
-            settings_path: None,
-            agent_config_path: None,
+            import_state_root: compat_enabled.then(|| ".app/compat/import-sessions".into()),
+            source_state_root: compat_enabled.then(|| ".app/compat/sources".into()),
+            compile_state_root: compat_enabled.then(|| ".app/compat/compile".into()),
+            chat_state_root: compat_enabled.then(|| ".app/compat/chats".into()),
+            task_state_root: compat_enabled.then(|| ".app/compat/tasks".into()),
+            workflow_state_root: compat_enabled.then(|| ".app/compat/workflows".into()),
+            graph_cache_path: compat_enabled.then(|| ".app/compat/graph-cache.json".into()),
+            lint_report_root: compat_enabled.then(|| ".app/compat/lint-reports".into()),
+            lint_ignore_path: compat_enabled.then(|| ".app/compat/lint-ignore.json".into()),
+            export_record_path: compat_enabled.then(|| ".app/compat/exports.json".into()),
+            bookmarks_path: compat_enabled.then(|| ".app/compat/bookmarks.json".into()),
+            settings_path: compat_enabled.then(|| ".app/compat/settings.json".into()),
+            agent_config_path: compat_enabled.then(|| ".app/compat/agent-config.json".into()),
             purpose_context: if compat_purpose {
                 Some(ProjectContextDocument {
                     read_path: some(".app/compat/purpose.md"),
@@ -1046,6 +1054,12 @@ mod tests {
         fs::write(root.join("UPPER.MD"), "# Upper").unwrap();
 
         let layout = resolve_layout(&root).unwrap().layout;
+        assert_eq!(layout.app_state_root.as_deref(), Some(".app/compat"));
+        assert_eq!(layout.task_state_root.as_deref(), Some(".app/compat/tasks"));
+        assert_eq!(
+            layout.workflow_state_root.as_deref(),
+            Some(".app/compat/workflows")
+        );
         let files = layout
             .list_markdown_files(
                 &root,

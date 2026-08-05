@@ -4,11 +4,14 @@ use std::sync::{Mutex, RwLock};
 
 use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
 use crate::models::confirmation::ConfirmationRegistry;
-use crate::models::layout::{inspect_native_layout, resolve_layout, NativeLayoutState, ProjectLayoutConfidence};
+use crate::models::layout::{
+    inspect_native_layout, resolve_layout, NativeLayoutState, ProjectLayoutConfidence,
+};
 use crate::models::paths::ProjectContext;
 use crate::models::project::{ProjectFilesystemAccess, ProjectTrustKind};
 use crate::models::workflow::{
-    WorkflowFilesystemAccess, WorkflowGitState, WorkflowPersistenceMode, WorkflowProjectTrust,
+    WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind, WorkflowPersistenceMode,
+    WorkflowProjectTrust,
 };
 use crate::services::import_v2::capability_runtime::ImportCapabilityRuntime;
 use crate::services::import_v2::connector_session::ConnectorSessionService;
@@ -19,6 +22,26 @@ use crate::services::{
     SearchService, SecretService, SettingsService, WorkflowService,
 };
 use crate::tasks::TaskService;
+use crate::utils::path_safety::validate_existing_project_directory;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectWriteRootKind {
+    Source,
+    Wiki,
+    Export,
+    Query,
+}
+
+impl ProjectWriteRootKind {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Wiki => "wiki",
+            Self::Export => "export",
+            Self::Query => "query",
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct AppState {
@@ -531,16 +554,55 @@ impl AppState {
                     true,
                 ));
             }
-            if access.persistence != WorkflowPersistenceMode::Persistent {
-                return Err(BackendError::new(
-                    "PROJECT_WRITE_STATE_UNAVAILABLE",
-                    "Project application state is not available for a safe write.",
-                    true,
-                    true,
-                ));
-            }
             Ok(())
         })
+    }
+
+    /// Content writes require a layout-specific root in addition to the
+    /// authority/filesystem/persistence checks above. App-owned state alone
+    /// is deliberately insufficient for a compatible vault.
+    pub(crate) fn require_project_content_write_root(
+        &self,
+        context: &ProjectContext,
+        root_kind: ProjectWriteRootKind,
+    ) -> Result<(), BackendError> {
+        let relative = match root_kind {
+            ProjectWriteRootKind::Source => context.layout.source_write_root.as_deref(),
+            ProjectWriteRootKind::Wiki => context.layout.wiki_write_root.as_deref(),
+            ProjectWriteRootKind::Export => context.layout.export_root.as_deref(),
+            ProjectWriteRootKind::Query => context.layout.queries_write_root.as_deref(),
+        };
+        let missing = || {
+            BackendError::new(
+                "PROJECT_LAYOUT_ROOT_UNAVAILABLE",
+                "The project layout does not provide the required content write root.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "rootKind": root_kind.detail() }))
+        };
+        let relative = relative.ok_or_else(missing)?;
+        let root = context
+            .resolve_project_path(relative)
+            .map_err(|_| missing())?;
+        validate_existing_project_directory(&context.root, &root).map_err(|_| missing())?;
+        Ok(())
+    }
+
+    pub(crate) fn require_workflow_content_write_root(
+        &self,
+        context: &ProjectContext,
+        kind: &WorkflowKind,
+    ) -> Result<(), BackendError> {
+        match kind {
+            WorkflowKind::UpdateWiki => {
+                self.require_project_content_write_root(context, ProjectWriteRootKind::Wiki)
+            }
+            WorkflowKind::GenerateContent => {
+                self.require_project_content_write_root(context, ProjectWriteRootKind::Export)
+            }
+            WorkflowKind::HealthCheck => Ok(()),
+        }
     }
 
     pub(crate) fn with_workflow_access<T>(
@@ -755,11 +817,24 @@ impl AppState {
                 return Err(error);
             }
         };
+        let task_root = self
+            .project_service
+            .has_writable_task_state_root(&context)
+            .then(|| {
+                context
+                    .layout
+                    .task_state_root
+                    .as_ref()
+                    .map(|relative| context.root.join(relative))
+            })
+            .flatten();
         if let Err(message) = self
             .task_service
-            .rebind_workflows_for_root(&context.root, None)
+            .rebind_workflows_for_root(&context.root, task_root)
         {
-            let _ = self.project_registry.revoke_trust(project_id, &context.root);
+            let _ = self
+                .project_registry
+                .revoke_trust(project_id, &context.root);
             let _ = self.project_service.revoke_project_trust(&context.root);
             return Err(BackendError::new(
                 "WORKFLOW_PERSISTENCE_REBIND_FAILED",
@@ -802,9 +877,9 @@ mod project_registry_tests {
     use std::sync::{mpsc, Arc, Barrier};
     use std::time::Duration;
 
-    use super::{AppState, ProjectRegistry, ProjectTrustAuthority};
+    use super::{AppState, ProjectRegistry, ProjectTrustAuthority, ProjectWriteRootKind};
     use crate::errors::PROJECT_CONTEXT_MISMATCH;
-    use crate::models::project::ProjectTrustKind;
+    use crate::models::project::{ProjectTemplate, ProjectTrustKind};
     use crate::models::workflow::{
         HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
         WorkflowKind, WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectTrust,
@@ -1233,6 +1308,36 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn enabled_compatible_state_persists_workflows_without_content_write_roots() {
+        let (state, config) = state_with_temp_config("compatible-state-root-config");
+        let project = compatible_project("compatible-state-root");
+        state
+            .project_registry
+            .register("project-a", &project)
+            .unwrap();
+        let restricted = state
+            .project_registry
+            .resolve("project-a", &project)
+            .unwrap();
+        state
+            .project_service
+            .enable_compatible_guidance(&restricted, ProjectTemplate::General)
+            .unwrap();
+
+        let context = state
+            .grant_compatible_project_trust("project-a", &project)
+            .unwrap();
+        let access = state.resolve_workflow_access(&context).unwrap();
+
+        assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
+        assert!(project.join(".app/compat/tasks").is_dir());
+        assert!(project.join(".app/compat/workflows").is_dir());
+        assert!(context.layout.wiki_write_root.is_none());
+        assert!(context.layout.export_root.is_none());
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
     fn explicit_native_revoke_rebinds_every_existing_workflow_to_memory_only() {
         let (state, config) = state_with_temp_config("native-rebind-config");
         let project = strict_native_project("native-rebind");
@@ -1353,7 +1458,7 @@ mod project_registry_tests {
     }
 
     #[test]
-    fn project_writes_require_trust_writable_state_and_healthy_layout() {
+    fn project_writes_require_trust_writable_health_and_a_specific_content_root() {
         let (state, config) = state_with_temp_config("project-write-access-config");
         let compatible = compatible_project("project-write-compatible");
         let untrusted = state
@@ -1371,12 +1476,20 @@ mod project_registry_tests {
         let trusted_compatible = state
             .grant_compatible_project_trust("project-a", &compatible)
             .unwrap();
+        state
+            .require_project_write_access(&trusted_compatible)
+            .unwrap();
+        let root_error = state
+            .require_project_content_write_root(&trusted_compatible, ProjectWriteRootKind::Wiki)
+            .unwrap_err();
+        assert_eq!(root_error.code, "PROJECT_LAYOUT_ROOT_UNAVAILABLE");
         assert_eq!(
-            state
-                .require_project_write_access(&trusted_compatible)
-                .unwrap_err()
-                .code,
-            "PROJECT_WRITE_STATE_UNAVAILABLE"
+            root_error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("rootKind"))
+                .and_then(|value| value.as_str()),
+            Some("wiki")
         );
 
         let native = strict_native_project("project-write-native");

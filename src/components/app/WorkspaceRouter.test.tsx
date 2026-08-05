@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import type { ImportWorkflow } from "../../features/import/useImportWorkflow";
 import type { WorkflowsController } from "../../features/workflows/useWorkflowsController";
+import { WorkspaceRouter } from "./WorkspaceRouter";
 
 const capabilities: AiCapabilitiesWorkflow = {
   agents: [],
@@ -95,32 +96,30 @@ const workflowsController: WorkflowsController = {
   backToOverview: vi.fn(),
 };
 
-function installViewMocks() {
-  vi.doMock("../../features/dashboard/DashboardView", () => ({
-    DashboardView: () => <div data-testid="dashboard-view" />,
-  }));
-  vi.doMock("../../features/wiki/WikiView", () => ({
-    WikiView: () => <div data-testid="wiki-view" />,
-  }));
-  vi.doMock("../../features/chat/ChatView", () => ({
-    ChatView: () => <div data-testid="chat-view" />,
-  }));
-  vi.doMock("../../features/graph/GraphView", () => ({
-    GraphView: () => <div data-testid="graph-view" />,
-  }));
-  vi.doMock("../../features/lint/LintView", () => ({
-    LintView: () => <div data-testid="lint-view" />,
-  }));
-  vi.doMock("../../features/exports/ExportsView", () => ({
-    ExportsView: () => <div data-testid="exports-view" />,
-  }));
-  vi.doMock("../../features/import/ImportView", () => ({
-    ImportView: () => <div data-testid="import-view" />,
-  }));
-  vi.doMock("../../features/workflows/WorkflowsView", () => ({
-    WorkflowsView: () => <div data-testid="workflows-view" />,
-  }));
-}
+vi.mock("../../features/dashboard/DashboardView", () => ({
+  DashboardView: () => <div data-testid="dashboard-view" />,
+}));
+vi.mock("../../features/wiki/WikiView", () => ({
+  WikiView: () => <div data-testid="wiki-view" />,
+}));
+vi.mock("../../features/chat/ChatView", () => ({
+  ChatView: () => <div data-testid="chat-view" />,
+}));
+vi.mock("../../features/graph/GraphView", () => ({
+  GraphView: () => <div data-testid="graph-view" />,
+}));
+vi.mock("../../features/lint/LintView", () => ({
+  LintView: () => <div data-testid="lint-view" />,
+}));
+vi.mock("../../features/exports/ExportsView", () => ({
+  ExportsView: () => <div data-testid="exports-view" />,
+}));
+vi.mock("../../features/import/ImportView", () => ({
+  ImportView: () => <div data-testid="import-view" />,
+}));
+vi.mock("../../features/workflows/WorkflowsView", () => ({
+  WorkflowsView: () => <div data-testid="workflows-view" />,
+}));
 
 const sharedProps = {
   capabilities,
@@ -130,20 +129,13 @@ const sharedProps = {
 };
 
 afterEach(() => {
-  vi.resetModules();
   vi.clearAllMocks();
 });
 
 describe("WorkspaceRouter", () => {
   it("maps every workspace view while keeping Dashboard static", async () => {
-    installViewMocks();
-    const { WorkspaceRouter } = await import("./WorkspaceRouter");
-    const { rerender } = render(
-      <WorkspaceRouter activeView="dashboard" {...sharedProps} />,
-    );
-
-    expect(screen.getByTestId("dashboard-view")).toBeInTheDocument();
-    for (const view of [
+    const views = [
+      "dashboard",
       "wiki",
       "chat",
       "graph",
@@ -151,8 +143,17 @@ describe("WorkspaceRouter", () => {
       "exports",
       "import",
       "workflows",
-    ] as const) {
-      rerender(<WorkspaceRouter activeView={view} {...sharedProps} />);
+    ] as const;
+    render(
+      <>
+        {views.map((view) => (
+          <WorkspaceRouter key={view} activeView={view} {...sharedProps} />
+        ))}
+      </>,
+    );
+
+    expect(screen.getByTestId("dashboard-view")).toBeInTheDocument();
+    for (const view of views.filter((view) => view !== "dashboard")) {
       expect(await screen.findByTestId(`${view}-view`)).toBeInTheDocument();
     }
   });

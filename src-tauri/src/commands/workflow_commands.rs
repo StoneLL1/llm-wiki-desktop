@@ -409,6 +409,7 @@ pub(crate) fn revalidate_workflow_replay_with_access(
     access: crate::services::WorkflowAccessSnapshot,
 ) -> Result<WorkflowReplayValidation, BackendError> {
     ensure_workflow_identity(context, run)?;
+    state.require_workflow_content_write_root(context, &run.kind)?;
     let persistence = resolve_workflow_persistence_binding(context, access.persistence.clone())?;
     let route_selection = run.route.as_ref().and_then(|route| match route {
         crate::models::workflow::WorkflowRoute::Agent { agent, .. } => {
@@ -506,6 +507,7 @@ pub fn confirm_workflow_action(
                 "Workflow confirmation requires writable project access.",
             ));
         }
+        state.require_workflow_content_write_root(&context, &run.kind)?;
         let stored = state.confirmation_registry.claim(&request.action_id)?;
         if !confirmation_execution_matches(
             &run.kind,

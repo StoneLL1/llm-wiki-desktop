@@ -371,6 +371,8 @@ pub fn enable_compatible_full_features(
     let mut affected_paths = vec![
         ".app/compat/purpose.md".to_string(),
         ".app/compat/schema.md".to_string(),
+        ".app/compat/tasks".to_string(),
+        ".app/compat/workflows".to_string(),
     ];
     if initialize_git {
         affected_paths.push(".git".to_string());
@@ -388,7 +390,7 @@ pub fn enable_compatible_full_features(
             summary: "Existing Markdown and .obsidian content will remain in place.".into(),
             before: None,
             after: Some(
-                "Only .app/compat guidance and the optional local .git history will be created."
+                "Only .app/compat guidance, task/workflow state roots, and the optional local .git history will be created."
                     .into(),
             ),
             diff: None,
