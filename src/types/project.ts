@@ -57,6 +57,8 @@ export type ProjectFormat =
   | "ordinary_materials"
   | "unknown";
 
+export type ProjectOpenIntent = "open_as_markdown_vault" | "create_from_materials";
+
 export type ProjectTrustState = "trusted" | "untrusted";
 export type ProjectFilesystemAccess = "writable" | "read_only";
 export type ProjectHealth = "healthy" | "repairable" | "recovery" | "unreadable";
@@ -95,9 +97,11 @@ export interface ProjectOpenAssessment {
   canonicalIdentityKey: string;
   identityRevision: string;
   format: ProjectFormat;
+  rememberedOpenIntent?: ProjectOpenIntent;
   trust: ProjectTrustState;
   filesystemAccess: ProjectFilesystemAccess;
   health: ProjectHealth;
+  repairAvailable?: boolean;
   layout: ProjectLayout;
   confidence: ProjectLayoutConfidence;
   markers: ProjectMarker[];
@@ -105,6 +109,55 @@ export interface ProjectOpenAssessment {
   warnings: ProjectAssessmentWarning[];
   layoutWarnings: ProjectLayoutWarning[];
   git: ProjectGitAssessment;
+}
+
+export type ProjectRepairOperationType = "regenerate_graph_cache" | "create_directory";
+
+export interface ProjectRepairOperation {
+  operationType: ProjectRepairOperationType;
+  targetPath: string;
+  backupPath?: string;
+  expectedHash?: string;
+  allowlistDescriptor?: string;
+}
+
+export interface ProjectRepairPlan {
+  repairPlanId: string;
+  canonicalIdentityKey: string;
+  identityRevision: string;
+  expectedGitHead?: string;
+  expectedGitPaths: string[];
+  operations: ProjectRepairOperation[];
+  protectedPaths: string[];
+  externalLinksRemainBlocked: boolean;
+}
+
+/**
+ * Backend-derived authorization and readiness facts for the currently opened
+ * project. Keep the dimensions separate: a project can be trusted yet
+ * read-only, or untrusted while its filesystem itself is writable.
+ */
+export interface ProjectSessionAuthority {
+  projectId: string;
+  canonicalRootPath: string;
+  canonicalIdentityKey: string;
+  identityRevision: string;
+  authorityRevision: string;
+  format: ProjectFormat;
+  trust: ProjectTrustState;
+  filesystemAccess: ProjectFilesystemAccess;
+  health: ProjectHealth;
+  layout: ProjectLayout;
+  confidence: ProjectLayoutConfidence;
+  capabilities: ProjectCapability[];
+  warnings: ProjectAssessmentWarning[];
+  layoutWarnings: ProjectLayoutWarning[];
+  git: ProjectGitAssessment;
+}
+
+export interface OpenedProject {
+  summary: ProjectSummary;
+  authority: ProjectSessionAuthority;
 }
 
 export type AssessmentOperationStatus = "running" | "completed" | "failed";
@@ -144,6 +197,8 @@ export type GraphState = "cached" | "stale" | "missing";
 
 export type AgentRoute = "agent" | "byok" | "unconfigured";
 
+export type ProjectInventoryState = "scanning" | "partial" | "failed" | "ready";
+
 export interface ProjectHealthReport {
   isWikiProject: boolean;
   hasPurpose: boolean;
@@ -164,6 +219,7 @@ export interface ProjectSummary {
   indexState: IndexState;
   graphState: GraphState;
   agentRoute: AgentRoute;
+  inventoryState?: ProjectInventoryState;
   health: ProjectHealthReport;
 }
 
@@ -186,5 +242,6 @@ export type OpenProjectKind = "opened" | "needs_confirmation";
 export interface OpenProjectResponse {
   kind: OpenProjectKind;
   summary?: ProjectSummary;
+  authority?: ProjectSessionAuthority;
   pendingAction?: PendingAction;
 }

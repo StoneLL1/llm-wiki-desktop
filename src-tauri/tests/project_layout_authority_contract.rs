@@ -1,27 +1,29 @@
 use std::sync::atomic::AtomicBool;
 
 use llm_wiki_desktop_lib::app_state::ProjectRegistry;
-use llm_wiki_desktop_lib::models::layout::resolve_layout;
+use llm_wiki_desktop_lib::models::layout::{inspect_native_layout, resolve_layout, NativeLayoutState};
 use llm_wiki_desktop_lib::models::project::{ProjectFormat, ProjectHealth};
 use llm_wiki_desktop_lib::services::assess_project_folder;
 
 fn legacy_native(root: &std::path::Path, missing: &str) {
-    for directory in [".app", "raw", "wiki", "exports", "skills"] {
-        std::fs::create_dir_all(root.join(directory)).unwrap();
+    for directory in [
+        ".app/chats", ".app/tasks", "raw/sources/pdfs", "raw/sources/docs",
+        "raw/sources/slides", "raw/sources/sheets", "raw/sources/markdown",
+        "raw/sources/links", "raw/sources/other", "raw/extracted", "raw/assets",
+        "wiki/entities", "wiki/concepts", "wiki/sources", "wiki/queries", "wiki/synthesis",
+        "wiki/comparisons", "exports/html", "skills",
+    ] {
+        if directory != missing && !directory.starts_with(&format!("{missing}/")) {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
     }
     std::fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
     std::fs::write(root.join("schema.md"), "# Schema\n").unwrap();
     std::fs::write(root.join("wiki/legacy-page.md"), "# Legacy\n").unwrap();
-    if missing != "raw/sources" {
-        std::fs::create_dir_all(root.join("raw/sources")).unwrap();
-    }
-    if missing != ".app/tasks" {
-        std::fs::create_dir_all(root.join(".app/tasks")).unwrap();
-    }
 }
 
 #[test]
-fn expected_red_layout_and_registry_disagree_for_legacy_task_root() {
+fn legacy_native_layout_inspection_agrees_on_a_repairable_missing_task_root() {
     let root = tempfile::tempdir().unwrap();
     legacy_native(root.path(), ".app/tasks");
 
@@ -29,14 +31,15 @@ fn expected_red_layout_and_registry_disagree_for_legacy_task_root() {
     assert_eq!(layout.layout.app_state_root.as_deref(), Some(".app"));
     assert_eq!(layout.layout.evidence_root.as_deref(), Some("raw"));
     assert_eq!(layout.layout.wiki_write_root.as_deref(), Some("wiki"));
-    assert!(
-        !ProjectRegistry::is_strict_native_layout(root.path()),
-        "this witness must turn green in Batch B when native inspection is unified"
-    );
+    assert!(matches!(
+        inspect_native_layout(root.path()).state,
+        NativeLayoutState::RepairableLegacy { .. }
+    ));
+    assert!(!ProjectRegistry::is_strict_native_layout(root.path()));
 }
 
 #[test]
-fn expected_red_native_legacy_is_repairable_without_a_repair_plan() {
+fn native_legacy_repairable_state_advertises_a_repair_plan() {
     let root = tempfile::tempdir().unwrap();
     legacy_native(root.path(), "raw/sources");
     let config = tempfile::tempdir().unwrap();
@@ -49,10 +52,7 @@ fn expected_red_native_legacy_is_repairable_without_a_repair_plan() {
     .unwrap();
     assert_eq!(assessment.format, ProjectFormat::NativeLegacy);
     assert_eq!(assessment.health, ProjectHealth::Repairable);
-    assert!(
-        !assessment.repair_available,
-        "this witness must become a positive repair-plan contract in Batch B"
-    );
+    assert!(assessment.repair_available);
 }
 
 
@@ -103,8 +103,8 @@ fn expected_red_evidence_is_unique_valid_json_and_keeps_green_targets_visible() 
 
     let witnesses = evidence["witnesses"].as_array().unwrap();
     let expected_witnesses = [
-        ("project_layout_authority_contract.rs", "expected_red_layout_and_registry_disagree_for_legacy_task_root", true),
-        ("project_layout_authority_contract.rs", "expected_red_native_legacy_is_repairable_without_a_repair_plan", true),
+        ("project_layout_authority_contract.rs", "legacy_native_layout_inspection_agrees_on_a_repairable_missing_task_root", true),
+        ("project_layout_authority_contract.rs", "native_legacy_repairable_state_advertises_a_repair_plan", true),
         ("workflow_compatible_layout.rs", "expected_red_compatible_enablement_has_no_task_state_root", true),
         ("import_v2_file_discovery.rs", "batch_a_expected_red_counts_one_discovery_callback_per_file", true),
         ("import_v2_scale_contract.rs", "expected_red_single_item_update_rewrites_every_persisted_item_file", true),

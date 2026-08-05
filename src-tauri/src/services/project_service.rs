@@ -10,6 +10,7 @@ use crate::errors::BackendError;
 use crate::models::graph::GraphData;
 use crate::models::layout::{
     canonical_internal_read_path, is_link_or_reparse, project_descendant_path_enters_link,
+    inspect_native_layout, native_repair_directory_allowed, NativeLayoutState,
     ProjectMarkdownRootRole,
 };
 use crate::models::paths::ProjectContext;
@@ -385,8 +386,9 @@ impl ProjectService {
             operations: vec![ProjectRepairOperation {
                 operation_type: ProjectRepairOperationType::RegenerateGraphCache,
                 target_path: ".app/graph-cache.json".into(),
-                backup_path,
-                expected_hash: sha256_hex(&bytes),
+                backup_path: Some(backup_path),
+                expected_hash: Some(sha256_hex(&bytes)),
+                allowlist_descriptor: None,
             }],
             protected_paths: vec![
                 "raw/".into(),
@@ -426,8 +428,12 @@ impl ProjectService {
             || operation.target_path != ".app/graph-cache.json"
             || !operation
                 .backup_path
-                .starts_with(".app/recovery-backups/graph-cache.")
-            || !operation.backup_path.ends_with(".invalid.json")
+                .as_deref()
+                .is_some_and(|path| path.starts_with(".app/recovery-backups/graph-cache."))
+            || !operation
+                .backup_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with(".invalid.json"))
         {
             return Err(BackendError::new(
                 "PROJECT_REPAIR_PLAN_UNSUPPORTED",
@@ -439,7 +445,7 @@ impl ProjectService {
 
         let target = root.join(".app").join("graph-cache.json");
         let bytes = read_invalid_graph_cache(&root, &target)?;
-        if sha256_hex(&bytes) != operation.expected_hash {
+        if operation.expected_hash.as_deref() != Some(sha256_hex(&bytes).as_str()) {
             return Err(BackendError::new(
                 "PROJECT_REPAIR_TARGET_CHANGED",
                 "The corrupt cache changed after the repair preview. Prepare repair again.",
@@ -448,7 +454,8 @@ impl ProjectService {
             ));
         }
 
-        let backup = root.join(&operation.backup_path);
+        let backup_path = operation.backup_path.as_deref().expect("validated repair backup path");
+        let backup = root.join(backup_path);
         let backup_directory = backup.parent().ok_or_else(|| {
             BackendError::new(
                 "PROJECT_REPAIR_PLAN_UNSUPPORTED",
@@ -501,9 +508,219 @@ impl ProjectService {
         replace_graph_cache_atomically(&root, &target, &replacement)?;
 
         Ok(vec![
-            operation.backup_path.clone(),
+            backup_path.to_string(),
             operation.target_path.clone(),
         ])
+    }
+
+    /// Prepares a directory-only repair for a recognized legacy native
+    /// layout.  This is intentionally independent from graph-cache recovery:
+    /// empty-directory creation neither overwrites content nor creates a Git
+    /// tree entry, so it must not pretend to have a cache-repair backup or
+    /// checkpoint contract.
+    pub(crate) fn prepare_native_layout_repair_plan(
+        &self,
+        context: &ProjectContext,
+        canonical_identity_key: String,
+        identity_revision: String,
+    ) -> Result<ProjectRepairPlan, BackendError> {
+        let root = repair_safe_root(context)?;
+        let NativeLayoutState::RepairableLegacy { missing } = inspect_native_layout(&root).state else {
+            return Err(BackendError::new(
+                "PROJECT_NATIVE_REPAIR_UNAVAILABLE",
+                "This project does not have a safe legacy native layout repair.",
+                true,
+                true,
+            ));
+        };
+        if missing.is_empty() {
+            return Err(BackendError::new(
+                "PROJECT_NATIVE_REPAIR_UNAVAILABLE",
+                "No missing native directories can be repaired safely.",
+                true,
+                true,
+            ));
+        }
+        let mut operations = Vec::with_capacity(missing.len());
+        for requirement in missing {
+            let target_path = requirement.relative_path();
+            let target = root.join(target_path);
+            match fs::symlink_metadata(&target) {
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Ok(_) => {
+                    return Err(BackendError::new(
+                        "PROJECT_NATIVE_REPAIR_UNAVAILABLE",
+                        "A required native path is no longer safely missing.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "path": target_path })));
+                }
+                Err(error) => {
+                    return Err(BackendError::new(
+                        "PROJECT_NATIVE_REPAIR_UNAVAILABLE",
+                        "A required native path could not be inspected safely.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "path": target_path, "error": error.to_string() })));
+                }
+            }
+            operations.push(ProjectRepairOperation {
+                operation_type: ProjectRepairOperationType::CreateDirectory,
+                target_path: target_path.into(),
+                backup_path: None,
+                expected_hash: None,
+                allowlist_descriptor: Some(format!("native-layout-v{}", crate::models::layout::CURRENT_NATIVE_LAYOUT_VERSION)),
+            });
+        }
+
+        Ok(ProjectRepairPlan {
+            repair_plan_id: uuid::Uuid::new_v4().to_string(),
+            canonical_identity_key,
+            identity_revision,
+            expected_git_head: None,
+            expected_git_paths: Vec::new(),
+            operations,
+            protected_paths: vec![
+                "raw/".into(),
+                "wiki/".into(),
+                "purpose.md".into(),
+                "schema.md".into(),
+            ],
+            external_links_remain_blocked: true,
+        })
+    }
+
+    /// Applies only an already-previewed set of allowlisted missing
+    /// directories.  Every target is rechecked immediately before creation;
+    /// a failure removes only directories created by this invocation and only
+    /// when they remain empty.
+    pub(crate) fn apply_native_layout_repair_plan(
+        &self,
+        context: &ProjectContext,
+        plan: &ProjectRepairPlan,
+    ) -> Result<Vec<String>, BackendError> {
+        let _write_guard = project_repair_write_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _initial_root = repair_safe_root(context)?;
+        let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
+        let root = repair_safe_root(context)?;
+
+        let NativeLayoutState::RepairableLegacy { missing } = inspect_native_layout(&root).state else {
+            return Err(BackendError::new(
+                "PROJECT_NATIVE_REPAIR_STALE",
+                "The native layout changed after the repair preview. Prepare repair again.",
+                true,
+                true,
+            ));
+        };
+        let expected = missing
+            .iter()
+            .map(|requirement| requirement.relative_path())
+            .collect::<HashSet<_>>();
+        let planned = plan
+            .operations
+            .iter()
+            .map(|operation| operation.target_path.as_str())
+            .collect::<HashSet<_>>();
+        if expected != planned || planned.is_empty() || planned.len() != plan.operations.len() {
+            return Err(BackendError::new(
+                "PROJECT_NATIVE_REPAIR_STALE",
+                "The planned native directories no longer match the project layout.",
+                true,
+                true,
+            ));
+        }
+
+        let mut created = Vec::new();
+        let descriptor = format!(
+            "native-layout-v{}",
+            crate::models::layout::CURRENT_NATIVE_LAYOUT_VERSION
+        );
+        let result = (|| {
+            for operation in &plan.operations {
+                if operation.operation_type != ProjectRepairOperationType::CreateDirectory
+                    || !native_repair_directory_allowed(&operation.target_path)
+                    || operation.backup_path.is_some()
+                    || operation.expected_hash.is_some()
+                    || operation.allowlist_descriptor.as_deref() != Some(descriptor.as_str())
+                {
+                    return Err(BackendError::new(
+                        "PROJECT_REPAIR_PLAN_UNSUPPORTED",
+                        "The repair plan contains an unsafe native directory operation.",
+                        true,
+                        true,
+                    ));
+                }
+                let target = root.join(&operation.target_path);
+                match fs::symlink_metadata(&target) {
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        return Err(BackendError::new(
+                            "PROJECT_NATIVE_REPAIR_STALE",
+                            "A native repair target appeared after preview. Prepare repair again.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "path": operation.target_path })));
+                    }
+                    Err(error) => {
+                        return Err(BackendError::new(
+                            "PROJECT_REPAIR_PATH_UNSAFE",
+                            "A native repair target could not be inspected safely.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "path": operation.target_path, "error": error.to_string() })));
+                    }
+                }
+                let created_paths = create_native_repair_directory(&root, &target)
+                    .map_err(|message| repair_path_unsafe_error("Native repair cannot create an unsafe directory.", message))?;
+                if !created_paths.iter().any(|path| path == &target) {
+                    return Err(BackendError::new(
+                        "PROJECT_NATIVE_REPAIR_STALE",
+                        "A native repair target appeared while the repair was running. Prepare repair again.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "path": operation.target_path })));
+                }
+                for path in created_paths {
+                    let relative = path.strip_prefix(&root).map_err(|_| BackendError::new(
+                        "PROJECT_REPAIR_PATH_UNSAFE",
+                        "Native repair created a path outside the project.",
+                        false,
+                        true,
+                    ))?;
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    if !native_repair_directory_allowed(&relative) {
+                        return Err(BackendError::new(
+                            "PROJECT_REPAIR_PLAN_UNSUPPORTED",
+                            "Native repair attempted to create a directory outside its allowlist.",
+                            false,
+                            true,
+                        ));
+                    }
+                    created.push(path);
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            for directory in created.iter().rev() {
+                remove_compatible_directory_if_safe(&root, directory);
+            }
+            return Err(error);
+        }
+
+        Ok(created
+            .iter()
+            .filter_map(|path| path.strip_prefix(&root).ok())
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect())
     }
 
     pub fn create_project(
@@ -1073,25 +1290,28 @@ impl ProjectService {
     }
 
     fn health_report(&self, root: &Path) -> ProjectHealthReport {
+        let native_inspection = inspect_native_layout(root);
         let has_purpose = has_child_named(root, "purpose.md");
         let has_schema = has_child_named(root, "schema.md");
         let has_app_state = root.join(".app").exists();
         let has_obsidian = root.join(".obsidian").exists();
         let has_wiki_dir = root.join("wiki").exists();
 
-        let required = [
-            ("purpose.md", has_child_named(root, "purpose.md")),
-            ("schema.md", has_child_named(root, "schema.md")),
-            ("raw/sources", root.join("raw").join("sources").exists()),
-            ("wiki", has_wiki_dir || root.join("index.md").exists()),
-            (".app", has_app_state),
-            ("exports", root.join("exports").exists()),
-        ];
-        let missing_paths: Vec<String> = required
-            .iter()
-            .filter(|(_, present)| !present)
-            .map(|(name, _)| (*name).to_string())
-            .collect();
+        let missing_paths = match native_inspection.state {
+            NativeLayoutState::RepairableLegacy { missing } => missing
+                .iter()
+                .map(|requirement| requirement.relative_path().to_string())
+                .collect(),
+            NativeLayoutState::IncompleteLegacy { reasons } => reasons
+                .iter()
+                .map(|reason| match reason {
+                    crate::models::layout::NativeLayoutGap::MissingSemanticFile(path) => {
+                        (*path).to_string()
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
 
         let is_wiki_project = has_purpose
             || has_schema
@@ -1154,6 +1374,151 @@ fn repair_safe_root(context: &ProjectContext) -> Result<PathBuf, BackendError> {
             message,
         )
     })
+}
+
+/// Creates one directory path without ever resolving a descendant through a
+/// link or reparse point. This is separate from the generic app-state helper:
+/// a native repair promises that it creates only the previewed empty paths,
+/// even while another process changes the project tree.
+#[cfg(unix)]
+fn create_native_repair_directory(root: &Path, target: &Path) -> Result<Vec<PathBuf>, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| "Native repair target is outside the project root".to_string())?;
+    let root_name = CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| "Project root contains an unsupported NUL byte".to_string())?;
+    let root_fd = unsafe {
+        libc::open(
+            root_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        return Err(format!(
+            "Project root could not be opened without following links: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut handles = vec![unsafe { fs::File::from_raw_fd(root_fd) }];
+    let mut current = root.to_path_buf();
+    let mut created = Vec::new();
+
+    for component in relative.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err("Native repair target contains an unsafe path component".into());
+        };
+        let name = CString::new(segment.as_bytes())
+            .map_err(|_| "Native repair target contains an unsupported NUL byte".to_string())?;
+        let parent_fd = handles
+            .last()
+            .expect("the project root handle is retained during repair")
+            .as_raw_fd();
+        let mut made = false;
+        let mut child_fd = unsafe {
+            libc::openat(
+                parent_fd,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if child_fd < 0 && std::io::Error::last_os_error().kind() == ErrorKind::NotFound {
+            let result = unsafe { libc::mkdirat(parent_fd, name.as_ptr(), 0o755) };
+            if result == 0 {
+                made = true;
+            } else if std::io::Error::last_os_error().kind() != ErrorKind::AlreadyExists {
+                return Err(format!(
+                    "Native repair could not create a directory: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            child_fd = unsafe {
+                libc::openat(
+                    parent_fd,
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+        }
+        if child_fd < 0 {
+            return Err(format!(
+                "Native repair encountered a linked or invalid directory: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        current.push(segment);
+        if made {
+            created.push(current.clone());
+        }
+        handles.push(unsafe { fs::File::from_raw_fd(child_fd) });
+    }
+    Ok(created)
+}
+
+#[cfg(windows)]
+fn create_native_repair_directory(root: &Path, target: &Path) -> Result<Vec<PathBuf>, String> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    fn open_locked_directory(path: &Path) -> Result<fs::File, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|error| format!("Native repair cannot open directory {}: {error}", path.display()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("Native repair cannot inspect directory {}: {error}", path.display()))?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!(
+                "Native repair encountered a linked or invalid directory: {}",
+                path.display()
+            ));
+        }
+        Ok(file)
+    }
+
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| "Native repair target is outside the project root".to_string())?;
+    let mut handles = vec![open_locked_directory(root)?];
+    let mut current = root.to_path_buf();
+    let mut created = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err("Native repair target contains an unsafe path component".into());
+        };
+        current.push(segment);
+        let made = match fs::create_dir(&current) {
+            Ok(()) => true,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+            Err(error) => {
+                return Err(format!(
+                    "Native repair could not create directory {}: {error}",
+                    current.display()
+                ));
+            }
+        };
+        let handle = open_locked_directory(&current)?;
+        if made {
+            created.push(current.clone());
+        }
+        handles.push(handle);
+    }
+    Ok(created)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_native_repair_directory(root: &Path, target: &Path) -> Result<Vec<PathBuf>, String> {
+    ensure_project_directory_with_created(root, target).map(|(_, created)| created)
 }
 
 fn repair_path_unsafe_error(message: &str, error: String) -> BackendError {
@@ -2225,7 +2590,7 @@ pub(crate) fn default_config_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectService;
+    use super::{ProjectRepairOperationType, ProjectService};
     use crate::models::graph::GraphData;
     use crate::models::paths::ProjectContext;
     use crate::models::project::{
@@ -3424,7 +3789,7 @@ mod tests {
         assert_eq!(changed.len(), 2);
         let operation = plan.operations.first().unwrap();
         assert_eq!(
-            fs::read(root.join(&operation.backup_path)).unwrap(),
+            fs::read(root.join(operation.backup_path.as_deref().unwrap())).unwrap(),
             invalid
         );
         let repaired: crate::models::graph::GraphData =
@@ -3486,7 +3851,7 @@ mod tests {
             .unwrap();
         let operation = plan.operations.first().unwrap();
         assert_eq!(
-            fs::read(target.join(&operation.backup_path)).unwrap(),
+            fs::read(target.join(operation.backup_path.as_deref().unwrap())).unwrap(),
             invalid
         );
         let repaired: GraphData =
@@ -3528,5 +3893,65 @@ mod tests {
             "{ changed"
         );
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn native_layout_repair_creates_only_previewed_empty_directories() {
+        let (service, _config) = service_in_temp();
+        let root = unique_temp_dir("native-layout-repair");
+        for directory in [
+            ".app/chats", ".app/tasks", "raw/sources/pdfs", "raw/sources/docs",
+            "raw/sources/slides", "raw/sources/sheets", "raw/sources/markdown",
+            "raw/sources/links", "raw/sources/other", "raw/extracted", "raw/assets",
+            "wiki/entities", "wiki/concepts", "wiki/sources", "wiki/queries", "wiki/synthesis",
+            "wiki/comparisons", "exports/html", "skills",
+        ] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
+        fs::write(root.join("schema.md"), "# Schema\n").unwrap();
+        fs::write(root.join("wiki/keep.md"), "# Keep\n").unwrap();
+        fs::remove_dir(root.join(".app/tasks")).unwrap();
+        let context = ProjectContext::new("legacy", root.clone());
+
+        let plan = service
+            .prepare_native_layout_repair_plan(
+                &context,
+                "identity".into(),
+                "revision".into(),
+            )
+            .unwrap();
+        assert!(plan.expected_git_head.is_none());
+        assert!(plan.operations.iter().all(|operation| {
+            operation.operation_type == ProjectRepairOperationType::CreateDirectory
+                && operation.backup_path.is_none()
+                && operation.expected_hash.is_none()
+        }));
+
+        let changed = service.apply_native_layout_repair_plan(&context, &plan).unwrap();
+        assert_eq!(changed, vec![".app/tasks"]);
+        assert!(root.join(".app/tasks").is_dir());
+        assert_eq!(fs::read_to_string(root.join("wiki/keep.md")).unwrap(), "# Keep\n");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_repair_directory_creation_never_follows_a_linked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("native-layout-repair-linked-ancestor");
+        let outside = unique_temp_dir("native-layout-repair-outside");
+        symlink(&outside, root.join("raw")).unwrap();
+
+        let error = create_native_repair_directory(&root, &root.join("raw/sources"))
+            .expect_err("native repair must reject a linked ancestor");
+        assert!(error.contains("linked or invalid"));
+        assert!(!outside.join("sources").exists());
+
+        fs::remove_file(root.join("raw")).ok();
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside).ok();
     }
 }

@@ -27,8 +27,8 @@
     "sessionUpdateUsesFullLoadAndSave": true
   },
   "witnesses": [
-    { "file": "project_layout_authority_contract.rs", "test": "expected_red_layout_and_registry_disagree_for_legacy_task_root" },
-    { "file": "project_layout_authority_contract.rs", "test": "expected_red_native_legacy_is_repairable_without_a_repair_plan" },
+    { "file": "project_layout_authority_contract.rs", "test": "legacy_native_layout_inspection_agrees_on_a_repairable_missing_task_root" },
+    { "file": "project_layout_authority_contract.rs", "test": "native_legacy_repairable_state_advertises_a_repair_plan" },
     { "file": "workflow_compatible_layout.rs", "test": "expected_red_compatible_enablement_has_no_task_state_root" },
     { "file": "import_v2_file_discovery.rs", "test": "batch_a_expected_red_counts_one_discovery_callback_per_file" },
     { "file": "import_v2_scale_contract.rs", "test": "expected_red_single_item_update_rewrites_every_persisted_item_file" },

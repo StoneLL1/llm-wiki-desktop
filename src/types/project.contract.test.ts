@@ -11,6 +11,8 @@ import type {
   ProjectFilesystemAccess,
   ProjectFormat,
   ProjectHealth,
+  ProjectRepairOperation,
+  ProjectRepairOperationType,
   ProjectTrustState,
 } from "./project";
 
@@ -144,5 +146,18 @@ describe("Project layout shared Rust/TypeScript contract", () => {
     expect(access).toEqual(["writable", "read_only"]);
     expect(health).toHaveLength(4);
     expect(capabilities).toHaveLength(8);
+  });
+
+  it("models directory repairs without fake cache backup or hash fields", () => {
+    const operationTypes = ["regenerate_graph_cache", "create_directory"] as const satisfies readonly ProjectRepairOperationType[];
+    const directoryRepair = {
+      operationType: "create_directory",
+      targetPath: ".app/tasks",
+      allowlistDescriptor: "native-layout-v1",
+    } satisfies ProjectRepairOperation;
+
+    expect(operationTypes).toHaveLength(2);
+    expect(directoryRepair).not.toHaveProperty("backupPath");
+    expect(directoryRepair).not.toHaveProperty("expectedHash");
   });
 });

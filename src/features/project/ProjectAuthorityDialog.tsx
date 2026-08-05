@@ -13,7 +13,8 @@ export type ProjectAuthorityAction =
   | "trust_project"
   | "make_writable"
   | "configure_git"
-  | "resolve_dirty_git";
+  | "resolve_dirty_git"
+  | "repair_project";
 
 interface ProjectAuthorityDialogProps {
   action: ProjectAuthorityAction;
@@ -31,6 +32,7 @@ function satisfies(action: ProjectAuthorityAction, assessment: ProjectOpenAssess
   if (action === "configure_git") return assessment.git.head != null;
   if (action === "resolve_dirty_git") return assessment.git.head != null && !assessment.git.hasChanges;
   if (action === "make_writable") return assessment.filesystemAccess === "writable";
+  if (action === "repair_project") return !assessment.repairAvailable;
   return false;
 }
 
@@ -52,6 +54,7 @@ export function ProjectAuthorityDialog({
   const trustProject = useProjectStore((state) => state.trustAssessedProject);
   const revokeTrust = useProjectStore((state) => state.revokeAssessedProjectTrust);
   const enableCompatible = useProjectStore((state) => state.enableCompatibleFullFeatures);
+  const repairProject = useProjectStore((state) => state.repairAssessedProject);
   const initializeGit = useProjectStore((state) => state.requestAssessedGitInitialization);
   const checkpointGit = useProjectStore((state) => state.requestAssessedGitCheckpoint);
   const [initializeGitWithCompatibility, setInitializeGitWithCompatibility] = useState(true);
@@ -253,6 +256,19 @@ export function ProjectAuthorityDialog({
                 </div>
               ) : null}
 
+              {action === "repair_project" ? (
+                <div className="space-y-3">
+                  <p className="m-0 text-[12px] text-[var(--text-secondary)]">{t("projectAuthority.repairDescription")}</p>
+                  {assessment.repairAvailable ? (
+                    <button className="btn btn--primary" onClick={() => void requestConfirmation(() => repairProject(assessment.assessmentId))} type="button">
+                      {t("projectAuthority.repairProject")}
+                    </button>
+                  ) : (
+                    <p className="m-0 text-[12px] text-[var(--text-muted)]">{t("projectAuthority.repairUnavailable")}</p>
+                  )}
+                </div>
+              ) : null}
+
               {action === "manage" ? (
                 <div className="space-y-3">
                   <p className="m-0 text-[12px] text-[var(--text-secondary)]">{t("projectAuthority.manageDescription")}</p>
@@ -287,6 +303,11 @@ export function ProjectAuthorityDialog({
                     ) : assessment.git.hasChanges ? (
                       <button className="btn btn--secondary" onClick={() => void requestConfirmation(() => checkpointGit(assessment.assessmentId))} type="button">
                         {t("projectAuthority.createCheckpoint")}
+                      </button>
+                    ) : null}
+                    {assessment.repairAvailable ? (
+                      <button className="btn btn--primary" onClick={() => void requestConfirmation(() => repairProject(assessment.assessmentId))} type="button">
+                        {t("projectAuthority.repairProject")}
                       </button>
                     ) : null}
                   </div>

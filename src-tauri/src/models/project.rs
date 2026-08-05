@@ -72,6 +72,16 @@ pub enum ProjectFormat {
     Unknown,
 }
 
+/// A user-owned route for a low-confidence Markdown folder. It is stored in
+/// global app settings against the canonical folder identity, never in the
+/// selected folder itself.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectOpenIntent {
+    OpenAsMarkdownVault,
+    CreateFromMaterials,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectTrustState {
@@ -133,9 +143,13 @@ pub struct ProjectOpenAssessment {
     pub canonical_identity_key: String,
     pub identity_revision: String,
     pub format: ProjectFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remembered_open_intent: Option<ProjectOpenIntent>,
     pub trust: ProjectTrustState,
     pub filesystem_access: ProjectFilesystemAccess,
     pub health: ProjectHealth,
+    #[serde(default)]
+    pub repair_available: bool,
     pub layout: ProjectLayout,
     pub confidence: ProjectLayoutConfidence,
     pub markers: Vec<ProjectMarker>,
@@ -143,6 +157,38 @@ pub struct ProjectOpenAssessment {
     pub warnings: Vec<ProjectAssessmentWarning>,
     pub layout_warnings: Vec<ProjectLayoutWarning>,
     pub git: GitRepositoryStatus,
+}
+
+/// Backend-derived authorization and readiness facts for an opened project.
+///
+/// This snapshot deliberately keeps trust, filesystem access, health, layout,
+/// and capabilities independent. UI surfaces may display a condensed state,
+/// but commands must continue to authorize from the individual facts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSessionAuthority {
+    pub project_id: String,
+    pub canonical_root_path: String,
+    pub canonical_identity_key: String,
+    pub identity_revision: String,
+    pub authority_revision: String,
+    pub format: ProjectFormat,
+    pub trust: ProjectTrustState,
+    pub filesystem_access: ProjectFilesystemAccess,
+    pub health: ProjectHealth,
+    pub layout: ProjectLayout,
+    pub confidence: ProjectLayoutConfidence,
+    pub capabilities: Vec<ProjectCapability>,
+    pub warnings: Vec<ProjectAssessmentWarning>,
+    pub layout_warnings: Vec<ProjectLayoutWarning>,
+    pub git: GitRepositoryStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedProject {
+    pub summary: ProjectSummary,
+    pub authority: ProjectSessionAuthority,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,7 +229,57 @@ pub struct ProjectSummary {
     pub index_state: IndexState,
     pub graph_state: GraphState,
     pub agent_route: AgentRoute,
+    #[serde(default)]
+    pub inventory_state: ProjectInventoryState,
     pub health: ProjectHealthReport,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectInventoryState {
+    Scanning,
+    Partial,
+    Failed,
+    #[default]
+    Ready,
+}
+
+/// A bounded recovery plan prepared from a current project assessment. The
+/// plan contains only app-owned, derived state operations; it never carries
+/// Markdown, original sources, or a request to follow external links.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepairPlan {
+    pub repair_plan_id: String,
+    pub canonical_identity_key: String,
+    pub identity_revision: String,
+    pub expected_git_head: Option<String>,
+    pub expected_git_paths: Vec<String>,
+    pub operations: Vec<ProjectRepairOperation>,
+    pub protected_paths: Vec<String>,
+    pub external_links_remain_blocked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepairOperation {
+    pub operation_type: ProjectRepairOperationType,
+    pub target_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<String>,
+    /// Content hash observed during the read-only prepare phase. Apply must
+    /// refuse the repair if the target changed after preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowlist_descriptor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRepairOperationType {
+    RegenerateGraphCache,
+    CreateDirectory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,6 +374,8 @@ pub struct OpenProjectResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ProjectSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<ProjectSessionAuthority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_action: Option<PendingAction>,
 }
 
@@ -293,6 +391,7 @@ impl OpenProjectResponse {
         Self {
             kind: OpenProjectKind::Opened,
             summary: Some(summary),
+            authority: None,
             pending_action: None,
         }
     }
@@ -301,6 +400,7 @@ impl OpenProjectResponse {
         Self {
             kind: OpenProjectKind::NeedsConfirmation,
             summary: None,
+            authority: None,
             pending_action: Some(pending_action),
         }
     }
@@ -314,6 +414,23 @@ pub struct RememberRecentProjectRequest {
     pub root_path: String,
     #[serde(default)]
     pub template: ProjectTemplate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveRecentProjectRequest {
+    pub project_id: String,
+    pub root_path: String,
+}
+
+/// Relocates a missing native knowledge-base entry only after the selected
+/// folder's app-owned stable ID has been revalidated by the backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateRecentProjectRequest {
+    pub assessment_id: AssessmentId,
+    pub previous_project_id: String,
+    pub previous_root_path: String,
 }
 
 #[cfg(test)]
@@ -360,6 +477,7 @@ mod tests {
             index_state: IndexState::Indexed,
             graph_state: GraphState::Cached,
             agent_route: AgentRoute::Agent,
+            inventory_state: ProjectInventoryState::Ready,
             health: ProjectHealthReport {
                 is_wiki_project: true,
                 has_purpose: true,
@@ -378,6 +496,7 @@ mod tests {
         assert_eq!(value["template"], json!("research"));
         assert_eq!(value["indexState"], json!("indexed"));
         assert_eq!(value["agentRoute"], json!("agent"));
+        assert_eq!(value["inventoryState"], json!("ready"));
         assert_eq!(value["health"]["isWikiProject"], json!(true));
         assert!(value.get("wiki_page_count").is_none());
     }
@@ -396,6 +515,7 @@ mod tests {
             index_state: IndexState::Missing,
             graph_state: GraphState::Missing,
             agent_route: AgentRoute::Unconfigured,
+            inventory_state: ProjectInventoryState::Ready,
             health: ProjectHealthReport {
                 is_wiki_project: false,
                 has_purpose: false,
@@ -411,11 +531,11 @@ mod tests {
 
         let pending = OpenProjectResponse::needs_confirmation(PendingAction {
             id: "pa-1".to_string(),
-            action_type: crate::models::confirmation::PendingActionType::InitializeFolder,
-            title: "Initialize".to_string(),
-            message: "Will organize files.".to_string(),
-            risk_level: crate::models::confirmation::RiskLevel::Medium,
-            affected_paths: vec!["report.pdf".to_string()],
+            action_type: crate::models::confirmation::PendingActionType::TrustCompatibleProject,
+            title: "Trust".to_string(),
+            message: "Will trust this compatible knowledge base.".to_string(),
+            risk_level: crate::models::confirmation::RiskLevel::High,
+            affected_paths: Vec::new(),
             preview: None,
             expires_at: None,
             checkpoint_hash: None,
@@ -424,7 +544,7 @@ mod tests {
         assert_eq!(pending_value["kind"], json!("needs_confirmation"));
         assert_eq!(
             pending_value["pendingAction"]["actionType"],
-            json!("initialize_folder")
+            json!("trust_compatible_project")
         );
         let _ = OpenProjectKind::Opened;
     }
