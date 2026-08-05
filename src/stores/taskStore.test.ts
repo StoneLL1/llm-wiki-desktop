@@ -195,6 +195,17 @@ describe("recoverTasksForProject", () => {
     expect(useTaskStore.getState().tasks).toEqual([]);
   });
 
+  it("records one store publication per current task update as the Batch A expected-red baseline", () => {
+    let publications = 0;
+    const unsubscribe = useTaskStore.subscribe(() => { publications += 1; });
+    for (let index = 0; index < 100; index += 1) {
+      useTaskStore.getState().upsertTask({ ...task(`task-${index}`, "project-a"), updatedAt: `2026-06-21T00:00:${index % 60}Z` });
+    }
+    unsubscribe();
+    expect(publications).toBe(100);
+    expect(useTaskStore.getState().tasks).toHaveLength(100);
+  });
+
   it("propagates task list and recovery failures so the UI can report them", async () => {
     invokeMock.mockRejectedValueOnce(new Error("task registry unavailable"));
     await expect(fetchTasks("project-a", "D:/project-a")).rejects.toThrow(

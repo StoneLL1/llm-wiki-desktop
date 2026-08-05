@@ -115,6 +115,17 @@ describe("Project layout shared Rust/TypeScript contract", () => {
     expect(minimum.markdownRoots).toEqual([]);
   });
 
+  it("keeps compatible app state distinct from writable content roots", () => {
+    const enabledCompatible = {
+      appStateRoot: ".app",
+      markdownRoots: [{ path: ".", role: "mixed" }],
+      purposeContext: { readPath: ".app/compat/purpose.md", writePath: ".app/compat/purpose.md", inferred: false },
+    } satisfies ProjectLayout;
+    expect(enabledCompatible).toHaveProperty("appStateRoot", ".app");
+    expect(enabledCompatible).not.toHaveProperty("taskStateRoot");
+    expect(enabledCompatible).not.toHaveProperty("sourceWriteRoot");
+  });
+
   it("freezes every typed assessment dimension independently", () => {
     const formats = [
       "native_current", "native_legacy", "nashsu_llm_wiki", "obsidian_vault",

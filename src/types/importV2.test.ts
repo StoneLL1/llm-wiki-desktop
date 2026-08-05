@@ -38,4 +38,12 @@ describe("Import V2 contract", () => {
       expect("wikiPath" in request).toBe(false);
     }
   });
+
+  it("keeps the legacy per-item start request explicit until Batch E replaces it", () => {
+    const request = {
+      projectId: "project-1", projectRootPath: "fixture/project", sessionId: "session-1",
+      itemIds: ["item-1", "item-2"],
+    } satisfies StartImportItemsV2Request;
+    expect(request.itemIds).toHaveLength(2);
+  });
 });

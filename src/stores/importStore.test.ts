@@ -90,6 +90,12 @@ describe("Import V2 session store", () => {
     expect(useImportStore.getState().session?.items[0].itemId).toBe("new");
   });
 
+  it("keeps a terminal item update scoped to the active project key", () => {
+    useImportStore.getState().attachSession(projectA, session([item("one")]));
+    expect(useImportStore.getState().replaceItem(projectB, item("one", "completed"))).toBe(false);
+    expect(useImportStore.getState().session?.items[0].status).toBe("queued");
+  });
+
   it.each<ImportQueueFilter>(["all", "active", "ready", "needs_action", "failed", "completed"])(
     "stores queue filter %s and item-scoped dialog identities",
     (filter) => {
