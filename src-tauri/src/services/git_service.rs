@@ -193,6 +193,20 @@ impl GitService {
         status_paths(context)
     }
 
+    /// Check whether a precise project-relative path is tracked without
+    /// staging it. High-risk overwrite flows use this to avoid treating an
+    /// ignored app-state file as if a Git checkpoint could recover it.
+    pub fn is_path_tracked(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+    ) -> Result<bool, BackendError> {
+        if !self.repository_status(context)?.is_repository {
+            return Ok(false);
+        }
+        Ok(run_git(context, &["ls-files", "--error-unmatch", "--", relative_path]).is_ok())
+    }
+
     pub fn verify_checkpoint_state(
         &self,
         context: &ProjectContext,

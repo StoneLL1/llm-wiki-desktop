@@ -3,9 +3,26 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::settings::{
-    ChatConvenienceAuthorization, ProviderSecretStatusRequest, SaveSettingsRequest,
-    SetChatConvenienceAuthorizationRequest, Settings, SettingsProjectRequest,
+    ChatConvenienceAuthorization, GlobalUiPreferences, ProviderSecretStatusRequest,
+    SaveSettingsRequest, SetChatConvenienceAuthorizationRequest, Settings, SettingsProjectRequest,
 };
+
+#[tauri::command]
+pub fn get_global_ui_preferences(
+    state: State<'_, AppState>,
+) -> Result<GlobalUiPreferences, BackendError> {
+    state.settings_service.read_global_ui_preferences()
+}
+
+#[tauri::command]
+pub fn save_global_ui_preferences(
+    state: State<'_, AppState>,
+    preferences: GlobalUiPreferences,
+) -> Result<GlobalUiPreferences, BackendError> {
+    state
+        .settings_service
+        .save_global_ui_preferences(preferences)
+}
 
 #[tauri::command]
 pub fn get_settings(

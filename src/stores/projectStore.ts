@@ -6,10 +6,13 @@ import type { TaskProjectPersistenceReason } from "../types/task";
 import type { WorkflowPersistenceMode } from "../types/workflow";
 import type {
   AgentRoute,
+  OpenedProject,
   ProjectAssessmentOperation,
   ProjectOpenAssessment,
+  ProjectOpenIntent,
   OpenProjectResponse,
   ProjectSummary,
+  ProjectSessionAuthority,
   ProjectTemplate,
   RecentProject,
   StartProjectOpenAssessmentResult,
@@ -25,6 +28,7 @@ export interface CreateProjectPayload {
 
 interface ProjectState {
   currentProject: ProjectSummary;
+  authority: ProjectSessionAuthority | null;
   recentProjects: RecentProject[];
   pendingAction: OpenProjectResponse["pendingAction"];
   assessmentOperationId: string | null;
@@ -39,6 +43,7 @@ interface ProjectState {
   setCurrentProject: (project: ProjectSummary) => void;
   setAgentRoute: (projectId: string, rootPath: string, agentRoute: AgentRoute) => void;
   clearCurrentProject: () => void;
+  showAssessedProjectSelection: () => void;
   setRecentProjects: (projects: RecentProject[]) => void;
   setPendingAction: (action: OpenProjectResponse["pendingAction"]) => void;
   setTaskPersistence: (
@@ -48,11 +53,24 @@ interface ProjectState {
     reason: TaskProjectPersistenceReason | null,
   ) => void;
   loadRecentProjects: () => Promise<RecentProject[]>;
+  removeRecentProject: (projectId: string, rootPath: string) => Promise<RecentProject[]>;
   createProject: (payload: CreateProjectPayload) => Promise<ProjectSummary>;
   openProject: (path: string) => Promise<OpenProjectResponse>;
   assessProject: (path: string) => Promise<ProjectOpenAssessment>;
   cancelProjectAssessment: () => Promise<void>;
   openAssessedProject: (assessmentId: string) => Promise<ProjectSummary>;
+  relocateRecentProject: (
+    assessmentId: string,
+    previousProjectId: string,
+    previousRootPath: string,
+  ) => Promise<ProjectSummary>;
+  resolveAmbiguousAssessedProject: (assessmentId: string) => Promise<ProjectSummary>;
+  rememberAmbiguousProjectIntent: (
+    assessmentId: string,
+    intent: Exclude<ProjectOpenIntent, "open_as_markdown_vault">,
+  ) => Promise<ProjectOpenAssessment>;
+  clearAmbiguousProjectIntent: (assessmentId: string) => Promise<ProjectOpenAssessment>;
+  refreshProjectAuthority: () => Promise<ProjectSessionAuthority>;
   assessCurrentProject: () => Promise<ProjectOpenAssessment>;
   trustAssessedProject: (assessmentId: string) => Promise<void>;
   revokeAssessedProjectTrust: (assessmentId: string) => Promise<ProjectOpenAssessment>;
@@ -61,6 +79,11 @@ interface ProjectState {
     template: ProjectTemplate,
     initializeGit: boolean,
   ) => Promise<void>;
+  configureCompatibleLayout: (
+    assessmentId: string,
+    mapping: { wikiRoot?: string; sourceRoot?: string; exportRoot?: string },
+  ) => Promise<void>;
+  repairAssessedProject: (assessmentId: string) => Promise<void>;
   requestAssessedGitInitialization: (assessmentId: string) => Promise<void>;
   requestAssessedGitCheckpoint: (assessmentId: string) => Promise<void>;
   confirmPendingAction: () => Promise<ConfirmedAction | undefined>;
@@ -158,8 +181,25 @@ async function refreshTaskPersistence(
   await recoverTasksForProject(project.projectId, project.rootPath);
 }
 
+function startProjectInventory(project: Pick<ProjectSummary, "projectId" | "rootPath">): void {
+  if (!hasTauri() || !project.projectId || !project.rootPath) return;
+  // Promise.resolve keeps this fire-and-forget path safe for embedded/test
+  // environments whose invoke shim does not implement every background command.
+  void Promise.resolve(invoke("start_project_inventory", {
+    request: { projectId: project.projectId, projectRootPath: project.rootPath },
+  })).catch(() => {
+    const current = useProjectStore.getState().currentProject;
+    if (current.projectId === project.projectId && current.rootPath === project.rootPath) {
+      useProjectStore.setState({
+        currentProject: { ...current, inventoryState: "failed" },
+      });
+    }
+  });
+}
+
 export const useProjectStore = create<ProjectState>((set, get) => ({
   currentProject: defaultProject,
+  authority: null,
   recentProjects: defaultRecentProjects,
   pendingAction: undefined,
   assessmentOperationId: null,
@@ -185,6 +225,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     set({
       currentProject,
+      authority: changedProject ? null : get().authority,
       pendingAction: changedProject ? undefined : get().pendingAction,
       assessmentOperationId: null,
       assessment: null,
@@ -215,9 +256,36 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     assessmentEpoch += 1;
     set({
       currentProject: defaultProject,
+      authority: null,
       pendingAction: undefined,
       assessmentOperationId: null,
       assessment: null,
+      assessing: false,
+      assessmentError: null,
+      taskPersistence: null,
+      taskPersistenceReason: null,
+    });
+  },
+  showAssessedProjectSelection: () => {
+    const assessment = get().assessment;
+    const assessmentOperationId = get().assessmentOperationId;
+    if (!assessment) {
+      get().clearCurrentProject();
+      return;
+    }
+    abandonPendingAction(get().pendingAction);
+    // The completed assessment remains valid for its short backend TTL. Keep
+    // it while releasing the active project so the no-project workspace can
+    // present its explicit next decision instead of forcing another scan.
+    selectionEpoch += 1;
+    invalidateProjectScope();
+    resetProjectScopedStores();
+    set({
+      currentProject: defaultProject,
+      authority: null,
+      pendingAction: undefined,
+      assessmentOperationId,
+      assessment,
       assessing: false,
       assessmentError: null,
       taskPersistence: null,
@@ -248,31 +316,39 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ recentProjects: projects, error: null });
     return projects;
   },
+  removeRecentProject: async (projectId, rootPath) => {
+    const projects = await invoke<RecentProject[]>("remove_recent_project", {
+      request: { projectId, rootPath },
+    });
+    set({ recentProjects: projects, error: null });
+    return projects;
+  },
   createProject: async ({ rootPath, name, template }) => {
     abandonPendingAction(get().pendingAction);
     assessmentEpoch += 1;
     cancelAssessmentOperation(get().assessmentOperationId);
     set({ pendingAction: undefined, assessmentOperationId: null, assessment: null, assessing: false, assessmentError: null });
     const epoch = ++selectionEpoch;
-    const summary = await invoke<ProjectSummary>("create_project", {
+    const opened = await invoke<OpenedProject>("create_project", {
       request: { rootPath, name, template: template ?? "general" },
     });
     if (epoch === selectionEpoch) {
       invalidateProjectScope();
       resetProjectScopedStores();
       set({
-        currentProject: summary,
+        currentProject: opened.summary,
+        authority: opened.authority,
         pendingAction: undefined,
         error: null,
         taskPersistence: null,
         taskPersistenceReason: null,
       });
     }
-    return summary;
+    return opened.summary;
   },
   openProject: async (path) => {
     if (!hasTauri()) {
-      return { kind: "opened" as const, summary: undefined, pendingAction: undefined };
+      return { kind: "opened" as const, summary: undefined, authority: undefined, pendingAction: undefined };
     }
     assessmentEpoch += 1;
     abandonPendingAction(get().pendingAction);
@@ -288,6 +364,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       resetProjectScopedStores();
       set({
         currentProject: response.summary,
+        authority: response.authority ?? null,
         error: null,
         taskPersistence: null,
         taskPersistenceReason: null,
@@ -376,7 +453,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     abandonPendingAction(get().pendingAction);
     set({ pendingAction: undefined });
     const requestEpoch = ++selectionEpoch;
-    const summary = await invoke<ProjectSummary>("open_assessed_project", {
+    const opened = await invoke<OpenedProject>("open_assessed_project", {
       request: { assessmentId },
     });
     if (requestEpoch === selectionEpoch) {
@@ -384,7 +461,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       invalidateProjectScope();
       resetProjectScopedStores();
       set({
-        currentProject: summary,
+        currentProject: opened.summary,
+        authority: opened.authority,
         pendingAction: undefined,
         assessmentOperationId: null,
         assessment: null,
@@ -392,8 +470,106 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         assessmentError: null,
         error: null,
       });
+      startProjectInventory(opened.summary);
     }
-    return summary;
+    return opened.summary;
+  },
+  relocateRecentProject: async (assessmentId, previousProjectId, previousRootPath) => {
+    abandonPendingAction(get().pendingAction);
+    set({ pendingAction: undefined });
+    const requestEpoch = ++selectionEpoch;
+    const opened = await invoke<OpenedProject>("relocate_recent_project", {
+      request: { assessmentId, previousProjectId, previousRootPath },
+    });
+    if (requestEpoch === selectionEpoch) {
+      assessmentEpoch += 1;
+      invalidateProjectScope();
+      resetProjectScopedStores();
+      set({
+        currentProject: opened.summary,
+        authority: opened.authority,
+        pendingAction: undefined,
+        assessmentOperationId: null,
+        assessment: null,
+        assessing: false,
+        assessmentError: null,
+        error: null,
+      });
+      startProjectInventory(opened.summary);
+    }
+    // The relocation command has already committed the global recent-file
+    // update. Refresh it best-effort so the switcher does not keep rendering
+    // the old missing path; failure here must not turn a successful open into
+    // a failed relocation for the user.
+    await get().loadRecentProjects().catch(() => undefined);
+    return opened.summary;
+  },
+  resolveAmbiguousAssessedProject: async (assessmentId) => {
+    abandonPendingAction(get().pendingAction);
+    set({ pendingAction: undefined });
+    const requestEpoch = ++selectionEpoch;
+    const opened = await invoke<OpenedProject>("resolve_ambiguous_assessed_project", {
+      request: { assessmentId, intent: "open_as_markdown_vault" },
+    });
+    if (requestEpoch === selectionEpoch) {
+      assessmentEpoch += 1;
+      invalidateProjectScope();
+      resetProjectScopedStores();
+      set({
+        currentProject: opened.summary,
+        authority: opened.authority,
+        pendingAction: undefined,
+        assessmentOperationId: null,
+        assessment: null,
+        assessing: false,
+        assessmentError: null,
+        error: null,
+      });
+      startProjectInventory(opened.summary);
+    }
+    return opened.summary;
+  },
+  rememberAmbiguousProjectIntent: async (assessmentId, intent) => {
+    const assessment = await invoke<ProjectOpenAssessment>(
+      "remember_ambiguous_project_intent",
+      { request: { assessmentId, intent } },
+    );
+    if (get().assessment?.assessmentId === assessmentId) {
+      set({ assessment });
+    }
+    return assessment;
+  },
+  clearAmbiguousProjectIntent: async (assessmentId) => {
+    const assessment = await invoke<ProjectOpenAssessment>(
+      "clear_ambiguous_project_intent",
+      { request: { assessmentId } },
+    );
+    if (get().assessment?.assessmentId === assessmentId) {
+      set({ assessment });
+    }
+    return assessment;
+  },
+  refreshProjectAuthority: async () => {
+    const project = get().currentProject;
+    if (!project.projectId || !project.rootPath) {
+      throw new Error("No knowledge base is open.");
+    }
+    if (!hasTauri()) {
+      throw new Error("Project authority requires the desktop runtime.");
+    }
+    const epoch = selectionEpoch;
+    const authority = await invoke<ProjectSessionAuthority>(
+      "get_project_session_authority",
+      { request: { projectId: project.projectId, projectRootPath: project.rootPath } },
+    );
+    if (
+      epoch === selectionEpoch &&
+      get().currentProject.projectId === project.projectId &&
+      get().currentProject.rootPath === project.rootPath
+    ) {
+      set({ authority });
+    }
+    return authority;
   },
   assessCurrentProject: async () => {
     const project = get().currentProject;
@@ -440,6 +616,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       get().currentProject.rootPath === project.rootPath
     ) {
       set({ assessment });
+      await get().refreshProjectAuthority();
       await refreshTaskPersistence(project);
     }
     return assessment;
@@ -455,6 +632,51 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           projectRootPath: project.rootPath,
           template,
           initializeGit,
+        },
+      },
+    );
+    if (
+      get().currentProject.projectId === project.projectId &&
+      get().currentProject.rootPath === project.rootPath
+    ) {
+      bindPendingAction(action, project);
+      set({ pendingAction: action });
+    } else {
+      abandonPendingAction(action);
+    }
+  },
+  configureCompatibleLayout: async (assessmentId, mapping) => {
+    const project = get().currentProject;
+    const action = await invoke<NonNullable<OpenProjectResponse["pendingAction"]>>(
+      "configure_compatible_layout",
+      {
+        request: {
+          assessmentId,
+          projectId: project.projectId,
+          projectRootPath: project.rootPath,
+          ...mapping,
+        },
+      },
+    );
+    if (
+      get().currentProject.projectId === project.projectId &&
+      get().currentProject.rootPath === project.rootPath
+    ) {
+      bindPendingAction(action, project);
+      set({ pendingAction: action });
+    } else {
+      abandonPendingAction(action);
+    }
+  },
+  repairAssessedProject: async (assessmentId) => {
+    const project = get().currentProject;
+    const action = await invoke<NonNullable<OpenProjectResponse["pendingAction"]>>(
+      "prepare_assessed_project_repair",
+      {
+        request: {
+          assessmentId,
+          projectId: project.projectId,
+          projectRootPath: project.rootPath,
         },
       },
     );
@@ -555,9 +777,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       });
       if (
         action.actionType === "trust_compatible_project" ||
-        action.actionType === "enable_compatible_project"
+        action.actionType === "enable_compatible_project" ||
+        action.actionType === "repair_project" ||
+        action.actionType === "initialize_git_repository" ||
+        action.actionType === "create_git_checkpoint"
       ) {
+        await get().refreshProjectAuthority();
         await refreshTaskPersistence(confirmed.projectSummary ?? requestProject);
+        if (action.actionType === "repair_project") {
+          startProjectInventory(confirmed.projectSummary ?? requestProject);
+        }
       }
     }
     return confirmed;
@@ -603,9 +832,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     try {
       const recentProjects = await get().loadRecentProjects();
-      const last = recentProjects.find((project) => !project.missing);
-      if (last && bootstrapEpoch === selectionEpoch) {
-        await get().openProject(last.rootPath);
+      const last = recentProjects[0];
+      if (last?.missing) {
+        set({
+          error: `The most recently used knowledge base is unavailable: ${last.rootPath}`,
+        });
+      } else if (last && bootstrapEpoch === selectionEpoch) {
+        const assessment = await get().assessProject(last.rootPath);
+        const canAutoOpen =
+          assessment.health !== "unreadable" &&
+          !["ambiguous_markdown", "ordinary_materials", "unknown"].includes(assessment.format);
+        if (canAutoOpen && bootstrapEpoch === selectionEpoch) {
+          await get().openAssessedProject(assessment.assessmentId);
+        }
       }
       set({ initializing: false, initialized: true });
     } catch (error) {

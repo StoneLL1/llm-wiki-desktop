@@ -12,6 +12,7 @@ use crate::services::{project_identity, FileStore};
 
 const PROJECT_TRUST_FILE: &str = "project-trust.json";
 const PROJECT_TRUST_LOCK_FILE: &str = "project-trust.lock";
+const PROJECT_MUTATION_LOCK_FILE: &str = "project-mutations.lock";
 const PROJECT_TRUST_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +193,30 @@ impl ProjectTrustStore {
         Ok(())
     }
 
+    /// Serializes short, high-risk project mutations across LLM Wiki desktop
+    /// processes that share this application's configuration directory. The
+    /// project writer still validates every project path immediately before
+    /// use; this guard closes races between cooperating app instances rather
+    /// than claiming to control arbitrary external filesystem actors.
+    pub(crate) fn acquire_project_mutation_lock(
+        &self,
+    ) -> Result<ProjectTrustFileLock, BackendError> {
+        acquire_project_trust_lock(&self.path.with_file_name(PROJECT_MUTATION_LOCK_FILE)).map_err(
+            |error| {
+                BackendError::new(
+                    "PROJECT_MUTATION_LOCKED",
+                    "Another LLM Wiki process is applying a project change. Try again shortly.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "error": error.message,
+                    "details": error.details,
+                }))
+            },
+        )
+    }
+
     fn read_file_strict(&self) -> Result<ProjectTrustFile, BackendError> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
@@ -234,7 +259,7 @@ impl ProjectTrustStore {
     }
 }
 
-struct ProjectTrustFileLock {
+pub(crate) struct ProjectTrustFileLock {
     file: File,
 }
 
@@ -616,5 +641,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(file.entries.len(), projects.len());
+    }
+
+    #[test]
+    fn mutation_lock_serializes_separate_store_instances() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+        use std::time::Duration;
+
+        let config = tempfile::tempdir().unwrap();
+        let worker_count = 6;
+        let barrier = Arc::new(Barrier::new(worker_count));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let handles = (0..worker_count)
+            .map(|_| {
+                let config = config.path().to_path_buf();
+                let barrier = Arc::clone(&barrier);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    let store = ProjectTrustStore::new(&config);
+                    barrier.wait();
+                    let _guard = store.acquire_project_mutation_lock().unwrap();
+                    let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(concurrent, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(15));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert!(config.path().join(PROJECT_MUTATION_LOCK_FILE).is_file());
+    }
+
+    #[test]
+    fn mutation_lock_is_exclusive_across_processes() {
+        const CHILD_CONFIG_ENV: &str = "LLM_WIKI_MUTATION_LOCK_CHILD_CONFIG";
+        const TEST_NAME: &str =
+            "services::project_service::trust_store::tests::mutation_lock_is_exclusive_across_processes";
+
+        if let Some(config) = std::env::var_os(CHILD_CONFIG_ENV) {
+            let store = ProjectTrustStore::new(Path::new(&config));
+            let error = match store.acquire_project_mutation_lock() {
+                Ok(_) => panic!("child process acquired a lock held by its parent"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, "PROJECT_MUTATION_LOCKED");
+            return;
+        }
+
+        let config = tempfile::tempdir().unwrap();
+        let store = ProjectTrustStore::new(config.path());
+        let _guard = store.acquire_project_mutation_lock().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_CONFIG_ENV, config.path())
+            .status()
+            .unwrap();
+
+        assert!(status.success());
     }
 }

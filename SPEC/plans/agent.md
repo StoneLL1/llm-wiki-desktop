@@ -1,5 +1,7 @@
 # Agent 板块 P0+P1 进度账本
 
+> **历史记录，不是当前目标。** 本文保留 2026-06-22 legacy Agent surface 的完成证据。自 2026-07-30 起，主导航和页面目标已由 [`../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) 取代；后续实施使用 [`../roadmap/agent.md`](../roadmap/agent.md)。不要据此恢复四宫格、BYOK 配置卡、Agent 右侧配置区或“运行 Agent”对话框。
+
 > ✅ **本轮完成 @ 2026-06-22** — 8 项 P0/P1 全部 verified。blocker 修复（agent 挂起 / COMPILE_INPUT_EMPTY / 取消无响应）+ 四宫格+BYOK 卡+右面板+RunAgentDialog+terminal 升级全部落地。文件：`src/features/agent/{AgentView,RunAgentDialog,AgentRightPanel}.tsx`、`src/components/app/{AppShell,RightContextPanel,TaskLogDrawer}.tsx`、`src/styles.css`、`src/i18n/locales/*`、`src-tauri/src/services/compile_service.rs`、`src-tauri/src/tasks/task_service.rs`。105 FE + 315 Rust lib 测试 + clippy + fmt + tsc + lint 全绿。遗留：用户需在 `npm run tauri dev` 实测确认 GUI 下 dialog/取消/terminal 行为；skill-template 校验后端命令未实现（右面板用已知清单代替）；安全边界 checkbox 为不可变 invariant（CLAUDE.md 硬规则），未来若改为可配置需扩 Settings。
 
 > 对照源：`SPEC/roadmap/agent.md` + `UI-Frontend-design/agent.html` + `assets/app.css` + `SPEC/PRD.md`

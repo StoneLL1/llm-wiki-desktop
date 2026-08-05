@@ -7,7 +7,8 @@ use crate::models::import_v2_agent::AgentAssistancePolicy;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::settings::{
-    ChatConvenienceAuthorization, CloseBehavior, GlobalSettingsFile, ProjectSettingsFile, Settings,
+    ChatConvenienceAuthorization, CloseBehavior, GlobalSettingsFile, GlobalUiPreferences,
+    ProjectSettingsFile, Settings,
 };
 use crate::services::{FileStore, SecretService};
 
@@ -32,18 +33,20 @@ impl SettingsService {
         let mut settings = Settings::default();
         settings.apply_global(self.read_global_settings()?);
 
-        let project_path = context.resolve_project_path(".app/settings.json")?;
-        if project_path.exists() {
-            let project: ProjectSettingsFile =
-                FileStore.read_json(context, ".app/settings.json")?;
-            settings.apply_project(project);
+        if let Some(settings_path) = context.layout.settings_path.as_deref() {
+            let project_path = context.resolve_project_path(settings_path)?;
+            if project_path.exists() {
+                let project: ProjectSettingsFile = FileStore.read_json(context, settings_path)?;
+                settings.apply_project(project);
+            }
         }
 
-        let agent_config_path = context.resolve_project_path(".app/agent-config.json")?;
-        if agent_config_path.exists() {
-            let agent_config: AgentConfig =
-                FileStore.read_json(context, ".app/agent-config.json")?;
-            settings.agent_default = agent_config.default_agent;
+        if let Some(agent_config_path) = context.layout.agent_config_path.as_deref() {
+            let agent_config_file = context.resolve_project_path(agent_config_path)?;
+            if agent_config_file.exists() {
+                let agent_config: AgentConfig = FileStore.read_json(context, agent_config_path)?;
+                settings.agent_default = agent_config.default_agent;
+            }
         }
 
         Ok(settings)
@@ -63,10 +66,12 @@ impl SettingsService {
         global.remote_provider_disclosure_revision =
             existing_global.remote_provider_disclosure_revision;
         store.write_json_atomic_absolute(&self.global_settings_path(), &global)?;
-        store.write_json_atomic(context, ".app/settings.json", &settings.to_project_file())?;
+        let settings_path = project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
+        let agent_config_path = project_state_path(context, context.layout.agent_config_path.as_deref(), "agent configuration")?;
+        store.write_json_atomic(context, settings_path, &settings.to_project_file())?;
         store.write_json_atomic(
             context,
-            ".app/agent-config.json",
+            agent_config_path,
             &AgentConfig {
                 default_agent: settings.agent_default,
             },
@@ -85,8 +90,10 @@ impl SettingsService {
             default_agent: agent,
         };
         let store = FileStore;
-        store.write_json_atomic(context, ".app/agent-config.json", &config)?;
-        store.write_json_atomic(context, ".app/settings.json", &settings.to_project_file())?;
+        let settings_path = project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
+        let agent_config_path = project_state_path(context, context.layout.agent_config_path.as_deref(), "agent configuration")?;
+        store.write_json_atomic(context, agent_config_path, &config)?;
+        store.write_json_atomic(context, settings_path, &settings.to_project_file())?;
         Ok(config)
     }
 
@@ -173,6 +180,31 @@ impl SettingsService {
         self.read_global_settings()
             .map(|settings| settings.close_behavior)
             .unwrap_or_default()
+    }
+
+    pub fn read_global_ui_preferences(&self) -> Result<GlobalUiPreferences, BackendError> {
+        let settings = self.read_global_settings()?;
+        Ok(GlobalUiPreferences {
+            language: settings.language,
+            theme: settings.theme,
+        })
+    }
+
+    pub fn save_global_ui_preferences(
+        &self,
+        preferences: GlobalUiPreferences,
+    ) -> Result<GlobalUiPreferences, BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        settings.language = preferences.language;
+        settings.theme = preferences.theme;
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+        Ok(GlobalUiPreferences {
+            language: settings.language,
+            theme: settings.theme,
+        })
     }
 
     pub fn is_remote_provider_disclosure_acknowledged(
@@ -298,6 +330,21 @@ impl SettingsService {
     }
 }
 
+fn project_state_path<'a>(
+    _context: &ProjectContext,
+    path: Option<&'a str>,
+    feature: &str,
+) -> Result<&'a str, BackendError> {
+    path.ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_LAYOUT_STATE_UNAVAILABLE",
+            format!("Project {feature} state is unavailable until compatible features are enabled."),
+            true,
+            true,
+        )
+    })
+}
+
 fn global_settings_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -337,7 +384,9 @@ mod tests {
     use crate::models::agent::{AgentConfig, AgentKind};
     use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
     use crate::models::paths::ProjectContext;
-    use crate::models::settings::{CloseBehavior, GlobalSettingsFile, Settings};
+    use crate::models::settings::{
+        CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, Settings, ThemePreference,
+    };
     use crate::services::{AgentService, FileStore, SecretService};
 
     fn tmp_paths(suffix: &str) -> (ProjectContext, PathBuf, PathBuf) {
@@ -643,6 +692,32 @@ mod tests {
         assert!(project_settings
             .get("remoteProviderDisclosureRevision")
             .is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn saves_global_ui_preferences_without_project_context() {
+        let (_context, root, config_dir) = tmp_paths("global-ui-preferences");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        let saved = service
+            .save_global_ui_preferences(GlobalUiPreferences {
+                language: "zh-CN".into(),
+                theme: ThemePreference::Dark,
+            })
+            .unwrap();
+
+        assert_eq!(saved.language, "zh-CN");
+        assert_eq!(saved.theme, ThemePreference::Dark);
+        assert_eq!(
+            service.read_global_ui_preferences().unwrap(),
+            GlobalUiPreferences {
+                language: "zh-CN".into(),
+                theme: ThemePreference::Dark,
+            }
+        );
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();

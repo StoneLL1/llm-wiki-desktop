@@ -46,6 +46,8 @@ pub fn start_deep_lint(
     request: StartDeepLintRequest,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    state.require_project_write_access(&context)?;
     let _deep_start_guard = state.lint_service.lock_deep_start()?;
     if let Some(existing) = state
         .task_service
@@ -102,6 +104,8 @@ async fn run_deep_lint(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
+    state.require_external_ai_access(context)?;
+    state.require_project_write_access(context)?;
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)

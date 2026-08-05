@@ -1,10 +1,14 @@
+# 历史实施计划（禁止直接执行）
+
+> 本文保留旧 `ProjectStartView` / 启动页方案的实现证据，不再定义目标。独立启动页、三张首屏操作卡、最近项目画廊、首屏 Agent/BYOK/模板墙等条目已由 [首次使用与打开已有知识库规范](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 取代。当前实施路线见 [`../roadmap/shell-dashboard.md`](../roadmap/shell-dashboard.md)。
+
 ✅ 本轮完成 @ 2026-06-21
 
 全部 P0 (7 项) + P1 (11 项) 已 verified。npm run test 72/72 全绿，npm run lint 全绿。
 
 改动文件：`src/components/app/LeftSidebar.tsx`、`RightContextPanel.tsx`、`TopBar.tsx`、`BottomStatusBar.tsx`、`src/hooks/useProjectStatus.ts`、`src/styles.css`、`src/i18n/locales/{en,zh-CN}.json`、`src/app/App.test.tsx`。
 
-# 进度账本 · shell + dashboard + 启动页 (P0+P1)
+## 原始进度账本 · shell + dashboard + 启动页 (P0+P1)
 
 > 权威源：SPEC/roadmap/shell-dashboard.md · UI-Frontend-design/{index,launch,dashboard}.html + assets/app.css · SPEC/PRD.md
 > status: pending | in_progress | done | verified

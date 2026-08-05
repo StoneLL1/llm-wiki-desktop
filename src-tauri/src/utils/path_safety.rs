@@ -2,21 +2,23 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-/// Resolve an existing project root while rejecting a root-level link or
-/// Windows reparse point. Descendant operations should still use the more
-/// specific helpers below so every traversed component is revalidated.
+/// Resolve an existing project root to its canonical directory. A root-level
+/// link or Windows junction is allowed only through this canonical handoff;
+/// descendants still use the more specific helpers below and may never be
+/// links or reparse points.
 pub(crate) fn validate_existing_project_root(project_root: &Path) -> Result<PathBuf, String> {
-    let metadata = fs::symlink_metadata(project_root)
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("Project root is unavailable: {error}"))?;
+    let metadata = fs::symlink_metadata(&canonical_root)
         .map_err(|error| format!("Project root is unavailable: {error}"))?;
     if metadata_is_link_or_reparse(&metadata) {
-        return Err("Project root is a link or reparse point".into());
+        return Err("Canonical project root is a link or reparse point".into());
     }
     if !metadata.is_dir() {
         return Err("Project root is not a directory".into());
     }
-    project_root
-        .canonicalize()
-        .map_err(|error| format!("Project root is unavailable: {error}"))
+    Ok(canonical_root)
 }
 
 /// Resolve a project-owned directory without following any descendant link or
@@ -88,8 +90,21 @@ pub(crate) fn ensure_project_directory(
     project_root: &Path,
     directory: &Path,
 ) -> Result<PathBuf, String> {
+    ensure_project_directory_with_created(project_root, directory).map(|(directory, _)| directory)
+}
+
+/// Like [`ensure_project_directory`], but also returns the exact components
+/// this process created. Callers that need to roll back a failed, scoped
+/// operation must only remove these returned paths after revalidating them;
+/// a pre-existing or concurrently-created component never belongs to their
+/// rollback.
+pub(crate) fn ensure_project_directory_with_created(
+    project_root: &Path,
+    directory: &Path,
+) -> Result<(PathBuf, Vec<PathBuf>), String> {
     let (canonical_root, relative) = canonical_root_and_relative(project_root, directory)?;
     let mut current = canonical_root.clone();
+    let mut created = Vec::new();
 
     for component in relative.components() {
         let Component::Normal(segment) = component else {
@@ -100,7 +115,7 @@ pub(crate) fn ensure_project_directory(
             Ok(metadata) => validate_directory_metadata(&canonical_root, &current, &metadata)?,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 match fs::create_dir(&current) {
-                    Ok(()) => {}
+                    Ok(()) => created.push(current.clone()),
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
                     Err(error) => {
                         return Err(format!(
@@ -132,7 +147,7 @@ pub(crate) fn ensure_project_directory(
     // close to that open as possible and must not claim an atomic no-follow
     // guarantee from this helper alone.
     validate_directory_components(&canonical_root, &relative, false)?;
-    Ok(canonical_root.join(relative))
+    Ok((canonical_root.join(relative), created))
 }
 
 fn canonical_root_and_relative(
@@ -273,7 +288,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_a_symlink_used_as_the_project_root() {
+    fn canonicalizes_a_symlink_used_as_the_project_root() {
         use std::os::unix::fs::symlink;
 
         let target = tempfile::tempdir().unwrap();
@@ -281,7 +296,35 @@ mod tests {
         let linked_root = parent.path().join("linked-project");
         symlink(target.path(), &linked_root).unwrap();
 
-        assert!(super::validate_existing_project_root(&linked_root).is_err());
+        assert_eq!(
+            super::validate_existing_project_root(&linked_root).unwrap(),
+            target.path().canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonicalizes_a_junction_used_as_the_project_root() {
+        let target = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let linked_root = parent.path().join("linked-project");
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                linked_root.to_string_lossy().as_ref(),
+                target.path().to_string_lossy().as_ref(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "junction setup failed");
+
+        assert_eq!(
+            super::validate_existing_project_root(&linked_root).unwrap(),
+            target.path().canonicalize().unwrap()
+        );
+        std::fs::remove_dir(linked_root).unwrap();
     }
 
     #[cfg(windows)]

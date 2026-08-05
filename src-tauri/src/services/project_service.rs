@@ -9,9 +9,9 @@ use sha2::{Digest, Sha256};
 use crate::errors::BackendError;
 use crate::models::graph::GraphData;
 use crate::models::layout::{
-    canonical_internal_read_path, is_link_or_reparse, project_descendant_path_enters_link,
-    inspect_native_layout, native_repair_directory_allowed, NativeLayoutState,
-    ProjectMarkdownRootRole,
+    canonical_internal_read_path, inspect_native_layout, is_link_or_reparse,
+    native_repair_directory_allowed, project_descendant_path_enters_link, CompatibleLayoutMapping,
+    NativeLayoutState, ProjectMarkdownRootRole, COMPATIBLE_LAYOUT_MAPPING_PATH,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::project::{
@@ -19,7 +19,7 @@ use crate::models::project::{
     ProjectHealthReport, ProjectInventoryState, ProjectRepairOperation, ProjectRepairOperationType,
     ProjectRepairPlan, ProjectSummary, ProjectTemplate, ProjectTrustKind, RecentProject,
 };
-use crate::services::file_store::FileStore;
+use crate::services::file_store::{FileStore, WriteMode};
 use crate::services::git_service::GitService;
 use crate::utils::path_safety::{
     ensure_project_directory_with_created, validate_existing_project_directory,
@@ -373,6 +373,75 @@ impl ProjectService {
         ])
     }
 
+    /// Persists a confirmed association with existing compatible-vault
+    /// directories.  This never creates or rewrites Markdown, raw sources, or
+    /// functional roots.  The caller supplies the preview hash so an external
+    /// mapping edit between preview and confirmation fails rather than being
+    /// overwritten.
+    pub(crate) fn write_compatible_layout_mapping(
+        &self,
+        context: &ProjectContext,
+        mapping: &CompatibleLayoutMapping,
+        expected_hash: Option<&str>,
+    ) -> Result<(), BackendError> {
+        let _write_guard = compatibility_guidance_write_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = validate_existing_project_root(&context.root).map_err(|message| {
+            compatibility_path_unsafe_error(
+                "Compatible layout mapping cannot use an unsafe project path.",
+                message,
+            )
+        })?;
+        let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
+        let purpose = root.join(".app/compat/purpose.md");
+        let schema = root.join(".app/compat/schema.md");
+        validate_existing_project_file(&root, &purpose).map_err(|message| {
+            compatibility_path_unsafe_error(
+                "Compatible layout mapping requires verified app-owned guidance.",
+                message,
+            )
+        })?;
+        validate_existing_project_file(&root, &schema).map_err(|message| {
+            compatibility_path_unsafe_error(
+                "Compatible layout mapping requires verified app-owned guidance.",
+                message,
+            )
+        })?;
+        mapping.validate_existing_roots(&root)?;
+        let mapping_path = root.join(COMPATIBLE_LAYOUT_MAPPING_PATH);
+        let mode = match expected_hash {
+            Some(hash) => WriteMode::OverwriteIfHashMatches(hash.to_string()),
+            None => WriteMode::CreateNew,
+        };
+        FileStore.write_json_atomic_checked(
+            context,
+            COMPATIBLE_LAYOUT_MAPPING_PATH,
+            mapping,
+            mode,
+        )
+        .map_err(|error| {
+            if matches!(error.code.as_str(), "FILE_HASH_MISMATCH" | "FILE_ALREADY_EXISTS" | "FILE_NOT_FOUND") {
+                BackendError::new(
+                    "PROJECT_COMPAT_LAYOUT_CHANGED",
+                    "The compatible layout mapping changed after preview. Prepare it again.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": COMPATIBLE_LAYOUT_MAPPING_PATH }))
+            } else {
+                error
+            }
+        })?;
+        validate_existing_project_file(&root, &mapping_path).map_err(|message| {
+            compatibility_path_unsafe_error(
+                "Compatible layout mapping became unsafe after writing.",
+                message,
+            )
+        })?;
+        Ok(())
+    }
+
     /// Prepares the only currently supported automatic recovery: replacing an
     /// invalid graph cache with a known empty cache after preserving the exact
     /// invalid bytes. The preparation phase is read-only and intentionally
@@ -471,7 +540,10 @@ impl ProjectService {
             ));
         }
 
-        let backup_path = operation.backup_path.as_deref().expect("validated repair backup path");
+        let backup_path = operation
+            .backup_path
+            .as_deref()
+            .expect("validated repair backup path");
         let backup = root.join(backup_path);
         let backup_directory = backup.parent().ok_or_else(|| {
             BackendError::new(
@@ -524,10 +596,7 @@ impl ProjectService {
             })?;
         replace_graph_cache_atomically(&root, &target, &replacement)?;
 
-        Ok(vec![
-            backup_path.to_string(),
-            operation.target_path.clone(),
-        ])
+        Ok(vec![backup_path.to_string(), operation.target_path.clone()])
     }
 
     /// Prepares a directory-only repair for a recognized legacy native
@@ -542,7 +611,8 @@ impl ProjectService {
         identity_revision: String,
     ) -> Result<ProjectRepairPlan, BackendError> {
         let root = repair_safe_root(context)?;
-        let NativeLayoutState::RepairableLegacy { missing } = inspect_native_layout(&root).state else {
+        let NativeLayoutState::RepairableLegacy { missing } = inspect_native_layout(&root).state
+        else {
             return Err(BackendError::new(
                 "PROJECT_NATIVE_REPAIR_UNAVAILABLE",
                 "This project does not have a safe legacy native layout repair.",
@@ -580,7 +650,9 @@ impl ProjectService {
                         true,
                         true,
                     )
-                    .with_details(serde_json::json!({ "path": target_path, "error": error.to_string() })));
+                    .with_details(
+                        serde_json::json!({ "path": target_path, "error": error.to_string() }),
+                    ));
                 }
             }
             operations.push(ProjectRepairOperation {
@@ -588,7 +660,10 @@ impl ProjectService {
                 target_path: target_path.into(),
                 backup_path: None,
                 expected_hash: None,
-                allowlist_descriptor: Some(format!("native-layout-v{}", crate::models::layout::CURRENT_NATIVE_LAYOUT_VERSION)),
+                allowlist_descriptor: Some(format!(
+                    "native-layout-v{}",
+                    crate::models::layout::CURRENT_NATIVE_LAYOUT_VERSION
+                )),
             });
         }
 
@@ -625,7 +700,8 @@ impl ProjectService {
         let _process_guard = self.trust_store.acquire_project_mutation_lock()?;
         let root = repair_safe_root(context)?;
 
-        let NativeLayoutState::RepairableLegacy { missing } = inspect_native_layout(&root).state else {
+        let NativeLayoutState::RepairableLegacy { missing } = inspect_native_layout(&root).state
+        else {
             return Err(BackendError::new(
                 "PROJECT_NATIVE_REPAIR_STALE",
                 "The native layout changed after the repair preview. Prepare repair again.",
@@ -693,8 +769,13 @@ impl ProjectService {
                         .with_details(serde_json::json!({ "path": operation.target_path, "error": error.to_string() })));
                     }
                 }
-                let created_paths = create_native_repair_directory(&root, &target)
-                    .map_err(|message| repair_path_unsafe_error("Native repair cannot create an unsafe directory.", message))?;
+                let created_paths =
+                    create_native_repair_directory(&root, &target).map_err(|message| {
+                        repair_path_unsafe_error(
+                            "Native repair cannot create an unsafe directory.",
+                            message,
+                        )
+                    })?;
                 if !created_paths.iter().any(|path| path == &target) {
                     return Err(BackendError::new(
                         "PROJECT_NATIVE_REPAIR_STALE",
@@ -705,12 +786,14 @@ impl ProjectService {
                     .with_details(serde_json::json!({ "path": operation.target_path })));
                 }
                 for path in created_paths {
-                    let relative = path.strip_prefix(&root).map_err(|_| BackendError::new(
-                        "PROJECT_REPAIR_PATH_UNSAFE",
-                        "Native repair created a path outside the project.",
-                        false,
-                        true,
-                    ))?;
+                    let relative = path.strip_prefix(&root).map_err(|_| {
+                        BackendError::new(
+                            "PROJECT_REPAIR_PATH_UNSAFE",
+                            "Native repair created a path outside the project.",
+                            false,
+                            true,
+                        )
+                    })?;
                     let relative = relative.to_string_lossy().replace('\\', "/");
                     if !native_repair_directory_allowed(&relative) {
                         return Err(BackendError::new(
@@ -995,14 +1078,24 @@ impl ProjectService {
         task_count: usize,
         inventory_state: ProjectInventoryState,
     ) -> ProjectSummary {
-        let index_state = if context.wiki_dir.join("index.md").exists()
-            || context.root.join("index.md").exists()
+        let index_state = if context
+            .layout
+            .wiki_index_path
+            .as_deref()
+            .and_then(|path| context.resolve_project_path(path).ok())
+            .is_some_and(|path| path.exists())
         {
             IndexState::Indexed
         } else {
             IndexState::Missing
         };
-        let graph_state = if graph_cache_has_content(&context.app_dir.join("graph-cache.json")) {
+        let graph_state = if context
+            .layout
+            .graph_cache_path
+            .as_deref()
+            .and_then(|path| context.resolve_project_path(path).ok())
+            .is_some_and(|path| graph_cache_has_content(&path))
+        {
             GraphState::Cached
         } else {
             GraphState::Missing
@@ -1301,8 +1394,9 @@ impl ProjectService {
     }
 
     fn read_project_template(&self, context: &ProjectContext) -> Option<ProjectTemplate> {
+        let settings_path = context.layout.settings_path.as_deref()?;
         let store = FileStore;
-        let settings: ProjectSettings = store.read_json(context, ".app/settings.json").ok()?;
+        let settings: ProjectSettings = store.read_json(context, settings_path).ok()?;
         Some(settings.template)
     }
 
@@ -1490,10 +1584,18 @@ fn create_native_repair_directory(root: &Path, target: &Path) -> Result<Vec<Path
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
-            .map_err(|error| format!("Native repair cannot open directory {}: {error}", path.display()))?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| format!("Native repair cannot inspect directory {}: {error}", path.display()))?;
+            .map_err(|error| {
+                format!(
+                    "Native repair cannot open directory {}: {error}",
+                    path.display()
+                )
+            })?;
+        let metadata = file.metadata().map_err(|error| {
+            format!(
+                "Native repair cannot inspect directory {}: {error}",
+                path.display()
+            )
+        })?;
         if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(format!(
                 "Native repair encountered a linked or invalid directory: {}",
@@ -3929,11 +4031,25 @@ mod tests {
         let (service, _config) = service_in_temp();
         let root = unique_temp_dir("native-layout-repair");
         for directory in [
-            ".app/chats", ".app/tasks", "raw/sources/pdfs", "raw/sources/docs",
-            "raw/sources/slides", "raw/sources/sheets", "raw/sources/markdown",
-            "raw/sources/links", "raw/sources/other", "raw/extracted", "raw/assets",
-            "wiki/entities", "wiki/concepts", "wiki/sources", "wiki/queries", "wiki/synthesis",
-            "wiki/comparisons", "exports/html", "skills",
+            ".app/chats",
+            ".app/tasks",
+            "raw/sources/pdfs",
+            "raw/sources/docs",
+            "raw/sources/slides",
+            "raw/sources/sheets",
+            "raw/sources/markdown",
+            "raw/sources/links",
+            "raw/sources/other",
+            "raw/extracted",
+            "raw/assets",
+            "wiki/entities",
+            "wiki/concepts",
+            "wiki/sources",
+            "wiki/queries",
+            "wiki/synthesis",
+            "wiki/comparisons",
+            "exports/html",
+            "skills",
         ] {
             fs::create_dir_all(root.join(directory)).unwrap();
         }
@@ -3944,11 +4060,7 @@ mod tests {
         let context = ProjectContext::new("legacy", root.clone());
 
         let plan = service
-            .prepare_native_layout_repair_plan(
-                &context,
-                "identity".into(),
-                "revision".into(),
-            )
+            .prepare_native_layout_repair_plan(&context, "identity".into(), "revision".into())
             .unwrap();
         assert!(plan.expected_git_head.is_none());
         assert!(plan.operations.iter().all(|operation| {
@@ -3957,10 +4069,15 @@ mod tests {
                 && operation.expected_hash.is_none()
         }));
 
-        let changed = service.apply_native_layout_repair_plan(&context, &plan).unwrap();
+        let changed = service
+            .apply_native_layout_repair_plan(&context, &plan)
+            .unwrap();
         assert_eq!(changed, vec![".app/tasks"]);
         assert!(root.join(".app/tasks").is_dir());
-        assert_eq!(fs::read_to_string(root.join("wiki/keep.md")).unwrap(), "# Keep\n");
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/keep.md")).unwrap(),
+            "# Keep\n"
+        );
 
         fs::remove_dir_all(root).ok();
     }

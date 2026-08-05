@@ -31,8 +31,9 @@ pub struct PendingAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingActionType {
-    InitializeFolder,
+    RepairProject,
     EnableCompatibleProject,
+    ConfigureCompatibleLayout,
     TrustCompatibleProject,
     InitializeGitRepository,
     CreateGitCheckpoint,
@@ -94,9 +95,11 @@ pub struct StoredPendingAction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmationExecution {
-    InitializeFolder {
+    RepairProject {
+        assessment_id: crate::models::project::AssessmentId,
+        project_id: String,
         root_path: String,
-        file_hashes: Vec<(String, String)>,
+        plan: crate::models::project::ProjectRepairPlan,
     },
     EnableCompatibleProject {
         assessment_id: crate::models::project::AssessmentId,
@@ -104,6 +107,13 @@ pub enum ConfirmationExecution {
         root_path: String,
         template: crate::models::project::ProjectTemplate,
         initialize_git: bool,
+    },
+    ConfigureCompatibleLayout {
+        assessment_id: crate::models::project::AssessmentId,
+        project_id: String,
+        root_path: String,
+        mapping: crate::models::layout::CompatibleLayoutMapping,
+        expected_hash: Option<String>,
     },
     TrustCompatibleProject {
         assessment_id: crate::models::project::AssessmentId,

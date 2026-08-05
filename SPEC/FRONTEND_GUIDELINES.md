@@ -4,13 +4,15 @@
 > Implementation authority: the entire `UI-Frontend-design/` folder is authoritative for exact DOM hierarchy, interaction structure, CSS tokens, absolute-pixel font sizes, and component heights. `DESIGN.md` remains a high-level visual reference; when exact values or structure differ, follow `UI-Frontend-design/`.
 > Import interaction authority: [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) defines the confirmed information architecture, states, media actions, Source preview and AI 整理 behavior. Existing design HTML is visual evidence only where it conflicts with that flow.
 > Compatibility migration UI is Settings-only. The normal Import workbench must remain free of migration terminology and legacy source actions; icon-only dialog controls require a localized accessible name and matching tooltip.
+> Workflows interaction authority: [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) defines the confirmed navigation, information architecture, preparation, project-scoped task presentation, pipelines and safety behavior. Legacy `agent.html` remains a density and component-style reference only; do not restore its configuration dashboard, BYOK cards, four-card launcher, or Run Agent dialog.
+> First-run / project-open authority: [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) defines the confirmed no-project shell, exactly two first-screen actions, creation flow, typed open assessment, restricted/trusted/read-only states, compatibility enablement, repair and Import handoff. Legacy `launch.html` and completed ProjectStartView plans are visual history only where they conflict.
 > Stack target: React 19, TypeScript, Tailwind CSS v4, shadcn/ui, Lucide React.
 
 ## 1. Design Intent
 
 LLM Wiki Desktop should feel like a quiet local knowledge workbench: precise, readable, fast, and respectful of user files. The interface should be recognizably close to the Codex desktop app: a calm agent workspace with a compact shell, restrained surfaces, clear task state, and very little decorative styling.
 
-The product is not a landing page, a chat-only surface, or a decorative AI dashboard. It is a multi-pane workspace for importing sources, reading and editing Markdown, running local agents, inspecting diffs, viewing graphs, and exporting knowledge artifacts.
+The product is not a landing page, a chat-only surface, or a decorative AI dashboard. It is a multi-pane workspace for importing sources, reading and editing Markdown, running product-defined workflows through local or BYOK routes, inspecting diffs, viewing graphs, and exporting knowledge artifacts.
 
 Core qualities:
 
@@ -35,7 +37,7 @@ Codex-like means:
 - Minimal chromatic expression: white, near-black, gray, hairline borders, and a small amount of teal.
 - Subtle selected states, quiet hover states, and nearly flat panels.
 - Direct language, tool-like controls, and no marketing copy.
-- Agent activity shown as a first-class workflow, with logs, progress, and cancel controls.
+- Product workflows shown as first-class activity, with structured stages, progress, confirmations, results, and cancel controls.
 
 Avoid designs that look like generic admin templates, SaaS analytics dashboards, Notion clones, or AI landing pages. The closest mental model is: "Codex desktop, but the task domain is local wiki building instead of code editing."
 
@@ -119,13 +121,13 @@ The implemented call chain is `AppShell -> WorkspaceController -> WorkspaceRoute
 
 | Layer | Ownership |
 |---|---|
-| `AppShell` | Application frame, pane sizing, responsive behavior, global keyboard shortcuts, and mounting global controllers/overlays. |
+| `AppShell` | Application frame in both project and no-project states, pane sizing, responsive behavior, global keyboard shortcuts, and mounting global controllers/overlays. |
 | `WorkspaceController` | Project-scoped workflow composition and modal wiring. |
 | `WorkspaceRouter` | Active-view dispatch and the lazy-view boundary. |
 | `ProjectConfirmationController` | `PendingAction` and compile-conflict orchestration. |
 | Feature workflows | Domain-specific state and effects only. |
 
-The five current domain workflows remain separate: `useAiCapabilities`, `useTaskLauncher`, `useImportWorkflow`, `useProviderWorkflow`, and `useAgentWorkflow`. Do not move workflow logic back into `AppShell`, and do not consolidate these responsibilities into one giant controller or hook. New cross-view coordination belongs in a focused domain workflow composed by `WorkspaceController`; view-specific behavior stays with its feature.
+The five current domain workflows remain separate: `useAiCapabilities`, `useTaskLauncher`, `useImportWorkflow`, `useProviderWorkflow`, and `useAgentWorkflow`. This is the 2026-07-30 implementation baseline; the Agent-facing hook and view may be migrated or renamed for Workflows, but their responsibilities must not move back into `AppShell` or one giant controller. New cross-view coordination belongs in a focused domain workflow composed by `WorkspaceController`; view-specific behavior stays with its feature.
 
 ### 3.5 Async Project-Scope Safety
 
@@ -133,13 +135,13 @@ Every asynchronous UI commit must prove that it still belongs to the active proj
 
 - Supersedable requests, such as capability refreshes, previews, and tests, must use a request epoch or equivalent monotonic guard so only the latest request may commit.
 - When the project changes or a newer request supersedes an older one, suppress stale commits to view state, navigation, drawer opening, and toasts.
-- Backend task records are global history: stale project-scoped presentation must be suppressed, but valid task records still enter `taskStore` and remain inspectable from the task UI.
+- Backend task events may enter one process-level `taskStore`, but task lists, selection, drawers, confirmations and history must be filtered to the active project. Other projects remain inspectable only after switching projects.
 - Do not infer project scope from the currently rendered view after awaiting; compare against the captured stable key before every stateful UI effect.
 
 ### 3.6 Secrets, Long Tasks, and Bundle Boundaries
 
 - Raw provider secrets pass directly from the form callback through typed Tauri IPC to OS credential storage. They must never enter Zustand, logs, task payloads, error details, analytics, or toast text.
-- Every long-running operation and its result enters `taskStore` so progress, logs, cancellation, completion, and failure remain globally visible in the task drawer across navigation.
+- Every long-running operation and its result enters `taskStore` so progress, logs, cancellation, completion, and failure remain visible across navigation within the active project. The task drawer must never mix projects.
 - `WorkspaceRouter` owns lazy active-view dispatch. Keep each lazy view wrapped by colocated `Suspense` and `ViewErrorBoundary` boundaries so loading and render/import failures are isolated per active view.
 - Controller imports must not pull heavy feature implementations or their transitive async chunks into the initial bundle. Pass typed workflow facades into lazy views, use type-only imports where applicable, and keep view-only heavy dependencies behind the lazy import boundary.
 
@@ -344,13 +346,15 @@ Primary navigation belongs in the left sidebar:
 - Wiki
 - Chat
 - Graph
-- Agent
+- Workflows
 - Import
 - Lint
 - Exports
 - Settings
 
 Use Lucide icons plus text in expanded mode, icons only in collapsed mode. Active state uses `--accent-soft` background and `--accent` icon/text. Keep primary navigation rows 30px high and compact recent/tree rows 26px high, with 6px radius.
+
+The sidebar group that previously used the label `工作流` is named `知识处理 / Knowledge Processing`. Its Workflows item uses Lucide `Workflow` and never carries a task count or running badge. Preserve the existing Agent status foot at the bottom of the sidebar as execution-route status, not primary navigation.
 
 ### 7.4 Panels
 
@@ -398,9 +402,10 @@ Use dialogs for blocking decisions:
 
 - Delete page.
 - Overwrite file.
-- Apply Agent changes.
 - Initialize a normal folder as project.
 - Store or replace provider credentials.
+
+Workflow-generated high-risk changes use a persistent, non-modal `waiting for confirmation` task state with an impact summary and optional Diff. Users may navigate elsewhere before confirming; do not interrupt them with a modal as soon as the task reaches the checkpoint.
 
 Permanent Source deletion is not a generic compact dialog. Use a dedicated second-confirmation page that shows the whole source package, freed space, referencing Wiki pages, checkpoint behavior, and the explicit action `永久删除此来源`.
 
@@ -422,18 +427,26 @@ Destructive dialogs must include:
 
 ### 8.1 Project Start and Dashboard
 
-The first screen should be a usable project surface, not a marketing page.
+The no-project first screen is the real workbench, not a separate start or marketing page:
 
-Dashboard should show:
+- Keep the full top bar, left navigation, center workspace, right context panel, and bottom status bar mounted.
+- The center workspace contains exactly two compact task cards: `新建知识库 / New Knowledge Base` and `打开已有知识库 / Open Existing Knowledge Base`.
+- Do not add a third Import or “Open Folder as Project” card, recent-project gallery, hero, template wall, Agent/BYOK setup, capability marketing, or decorative empty-state illustration.
+- Navigation remains visible. A module without enough context shows one short reason and one relevant action; Settings remains available, and search without a knowledge-base scope is disabled.
+- The no-project right panel explains local storage, read-only assessment, compatibility and trust. It does not ask users to configure AI.
+- New-knowledge-base fields are name, parent save location, and creation-time template. Show the generated final path; default to General; creation opens Import without automatically opening a system picker.
+- Opening an existing knowledge base presents format, health and permission separately. Restricted, read-only and recovery banners appear only when actionable and provide one primary next step.
+
+A loaded Dashboard should show:
 
 - Current project health.
 - Recent pages.
 - Import status.
-- Agent and BYOK availability.
+- Capability readiness only where it affects an action.
 - Index and graph state.
 - Recent tasks.
 
-Use compact summary blocks, not large decorative cards. Empty states should offer direct actions: create project, open folder, import files.
+Native, compatible and recovery projects keep the same Dashboard structure; unavailable or partial values say why rather than collapsing into an empty page. Use compact summary blocks, not large decorative cards.
 
 ### 8.2 Wiki Browser and Reader
 
@@ -482,7 +495,8 @@ Rules:
 - Assistant answers must show source links or source cards when available.
 - Streaming state should be calm: subtle cursor, progress text, and cancel button.
 - Saved answers should clearly indicate the target `wiki/queries/` path.
-- Empty state should suggest asking about the current wiki, not generic AI prompts.
+- Empty state should suggest asking about the current readable Sources or Wiki, not generic AI prompts; Source-only projects do not need to compile first.
+- Restricted projects explain that external AI requires trust and provide one `信任知识库` action. Missing AI configuration provides `去配置`; returning preserves the draft and never auto-sends.
 
 ### 8.4 Graph
 
@@ -500,6 +514,8 @@ Rules:
 - Community colors may expand beyond teal, but keep saturation moderate.
 - Provide fit-to-screen, zoom, and reset layout controls as icon buttons.
 - Show build progress and allow cancellation for long graph builds.
+- Build from readable Source/Wiki Markdown without a compile prerequisite. Restricted/read-only projects show in-memory results without implying a cache write.
+- Label deep-scan results as partial until coverage is complete; never present a partial empty canvas as proof that the knowledge base has no links.
 - Avoid text labels that overlap heavily; use hover and selection for detail.
 
 ### 8.5 Import
@@ -545,24 +561,29 @@ Source reader:
 - Original draft, provenance, meaningful version timeline, OCR / ASR reprocessing and platform refresh belong in the toggleable right panel.
 - AI 整理 always produces a candidate, adds or replaces one `## 内容概览`, and requires Diff plus confirmation before updating the current Source.
 
-### 8.6 Agent Panel
+### 8.6 Workflows
 
-Agent panel should communicate capability and process state.
+Workflows is a task-oriented surface for updating, checking, and generating the active project. Agent and Provider configuration remains in Settings.
 
-Show:
+Views:
 
-- Detected CLIs and versions.
-- Default Agent.
-- BYOK fallback availability.
-- Running tasks.
-- stdout / stderr logs.
-- Cancel controls.
+- Overview: active, waiting, or failed task first; otherwise the three fixed workflow rows `更新 Wiki`, `健康检查`, and `生成内容`.
+- Run preparation: a full center-workspace view with scope, prerequisites, output summary, and collapsed advanced execution settings. Do not use a Run Agent modal.
+- Task detail: an observable vertical pipeline with overall status, current stage, current item, bounded count progress, activity, and the next safe action.
+- Run history: records for the active project only, filterable by workflow and task state.
 
 Rules:
 
-- Do not present install actions as automatic.
-- Logs use monospace and a dark or muted terminal surface.
-- Running state must survive navigation away from the view.
+- Use compact rows and the existing right context panel. Do not use a configuration card wall, BYOK cards, or four oversized launch cards.
+- Keep workflow order fixed. At most one row can be recommended; recommendations never reorder or auto-run work.
+- The main rows do not expose Agent or Provider selectors. Show the effective route as secondary information in preparation/details, with a link to Settings when unavailable.
+- Keep data scope collapsed under execution details. On the first remote Provider run, disclose once that the selected content leaves the device.
+- Keep all three workflows visible in incomplete projects; clicking reveals prerequisites instead of disabling discovery.
+- Present structured stages before raw logs. Logs are read-only, monospace, collapsed by default, and never substitute for the primary task state.
+- Task state labels cover queued, running, waiting for confirmation, completed, failed, cancelled, and interrupted. Do not communicate state by color alone.
+- Workflows, task selection, confirmation, and history are isolated to the active project; same-project work runs serially.
+- Running state survives navigation. Cancellation, linked retry, and interrupted-run explanation remain available from task detail.
+- Health Check launches from Workflows but the unchanged Lint page owns findings and repair. Generate Content launches from Workflows but the unchanged Exports page owns artifacts and preview.
 
 ### 8.7 Lint
 
@@ -616,7 +637,7 @@ Selected state should be visible without relying on color alone.
 
 ### 9.2 Long Tasks
 
-Long tasks include import parsing, wiki compilation, graph building, deep lint, and export generation.
+Long tasks include import parsing, Update Wiki, graph building, Health Check, and Generate Content.
 
 Every long task must provide:
 
@@ -628,6 +649,8 @@ Every long task must provide:
 
 Do not block the whole UI for long tasks.
 
+Workflow tasks additionally show a structured stage timeline, current item, count progress, activity history, and queued/running/waiting/completed/failed/cancelled/interrupted state. Queueing, task start, and ordinary stage progress do not produce system notifications.
+
 Import navigation and window minimization keep tasks running. After an application restart, heavy download, OCR and ASR tasks return as `Paused, ready to continue`; do not resume them automatically. Reuse completed chunks, and clean temporary media only after explicit cancellation.
 
 ### 9.3 Confirmations
@@ -637,8 +660,9 @@ Require confirmation for:
 - Deleting pages.
 - Applying a new Source version or merging it into the current Source.
 - Batch rewrites.
-- Applying Agent-generated diffs.
-- Initializing a normal folder as a project.
+- Applying high-risk workflow-generated deletes, overwrites, broad rewrites, or conflicts.
+- Trusting and enabling full features for an external compatible knowledge base.
+- Applying a project-open repair plan.
 - Saving credentials.
 - Enabling OCR or ASR for the current import session.
 - Installing the dependency chain required by a media, OCR or ASR goal.
@@ -702,7 +726,7 @@ Suggested mappings:
 | Wiki | `BookOpenText` |
 | Chat | `MessageSquare` |
 | Graph | `Network` |
-| Agent | `Bot` |
+| Workflows | `Workflow` |
 | Import | `Upload` |
 | Lint | `ShieldCheck` |
 | Exports | `FileOutput` |
@@ -733,7 +757,7 @@ A screen is sufficiently Codex-like when:
 - Navigation, task status, and context stay visible during work.
 - Most controls are compact, aligned, and quiet.
 - The design relies on spacing, typography, borders, and selection state rather than decoration.
-- Agent or background execution is visible through logs, progress, and state labels.
+- Workflow or background execution is visible through structured stages, progress, state labels, and secondary logs.
 - The user can understand where files live, what changed, and what process is running.
 
 If a screen could be mistaken for a generic SaaS dashboard screenshot, revise it toward the Codex desktop shell.
@@ -793,13 +817,15 @@ The app supports Chinese and English. UI writing should be short, direct, and ac
 Rules:
 
 - Use verbs for commands: `Import`, `Save`, `Run Lint`, `Apply Diff`.
-- Use nouns for navigation: `Wiki`, `Chat`, `Graph`, `Agent`, `Settings`.
+- Use nouns for navigation: `Wiki`, `Chat`, `Graph`, `Workflows`, `Settings`.
 - Avoid hype words such as `magic`, `revolutionary`, or `supercharged`.
 - Explain risky actions in plain language.
 - File paths and generated filenames should be shown exactly.
 - Chinese labels should not be forced into narrow English-sized controls.
 - User-facing terms are `原始资料`, `来源库 / 来源`, and `Wiki 页面`; normal UI does not expose staging, artifact, manifest, or baseline.
 - Core Chinese actions are `导入到来源库`, `用这些来源更新 Wiki`, and `AI 整理`; English equivalents must preserve the same separation.
+- First-screen actions are `新建知识库` and `打开已有知识库`. `导入` always means adding material to the currently open knowledge base; it never means opening or initializing a selected folder.
+- Use `受限`, `已信任`, and `只读` for permission; use native/compatible wording for format; do not compress both dimensions into `兼容模式`.
 
 ## 15. Do and Do Not
 
@@ -809,6 +835,7 @@ Do:
 - Make the app visually close to Codex desktop: compact, pane-based, quiet, and agent-aware.
 - Keep the interface quiet and information-dense.
 - Show the current project and local file boundaries clearly.
+- Preserve the full workbench shell before a knowledge base is opened.
 - Make background tasks visible and cancellable.
 - Use right panels for context instead of modal overload.
 - Use Git checkpoint and diff language consistently.
@@ -817,6 +844,8 @@ Do:
 Do not:
 
 - Turn the app into a landing page.
+- Add a third first-screen action, recent-project card wall, template wall, or Agent/BYOK setup panel.
+- Initialize, move, rename, or mark an ordinary materials folder in place.
 - Drift into generic shadcn dashboard styling.
 - Use oversized decorative cards for primary workflows.
 - Hide Agent or file-system side effects.
@@ -831,6 +860,8 @@ Do not:
 Before considering a frontend view complete, verify:
 
 - The view fits the global shell model.
+- The no-project state keeps the global shell and shows exactly the two confirmed knowledge-base actions.
+- Format, health, permission and capability readiness remain independently understandable.
 - Text fits in Chinese and English.
 - Primary and secondary actions are visually distinct.
 - Loading, empty, error, success, and disabled states exist.

@@ -133,6 +133,8 @@ fn start_source_ai_organize_impl(
     expected_resolved_identity: Option<(String, String)>,
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    state.require_project_write_access(&context)?;
     let input = state.import_v2_service.prepare_source_ai_organize_input(
         &context,
         &state.file_store,
@@ -409,6 +411,8 @@ async fn run_source_ai_organize(
     if state.task_service.is_cancelled(task_id) {
         return Err(source_ai_cancelled());
     }
+    state.require_external_ai_access(context)?;
+    state.require_project_write_access(context)?;
     state
         .task_service
         .append_log(

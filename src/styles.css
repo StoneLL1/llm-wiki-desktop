@@ -2656,6 +2656,21 @@ select:focus-visible {
   padding: 6px var(--sp-2);
   text-align: left;
 }
+.app-topbar__project-menu-entry { display: flex; align-items: center; gap: 2px; }
+.app-topbar__project-menu-entry .app-topbar__project-menu-row { flex: 1; min-width: 0; }
+.app-topbar__project-menu-reset {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+.app-topbar__project-menu-reset:hover,
+.app-topbar__project-menu-reset:focus-visible { background: var(--surface-muted); color: var(--text-primary); }
+.app-topbar__project-menu-reset:disabled { color: var(--text-disabled); cursor: not-allowed; }
 .app-topbar__project-menu-row:hover,
 .app-topbar__project-menu-row:focus-visible {
   background: var(--surface-muted);
@@ -2740,6 +2755,161 @@ select:focus-visible {
 .app-shell.is-sidebar-collapsed .app-sidebar__agent-name,
 .app-shell.is-sidebar-collapsed .app-sidebar__count {
   display: none;
+}
+
+/* No-project workbench: keep the regular desktop shell and use compact task
+   launchers, rather than a separate launch or marketing page. */
+.no-project-workspace {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  justify-content: center;
+  padding: var(--sp-6);
+}
+
+.no-project-actions,
+.no-project-dependency,
+.no-project-decision,
+.no-project-assessment-state {
+  width: min(100%, 720px);
+  margin: 0 auto;
+}
+
+.no-project-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3);
+}
+
+.no-project-action {
+  display: flex;
+  min-height: 112px;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  padding: var(--sp-4);
+  color: var(--text-primary);
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.no-project-action:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  background: var(--surface);
+}
+
+.no-project-action:disabled {
+  cursor: not-allowed;
+  color: var(--text-disabled);
+}
+
+.no-project-action__icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+.no-project-action strong,
+.no-project-action small {
+  display: block;
+}
+
+.no-project-action strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.no-project-action small {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.no-project-storage-note {
+  grid-column: 1 / -1;
+  margin: var(--sp-1) 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.no-project-dependency,
+.no-project-decision,
+.no-project-assessment-state {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: var(--sp-4);
+}
+
+.no-project-dependency h2,
+.no-project-decision h2,
+.no-project-assessment-state h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.no-project-dependency p,
+.no-project-decision p,
+.no-project-assessment-state p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.no-project-decision,
+.no-project-assessment-state {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+
+.no-project-decision > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--warning-text);
+}
+
+.no-project-error {
+  width: min(100%, 720px);
+  margin: var(--sp-3) auto 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.import-handoff-notice {
+  display: flex;
+  min-height: 38px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--sp-3);
+  border-bottom: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--accent-hover);
+  font-size: 12px;
+}
+
+.import-handoff-notice .btn {
+  margin-left: auto;
+}
+
+@media (max-width: 680px) {
+  .no-project-actions {
+    grid-template-columns: 1fr;
+  }
 }
 
 .app-shell.is-sidebar-collapsed .app-sidebar button,
@@ -4358,6 +4528,9 @@ select:focus-visible {
 .workflow-row__icon { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); color: var(--text-secondary); background: var(--surface-raised); }
 .workflow-row__state { display: flex; align-items: center; gap: 7px; color: var(--text-secondary); font-size: 11.5px; }
 .workflow-row__last { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
+.workflow-row__prerequisite { display: flex; align-items: flex-start; gap: 5px; margin: 3px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.4; }
+.workflow-row__prerequisite svg { flex: 0 0 auto; margin-top: 1px; }
+.workflow-row__prerequisite.is-blocking { color: var(--warning); }
 .workflow-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--text-disabled); }
 .workflow-status-dot.is-running { background: var(--accent); }
 .workflow-status-dot.is-waiting-for-confirmation,
@@ -4427,7 +4600,9 @@ select:focus-visible {
 .workflow-result dd { margin: 0; overflow-wrap: anywhere; }
 .workflow-affected-paths { max-height: 180px; margin: 6px 0 0; padding-left: 20px; overflow-y: auto; font-size: 11px; }
 .workflow-progress-count { display: block; margin-top: 5px; color: var(--text-muted); font-size: 11px; }
-.workflow-error-banner { position: sticky; top: 0; z-index: 2; border-bottom: 1px solid var(--danger); padding: 7px var(--sp-4); background: var(--surface-raised); color: var(--danger); font-size: 12px; }
+.workflow-error-banner { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); border-bottom: 1px solid var(--danger); padding: 7px var(--sp-4); background: var(--surface-raised); color: var(--danger); font-size: 12px; }
+.workflow-error-banner > span { min-width: 0; overflow-wrap: anywhere; }
+.workflow-error-banner .btn { flex: 0 0 auto; }
 .workflow-pipeline { margin: 0 0 var(--sp-5); padding: 0; list-style: none; }
 .workflow-pipeline li { position: relative; display: flex; gap: var(--sp-3); min-height: 50px; padding: 7px 0 12px; color: var(--text-secondary); font-size: 12px; }
 .workflow-pipeline li::before { position: absolute; top: 28px; bottom: -2px; left: 10px; width: 1px; background: var(--border-subtle); content: ""; }
@@ -4448,6 +4623,10 @@ select:focus-visible {
 .workflow-history__run:hover { background: var(--surface-muted); color: var(--text-primary); }
 .workflow-history__run time { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
 .workflow-empty { display: grid; min-height: 280px; place-content: center; padding: var(--sp-6); text-align: center; }
+.workflow-empty__icon { justify-self: center; margin-bottom: var(--sp-3); color: var(--text-muted); }
+.workflow-empty__icon.is-error { color: var(--danger); }
+.workflow-empty__detail { display: block; max-width: 68ch; margin-top: var(--sp-3); color: var(--danger); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.workflow-empty__retry { justify-self: center; margin-top: var(--sp-4); }
 .workflow-muted { color: var(--text-muted); font-size: 12px; }
 .workflow-context-section { border-bottom: 1px solid var(--border-subtle); padding: var(--sp-3) 0; }
 .workflow-context-section:last-child { border-bottom: 0; }

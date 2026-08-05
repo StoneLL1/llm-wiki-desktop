@@ -1,10 +1,13 @@
 # LLM Wiki Desktop MVP Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status note (2026-07-30):** This is the original MVP bootstrap plan, so its baseline and create/modify labels are historical rather than a current repository inventory. For Workflows, follow [`docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) and [`SPEC/roadmap/agent.md`](SPEC/roadmap/agent.md). For Task 2, Task 3, Task 14 and the project-lifecycle acceptance matrix, follow [`docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md). For Task 5 and every Import/Source acceptance item, follow [`docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md). The updated text below reflects those overrides; remaining historical baseline wording must not restore a standalone launch page, ordinary-folder in-place initialization, media-type-only evidence layout, partial evidence/Source commits, or compile-after-import.
 
-**Goal:** Build the MVP local-first Tauri desktop app that turns personal sources into a Markdown wiki with import, compile, graph, chat, lint, Agent, BYOK, export, Git safety, background tasks, and settings workflows.
+**Goal:** Build the MVP local-first Tauri desktop app that turns personal sources into a Markdown wiki with import, graph, chat, lint, Workflows, Agent/BYOK execution routes, export, Git safety, background tasks, and settings.
 
 **Architecture:** Keep React as a compact Codex-like workbench and keep all filesystem, Git, Agent process, LLM, task, and secret logic behind typed Tauri IPC commands. The project folder remains the source of truth, with Markdown and JSON persisted under `purpose.md`, `schema.md`, `raw/`, `wiki/`, `.app/`, `exports/`, and `skills/`.
+
+That root layout describes a newly created native knowledge base. Compatible external vaults retain their structure; after explicit enablement, app-owned compatibility guidance lives under `.app/compat/`, never in root files that may belong to the user.
 
 **Tech Stack:** React 19, TypeScript, Vite, Tailwind CSS v4, shadcn-style local components, Lucide React, Zustand, react-i18next, Tauri v2, Rust services, Markdown/JSON/local files, Git checkpoints, sigma.js, graphology, ForceAtlas2, Louvain, remark/rehype Markdown rendering, Milkdown editor.
 
@@ -14,14 +17,14 @@
 
 Every implementation agent must follow these rules before editing code:
 
-- Read `AGENTS.md`, `CLAUDE.md`, `SPEC/PRD.md`, `SPEC/SPEC.md`, `SPEC/APP_flow.md`, `SPEC/TECH_STACK.md`, `SPEC/BACKEND_STRUCTURE.md`, `SPEC/FRONTEND_GUIDELINES.md`, and `SPEC/DESIGN.md`.
+- Read `AGENTS.md`, `CLAUDE.md`, `SPEC/PRD.md`, `SPEC/SPEC.md`, `SPEC/APP_flow.md`, `SPEC/TECH_STACK.md`, `SPEC/BACKEND_STRUCTURE.md`, `SPEC/FRONTEND_GUIDELINES.md`, `SPEC/DESIGN.md`, and the feature-specific confirmed design documents linked from those files.
 - Treat `wiki/wiki/` as validation data only. Do not move it into app source code.
 - Keep user project content as Markdown, JSON, and local files. Do not introduce a database for wiki content.
 - Keep `raw/sources/` immutable by default. Replacement or deletion requires an explicit confirmation flow and a Git checkpoint.
 - Store API keys only through OS credential storage. Do not write secrets to project files, logs, exports, or tests.
 - Route all filesystem, Git, Agent, LLM, task, and secret behavior through Tauri IPC and Rust services. React must not own those concerns.
-- For every meaningful milestone, add a new top entry to `SPEC/progress.txt` with `[YYYY-MM-DD] Module/Task - Summary - Key decision or open issue`.
-- Add one `SPEC/gotchas.txt` entry only when an issue recurs, is subtle, or is easy to repeat.
+- For every meaningful milestone, add a new top entry to root `progress.txt` with `[YYYY-MM-DD] Module/Task - Summary - Key decision or open issue`.
+- Add one root `gotchas.txt` entry only when an issue recurs, is subtle, or is easy to repeat.
 - After each feature or meaningful fix, run tests and lint, perform the review workflow from `AGENTS.md`, fix valid findings, then rerun checks from the beginning.
 - Required final checks for every completed implementation task: `npm run test`, `npm run lint`, no unintended `console.log`, import paths resolve through `npm run build` or equivalent TypeScript build verification.
 
@@ -48,6 +51,8 @@ Baseline gaps to close:
 - `ExtractionService`, `LintService`, `SecretService`, full task models, confirmation models, and most command modules are missing.
 - Existing services are stubs and do not yet implement project lifecycle, file safety, import, Git checkpoints, Agent, BYOK, graph, lint, export, settings, or secrets.
 - Frontend feature folders currently contain README placeholders rather than working views.
+
+2026-07-30 migration reality supersedes the original scaffold inventory above: the app is broadly implemented, but no-project rendering still branches to standalone `ProjectStartView`; project opening still uses binary detection, can initialize Git while opening an external folder, and retains an ordinary-folder move / initialization continuation. There is no complete global trust identity, access policy, typed repair plan or restricted/read-only project-open pipeline yet.
 
 Acceptance for this baseline:
 
@@ -100,7 +105,7 @@ Frontend feature views:
 - Create: `src/features/import/ImportView.tsx`
 - Create: `src/features/graph/GraphView.tsx`
 - Create: `src/features/chat/ChatView.tsx`
-- Create: `src/features/agent/AgentView.tsx`
+- Legacy baseline: `src/features/agent/AgentView.tsx`; migrate the user-facing surface to Workflows per Task 8 and `SPEC/roadmap/agent.md`
 - Create: `src/features/lint/LintView.tsx`
 - Create: `src/features/exports/ExportsView.tsx`
 - Create: `src/features/settings/SettingsView.tsx`
@@ -237,7 +242,7 @@ Project templates and skills:
 
 - [ ] Step 2: Implement `ProjectContext`, canonical project-relative path conversion, and `BackendError`.
 
-  Acceptance: `ProjectContext::resolve_project_path` accepts safe paths like `wiki/concepts/agent.md`, preserves CJK names, converts backslashes to `/` for relative display paths, and rejects `../`, absolute path injection, and symlink escapes where detectable.
+  Acceptance: `ProjectContext` carries typed layout and access policy rather than assuming every compatible vault has native directories. `resolve_project_path` accepts safe paths like `wiki/concepts/agent.md`, preserves CJK names, converts backslashes to `/` for relative display paths, and rejects `../` and absolute injection. A root symlink/junction may open after canonicalization; contained internal links are loop-safe, while external targets are display-only and never indexed or written. Every mutation checks trusted/writable/checkpoint capabilities.
 
 - [ ] Step 3: Add `PendingAction`, `RiskLevel`, `ActionPreview`, `BackendTask`, `TaskStatus`, `TaskProgress`, and `BackendEvent` models.
 
@@ -282,7 +287,7 @@ Project templates and skills:
 
 - [ ] Step 2: Split the shell into top bar, left sidebar, center workspace outlet, right context panel, and bottom status bar.
 
-  Acceptance: left sidebar includes Dashboard, Wiki, Chat, Graph, Agent, Import, Lint, Exports, Settings; active view is selected; center view changes when nav buttons are clicked; right panel remains visible; bottom bar shows project path, Agent/BYOK route, tasks, and wiki page count.
+  Acceptance: `AppShell` stays mounted with or without a current project. In the no-project state the center shows exactly `New Knowledge Base` and `Open Existing Knowledge Base` as compact task cards; navigation remains visible with truthful dependency states, Settings remains usable, scope-less search is disabled, and the right panel explains local/open policy without Agent/BYOK setup. With a project, the left sidebar includes Dashboard, Wiki, Chat, Graph, Workflows, Import, Lint, Exports, Settings; the former `工作流` group is named `知识处理 / Knowledge Processing`; Workflows uses Lucide `Workflow` without a badge; the existing Agent status foot remains.
 
 - [ ] Step 3: Move hardcoded labels into i18n keys.
 
@@ -306,61 +311,68 @@ Project templates and skills:
 
   Commit message: `feat: build desktop shell foundation`
 
-## 5. Task 3: Project Lifecycle And Templates
+## 5. Task 3: First-run Workbench, Typed Open Assessment, Trust, And Recovery
 
 **Files:**
 
+- Modify: `src/app/App.tsx`
+- Modify: `src/components/app/AppShell.tsx`
+- Modify: `src/features/project/ProjectStartView.tsx` or replace it with a no-project workspace feature inside `AppShell`
+- Modify: `src/features/dashboard/DashboardView.tsx`
+- Modify: `src/stores/projectStore.ts`
+- Modify: `src/types/project.ts`
 - Modify: `src-tauri/src/models/project.rs`
+- Modify: `src-tauri/src/models/settings.rs`
 - Modify: `src-tauri/src/services/project_service.rs`
+- Modify: `src-tauri/src/services/settings_service.rs`
 - Modify: `src-tauri/src/services/file_store.rs`
+- Modify: `src-tauri/src/services/git_service.rs`
 - Modify: `src-tauri/src/commands/project_commands.rs`
-- Create: `src-tauri/templates/projects/general/purpose.md`
-- Create: `src-tauri/templates/projects/general/schema.md`
-- Create: `src-tauri/templates/projects/research/purpose.md`
-- Create: `src-tauri/templates/projects/research/schema.md`
-- Create: `src-tauri/templates/projects/reading/purpose.md`
-- Create: `src-tauri/templates/projects/reading/schema.md`
-- Create: `src-tauri/templates/projects/personal-growth/purpose.md`
-- Create: `src-tauri/templates/projects/personal-growth/schema.md`
-- Create: `src-tauri/templates/projects/business/purpose.md`
-- Create: `src-tauri/templates/projects/business/schema.md`
-- Create: `src/features/dashboard/DashboardView.tsx`
-- Create: `src/types/project.ts`
-- Create: `src/stores/projectStore.ts`
+- Modify: `src-tauri/src/app_state.rs`
+- Create or extend: backend assessment / trust / repair registries behind stable service facades
+- Keep: the five creation-time templates under `src-tauri/templates/projects/`
 
-- [ ] Step 1: Write failing temporary-directory tests for project creation.
+- [ ] Step 1: Lock the no-project and native-creation contract with failing tests.
 
-  Run: `cargo test --manifest-path src-tauri/Cargo.toml project_service -- --nocapture`
+  Acceptance: `AppShell` remains mounted without a project and shows exactly two compact actions; creation accepts name + parent location + creation-time template, defaults to General, derives the final child path, handles CJK / Unicode / platform-invalid names, blocks an existing non-empty target, and rolls back partial creation transactionally.
 
-  Expected before implementation: tests fail because project structure, templates, and health scan are missing.
+- [ ] Step 2: Implement creation preferences and the Import handoff.
 
-- [ ] Step 2: Implement `create_project`, `open_project`, `scan_project`, `list_recent_projects`, and `remember_recent_project`.
+  Acceptance: the initial parent is Documents/LLM Wiki, the last successful parent is remembered globally, templates affect only initial root `purpose.md` and `schema.md`, no template-switch command exists after creation, and successful creation navigates to Import without automatically opening a system picker.
 
-  Acceptance: a new project contains `purpose.md`, `schema.md`, `raw/sources/`, `raw/extracted/`, `raw/assets/`, `wiki/index.md`, `wiki/log.md`, `wiki/overview.md`, `exports/html/`, `skills/`, `.app/settings.json`, `.app/agent-config.json`, `.app/bookmarks.json`, `.app/chats/`, `.app/tasks/`, `.app/graph-cache.json`; templates change only `purpose.md` and `schema.md`.
+- [ ] Step 3: Replace binary folder detection with typed, zero-write quick assessment.
 
-- [ ] Step 3: Implement ordinary-folder detection with `PendingAction`.
+  Acceptance: `start_project_open_assessment` returns an application-scoped operation id; typed query/event delivery reports progress and completion; `cancel_project_open_assessment` accepts only that opaque id. Completion returns a backend-owned assessment id plus independent format, health, trust, filesystem access, layout, Git, capability, confidence, warning and recommended-action fields. The matrix covers current native, legacy native, `nashsu/llm_wiki`, Obsidian, Markdown vault, ambiguous Markdown, ordinary materials, damaged/recoverable and unreadable directories. Assessment creates no `.app`, Git repository, cache or project task and executes no folder content; cancellation discards the incomplete snapshot and keeps the no-project shell.
 
-  Acceptance: opening a non-project folder returns a confirmation action that lists affected paths and explains that files will be organized; no file is moved before confirmation.
+- [ ] Step 4: Implement intent routing without mutating ordinary materials.
 
-- [ ] Step 4: Add dashboard project summary UI.
+  Acceptance: ambiguous Markdown offers `Open as Markdown Knowledge Base` or `Create a Knowledge Base with These Materials` and remembers the choice globally without a folder marker. Ordinary materials only enter the latter flow; the new project is created elsewhere and Import copies / archives confirmed inputs while the source folder remains byte-for-byte and structurally unchanged.
 
-  Acceptance: Dashboard displays current project health, recent pages, import status, Agent/BYOK availability, index state, graph state, and recent tasks using compact panes rather than marketing cards.
+- [ ] Step 5: Implement independent trust, filesystem-access, health and capability policy.
 
-- [ ] Step 5: Validate sample wiki opening.
+  Acceptance: the backend derives an access policy for every `ProjectContext` from independent trust, filesystem access, health, layout and capabilities; trusted read-only is representable. Restricted mode allows Markdown/tree/local search/in-memory graph, background inventory and local quick health checks, but blocks external AI, Agent, Skill, project-writing tasks and writes. Read-only can remain permanent. Runtime path registration is not trust; global trust is keyed by canonical folder identity and invalidates after move, replacement or identity mismatch.
 
-  Run: `cargo test --manifest-path src-tauri/Cargo.toml project_service_opens_sample_wiki -- --nocapture`
+- [ ] Step 6: Implement compatibility enablement and Git policy.
 
-  Expected: the `wiki/wiki/` sample opens as a compatible wiki-like project, reports 345 Markdown pages or the current measured count, and treats `.obsidian/` as external app data.
+  Acceptance: explicit enablement may create only `.app/` and `.app/compat/{purpose.md,schema.md}`; root same-name files remain user content and no `.app/project.json` is introduced. External opening never initializes or commits Git. The enablement page defaults local Git on; declining disables checkpoint-required writes while reading, search and explicitly authorized Chat remain available. Dirty worktrees are never auto-committed or stashed.
 
-- [ ] Step 6: Run required checks and commit.
+- [ ] Step 7: Implement repair planning and confirmation.
 
-  Run: `npm run test`
+  Acceptance: safe derived state may be calculated before confirmation, but disk writes use a backend-held repair plan id and revalidate canonical identity, hashes, permissions and Git. The full page exposes `Trust, Repair, and Open` and `Open Restricted Without Repair`; readable Markdown remains available when repair is declined or `.app` is corrupt. Project-open repair is distinct from Wiki/Lint content repair.
 
-  Run: `npm run lint`
+- [ ] Step 8: Implement cancellable deep scan and truthful partial presentation.
 
-  Run: `cargo test --manifest-path src-tauri/Cargo.toml`
+  Acceptance: compatible projects enter the normal Dashboard immediately, deep scan runs read-only in the background, streams partial counts/warnings, and can be cancelled. Cancellation or failure leaves discovered Markdown readable; graph stays in memory until trusted+writable, and missing values explain `Scanning`, `Restricted`, or `Read-only` rather than appearing empty.
 
-  Commit message: `feat: add project lifecycle`
+- [ ] Step 9: Implement deterministic startup and sample-vault coverage.
+
+  Acceptance: when the single most recently opened knowledge base is valid, startup opens it and always lands Dashboard. With no history, or when that latest path is missing/inaccessible, startup keeps the full shell on the no-project workbench; the invalid-latest case shows its path error and never silently falls back to an older project. The sample wiki and representative Obsidian/Markdown/CJK/symlink fixtures open through the typed assessment path.
+
+- [ ] Step 10: Run the risk-proportional checks and commit.
+
+  Run the current full repository gate because this task changes filesystem, Git, IPC, trust, permission and background-task boundaries.
+
+  Commit message: `feat: add safe first-run and project-open workbench`
 
 ## 6. Task 4: Git Safety, Confirmation Flow, And FileStore
 
@@ -387,7 +399,7 @@ Project templates and skills:
 
 - [ ] Step 3: Implement `GitService`.
 
-  Acceptance: new projects are initialized as Git repos; initial commits are created; high-risk operations can request a checkpoint; checkpoint failure blocks the high-risk operation; generated diffs are Markdown-friendly and include affected paths.
+  Acceptance: newly created native knowledge bases are initialized as Git repos and receive an initial commit. Assessing or opening an external knowledge base never initializes, stages, commits or stashes Git. Compatible enablement offers an explicit default-on Git choice; declining disables checkpoint-required writes. Dirty worktrees remain untouched unless the user explicitly approves a checkpoint containing all current changes. Checkpoint failure blocks the high-risk operation; generated diffs are Markdown-friendly and include affected paths.
 
 - [ ] Step 4: Implement `confirm_pending_action`.
 
@@ -432,11 +444,11 @@ Project templates and skills:
 
 - [ ] Step 2: Implement archive rules.
 
-  Acceptance: PDF files go to `raw/sources/pdfs/`; DOCX and similar documents go to `raw/sources/docs/`; PPTX goes to `raw/sources/slides/`; XLSX and CSV go to `raw/sources/sheets/`; MD and TXT go to `raw/sources/markdown/`; images go to `raw/assets/`; unknown files go to `raw/sources/other/`.
+  Acceptance: every retained original and localized asset is resolved beneath the evidence root returned by `ProjectContext.layout` and organized by stable source channel/identity rather than media type alone. For a newly created native knowledge base, local files and media use `raw/sources/`, webpage/platform evidence uses `raw/web/<host>/`, and localized Source assets use `raw/assets/`; document type remains metadata. A compatible layout without an unambiguous writable evidence root returns a typed prerequisite instead of inventing `raw/`.
 
 - [ ] Step 3: Implement duplicate and conflict handling.
 
-  Acceptance: exact duplicate files are skipped or linked to the existing retained copy according to the import request; same-name different-content files are renamed deterministically; conflicts, renames, failures, hashes, and source paths are written to `.app/import-conflicts.json`.
+  Acceptance: exact duplicate content reuses the existing logical `sourceId`, records a new locator as an alias when needed, and does not create a second Source; a changed version of the same logical source creates a new immutable `versionId` while protecting the edited current Source. Same-name different-content evidence is renamed deterministically. Conflicts, renames, failures, hashes, aliases, versions, and source paths are written beneath `ProjectLayout.importStateRoot` / `sourceStateRoot` (native conflict-record mapping: `.app/import-conflicts.json`) only when project app state is writable.
 
 - [ ] Step 4: Implement extraction interface, Readability adapter, and parser adapter record.
 
@@ -444,11 +456,11 @@ Project templates and skills:
 
 - [ ] Step 5: Build import review UI.
 
-  Acceptance: Import view shows file name, type, size, parse status, error reason, extracted text preview, pages or word count when available, conflicts, renamed paths, and a disabled compile action until the user confirms.
+  Acceptance: Import view shows file name, type, size, parse status, error reason, extracted text preview, pages or word count when available, conflicts, renamed paths, and keeps “导入到来源库” disabled until the user confirms the preview. Import does not expose a compile toggle or start Update Wiki.
 
-- [ ] Step 6: Verify no compile starts before confirmation.
+- [ ] Step 6: Verify Import never starts compilation.
 
-  Acceptance: a test or UI integration check proves `confirm_import_preview` is required before any wiki compile task is created.
+  Acceptance: tests prove `confirm_import_preview` revalidates trusted + writable access and requires layout-provided `appStateRoot`, `importStateRoot`, `sourceStateRoot`, `evidenceRoot`, and `sourceWriteRoot`; every successful item atomically commits both immutable evidence and a readable Source plus source/version state, while a failed or unconfirmed item creates neither half. It never creates a Wiki compile task. After a successful commit, “用这些来源更新 Wiki” may carry the committed change set into the separate shared Workflows preparation flow, which still requires a distinct user start action.
 
 - [ ] Step 7: Run checks and commit.
 
@@ -483,7 +495,7 @@ Project templates and skills:
 
 - [ ] Step 2: Implement task lifecycle.
 
-  Acceptance: tasks support `queued`, `running`, `waiting_for_confirmation`, `cancelling`, `cancelled`, `succeeded`, and `failed`; task state is written under `.app/tasks/`; logs are append-only; task ids are stable UUIDs.
+  Acceptance: tasks support `queued`, `running`, `waiting_for_confirmation`, `cancelling`, `cancelled`, `succeeded`, `failed`, and user-visible `interrupted`; when project app state is writable, task state is written under `ProjectLayout.taskStateRoot` (native mapping: `.app/tasks/`) and logs are append-only. Permitted restricted/read-only inventory, Import discovery/extraction/preview, Local Quick Check, and trusted read-only Complete Check runs remain explicitly ephemeral or use backend-owned temporary space, are labeled non-persistent, and never try to create `.app/`. Task ids are stable UUIDs. Persisted workflow tasks also include runtime `project_id`, canonical identity key/revision, kind, scope, baseline, input fingerprint, structured stage/activity, and optional `attempt_of`.
 
 - [ ] Step 3: Implement Tauri event envelope.
 
@@ -491,7 +503,7 @@ Project templates and skills:
 
 - [ ] Step 4: Add task UI.
 
-  Acceptance: bottom status and task drawer show running tasks, progress, logs, cancel actions, failure details, and result links; task updates survive navigating between views.
+  Acceptance: bottom status and task drawer show only the active project's tasks, running state, structured progress, secondary logs, cancel actions, failure details, and result links; task updates survive navigating between views. Other projects continue independently but are visible only after switching projects.
 
 - [ ] Step 5: Add tray and notification integration.
 
@@ -532,7 +544,7 @@ Project templates and skills:
 
 - [ ] Step 2: Implement wiki scanning and page metadata.
 
-  Acceptance: `wiki/` pages are returned as a tree with path, title, inferred type, tags, source metadata, star/bookmark state, file size, modified time, and external modification hash.
+  Acceptance: pages from the layout-allowed Wiki read roots are returned as a tree with path, title, inferred type, tags, source metadata, star/bookmark state, file size, modified time, and external modification hash; compatible vaults do not need a native `wiki/` directory.
 
 - [ ] Step 3: Implement Markdown rendering.
 
@@ -548,7 +560,7 @@ Project templates and skills:
 
 - [ ] Step 6: Refresh caches after save.
 
-  Acceptance: after saving a page, index/search metadata refreshes, graph cache is marked stale, and `wiki/log.md` records the user-visible save event when configured.
+  Acceptance: after saving a page, index/search metadata refreshes, graph cache is marked stale when persistence is allowed, and the layout-defined log records the user-visible save event when configured.
 
 - [ ] Step 7: Run checks and commit.
 
@@ -560,7 +572,7 @@ Project templates and skills:
 
   Commit message: `feat: add wiki reading and search`
 
-## 10. Task 8: Agent Detection, BYOK Provider Skeleton, And Wiki Compile
+## 10. Task 8: Execution Routes, Update Wiki, And Workflows Surface
 
 **Files:**
 
@@ -572,7 +584,8 @@ Project templates and skills:
 - Create: `src-tauri/src/models/agent.rs`
 - Create: `src-tauri/src/models/llm.rs`
 - Create: `src-tauri/templates/skills/wiki-ingest/SKILL.md`
-- Create: `src/features/agent/AgentView.tsx`
+- Migrate: `src/features/agent/AgentView.tsx` into the Workflows main surface; the final folder/name may become `src/features/workflows/`
+- Create: Workflows preparation, task-detail, and history components under the selected feature folder
 - Create: `src/features/settings/LlmProviderSettings.tsx`
 - Create: `src/types/agent.ts`
 - Create: `src/types/llm.ts`
@@ -593,15 +606,17 @@ Project templates and skills:
 
 - [ ] Step 4: Implement BYOK provider configuration without storing secrets in project files.
 
-  Acceptance: provider metadata for OpenAI, Anthropic, Google, Ollama, and Custom can be saved without API keys; API keys are stored and read only through `SecretService`; tests assert `.app/settings.json` and `.app/agent-config.json` contain no key material.
+  Acceptance: provider metadata for OpenAI, Anthropic, Google, Ollama, and Custom can be saved without API keys; API keys are stored and read only through `SecretService`; tests assert every persisted project settings/Agent-config record contains no key material, including native `.app/settings.json` and `.app/agent-config.json`.
 
 - [ ] Step 5: Implement compile request orchestration.
 
-  Acceptance: compile reads `purpose.md`, `schema.md`, `raw/extracted/`, and existing `wiki/`; creates a Git checkpoint; chooses Agent when configured and BYOK when Agent is unavailable or user selects BYOK; writes candidate wiki changes through the conflict-safe merge path; updates `wiki/index.md`, `wiki/overview.md`, and `wiki/log.md`; refreshes search and graph stale state.
+  Acceptance: Update Wiki requires a trusted writable project and reads purpose/schema/page roots from backend-derived `ProjectContext.layout`; for a native project these resolve to root `purpose.md`, `schema.md`, confirmed `wiki/sources/`, and existing `wiki/`. It defaults to changed `sourceId + versionId` Sources; creates the required Git checkpoint before writes; uses the Settings default route or an explicit per-run override without silent fallback; writes candidates through the conflict-safe merge path; updates the layout-defined index/overview/log outputs; never writes Source pages; refreshes search and graph stale state.
 
-- [ ] Step 6: Build Agent panel.
+- [ ] Step 6: Replace the Agent main panel with Workflows.
 
-  Acceptance: Agent view shows detected CLIs, versions, default binding, BYOK fallback state, running tasks, stdout/stderr logs, cancel controls, and task history.
+  Execution: follow [`docs/superpowers/plans/2026-07-30-workflows-panel-implementation.md`](docs/superpowers/plans/2026-07-30-workflows-panel-implementation.md) batch by batch; do not expose the new route before its three runners are valid or remove legacy launch paths before shared-entry integration passes.
+
+  Acceptance: Workflows provides the fixed `更新 Wiki`, `健康检查`, and `生成内容` rows; adaptive overview; full preparation view instead of a Run Agent dialog; active-project-only serial queue and input-fingerprint dedupe; observable structured pipelines; non-modal waiting confirmation; cancellation, linked retry, interrupted recovery explanation, and project-scoped history. No-project creates no task; restricted blocks external execution; mutations require trusted writable and the declared Git policy; prepare/start both revalidate canonical project identity and access. Raw logs are secondary. Agent/Provider configuration remains in Settings, while Lint and Exports retain their existing result pages.
 
 - [ ] Step 7: Run checks and commit.
 
@@ -611,7 +626,7 @@ Project templates and skills:
 
   Run: `cargo test --manifest-path src-tauri/Cargo.toml`
 
-  Commit message: `feat: add agent and byok compile path`
+  Commit message: `feat: add workflows and execution routes`
 
 ## 11. Task 9: Graph Build, Cache, And Sigma View
 
@@ -626,7 +641,7 @@ Project templates and skills:
 - Create: `src/types/graph.ts`
 - Modify: `src/stores/graphStore.ts`
 
-- [ ] Step 1: Write failing tests for node extraction, wikilink edges, inferred page types, layout cache read/write, corrupted cache recovery, and CJK path labels.
+- [ ] Step 1: Write failing tests for Source/Wiki node extraction, wikilink edges, inferred page types, restricted/read-only memory-only results, trusted cache read/write, partial deep scan, corrupted cache recovery, and CJK path labels.
 
   Run: `cargo test --manifest-path src-tauri/Cargo.toml graph_service -- --nocapture`
 
@@ -634,11 +649,11 @@ Project templates and skills:
 
 - [ ] Step 2: Implement backend graph data.
 
-  Acceptance: every Wiki page becomes one node; node type comes from frontmatter or directory; edges come from `[[wikilinks]]` and the MVP multi-signal association model; all edges use relation label `related`; cache writes to `.app/graph-cache.json`.
+  Acceptance: every Markdown document in the layout-allowed Source/Wiki roots becomes one page-level node; no compile prerequisite exists; node type comes from frontmatter or directory; edges come from `[[wikilinks]]` and the MVP multi-signal association model; all edges use relation label `related`. Restricted/read-only projects return bounded in-memory results without cache writes; trusted writable projects cache through `ProjectContext.layout.graphCachePath` (native mapping: `.app/graph-cache.json`).
 
 - [ ] Step 3: Implement layout and community support.
 
-  Acceptance: first build can run as a cancellable background task; cached graph opens in seconds for the sample `wiki/wiki/`; Louvain community ids and ForceAtlas2 positions are persisted or reused without recomputing when inputs have not changed.
+  Acceptance: first/deep build can run as a cancellable background task; partial results carry scanned/pending counts; cached graph opens in seconds for the sample `wiki/wiki/`; Louvain community ids and ForceAtlas2 positions are persisted or reused only when the project access mode permits and inputs have not changed.
 
 - [ ] Step 4: Build sigma.js graph view.
 
@@ -675,7 +690,7 @@ Project templates and skills:
 - Create: `src/types/chat.ts`
 - Modify: `src/stores/chatStore.ts`
 
-- [ ] Step 1: Write failing tests for chat JSON persistence, session rename/delete, retrieval context assembly, citation serialization, and save-to-query page.
+- [ ] Step 1: Write failing tests for chat JSON persistence, session rename/delete, Source/Wiki retrieval context assembly, typed citation serialization, trust/configuration prerequisites, and save-to-query page access/Git policy.
 
   Run: `cargo test --manifest-path src-tauri/Cargo.toml chat search llm_service -- --nocapture`
 
@@ -683,19 +698,19 @@ Project templates and skills:
 
 - [ ] Step 2: Implement chat session storage.
 
-  Acceptance: chat sessions are stored as `.app/chats/{id}.json`; create, rename, delete, list, and load operations work; corrupted chat files are reported with recoverable errors and do not crash app startup.
+  Acceptance: when project app state is writable, chat sessions are stored under `ProjectLayout.chatStateRoot` (native mapping `.app/chats/{id}.json`); read-only sessions are explicitly ephemeral. Create, rename, delete, list, and load operations work where persistence is available; corrupted chat files are reported with recoverable errors and do not crash app startup.
 
 - [ ] Step 3: Implement retrieval context.
 
-  Acceptance: Chat uses local SearchService to retrieve relevant Wiki pages, includes citations, purpose text, and bounded chat history, then sends the request to Agent or BYOK according to execution route; global search remains keyword-only.
+  Acceptance: Chat uses local SearchService to retrieve relevant readable Source or Wiki pages, includes typed citations, layout-resolved purpose text, and bounded chat history, then sends the request to the explicit Agent or BYOK route. Source-only projects work without compile; restricted projects never send content externally; configuration return preserves the draft and does not auto-send; global search remains keyword-only.
 
 - [ ] Step 4: Implement response and citations UI.
 
-  Acceptance: chat stream or nonstream response shows assistant answer, source pages, citation snippets, click-to-open links, running state, cancel action, and clear provider/Agent route.
+  Acceptance: chat stream or nonstream response shows assistant answer, Source/Wiki citations, snippets, type-aware click-to-open links, running state, cancel action, and clear provider/Agent route.
 
-- [ ] Step 5: Implement save answer to `wiki/queries/`.
+- [ ] Step 5: Implement save answer to the layout-defined queries root.
 
-  Acceptance: saved answers become Markdown files with frontmatter, question, answer, citations, created timestamp, and source paths; save creates a Git checkpoint when writing multiple files or changing existing query pages.
+  Acceptance: saved answers become Markdown files under the layout-defined queries root (native mapping `wiki/queries/`) with frontmatter, question, answer, typed citations, created timestamp, and source paths; the backend requires writable access and creates a Git checkpoint when writing multiple files or changing existing query pages. Pure Chat does not require Git.
 
 - [ ] Step 6: Run checks and commit.
 
@@ -779,7 +794,7 @@ Project templates and skills:
 
 - [ ] Step 2: Implement export jobs.
 
-  Acceptance: single article beautiful read, knowledge card, concept map, and project report jobs run through the matching `skills/html-*` folder, write outputs to `exports/html/`, and never modify `schema.md`, `wiki/`, or lint rules as a side effect.
+  Acceptance: single article beautiful read, knowledge card, concept map, and project report jobs run through the matching `skills/html-*` folder, write outputs only to the export root returned by `ProjectContext.layout` (native projects resolve to `exports/html/`), and never modify schema guidance, Wiki pages, or lint rules as a side effect.
 
 - [ ] Step 3: Implement preview and open-location support.
 
@@ -827,7 +842,7 @@ Project templates and skills:
 
 - [ ] Step 2: Implement settings service.
 
-  Acceptance: project settings write to `.app/settings.json`; global settings write to app config directory; settings include language, theme, startup behavior, Agent default binding, provider metadata, context window from 4K to 1M tokens, close-window behavior, and update preferences.
+  Acceptance: project settings write to `ProjectLayout.settingsPath` (native mapping: `.app/settings.json`) when it is writable; global settings write to the app config directory; settings include language, theme, startup behavior, Agent default binding, provider metadata, context window from 4K to 1M tokens, close-window behavior, and update preferences.
 
 - [ ] Step 3: Implement SecretService.
 
@@ -869,7 +884,7 @@ Project templates and skills:
 - Modify: `src/features/wiki/WikiView.tsx`
 - Modify: `src/features/graph/GraphView.tsx`
 - Modify: `src/features/chat/ChatView.tsx`
-- Modify: `src/features/agent/AgentView.tsx`
+- Modify: the migrated Workflows feature (legacy source: `src/features/agent/AgentView.tsx`)
 - Modify: `src/features/lint/LintView.tsx`
 - Modify: `src/features/exports/ExportsView.tsx`
 - Modify: `src/features/settings/SettingsView.tsx`
@@ -889,19 +904,19 @@ Project templates and skills:
 
 - [ ] Step 3: Pass the project-to-wiki loop.
 
-  Acceptance: user can create or open a project, import validation sources, review parse preview, confirm compile, generate `wiki/index.md`, `wiki/overview.md`, `wiki/log.md`, open a page, search it, and see graph stale or built state.
+  Acceptance: a first-time user sees the full-shell two-action workbench, creates a knowledge base, lands in Import without an automatic picker, imports validation sources, reviews and confirms at least one Source, and can immediately read that committed Source without configuring AI or compiling. The user may then separately start Update Wiki from the shared workflow preparation model, generate `wiki/index.md`, `wiki/overview.md`, `wiki/log.md`, open a page, search it, and see graph partial/stale/built state.
 
 - [ ] Step 4: Pass the sample-wiki loop.
 
-  Acceptance: app opens `wiki/wiki/`, scans the page tree, searches pages, renders Markdown, builds or loads graph cache, and opens graph within the performance target for 200-500 pages.
+  Acceptance: the app opens `wiki/wiki/` through typed zero-write assessment, scans the page tree, searches pages, renders Markdown, builds or loads graph cache according to access policy, and opens graph within the performance target for 200-500 pages. Fixtures also cover compatible restricted, read-only, ambiguous, ordinary-materials, damaged/recovery, dirty-Git and deep-scan-cancel paths.
 
 - [ ] Step 5: Pass the AI-assisted loop with fakes.
 
-  Acceptance: fake Agent and fake BYOK both compile a small wiki, answer Chat with citations, run deep lint, and generate an export without real API keys or real CLI dependency.
+  Acceptance: fake Agent and fake BYOK can execute the applicable Update Wiki, Chat, Health Check, and Generate Content paths without real API keys or real CLI dependency; all workflow launches use the same project-scoped task model.
 
 - [ ] Step 6: Pass safety loop.
 
-  Acceptance: destructive operations, source replacement, Agent auto-fix, conflict merge, and batch rewrite all require confirmation and Git checkpoint; conflict UI offers keep current, use generated, and manual merge choices.
+  Acceptance: low-risk conflict-free changes auto-apply only when that operation's backend `CheckpointPolicy` is satisfied. Update Wiki and safe repairs that require a checkpoint apply after it succeeds; Health Check never mutates or creates a checkpoint; Generate Content creates a new artifact without a checkpoint, while overwrite requires both checkpoint and confirmation. Destructive operations, source replacement, delete, broad rewrite, and conflict merge wait for explicit confirmation and a required checkpoint; conflict UI offers keep current, use generated, and manual merge choices.
 
 - [ ] Step 7: Document QA evidence.
 
@@ -934,7 +949,7 @@ Project templates and skills:
 - Modify: `src/features/import/ImportView.tsx`
 - Modify: `src/features/graph/GraphView.tsx`
 - Modify: `src/features/chat/ChatView.tsx`
-- Modify: `src/features/agent/AgentView.tsx`
+- Modify: the migrated Workflows feature (legacy source: `src/features/agent/AgentView.tsx`)
 - Modify: `src/features/lint/LintView.tsx`
 - Modify: `src/features/exports/ExportsView.tsx`
 - Modify: `src/features/settings/SettingsView.tsx`
@@ -945,7 +960,7 @@ Project templates and skills:
 
 - [ ] Step 1: Verify Codex-like visual checklist.
 
-  Acceptance: every view uses compact panes, lists, toolbars, drawers, log panels, and inspectors; no landing hero, decorative gradient, bokeh, nested card layout, glossy AI visual, or generic SaaS dashboard styling is present.
+  Acceptance: every view uses compact panes, lists, toolbars, drawers, log panels, and inspectors. The no-project state preserves the full shell, contains exactly two compact task cards, and has no recent-project grid, template wall, Agent/BYOK setup or third Import action. No landing hero, decorative gradient, bokeh, nested card layout, glossy AI visual, or generic SaaS dashboard styling is present.
 
 - [ ] Step 2: Verify accessibility.
 
@@ -987,7 +1002,7 @@ After each feature or meaningful fix:
 - [ ] Merge both review results into a short findings list.
 - [ ] Fix all valid findings.
 - [ ] Rerun `npm run test`, `npm run lint`, and any Rust or build checks relevant to the touched files.
-- [ ] Add a top entry to `SPEC/progress.txt`.
+- [ ] Add a top entry to root `progress.txt`.
 
 Acceptance:
 
@@ -998,38 +1013,48 @@ Acceptance:
 
 Project lifecycle:
 
-- New project creates the required directory and state files.
-- Existing LLM Wiki, `nashsu/llm_wiki`-style, and Obsidian Markdown folders can open.
-- Ordinary folder initialization requires confirmation before any move or reorganization.
+- No-project mode keeps the complete desktop shell and exposes exactly New Knowledge Base and Open Existing Knowledge Base.
+- New native knowledge bases create the required directory/state files transactionally, default to General, and hand off to Import without an automatic picker.
+- Existing LLM Wiki, `nashsu/llm_wiki`-style, Obsidian and Markdown folders open through typed, zero-write assessment with separate format, health, trust, filesystem access and layout.
+- Ordinary materials are never initialized, moved, renamed or marked in place; a separate knowledge base is created and confirmed inputs are copied / archived through Import.
+- Compatible contexts enforce capabilities derived from independent trust, filesystem access, health and layout; trusted read-only and untrusted read-only are both representable, and `.app/compat` never overwrites root user files.
+- A valid latest history entry auto-opens that knowledge base and lands Dashboard; absent history shows the no-project workbench, while an invalid/inaccessible latest entry shows the same workbench plus its path error and never silently falls back to an older project.
 
 Import and extraction:
 
 - PDF, DOCX, PPTX, XLSX, CSV, MD, TXT, HTML, URL, clipboard text, and folders enter preview.
 - Preview shows name, type, size, status, error reason, text preview, and pages or word count where available.
-- Original files and extracted artifacts are stored under the project folder.
+- Every successful item commits immutable evidence and a readable Source plus source/version state through the layout-provided roots; failed or unconfirmed items commit neither. Native local/web/assets mappings follow stable source channel and identity rather than media-type folders.
+- Exact duplicate content reuses one `sourceId` and records new locators as aliases; refreshed content creates a new immutable `versionId` and preserves user edits through Diff or three-way merge.
+- Import never starts Update Wiki; the completion CTA only opens the shared workflow preparation flow.
 
 Wiki and editing:
 
-- Compile creates or updates `wiki/index.md`, `wiki/overview.md`, and `wiki/log.md`.
+- Compile creates or updates the layout-defined index, overview and log outputs; native projects map them to `wiki/index.md`, `wiki/overview.md`, and `wiki/log.md`.
 - Markdown reader supports GFM, code highlight, math, KaTeX, frontmatter, and wikilinks.
 - WYSIWYG editing saves safely and detects external modifications.
 
 Graph:
 
-- Page-level nodes match Wiki pages within documented exclusions.
-- Type coloring, community coloring, ForceAtlas2 layout, Louvain communities, hover neighbors, click navigation, zoom, drag, fit-to-screen, and cache are available.
+- Page-level nodes match the readable Source/Wiki Markdown roots within documented exclusions; Source-only projects do not require compile.
+- Type coloring, community coloring, ForceAtlas2 layout, Louvain communities, hover neighbors, click navigation, zoom, drag and fit-to-screen are available; cache is written only for trusted writable projects and deep scans expose partial state.
 
 Chat:
 
 - Multiple sessions can be created, renamed, deleted, and persisted.
-- Answers use Wiki retrieval and show clickable citations.
-- Good answers can be saved to `wiki/queries/`.
+- Answers use readable Source/Wiki retrieval and show type-aware clickable citations; restricted projects do not send content externally.
+- Good answers can be saved to the layout-defined queries root; native projects map it to `wiki/queries/`.
 
-Agent and BYOK:
+Workflows and execution routes:
 
+- Workflows exposes only Update Wiki, Health Check, and Generate Content in the first release; preparation, queueing, task detail, confirmation, retry, and history use one project-scoped task model.
+- Same-project workflows run serially and identical inputs dedupe; task presentation never mixes projects.
+- No-project creates no workflow task; external execution requires trust; mutations require writable access and revalidated Git policy.
+- Each workflow exposes a structured pipeline before raw logs and handles queued, running, waiting, completed, failed, cancelled, and interrupted states.
 - Agent CLI detection shows installed/missing/failed states and versions.
 - Agent tasks stream logs, run in background, and cancel.
-- BYOK works for core compile/chat flows when Agent is not configured.
+- Settings owns Agent/BYOK configuration; the selected route never silently falls back.
+- BYOK works for applicable Update Wiki, Generate Content, and Chat flows when configured.
 - Agent install commands are never run silently.
 
 Lint:
@@ -1040,13 +1065,16 @@ Lint:
 
 Exports:
 
-- Single article HTML, knowledge card, concept map, and project report generate under `exports/html/`.
+- Single article HTML, knowledge card, concept map, and project report generate under the layout-defined export root; native projects resolve it to `exports/html/`.
 - Export preview works inside the app and can open the output folder.
 - HTML templates do not mutate Wiki schema, lint rules, or source pages.
 
 Safety and platform:
 
-- Git checkpoints protect destructive, overwrite, batch rewrite, Agent auto-fix, conflict merge, and source replacement flows.
+- Git checkpoints protect destructive, overwrite, batch rewrite, checkpoint-required workflow auto-fix, conflict merge, and source replacement flows. Low-risk conflict-free changes auto-apply only after any policy-required checkpoint; Health Check stays read-only, and a newly created Generate Content artifact needs no checkpoint. High-risk changes wait for confirmation.
+- Quick assessment performs zero writes and never initializes Git. Compatible Git initialization is explicit; declining disables checkpoint-required writes, and dirty worktrees are never auto-committed or stashed.
+- Global trust is bound to canonical directory identity and invalidates after move/replacement; runtime project registration is not trust.
+- Restricted/read-only gates, root symlink containment, external-link non-following and case/Unicode-normalization conflict reporting are tested.
 - API keys never appear in project files, logs, exports, or snapshots.
 - CJK filenames, Unicode paths, Windows/macOS/Linux path styles, and case-sensitivity cases are tested.
 - Long tasks are cancellable, logged, progress-visible, background-safe, and notification-aware.

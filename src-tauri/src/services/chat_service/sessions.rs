@@ -6,7 +6,6 @@ use crate::services::WriteMode;
 use crate::utils::time_utils::now_rfc3339;
 use std::sync::{Arc, Mutex};
 
-const CHATS_DIR: &str = ".app/chats";
 const DEFAULT_TITLE: &str = "New chat";
 
 impl ChatService {
@@ -37,20 +36,20 @@ impl ChatService {
         };
         self.file_store.write_json_atomic_checked(
             context,
-            &session_path(&session.id),
+            &session_path(context, &session.id)?,
             &session,
             WriteMode::CreateNew,
         )?;
         Ok(session)
     }
 
-    /// Enumerate `.app/chats/*.json`; corrupt files are skipped so one damaged
-    /// session cannot prevent the remaining history from loading.
+    /// Enumerate the layout-owned chat state directory; corrupt files are skipped
+    /// so one damaged session cannot prevent the remaining history from loading.
     pub fn list_sessions(
         &self,
         context: &ProjectContext,
     ) -> Result<Vec<ChatSessionSummary>, BackendError> {
-        let dir = context.resolve_project_path(CHATS_DIR)?;
+        let dir = context.resolve_project_path(chat_state_root(context)?)?;
         let mut summaries = Vec::new();
         if !dir.exists() {
             return Ok(summaries);
@@ -104,7 +103,7 @@ impl ChatService {
         context: &ProjectContext,
         session_id: &str,
     ) -> Result<ChatSession, BackendError> {
-        let path = session_path(session_id);
+        let path = session_path(context, session_id)?;
         self.file_store.read_json(context, &path).map_err(|err| {
             BackendError::new(
                 "CHAT_PARSE_FAILED",
@@ -151,7 +150,7 @@ impl ChatService {
     ) -> Result<(), BackendError> {
         let lock = self.session_lock(context, session_id);
         let _guard = lock.lock().map_err(|_| session_lock_error())?;
-        let path = context.resolve_project_write_path(&session_path(session_id))?;
+        let path = context.resolve_project_write_path(&session_path(context, session_id)?)?;
         if path.exists() {
             std::fs::remove_file(&path).map_err(|err| {
                 BackendError::new("CHAT_DELETE_FAILED", err.to_string(), true, false)
@@ -227,7 +226,7 @@ impl ChatService {
         message.saved_path = Some(path.to_string());
         session.updated_at = now_rfc3339();
         self.file_store
-            .write_json_atomic(context, &session_path(&session.id), &session)?;
+            .write_json_atomic(context, &session_path(context, &session.id)?, &session)?;
         Ok(session)
     }
 
@@ -320,7 +319,7 @@ impl ChatService {
             Err(error) => return Err(error),
         };
         self.file_store
-            .write_json_atomic(context, &session_path(&session.id), &session)
+            .write_json_atomic(context, &session_path(context, &session.id)?, &session)
     }
 
     fn session_lock(&self, context: &ProjectContext, session_id: &str) -> Arc<Mutex<()>> {
@@ -345,8 +344,19 @@ fn session_lock_error() -> BackendError {
     )
 }
 
-fn session_path(id: &str) -> String {
-    format!("{CHATS_DIR}/{id}.json")
+fn chat_state_root(context: &ProjectContext) -> Result<&str, BackendError> {
+    context.layout.chat_state_root.as_deref().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_LAYOUT_STATE_UNAVAILABLE",
+            "Project chat state is unavailable until compatible features are enabled.",
+            true,
+            true,
+        )
+    })
+}
+
+fn session_path(context: &ProjectContext, id: &str) -> Result<String, BackendError> {
+    Ok(format!("{}/{}.json", chat_state_root(context)?, id))
 }
 
 fn validate_context_page_path(
@@ -355,10 +365,21 @@ fn validate_context_page_path(
 ) -> Result<String, BackendError> {
     let normalized = path.replace('\\', "/");
     let absolute = context.resolve_project_path(&normalized)?;
-    if absolute.strip_prefix(&context.wiki_dir).is_err() || !normalized.starts_with("wiki/") {
+    let is_wiki_page = context
+        .layout
+        .markdown_roots
+        .iter()
+        .filter(|root| root.role == crate::models::layout::ProjectMarkdownRootRole::Wiki)
+        .any(|root| {
+            let Ok(wiki_root) = context.resolve_project_path(&root.path) else {
+                return false;
+            };
+            absolute.strip_prefix(wiki_root).is_ok()
+        });
+    if !is_wiki_page {
         return Err(BackendError::new(
             "CHAT_CONTEXT_PAGE_INVALID",
-            "Page-scoped chat sessions must reference a page under the wiki/ directory.",
+            "Page-scoped chat sessions must reference a page under a configured wiki directory.",
             true,
             true,
         )

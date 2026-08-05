@@ -1,5 +1,7 @@
 # 00 Codebase Audit
 
+> **历史代码审计快照：** 本文描述 2026-07-04 的源码和规格状态，其中 `ProjectStartView`、项目选择页、二元目录识别等内容是当时事实，不是当前目标合同。首次使用与打开已有知识库以 [2026-07-30 权威规范](../superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准，living 路线图以 [`../../SPEC/roadmap/README.md`](../../SPEC/roadmap/README.md) 为准。
+
 审计日期：2026-07-04  
 审计范围：`D:\Users\Aletta\Desktop\Works\llm-wiki-desktop`  
 审计方式：只读阅读 SPEC、设计稿、前端源码、Tauri/Rust 后端、测试与配置。`rg.exe` 在本机返回 access denied，本轮改用 PowerShell 目录枚举与文件读取。`node_modules/`、`dist/`、`.git/` 排除；`src-tauri/target/` 为 Rust 构建产物，报告中只摘要。样例 `wiki/wiki/raw/**` 是验证数据，文件量大，报告按目录与代表性文件摘要。

@@ -39,7 +39,20 @@ describe("workflowStore", () => {
     const secondEpoch = useWorkflowStore.getState().activateProject("project-b\0D:/b");
     expect(secondEpoch).toBeGreaterThan(firstEpoch);
     expect(useWorkflowStore.getState().runs).toEqual([]);
+    expect(useWorkflowStore.getState().overviewStatus).toBe("idle");
     expect(useWorkflowStore.getState().projectKey).toContain("project-b");
+  });
+
+  it("marks an overview ready before history is available", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.getState().setOverviewStatus("loading");
+    useWorkflowStore.getState().setOverviewSnapshot(overview("identity-a", "revision-a"));
+
+    expect(useWorkflowStore.getState()).toMatchObject({
+      overviewStatus: "ready",
+      runs: [],
+      historyCursor: null,
+    });
   });
 
   it("upserts event snapshots by task id and keeps newest runs first", () => {

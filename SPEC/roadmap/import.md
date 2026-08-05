@@ -1,6 +1,10 @@
-# Import 板块落差与实施计划
+# 历史 Import 路线图（禁止直接执行）
 
-> 历史 roadmap：下方完成状态与代码位置可用于追溯，但“导入后触发编译”“OCR 交给编译”等旧目标已失效。当前唯一产品基线为 [`../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。
+> 本文保留 2026-06 至 2026-07 早期实现审计，只用于追溯。当前 Import / Source / Media 唯一权威是 [`../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)；项目创建与打开唯一权威是 [`../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。
+>
+> 本文所有“打开文件夹为项目”“原地初始化普通文件夹”“移动原资料”“导入后自动/可选编译”“编译期 OCR”及对应 P0/实施步骤均已废止，不得据此实现。Import 只能把文件、文件夹、URL 或剪贴板内容预览并复制到**当前已打开的知识库**；若用户选择的是普通资料文件夹，必须另建知识库后再导入，原目录保持不变。
+
+## 原始路线图快照：Import 板块落差与实施计划
 
 > 对照源：UI-Frontend-design/import.html + assets/app.css + SPEC/PRD.md
 > 当前实现：src/features/import/、src/lib/readability.ts、src/types/import.ts
@@ -84,7 +88,7 @@ Import 板块已打通「路径 / URL / 剪贴板」三种来源的预览-确认
 - **无批量选择**：表头/行 checkbox 缺失，无法批量确认或排除。
 - **URL 交互降级**：设计稿是独立 Dialog（`dlg-url`），实现是 Tab 内嵌；两者交互节奏不同，Dialog 更符合「抓取并预览」心智。
 - **键盘可达性**：当前 button 列表可键盘选择，但来源 Tab、输入框、提交按钮之间缺乏 `tabindex` 序列与 `aria-labelledby` 关联；右面板 section 缺 `aria-label`。
-- **进度反馈不足**：preview 是后台任务，但 ImportView 没有绑定当前 preview 任务的 progress / cancel UI；用户只能通过全局任务抽屉查看。
+- **进度反馈不足**：preview 是后台任务，但 ImportView 没有绑定当前 preview 任务的 progress / cancel UI；用户只能通过当前项目的任务抽屉查看。
 - **i18n 后续项**：动作条的无损保留、OCR/视觉理解边界与确认操作已加入 `src/i18n/locales/{en,zh-CN}.json`；仍需随未来归档规则、完整冲突记录和导入历史板块补齐对应文案。
 - **冲突信息展示薄弱**：底部 warning banner 是英文硬编码「N conflict(s) found…」（`ImportView.tsx:354-357`），未用 i18n；冲突详情只在右面板按文件显示，无全局冲突列表。
 

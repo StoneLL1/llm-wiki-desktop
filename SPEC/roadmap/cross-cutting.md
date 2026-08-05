@@ -3,17 +3,20 @@
 > 对照源：`SPEC/PRD.md` + `CLAUDE.md` 必读硬边界
 > 当前实现：`src/stores/`、`src/hooks/`、`src/services/`、`src-tauri/src/{services,commands,utils}/`、`src/i18n/`、`src/components/app/`
 > 审计范围：跨视图、被 PRD 或 CLAUDE.md "必读硬边界" 强制约束、不属于单一视图的全局特性。
+> Workflows 路由、项目任务隔离与确认状态以 [`../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) 为准；本文中的 `Auto` 路由和 dialog 描述只记录当前实现，不是目标产品行为。
+> 首次使用、项目类型化评估、信任、兼容、修复与符号链接边界以 [`../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准。`ProjectRegistry` 路径登记不是用户信任，旧 `InitializeFolder` continuation 不是目标能力。
 
 ## 0. 现状摘要
 
 跨切面硬约束整体落地度高。`GitService` 能初始化仓库、生成 scoped/全量 checkpoint、输出 Markdown diff；`CompileService`、`LintService`、`ChatService.save_answer_to_wiki` 在写文件前创建 checkpoint，但 **Import 仍是 P0 例外**：`confirm_import_preview` 先确认归档并写 `.app/import-conflicts.json`，之后才创建 checkpoint，因此跨切面的“危险写操作前检查点”边界仅部分完成。`PendingAction + ConfirmationRegistry + ConfirmationDialog` 把删除、替换、覆盖、冲突、智能体自动修复统一收口到前端对话框；`ProjectContext` + `app_state::ProjectRegistry` 实现了项目 id+根路径双校验、路径穿越/绝对路径/符号链接拒绝、Unicode-CJK 兼容（测试覆盖中文资料库路径）。托盘最小化、任务事件流、OS 通知、任务可取消也已落地。
 
-主要的 P0 落差集中在两处：
+主要的 P0 落差集中在三处：
 
-1. **i18n 对 Agent/LLM 生成内容的语言偏好未落地**（CLAUDE.md 硬约束明确要求 "Agent 生成内容按用户语言偏好输出"，但 chat/compile/export/lint 的 prompt 全是英文，且未把 `settings.language` 传入后端）。这是 P0 红线。
-2. **Import checkpoint 时序不满足预操作语义**：`confirm_import_preview` 的两次写盘都发生在 `create_import_checkpoint` 之前；checkpoint 失败无法阻止已经发生的导入变更。详细 P0 以 [import.md](import.md) 为准。
+1. **项目访问仍是二元打开模型**：当前缺少零写入类型化评估、全局信任、受限/只读/兼容/恢复能力矩阵、评估 ID 二次校验和普通资料目录保护。
+2. **i18n 对 Agent/LLM 生成内容的语言偏好未落地**（CLAUDE.md 硬约束明确要求 "Agent 生成内容按用户语言偏好输出"，但 chat/compile/export/lint 的 prompt 全是英文，且未把 `settings.language` 传入后端）。这是 P0 红线。
+3. **Import checkpoint 时序不满足预操作语义**：`confirm_import_preview` 的两次写盘都发生在 `create_import_checkpoint` 之前；checkpoint 失败无法阻止已经发生的导入变更。目标合同与验收以 [Import / Source 权威规范](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准；`import.md` 仅是禁止执行的历史审计。
 
-另外有几处 P1/P2 收尾项：托盘菜单已按启动时的 Settings language 本地化，但应用运行中切换语言后需重启才能重建菜单（P2）；URL 安全策略与 SSRF 防护已落地但日志不显式遮蔽密钥的回归测试缺失；`set_default_agent` 后未持久化到 `.app/agent-config.json`（待核对）。`WorkspaceController` 挂载的 `useAiCapabilities` 已在每次 project key 变化时无条件检测 Agent/Provider；启动页也会复用最近项目检测，但没有任何 recent project 时仍无法构造后端要求的 project context。
+另外有几处 P1/P2 收尾项：托盘菜单已按启动时的 Settings language 本地化，但应用运行中切换语言后需重启才能重建菜单（P2）；URL 安全策略与 SSRF 防护已落地但日志不显式遮蔽密钥的回归测试缺失；`set_default_agent` 后未持久化到 `.app/agent-config.json`（待核对）。`WorkspaceController` 挂载的 `useAiCapabilities` 会在 project key 变化时检测 Agent/Provider；旧 `ProjectStartView` 也会复用最近项目检测。目标无项目工作台不做首屏 AI 检测，只有用户触发 Chat、Workflows、AI 整理等能力时才上下文式检查并提供配置入口。
 
 ## 1. 跨切面特性清单
 
@@ -21,14 +24,15 @@
 |---|---|---|---|---|---|
 | 1. Git 检查点机制 | CLAUDE.md 必读硬边界；PRD-GIT-001/002/003/004 | `GitService` 完整落地，compile/lint/chat 在受保护写入前创建 checkpoint；Import 虽接入 checkpoint，但 `confirm_import_preview` 先写导入产物和冲突 JSON 再创建 checkpoint | 🟡部分实现 | P0 | `src-tauri/src/services/git_service.rs:60-150`、`src-tauri/src/commands/import_commands.rs:597-625`、[import.md](import.md) |
 | 2. API Key 凭据管理 | CLAUDE.md 必读硬边界；PRD-SET-002 | 走 `keyring` crate；前端只显"已配置"；密钥不入项目文件 | ✅已完成 | — | `src-tauri/src/services/secret_service.rs:14-92`、`src-tauri/src/commands/llm_commands.rs`、`src/components/settings/SettingsView.tsx` |
-| 3. Agent 默认优先 / BYOK 兜底 | CLAUDE.md 必读硬边界；PRD-WIKI-001/002、PRD-AGENT-001 | 路由策略 `Auto` 已落地：Agent installed → Agent，否则 BYOK；Agent CLI 检测走 `where`/`which`+`%APPDATA%\npm` fallback；只检测不安装 | ✅已完成 | — | `src-tauri/src/commands/compile_commands.rs:160-257`、`src-tauri/src/services/agent_service.rs:73-131,554-607` |
+| 3. 设置默认路径 / 单次显式覆盖 / 无静默回退 | CLAUDE.md 必读硬边界；PRD-WORKFLOW-003、PRD-AGENT-007 | 当前 `Auto` 会按 Agent installed → BYOK 自动回退；CLI 检测与不静默安装已完成，但目标路由合同尚未迁移 | 🟡部分实现 | P0 | `src-tauri/src/commands/compile_commands.rs:160-257`、`src-tauri/src/services/agent_service.rs:73-131,554-607`、[agent.md](agent.md) |
 | 4. 长任务可取消 / 可后台 / 可报告进度 / 托盘 | CLAUDE.md 必读硬边界；PRD-AGENT-003/004/005、§11.1 | `TaskService` 后台任务+事件总线+进度+取消；托盘"最小化到托盘"已接入 `CloseBehavior`；启动时按 Settings language 本地化菜单/tooltip；OS 通知 | 🟡部分实现 | P1 | `src-tauri/src/lib.rs:31-108`、`src-tauri/src/utils/i18n.rs:34-41`、`src/stores/taskStore.ts:121-128`、`src/hooks/useTaskEvents.ts:43-98`、`src/services/notifications.ts` |
-| 5. 路径安全 / Unicode-CJK / 跨平台 | CLAUDE.md 必读硬边界；PRD §11.4 | `ProjectContext` 全链路路径校验 + 符号链接拒绝 + canonicalize 跨盘符防护 + CJK 测试 | ✅已完成 | — | `src-tauri/src/models/paths.rs:19-103`、`src-tauri/src/app_state.rs:41-95`、`src-tauri/src/utils/url_utils.rs:11-57` |
+| 5. 路径安全 / Unicode-CJK / 跨平台 | CLAUDE.md 必读硬边界；PRD §11.4 | 当前 `ProjectContext` 全链路路径校验、统一拒绝符号链接、canonicalize 跨盘符防护与 CJK 测试已落地；目标需允许根目录符号链接经规范化形成身份，并区分仓库内受控链接与仓库外不跟随链接 | 🟡部分实现 | P0 | `src-tauri/src/models/paths.rs:19-103`、`src-tauri/src/app_state.rs:41-95`、`src-tauri/src/utils/url_utils.rs:11-57` |
 | 6. PendingAction 高风险确认流 | CLAUDE.md 必读硬边界；PRD-LINT-004、PRD-GIT-004 | 后端 `ConfirmationRegistry` 统一登记 + scoped 执行；`ProjectConfirmationController` 从 `PendingAction.checkpointHash` 派生 checkpoint 显示，并编排 `ConfirmationDialog` + `CompileConflictDialog` | 🟡部分实现 | P1 | `src/components/app/ProjectConfirmationController.tsx`、`src/components/app/ConfirmationDialog.tsx`、`src-tauri/src/commands/compile_commands.rs:385-628` |
 | 7. i18n（zh-CN / en） | CLAUDE.md 必读硬边界（UI + Agent 输出）；PRD-SET-003 | UI 全量双语；Agent/LLM 生成内容未按用户语言偏好输出 | 🟡部分实现 | P0 | `src/i18n/index.ts:19-34`、`src/i18n/locales/en.json`、`src-tauri/src/services/chat_service/retrieval.rs` (`ChatService::build_retrieval_context`)、`src-tauri/src/services/compile_service.rs:207-211`、`src-tauri/src/services/export_service.rs:31-150`、`src-tauri/src/services/lint_service/deep.rs` (`LintService::build_deep_lint_prompt`) |
 | 8. 本地优先 / 无数据库 | CLAUDE.md 必读硬边界；PRD §11.5 | 无任何数据库依赖；状态 = Markdown + JSON；`FileStore` 原子写 `.app/` | ✅已完成 | — | `src-tauri/src/services/file_store.rs`、`src-tauri/Cargo.toml` |
 | 9. 通知 / Toast 系统 | PRD-AGENT-003/005、§11.2 | OS 通知（完成/失败/待确认）+ 前端 Toaster | ✅已完成 | — | `src/services/notifications.ts`、`src/components/app/Toaster.tsx`、`src/stores/toastStore.ts` |
 | 10. 搜索全局入口（普通搜索不调模型） | CLAUDE.md §搜索约定；PRD-CHAT-005 | `search_wiki` 后端命令只做关键词/标签/类型/来源过滤；TopBar ⌘K 入口 | ✅已完成 | — | `src-tauri/src/commands/search_commands.rs:7-20`、`src/components/app/TopBar.tsx` |
+| 11. 项目评估 / 信任 / 访问策略 | 首次使用与打开已有知识库专题规范 | 当前只有 `is_wiki_project`、`ProjectRegistry` 与零散可写/Git 检查；缺少带类型评估、全局信任、受限/只读/兼容/恢复策略和 assessment ID 二次校验 | ❌缺失 | P0 | `src-tauri/src/commands/project_commands.rs`、`src-tauri/src/services/project_service.rs`、`src-tauri/src/app_state.rs`、`src/stores/projectStore.ts` |
 
 ## 2. 逐条落差与验收
 
@@ -41,7 +45,7 @@
   - `ChatService::save_answer_to_wiki` 新建页面直接写、覆盖前必须 `allow_overwrite + expected_hash` 且先 scoped checkpoint。
   - `request_delete_source` / `request_replace_source` 返回 `PendingAction(risk_level=Destructive)`，`affected_paths` 包含源文件 + 关联 extracted 工件。
   - **Import 例外**：`confirm_import_preview` 在 `ImportService::confirm_import` 与 `.app/import-conflicts.json` 写盘后才调用 `create_import_checkpoint`（`src-tauri/src/commands/import_commands.rs:603-618`），不满足预操作检查点硬边界。
-- 目标：先修复 Import P0，使 checkpoint 创建发生在任何 confirm-import mutation 之前；同时补显式覆盖“checkpoint 失败时写盘被阻止”的回归测试（详细设计以 [import.md](import.md) 为准）。
+- 目标：按 [Import / Source 权威规范](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 修复 Import P0：只有 checkpoint-required 覆盖/替换/合并等动作在任何 mutation 前创建检查点；纯新增不强制检查点。补显式覆盖“required checkpoint 失败时零写入”的回归测试；不要从历史 `import.md` 恢复旧流程。
 - 涉及文件：见清单表。
 - 验收标准：
   1. `confirm_import_preview` 必须在 `ImportService::confirm_import`、conflict JSON 或其他确认导入写盘之前成功创建 checkpoint；模拟 checkpoint 失败时项目内容不变。
@@ -61,18 +65,18 @@
   1. 新增 `grep`-级测试：对 `src-tauri/src/services` 下所有 prompt 构造函数，快照断言输出不含"sk-"、"key"、"secret"等模式（数据驱动，避免未来回归）。
   2. 前端单测：`provider.hasSecret === false` 时 UI 文案严格为"未配置/Not configured"，不出现任何密钥片段。
 
-### 2.3 Agent 默认优先 / BYOK 兜底（✅已完成）
+### 2.3 设置默认路径 / 单次显式覆盖 / 无静默回退（🟡部分实现，P0）
 
 - 现状：
   - `compile_commands::generate_manifest` 实现 `CompileRoutePreference::Auto`：先尝试 `usable_agent`（`detect_agents` 里 `state == Installed`），有则 Agent，无则 BYOK。
   - `find_executable` 做了 `where`/`which` → `%APPDATA%\npm\{cmd,bat,exe}` 的 fallback，且 Windows 下优先 `.cmd/.bat/.exe` 避开无扩展名 bash shim（注释解释了 CreateProcess 无法执行该 shim）。
   - "不静默安装"：`install_guidance` 只是字符串数据，`AgentService` 没有任何 `Command::new("npm install ...")`。
   - BYOK 路径：`LlmService::complete` 在 BYOK 时用 `secret_service.get(provider.provider)` 拿密钥，Provider 未配置 secret 直接错 `LLM_SECRET_MISSING`。
-- 目标：项目工作区保持现状；`useAiCapabilities` 已在 project key 变化时无条件异步 `detect_agents` / `list_llm_providers`。仅启动页在没有任何 recent project 时缺少可用于后端命令的 project context。
+- 目标：保留能力检测，但用设置中的默认路径决定执行器；工作流准备页和 Chat 只允许显式覆盖本次路径，不改变默认值。所选 Agent / Provider 不可用时返回结构化 prerequisite 并引导配置，禁止自动切换到另一条路径。Legacy `Auto` 只能作为迁移输入，不得继续承担目标 Workflows 语义。
 - 涉及文件：见清单表。
 - 验收标准：
-  1. ✅ `WorkspaceController` / `useAiCapabilities` 已在 `projectId + rootPath` 变化时触发 `detect_agents` 与 provider refresh，并把 resolved route 写入共享 project 状态。
-  2. 回归测试：`Auto` + Agent installed + BYOK configured → 路由是 Agent；`Auto` + Agent missing + BYOK configured → 路由是 BYOK；`Auto` + 两者都缺 → 错 `LLM_PROVIDER_MISSING` 或 `AGENT_UNAVAILABLE`。
+  1. ✅ `WorkspaceController` / `useAiCapabilities` 在 `projectId + rootPath` 变化时触发 `detect_agents` 与 provider refresh；能力发现与执行选择保持分离。
+  2. 回归测试：设置默认 Agent 时只使用该 Agent；设置默认 BYOK 时只使用该 Provider；显式单次覆盖只影响当前任务；任何所选路径不可用都返回 prerequisite，不启动另一 Agent / Provider。
 
 ### 2.4 长任务可取消 / 可后台 / 可报告进度 / 托盘最小化（🟡部分实现，P1）
 
@@ -91,7 +95,7 @@
   2. BYOK compile 在模型生成期间每 ≤2s append 一条 progress 日志，或切到流式 API。
   3. 评估 `waitForTaskTerminal` 的 event-first + 1s polling fallback 是否需要进一步统一；不得删除防漏事件兜底而不补等价可靠性保障。
 
-### 2.5 路径安全 / Unicode-CJK / 跨平台（✅已完成）
+### 2.5 路径安全 / Unicode-CJK / 跨平台（🟡部分实现，P0）
 
 - 现状：
   - `ProjectContext::resolve_project_path` → `validate_project_relative_path`（拒绝绝对路径、Windows 盘符 prefix、`..` 穿越）；`ensure_no_detectable_escape` 通过 canonicalize 检查最终路径在 canonical root 之下，防符号链接逃逸。
@@ -99,9 +103,13 @@
   - `matching_normalized_root_resolves_and_preserves_cjk` 测试用中文目录名 `"中文资料库"` 验证规范化后可解析。
   - `is_safe_remote_url` + `is_public_ip` + `fetch_import_url` 在 DNS 解析后再校验 IP（防 DNS rebinding 到内网），重定向 `Policy::none()`（不跟随），5MB 上限，UTF-8 强制。
   - `compile_service::is_safe_wiki_markdown` 独立校验编译输出，拒绝反斜杠、绝对路径、非 `wiki/` 前缀。
-- 目标：保持现状。
+- 目标：
+  1. 选择的根目录如果本身是符号链接，先解析为 canonical root，并用规范化目录身份承载历史、信任和 assessment 绑定。
+  2. 枚举仓库内容时，普通文件按现有 containment 校验；仓库内符号链接只有解析目标仍位于 canonical root 下时才可读取；指向仓库外的链接不跟随并作为诊断返回。
+  3. 大小写折叠、Unicode 归一化或跨平台不等价冲突只报告，不自动重命名。
+  4. 任何写操作继续要求最终路径在 canonical root 内，且同时通过项目访问策略的 trusted + writable 校验。
 - 验收标准：
-  1. 已有测试覆盖路径穿越、CJK、符号链接、跨盘符；建议补一项 `ensure_no_detectable_escape` 对 Windows UNC 路径（`\\?\C:\...`）的行为测试。
+  1. 覆盖根目录符号链接身份、仓库内链接、仓库外链接不跟随、悬空链接、循环链接、Windows junction/UNC、CJK、大小写和 Unicode 归一化冲突。
 
 ### 2.6 PendingAction 高风险确认流（🟡部分实现，P1）
 
@@ -112,6 +120,7 @@
   - `ProjectConfirmationController` 把项目级 PendingAction（import delete/replace）与 compile 冲突 PendingAction 合并到 `displayedPendingAction`，分别走 `confirmPendingAction`（项目 store）和 `confirm_compile_action`（后端命令）；`AppShell` 只挂载 controller。
 - 已完成：`PendingAction.checkpointHash` 已透传；`ProjectConfirmationController` 使用 `displayedPendingAction.checkpointHash != null` 派生 `checkpointExists`，compile merge 与尚未创建 checkpoint 的动作能显示不同状态。
 - 已完成：破坏性操作确认按钮使用 `Button variant="danger"`；非破坏性确认使用 secondary，不再存在 primary/danger 冲突。
+- 迁移要求：`InitializeFolder` 只记录旧实现。目标流程中普通资料文件夹绝不原地初始化；删除对应 producer，并用“新建独立知识库 → Import 复制”的项目流程替代。不要为它补新的前端入口。
 - 剩余落差（P1/P2）：`PendingActionType::BatchRewrite` / `InstallAgent` / `RunSkill` 当前没有生产者。若未来接入，应分别决定是否需要 executable continuation；不能据此虚构同名 `ConfirmationExecution` 变体。
 - 涉及文件：`src/components/app/ConfirmationDialog.tsx`、`src/components/app/ProjectConfirmationController.tsx`、`src-tauri/src/models/confirmation.rs`、`src-tauri/src/commands/compile_commands.rs:128-145`。
 - 验收标准：
@@ -157,21 +166,35 @@
 - 验收标准：
   1. 回归测试：`search_wiki` 在 0 个 LlmProvider 配置时仍返回结果（断言无网络调用）。
 
+### 2.11 项目评估 / 信任 / 访问策略（❌缺失，P0）
+
+- 快速评估必须零写入：启动返回 application-scoped `assessmentOperationId`，取消只接受该 opaque ID、不创建项目任务并丢弃未完成快照；完成后才返回短期有效的 `assessmentId`、canonical folder identity、独立 format/trust/filesystem-access/health、layout、证据、风险、capabilities 和是否需要深度扫描。
+- 信任存储在全局应用状态中，按 canonical folder identity 绑定；它与 `ProjectRegistry` 的进程内路径校验职责分离。
+- 所有命令在后端从独立 trust、filesystem access、health、layout 与 capabilities 派生 access policy；`restricted` 只是 untrusted/capability 的 UI 摘要，`recovery` 是 health：
+  - untrusted：允许本地有限深度只读、内存图与 Local Quick，不调用外部 AI/Agent/Skill，不写项目状态；
+  - trusted + read-only：允许本地浏览、ephemeral Chat/Complete Check 等无需项目写入的明确能力，禁止项目变更；
+  - trusted + writable：按 layout capability 与 Git 策略允许兼容、修复和业务写入；
+  - recovery health：Markdown 可读时保留 Recovery Dashboard，只开放当前 layout/capabilities 证明安全的诊断与已确认修复。
+- 确认信任、启用兼容、修复与最终打开使用短期 `assessmentId` 重新解析目录并校验 identity/revision。项目打开后，Workflows 不复用过期 assessment；其 prepare/start/confirm 使用当前 `ProjectContext` 的 canonical identity/revision、trust、filesystem access、health、layout、baseline 与 Git 状态重验。
+- ordinary materials 结果只能导向“另建知识库后 Import 复制”，不能注册为可写项目或生产 `InitializeFolder`。
+- 验收覆盖：原生/旧版/nashsu/Obsidian/Markdown/含糊/普通资料/unknown format，以及独立 healthy/repairable/recovery/unreadable health；另覆盖受限到信任转换、filesystem-access 漂移、目录替换、符号链接身份与 TOCTOU。
+
 ## 3. 建议实施顺序（P0 先做）
 
 ### P0（红线，MVP 前必须关闭）
 
-1. **2.1 Import checkpoint 预操作语义**：把 checkpoint 创建移到任何 confirm-import mutation 之前；checkpoint 失败不得产生项目文件变更。详细实现与验收以 [import.md](import.md) 为准。
-2. **2.7 i18n 生成内容语言偏好**：五个 prompt 构造点接入 `SettingsService::language`。托盘启动时本地化已完成，不属于此 P0。
+1. **2.11 项目评估 / 信任 / 访问策略**：先建立所有页面、任务和写操作共用的项目能力边界。
+2. **2.5 路径身份与符号链接策略**：与 assessment/trust 一起落地，避免身份和 containment 规则分裂。
+3. **2.1 Import checkpoint 预操作语义**：按 [Import / Source 权威规范](../../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 区分纯新增与 checkpoint-required 覆盖/替换/合并；后者必须在任何 mutation 前完成检查点，失败时零写入。历史 `import.md` 不作为实施依据。
+4. **2.7 i18n 生成内容语言偏好**：五个 prompt 构造点接入 `SettingsService::language`。托盘启动时本地化已完成，不属于此 P0。
 
 ### P1（MVP 期内补齐）
 
-3. **2.4 BYOK compile 流式进度**：把 `LlmService::complete` 改成 stream，或至少每 2s append "Generating..." 日志。
-4. **2.4 任务状态同步机制统一**：Import 已改为 `useImportWorkflow` + `waitForTaskTerminal`；继续评估 event-first 与可靠 polling fallback 的统一边界。
+5. **2.4 BYOK compile 流式进度**：把 `LlmService::complete` 改成 stream，或至少每 2s append "Generating..." 日志。
+6. **2.4 任务状态同步机制统一**：Import 已改为 `useImportWorkflow` + `waitForTaskTerminal`；继续评估 event-first 与可靠 polling fallback 的统一边界。
 
 ### P2（打磨）
 
-5. **2.2 prompt 泄露密钥的快照测试**。
-6. **2.5 Windows UNC 路径**的 `ensure_no_detectable_escape` 测试。
-7. **2.10 无 Provider 也能搜索**的回归测试。
-8. **2.4 托盘菜单语言热更新**：如需免重启切换，重建现有 tray menu；当前启动时本地化已满足，故为 P2。
+7. **2.2 prompt 泄露密钥的快照测试**。
+8. **2.10 无 Provider 也能搜索**的回归测试。
+9. **2.4 托盘菜单语言热更新**：如需免重启切换，重建现有 tray menu；当前启动时本地化已满足，故为 P2。

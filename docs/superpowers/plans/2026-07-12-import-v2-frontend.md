@@ -1,6 +1,7 @@
 # Import V2 Frontend Implementation Plan
 
 > Historical implementation plan. Keep task-level code and test guidance only where it agrees with [`../specs/2026-07-24-import-source-media-flow-design.md`](../specs/2026-07-24-import-source-media-flow-design.md), which is the sole authority for current Import, Source, media, OCR / ASR, login, and AI 整理 behavior.
+> Import completion never compiles or auto-navigates. Any conditional “导入后编译” language below is superseded and must be implemented as an explicit later `更新 Wiki` entry into Workflows.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -435,7 +436,7 @@ On matching Import task progress/terminal events, refresh the affected session t
 
 - [ ] **Step 5: Implement commit ordering and partial results**
 
-`confirm_import_session_v2` returns a task immediately. On success, refresh session, then `wikiStore.scan(projectId, rootPath)`. Compilation is no longer hidden inside Import confirmation; if the final product retains “导入后编译”, launch it only after scan and only for the still-current project.
+`confirm_import_session_v2` returns a task immediately. On success, refresh the session, scan/select the committed Source, and remain in Import. Do not launch compilation. The completion summary may offer an explicit `更新 Wiki` action that enters the separate Workflows preparation flow for the still-current project.
 
 - [ ] **Step 6: Prove legacy calls are gone**
 

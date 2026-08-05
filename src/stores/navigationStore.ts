@@ -69,6 +69,16 @@ export interface WorkflowSettingsReturnIntent {
   expectedTaskId: string | null;
 }
 
+export interface ImportSuccessNotice {
+  projectId: string;
+  name: string;
+}
+
+export interface PendingImportPath {
+  projectId: string;
+  path: string;
+}
+
 export interface NavigationState {
   activeView: AppView;
   rightPanelOpen: boolean;
@@ -82,6 +92,8 @@ export interface NavigationState {
   settingsSection: SettingsSectionKey;
   workflowSettingsReturnIntent: WorkflowSettingsReturnIntent | null;
   workflowLaunchIntent: WorkflowLaunchIntent | null;
+  importSuccessNotice: ImportSuccessNotice | null;
+  pendingImportPath: PendingImportPath | null;
   setActiveView: (view: AppView) => void;
   setRightPanelOpen: (open: boolean) => void;
   openWikiAssistant: (path: string) => void;
@@ -102,6 +114,10 @@ export interface NavigationState {
   clearWorkflowSettingsReturnIntent: () => void;
   requestWorkflowLaunch: (intent: WorkflowLaunchIntent) => void;
   clearWorkflowLaunchIntent: () => void;
+  setImportSuccessNotice: (notice: ImportSuccessNotice) => void;
+  clearImportSuccessNotice: () => void;
+  setPendingImportPath: (path: PendingImportPath) => void;
+  clearPendingImportPath: () => void;
 }
 
 const initialLayoutPreferences = readLayoutPreferenceSnapshot();
@@ -119,6 +135,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   settingsSection: "general",
   workflowSettingsReturnIntent: null,
   workflowLaunchIntent: null,
+  importSuccessNotice: null,
+  pendingImportPath: null,
   setActiveView: (activeView) =>
     set((state) => {
       if (activeView === "wiki") {
@@ -266,4 +284,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   requestWorkflowLaunch: (workflowLaunchIntent) =>
     set({ workflowLaunchIntent, activeView: "workflows" }),
   clearWorkflowLaunchIntent: () => set({ workflowLaunchIntent: null }),
+  setImportSuccessNotice: (importSuccessNotice) => set({ importSuccessNotice }),
+  clearImportSuccessNotice: () => set({ importSuccessNotice: null }),
+  setPendingImportPath: (pendingImportPath) => set({ pendingImportPath }),
+  clearPendingImportPath: () => set({ pendingImportPath: null }),
 }));

@@ -2,8 +2,9 @@
 
 > 状态：已确认，作为实现依据
 > 确认日期：2026-07-24
-> 适用范围：Import V2、`raw/`、`wiki/sources/`、本地文件与媒体、网页与平台内容、OCR、ASR、登录态、能力包、Source 阅读与 AI 整理
+> 适用范围：Import V2、逻辑 evidence / Source / app-state roots（新建原生知识库分别映射为 `raw/`、`wiki/sources/`、`.app/`）、本地文件与媒体、网页与平台内容、OCR、ASR、登录态、能力包、Source 阅读与 AI 整理
 > 决策权威：当本文件与旧版 PRD、SPEC、APP flow、技术说明、Import V2 设计或实现计划冲突时，以本文件为准；旧文档只保留不冲突的背景、非本范围设计和历史信息。
+> 交叉边界：Import 只在已经打开的当前知识库内添加资料。知识库的新建、识别、打开、信任、兼容、修复与 `ProjectContext.layout` 合同由 [`2026-07-30-first-run-project-open-workbench-design.md`](2026-07-30-first-run-project-open-workbench-design.md) 负责；选择一个文件夹作为 Import 输入绝不表示打开或原地初始化该文件夹。Import 写入要求 trusted + writable，且 layout 必须提供 app state、evidence 与 Source write roots；缺少任一写根时返回 typed prerequisite，不自行创建原生目录。
 
 ## 1. 设计结论
 
@@ -12,8 +13,8 @@
 - **导入**负责把用户选择的内容变成可追溯、可阅读、可编辑的 Source，并写入来源库。
 - **编译**负责读取已经确认的 Sources，生成或更新其他 Wiki 页面。
 - 导入确认后不得自动编译。
-- 每个成功提交的导入项都必须产出可阅读的 Source；不能只写 `raw/`，也不能只写内部 manifest。
-- `raw/` 保存不可变证据和历史，`wiki/sources/` 保存用户当前阅读、编辑、引用的来源稿。
+- 每个成功提交的导入项都必须同时产出不可变 evidence 与可阅读 Source；不能只写 evidence root，也不能只写内部 manifest。
+- evidence root 保存不可变证据和历史，Source write root 保存用户当前阅读、编辑、引用的来源稿；新建原生知识库分别映射为 `raw/` 与 `wiki/sources/`。
 - 重复内容不重复创建 Source；来源更新写入同一个逻辑来源的新版本。
 
 ```mermaid
@@ -25,8 +26,8 @@ flowchart LR
   C -- "否" --> E["候选 Source 与质量检查"]
   E --> F["预览 / Diff / 默认勾选"]
   F --> G["导入到来源库"]
-  G --> H["raw/ 不可变证据"]
-  G --> I["wiki/sources/ 当前可读 Source"]
+  G --> H["evidence root：不可变证据"]
+  G --> I["Source root：当前可读 Source"]
   I --> J["查看已导入来源"]
   I --> K["用这些来源更新 Wiki"]
   K --> L["独立编译流程"]
@@ -36,8 +37,8 @@ flowchart LR
 
 | 内部或历史术语 | 用户界面统一文案 | 含义 |
 |---|---|---|
-| `raw/` | 原始资料 | 不可变文件、页面证据、原始字幕、OCR/ASR 原始输出和版本证据 |
-| `wiki/sources/` | 来源库 / 来源 | 可阅读、可编辑、可引用的当前 Source Markdown |
+| evidence root（原生为 `raw/`） | 原始资料 | 不可变文件、页面证据、原始字幕、OCR/ASR 原始输出和版本证据 |
+| Source write root（原生为 `wiki/sources/`） | 来源库 / 来源 | 可阅读、可编辑、可引用的当前 Source Markdown |
 | 其他 `wiki/` 页面 | Wiki 页面 / 知识页面 | 由编译、编辑、问答或其他流程生成的派生内容 |
 | commit import | 导入到来源库 | 将候选正式写入原始资料和来源库 |
 | compile | 用这些来源更新 Wiki | 以已导入 Sources 为输入启动独立编译 |
@@ -52,13 +53,15 @@ flowchart LR
 1. 所有成功导入项都生成 Source。
 2. 所有来源类型遵循相同的“发现 → 处理 → 预览 → 确认 → 来源库”闭环。
 3. 导入不自动触发 Wiki 编译。
-4. `raw/` 默认不可变；Source 是可读的当前版本。
+4. evidence root 默认不可变；Source 是可读的当前版本。
 5. Source 可被用户编辑，后续刷新、OCR、ASR 和 AI 整理必须保护人工修改。
 6. 长任务可取消、可在后台运行、可恢复、可查看进度和日志。
 7. 登录、能力安装、OCR、ASR 和 Agent 修复均由用户主动触发。
 8. React 不直接管理文件系统、Git、Agent 进程、能力包或登录秘密；全部经 Tauri IPC 进入后端服务。
 9. BYOK 不参与网页、平台、文件或媒体解析恢复；BYOK 只在 Source 已经存在后参与 AI 整理和 Wiki 编译。
 10. 失败项不创建占位 Source。
+11. 发现、确定性提取和预览可以在 restricted/read-only 项目中使用应用临时空间只读运行；正式提交 Source 要求项目已信任、文件系统可写，且 `ProjectLayout` 提供 `appStateRoot` 及其 `importStateRoot` / `sourceStateRoot`、`evidenceRoot` 与 `sourceWriteRoot`。
+12. Source AI 整理在把内容交给 Agent / Provider 前要求项目已信任；把候选稿应用到 Source 还要求 writable、Source/version/hash 重验，以及适用的 Git checkpoint / confirmation 策略。
 
 ### 3.2 本轮明确不设计
 
@@ -88,6 +91,8 @@ flowchart LR
 完全相同的内容不得创建第二个 Source。新的 URL、短链接或文件路径只作为别名写入现有来源记录。
 
 ### 4.2 目录职责
+
+Import 只能使用打开评估返回的 `ProjectContext.layout`。下列目录树是**新建原生知识库的默认映射**，不是所有兼容知识库的结构要求。兼容适配器保留既有 Markdown 布局；只有明确提供 `appStateRoot`、`importStateRoot`、`sourceStateRoot`、`evidenceRoot` 与 `sourceWriteRoot` 时才能提交导入，所有路径仍需做 canonical containment 与 capability 校验。
 
 ```text
 raw/
@@ -213,6 +218,8 @@ quality: ...
 - 选择文件夹
 - 粘贴链接
 - 粘贴文本 / Markdown
+
+这些入口都把内容加入当前知识库。“选择文件夹”只是批量资料输入，不提供“打开为项目”分支，不创建 `.app/` / Git，不移动或改造所选目录。
 
 剪贴板预览识别结果后再创建任务，不监听全局 `Ctrl+V` 静默导入。URL 剪贴板路由到 URL；文本或 Markdown 生成本地文本 Source。图片剪贴板不在首版范围。
 
@@ -364,7 +371,7 @@ OCR 用于补足缺失正文，不对所有图片例行扫描。
 
 - OCR 成功：生成“原图 + 图片文字”的 Source。
 - OCR 未得到有效文本：显示“无法生成来源：未识别到文字”。
-- 不写入 `raw/`，不创建 Source，不影响批次其他项目。
+- 不写入 layout-defined evidence root，不创建 Source，不影响批次其他项目。
 - 提供重新识别、让 Agent 尝试提取和移除。
 - Agent 可在临时任务区尝试旋转、裁切、预处理或其他已安装 OCR 路线；只有产出有效文字并通过预览后才可提交。
 
@@ -429,7 +436,7 @@ OCR 用于补足缺失正文，不对所有图片例行扫描。
 音频 ASR 未检测到有效语音或低于最低质量门槛时：
 
 - 不生成 Source。
-- 不把音频提交到 `raw/`。
+- 不把音频提交到 layout-defined evidence root。
 - 显示“无法生成来源：未识别到有效语音”。
 - 提供调整语言后重试、重新转录、让 Agent 尝试修复和移除。
 
@@ -439,7 +446,7 @@ OCR 用于补足缺失正文，不对所有图片例行扫描。
 2. 命中后进入“需要操作：识别视频画面文字”。
 3. 用户启用后按场景变化抽取关键帧、OCR 并去重连续重复内容。
 4. 得到有效文字后生成“视频信息 + 按时间排列的画面文字”Source。
-5. ASR 和画面 OCR 都无有效文字时，不落 `raw/`、不生成 Source，可交给 Agent 或移除。
+5. ASR 和画面 OCR 都无有效文字时，不落 evidence root、不生成 Source，可交给 Agent 或移除。
 
 普通已有完整语音稿的视频不自动做画面 OCR。
 
@@ -519,6 +526,7 @@ OCR 用于补足缺失正文，不对所有图片例行扫描。
 - 同一来源内容变化进入更新和 Diff。
 - 不支持文件在扫描摘要中单列，不混入失败项。
 - 文件夹只是批量选择方式，不创建文件夹 Source。
+- 文件夹输入只读发现并把确认项复制 / 归档到当前知识库；不在原目录初始化知识库、写 marker、移动或重命名原件。
 
 ### 11.3 PDF
 
@@ -571,7 +579,7 @@ OCR 用于补足缺失正文，不对所有图片例行扫描。
 4. 已关联字幕属于音视频来源包，不单独创建重复 Source。
 5. 原字幕保存在原始资料中，Source 使用规范化可读版本。
 6. 没有可靠伴随稿时走本地 ASR；视频 ASR 无效时可进入画面 OCR。
-7. 本地原媒体在确认导入后完整保存到 `raw/`。
+7. 本地原媒体在确认导入后完整保存到 layout-defined evidence root。
 
 ### 11.8 本地媒体能力包
 
@@ -719,7 +727,7 @@ OCR 不把多图文字直接揉成文章。连续文章体验由后续 AI 整理
 
 编译请求携带本次成功提交的 `sourceId + versionId` change set。编译可以读取现有 Sources 和 Wiki 关系，但重点处理新版本和更新版本。历史页可以重新启动编译；系统记录哪些 Source 版本已经编译，避免无变化重复运行。
 
-编译不得写入 `wiki/sources/`。
+编译不得写入 layout-defined Source roots（原生为 `wiki/sources/`）。
 
 ## 15. Source 阅读页与 AI 整理
 
@@ -735,6 +743,8 @@ Sources 继续位于现有 Wiki 导航和阅读器中，不增加顶层 Sources 
 ### 15.2 AI 整理启动
 
 点击 `AI 整理` 打开非模态浮动工作台。工作台可拖动、调整尺寸、最小化；用户可以在任务运行期间继续阅读、编辑或切换页面。启动区包含：
+
+启动命令必须先在后端重验 canonical identity 与 trust；restricted 项目只显示“信任知识库”，不得把 Source 内容发送给 Agent 或远程 Provider。生成候选本身不直接写项目；确认应用候选时再次重验 writable、layout Source write root、Source/version/hash 与 Git/确认策略。
 
 - 固定任务说明。
 - 当前 Agent / BYOK 路线和模型。
@@ -853,7 +863,7 @@ Agent 不可以：
 - 执行未知下载二进制。
 - 读取或输出原始 Cookie、API Key 或其他秘密。
 - 绕过验证码、风控、付费墙和访问权限。
-- 直接修改 `raw/`、`wiki/` 或 Git。
+- 直接修改未经 `ProjectContext.layout` 授权的 evidence / Source / Wiki roots 或 Git。
 
 Agent 只写 staging 候选；候选仍需质量检查、预览和用户确认。
 
@@ -968,8 +978,8 @@ CompileChangeSet
 
 ### 19.1 核心闭环
 
-- 任意成功本地文件导入均同时产生 raw 证据和 `wiki/sources/` Source。
-- 任意成功网页、视频、图文导入均产生 `wiki/sources/` Source。
+- 任意成功本地文件导入均同时在 layout-defined evidence root 与 Source write root 产生完整证据和可读 Source；原生映射为 `raw/` + `wiki/sources/`。
+- 任意成功网页、视频、图文导入均在 layout-defined Source write root 产生可读 Source。
 - 导入完成后不自动启动编译。
 - 点击“用这些来源更新 Wiki”才创建独立编译任务。
 - 重复导入不创建第二个 Source。

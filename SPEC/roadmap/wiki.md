@@ -2,6 +2,7 @@
 
 > 对照源：UI-Frontend-design/wiki.html + assets/app.css + SPEC/PRD.md
 > 当前实现：src/features/wiki/、src/types/wiki.ts
+> 项目布局与访问边界：[`../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。原生、兼容、受限、只读和恢复模式共用 Wiki 视图；页面根与元数据由后端 `ProjectContext.layout`/capabilities 提供，不能假定所有知识库都有原生 `wiki/`、根 `purpose.md` 或 `schema.md`。所有 mutation 需要 trusted + writable，并遵守 Git/确认策略。
 
 ## 0. 现状摘要
 
@@ -36,15 +37,17 @@ Wiki 板块已具备核心骨架但远未对齐设计稿。左侧文件树（`Wi
 | 右侧"操作"区（生成 HTML / 生成卡片 / 图谱中查看 / 复制 wikilink） | 4 个 block 按钮 | **完全未实现**（生成 HTML 入口在中间顶栏也缺失） | ❌缺失 | P1 | 无 |
 | 页面级操作：新建/重命名/删除/星标/复制路径 | "+" 新建、星标按钮、复制路径按钮；重命名/删除（设计稿未直接画出，但 PRD-READ-004 / Git 检查点硬边界隐含） | 后端 `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page` 已实现并在 `lib.rs` 注册，`wikiStore` 也有对应调用；星标已实现。**剩余缺口是文件树/页面操作 UI 接线与复制路径入口** | 🟡部分实现 | P0 | `src/features/wiki/WikiTree.tsx:80-88`、`src/features/wiki/wikiStore.ts:398-457`、`src-tauri/src/commands/wiki_commands.rs:73-182`、`src-tauri/src/lib.rs:164-166` |
 | 搜索快捷键 ⌘K | 顶栏全局搜索框带 `⌘K` 提示 | 不在 wiki 板块内部（在 `AppShell` 顶栏）；wiki.html 设计稿把搜索放在 topbar | 🟡部分实现 | P1 | `src/components/app/AppShell.tsx`（顶栏） |
+| 兼容 / 访问模式 | 同一 Wiki UI 浏览原生与兼容 Markdown；restricted/read-only 只读；recovery 显示诊断 | 当前树与命令主要硬编码原生 `wiki/` 结构，未消费 layout/access/capabilities | ❌缺失 | P0 | `WikiTree.tsx`、`wikiStore.ts`、`wiki_commands.rs`、项目上下文 DTO |
 
 ## 2. 功能落差（PRD 对照）
 
+- [ ] **项目布局与访问模式（P0）**：树扫描、读取、反链与搜索通过后端解析的 page roots 工作，兼容 Obsidian/Markdown vault 时不要求根 `purpose.md`/`schema.md`；restricted 与 trusted read-only 隐藏/禁用新建、保存、重命名、删除、生成和修复，并给出“信任知识库”或权限说明；recovery 把诊断与备份/修复入口置顶。所有写命令在后端重验 canonical identity、trust、writability、hash 与 Git policy。
 - [x] **PRD-READ-001 后端部分（create/rename/delete_wiki_page 命令）** @ 2026-06-21：后端三命令已落地（`create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page` + `confirm_pending_action` 的 `DeleteWikiPage` 分支），rename 同步重写全仓 `[[old]]`→`[[new]]`（含 alias/anchor/CJK/嵌套括号）+ 前置 Git 检查点，delete 走 PendingAction + 双 checkpoint（pre HighRiskOperation + post FinalResult）+ 失败回滚，FILE_HASH_MISMATCH 返回 baselineContent。**前端 UI（树右键菜单/`+` 按钮/ConfirmationDialog 接线）仍缺，属前端板块，不在本 loop 范围。** 涉及后端文件：`src-tauri/src/commands/wiki_commands.rs`、`src-tauri/src/services/search_service/pages.rs` (`SearchService::create_page` / `rename_page`)、`src-tauri/src/utils/markdown_utils.rs`、`src-tauri/src/services/file_store.rs`。
 - [ ] **PRD-READ-001 前端部分（文件树新建/重命名/删除 UI）**：现状 = 树只读 + 只能通过编辑器覆盖现有页面 → 目标 = 顶栏"+"按钮新建页面（带模板选择），右键行项重命名/删除，删除前创建 Git 检查点并经用户确认 → 涉及文件 = `src/features/wiki/WikiTree.tsx`、`src/features/wiki/wikiStore.ts`（接已落地的 `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page` + `confirm_pending_action`）→ 验收 = 能新建空页面、重命名会同步更新所有 wikilink 引用、删除走 `ConfirmationDialog` + Git 检查点。
 - [ ] **P2 wikilink 重写边界（`rewrite_wikilinks` 已知限制，与本 loop `extract_wikilinks` 行为一致）** @ 2026-06-21：`rewrite_wikilinks` 与 `extract_wikilinks` 同源，共享以下已知限制（非本 loop P0/P1 范围，记录待后续统一处理）：①不跳过代码块/行内 code span 中的 `[[old]]`，会重写代码示例内容；②不识别路径式 wikilink `[[concepts/old]]`（只按 stem 精确匹配，Obsidian 两者都解析到同一文件）；③rename 引用重写用 `std::fs::write` 非原子写（file_store 用 `write_atomic`）。涉及文件 = `src-tauri/src/utils/markdown_utils.rs`、`src-tauri/src/services/search_service/pages.rs` (`SearchService::rename_page`)。验收 = 代码块内的 wikilink 不被重写；`[[dir/old]]` 也能被重写；引用重写走原子写。
 - [ ] **PRD-READ-002 frontmatter 卡片化渲染**：现状 = `<pre>` 裸 YAML（`MarkdownReader.tsx:60-61`） → 目标 = 解析 YAML 后按 `.frontmatter` + `.frontmatter__row` 两列 grid 渲染，120px key 列 → 涉及文件 = `src/features/wiki/MarkdownReader.tsx`、`src/styles.css`（复用设计稿 `.frontmatter` token） → 验收 = type/tags/aliases/created/updated/sources 等字段以卡片样式显示，未知字段也能优雅降级。
 - [ ] **PRD-READ-003 编辑器格式工具条**：现状 = Milkdown 已挂载但无 UI 工具条，用户只能靠键盘/鼠标选区操作 → 目标 = 顶部 28px 按钮组（加粗/斜体/标题/链接/代码/引用 + 分隔 + 撤销/重做），调用 Milkdown commands → 涉及文件 = `src/features/wiki/WikiEditor.tsx:87-142`、可能需要 `@milkdown/kit/preset/commonmark` 的 `toggleStrong` / `toggleEmphasis` / `wrapInBlockquote` 等 command → 验收 = 点击工具条按钮能对选区生效；禁用态正确；按钮样式匹配 `.editor__toolbar`。
-- [ ] **HTML 预览态 + 模板生成入口（设计稿核心第三态）**：现状 = 段控只有 read/edit 两档；无 "生成 HTML" 按钮；无模板选择对话框；无 iframe 预览 → 目标 = 段控补 `preview` 档；新增 "生成 HTML" primary 按钮打开 `dlg-gen-html`（模板：beautiful-read/knowledge-card/concept-map/project-report）；调用 `skills/html-*` skill；生成完成后切换到 HTML 预览态显示 iframe；提供"重新生成/打开位置/外部浏览器/复制路径" → 涉及文件 = `src/features/wiki/WikiView.tsx`、新建 `src/features/wiki/HtmlPreviewPane.tsx`、`src/features/wiki/GenerateHtmlDialog.tsx`；后端 `src-tauri/src/commands/compile_commands.rs` / Agent skill 路径 → 验收 = 能选模板、能触发 Agent、能在应用内 iframe 预览、能在 `exports/html/` 落盘。
+- [ ] **HTML 结果预览态 + 统一生成入口（设计稿第三态的收敛方案）**：现状 = 段控只有 read/edit 两档；无“生成内容”入口；无 iframe 结果预览 → 目标 = “生成内容”按钮携带当前 Wiki 页进入统一 Workflows Generate Content preparation，由其选择内建类型、范围与本次执行路径；Wiki 不新建 `GenerateHtmlDialog`，也不直接调用 Skill / compile command。任务完成后可进入 Exports 结果页或在 Wiki 的 preview 态读取该 Exports record，提供“重新生成 / 打开位置 / 外部浏览器 / 复制路径” → 涉及文件 = `src/features/wiki/WikiView.tsx`、可选 `HtmlPreviewPane.tsx`、Workflows 导航参数与 Exports record API → 验收 = trusted writable 项目从当前文章进入同一准备模型，用户再次明确开始后生成；输出落在 layout-defined export root（原生为 `exports/html/`），结果仍由 Exports 管理。
 - [ ] **PRD-READ-005 相关页面反链计数与"查看全部"**：现状 = 反链列表无每页反链次数、无"查看全部"链接 → 目标 = 每条 `relpage` 右侧显示 mono 计数；列表底部显示"查看全部 N 个反链 →" → 涉及文件 = `src/features/wiki/RelatedPagesPanel.tsx:95-119` → 验收 = 计数正确；点击全部打开图谱或反链总览。
 - [ ] **引用编号化（citation 列表）**：现状 = sources 纯文字列表 → 目标 = `citation__idx` 圆形编号 + 截断标题，且与正文 `citation-ref` 角标对应 → 涉及文件 = `src/features/wiki/RelatedPagesPanel.tsx:121-134`、`src/features/wiki/MarkdownReader.tsx`（正文需识别 `[^1]` 或 `[1]` 角标 → 渲染 `citation-ref` 圆形上标） → 验收 = 编号样式与设计稿一致；点击角标滚动到 citation。
 - [ ] **PRD-WIKI-004 编译冲突 Markdown Diff 对话框**：现状 = 仅编辑器内 banner + reload 按钮 → 目标 = 三路 diff 视图（baseline / current 外部修改 / agent ingest）+ 三选项（保留当前 / 使用 Agent / 手动合并）；与 `src/components/app/ConfirmationDialog.tsx` 协同 → 涉及文件 = 新建 `src/features/wiki/ConflictDiffDialog.tsx`；后端需返回 baseline 与三路文本（目前 `FILE_HASH_MISMATCH` 只给错误码） → 验收 = 用户能看到 diff、能选择合并策略。
@@ -77,14 +80,15 @@ Wiki 板块已具备核心骨架但远未对齐设计稿。左侧文件树（`Wi
 
 ## 5. 建议实施顺序
 
-1. **P0 - frontmatter 卡片化 + wikilink 样式落地**（`MarkdownReader.tsx` + `styles.css`）：低成本、立竿见影对齐设计 token；同时把 `.prose` 全套排版迁到 `.wiki-prose`。
-2. **P0 - Milkdown 编辑器格式工具条**（`WikiEditor.tsx`）：加粗/斜体/标题/链接/代码/引用/撤销/重做，把已有 Milkdown 能力暴露成 UI；与设计稿 `.editor__toolbar` 对齐。
-3. **P0 - 新建/重命名/删除页面前端 UI 接线**（文件树/页面操作入口）：复用 `wikiStore` 与已注册的 `create_wiki_page` / `rename_wiki_page` / `request_delete_wiki_page`，把新建、重命名和删除确认暴露到 UI；删除走 `ConfirmationDialog`，后端继续负责 Git checkpoint。
-4. **P0 - 外部修改冲突 Diff 对话框**（`ConflictDiffDialog.tsx` + 后端扩 `FILE_HASH_MISMATCH` 返回 baseline/agent 文本）：满足 PRD-WIKI-004 / PRD-GIT-004 验收。
-5. **P1 - HTML 预览态 + 模板选择器 + 生成入口**（`HtmlPreviewPane.tsx` + `GenerateHtmlDialog.tsx` + 后端 skill 调用）：闭合设计稿第三态；与 `skills/html-*` 联动。
-6. **P1 - 右侧"操作"区 + citation 编号化 + 反链计数**：补齐 RelatedPagesPanel 的引用/反链视觉与跳转入口。
-7. **P2 - 编辑历史时间线 + 右键菜单 + 键盘快捷键体系**：依赖 Git log / task log 数据源；非 MVP 阻塞项。
-8. **P2 - 阅读视图 lint 可视化叠加**：跨 Lint 板块协同，等 Lint 数据稳定后再接。
+1. **P0 - 布局与访问策略**：先让扫描、读取与所有 mutation 消费后端 page roots/access/capabilities，覆盖兼容、受限、只读与恢复模式。
+2. **P0 - frontmatter 卡片化 + wikilink 样式落地**（`MarkdownReader.tsx` + `styles.css`）：同时把 `.prose` 全套排版迁到 `.wiki-prose`。
+3. **P0 - Milkdown 编辑器格式工具条**（`WikiEditor.tsx`）：加粗/斜体/标题/链接/代码/引用/撤销/重做。
+4. **P0 - 新建/重命名/删除页面前端 UI 接线**：只在后端确认 trusted writable 后开放；删除走 `ConfirmationDialog`，后端负责 Git checkpoint。
+5. **P0 - 外部修改冲突 Diff 对话框**（`ConflictDiffDialog.tsx` + 后端扩 `FILE_HASH_MISMATCH` 返回 baseline/agent 文本）。
+6. **P1 - HTML 结果预览态 + 共享生成入口**：Wiki 只拥有结果预览与携带当前页进入 Workflows 的入口；模板/制品类型与执行路径只在共享 Generate Content preparation 中选择。外部 Skill/Agent 路径受 trust gate，写入 Exports 受 writable/Git 策略。
+7. **P1 - 右侧“操作”区 + citation 编号化 + 反链计数**。
+8. **P2 - 编辑历史时间线 + 右键菜单 + 键盘快捷键体系**。
+9. **P2 - 阅读视图 lint 可视化叠加**。
 
 ## 6. 2026-06-21 wiki-fe loop 后端缺口
 

@@ -89,8 +89,12 @@ export async function handleNotificationAction(
     : projects.recentProjects.find((candidate) => candidate.projectId === projectId);
   if (!project?.rootPath) return;
   if (projects.currentProject.projectId !== projectId) {
-    const response = await projects.openProject(project.rootPath);
-    if (response.kind !== "opened") return;
+    const assessment = await projects.assessProject(project.rootPath);
+    const canOpen =
+      assessment.health !== "unreadable" &&
+      !["ambiguous_markdown", "ordinary_materials", "unknown"].includes(assessment.format);
+    if (!canOpen) return;
+    await projects.openAssessedProject(assessment.assessmentId);
     project = { rootPath: project.rootPath };
   }
 

@@ -35,6 +35,7 @@ pub fn create_chat_session(
     request: CreateChatSessionRequest,
 ) -> Result<ChatSession, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_project_write_access(&context)?;
     state.chat_service.create_session(
         &context,
         request.title.as_deref(),
@@ -57,6 +58,7 @@ pub fn load_chat_session(
     request: LoadChatRequest,
 ) -> Result<ChatSession, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_project_write_access(&context)?;
     state
         .chat_service
         .load_session(&context, &request.session_id)
@@ -79,6 +81,7 @@ pub fn delete_chat_session(
     request: DeleteChatRequest,
 ) -> Result<(), BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_project_write_access(&context)?;
     // Sending holds this process-wide guard until its task has finished
     // persisting the assistant turn (or cleaning up after cancellation).
     // Reject deletion at the command boundary as well as in the UI so a
@@ -87,7 +90,15 @@ pub fn delete_chat_session(
     // The UI asks for explicit confirmation before invoking this command. A
     // scoped checkpoint makes that destructive action recoverable without
     // committing unrelated dirty files in the project.
-    let session_path = format!(".app/chats/{}.json", request.session_id);
+    let chat_root = context.layout.chat_state_root.as_deref().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_LAYOUT_STATE_UNAVAILABLE",
+            "Project chat state is unavailable until compatible features are enabled.",
+            true,
+            true,
+        )
+    })?;
+    let session_path = format!("{chat_root}/{}.json", request.session_id);
     state.git_service.create_scoped_checkpoint(
         &context,
         CheckpointPurpose::HighRiskOperation,
@@ -111,6 +122,8 @@ pub fn send_chat_message(
     let content = validate_chat_content(&request.content)?;
     let request = SendChatMessageRequest { content, ..request };
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    state.require_project_write_access(&context)?;
     let send_guard = state.chat_service.try_acquire_send()?;
     let task = state
         .task_service
@@ -158,6 +171,8 @@ async fn run_chat_send(
     if state.task_service.is_cancelled(task_id) {
         return Err(chat_cancelled_error());
     }
+    state.require_external_ai_access(context)?;
+    state.require_project_write_access(context)?;
     state
         .task_service
         .transition_status(task_id, TaskStatus::Running)
@@ -991,6 +1006,9 @@ pub fn save_answer_to_wiki(
     // overwrite confirmation so a busy request leaves the confirmation
     // pending and retryable.
     let _send_guard = state.chat_service.try_acquire_send()?;
+    let initial_context =
+        state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_project_write_access(&initial_context)?;
     let mut project_id = request.project_id;
     let mut root_path = request.project_root_path;
     let mut session_id = request.session_id;
@@ -1043,6 +1061,7 @@ pub fn save_answer_to_wiki(
     }
 
     let context = state.resolve_project_context(&project_id, &root_path)?;
+    state.require_project_write_access(&context)?;
     let session = state.chat_service.load_session(&context, &session_id)?;
     let preceding: Vec<&ChatMessage> = session
         .messages
@@ -1160,6 +1179,7 @@ pub fn resolve_chat_convenience_edit(
 ) -> Result<ChatSession, BackendError> {
     let _send_guard = state.chat_service.try_acquire_send()?;
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_project_write_access(&context)?;
     let mut session = state
         .chat_service
         .load_session(&context, &request.session_id)?;
@@ -1206,6 +1226,7 @@ pub fn rollback_last_chat_convenience_edit(
 ) -> Result<ChatSession, BackendError> {
     let _send_guard = state.chat_service.try_acquire_send()?;
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_project_write_access(&context)?;
     let mut session = state
         .chat_service
         .load_session(&context, &request.session_id)?;

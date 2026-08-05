@@ -2,6 +2,8 @@
 
 > Import V2 的产品与跨层技术不变量见 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文描述技术边界；任何实现建议不得恢复“导入后自动编译”、URL 不写 Source 或 OCR / ASR 后移到编译阶段的旧行为。
 > 全量门禁先运行只读 `check:import-source-media`，验证证据 ID、可执行测试声明、被测试实际消费的真实夹具、禁止项和设置专属迁移入口，再运行前后端测试、构建与静态检查。
+> Workflows 的产品行为与跨层契约见 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md)。Agent CLI、BYOK 和本地规则继续作为后端执行能力，但不得再把配置型 Agent 页面作为目标信息架构。
+> 无项目工作台、新建知识库、typed 项目打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的跨层合同见 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。当前独立 `ProjectStartView`、二元目录识别、打开即 Git 初始化和普通目录原地初始化都是待迁移实现，不是目标合同。
 
 ## 1. 文档目的
 
@@ -15,6 +17,8 @@
 - 文件透明：知识库内容使用 Markdown、JSON 和普通文件。
 - 无数据库：项目内容不引入数据库。
 - Git 可恢复：批量修改、Agent 修改和高风险操作前创建检查点。
+- 外部目录先评估：打开评估必须只读，不创建 `.app/`、Git、缓存或任务，也不执行目录内代码或发送外部 AI。
+- 权限先于能力：项目格式、健康与权限分别建模；受限 / 只读上下文必须在所有写入、Agent、Skill、外部 AI 和任务入口重新校验。
 - Agent 增强：Agent CLI 提供高级能力；Source 已形成后，BYOK API 支撑 AI 整理、Wiki 编译和 Chat，不参与 Import 解析恢复。
 - 跨平台：Windows、macOS、Linux 都是目标平台。
 - CJK 安全：必须正确处理 Unicode 和中文文件名。
@@ -53,9 +57,11 @@ React shell/layout
   -> local files / Git / Agent / LLM / OS credential store
 ```
 
-当前前端工作台调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter`。`AppShell` 持有桌面 shell、右侧上下文面板，以及全局 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`；`WorkspaceController` 组合 `useAiCapabilities`、`useTaskLauncher`、`useImportWorkflow`、`useProviderWorkflow`、`useAgentWorkflow` 五条领域 workflow；`WorkspaceRouter` 只分发活动视图。
+当前前端工作台调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter`。`AppShell` 持有桌面 shell、右侧上下文面板，以及全局 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`；`WorkspaceController` 组合 `useAiCapabilities`、`useTaskLauncher`、`useImportWorkflow`、`useProviderWorkflow`、`useAgentWorkflow` 五条领域 workflow；`WorkspaceRouter` 只分发活动视图。这里的 `useAgentWorkflow` 与 Agent view 是 2026-07-30 的实现基线，后续目标是由项目级 Workflows 编排替代主界面职责，而不是删除底层 Agent 能力。
 
-Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Agent 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。这是当前实现事实，不是对 React Router 的推荐。
+Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Agent 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。这是当前实现事实，不是目标导航命名，也不是对 React Router 的推荐；Agent 主视图迁移后应以 Workflows 对用户呈现。
+
+截至 2026-07-30，`App.tsx` 在无项目时仍绕过 `AppShell` 渲染独立 `ProjectStartView`，后端仍以二元 `is_wiki_project` 决定打开或原地初始化，并可能在打开外部目录时初始化 Git。这些是必须被新项目打开管线替换的 legacy gap；本节描述现状不等于授权延续。
 
 跨层仍保持硬边界：React 不直接执行文件系统、Git、Agent 进程或系统凭据操作；typed Tauri invoke 进入显式注册的薄 command，再由 `AppState` 中的稳定 facade、`TaskService` 和 `ConfirmationRegistry` 编排本地能力。
 
@@ -71,7 +77,7 @@ React UI 负责：
 - WYSIWYG 编辑器容器。
 - Chat 会话界面。
 - 图谱画布。
-- Agent 面板。
+- Workflows 总览、准备页、任务详情和运行历史。
 - 导入预览。
 - Lint 问题列表。
 - Diff 确认。
@@ -98,17 +104,17 @@ React UI 不应直接实现：
 
 Zustand 用于管理前端应用状态。当前已拆分的主要 store 包括：
 
-- `projectStore`：当前项目、最近项目、项目扫描状态。
+- `projectStore`：当前项目、最近项目、no-project / assessing / open 状态、typed assessment、独立的 trust / filesystemAccess / health、能力 readiness 与深度扫描快照。`restricted` 只是后端 capabilities 的 UI 摘要；信任判定和持久化不得由 Zustand 决定。
 - `navigationStore`：当前视图、选中文章、右侧面板状态。
-- `taskStore`：全局后台任务、进度、日志、抽屉和选中任务；后端任务事件统一 upsert 到这里。
+- `taskStore`：统一接收后台任务、进度和日志事件；所有列表、抽屉、选择、确认与历史通过当前项目 selector 暴露，不能形成跨项目任务界面。
 - `importStore`：导入预览、来源目录和确认状态。
-- `settingsStore`：语言、主题、启动行为等 UI 设置。
+- `settingsStore`：语言、主题等 UI 设置，以及后端返回的最近创建父目录等非敏感全局偏好；目标启动规则固定，不由前端选项分支。
 - `chatStore`：当前会话、消息流、引用来源。
 - `graphStore`：图谱节点、边、布局状态、筛选模式。
 - `lintStore`、`exportStore`：对应领域的结果、历史和交互状态。
 - `toastStore`：全局瞬时通知。
 
-当前跨项目异步边界使用由 `projectId + rootPath` 组成的 project key，并在需要时叠加 request epoch。workflow 在提交视图状态、打开任务抽屉、切换视图或发送 toast 前核对 key / epoch，旧项目结果不得写回新项目 UI。项目文件内容仍以按需读取为主，不把大型 Wiki 全量塞入前端 store。
+当前跨项目异步边界使用 `projectId + rootPath` 并叠加 request epoch；迁移目标必须把 `rootPath` 明确为后端 canonical root，并加入 `identityRevision`。`projectId` 仍是当前进程句柄；持久 workflow 指纹、队列和恢复归属使用后端 opaque `canonicalIdentityKey + identityRevision`。workflow 在提交视图状态、打开任务抽屉、切换视图或发送 toast 前核对 key / epoch，旧项目结果不得写回新项目 UI。项目文件内容仍以按需读取为主，不把大型 Wiki 全量塞入前端 store。
 
 ## 7. Tauri IPC Commands
 
@@ -116,10 +122,10 @@ IPC 层负责把前端意图转成后端服务调用。
 
 当前 command 已按领域拆分：
 
-- Project commands：应用摘要、创建 / 打开 / 预览普通文件夹、扫描、最近项目列表与记忆。
+- Project commands：应用摘要、事务式创建、开始 / 查询 / 取消无写入 project-open assessment、按后端保存的 assessment 打开、开始 / 取消深度扫描、信任与兼容启用、读取 / 确认修复计划、最近知识库列表与记忆。quick assessment 使用应用级 operation id，不创建项目 Task。
 - Import commands：文件 / 文本 / URL 预览、URL 抓取与校验、来源目录、删除 / 替换请求、确认导入和提取文本预览。
 - Wiki commands：扫描、读取、保存、创建、重命名、删除请求和书签切换。
-- Search commands：`search_wiki` 提供本地 Wiki 关键词 / 过滤搜索，不调用模型。
+- Search commands：legacy command 名 `search_wiki` 提供 layout-readable Source/Wiki Markdown 的本地关键词 / 过滤搜索，不调用模型。
 - Git commands：状态、仓库初始化、检查点和 Markdown diff；当前未注册通用提交或恢复 command。
 - Agent commands：检测 CLI、读取 Agent 配置和设置默认 Agent；任务取消与日志归 `Task commands`，当前 Agent command 不直接启动任务。
 - LLM commands：Provider 列表 / 保存、密钥保存 / 删除 / 状态、Ollama 可达性和 Provider 测试；当前未注册通用 BYOK 执行 command。
@@ -169,17 +175,23 @@ Import V2 可以在稳定 facade 后组合 `ImportSessionService`、`CapabilityR
 
 负责项目生命周期：
 
-- 创建项目结构。
-- 打开已有项目。
-- 判断普通文件夹是否需要初始化。
-- 扫描项目健康状态。
+- 事务式创建原生项目结构；校验名称、父级位置、最终子目录、CJK / Unicode / 大小写与已存在非空目录。
+- 对外部目录执行零写入快速评估，返回 format、health、trust、filesystemAccess、layout、Git、capabilities、warnings、confidence 和建议动作。
+- format 分类当前 / legacy 原生、`nashsu`、Obsidian、Markdown vault、歧义 Markdown、普通资料与 unknown；独立 health 返回 healthy、repairable、recovery 或 unreadable。
+- 把歧义 Markdown 与普通资料目录路由到用户意图；普通资料目录只返回“新建并导入”，不原地初始化或搬移。
+- 以 canonical identity 查询全局信任，并把 trust、filesystemAccess、health、layout 与 capabilities 组合成 `ProjectContext` access policy；必须能表达 trusted + read-only，不能把受限 / 信任 / 只读当作互斥授权事实。
+- 规划 / 执行 `.app/compat` 启用和可重校验修复计划。
+- 编排可取消深度扫描并发布 partial snapshot。
 - 管理最近项目。
 - 读取项目元信息。
 
 硬边界：
 
-- 项目模板只能影响 `purpose.md` 和 `schema.md` 初始内容。
-- 核心目录结构必须稳定。
+- 项目模板只能在创建时影响原生根目录 `purpose.md` 和 `schema.md` 初始内容，创建后不提供切换。
+- 新建原生知识库的核心目录结构必须稳定；兼容知识库保留评估返回的布局，不强制迁移为原生目录树。
+- 打开评估不写盘、不初始化 Git、不执行项目内容。
+- 普通资料目录保持原样；兼容库生成的指导文件只写 `.app/compat/`，根级同名文件视为用户内容。
+- `ProjectRegistry` 的运行时路径注册不等于用户信任；全局 trust store 与 assessment / repair registry 是独立边界。
 - 不能把项目内容写入应用私有数据库。
 
 ## 10. FileStore
@@ -208,10 +220,10 @@ Import V2 可以在稳定 facade 后组合 `ImportSessionService`、`CapabilityR
 负责导入会话、来源身份、候选与提交：
 
 - 文件、文件夹、URL、平台内容和剪贴板输入的后端处理。
-- 持久化一个项目级活动 `ImportSession` 及其任务、尝试和待办。
+- 在 layout-defined Import state root 持久化一个项目级活动 `ImportSession` 及其任务、尝试和待办；无可写 state root 时不得启动提交型 Import。
 - 统一规范 URL、来源 ID、内容 hash 和别名，完成去重与更新识别。
 - 将确定性提取、登录、能力、OCR、ASR、Agent 修复和质量检查编排为 `SourceCandidate`。
-- 提交时以 `sourceId` 为原子单元写入 `raw/`、`.app/` 和 `wiki/sources/`。
+- 提交时以 `sourceId` 为原子单元写入 `ProjectLayout` 提供的 evidence、app-state 与 Source write roots；原生映射才是 `raw/`、`.app/` 和 `wiki/sources/`。
 - 保护人工编辑，更新时执行 Diff 或三方合并。
 - 只在覆盖、合并、替换和删除等高风险操作前创建 Git 检查点。
 - 导入完成后生成 `CompileChangeSet` 候选，但不自动启动编译。
@@ -236,14 +248,14 @@ OCR 和 ASR 属于导入层的显式用户授权能力。图片视觉理解不�
 
 ### 11.4 SourceService 与 CompileService 边界
 
-- `SourceService` 管理 `sourceId`、版本、别名、基线、当前 `wiki/sources/` 页面和整包删除。
+- `SourceService` 管理 `sourceId`、版本、别名、基线、layout-defined Source 页面和整包删除。
 - `CompileService` 只在用户点击“用这些来源更新 Wiki”后读取 `sourceId + versionId` change set。
-- 编译可以读取现有 Sources 与 Wiki 关系，但不得写入 `wiki/sources/`。
-- 当前 Source Registry / manifest v3 是唯一写入主模型。仅当项目不存在 V2 Source Registry 时，`CompileLegacyAdapter` 才可只读解析旧 `.app/source-index.json`；兼容读取不得回写旧索引、不得写入 `wiki/sources/`，也不得把旧记录并入 V2 主模型。
+- 编译可以读取现有 Sources 与 Wiki 关系，但不得写入任何 layout-defined Source root。
+- 当前 Source Registry / manifest v3 是唯一写入主模型。仅当项目不存在 V2 Source Registry 时，`CompileLegacyAdapter` 才可按原生 legacy 映射只读解析旧 `.app/source-index.json`；兼容读取不得回写旧索引、不得写入任何 layout-defined Source root，也不得把旧记录并入 V2 主模型。
 
 ## 12. GitService
 
-负责自动 Git 管理：
+负责受策略约束的 Git 管理：
 
 - 初始化 Git 仓库。
 - 创建初始提交。
@@ -262,7 +274,7 @@ OCR 和 ASR 属于导入层的显式用户授权能力。图片视觉理解不�
 - 重大重新编译。
 - 原始资料替换或删除。
 
-Git 是用户数据安全边界，不是可选增强。
+新建原生知识库自动初始化本地 Git。评估或打开外部知识库绝不自动初始化、`git add`、提交或 stash；只有用户在兼容启用确认页选择后才初始化。用户拒绝 Git 时，阅读、搜索和 Chat 可继续，但所有需要 checkpoint 的写入能力禁用。已有 dirty worktree 不自动处理，只有用户明确授权时才把当前全部变更作为检查点。
 
 ## 13. AgentService
 
@@ -278,11 +290,12 @@ Git 是用户数据安全边界，不是可选增强。
 - 写入任务日志。
 - 发出任务状态事件。
 
-默认策略：
+执行路径策略：
 
-- 配置可用 Agent 时，Agent CLI 是默认优先路径。
-- 用户可以在 Source 已形成后的 AI 整理、Wiki 编译或 Chat 任务启动时选择 BYOK API。
-- 未配置 Agent 时，BYOK API 必须能跑通这些文本流程，但不能替代 Import recovery。
+- 全局默认路径由设置保存；Workflows 和 Chat 可以在单次运行时显式覆盖，但不能静默改变默认值。
+- 用户可以在 Source 已形成后的 AI 整理、更新 Wiki、生成内容或 Chat 任务启动时选择 Agent CLI 或 BYOK API。
+- 即使未配置 Agent，用户显式选择且已配置的 BYOK API 也必须能跑通这些文本流程，但不能替代 Import recovery。
+- 所选路径不可用时返回结构化 prerequisite，前端引导进入设置；不得静默回退到另一执行路径。
 
 安全边界：
 
@@ -295,7 +308,7 @@ Git 是用户数据安全边界，不是可选增强。
 
 - 只允许本地 Agent，并且必须由用户主动触发。
 - 可在当前授权任务工作区使用现有浏览器、媒体、OCR / ASR 和脚本工具。
-- 只能写 staging 候选，不得直接写 `raw/`、`wiki/` 或 Git。
+- 只能写 staging 候选，不得直接写布局定义的 evidence、Source/Wiki roots 或 Git。
 - 不得安装软件、执行未知下载二进制、接触原始 Cookie / API Key 或绕过访问控制。
 
 ## 14. LlmService
@@ -347,19 +360,22 @@ BYOK 只在 Source 已经形成后用于 AI 整理、Wiki 编译、Chat 和引�
 - 类型过滤。
 - 来源过滤。
 - 页面打开定位。
+- 按 `ProjectContext.layout` 扫描当前访问模式允许的 Source/Wiki Markdown roots；兼容项目不得硬编码只读原生 `wiki/`。
 
 边界：
 
 - 普通搜索不自动调用模型。
-- 语义问答交给 Chat / Agent / BYOK 流程。
+- 语义问答只从 Chat 产品入口触发；Agent / BYOK 是 Chat 选择的执行路径。
+- Chat retrieval 复用本地结果并保留 Source/Wiki 类型；Source-only 项目无需先编译。
 
 ## 17. GraphService
 
 后端图谱路径负责扫描、解析、拓扑构建、缓存和数据提供：
 
-- command 通过 `SearchService` 扫描 `wiki/` 页面并解析 frontmatter、`[[wikilinks]]` 和页面元数据。
-- `GraphService` 从扫描结果构建节点与边，按 content hash 解析 / 重建 `.app/graph-cache.json`，并向前端提供图谱数据。
-- `GraphService` 保存前端回传且与 content hash 匹配的布局和社区结果；陈旧布局不会附着到新版本 Wiki。
+- command 通过 `SearchService` 扫描 `ProjectContext.layout` 允许的 Source/Wiki Markdown，并解析 frontmatter、`[[wikilinks]]` 和页面元数据；不要求先编译。
+- `GraphService` 从扫描结果构建节点与边。trusted writable 项目按 content hash 解析 / 重建 `ProjectLayout.graphCachePath`（原生映射为 `.app/graph-cache.json`）；restricted/read-only 项目只返回有界内存结果，不创建缓存。
+- `GraphService` 只在 trusted writable 项目保存前端回传且与 content hash 匹配的布局和社区结果；陈旧布局不会附着到新版本内容。
+- 深度扫描未完成时 DTO 返回 `partial`、已扫描/待扫描数量和任务引用，UI 不把部分结果显示为空图谱。
 - ForceAtlas2 布局和 Louvain 社区检测在前端运行，不在 Rust `GraphService` 中计算。
 
 图谱技术：
@@ -368,7 +384,7 @@ BYOK 只在 Source 已经形成后用于 AI 整理、Wiki 编译、Chat 和引�
 - graphology 负责前端图结构。
 - graphology ForceAtlas2 负责前端布局。
 - graphology Louvain 负责前端社区检测。
-- Rust 后端负责拓扑、缓存、失效判断和布局持久化。
+- Rust 后端负责拓扑、访问策略、可选缓存、失效判断和布局持久化。
 
 首版边统一表示“相关”。不要提前实现复杂关系类型和证据系统。
 
@@ -381,7 +397,7 @@ BYOK 只在 Source 已经形成后用于 AI 整理、Wiki 编译、Chat 和引�
 - 死链。
 - 孤立页面。
 - 缺失 frontmatter。
-- `wiki/index.md` 漂移。
+- 布局声明了 Wiki 索引/概览入口时，检查对应页面漂移；没有 Wiki 根目录的 Source-only 知识库将该规则标记为“不适用”。
 - 空页面。
 - 重复文件名。
 - 路径大小写问题。
@@ -407,7 +423,7 @@ Agent 深度 Lint：
 - 生成单篇美化阅读页。
 - 生成知识卡片。
 - 生成项目级 HTML 报告。
-- 输出到 `exports/html/`。
+- 输出到 `ProjectContext.layout` 解析的导出根；原生项目默认是 `exports/html/`。
 - 为 UI 提供 iframe 预览路径。
 
 边界：
@@ -431,17 +447,29 @@ Agent 深度 Lint：
 
 后台任务包括：
 
+- 项目兼容深度扫描（只读、可取消、持续发布 partial snapshot）。
 - 导入解析。
 - 媒体下载、OCR、ASR 与能力安装。
 - Source AI 整理和来源重处理。
-- Wiki 编译。
+- 更新 Wiki。
 - 图谱构建。
-- Agent 深度 Lint。
-- HTML / 报告生成。
+- 健康检查。
+- 生成内容。
 
 长任务不能阻塞 UI。关闭主窗口时默认最小化到托盘并继续任务。
 
 应用重启后，耗时下载、OCR 和 ASR 恢复为暂停状态，由用户明确继续；已完成分片可复用。用户主动取消时清理临时数据，后续重试从头开始。
+
+Workflows 迁移必须在 `TaskService` 或其后端编排模块中落实以下契约，不能由 React 本地状态模拟：
+
+- 每个工作流任务都带当前进程使用的 runtime `project_id`、后端 opaque `canonical_identity_key + identity_revision`、稳定 `workflow_kind`、输入范围、基线和输入指纹；持久归属与跨重开去重不得依赖 runtime `project_id`。
+- 同一项目的工作流串行执行；不同项目可以独立运行，但前端只能在对应项目内展示和操作。
+- 相同 canonical identity/revision、工作流、范围、执行选项、路线和基线的请求按输入指纹去重并返回既有任务。
+- 任务事件携带结构化阶段、当前处理项、计数进度和活动记录；stdout/stderr 只作为附属日志。
+- 重试创建带 `attempt_of` 关联的新任务，不覆盖原任务。
+- 用户可见状态覆盖已排队、运行中、等待确认、已完成、失败、已取消、已中断；异常退出不得把运行中任务恢复成仍在运行。
+- 项目 app state 可写时，任务、等待确认与排队状态持久化到 `ProjectLayout.taskStateRoot`（原生映射为 `.app/tasks/`）；排队任务重开后等待用户明确继续，运行中任务映射为已中断并报告可复用阶段。restricted/read-only 允许的只读任务使用 typed 但 non-persistent 的内存/临时状态；其中 trusted read-only Complete Check 也不得尝试创建项目 `.app/`。
+- 系统通知只用于等待确认、完成和失败。
 
 ## 21. SettingsService
 
@@ -449,14 +477,15 @@ Agent 深度 Lint：
 
 - 语言。
 - 主题。
-- 启动行为。
-- Agent 默认绑定。
+- 固定启动规则所需的最近项目与失效记录。
+- 最近创建父目录、歧义 Markdown 意图和 canonical 目录信任记录。
+- 默认执行路径与默认 Agent 绑定。
 - LLM Provider 配置。
 - 上下文窗口。
 - 后台任务关闭行为。
 - 更新检查。
 
-项目级设置可以写入 `.app/settings.json`。全局设置写入应用配置目录。密钥交给 SecretService。
+项目级设置可以写入可写的 `ProjectLayout.settingsPath`（原生映射为 `.app/settings.json`）。最近项目、最近创建父目录、歧义意图和目录信任写入应用配置目录，并可在无项目上下文时读取；目录信任不得写入项目 marker。密钥交给 SecretService。
 
 ## 22. 数据存储规范
 
@@ -473,6 +502,8 @@ project-root/
 └── .app/
 ```
 
+上述是新建原生知识库的根结构。兼容知识库保留原目录；受限 / 只读打开不创建 `.app/`。用户确认启用完整功能后，应用自己的指导文件写入 `.app/compat/purpose.md` 与 `.app/compat/schema.md`，根目录同名文件始终是用户内容。
+
 存储规则：
 
 - Wiki 页面是 Markdown。
@@ -482,10 +513,12 @@ project-root/
 - 不引入数据库。
 - 不把密钥写入项目文件。
 - 用户可以用外部编辑器修改 Markdown。
+- 下列路径是新建原生知识库的默认映射；兼容知识库由 `ProjectLayout` 返回等价逻辑位置，缺少写根时对应能力不可用。
 - `wiki/sources/` 保存当前可阅读 Source，编译器不得写入。
 - `.app/import/` 保存活动会话、任务、尝试和能力需求。
 - `.app/sources/` 保存来源身份、版本、别名、编辑基线和时间线。
 - `.app/compile/` 保存 Source change set 与已消费版本。
+- `.app/compat/` 只保存兼容层应用自有配置；不新增 `.app/project.json` manifest。
 
 ## 23. 国际化
 
@@ -535,10 +568,12 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 
 1. 前端新增跨视图流程时，优先进入 `WorkspaceController` 组合的领域 workflow；`WorkspaceRouter` 只做视图分发。
 2. 新增 feature view 默认评估 lazy load，并使用现有 `Suspense` / `ViewErrorBoundary` 边界。
-3. 新增异步 workflow 必须接入 project key / epoch 防护；长任务结果必须进入全局 `taskStore`。
+3. 新增异步 workflow 必须接入 project key / epoch 防护；长任务事件统一进入 `taskStore`，但任何用户可见 selector、抽屉、确认和历史都必须按当前项目隔离。
 4. 新增 Tauri 能力先定义 typed DTO 和薄 command，再通过 `AppState` 的稳定 facade 进入聚焦用例。
 5. 高风险操作继续复用全局确认控制器和后端 `ConfirmationRegistry` / Git checkpoint，不在 feature view 保存可绕过重校验的继续执行参数。
 6. Provider 非密钥配置与密钥流必须分离：配置可写项目设置，密钥只通过 typed invoke 交给 `SecretService` 和 OS credential store；前端只接收 `hasSecret` 与掩码等状态，不回读完整密钥。
+7. `ProjectRegistry` 只负责运行时项目句柄授权；用户信任由全局持久层负责。每个 `ProjectContext` 必须携带后端派生的 layout / access policy，所有 service 在执行时重新校验能力。
+8. 项目打开 quick scan 必须零写入；兼容启用和 repair 只能通过后端保存、确认时重新评估的 assessment / plan id 继续。
 
 ## 27. 后续开发 Agent 注意事项
 
@@ -550,4 +585,5 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 - 任何涉及删除、覆盖、批量迁移、Agent 自动修复的实现，都必须接入 Git 检查点。
 - 任何密钥相关实现都必须走系统凭据管理。
 - 任何长任务都必须可取消、可后台运行、可报告进度。
+- 工作流长任务必须使用结构化阶段、项目级串行队列和输入指纹去重；不要以原始 Agent 日志代替主状态。
 - 任何跨平台路径逻辑都必须测试 Windows、macOS、Linux 风格路径和 CJK 文件名。

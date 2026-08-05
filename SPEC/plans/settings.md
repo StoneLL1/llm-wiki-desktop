@@ -3,6 +3,7 @@
 > 对照源：SPEC/roadmap/settings.md · SPEC/PRD.md §9.11 (PRD-SET-001/002/005) · UI-Frontend-design/settings.html + assets/app.css · CLAUDE.md
 > 范围：仅本板块 P0+P1。不碰 P2（关于/配置概览右面板/设置搜索），不碰其它板块。
 > 状态机：pending → in_progress → done → verified。每项独立 commit（conventional，不 --no-verify，不 push）。
+> 2026-07-30 同步边界：首次使用与项目打开以 [`../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准。启动规则已固定；创建父目录在创建流程中首次默认 `Documents/LLM Wiki`、随后记住上次成功位置；模板仅创建时选择且默认通用。因此 Settings 不再新增或展示“启动行为 / 默认项目位置 / 默认项目模板 / 创建后切换模板”。
 
 ## 设计意图总览（决策依据）
 
@@ -10,8 +11,8 @@
 
 ## 数据模型 scoping 决策（SET-MODEL）
 
-- **全局**（写全局 settings.json，跨项目 UI 偏好/托盘/通知/更新）：startup_behavior、default_project_location、external_editor、associate_md_files、associate_wiki_folders、density、ui_font/reading_font/code_font、agent_output_language、system_notifications、notification_click_behavior、max_concurrent_tasks、update_frequency、auto_download_updates、prompt_changelog_before_install。沿用现有 language/theme/close_behavior/check_updates 归全局。
-- **项目**（写 .app/settings.json，影响该项目 Agent/Git/上下文行为）：agent_task_timeout_secs、allow_agent_install、install_command_display_only、prompt_on_new_agent、skill_autoload、max_tokens、temperature、auto_git_checkpoint、manual_edit_protection、raw_sources_immutable。沿用现有 context_window/agent_default/llm_providers/template 归项目。
+- **全局**（写全局 settings.json，跨知识库 UI 偏好/托盘/通知/更新）：external_editor、associate_md_files、associate_wiki_folders、density、ui_font/reading_font/code_font、agent_output_language、system_notifications、notification_click_behavior、max_concurrent_tasks、update_frequency、auto_download_updates、prompt_changelog_before_install。沿用现有 language/theme/close_behavior/check_updates 归全局。创建流程记忆的最近成功父目录属于内部全局偏好，不作为通用 Settings 控件。
+- **项目**（写 .app/settings.json，影响该项目 Agent/Git/上下文行为）：agent_task_timeout_secs、allow_agent_install、install_command_display_only、prompt_on_new_agent、skill_autoload、max_tokens、temperature、auto_git_checkpoint、manual_edit_protection、raw_sources_immutable。沿用现有 context_window/agent_default/llm_providers。已有 `startup_behavior`、`default_project_location` 或 `template` 字段只作向后兼容读取/迁移，不得据此生成目标 UI 或创建后模板切换能力。
 - 所有新字段 `#[serde(default)]`，旧 .app/settings.json / 全局 settings.json 无新字段时仍可反序列化（向后兼容）。
 
 ## 账本条目
@@ -23,7 +24,7 @@
 | 3 | SET-SECURITY | P0 | pending | SecuritySettings 重写为 自动Git检查点/人工编辑保护/Raw不可变 toggle + 钥匙串 mono 说明 + 沙箱说明 | src/features/settings/SecuritySettings.tsx |
 | 4 | SET-AGENT | P0 | pending | AgentSettings 补 任务超时 input + 安装行为 3 checkbox + Skill 自动加载 toggle | src/features/settings/AgentSettings.tsx |
 | 5 | SET-CONTEXT | P1 | pending | 新建 ContextWindowSettings.tsx（range 4K-1M + max tokens + 温度 range）；从后台任务页移除 contextWindow | src/features/settings/ContextWindowSettings.tsx, SettingsView.tsx, BackgroundTaskSettings.tsx |
-| 6 | SET-GENERAL | P1 | pending | 通用 section：启动行为 select / 默认项目位置 input+选择 / 外部编辑器 input / 文件关联 checkbox | src/features/settings/SettingsView.tsx (general 分支) |
+| 6 | SET-GENERAL | P1 | pending | 通用 section：外部编辑器 input / 文件关联 checkbox；隐藏或迁移 legacy 启动行为、默认项目位置和模板设置 | src/features/settings/SettingsView.tsx (general 分支) |
 | 7 | SET-BACKGROUND | P1 | pending | 后台任务：closeBehavior 加"询问"第三项 + 系统通知 4 checkbox + 通知点击行为 select + 并发上限 input | src/features/settings/BackgroundTaskSettings.tsx |
 | 8 | SET-UPDATES | P1 | pending | PRD-SET-005：新建 UpdateService（reqwest 真查 release 源）+ update_commands；UpdateSettings 接真检查 + 应用内确认对话框（弃 window.confirm）+ 频率 select + 变更说明 checkbox | src/features/settings/UpdateSettings.tsx, src-tauri/src/services/update_service.rs(新), src-tauri/src/commands/update_commands.rs(新), src-tauri/src/app_state.rs, src-tauri/src/lib.rs |
 | 9 | SET-APPEARANCE-LANG | P1 | pending | 外观：界面密度 seg + UI/阅读/代码三字体 select；语言：Agent 输出语言 select 四选 | src/features/settings/AppearanceSettings.tsx, src/features/settings/LanguageSettings.tsx |

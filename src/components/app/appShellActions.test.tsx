@@ -18,6 +18,12 @@ beforeEach(async () => {
   useNavigationStore.getState().setRightPanelOpen(true);
   useNavigationStore.getState().closeSettings();
   useNavigationStore.setState({ workspaceFocus: null, rightPanelOpenBeforeFocus: null });
+  useProjectStore.getState().setCurrentProject({
+    ...defaultProject,
+    projectId: "shell-project",
+    name: "Shell Project",
+    rootPath: "D:/knowledge/shell-project",
+  });
   useProjectStore.getState().setPendingAction(undefined);
   invokeMock.mockReset();
 });

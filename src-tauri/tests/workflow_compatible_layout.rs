@@ -68,6 +68,16 @@ fn compatible_restricted_overview_keeps_readable_markdown_without_creating_state
         )
         .unwrap();
     assert_eq!(overview.rows.len(), 3);
+    let generate_content = overview
+        .rows
+        .iter()
+        .find(|row| row.kind == WorkflowKind::GenerateContent)
+        .unwrap();
+    assert_eq!(
+        generate_content.prerequisite.as_ref().map(|item| item.code.as_str()),
+        Some("WORKFLOW_PROJECT_UNTRUSTED"),
+        "The overview must report blocking prerequisites instead of requiring an unmapped export root."
+    );
     let health = overview.rows.iter().find(|row| row.kind == WorkflowKind::HealthCheck).unwrap();
     assert_ne!(
         health.prerequisite.as_ref().map(|item| &item.action),

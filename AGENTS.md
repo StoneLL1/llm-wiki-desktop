@@ -2,27 +2,28 @@
 
 ## Project Brief
 
-LLM Wiki Desktop is a local-first, cross-platform Tauri v2 desktop app for turning personal sources into a Markdown wiki with graph, chat, lint, Agent, and HTML export workflows.
+LLM Wiki Desktop is a local-first, cross-platform Tauri v2 desktop app for turning personal sources into a Markdown wiki with graph, chat, project-scoped Workflows, lint, and HTML export capabilities.
 
 Before implementation, read the relevant docs:
 
-- Product and scope: `PRD.md`, `SPEC.md`
-- App flows: `APP_flow.md`
-- Tech and architecture: `TECH_STACK.md`, `BACKEND_STRUCTURE.md`
-- Frontend style: `FRONTEND_GUIDELINES.md`, `DESIGN.md`
+- Product and scope: `SPEC/PRD.md`, `SPEC/SPEC.md`
+- App flows: `SPEC/APP_flow.md`
+- Tech and architecture: `SPEC/TECH_STACK.md`, `SPEC/BACKEND_STRUCTURE.md`
+- Frontend style: `SPEC/FRONTEND_GUIDELINES.md`, `SPEC/DESIGN.md`
 
 ## Hard Rules
 
 - Project content stays as Markdown + JSON + local files. Do not introduce a database for user wiki content.
-- Use the project folder as the source of truth: `raw/`, `wiki/`, `.app/`, `exports/`, `skills/`.
+- For a new native knowledge base, use the project folder as the source of truth: `raw/`, `wiki/`, `.app/`, `exports/`, `skills/`. Compatible vaults keep their existing Markdown layout; app-owned guidance lives only under `.app/compat/`.
 - Keep `raw/sources/` immutable by default. Replacing or deleting original sources requires explicit confirmation.
 - API keys and tokens must use OS credential storage. Never write secrets to project files, logs, or exported artifacts.
-- High-risk file operations need Git checkpoints first: delete, overwrite, batch rewrite, Agent auto-fix, conflict merge, source replacement.
-- Search is local keyword/filter search only. Natural-language answers must enter Chat / Agent / BYOK flow.
-- Agent CLI is an enhancement, not the only path. After a readable Source exists, BYOK API must support core AI organization, compile, and Chat flows; it is not an Import parser or recovery route.
+- Checkpoint-required file operations need Git checkpoints first: delete, overwrite, batch rewrite, workflow/Agent auto-fix, conflict merge, source replacement.
+- Search is local keyword/filter search only. Natural-language answers must enter Chat or an explicit product workflow; Agent / BYOK is the execution route, not the navigation model.
+- Agent CLI is an enhancement, not the only path. After a readable Source exists, BYOK API must support core AI organization, Update Wiki, and Chat flows; it is not an Import parser or recovery route.
 - Do not silently install or run Agent install commands.
 - Long tasks must be cancellable, logged, progress-visible, and safe to run in the background.
 - React UI must not own filesystem, Git, Agent process, or secret-storage logic. Use Tauri IPC and backend services.
+- A canonical path registered in `ProjectRegistry` is not user trust. External AI/Agent/Skill execution requires a trusted project; mutations require writable access, and commands must revalidate access and any required Git policy in the backend.
 
 ## Tech Direction
 
@@ -52,7 +53,11 @@ The entire `UI-Frontend-design/` folder is the design spec — not just `app.css
 
 Import / Source exception: `docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md` is the sole authority for Import and Source product flow, information architecture, state, copy, media actions, login, OCR / ASR, and AI 整理. Legacy `UI-Frontend-design/import*.html` files remain visual-density and structure references only where they do not conflict; do not restore their compile-after-import, Git toggle, or compile-time OCR behavior.
 
-1. **Page layout & component structure** — `dashboard.html` defines the full shell: left sidebar (3 labeled sections + agent foot), right panel (project info with paths/index/route/tasks), topbar, status bar. Match DOM hierarchy, section labels, and aria roles.
+First-run / project-open exception: `docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md` is the sole authority for the no-project workbench, new knowledge-base flow, opening native or compatible knowledge bases, folder assessment, restricted/trusted/read-only modes, compatibility enablement, repair, and the handoff into Import. Legacy launch HTML and completed launch-page plans remain historical visual evidence only where they do not conflict. Do not restore a standalone launch/marketing page, a third “open folder as project” action, in-place initialization of an ordinary materials folder, Agent/BYOK setup on the first screen, or creation that lands on Dashboard.
+
+Workflows exception: `docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md` is the sole authority for the former Agent main surface, Workflows information architecture, built-in workflows, project-scoped queueing, observable pipelines, state, confirmation, copy, and cross-surface launch ownership. Legacy `UI-Frontend-design/agent.html` remains a visual-density reference only where it does not conflict. Do not restore the Agent configuration dashboard, BYOK card grid, four-card launcher, or generic “Run Agent” dialog as the target product.
+
+1. **Page layout & component structure** — `dashboard.html` defines the full shell: left sidebar (3 labeled sections + agent foot), right panel (project info with paths/index/route/tasks), topbar, status bar. Preserve that hierarchy, but the former workflow section label is now `知识处理 / Knowledge Processing`, its Agent item is `工作流 / Workflows` with the Lucide `Workflow` icon, and the existing agent foot remains unchanged.
 2. **CSS tokens & visual density** — `assets/app.css` is the canonical style reference. Implement in Tailwind v4 + `src/styles.css`:
    - Font sizes in absolute px: UI body 13px, secondary 12px, muted/mono 11px, micro-labels 10.5px, reading 14–15px. Write `text-[13px]`, not `text-sm`.
    - Component heights: topbar 48px, main header 52px, right panel header 52px, status bar 28px, nav items 30px (small 26px), panel header 44px.
@@ -64,7 +69,7 @@ Import / Source exception: `docs/superpowers/specs/2026-07-24-import-source-medi
 
 ## Safety And UX Boundaries
 
-- Normal folder initialization, source replacement, destructive edits, conflict merges, and Agent-generated diffs require explicit user confirmation.
+- Ordinary materials folders must never be initialized or reorganized in place. Compatibility enablement, repair writes, source replacement, destructive edits, conflict merges, and high-risk workflow-generated changes require explicit user confirmation. Low-risk, conflict-free generated changes may apply automatically only after the required Git checkpoint.
 - Show what changed, what paths are affected, and whether a Git checkpoint exists.
 - Preserve external Markdown edits; never silently overwrite user changes.
 - CJK filenames, Unicode paths, Windows/macOS/Linux path styles, and case-sensitivity edge cases are required test concerns.
@@ -128,3 +133,16 @@ How it works: `/how-it-works`
 
 This message disappears once the first observation lands.
 </claude-mem-context>
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

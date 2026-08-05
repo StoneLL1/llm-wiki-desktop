@@ -37,6 +37,7 @@ pub enum TaskType {
     AutoFix,
     Export,
     SourceAiOrganize,
+    ProjectInventory,
     Workflow,
 }
 

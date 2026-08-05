@@ -7,7 +7,7 @@ import { useNavigationStore } from "../stores/navigationStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
 import { useToastStore } from "../stores/toastStore";
-import type { ProjectSummary } from "../types/project";
+import type { OpenedProject, ProjectSessionAuthority, ProjectSummary } from "../types/project";
 import type { BackendTask } from "../types/task";
 import type { WikiPageContent } from "../types/wiki";
 import { App } from "./App";
@@ -65,6 +65,29 @@ const sampleProject = (overrides: Partial<ProjectSummary> = {}): ProjectSummary 
   ...overrides,
 });
 
+const sampleAuthority = (project: ProjectSummary): ProjectSessionAuthority => ({
+  projectId: project.projectId,
+  canonicalRootPath: project.rootPath,
+  canonicalIdentityKey: "identity-a",
+  identityRevision: "revision-a",
+  authorityRevision: "authority-a",
+  format: "native_current",
+  trust: "trusted",
+  filesystemAccess: "writable",
+  health: "healthy",
+  layout: { markdownRoots: [{ path: "wiki", role: "wiki" }] },
+  confidence: "high",
+  capabilities: ["read_markdown", "project_write", "git_checkpoint"],
+  warnings: [],
+  layoutWarnings: [],
+  git: { isRepository: true, branch: "main", head: "abc", hasChanges: false },
+});
+
+const sampleOpenedProject = (overrides: Partial<ProjectSummary> = {}): OpenedProject => {
+  const summary = sampleProject(overrides);
+  return { summary, authority: sampleAuthority(summary) };
+};
+
 beforeEach(() => {
   invokeMock.mockReset();
   openDialogMock.mockReset();
@@ -74,12 +97,16 @@ beforeEach(() => {
   useGraphStore.getState().reset();
   useNavigationStore.getState().setActiveView("dashboard");
   useNavigationStore.getState().setRightPanelOpen(true);
+  useNavigationStore.getState().closeSettings();
+  useNavigationStore.setState({ workspaceFocus: null, rightPanelOpenBeforeFocus: null });
   useNavigationStore.getState().setSidebarCollapsed(false);
   useNavigationStore.getState().resetPaneSize("sidebar");
   useNavigationStore.getState().resetPaneSize("rightPanel");
   useNavigationStore.getState().resetPaneSize("wikiTree");
   useNavigationStore.getState().resetPaneSize("exportsList");
   useNavigationStore.getState().resetPaneSize("lintDetails");
+  useNavigationStore.getState().clearImportSuccessNotice();
+  useNavigationStore.getState().clearPendingImportPath();
   useProjectStore.getState().setCurrentProject(
     sampleProject({
       rootPath: "D:/Users/Aletta/Documents/wiki/agent-llm",
@@ -100,7 +127,7 @@ afterEach(() => {
 });
 
 describe("App", () => {
-  it("shows the project start flow instead of a fabricated workspace when no project is active", () => {
+  it("does not offer an in-place ordinary-folder initialization action when no project is active", () => {
     useProjectStore.getState().setCurrentProject(
       sampleProject({
         projectId: "",
@@ -117,13 +144,13 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Choose a project to start working" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /New empty project/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Open folder as project/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Open existing project/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /New knowledge base/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open existing knowledge base/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Open folder as project/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: /project path|open path|local file/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/Import materials into existing project/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole("navigation", { name: "Primary" })).not.toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Primary" })).toBeInTheDocument();
   });
 
   it("opens existing projects through the native directory picker", async () => {
@@ -161,13 +188,13 @@ describe("App", () => {
         });
       }
       if (command === "open_assessed_project") {
-        return Promise.resolve(sampleProject({ rootPath: "D:/知识库/agent" }));
+        return Promise.resolve(sampleOpenedProject({ rootPath: "D:/知识库/agent" }));
       }
       return Promise.resolve([]);
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /Open existing project/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Open existing knowledge base/i }));
 
     await waitFor(() =>
       expect(openDialogMock).toHaveBeenCalledWith(
@@ -193,7 +220,7 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /Open existing project/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Open existing knowledge base/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("dialog unavailable");
     expect(invokeMock).not.toHaveBeenCalledWith("open_project", expect.anything());
@@ -204,15 +231,13 @@ describe("App", () => {
     openDialogMock.mockResolvedValue("D:\\资料库");
     invokeMock.mockImplementation((command: string) => {
       if (command === "create_project") {
-        return Promise.resolve(
-          sampleProject({ rootPath: "D:/资料库/中文知识库", name: "中文知识库" }),
-        );
+        return Promise.resolve(sampleOpenedProject({ rootPath: "D:/资料库/中文知识库", name: "中文知识库" }));
       }
       return Promise.resolve([]);
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /New empty project/i }));
+    fireEvent.click(screen.getByRole("button", { name: /New knowledge base/i }));
     expect(screen.queryByRole("checkbox", { name: /Initialize a Git repo/i })).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
       target: { value: "中文知识库" },
@@ -232,49 +257,76 @@ describe("App", () => {
     );
   });
 
-  it("collapses the launch setup panel without placeholder controls", () => {
-    useProjectStore.getState().setCurrentProject(
-      sampleProject({ projectId: "", name: "", rootPath: "" }),
-    );
-
-    render(<App />);
-
-    expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Help" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Collapse setup panel" }));
-    expect(screen.queryByRole("complementary", { name: "Launch side panel" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open setup panel" }));
-    expect(screen.getByRole("complementary", { name: "Launch side panel" })).toBeInTheDocument();
-  });
-
-  it("starts the launch setup panel closed on narrow viewports", () => {
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
-    useProjectStore.getState().setCurrentProject(
-      sampleProject({ projectId: "", name: "", rootPath: "" }),
-    );
-
-    render(<App />);
-
-    expect(screen.queryByRole("complementary", { name: "Launch side panel" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open setup panel" })).toBeInTheDocument();
-  });
-
-  it("opens the setup panel before navigating to templates", () => {
-    useProjectStore.getState().setCurrentProject(
-      sampleProject({ projectId: "", name: "", rootPath: "" }),
-    );
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(Element.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
+  it("uses the prepared Documents/LLM Wiki parent on the first new-project dialog", async () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", rootPath: "" }));
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "prepare_default_project_parent") return Promise.resolve("D:\\Documents\\LLM Wiki");
+      return Promise.resolve([]);
     });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /New knowledge base/i }));
+
+    expect(await screen.findByDisplayValue("D:\\Documents\\LLM Wiki")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("prepare_default_project_parent");
+  });
+
+  it("keeps a new-project creation failure visible inside the dialog", async () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", name: "", rootPath: "" }));
+    openDialogMock.mockResolvedValue("D:\\Documents");
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "create_project") return Promise.reject(new Error("The selected directory is not empty."));
+      return Promise.resolve([]);
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /New knowledge base/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), { target: { value: "Audit" } });
+    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    await screen.findByText("D:\\Documents\\Audit");
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent(
+      "The selected directory is not empty.",
+    );
+  });
+
+  it("keeps Settings available without showing Agent or provider setup on the workbench", () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", name: "", rootPath: "" }));
+
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Collapse setup panel" }));
-    fireEvent.click(screen.getByRole("button", { name: "Templates" }));
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByText("Detected Agent CLIs")).not.toBeInTheDocument();
+    expect(screen.queryByText("BYOK fallback")).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByRole("complementary", { name: "Launch side panel" })).toBeInTheDocument();
-    expect(scrollIntoView).toHaveBeenCalled();
+  it("opens global language and theme preferences before a project is selected", async () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", name: "", rootPath: "" }));
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_global_ui_preferences") return Promise.resolve({ language: "en", theme: "auto" });
+      if (command === "save_global_ui_preferences") return Promise.resolve({ language: "en", theme: "dark" });
+      return Promise.resolve([]);
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Low-glare shell for longer sessions." }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("save_global_ui_preferences", {
+        preferences: { language: "en", theme: "dark" },
+      }),
+    );
   });
 
   it("returns to project selection when the project switcher is used", () => {
@@ -282,9 +334,9 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Switch project" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Back to launch" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Back to workspace" })[0]);
 
-    expect(screen.getByRole("heading", { name: "Choose a project to start working" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(useWikiStore.getState().selectedPath).toBeNull();
     expect(useNavigationStore.getState().activeView).toBe("dashboard");
   });
@@ -319,11 +371,41 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Switch project" }));
-    const missingRow = screen.getByRole("menuitem", { name: /Missing project/ });
+    const missingRow = screen.getByRole("button", { name: /^Missing project/ });
     fireEvent.click(missingRow);
 
     expect(missingRow).toHaveAttribute("aria-disabled", "true");
     expect(useProjectStore.getState().currentProject.rootPath).toBe("D:/Users/Aletta/Documents/wiki/agent-llm");
+  });
+
+  it("removes a missing recent project without touching the current project", async () => {
+    const missing = {
+      projectId: "missing-project",
+      name: "Missing project",
+      rootPath: "D:/Users/Aletta/Documents/wiki/missing-project",
+      template: "general" as const,
+      openedAt: "2026-07-04T00:00:00Z",
+      wikiPageCount: 0,
+      sourceCount: 0,
+      taskCount: 0,
+      indexState: "missing" as const,
+      graphState: "missing" as const,
+      missing: true,
+    };
+    useProjectStore.getState().setRecentProjects([missing]);
+    invokeMock.mockResolvedValueOnce([]);
+    render(<App />);
+
+    const switcher = screen.getByRole("button", { name: "Switch project" });
+    fireEvent.click(switcher);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Missing project from recent knowledge bases" }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("remove_recent_project", {
+      request: { projectId: missing.projectId, rootPath: missing.rootPath },
+    }));
+    expect(useProjectStore.getState().recentProjects).toEqual([]);
+    expect(useProjectStore.getState().currentProject.rootPath).toBe("D:/Users/Aletta/Documents/wiki/agent-llm");
+    expect(switcher).toHaveFocus();
   });
 
   it("opens the project menu with keyboard navigation and closes it with Escape", async () => {
@@ -359,12 +441,14 @@ describe("App", () => {
 
     const switcher = screen.getByRole("button", { name: "Switch project" });
     fireEvent.keyDown(switcher, { key: "ArrowDown" });
-    const enabledRow = await screen.findByRole("menuitem", { name: /Enabled project/ });
+    const locateMissing = await screen.findByRole("button", {
+      name: "Locate the moved Missing project knowledge base",
+    });
 
-    await waitFor(() => expect(enabledRow).toHaveFocus());
-    fireEvent.keyDown(enabledRow, { key: "Escape" });
+    await waitFor(() => expect(locateMissing).toHaveFocus());
+    fireEvent.keyDown(locateMissing, { key: "Escape" });
 
-    expect(screen.queryByRole("menuitem", { name: /Enabled project/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Locate the moved Missing project knowledge base" })).not.toBeInTheDocument();
     expect(switcher).toHaveFocus();
   });
 
@@ -389,16 +473,16 @@ describe("App", () => {
     const switcher = screen.getByRole("button", { name: "Switch project" });
     fireEvent.click(switcher);
     switcher.focus();
-    expect(await screen.findByRole("menuitem", { name: /Enabled project/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^Enabled project/ })).toBeInTheDocument();
 
     fireEvent.keyDown(switcher, { key: "Escape" });
 
-    expect(screen.queryByRole("menuitem", { name: /Enabled project/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Enabled project/ })).not.toBeInTheDocument();
     expect(switcher).toHaveFocus();
 
     fireEvent.click(switcher);
     switcher.focus();
-    const enabledRow = await screen.findByRole("menuitem", { name: /Enabled project/ });
+    const enabledRow = await screen.findByRole("button", { name: /^Enabled project/ });
     fireEvent.keyDown(switcher, { key: "ArrowDown" });
 
     await waitFor(() => expect(enabledRow).toHaveFocus());
@@ -592,10 +676,10 @@ describe("App", () => {
   it("closes only the topmost modal when Escape is pressed", async () => {
     useProjectStore.getState().setPendingAction({
       id: "action-escape",
-      actionType: "initialize_folder",
-      title: "Initialize folder as project",
-      message: "Create the project structure.",
-      riskLevel: "medium",
+      actionType: "overwrite_file",
+      title: "Overwrite page",
+      message: "Replace the generated page.",
+      riskLevel: "high",
       affectedPaths: ["purpose.md"],
       preview: null,
       expiresAt: null,
@@ -734,10 +818,10 @@ describe("App", () => {
   it("shows and clears pending confirmation actions from the project store", () => {
     useProjectStore.getState().setPendingAction({
       id: "action-1",
-      actionType: "initialize_folder",
-      title: "Initialize folder as project",
-      message: "Create the project structure and organize files.",
-      riskLevel: "medium",
+      actionType: "overwrite_file",
+      title: "Overwrite page",
+      message: "Replace the generated page.",
+      riskLevel: "high",
       affectedPaths: ["report.pdf"],
       preview: null,
       expiresAt: null,
@@ -745,7 +829,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("dialog", { name: "Initialize folder as project" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Overwrite page" })).toBeInTheDocument();
     expect(screen.getByText("report.pdf")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));

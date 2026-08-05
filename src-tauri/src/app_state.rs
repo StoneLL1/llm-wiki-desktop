@@ -406,7 +406,10 @@ impl ProjectRegistry {
     }
 
     pub fn is_strict_native_layout(root: &Path) -> bool {
-        matches!(inspect_native_layout(root).state, NativeLayoutState::Current)
+        matches!(
+            inspect_native_layout(root).state,
+            NativeLayoutState::Current
+        )
     }
 
     fn is_verified_compatible_layout(root: &Path) -> bool {
@@ -758,7 +761,11 @@ impl AppState {
             .project_registry
             .register_trusted_native(project_id.to_string(), root)?;
         let task_root = if self.project_service.has_writable_task_state_root(&context) {
-            context.layout.task_state_root.as_ref().map(|relative| context.root.join(relative))
+            context
+                .layout
+                .task_state_root
+                .as_ref()
+                .map(|relative| context.root.join(relative))
         } else {
             None
         };
@@ -766,7 +773,9 @@ impl AppState {
             .task_service
             .rebind_workflows_for_root(&context.root, task_root)
         {
-            let _ = self.project_registry.revoke_trust(project_id, &context.root);
+            let _ = self
+                .project_registry
+                .revoke_trust(project_id, &context.root);
             return Err(BackendError::new(
                 "WORKFLOW_PERSISTENCE_REBIND_FAILED",
                 message,

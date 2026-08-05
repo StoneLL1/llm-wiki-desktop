@@ -12,7 +12,7 @@ mod graph_service;
 pub mod import_v2;
 mod lint_service;
 mod llm_service;
-mod project_service;
+pub(crate) mod project_service;
 mod search_service;
 mod secret_service;
 mod settings_service;

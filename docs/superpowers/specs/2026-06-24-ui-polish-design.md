@@ -1,6 +1,6 @@
 # 全界面 UI Polish 设计
 
-> 历史视觉设计：全局桌面壳和可访问性原则仍可参考；Import 连续队列、能力矩阵、聚合待办、固定确认栏和 Source 右栏以 [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md) 为准。
+> 历史视觉设计：全局桌面壳和可访问性原则仍可参考；独立启动页、三入口、最近项目画廊和首屏 Agent/BYOK/模板墙已由 [`2026-07-30-first-run-project-open-workbench-design.md`](2026-07-30-first-run-project-open-workbench-design.md) 取代；Import 连续队列、能力矩阵、聚合待办、固定确认栏和 Source 右栏以 [`2026-07-24-import-source-media-flow-design.md`](2026-07-24-import-source-media-flow-design.md) 为准。
 
 **日期：** 2026-06-24  
 **范围：** 启动页、全局桌面壳、Dashboard、Wiki、Chat、Graph、Agent、Import、Lint、Exports、Settings、右侧上下文栏、抽屉与弹窗。  

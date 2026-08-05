@@ -54,10 +54,14 @@ export function ProjectAuthorityDialog({
   const trustProject = useProjectStore((state) => state.trustAssessedProject);
   const revokeTrust = useProjectStore((state) => state.revokeAssessedProjectTrust);
   const enableCompatible = useProjectStore((state) => state.enableCompatibleFullFeatures);
+  const configureCompatibleLayout = useProjectStore((state) => state.configureCompatibleLayout);
   const repairProject = useProjectStore((state) => state.repairAssessedProject);
   const initializeGit = useProjectStore((state) => state.requestAssessedGitInitialization);
   const checkpointGit = useProjectStore((state) => state.requestAssessedGitCheckpoint);
   const [initializeGitWithCompatibility, setInitializeGitWithCompatibility] = useState(true);
+  const [wikiRoot, setWikiRoot] = useState("");
+  const [sourceRoot, setSourceRoot] = useState("");
+  const [exportRoot, setExportRoot] = useState("");
   const [template] = useState<ProjectTemplate>(currentProject.template);
   const [pendingAuthorityActionId, setPendingAuthorityActionId] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -94,6 +98,13 @@ export function ProjectAuthorityDialog({
     onClose,
     onSatisfied,
   ]);
+
+  useEffect(() => {
+    if (!assessment || wikiRoot) return;
+    setWikiRoot(assessment.layout.wikiWriteRoot ?? "");
+    setSourceRoot(assessment.layout.sourceWriteRoot ?? "");
+    setExportRoot(assessment.layout.exportRoot ?? "");
+  }, [assessment, wikiRoot]);
 
   useEffect(() => {
     if (!pendingAuthorityActionId || pendingAction?.id === pendingAuthorityActionId) return;
@@ -309,6 +320,41 @@ export function ProjectAuthorityDialog({
                       <button className="btn btn--primary" onClick={() => void requestConfirmation(() => repairProject(assessment.assessmentId))} type="button">
                         {t("projectAuthority.repairProject")}
                       </button>
+                    ) : null}
+                    {assessment.trust === "trusted" &&
+                    assessment.format !== "native_current" &&
+                    assessment.layout.appStateRoot === ".app/compat" ? (
+                      <details className="w-full border-t border-[var(--border)] pt-3 text-[12px] text-[var(--text-secondary)]">
+                        <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
+                          {t("projectAuthority.configureLayout")}
+                        </summary>
+                        <p className="mb-3 mt-2">{t("projectAuthority.configureLayoutDescription")}</p>
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          <label className="grid gap-1">
+                            <span>{t("projectAuthority.wikiRoot")}</span>
+                            <input className="input h-8 font-mono text-[12px]" onChange={(event) => setWikiRoot(event.target.value)} value={wikiRoot} />
+                          </label>
+                          <label className="grid gap-1">
+                            <span>{t("projectAuthority.sourceRootOptional")}</span>
+                            <input className="input h-8 font-mono text-[12px]" onChange={(event) => setSourceRoot(event.target.value)} value={sourceRoot} />
+                          </label>
+                          <label className="grid gap-1">
+                            <span>{t("projectAuthority.exportRootOptional")}</span>
+                            <input className="input h-8 font-mono text-[12px]" onChange={(event) => setExportRoot(event.target.value)} value={exportRoot} />
+                          </label>
+                        </div>
+                        <button
+                          className="btn btn--primary mt-3"
+                          onClick={() => void requestConfirmation(() => configureCompatibleLayout(assessment.assessmentId, {
+                            ...(wikiRoot.trim() ? { wikiRoot: wikiRoot.trim() } : {}),
+                            ...(sourceRoot.trim() ? { sourceRoot: sourceRoot.trim() } : {}),
+                            ...(exportRoot.trim() ? { exportRoot: exportRoot.trim() } : {}),
+                          }))}
+                          type="button"
+                        >
+                          {t("projectAuthority.saveLayout")}
+                        </button>
+                      </details>
                     ) : null}
                   </div>
                 </div>

@@ -747,6 +747,10 @@ fn normalize_scope(
             validate_artifact_scope(&artifact_type, &page_paths)?;
             let output_path = match output_path {
                 Some(path) => Some(validate_output_path(context, &path)?),
+                // A compatible project without a configured export root must still be
+                // inspectable. Keep the target unset so preparation can report the
+                // explicit export-root prerequisite; execution remains fail-closed.
+                None if context.layout.export_root.is_none() => None,
                 None => Some(default_output_path(context, &artifact_type, &page_paths)?),
             };
             Ok(WorkflowScope::GenerateContent {
