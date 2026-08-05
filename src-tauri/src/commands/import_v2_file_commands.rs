@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
@@ -11,6 +12,24 @@ use crate::models::import_v2_file::{
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::file_discovery::{new_import_inputs, FileDiscoveryService};
+
+const DISCOVERY_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+fn import_scan_path(
+    context: &crate::models::paths::ProjectContext,
+    session_id: &str,
+    task_id: &str,
+) -> Result<String, BackendError> {
+    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
+        BackendError::new(
+            "IMPORT_STATE_ROOT_REQUIRED",
+            "Import state is unavailable for this project layout.",
+            true,
+            false,
+        )
+    })?;
+    Ok(format!("{root}/{session_id}/scans/{task_id}.json"))
+}
 
 #[tauri::command]
 pub fn get_import_capability_statuses(state: State<'_, AppState>) -> Vec<CapabilityRuntimeStatus> {
@@ -98,28 +117,35 @@ pub fn start_add_import_paths_v2(
                 .map(PathBuf::from)
                 .collect::<Vec<_>>();
             let mut discovered = 0_u64;
+            let mut last_progress = Instant::now() - DISCOVERY_PROGRESS_MIN_INTERVAL;
             let mut scan = FileDiscoveryService::default().scan(
                 &context,
                 &roots,
                 FileScanPolicy::default(),
                 |batch| {
                     discovered += batch.len() as u64;
-                    let _ = state.task_service.update_progress(
-                        &task_id,
-                        discovered,
-                        None,
-                        Some("Discovering files".into()),
-                    );
+                    if last_progress.elapsed() >= DISCOVERY_PROGRESS_MIN_INTERVAL {
+                        let _ = state.task_service.update_progress(
+                            &task_id,
+                            discovered,
+                            None,
+                            Some("Discovering files".into()),
+                        );
+                        last_progress = Instant::now();
+                    }
                 },
                 || state.task_service.is_cancelled(&task_id),
             )?;
             if state.task_service.is_cancelled(&task_id) {
                 return Ok(());
             }
-            let scan_path = format!(
-                ".app/import-sessions/{}/scans/{}.json",
-                request.session_id, task_id
+            let _ = state.task_service.update_progress(
+                &task_id,
+                discovered,
+                Some(discovered),
+                Some("Discovery complete".into()),
             );
+            let scan_path = import_scan_path(&context, &request.session_id, &task_id)?;
             let importable = take_importable_files(&mut scan, request.large_data_confirmed);
             state
                 .file_store
@@ -185,10 +211,7 @@ pub fn get_import_scan_result_v2(
     request: GetImportScanResultV2Request,
 ) -> Result<FileScanResult, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let path = format!(
-        ".app/import-sessions/{}/scans/{}.json",
-        request.session_id, request.task_id
-    );
+    let path = import_scan_path(&context, &request.session_id, &request.task_id)?;
     state.file_store.read_json(&context, &path)
 }
 

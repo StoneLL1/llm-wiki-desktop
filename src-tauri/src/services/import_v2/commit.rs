@@ -677,9 +677,19 @@ impl ImportV2Service {
         })?;
         FileTransaction::reconcile_project(&context.root)?;
         SourceRegistry::migrate_project_v3(context, file_store)?;
-        let session = self
+        let mut session = self
             .sessions
             .load(context, file_store, &request.session_id)?;
+        // These hashes protect the same item bytes that supplied the working
+        // snapshot below.  Do not recalculate a "current" hash inside
+        // `commit_one`: that would bless a newer external edit while writing
+        // an older in-memory item.
+        let session_snapshot_hashes = self
+            .sessions
+            .serialized_writes(context, &session)?
+            .into_iter()
+            .map(|(path, bytes)| (path, format!("{:x}", Sha256::digest(&bytes))))
+            .collect::<std::collections::HashMap<_, _>>();
         if let Some((item_id, fingerprint)) = exact_duplicate_precondition {
             let item = session
                 .items
@@ -762,11 +772,29 @@ impl ImportV2Service {
                 context,
                 file_store,
                 git_service,
-                &request.session_id,
+                &mut session,
                 decision,
                 &history_path,
                 &batch,
                 &history_hash_before,
+                session_snapshot_hashes
+                    .get(&format!(
+                        "{}/{}/items/{}.json",
+                        context.layout.import_state_root.as_deref().ok_or_else(|| {
+                            commit_error(
+                                IMPORT_V2_STATE_INVALID,
+                                "Import state is unavailable for this project layout.",
+                            )
+                        })?,
+                        request.session_id,
+                        decision.item_id
+                    ))
+                    .ok_or_else(|| {
+                        commit_error(
+                            IMPORT_V2_COMMIT_CONFLICT,
+                            "Import item changed before commit.",
+                        )
+                    })?,
             ) {
                 Ok(result) => result,
                 Err(error) => ImportItemCommitResult {
@@ -792,6 +820,39 @@ impl ImportV2Service {
             }
             on_durable_progress(&batch);
         }
+        // Membership and summary are a separate linearization boundary.  The
+        // per-item transactions above intentionally never rewrite unrelated
+        // item JSON.  If an external edit touched membership/summary, stop
+        // rather than clobber it; completed item facts/history remain durable.
+        session.status = derive_session_status(&session.items);
+        session.updated_at = chrono::Utc::now().to_rfc3339();
+        let summary_write = self
+            .sessions
+            .serialized_writes(context, &session)?
+            .into_iter()
+            .find(|(path, _)| path.ends_with("/session.json"))
+            .ok_or_else(|| {
+                commit_error(
+                    IMPORT_V2_COMMIT_FAILED,
+                    "Import session summary is missing.",
+                )
+            })?;
+        let expected_summary_hash =
+            session_snapshot_hashes
+                .get(&summary_write.0)
+                .ok_or_else(|| {
+                    commit_error(
+                        IMPORT_V2_COMMIT_CONFLICT,
+                        "Import session changed during commit.",
+                    )
+                })?;
+        let mut summary_transaction = FileTransaction::new_for_project(&context.root);
+        summary_transaction.write_if_hash_matches(
+            &context.resolve_project_path(&summary_write.0)?,
+            &summary_write.1,
+            expected_summary_hash,
+        )?;
+        summary_transaction.commit()?;
         Ok(batch)
     }
 
@@ -800,13 +861,13 @@ impl ImportV2Service {
         context: &ProjectContext,
         files: &FileStore,
         git: &GitService,
-        session_id: &str,
+        session: &mut ImportSession,
         decision: &CommitItemDecision,
         history_path: &str,
         prior_batch: &ImportBatchResult,
         history_expected_hash: &str,
+        item_expected_hash: &str,
     ) -> Result<ImportItemCommitResult, BackendError> {
-        let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
             .items
             .iter()
@@ -855,8 +916,8 @@ impl ImportV2Service {
             ));
         }
         let staging = context.root.join(format!(
-            ".app/import-sessions/{session_id}/items/{}/staging",
-            item.item_id
+            ".app/import-sessions/{}/items/{}/staging",
+            session.session_id, item.item_id
         ));
         let source = verified_artifact(
             &staging,
@@ -1624,12 +1685,6 @@ impl ImportV2Service {
         history.committed_count =
             history.items.iter().filter(|entry| entry.committed).count() as u32;
         history.failed_count = history.items.len() as u32 - history.committed_count;
-        let session_expected_hashes: std::collections::HashMap<_, _> = self
-            .sessions
-            .serialized_writes(&session)?
-            .into_iter()
-            .map(|(path, bytes)| (path, format!("{:x}", Sha256::digest(&bytes))))
-            .collect();
         #[cfg(test)]
         {
             let mut targets = Vec::new();
@@ -1673,18 +1728,30 @@ impl ImportV2Service {
                 ("history preview".into(), history_preview_path.clone()),
                 ("batch history".into(), history_path.to_string()),
             ]);
-            targets.extend(session.items.iter().map(|session_item| {
-                (
-                    format!("session item {}", session_item.item_id),
-                    format!(
-                        ".app/import-sessions/{session_id}/items/{}.json",
-                        session_item.item_id
-                    ),
-                )
-            }));
+            targets.push((
+                format!("session item {}", item.item_id),
+                format!(
+                    "{}/{}/items/{}.json",
+                    context
+                        .layout
+                        .import_state_root
+                        .as_deref()
+                        .expect("fixture import state root"),
+                    session.session_id,
+                    item.item_id
+                ),
+            ));
             targets.push((
                 "session summary".into(),
-                format!(".app/import-sessions/{session_id}/session.json"),
+                format!(
+                    "{}/{}/session.json",
+                    context
+                        .layout
+                        .import_state_root
+                        .as_deref()
+                        .expect("fixture import state root"),
+                    session.session_id
+                ),
             ));
             run_commit_durable_targets_hook(targets);
         }
@@ -1773,27 +1840,34 @@ impl ImportV2Service {
             )?;
             session.items[item_position].status = ImportItemStatus::Committing;
             session.items[item_position].status = ImportItemStatus::Completed;
-            session.status = derive_session_status(&session.items);
-            session.updated_at = chrono::Utc::now().to_rfc3339();
-            for (relative, bytes) in self.sessions.serialized_writes(&session)? {
-                transaction.write_if_hash_matches(
-                    &context.resolve_project_path(&relative)?,
-                    &bytes,
-                    session_expected_hashes.get(&relative).ok_or_else(|| {
-                        commit_error(
-                            IMPORT_V2_COMMIT_FAILED,
-                            "Import session changed during commit.",
-                        )
-                    })?,
-                )?;
-            }
+            let item_path = format!(
+                "{}/{}/items/{}.json",
+                context.layout.import_state_root.as_deref().ok_or_else(|| {
+                    commit_error(
+                        IMPORT_V2_STATE_INVALID,
+                        "Import state is unavailable for this project layout.",
+                    )
+                })?,
+                session.session_id,
+                item.item_id
+            );
+            transaction.write_if_hash_matches(
+                &context.resolve_project_path(&item_path)?,
+                &serde_json::to_vec_pretty(&session.items[item_position]).map_err(|_| {
+                    commit_error(
+                        IMPORT_V2_COMMIT_FAILED,
+                        "Import item could not be serialized.",
+                    )
+                })?,
+                item_expected_hash,
+            )?;
             Ok(())
         })();
         if let Err(error) = write_result {
             return Err(transaction.rollback_after(error));
         }
         transaction.commit()?;
-        remove_committed_clipboard_input(context, session_id, &item.input);
+        remove_committed_clipboard_input(context, &session.session_id, &item.input);
         Ok(result)
     }
 }
@@ -5677,7 +5751,7 @@ source_url: https://www.xiaohongshu.com/explore/other-note
     }
 
     #[test]
-    fn concurrent_session_edit_is_preserved_and_commit_rolls_back() {
+    fn concurrent_session_edit_is_preserved_and_stops_summary_linearization() {
         let mut fixture = CommitFixture::two_ready_items();
         fixture.second_item_id = None;
         set_before_checked_displace_hook(|path| {
@@ -5689,8 +5763,15 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                 false
             }
         });
-        let result = fixture.commit_all();
-        assert_eq!(result.failed_count, 1);
+        let request = fixture.request(vec![CommitItemDecision {
+            item_id: fixture.first_item_id.clone(),
+            resolution: None,
+        }]);
+        let error = fixture
+            .service
+            .commit_items(&fixture.context, &fixture.files, &fixture.git, &request)
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
         let session_path = fixture.root.join(format!(
             ".app/import-sessions/{}/session.json",
             fixture.session_id
@@ -5699,7 +5780,10 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             std::fs::read(session_path).unwrap(),
             b"external session edit"
         );
-        assert!(!fixture.root.join("raw/sources").exists());
+        // The item transaction may already be complete, but the external
+        // session edit is never overwritten; history/item facts permit a
+        // later recovery to reconcile the batch safely.
+        assert!(fixture.root.join("raw/sources").exists());
     }
 
     #[test]
@@ -5805,14 +5889,25 @@ source_url: https://www.xiaohongshu.com/explore/other-note
     fn expected_item_commit_boundaries(
         targets: &[(String, String)],
     ) -> Vec<CommitPersistenceBoundary> {
-        let mut expected = Vec::with_capacity(targets.len() * 2 + 2);
-        for (label, path) in targets {
+        let mut expected = Vec::with_capacity(targets.len() * 2 + 4);
+        let summary = targets.iter().find(|(label, _)| label == "session summary");
+        for (label, path) in targets
+            .iter()
+            .filter(|(label, _)| label != "session summary")
+        {
             let target = persistence_target_for(label, path);
             expected.push(CommitPersistenceBoundary::JournalIntent(target.clone()));
             expected.push(CommitPersistenceBoundary::TargetInstalled(target));
         }
         expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
         expected.push(CommitPersistenceBoundary::JournalDeleted);
+        if let Some((label, path)) = summary {
+            let target = persistence_target_for(label, path);
+            expected.push(CommitPersistenceBoundary::JournalIntent(target.clone()));
+            expected.push(CommitPersistenceBoundary::TargetInstalled(target));
+            expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
+            expected.push(CommitPersistenceBoundary::JournalDeleted);
+        }
         expected
     }
 
@@ -5965,12 +6060,30 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             CommitPersistenceBoundary::CommittedMarkerPersisted
                 | CommitPersistenceBoundary::JournalDeleted
         );
+        let item_forward = forward
+            || matches!(
+                target,
+                CommitPersistenceBoundary::JournalIntent(CommitPersistenceTarget::SessionSummary)
+                    | CommitPersistenceBoundary::TargetInstalled(
+                        CommitPersistenceTarget::SessionSummary
+                    )
+            );
         assert_eq!(
             session.items[0].status == ImportItemStatus::Completed,
-            forward
+            item_forward
         );
         for ((label, relative, old), new) in durable.iter().zip(&crashed) {
-            let expected = if forward { new } else { old };
+            let expected = if label == "session summary" {
+                if forward {
+                    new
+                } else {
+                    old
+                }
+            } else if item_forward {
+                new
+            } else {
+                old
+            };
             assert_eq!(
                 &read_optional(&fixture.root.join(relative)),
                 expected,
