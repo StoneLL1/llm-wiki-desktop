@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Aggregate Import confirmation cannot double as per-spreadsheet authorization — Root cause: a single accepted boolean makes the total-size acknowledgement silently admit every large CSV/XLSX and can also let a legacy `largeDataConfirmed` flag bypass the new aggregate gate — How to avoid: persist aggregate and item-risk acknowledgements separately, admit only ordinary files at the aggregate stage, keep risky spreadsheets pending on the same saved scan, and test both directions independently.
+
 Hidden per-item TaskService entries cannot stand in for one batch operation task — Root cause: giving every item an in-memory or transient task makes cancellation, recovery, confirmation, and terminal aggregation ambiguous even if only one task is shown in the UI — How to avoid: create exactly one persisted operation task, use its cancellation token and throttled aggregate facts, and keep each ImportItem/session JSON as the only item lifecycle state machine.
 
 A current hash read at commit time cannot protect a stale item snapshot — Root cause: comparing a just-read hash while writing bytes from an older in-memory session snapshot accepts a concurrent edit and overwrites it — How to avoid: capture expected hashes from the exact loaded item bytes, use them in each checked replacement, and treat target-item drift as a conflict while allowing unrelated items to continue.

@@ -34,7 +34,8 @@ export type BackendEventType =
   | "graph_updated"
   | "agent_output"
   | "task_activity"
-  | "workflow_updated";
+  | "workflow_updated"
+  | "import_session_patch";
 
 export type LogLevel = "info" | "warn" | "error" | "debug";
 

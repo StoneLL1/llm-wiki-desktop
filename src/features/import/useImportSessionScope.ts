@@ -3,14 +3,31 @@ import { useTranslation } from "react-i18next";
 
 import { importV2Api } from "../../services/importV2Api";
 import { importProjectKey, useImportStore } from "../../stores/importStore";
+import { useProjectStore } from "../../stores/projectStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AppView } from "../../stores/navigationStore";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
-import type { ProjectSummary } from "../../types/project";
+import type { ProjectSessionAuthority, ProjectSummary } from "../../types/project";
 import type { ImportBootstrapState } from "./importWorkflow";
 
 export const hasImportTauriRuntime = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+function authorityRevisionKey(
+  authority: ProjectSessionAuthority | null,
+  projectId: string,
+): string {
+  if (
+    !authority
+    || authority.projectId !== projectId
+  ) return "unresolved";
+  return [
+    authority.canonicalIdentityKey,
+    authority.canonicalRootPath,
+    authority.identityRevision,
+    authority.authorityRevision,
+  ].join("\0");
+}
 
 export function importWorkflowErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
@@ -47,9 +64,13 @@ export function useImportSessionScope(
   const pushToast = useToastStore((state) => state.pushToast);
   const projectId = project.projectId;
   const rootPath = project.rootPath;
+  const authority = useProjectStore((state) => state.authority);
+  const expectedAuthorityRevisionKey = authorityRevisionKey(authority, projectId);
   const projectKey = importProjectKey(projectId, rootPath);
   const latestProjectKey = useRef(projectKey);
   latestProjectKey.current = projectKey;
+  const latestAuthorityRevisionKey = useRef(expectedAuthorityRevisionKey);
+  latestAuthorityRevisionKey.current = expectedAuthorityRevisionKey;
 
   const [readiness, setReadiness] = useState<ImportFrontendReadiness | null>(null);
   const [readinessWarning, setReadinessWarning] = useState<string | null>(null);
@@ -62,18 +83,20 @@ export function useImportSessionScope(
 
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), []);
   const isProjectCurrent = useCallback(
-    (requestKey: string) => latestProjectKey.current === requestKey,
-    [],
+    (requestKey: string) => latestProjectKey.current === requestKey
+      && latestAuthorityRevisionKey.current === expectedAuthorityRevisionKey,
+    [expectedAuthorityRevisionKey],
   );
   const isScopeCurrent = useCallback(
     (requestKey: string, epoch: number, expectedSessionId?: string) => {
       const current = useImportStore.getState();
       return latestProjectKey.current === requestKey
+        && latestAuthorityRevisionKey.current === expectedAuthorityRevisionKey
         && current.projectKey === requestKey
         && current.sessionEpoch === epoch
         && (!expectedSessionId || current.session?.sessionId === expectedSessionId);
     },
-    [],
+    [expectedAuthorityRevisionKey],
   );
   const nextSessionMutationRevision = useCallback(() => {
     sessionMutationRevisionRef.current += 1;
@@ -227,7 +250,7 @@ export function useImportSessionScope(
     return () => {
       cancelled = true;
     };
-  }, [activeView, bootstrapAttempt, isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+  }, [activeView, bootstrapAttempt, expectedAuthorityRevisionKey, isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
 
   return {
     projectId,

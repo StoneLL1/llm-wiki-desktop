@@ -93,7 +93,8 @@ export interface ImportWorkflow {
   confirmRemoteMediaRetention: () => Promise<void>;
   dismissRemoteMediaRetention: () => void;
   cancelDiscovery?: () => Promise<void>;
-  dismissDiscovery?: () => void;
+  confirmDiscovery?: (sourcePaths?: readonly string[]) => Promise<void>;
+  dismissDiscovery?: () => Promise<void>;
   cancelBatch?: (batchId?: string) => Promise<void>;
   dismissBatch?: (batchId?: string) => void;
   retryBatch?: (batchId: string) => Promise<void>;

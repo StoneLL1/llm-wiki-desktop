@@ -1,19 +1,29 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
+use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::import_v2::ImportSession;
-use crate::models::import_v2_file::{
-    DiscoveredFile, FileScanPolicy, FileScanResult, FileSkipReason, SkippedFile,
-};
+use crate::models::import_v2_file::{FileScanPolicy, FileScanResult, ImportScanIdentity};
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
-use crate::services::import_v2::file_discovery::{new_import_inputs, FileDiscoveryService};
+use crate::services::import_v2::file_discovery::FileDiscoveryService;
+use crate::services::import_v2::scan_confirmation::{
+    mark_scan_accepted, mark_scan_aggregate_confirmed, mark_scan_discarded,
+    prepare_legacy_scan_staging, prepare_saved_scan_acceptance, prepare_scan_staging,
+    SavedScanAcceptance,
+};
 
 const DISCOVERY_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+fn import_scan_confirmation_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn import_scan_path(
     context: &crate::models::paths::ProjectContext,
@@ -55,6 +65,37 @@ pub struct GetImportScanResultV2Request {
     pub project_root_path: String,
     pub session_id: String,
     pub task_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptImportScanV2Request {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub confirmation_token: String,
+    #[serde(default)]
+    pub acknowledge_aggregate: bool,
+    #[serde(default)]
+    pub source_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptImportScanV2Result {
+    pub session: ImportSession,
+    pub scan: FileScanResult,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardImportScanV2Request {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub confirmation_token: String,
 }
 
 /// Starts durable discovery work and returns immediately. The existing
@@ -146,35 +187,51 @@ pub fn start_add_import_paths_v2(
                 Some("Discovery complete".into()),
             );
             let scan_path = import_scan_path(&context, &request.session_id, &task_id)?;
-            let importable = take_importable_files(&mut scan, request.large_data_confirmed);
+            scan.scan_identity = Some(ImportScanIdentity {
+                project_id: request.project_id.clone(),
+                project_root_path: context.root.to_string_lossy().into_owned(),
+                session_id: request.session_id.clone(),
+                task_id: task_id.clone(),
+            });
+            let plan =
+                prepare_scan_staging(&mut scan, &session, request.large_data_confirmed, || {
+                    Uuid::new_v4().to_string()
+                });
             state
                 .file_store
                 .write_json_atomic(&context, &scan_path, &scan)?;
             let skipped = scan.skipped.len();
-            let inputs = new_import_inputs(&session, importable);
-            let added = inputs.len();
-            if !inputs.is_empty() {
+            let added = plan.inputs.len();
+            if !plan.inputs.is_empty() {
                 state.import_v2_service.add_inputs(
                     &context,
                     &state.file_store,
                     &request.session_id,
-                    inputs,
+                    plan.inputs,
                 )?;
             }
+            let summary = if plan.aggregate_confirmation_pending {
+                format!(
+                    "Found {} files ({} bytes, about {} outputs); confirmation is required before adding them.",
+                    scan.totals.file_count,
+                    scan.totals.total_bytes,
+                    scan.totals.estimated_output_files.unwrap_or(scan.totals.file_count as u64),
+                )
+            } else if plan.item_confirmation_pending {
+                format!("Added {added} files; some large data files require confirmation.")
+            } else {
+                format!("Added {added} files; skipped {skipped}.")
+            };
             state
                 .task_service
-                .append_log(
-                    &task_id,
-                    LogLevel::Info,
-                    format!("Added {added} files; skipped {skipped}"),
-                )
+                .append_log(&task_id, LogLevel::Info, summary.clone())
                 .map_err(task_error)?;
             state
                 .task_service
                 .set_result(
                     &task_id,
                     TaskResult {
-                        summary: format!("Added {added} files; skipped {skipped}."),
+                        summary,
                         affected_paths: vec![scan_path],
                         reference: None,
                         pending_action: None,
@@ -215,6 +272,127 @@ pub fn get_import_scan_result_v2(
     state.file_store.read_json(&context, &path)
 }
 
+#[tauri::command]
+pub fn accept_import_scan_v2(
+    state: State<'_, AppState>,
+    request: AcceptImportScanV2Request,
+) -> Result<AcceptImportScanV2Result, BackendError> {
+    let _guard = import_scan_confirmation_lock().lock().map_err(|_| {
+        BackendError::new(
+            "IMPORT_SCAN_CONFIRMATION_INVALID",
+            "Import scan confirmation lock is poisoned.",
+            true,
+            false,
+        )
+    })?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |context| {
+            let path = import_scan_path(context, &request.session_id, &request.task_id)?;
+            let mut scan: FileScanResult = state.file_store.read_json(context, &path)?;
+            let expected_identity = ImportScanIdentity {
+                project_id: request.project_id.clone(),
+                project_root_path: context.root.to_string_lossy().into_owned(),
+                session_id: request.session_id.clone(),
+                task_id: request.task_id.clone(),
+            };
+            let current = state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let acceptance = prepare_saved_scan_acceptance(
+                &scan,
+                &expected_identity,
+                &request.confirmation_token,
+                request.acknowledge_aggregate,
+                request.source_paths.as_deref(),
+                &current,
+            )?;
+            let mut fully_accepted = matches!(acceptance, SavedScanAcceptance::AlreadyAccepted);
+            if let SavedScanAcceptance::Ready(plan) = acceptance {
+                if !plan.inputs.is_empty() {
+                    state.import_v2_service.add_inputs(
+                        context,
+                        &state.file_store,
+                        &request.session_id,
+                        plan.inputs,
+                    )?;
+                }
+                let now = chrono::Utc::now().to_rfc3339();
+                if plan.mark_aggregate_confirmed {
+                    mark_scan_aggregate_confirmed(&mut scan, now.clone());
+                }
+                if plan.fully_accepted {
+                    mark_scan_accepted(&mut scan, now);
+                    fully_accepted = true;
+                }
+                state.file_store.write_json_atomic(context, &path, &scan)?;
+            }
+            let session = if fully_accepted {
+                state.import_v2_service.set_discovery_task_id(
+                    context,
+                    &state.file_store,
+                    &request.session_id,
+                    None,
+                )?
+            } else {
+                state.import_v2_service.load_session(
+                    context,
+                    &state.file_store,
+                    &request.session_id,
+                )?
+            };
+            Ok(AcceptImportScanV2Result { session, scan })
+        },
+    )
+}
+
+#[tauri::command]
+pub fn discard_import_scan_v2(
+    state: State<'_, AppState>,
+    request: DiscardImportScanV2Request,
+) -> Result<FileScanResult, BackendError> {
+    let _guard = import_scan_confirmation_lock().lock().map_err(|_| {
+        BackendError::new(
+            "IMPORT_SCAN_CONFIRMATION_INVALID",
+            "Import scan confirmation lock is poisoned.",
+            true,
+            false,
+        )
+    })?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |context| {
+            let path = import_scan_path(context, &request.session_id, &request.task_id)?;
+            let mut scan: FileScanResult = state.file_store.read_json(context, &path)?;
+            let expected_identity = ImportScanIdentity {
+                project_id: request.project_id.clone(),
+                project_root_path: context.root.to_string_lossy().into_owned(),
+                session_id: request.session_id.clone(),
+                task_id: request.task_id.clone(),
+            };
+            if mark_scan_discarded(
+                &mut scan,
+                &expected_identity,
+                &request.confirmation_token,
+                chrono::Utc::now().to_rfc3339(),
+            )? {
+                state.file_store.write_json_atomic(context, &path, &scan)?;
+            }
+            state.import_v2_service.set_discovery_task_id(
+                context,
+                &state.file_store,
+                &request.session_id,
+                None,
+            )?;
+            Ok(scan)
+        },
+    )
+}
+
 fn task_error(message: String) -> BackendError {
     BackendError::new("TASK_SERVICE", message, true, false)
 }
@@ -241,8 +419,7 @@ pub fn add_import_paths_v2(
         |_| {},
         || false,
     )?;
-    let importable = take_importable_files(&mut scan, request.large_data_confirmed);
-    let inputs = new_import_inputs(&session, importable);
+    let inputs = prepare_legacy_scan_staging(&mut scan, &session, request.large_data_confirmed);
     if inputs.is_empty() {
         return Ok(session);
     }
@@ -251,53 +428,9 @@ pub fn add_import_paths_v2(
         .add_inputs(&context, &state.file_store, &request.session_id, inputs)
 }
 
-fn take_importable_files(
-    scan: &mut FileScanResult,
-    large_data_confirmed: bool,
-) -> Vec<DiscoveredFile> {
-    let pending = scan
-        .files
-        .iter()
-        .filter(|file| {
-            !large_data_confirmed
-                && file
-                    .large_data
-                    .as_ref()
-                    .is_some_and(|estimate| estimate.requires_confirmation)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let importable = scan
-        .files
-        .iter()
-        .filter(|file| {
-            large_data_confirmed
-                || !file
-                    .large_data
-                    .as_ref()
-                    .is_some_and(|estimate| estimate.requires_confirmation)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    for file in &pending {
-        let estimate = file.large_data.as_ref().expect("partition checked");
-        scan.skipped.push(SkippedFile {
-            source_path: file.source_path.clone(),
-            relative_path: Some(file.relative_path.clone()),
-            reason: FileSkipReason::LargeDataConfirmationRequired,
-            detail: Some(format!(
-                "{} rows, about {} output files, {} bytes",
-                estimate.row_count, estimate.estimated_output_files, estimate.total_bytes
-            )),
-        });
-    }
-    importable
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::paths::ProjectContext;
 
     #[test]
     fn request_has_sources_but_no_target_paths_or_policy_override() {
@@ -326,38 +459,5 @@ mod tests {
         .unwrap();
         assert_eq!(value["sourcePaths"].as_array().unwrap().len(), 2);
         assert!(value.get("install").is_none());
-    }
-
-    #[test]
-    fn large_csv_requires_confirmation_before_it_becomes_importable() {
-        let root = tempfile::tempdir().unwrap();
-        let context = ProjectContext::new("large-csv", root.path().to_path_buf());
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/fixtures/import-v2/local/batch3/large.csv");
-        let scan = FileDiscoveryService::default()
-            .scan(
-                &context,
-                &[fixture],
-                FileScanPolicy::default(),
-                |_| {},
-                || false,
-            )
-            .unwrap();
-        assert!(scan.files[0]
-            .large_data
-            .as_ref()
-            .is_some_and(|estimate| estimate.requires_confirmation));
-
-        let mut pending = scan.clone();
-        assert!(take_importable_files(&mut pending, false).is_empty());
-        assert!(pending
-            .skipped
-            .iter()
-            .any(|entry| entry.reason == FileSkipReason::LargeDataConfirmationRequired));
-
-        let mut confirmed = scan;
-        let accepted = take_importable_files(&mut confirmed, true);
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].large_data.as_ref().unwrap().row_count, 10_052);
     }
 }

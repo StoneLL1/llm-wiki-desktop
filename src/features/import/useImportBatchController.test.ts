@@ -88,4 +88,58 @@ describe("buildImportBatchProgress", () => {
     });
     expect(progress?.tasks.find((entry) => entry.id === "missing")?.status).toBe("unknown");
   });
+
+  it("shows one operation task while item facts retain partial, waiting, preview, failure, skip, and cancel states", () => {
+    const operation = {
+      ...task("operation-a", "running"),
+      batchId: "import-v2-operation:session-a",
+    };
+    const statuses: Array<[string, ImportItem["status"]]> = [
+      ["active.md", "extracting"],
+      ["preview.md", "preview_ready"],
+      ["waiting.md", "waiting_login"],
+      ["failed.md", "failed"],
+      ["skipped.md", "skipped"],
+      ["cancelled.md", "cancelled"],
+      ["completed.md", "completed"],
+    ];
+    const items = statuses.map(([itemId, status]) => ({
+      ...item(itemId, status),
+      taskId: operation.id,
+    }));
+    const session = {
+      schemaVersion: 2,
+      sessionId: "session-a",
+      projectId: "project-a",
+      status: "processing",
+      resourceMode: "balanced",
+      createdAt: "2026-07-22T00:00:00Z",
+      updatedAt: "2026-07-22T00:00:00Z",
+      items,
+    } satisfies ImportSession;
+
+    const [progress] = buildImportBatchProgress([{
+      id: operation.id,
+      sessionId: session.sessionId,
+      projectKey: "project-a\0D:/wiki",
+      epoch: 2,
+      tasks: [{ taskId: operation.id, itemId: "", title: operation.title }],
+      itemIds: items.map((value) => value.itemId),
+      operationTaskId: operation.id,
+    }], [operation], session);
+
+    expect(progress).toMatchObject({
+      total: 7,
+      processed: 6,
+      active: 1,
+      completed: 2,
+      waitingForConfirmation: 2,
+      reviewReady: 1,
+      failed: 1,
+      cancelled: 2,
+      failedItemIds: ["failed.md"],
+    });
+    expect(progress?.tasks).toHaveLength(1);
+    expect(progress?.tasks[0]?.id).toBe(operation.id);
+  });
 });

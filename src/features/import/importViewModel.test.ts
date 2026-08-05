@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ImportItem, ImportSession } from "../../types/importV2";
 import {
   selectCommittableItems,
+  selectImportViewModel,
   selectQueueCounts,
   selectSessionProgress,
   selectVisibleItems,
@@ -58,5 +59,51 @@ describe("Import V2 queue selectors", () => {
     ]);
 
     expect(selectSessionProgress(session)).toEqual({ completed: 1, total: 4, active: 2, processed: 2, failed: 0, cancelled: 0, needsAction: 0 });
+  });
+
+  it("derives visible items, queue counts, and progress in one snapshot", () => {
+    const session = makeSession([
+      makeItem("login", "waiting_login"),
+      makeItem("authorization", "waiting_authorization"),
+      makeItem("failed", "failed"),
+      makeItem("ready", "preview_ready"),
+      makeItem("completed", "completed"),
+      makeItem("skipped", "skipped"),
+      makeItem("cancelled", "cancelled"),
+      makeItem("active", "extracting"),
+    ]);
+
+    expect(selectImportViewModel(session, "needs_action")).toEqual({
+      visibleItems: [session.items[0], session.items[1]],
+      counts: {
+        all: 6,
+        active: 1,
+        ready: 1,
+        needsAction: 2,
+        failed: 1,
+        completed: 1,
+        waiting: 2,
+      },
+      progress: {
+        completed: 1,
+        total: 8,
+        active: 1,
+        processed: 5,
+        failed: 1,
+        cancelled: 1,
+        needsAction: 2,
+      },
+    });
+  });
+
+  it("counts an auto-finalizing exact duplicate preview as processed", () => {
+    const duplicate = {
+      ...makeItem("duplicate", "preview_ready"),
+      preview: {
+        resolution: { kind: "exact_duplicate" },
+      } as NonNullable<ImportItem["preview"]>,
+    };
+
+    expect(selectImportViewModel(makeSession([duplicate]), "all").progress.processed).toBe(1);
   });
 });

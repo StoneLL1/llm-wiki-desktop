@@ -8,7 +8,7 @@ import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { CommitItemDecision, ImportItemResolution, ImportRecoveryAction, ImportSession, MediaSaveMode } from "../../types/importV2";
 import type { ProjectSummary } from "../../types/project";
-import { selectQueueCounts, selectSessionProgress, selectVisibleItems } from "./importViewModel";
+import { selectImportViewModel } from "./importViewModel";
 import type { AsrAuthorizationOptions, ImportWorkflow } from "./importWorkflow";
 import type { AppView } from "../../stores/navigationStore";
 import { importWorkflowErrorMessage as errorMessage, useImportSessionScope } from "./useImportSessionScope";
@@ -124,6 +124,7 @@ export function useImportWorkflow(
     trackConfirmationTask,
     trackCapabilityTask,
     cancelDiscovery,
+    acceptDiscovery,
     dismissDiscovery,
   } = useImportTaskCoordinator({
     projectId,
@@ -462,14 +463,14 @@ export function useImportWorkflow(
     if (acceptedIds.length === 0) return;
     nextSessionMutationRevision();
     try {
-      const tasks = await importV2Api.startItems({
+      const task = await importV2Api.startBatch({
         projectId,
         projectRootPath: rootPath,
         sessionId: current.session.sessionId,
         itemIds: acceptedIds,
         ...(recoveryAction ? { recoveryAction } : {}),
       });
-      trackStartedItems(tasks, acceptedIds, projectKey, epoch, current.session.sessionId);
+      trackStartedItems([task], acceptedIds, projectKey, epoch, current.session.sessionId);
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
       endPendingItems(acceptedIds, projectKey, epoch);
@@ -644,41 +645,24 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     const item = current.session?.items.find((candidate) => candidate.itemId === itemId);
     if (!item || current.projectKey !== projectKey) return;
-    if (!item.taskId) {
-      if (item.status === "queued") {
-        const epoch = current.sessionEpoch;
-        const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
-        if (acceptedIds.length === 0) return;
-        const mutationRevision = nextSessionMutationRevision();
-        try {
-          const nextSession = await importV2Api.cancelItem({
-            projectId,
-            projectRootPath: rootPath,
-            sessionId: current.session!.sessionId,
-            itemId,
-          });
-          await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session!.sessionId);
-        } catch (error) {
-          if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
-        } finally {
-          endPendingItems(acceptedIds, projectKey, epoch);
-        }
-      }
-      return;
-    }
     const epoch = current.sessionEpoch;
     const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
     if (acceptedIds.length === 0) return;
-    nextSessionMutationRevision();
+    const mutationRevision = nextSessionMutationRevision();
     try {
-      await taskLauncher.cancel(item.taskId);
-      if (isScopeCurrent(projectKey, epoch)) await refreshForScope(projectKey, epoch);
+      const nextSession = await importV2Api.cancelItem({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId: current.session!.sessionId,
+        itemId,
+      });
+      await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session!.sessionId);
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
     } finally {
       endPendingItems(acceptedIds, projectKey, epoch);
     }
-  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, refreshForScope, rootPath, t, taskLauncher]);
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, rootPath, t]);
 
   const startConfirmation = useCallback(async (
     decisions: CommitItemDecision[],
@@ -920,9 +904,10 @@ export function useImportWorkflow(
     [projectId, rootPath],
   );
 
-  const visibleItems = useMemo(() => selectVisibleItems(session, filter), [filter, session]);
-  const counts = useMemo(() => selectQueueCounts(session), [session]);
-  const progress = useMemo(() => selectSessionProgress(session), [session]);
+  const { visibleItems, counts, progress } = useMemo(
+    () => selectImportViewModel(session, filter),
+    [filter, session],
+  );
   const selectItem = useImportStore((state) => state.selectItem);
   const setFilter = useImportStore((state) => state.setFilter);
 
@@ -1010,6 +995,7 @@ export function useImportWorkflow(
     confirmRemoteMediaRetention,
     dismissRemoteMediaRetention,
     cancelDiscovery,
+    confirmDiscovery: acceptDiscovery,
     dismissDiscovery,
     cancelBatch,
     dismissBatch,

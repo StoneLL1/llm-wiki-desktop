@@ -35,6 +35,7 @@ const TASK_EVENT_CHANNELS = [
   "wiki://changed",
   "graph://updated",
   "agent://output",
+  "import://session-patch",
 ] as const;
 
 type TaskEventListener = (event: BackendEvent) => void;

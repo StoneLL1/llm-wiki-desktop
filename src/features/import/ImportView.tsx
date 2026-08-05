@@ -631,8 +631,8 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
                 setIsCancellingDiscovery(true);
                 void cancel().catch(() => setIsCancellingDiscovery(false));
               }}
-              onDismiss={() => workflow.dismissDiscovery?.()}
-              onConfirmLargeData={(paths) => workflow.addPaths(paths, true)}
+              onDismiss={() => { void workflow.dismissDiscovery?.().catch(() => undefined); }}
+              onConfirmScan={(paths) => workflow.confirmDiscovery?.(paths)}
               confirmingLargeData={workflow.isAddingPaths}
             />
             <ImportActionGroups

@@ -32,6 +32,7 @@ pub mod platform_provider;
 pub mod quality_gate;
 pub(crate) mod redaction;
 pub mod remote_media_retention;
+pub mod scan_confirmation;
 pub(crate) mod session_store;
 pub mod source_ai_organize;
 pub mod source_finalization;

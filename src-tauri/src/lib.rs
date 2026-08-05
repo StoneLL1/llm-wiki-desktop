@@ -575,6 +575,8 @@ pub fn run() {
             commands::import_v2_file_commands::start_add_import_paths_v2,
             commands::import_v2_file_commands::get_import_capability_statuses,
             commands::import_v2_file_commands::get_import_scan_result_v2,
+            commands::import_v2_file_commands::accept_import_scan_v2,
+            commands::import_v2_file_commands::discard_import_scan_v2,
             commands::import_v2_web_commands::add_import_url_v2,
             commands::import_v2_web_commands::discover_import_collection_v2,
             commands::import_v2_web_commands::load_import_collection_page_v2,

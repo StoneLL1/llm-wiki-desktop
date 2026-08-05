@@ -29,6 +29,7 @@ interface TaskState {
 
   setTasks: (tasks: BackendTask[]) => void;
   upsertTask: (task: BackendTask) => void;
+  upsertTasks: (tasks: readonly BackendTask[]) => void;
   appendLog: (taskId: string, line: LogLine) => void;
   setLogs: (taskId: string, lines: LogLine[]) => void;
   appendActivity: (taskId: string, activity: TaskActivity) => void;
@@ -151,6 +152,19 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         idx >= 0
           ? state.tasks.map((t, i) => (i === idx ? preferFreshTask(t, task) : t))
           : [...state.tasks, task];
+      return { tasks, runningCount: countRunning(tasks) };
+    }),
+  upsertTasks: (incoming) =>
+    set((state) => {
+      if (incoming.length === 0) return state;
+      const incomingById = new Map(incoming.map((task) => [task.id, task]));
+      const tasks = state.tasks.map((task) => {
+        const next = incomingById.get(task.id);
+        if (!next) return task;
+        incomingById.delete(task.id);
+        return preferFreshTask(task, next);
+      });
+      tasks.push(...incomingById.values());
       return { tasks, runningCount: countRunning(tasks) };
     }),
   appendLog: (taskId, line) =>

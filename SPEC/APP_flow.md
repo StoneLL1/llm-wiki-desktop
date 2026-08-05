@@ -200,6 +200,8 @@ project-root/
 7. 后端写入布局定义的不可变 evidence、来源版本状态和当前 Source 页面；新建原生知识库分别映射为 `raw/`、`.app/sources/` 与 `wiki/sources/`。
 8. 完成摘要停留在 Import，并选中 / 预览已导入 Source；同时提供“查看已导入来源”和“用这些来源更新 Wiki”，只有后一个操作进入独立编译流程。
 
+文件 / 文件夹扫描若超过后端定义的总文件数、总字节数或预计输出数软阈值，流程停在“确认扫描总量”：session item 数保持不变，状态区同时展示 aggregate totals、原因、跳过项和每个超大表格的独立估算。总量确认先放行普通文件，超大表格仍停留等待独立确认；两次确认都消费同一 saved scan，并在 trusted + writable authority 临界区重验当前 layout import-state root、项目 / session / task identity、token、totals 和全部来源 fingerprint，不重扫原目录。hard file limit 直接 typed 拒绝且不产生可接受的截断扫描；取消只丢弃 app-state scan result，不触碰来源。
+
 ### 7.2 候选预览必须包含
 
 - 来源名称、类型和定位信息
@@ -232,6 +234,8 @@ OCR 和 ASR 在导入阶段按正文缺口启用，并且必须由用户主动�
 - 应用重启后耗时下载、OCR、ASR 显示“已暂停，可继续”，由用户恢复。
 - 批次状态区聚合登录、OCR、ASR 和能力安装待办，不连续弹出模态框。
 - 未解决项只阻断自身，其他可确认项可以部分提交。
+- 一次批量处理在任务抽屉中只显示一个 operation task；逐项状态由 Import session/item 事实呈现，不能用 operation terminal 状态替代 waiting、preview、失败、跳过或取消项。
+- `import://session-patch` 先通过 project/root/session/epoch/authority guards，再一次性 patch 当前 cohort；terminal patch 或 terminal task 竞态最终只触发一次 session summary refresh。
 
 ### 7.5 导入完成
 

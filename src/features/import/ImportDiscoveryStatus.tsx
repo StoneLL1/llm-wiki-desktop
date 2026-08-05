@@ -10,6 +10,7 @@ export interface ImportDiscoveryStatusProps {
   unavailable?: boolean;
   onCancel: () => void;
   onDismiss: () => void;
+  onConfirmScan?: (paths?: string[]) => void | Promise<unknown>;
   onConfirmLargeData?: (paths: string[]) => void | Promise<unknown>;
   cancelling?: boolean;
   confirmingLargeData?: boolean;
@@ -27,6 +28,7 @@ export function ImportDiscoveryStatus({
   unavailable = false,
   onCancel,
   onDismiss,
+  onConfirmScan,
   onConfirmLargeData,
   cancelling = false,
   confirmingLargeData = false,
@@ -49,12 +51,41 @@ export function ImportDiscoveryStatus({
   const resultSummary = parseDiscoverySummary(task.result?.summary);
   const liveSummary = resultSummary ?? { added: discovered, skipped: 0 };
   const skipped = scan?.skipped ?? [];
-  const pendingLargePaths = skipped
-    .filter((entry) => entry.reason === "large_data_confirmation_required")
-    .map((entry) => entry.sourcePath);
-  const pendingLarge = (scan?.files ?? []).filter((file) => pendingLargePaths.includes(file.sourcePath));
+  const pendingLarge = (scan?.files ?? []).filter((file) => file.largeData?.requiresConfirmation);
+  const pendingLargePaths = pendingLarge.map((file) => file.sourcePath);
   const mismatches = (scan?.files ?? []).filter((file) => file.identity.extensionMismatch);
   const number = new Intl.NumberFormat(i18n.language);
+  const confirmScan: ((paths?: string[]) => void | Promise<unknown>) | undefined = onConfirmScan
+    ?? (onConfirmLargeData ? (paths) => paths ? onConfirmLargeData(paths) : undefined : undefined);
+  const totals = scan?.totals;
+  const aggregateConfirmationPending = Boolean(
+    totals?.requiresConfirmation
+    && scan?.confirmationToken
+    && !scan.aggregateConfirmedAt
+    && !scan.acceptedAt
+    && !scan.discardedAt,
+  );
+  const largeDataEstimateRows = pendingLarge.map((file) => (
+    <p key={file.sourcePath} className="m-0 mt-1 break-words text-[10.5px] text-[var(--text-muted)]">
+      <span className="font-mono text-[var(--text-secondary)]">{file.relativePath}</span>
+      {" · "}
+      {file.largeData?.estimateComplete === false
+        ? t("importV2.discovery.workbookEstimateUnknown", {
+            bytes: number.format(file.largeData.totalBytes ?? file.sizeBytes),
+          })
+        : file.largeData?.sheetCount != null
+          ? t("importV2.discovery.workbookEstimate", {
+              sheets: number.format(file.largeData.sheetCount),
+              files: number.format(file.largeData.estimatedOutputFiles),
+              bytes: number.format(file.largeData.totalBytes ?? file.sizeBytes),
+            })
+          : t("importV2.discovery.largeDataEstimate", {
+              rows: number.format(file.largeData?.rowCount ?? 0),
+              files: number.format(file.largeData?.estimatedOutputFiles ?? 0),
+              bytes: number.format(file.largeData?.totalBytes ?? file.sizeBytes),
+            })}
+    </p>
+  ));
 
   const skippedDetails = skipped.length > 0 ? (
     <details className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2 text-[11px]">
@@ -96,29 +127,60 @@ export function ImportDiscoveryStatus({
       </ul>
     </details>
   ) : null;
-  const largeDataConfirmation = pendingLarge.length > 0 ? (
-    <section className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2" aria-label={t("importV2.discovery.largeDataTitle")}>
+  const aggregateConfirmation = aggregateConfirmationPending && totals ? (
+    <section className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2" aria-label={t("importV2.discovery.totalConfirmationTitle")}>
       <div className="flex min-w-0 flex-wrap items-start gap-2">
         <div className="min-w-0 flex-1">
-          <p className="m-0 font-medium text-[var(--text-primary)]">{t("importV2.discovery.largeDataTitle")}</p>
-          {pendingLarge.map((file) => (
-            <p key={file.sourcePath} className="m-0 mt-1 break-words text-[10.5px] text-[var(--text-muted)]">
-              <span className="font-mono text-[var(--text-secondary)]">{file.relativePath}</span>
-              {" · "}
-              {t("importV2.discovery.largeDataEstimate", {
-                rows: number.format(file.largeData?.rowCount ?? 0),
-                files: number.format(file.largeData?.estimatedOutputFiles ?? 0),
-                bytes: number.format(file.largeData?.totalBytes ?? file.sizeBytes),
-              })}
-            </p>
-          ))}
+          <p className="m-0 font-medium text-[var(--text-primary)]">{t("importV2.discovery.totalConfirmationTitle")}</p>
+          <p className="m-0 mt-1 text-[10.5px] text-[var(--text-muted)]">
+            {t("importV2.discovery.totalEstimate", {
+              files: number.format(totals.fileCount),
+              bytes: number.format(totals.totalBytes),
+              outputs: totals.estimatedOutputFiles == null
+                ? t("importV2.discovery.unknownEstimate")
+                : number.format(totals.estimatedOutputFiles),
+            })}
+          </p>
+          <p className="m-0 mt-1 text-[10.5px] text-[var(--text-muted)]">
+            {totals.reasons.map((reason) => t(`importV2.discovery.totalReason.${reason}`)).join(" · ")}
+          </p>
+          {largeDataEstimateRows.length > 0 ? (
+            <div className="mt-2 border-t border-[var(--border-subtle)] pt-1.5" aria-label={t("importV2.discovery.largeDataTitle")}>
+              <p className="m-0 text-[10.5px] font-medium text-[var(--text-secondary)]">{t("importV2.discovery.largeDataTitle")}</p>
+              {largeDataEstimateRows}
+            </div>
+          ) : null}
         </div>
         <button
           type="button"
           className="btn btn--sm btn--primary"
-          disabled={!onConfirmLargeData || confirmingLargeData}
+          disabled={!confirmScan || confirmingLargeData}
           aria-busy={confirmingLargeData}
-          onClick={() => void onConfirmLargeData?.(pendingLargePaths)}
+          onClick={() => void confirmScan?.()}
+        >
+          {confirmingLargeData ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" /> : null}
+          {t(confirmingLargeData
+            ? "importV2.discovery.totalConfirming"
+            : pendingLarge.length > 0
+              ? "importV2.discovery.totalConfirmSafe"
+              : "importV2.discovery.totalConfirm")}
+        </button>
+      </div>
+    </section>
+  ) : null;
+  const largeDataConfirmation = !aggregateConfirmationPending && pendingLarge.length > 0 ? (
+    <section className="basis-full min-w-0 border-t border-[var(--border-subtle)] pt-2" aria-label={t("importV2.discovery.largeDataTitle")}>
+      <div className="flex min-w-0 flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="m-0 font-medium text-[var(--text-primary)]">{t("importV2.discovery.largeDataTitle")}</p>
+          {largeDataEstimateRows}
+        </div>
+        <button
+          type="button"
+          className="btn btn--sm btn--primary"
+          disabled={!confirmScan || confirmingLargeData}
+          aria-busy={confirmingLargeData}
+          onClick={() => void confirmScan?.(pendingLargePaths)}
         >
           {confirmingLargeData ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" /> : null}
           {t(confirmingLargeData ? "importV2.discovery.largeDataConfirming" : "importV2.discovery.largeDataConfirm")}
@@ -158,6 +220,7 @@ export function ImportDiscoveryStatus({
           {resultSummary ? ` · ${t("importV2.discovery.added", { count: resultSummary.added })} · ${t("importV2.discovery.skipped", { count: resultSummary.skipped })}` : ""}
         </span>
         <button type="button" className="icon-button" aria-label={t("importV2.discovery.dismiss")} title={t("importV2.discovery.dismiss")} onClick={onDismiss}><X size={14} aria-hidden="true" /></button>
+        {aggregateConfirmation}
         {largeDataConfirmation}
         {formatDetails}
         {skippedDetails}

@@ -154,6 +154,7 @@ pub enum BackendEventType {
     /// Persisted structured workflow state changed. The payload is the full
     /// bounded [`WorkflowRun`](crate::models::workflow::WorkflowRun) snapshot.
     WorkflowUpdated,
+    ImportSessionPatch,
 }
 
 /// Payload of a [`BackendEventType::TaskStreamOutput`] event. `delta` is the

@@ -23,6 +23,8 @@ interface ImportBatchRecord {
   projectKey: string;
   epoch: number;
   tasks: readonly ImportBatchTaskRef[];
+  itemIds?: readonly string[];
+  operationTaskId?: string;
 }
 
 interface ImportBatchControllerOptions {
@@ -60,7 +62,6 @@ function isRecoverableImportItemStatus(status: ImportItem["status"]): boolean {
     "waiting_capability",
     "waiting_login",
     "waiting_authorization",
-    "waiting_log",
     "extracting",
     "validating",
     "preview_ready",
@@ -77,6 +78,70 @@ export function buildImportBatchProgress(
   const taskById = new Map(taskList.map((task) => [task.id, task]));
   const itemById = new Map((session?.items ?? []).map((item) => [item.itemId, item]));
   return records.map((record) => {
+    if (record.operationTaskId) {
+      const operation = taskById.get(record.operationTaskId);
+      const itemIds = record.itemIds ?? [];
+      let completed = 0;
+      let waitingForConfirmation = 0;
+      let reviewReady = 0;
+      let failed = 0;
+      let cancelled = 0;
+      let active = 0;
+      let unknown = 0;
+      const failedItemIds: string[] = [];
+      for (const itemId of itemIds) {
+        const item = itemById.get(itemId);
+        if (!item) {
+          unknown += 1;
+          continue;
+        }
+        if (item.status === "preview_ready" || item.status === "needs_merge") {
+          completed += 1;
+          waitingForConfirmation += 1;
+          reviewReady += 1;
+        } else if (["waiting_capability", "waiting_login", "waiting_authorization", "paused"].includes(item.status)) {
+          waitingForConfirmation += 1;
+        } else if (item.status === "failed") {
+          failed += 1;
+          failedItemIds.push(itemId);
+        } else if (item.status === "cancelled" || item.status === "skipped") {
+          cancelled += 1;
+        } else if (item.status === "completed") {
+          completed += 1;
+        } else {
+          active += 1;
+        }
+      }
+      const operationStatus = operation?.status ?? "unknown";
+      const operationActive = operation
+        ? !isTerminalStatus(operation.status) && operation.status !== "waiting_for_confirmation"
+        : false;
+      const tasks = [{
+        id: record.operationTaskId,
+        itemId: "",
+        title: operation?.title ?? "Import batch",
+        status: operationStatus,
+        cancellable: operation?.cancellable ?? false,
+      } satisfies ImportBatchTask];
+      return {
+        id: record.id,
+        sessionId: record.sessionId,
+        total: itemIds.length,
+        taskIds: [record.operationTaskId],
+        processed: completed + waitingForConfirmation + failed + cancelled - reviewReady,
+        active,
+        completed,
+        waitingForConfirmation,
+        reviewReady,
+        failed,
+        cancelled,
+        cancelling: operationStatus === "cancelling" ? 1 : 0,
+        unknown,
+        nonCancellable: operationActive && operation && !operation.cancellable ? 1 : 0,
+        failedItemIds,
+        tasks,
+      };
+    }
     let completed = 0;
     let waitingForConfirmation = 0;
     let reviewReady = 0;
@@ -143,9 +208,25 @@ function recoverImportBatchRecords(
   const taskById = new Map(taskList.map((task) => [task.id, task]));
   const recovered = new Map<string, ImportBatchRecord>();
   for (const item of session.items) {
-    if (!item.taskId || !isRecoverableImportItemStatus(item.status)) continue;
+    if (!item.taskId) continue;
     const task = taskById.get(item.taskId);
-    if (task && isTerminalStatus(task.status)) continue;
+    const isOperation = task?.batchId?.startsWith("import-v2-operation:") ?? false;
+    if (!isOperation && !isRecoverableImportItemStatus(item.status)) continue;
+    if (task && isTerminalStatus(task.status) && !isOperation) continue;
+    if (isOperation) {
+      const current = recovered.get(task!.id) ?? {
+        id: task!.id,
+        sessionId: session.sessionId,
+        projectKey,
+        epoch,
+        tasks: [{ taskId: task!.id, itemId: "", title: task!.title }],
+        itemIds: [],
+        operationTaskId: task!.id,
+      };
+      if (current.itemIds?.includes(item.itemId)) continue;
+      recovered.set(task!.id, { ...current, itemIds: [...(current.itemIds ?? []), item.itemId] });
+      continue;
+    }
     const batchId = task?.batchId ?? `recovered:${session.sessionId}:${item.taskId}`;
     const current = recovered.get(batchId) ?? {
       id: batchId,
@@ -180,7 +261,7 @@ export function useImportBatchController({
 }: ImportBatchControllerOptions): ImportBatchController {
   const { t } = useTranslation();
   const pushToast = useToastStore((state) => state.pushToast);
-  const selectedTaskUpsert = useTaskStore((state) => state.upsertTask);
+  const selectedTasksUpsert = useTaskStore((state) => state.upsertTasks);
   const [batchRecords, setBatchRecords] = useState<readonly ImportBatchRecord[]>([]);
   const [cancellingBatchIds, setCancellingBatchIds] = useState<ReadonlySet<string>>(new Set());
   const [dismissedBatchIds, setDismissedBatchIds] = useState<ReadonlySet<string>>(new Set());
@@ -216,7 +297,13 @@ export function useImportBatchController({
     if (tasks.length === 0 || !isScopeCurrent(requestKey, epoch, sessionId)) return;
     const currentSession = useImportStore.getState().session;
     const itemById = new Map((currentSession?.items ?? []).map((item) => [item.itemId, item]));
-    const batchId = tasks.find((task) => task.batchId)?.batchId ?? nextLocalBatchId();
+    const operationTask = tasks.length === 1
+      && tasks[0]?.batchId?.startsWith("import-v2-operation:")
+      ? tasks[0]
+      : null;
+    const batchId = operationTask?.id
+      ?? tasks.find((task) => task.batchId)?.batchId
+      ?? nextLocalBatchId();
     const taskRefs = tasks.map((task, index) => ({
       taskId: task.id,
       itemId: itemIds[index] ?? "",
@@ -228,7 +315,16 @@ export function useImportBatchController({
         (record) => record.id !== batchId
           && !record.tasks.some((task) => taskIds.has(task.taskId)),
       ),
-      { id: batchId, sessionId, projectKey: requestKey, epoch, tasks: taskRefs },
+      {
+        id: batchId,
+        sessionId,
+        projectKey: requestKey,
+        epoch,
+        tasks: operationTask
+          ? [{ taskId: operationTask.id, itemId: "", title: operationTask.title }]
+          : taskRefs,
+        ...(operationTask ? { itemIds: [...itemIds], operationTaskId: operationTask.id } : {}),
+      },
     ]);
     setCancellingBatchIds((current) => {
       if (!current.has(batchId)) return current;
@@ -258,7 +354,7 @@ export function useImportBatchController({
           sessionId: target.sessionId,
           batchId: target.id,
         });
-        cancelled.forEach((task) => selectedTaskUpsert(task));
+        selectedTasksUpsert(cancelled);
       } else {
         const results = await Promise.allSettled(
           activeTasks.map((task) => taskLauncher.cancel(task.id, { suppressToast: true })),
@@ -278,7 +374,7 @@ export function useImportBatchController({
         return next;
       });
     }
-  }, [batches, cancellingBatchIds, isScopeCurrent, projectId, projectKey, pushToast, rootPath, selectedTaskUpsert, sessionEpoch, t, taskLauncher]);
+  }, [batches, cancellingBatchIds, isScopeCurrent, projectId, projectKey, pushToast, rootPath, selectedTasksUpsert, sessionEpoch, t, taskLauncher]);
 
   const dismissBatch = useCallback((requestedBatchId?: string) => {
     const target = batches.find((candidate) => candidate.id === requestedBatchId) ?? batches[0];

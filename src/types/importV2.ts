@@ -262,6 +262,7 @@ export interface AddImportItemsV2Request { projectId: string; projectRootPath: s
 export interface SetImportItemSelectionV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; selected: boolean; }
 export interface SelectImportSubtitleV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; fileName: string; }
 export interface StartImportItemsV2Request { projectId: string; projectRootPath: string; sessionId: string; itemIds: string[]; recoveryAction?: ImportRecoveryAction | null; }
+export type StartImportBatchV2Request = StartImportItemsV2Request;
 export interface CancelImportBatchV2Request { projectId: string; projectRootPath: string; sessionId: string; batchId: string; }
 export interface CancelImportItemV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; }
 export interface ImportMergeContextV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; }
@@ -274,3 +275,21 @@ export type ImportItemCommitResult =
   | { itemId: string; sourceId: string; versionId: string; wikiPath: string; committed: true; errorCode: null }
   | { itemId: string; sourceId: null; versionId: null; wikiPath: null; committed: false; errorCode: string };
 export interface ImportBatchResult { batchId: string; sessionId: string; batchTaskId?: string | null; committedCount: number; failedCount: number; items: ImportItemCommitResult[]; }
+
+export interface ImportSessionPatchCounts {
+  total: number;
+  processed: number;
+  succeeded: number;
+  waiting: number;
+  failed: number;
+  cancelled: number;
+}
+
+export interface ImportSessionPatchEvent {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  batchId: string;
+  items: ImportItem[];
+  counts: ImportSessionPatchCounts;
+}

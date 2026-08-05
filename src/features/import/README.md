@@ -27,3 +27,20 @@ DTO. Bilibili imports prefer verified platform subtitles, preserve normalized
 transcript segments as evidence, and otherwise pause at
 `waiting_authorization` before local ASR. The UI must never infer ASR consent
 from pack availability.
+
+Batch processing is operation-owned: one backend operation task carries
+cancellation and aggregate progress, while Import session/item JSON remains the
+per-item source of truth. The frontend consumes bounded
+`import://session-patch` cohorts with one bulk store update and one terminal
+summary refresh; it does not synthesize one global task per item. Saved file
+scans and aggregate confirmation thresholds are backend-owned. React may show
+their totals and submit an accept/discard token, but it never rescans paths,
+decides thresholds, mutates source files, or treats app-state persistence as
+content write authority. The legacy per-item start IPC remains an explicit
+small-cohort compatibility boundary, not the primary workflow.
+
+Aggregate and per-spreadsheet risk are separate saved-scan acknowledgements:
+aggregate acceptance admits only ordinary files and keeps large CSV/XLSX (or
+an XLS with an incomplete output estimate) pending. Both stages retain the
+same scan token and are revalidated under the backend project-write authority
+critical section. A discovery hard-limit error never becomes a partial scan.

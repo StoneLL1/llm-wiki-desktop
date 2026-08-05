@@ -18,6 +18,8 @@ describe("Import V2 presentation API", () => {
       addPaths: "start_add_import_paths_v2",
       addText: "add_import_text_v2",
       getScanResult: "get_import_scan_result_v2",
+      acceptScan: "accept_import_scan_v2",
+      discardScan: "discard_import_scan_v2",
       addUrl: "add_import_url_v2",
       discoverCollection: "discover_import_collection_v2",
       loadCollectionPage: "load_import_collection_page_v2",
@@ -26,6 +28,7 @@ describe("Import V2 presentation API", () => {
       confirmRemoteMediaRetention: "confirm_remote_media_retention_v2",
       setSelection: "set_import_item_selection_v2",
       startItems: "start_import_items_v2",
+      startBatch: "start_import_batch_v2",
       cancelBatch: "cancel_import_batch_v2",
       cancelItem: "cancel_import_item_v2",
       skipItem: "skip_import_item_v2",
@@ -116,6 +119,32 @@ describe("Import V2 presentation API", () => {
     await importV2Api.getScanResult(request);
 
     expect(invoke).toHaveBeenLastCalledWith("get_import_scan_result_v2", { request });
+  });
+
+  it("keeps legacy item start while exposing operation and saved-scan commands", async () => {
+    const batchRequest = {
+      projectId: "project-1",
+      projectRootPath: "D:/Wiki/project-1",
+      sessionId: "session-1",
+      itemIds: ["item-1", "item-2"],
+    };
+    invoke.mockResolvedValueOnce({});
+    await importV2Api.startBatch(batchRequest);
+    expect(invoke).toHaveBeenLastCalledWith("start_import_batch_v2", { request: batchRequest });
+
+    const scanRequest = {
+      projectId: "project-1",
+      projectRootPath: "D:/Wiki/project-1",
+      sessionId: "session-1",
+      taskId: "scan-1",
+      confirmationToken: "token-1",
+    };
+    invoke.mockResolvedValueOnce({});
+    await importV2Api.acceptScan(scanRequest);
+    expect(invoke).toHaveBeenLastCalledWith("accept_import_scan_v2", { request: scanRequest });
+    invoke.mockResolvedValueOnce({});
+    await importV2Api.discardScan(scanRequest);
+    expect(invoke).toHaveBeenLastCalledWith("discard_import_scan_v2", { request: scanRequest });
   });
 
   it("forwards batch cancellation with the session and backend batch identity", async () => {
