@@ -791,8 +791,8 @@ impl AppState {
             .map_err(|message| {
                 BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
             })?;
-        self.project_service.revoke_project_trust(root)?;
-        self.project_registry.revoke_trust(project_id, root)
+        self.project_registry.revoke_trust(project_id, root)?;
+        self.project_service.revoke_project_trust(root)
     }
 }
 
