@@ -523,8 +523,11 @@ fn batch_a_expected_red_counts_one_discovery_callback_per_file() {
             )
             .unwrap();
         assert_eq!(result.files.len(), count);
-        assert_eq!(callback_invocations, count, "expected-red control-plane baseline for {count} files");
-        assert_eq!(callback_items, count, "Batch E must replace this with a bounded event assertion");
+        assert!(
+            callback_invocations <= count.div_ceil(128) + 1,
+            "discovery callback count must remain bounded for {count} files"
+        );
+        assert_eq!(callback_items, count);
     }
 }
 

@@ -13,6 +13,7 @@ pub mod connectors;
 pub mod domain_limiter;
 pub mod domain_router;
 pub mod engine;
+pub(crate) mod execution_control;
 pub mod file_discovery;
 pub mod file_router;
 pub mod generic_web_engine;
@@ -47,5 +48,7 @@ pub mod wechat_web_engine;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(feature = "gui")]
+pub(crate) use orchestrator::{batch_operation_marker, IMPORT_BATCH_OPERATION_MARKER};
 pub use orchestrator::{routes_for_format, ImportV2Service};
 pub use session_store::{CollectionImportInput, SessionStore};

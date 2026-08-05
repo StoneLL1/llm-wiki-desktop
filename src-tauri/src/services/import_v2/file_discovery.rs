@@ -19,6 +19,7 @@ const OOXML_MAX_UNCOMPRESSED: u64 = 64 * 1024 * 1024;
 const LARGE_DATA_BYTES: u64 = 8 * 1024 * 1024;
 const LARGE_DATA_ROWS: u64 = 10_000;
 const LARGE_DATA_ROWS_PER_FILE: u64 = 5_000;
+pub const DISCOVERY_BATCH_SIZE: usize = 128;
 
 #[derive(Default)]
 pub struct FileDiscoveryService;
@@ -48,6 +49,7 @@ impl FileDiscoveryService {
         };
         let mut visited_dirs = HashSet::new();
         let mut visited_files = HashSet::new();
+        let mut pending = Vec::with_capacity(DISCOVERY_BATCH_SIZE);
 
         while let Some((path, scan_root, depth)) = queue.pop_front() {
             if is_cancelled() {
@@ -252,7 +254,14 @@ impl FileDiscoveryService {
                 large_data: estimate_large_data(&path, format, metadata.len())?,
             };
             result.files.push(file.clone());
-            on_batch(std::slice::from_ref(&file));
+            pending.push(file);
+            if pending.len() == DISCOVERY_BATCH_SIZE {
+                on_batch(&pending);
+                pending.clear();
+            }
+        }
+        if !pending.is_empty() {
+            on_batch(&pending);
         }
         Ok(result)
     }

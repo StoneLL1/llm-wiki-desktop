@@ -566,6 +566,7 @@ pub fn run() {
             commands::import_v2_commands::cancel_import_batch_v2,
             commands::import_v2_commands::skip_import_item_v2,
             commands::import_v2_commands::start_import_items_v2,
+            commands::import_v2_commands::start_import_batch_v2,
             commands::import_v2_commands::confirm_import_session_v2,
             commands::import_v2_agent_commands::start_import_agent_assistance_v2,
             commands::import_v2_agent_commands::accept_import_agent_candidate_v2,

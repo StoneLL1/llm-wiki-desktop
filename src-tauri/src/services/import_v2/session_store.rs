@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::errors::{
     BackendError, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_SESSION_INVALID, IMPORT_V2_SESSION_NOT_FOUND,
@@ -12,6 +13,7 @@ use crate::models::import_v2::{
     ImportSessionStatus, IMPORT_V2_SCHEMA_VERSION,
 };
 use crate::models::paths::ProjectContext;
+use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::FileStore;
 
 #[derive(Default)]
@@ -81,8 +83,16 @@ fn validate_id(value: &str) -> Result<(), BackendError> {
     }
 }
 
-fn session_root(session_id: &str) -> String {
-    format!(".app/import-sessions/{session_id}")
+fn session_root(context: &ProjectContext, session_id: &str) -> Result<String, BackendError> {
+    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
+        BackendError::new(
+            IMPORT_V2_STATE_INVALID,
+            "Import state is unavailable for this project layout.",
+            true,
+            false,
+        )
+    })?;
+    Ok(format!("{root}/{session_id}"))
 }
 
 impl SessionStore {
@@ -103,10 +113,11 @@ impl SessionStore {
 
     pub(super) fn serialized_writes(
         &self,
+        context: &ProjectContext,
         session: &ImportSession,
     ) -> Result<Vec<(String, Vec<u8>)>, BackendError> {
         validate_id(&session.session_id)?;
-        let root = session_root(&session.session_id);
+        let root = session_root(context, &session.session_id)?;
         let mut writes = Vec::with_capacity(session.items.len() + 1);
         for item in &session.items {
             validate_id(&item.item_id)?;
@@ -143,7 +154,7 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
         validate_id(session_id)?;
-        let root = session_root(session_id);
+        let root = session_root(context, session_id)?;
         let summary_path = format!("{root}/session.json");
         if !file_store.exists(context, &summary_path) {
             return Err(BackendError::new(
@@ -215,7 +226,7 @@ impl SessionStore {
                 "Import session belongs to another project.",
             ));
         }
-        let root = session_root(&session.session_id);
+        let root = session_root(context, &session.session_id)?;
         let mut seen = HashSet::new();
         for item in &session.items {
             validate_id(&item.item_id)?;
@@ -254,13 +265,13 @@ impl SessionStore {
             .into_iter()
             .map(public_import_input)
             .collect::<Result<Vec<_>, _>>()?;
-        session.items.extend(
-            inputs
-                .into_iter()
-                .map(|input| ImportItem::queued(&uuid::Uuid::new_v4().to_string(), input)),
-        );
+        let new_items = inputs
+            .into_iter()
+            .map(|input| ImportItem::queued(&uuid::Uuid::new_v4().to_string(), input))
+            .collect::<Vec<_>>();
+        session.items.extend(new_items.clone());
         session.updated_at = chrono::Utc::now().to_rfc3339();
-        self.save(context, file_store, &session)?;
+        self.add_items(context, file_store, &session, &new_items)?;
         Ok(session)
     }
 
@@ -299,6 +310,7 @@ impl SessionStore {
             .collect::<HashSet<_>>();
         let mut child_item_ids = Vec::new();
         let mut children = Vec::new();
+        let existing_item_count = session.items.len();
         for collection_input in inputs {
             let input = public_import_input(collection_input.input)?;
             if let Some(url) = input.normalized_locator.as_ref() {
@@ -348,7 +360,8 @@ impl SessionStore {
             });
         }
         session.updated_at = now;
-        self.save(context, file_store, &session)?;
+        let new_items = session.items[existing_item_count..].to_vec();
+        self.add_items(context, file_store, &session, &new_items)?;
         Ok(session)
     }
 
@@ -360,7 +373,12 @@ impl SessionStore {
         platform: &str,
     ) -> HashMap<String, String> {
         let mut newest_fingerprints: HashMap<String, (String, String)> = HashMap::new();
-        let sessions_root = context.root.join(".app/import-sessions");
+        let Some(import_root) = context.layout.import_state_root.as_deref() else {
+            return HashMap::new();
+        };
+        let Ok(sessions_root) = context.resolve_project_path(import_root) else {
+            return HashMap::new();
+        };
         let Ok(entries) = std::fs::read_dir(sessions_root) else {
             return HashMap::new();
         };
@@ -420,19 +438,7 @@ impl SessionStore {
         item: ImportItem,
     ) -> Result<ImportSession, BackendError> {
         validate_id(&item.item_id)?;
-        let mut session = self.load(context, file_store, session_id)?;
-        let existing = session
-            .items
-            .iter_mut()
-            .find(|candidate| candidate.item_id == item.item_id)
-            .ok_or_else(|| {
-                BackendError::new(
-                    IMPORT_V2_ITEM_NOT_FOUND,
-                    "Import session item was not found.",
-                    true,
-                    false,
-                )
-            })?;
+        let existing = self.load_item(context, file_store, session_id, &item.item_id)?;
         if existing.input != item.input
             || (existing.status != item.status && !existing.status.can_transition_to(&item.status))
         {
@@ -443,10 +449,132 @@ impl SessionStore {
                 true,
             ));
         }
-        *existing = item;
-        session.updated_at = chrono::Utc::now().to_rfc3339();
-        self.save(context, file_store, &session)?;
-        Ok(session)
+        self.write_item(context, file_store, session_id, &item)?;
+        self.load(context, file_store, session_id)
+    }
+
+    pub fn load_item(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        validate_id(session_id)?;
+        validate_id(item_id)?;
+        let root = session_root(context, session_id)?;
+        let path = format!("{root}/items/{item_id}.json");
+        if !file_store.exists(context, &path) {
+            return Err(BackendError::new(
+                IMPORT_V2_ITEM_NOT_FOUND,
+                "Import session item was not found.",
+                true,
+                false,
+            ));
+        }
+        let item: ImportItem = file_store.read_json(context, &path)?;
+        if item.item_id != item_id {
+            return Err(invalid_session("Import session item metadata is invalid."));
+        }
+        Ok(item)
+    }
+
+    pub fn write_item(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        item: &ImportItem,
+    ) -> Result<(), BackendError> {
+        validate_id(session_id)?;
+        validate_id(&item.item_id)?;
+        let root = session_root(context, session_id)?;
+        file_store.write_json_atomic(
+            context,
+            &format!("{root}/items/{}.json", item.item_id),
+            item,
+        )
+    }
+
+    pub fn write_items(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        items: &[ImportItem],
+    ) -> Result<(), BackendError> {
+        for item in items {
+            self.write_item(context, file_store, session_id, item)?;
+        }
+        Ok(())
+    }
+
+    /// Install a cohort as one recoverable compare-and-swap transaction. The
+    /// expected hashes are captured from the caller's snapshot, so late
+    /// external edits fail closed instead of being overwritten.
+    pub(crate) fn write_item_cohort_if_unchanged(
+        &self,
+        context: &ProjectContext,
+        _file_store: &FileStore,
+        session_id: &str,
+        originals: &[ImportItem],
+        replacements: &[ImportItem],
+    ) -> Result<(), BackendError> {
+        if originals.len() != replacements.len() {
+            return Err(invalid_session(
+                "Import item cohort does not match its snapshot.",
+            ));
+        }
+        let root = session_root(context, session_id)?;
+        let mut writes = Vec::with_capacity(originals.len());
+        for (before, after) in originals.iter().zip(replacements) {
+            if before.item_id != after.item_id {
+                return Err(invalid_session("Import item cohort identity changed."));
+            }
+            let expected = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec_pretty(before).map_err(|_| {
+                    invalid_session("Import session item could not be serialized.")
+                })?)
+            );
+            let desired = serde_json::to_vec_pretty(after)
+                .map_err(|_| invalid_session("Import session item could not be serialized."))?;
+            writes.push((
+                context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?,
+                desired,
+                expected,
+            ));
+        }
+        let mut transaction = FileTransaction::new_for_project(&context.root);
+        transaction.write_many_if_hash_matches(&writes)?;
+        transaction.commit()
+    }
+
+    pub fn write_session_record(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session: &ImportSession,
+    ) -> Result<(), BackendError> {
+        let root = session_root(context, &session.session_id)?;
+        file_store.write_json_atomic(
+            context,
+            &format!("{root}/session.json"),
+            &SessionRecord::from(session),
+        )
+    }
+
+    pub fn add_items(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session: &ImportSession,
+        new_items: &[ImportItem],
+    ) -> Result<(), BackendError> {
+        let root = session_root(context, &session.session_id)?;
+        file_store.ensure_dir(context, &format!("{root}/items"))?;
+        self.write_items(context, file_store, &session.session_id, new_items)?;
+        self.write_session_record(context, file_store, session)
     }
 }
 

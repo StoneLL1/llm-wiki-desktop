@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -170,6 +171,19 @@ struct Journal {
     recovery_artifacts: Vec<String>,
 }
 
+/// A checked replacement prepared before the cohort journal is made durable.
+/// Keeping this small record lets large import cohorts write one complete
+/// recovery journal instead of repeatedly serializing a growing JSON array.
+struct PendingCheckedReplacement {
+    path: PathBuf,
+    temporary: PathBuf,
+    guard: PathBuf,
+    previous: Vec<u8>,
+    expected_identity: FileIdentity,
+    candidate_identity: FileIdentity,
+    desired: Vec<u8>,
+}
+
 pub struct FileTransaction {
     backups: Vec<(PathBuf, Option<Vec<u8>>)>,
     created_dirs: Vec<PathBuf>,
@@ -182,6 +196,8 @@ pub struct FileTransaction {
     journal_path: Option<PathBuf>,
     journal_entries: Vec<JournalEntry>,
     journal_artifacts: Vec<String>,
+    #[cfg(test)]
+    cohort_parent_syncs: usize,
     finished: bool,
 }
 
@@ -219,6 +235,8 @@ impl FileTransaction {
             journal_path: None,
             journal_entries: Vec::new(),
             journal_artifacts: Vec::new(),
+            #[cfg(test)]
+            cohort_parent_syncs: 0,
             finished: false,
         }
     }
@@ -725,6 +743,97 @@ impl FileTransaction {
         self.cleanup_artifact(&guard)
     }
 
+    /// Apply a cohort of checked replacements with a single durable intent
+    /// journal.  Every target is verified before the journal is written and
+    /// checked again immediately before installation.  A crash therefore
+    /// still rolls the whole cohort back, while journal serialization remains
+    /// linear for 10,000-item import batches.
+    pub fn write_many_if_hash_matches(
+        &mut self,
+        writes: &[(PathBuf, Vec<u8>, String)],
+    ) -> Result<(), BackendError> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+        if self.project_root.is_none() {
+            return Err(staging_safe_io_error());
+        }
+        let mut pending = Vec::with_capacity(writes.len());
+        for (path, desired, expected_hash) in writes {
+            let parent = path.parent().ok_or_else(staging_safe_io_error)?;
+            let temporary = write_synced_temp(parent, path, desired)?;
+            let guard = parent.join(format!(".wiki-guard-{}", uuid::Uuid::new_v4()));
+            self.recovery_artifacts.push(temporary.clone());
+            let parent_binding = self.bind_mutation_parent(path)?;
+            run_before_checked_displace_hook(path);
+            if let Err(error) = bound_hard_link(&parent_binding, path, &guard) {
+                let _ = self.cleanup_artifact(&temporary);
+                return Err(io_error(error, path));
+            }
+            self.recovery_artifacts.push(guard.clone());
+            self.guard_by_destination
+                .insert(path.clone(), guard.clone());
+            let expected_identity = file_identity(path)?;
+            let guard_identity = file_identity(&guard)?;
+            let previous = read_regular_nofollow(&parent_binding, &guard)?;
+            if expected_identity != guard_identity || digest_bytes(&previous) != *expected_hash {
+                return Err(conflict_error());
+            }
+            let candidate_identity = file_identity(&temporary)?;
+            pending.push(PendingCheckedReplacement {
+                path: path.clone(),
+                temporary,
+                guard,
+                previous,
+                expected_identity,
+                candidate_identity,
+                desired: desired.clone(),
+            });
+        }
+        self.install_cohort_journal(&pending)?;
+        let mut changed_parents = HashSet::new();
+        for replacement in pending {
+            let parent = replacement
+                .path
+                .parent()
+                .ok_or_else(staging_safe_io_error)?;
+            let parent_binding = self.bind_mutation_parent(&replacement.path)?;
+            if file_identity(&replacement.path)? != replacement.expected_identity {
+                return Err(conflict_error());
+            }
+            bound_replace_existing(&parent_binding, &replacement.temporary, &replacement.path)
+                .map_err(|error| io_error(error, &replacement.path))?;
+            changed_parents.insert(parent.to_path_buf());
+            self.backups
+                .push((replacement.path.clone(), Some(replacement.previous)));
+            self.capture_cohort_install(
+                &replacement.path,
+                &replacement.desired,
+                replacement.candidate_identity,
+            )?;
+            std::fs::remove_file(&replacement.guard)
+                .map_err(|error| io_error(error, &replacement.guard))?;
+        }
+        for parent in changed_parents {
+            sync_parent(&parent)?;
+            #[cfg(test)]
+            {
+                self.cohort_parent_syncs += 1;
+            }
+        }
+        // The journal retains all artifact names until commit, but the live
+        // vector need not remove them one-by-one (which is quadratic at
+        // 10,000 items). If an earlier step failed, this line is not reached
+        // and rollback still owns the complete artifact set.
+        self.recovery_artifacts.clear();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn cohort_parent_sync_count(&self) -> usize {
+        self.cohort_parent_syncs
+    }
+
     pub fn delete_if_hash_matches(
         &mut self,
         path: &Path,
@@ -784,6 +893,91 @@ impl FileTransaction {
         #[cfg(test)]
         commit_fault_boundary("deleted", None);
         self.finished = true;
+        Ok(())
+    }
+
+    fn install_cohort_journal(
+        &mut self,
+        pending: &[PendingCheckedReplacement],
+    ) -> Result<(), BackendError> {
+        let root = self
+            .project_root
+            .as_deref()
+            .ok_or_else(staging_safe_io_error)?;
+        self.journal_entries = pending
+            .iter()
+            .map(|replacement| {
+                let relative = replacement
+                    .path
+                    .strip_prefix(root)
+                    .map_err(|_| staging_safe_io_error())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Ok(JournalEntry {
+                    relative_path: relative,
+                    previous: Some(replacement.previous.clone()),
+                    desired_hash: digest_bytes(&replacement.desired),
+                    desired_absent: false,
+                    installed_identity: Some(replacement.candidate_identity),
+                    recovery: None,
+                })
+            })
+            .collect::<Result<Vec<_>, BackendError>>()?;
+        self.journal_artifacts = self
+            .recovery_artifacts
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .map_err(|_| staging_safe_io_error())
+                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            })
+            .collect::<Result<Vec<_>, BackendError>>()?;
+        let journal_path = self
+            .journal_path
+            .get_or_insert_with(|| {
+                root.join(format!(
+                    ".app/import-v2-journal/{}.json",
+                    uuid::Uuid::new_v4()
+                ))
+            })
+            .clone();
+        if let Some(parent) = journal_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| io_error(error, parent))?;
+        }
+        self.write_journal_in_progress(&journal_path)
+    }
+
+    fn write_journal_in_progress(&self, journal_path: &Path) -> Result<(), BackendError> {
+        let bytes = serde_json::to_vec(&Journal {
+            state: JournalState::InProgress,
+            entries: self.journal_entries.clone(),
+            recovery_artifacts: self.journal_artifacts.clone(),
+        })
+        .map_err(|_| staging_safe_io_error())?;
+        write_atomic_bytes(journal_path, &bytes)
+    }
+
+    fn capture_cohort_install(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        expected_identity: FileIdentity,
+    ) -> Result<(), BackendError> {
+        self.unverified_installs.insert(path.to_path_buf());
+        let anchor = std::fs::File::open(path).map_err(|error| io_error(error, path))?;
+        let identity = file_identity_from_file(&anchor, path)?;
+        if identity != expected_identity {
+            return Err(conflict_error());
+        }
+        self.installed_ownership.insert(
+            path.to_path_buf(),
+            InstalledOwnership {
+                identity,
+                hash: digest_bytes(bytes),
+                _anchor: anchor,
+            },
+        );
+        self.unverified_installs.remove(path);
         Ok(())
     }
 
@@ -2064,6 +2258,28 @@ mod tests {
         transaction.write_new(&path, b"kept").unwrap();
         transaction.commit().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"kept");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checked_cohort_syncs_each_parent_once_not_once_per_item() {
+        let root = std::env::temp_dir().join(format!("import-v2-cohort-{}", uuid::Uuid::new_v4()));
+        let items = root.join(".app/import-sessions/s/items");
+        std::fs::create_dir_all(&items).unwrap();
+        let writes = (0..128)
+            .map(|index| {
+                let path = items.join(format!("{index}.json"));
+                std::fs::write(&path, b"before").unwrap();
+                (path, b"after".to_vec(), digest_bytes(b"before"))
+            })
+            .collect::<Vec<_>>();
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_many_if_hash_matches(&writes).unwrap();
+        assert_eq!(transaction.cohort_parent_sync_count(), 1);
+        transaction.commit().unwrap();
+        assert!(writes
+            .iter()
+            .all(|(path, _, _)| std::fs::read(path).unwrap() == b"after"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

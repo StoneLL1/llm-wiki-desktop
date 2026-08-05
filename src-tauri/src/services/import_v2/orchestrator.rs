@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -18,7 +18,7 @@ use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_agent::AgentCandidate;
 use crate::models::import_v2_file::FileFormat;
 use crate::models::paths::ProjectContext;
-use crate::models::task::{TaskResult, TaskResultReference, TaskStatus, TaskType};
+use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
 use crate::services::import_v2::engine::{
     describe_engine, engine_panicked_error, execute_engine, execute_engine_with_progress,
@@ -46,6 +46,15 @@ use crate::services::SecretService;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 use sha2::{Digest, Sha256};
+
+/// Persisted marker on the one task representing a bulk operation.  Legacy
+/// item tasks retain their existing UUID batch IDs, so recovery can identify
+/// this ownership rule without an in-memory registry.
+pub(crate) const IMPORT_BATCH_OPERATION_MARKER: &str = "import-v2-operation";
+
+pub(crate) fn batch_operation_marker(session_id: &str) -> String {
+    format!("{IMPORT_BATCH_OPERATION_MARKER}:{session_id}")
+}
 
 pub struct ImportV2Service {
     pub(super) sessions: SessionStore,
@@ -164,7 +173,15 @@ impl ImportV2Service {
         context: &ProjectContext,
         files: &FileStore,
     ) -> Result<Option<String>, BackendError> {
-        let root = context.app_dir.join("import-sessions");
+        let import_state_root = context.layout.import_state_root.as_deref().ok_or_else(|| {
+            BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Import state is unavailable for this project layout.",
+                true,
+                false,
+            )
+        })?;
+        let root = context.resolve_project_path(import_state_root)?;
         let metadata = match fs::symlink_metadata(&root) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -236,7 +253,7 @@ impl ImportV2Service {
                 Err(error) => return Err(error),
             };
             if !matches!(
-                session.status,
+                derive_session_status(&session.items),
                 ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
             ) {
                 return Ok(Some(id));
@@ -556,6 +573,34 @@ impl ImportV2Service {
         })
     }
 
+    /// A batch item owns only its persisted item fact.  It must never cancel
+    /// the shared operation token used by its siblings.
+    pub fn cancel_batch_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.mutate_item(context, files, session_id, item_id, |item| {
+            if matches!(
+                item.status,
+                ImportItemStatus::Completed | ImportItemStatus::Committing
+            ) {
+                return Err(BackendError::new(
+                    IMPORT_V2_STATE_INVALID,
+                    "This import item can no longer be cancelled.",
+                    false,
+                    true,
+                ));
+            }
+            transition_item(item, ImportItemStatus::Cancelled)?;
+            item.task_id = None;
+            item.progress = None;
+            Ok(())
+        })
+    }
+
     pub fn skip_item(
         &self,
         context: &ProjectContext,
@@ -585,12 +630,14 @@ impl ImportV2Service {
             ));
         }
         if let Some(task_id) = item.task_id.as_deref() {
-            if tasks.get_task(task_id).is_some_and(|task| {
-                !matches!(
-                    task.status,
-                    TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
-                )
-            }) {
+            if !is_batch_operation_task(tasks, task_id)
+                && tasks.get_task(task_id).is_some_and(|task| {
+                    !matches!(
+                        task.status,
+                        TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                    )
+                })
+            {
                 task_call(tasks.cancel_task(task_id))?;
             }
         }
@@ -695,7 +742,8 @@ impl ImportV2Service {
             .filter(|value| !value.is_empty())
             .unwrap_or("md");
         let relative = format!(
-            ".app/import-sessions/{session_id}/inputs/{}.{}",
+            "{}/inputs/{}.{}",
+            session_relative_root(context, session_id)?,
             uuid::Uuid::new_v4(),
             extension
         );
@@ -766,7 +814,22 @@ impl ImportV2Service {
         )? {
             self.sessions.save(context, files, &session)?;
         }
+        // The record is a coarse checkpoint; individual item JSON is the
+        // authoritative lifecycle fact and can advance between summary writes.
+        session.status = derive_session_status(&session.items);
         Ok(session)
+    }
+
+    /// Focused item read for worker safe points. It deliberately avoids
+    /// reconstructing a complete session for every queued operation.
+    pub fn load_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.sessions.load_item(context, files, session_id, item_id)
     }
 
     pub fn ensure_session_accepts_inputs(
@@ -813,21 +876,39 @@ impl ImportV2Service {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
+        let index = session
+            .items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.item_id.clone(), position))
+            .collect::<HashMap<_, _>>();
+        self.bind_item_task_ids_from_snapshot(
+            context,
+            files,
+            session_id,
+            &mut session,
+            &index,
+            bindings,
+        )
+    }
 
+    fn bind_item_task_ids_from_snapshot(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        session: &mut ImportSession,
+        index: &HashMap<String, usize>,
+        bindings: &[(String, String)],
+    ) -> Result<(), BackendError> {
+        let mut seen = HashSet::with_capacity(bindings.len());
         for (item_id, task_id) in bindings {
-            let item = find_item_mut(&mut session, item_id)?;
-            if !matches!(
-                item.status,
-                ImportItemStatus::Queued
-                    | ImportItemStatus::Failed
-                    | ImportItemStatus::WaitingCapability
-                    | ImportItemStatus::WaitingLogin
-                    | ImportItemStatus::WaitingAuthorization
-                    | ImportItemStatus::Cancelled
-                    | ImportItemStatus::Skipped
-                    | ImportItemStatus::Paused
-                    | ImportItemStatus::PreviewReady
-            ) {
+            if !seen.insert(item_id.as_str()) {
+                return Err(task_error("Import item bindings must be unique."));
+            }
+            let position = *index.get(item_id).ok_or_else(item_not_found)?;
+            let item = &mut session.items[position];
+            if !is_batch_claimable(item) {
                 return Err(task_error(
                     "Import item is already claimed by another task.",
                 ));
@@ -844,10 +925,98 @@ impl ImportV2Service {
             }
         }
 
+        let mut originals = Vec::with_capacity(bindings.len());
+        let mut replacements = Vec::with_capacity(bindings.len());
         for (item_id, task_id) in bindings {
-            find_item_mut(&mut session, item_id)?.task_id = Some(task_id.clone());
+            let position = *index.get(item_id).expect("bindings were validated above");
+            let item = &mut session.items[position];
+            let before = item.clone();
+            item.task_id = Some(task_id.clone());
+            originals.push(before);
+            replacements.push(item.clone());
         }
-        persist_derived(&self.sessions, context, files, session)
+        self.sessions.write_item_cohort_if_unchanged(
+            context,
+            files,
+            session_id,
+            &originals,
+            &replacements,
+        )?;
+        Ok(())
+    }
+
+    /// Create the one persistent control-plane task for a bulk import and
+    /// atomically claim the requested item cohort before any worker can be
+    /// queued. Item JSON remains the state machine; `task_id` is only this
+    /// operation's claim token.
+    pub fn begin_batch_operation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<BackendTask, BackendError> {
+        if item_ids.is_empty() {
+            return Err(BackendError::new(
+                "IMPORT_BATCH_EMPTY",
+                "Choose at least one import item before starting a batch.",
+                false,
+                true,
+            ));
+        }
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        let index = session
+            .items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.item_id.clone(), position))
+            .collect::<HashMap<_, _>>();
+        let mut unique = HashSet::with_capacity(item_ids.len());
+        for item_id in item_ids {
+            if !unique.insert(item_id.as_str()) {
+                return Err(task_error("Import item ids must be unique."));
+            }
+            let Some(position) = index.get(item_id) else {
+                return Err(item_not_found());
+            };
+            if !is_batch_claimable(&session.items[*position]) {
+                return Err(task_error(
+                    "Import item is already claimed by another operation.",
+                ));
+            }
+        }
+
+        let task = tasks
+            .create_project_task_with_batch(
+                TaskType::Import,
+                context.project_id.clone(),
+                context.root.clone(),
+                format!("Import batch ({})", item_ids.len()),
+                true,
+                batch_operation_marker(session_id),
+            )
+            .map_err(|error| task_error(&error))?;
+        let bindings = item_ids
+            .iter()
+            .cloned()
+            .map(|item_id| (item_id, task.id.clone()))
+            .collect::<Vec<_>>();
+        if let Err(error) = self.bind_item_task_ids_from_snapshot(
+            context,
+            files,
+            session_id,
+            &mut session,
+            &index,
+            &bindings,
+        ) {
+            let _ = tasks.set_error(&task.id, error.clone());
+            let _ = tasks.transition_status(&task.id, TaskStatus::Failed);
+            return Err(error);
+        }
+        Ok(task)
     }
 
     pub fn begin_agent_assistance(
@@ -1321,12 +1490,20 @@ impl ImportV2Service {
                     .and_then(|id| tasks.get_task(id))
                     .map(|task| task.status);
                 match recovered_status {
-                    Some(TaskStatus::Cancelled) => {
+                    Some(TaskStatus::Cancelled)
+                        if !item
+                            .task_id
+                            .as_deref()
+                            .is_some_and(|id| is_batch_operation_task(tasks, id)) => {
                         transition_item(item, ImportItemStatus::Cancelled)?;
                         item.issue = None;
                         item.task_id = None;
                         item.progress = None;
                     }
+                    // An operation cancellation applies only to still queued
+                    // or in-flight claims. Waiting item facts remain available
+                    // for their explicit prerequisite/retry actions.
+                    Some(TaskStatus::Cancelled) => {}
                     Some(TaskStatus::Failed) | None => {
                         item.task_id = None;
                         item.progress = None;
@@ -1371,10 +1548,11 @@ impl ImportV2Service {
                     .and_then(|id| tasks.get_task(id))
                     .map(|task| task.status);
                 if recovered_status == Some(TaskStatus::Cancelled) {
-                    let staging = context.root.join(format!(
-                        ".app/import-sessions/{session_id}/items/{}/staging",
-                        item.item_id
-                    ));
+                    let staging = context.resolve_project_path(&item_staging_relative_path(
+                        context,
+                        session_id,
+                        &item.item_id,
+                    )?)?;
                     crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
                         &staging,
                     )?;
@@ -1383,13 +1561,18 @@ impl ImportV2Service {
                     item.progress = None;
                     continue;
                 }
-                let interrupted =
-                    recovered_status.is_none_or(|status| status == TaskStatus::Failed);
+                let interrupted = recovered_status.is_none_or(|status| {
+                    matches!(
+                        status,
+                        TaskStatus::Failed | TaskStatus::Succeeded | TaskStatus::Interrupted
+                    )
+                });
                 if interrupted {
-                    let staging = context.root.join(format!(
-                        ".app/import-sessions/{session_id}/items/{}/staging",
-                        item.item_id
-                    ));
+                    let staging = context.resolve_project_path(&item_staging_relative_path(
+                        context,
+                        session_id,
+                        &item.item_id,
+                    )?)?;
                     crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
                         &staging,
                     )?;
@@ -1562,6 +1745,55 @@ impl ImportV2Service {
         task_id: &str,
         recovery_action: Option<&ImportRecoveryAction>,
     ) -> Result<ImportItem, BackendError> {
+        self.run_item_with_recovery_mode(
+            context,
+            files,
+            tasks,
+            session_id,
+            item_id,
+            task_id,
+            recovery_action,
+            true,
+        )
+    }
+
+    /// Batch operations share one persistent task.  Item state remains the
+    /// source of truth, so this path never turns the operation task into an
+    /// item-sized WaitingForConfirmation/Failed/Succeeded state machine.
+    pub fn run_item_with_recovery_in_batch(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        operation_id: &str,
+        recovery_action: Option<&ImportRecoveryAction>,
+    ) -> Result<ImportItem, BackendError> {
+        self.run_item_with_recovery_mode(
+            context,
+            files,
+            tasks,
+            session_id,
+            item_id,
+            operation_id,
+            recovery_action,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_item_with_recovery_mode(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        recovery_action: Option<&ImportRecoveryAction>,
+        task_lifecycle: bool,
+    ) -> Result<ImportItem, BackendError> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_item_with_recovery_inner(
                 context,
@@ -1571,6 +1803,7 @@ impl ImportV2Service {
                 item_id,
                 task_id,
                 recovery_action,
+                task_lifecycle,
             )
         }))
         .unwrap_or_else(|_| Err(engine_panicked_error()));
@@ -1593,13 +1826,16 @@ impl ImportV2Service {
         item_id: &str,
         task_id: &str,
         recovery_action: Option<&ImportRecoveryAction>,
+        task_lifecycle: bool,
     ) -> Result<ImportItem, BackendError> {
         let task = tasks
             .get_task(task_id)
             .ok_or_else(|| task_error("Import task was not found."))?;
         if task.task_type != TaskType::Import
             || task.project_id.as_deref() != Some(context.project_id.as_str())
-            || !matches!(task.status, TaskStatus::Queued | TaskStatus::Cancelled)
+            || !(matches!(task.status, TaskStatus::Queued | TaskStatus::Cancelled)
+                || (!task_lifecycle
+                    && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)))
         {
             return Err(task_error("Task is not compatible with this import item."));
         }
@@ -1608,8 +1844,15 @@ impl ImportV2Service {
         if pre_cancelled {
             return self.finish_cancelled(context, files, tasks, session_id, item_id, task_id);
         }
-        self.start_claimed_task(context, files, tasks, session_id, item_id, task_id)?;
-        task_call(tasks.update_progress(task_id, 0, Some(100), Some("Inspecting input".into())))?;
+        if task_lifecycle {
+            self.start_claimed_task(context, files, tasks, session_id, item_id, task_id)?;
+            task_call(tasks.update_progress(
+                task_id,
+                0,
+                Some(100),
+                Some("Inspecting input".into()),
+            ))?;
+        }
         let input = self
             .load_session(context, files, session_id)?
             .items
@@ -1675,19 +1918,28 @@ impl ImportV2Service {
                 item.issue = Some(issue);
                 Ok(())
             })?;
-            task_call(tasks.append_log(
-                task_id,
-                LogLevel::Warn,
-                "No available import engine supports this input.".into(),
-            ))?;
-            task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+            if task_lifecycle {
+                task_call(tasks.append_log(
+                    task_id,
+                    LogLevel::Warn,
+                    "No available import engine supports this input.".into(),
+                ))?;
+                task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+            }
             return Err(error);
         }
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Extracting)
         })?;
-        task_call(tasks.update_progress(task_id, 5, Some(100), Some("Extracting source".into())))?;
-        let staging_root = format!(".app/import-sessions/{session_id}/items/{item_id}/staging");
+        if task_lifecycle {
+            task_call(tasks.update_progress(
+                task_id,
+                5,
+                Some(100),
+                Some("Extracting source".into()),
+            ))?;
+        }
+        let staging_root = item_staging_relative_path(context, session_id, item_id)?;
         let authorization_session = self.sessions.load(context, files, session_id)?;
         let asr_authorization =
             authorization_session
@@ -1770,8 +2022,17 @@ impl ImportV2Service {
                     return Ok(());
                 }
                 max_task_progress.set(mapped);
-                task_call(tasks.update_progress(task_id, mapped, Some(100), Some(progress.label)))
+                if task_lifecycle {
+                    task_call(tasks.update_progress(
+                        task_id,
+                        mapped,
+                        Some(100),
+                        Some(progress.label),
+                    ))
                     .map(|_| ())
+                } else {
+                    Ok(())
+                }
             };
             let mut candidate = match execute_engine_with_progress(
                 engine.as_ref(),
@@ -2136,12 +2397,14 @@ impl ImportV2Service {
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Validating)
         })?;
-        task_call(tasks.update_progress(
-            task_id,
-            95,
-            Some(100),
-            Some("Validating preview".into()),
-        ))?;
+        if task_lifecycle {
+            task_call(tasks.update_progress(
+                task_id,
+                95,
+                Some(100),
+                Some("Validating preview".into()),
+            ))?;
+        }
         let mut preview = match self
             .quality
             .evaluate(&context.root.join(Path::new(&staging_root)), &result)
@@ -2220,20 +2483,27 @@ impl ImportV2Service {
             });
             Ok(())
         })?;
-        task_call(tasks.update_progress(task_id, 100, Some(100), Some("Preview ready".into())))?;
-        task_call(tasks.set_result(
-            task_id,
-            TaskResult {
-                summary: "Import preview ready.".into(),
-                affected_paths: Vec::new(),
-                reference: Some(TaskResultReference::ImportPreview {
-                    session_id: session_id.into(),
-                    item_id: item_id.into(),
-                }),
-                pending_action: None,
-            },
-        ))?;
-        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        if task_lifecycle {
+            task_call(tasks.update_progress(
+                task_id,
+                100,
+                Some(100),
+                Some("Preview ready".into()),
+            ))?;
+            task_call(tasks.set_result(
+                task_id,
+                TaskResult {
+                    summary: "Import preview ready.".into(),
+                    affected_paths: Vec::new(),
+                    reference: Some(TaskResultReference::ImportPreview {
+                        session_id: session_id.into(),
+                        item_id: item_id.into(),
+                    }),
+                    pending_action: None,
+                },
+            ))?;
+            task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        }
         Ok(item)
     }
 
@@ -2437,8 +2707,17 @@ impl ImportV2Service {
                     return Ok(());
                 }
                 max_task_progress.set(mapped);
-                task_call(tasks.update_progress(task_id, mapped, Some(100), Some(progress.label)))
+                if is_batch_operation_task(tasks, task_id) {
+                    Ok(())
+                } else {
+                    task_call(tasks.update_progress(
+                        task_id,
+                        mapped,
+                        Some(100),
+                        Some(progress.label),
+                    ))
                     .map(|_| ())
+                }
             };
             let (mut asr_result, authorization_required) = if probe_embedded {
                 asr_request.asr_probe_only = true;
@@ -3085,18 +3364,23 @@ impl ImportV2Service {
         item_id: &str,
         task_id: &str,
     ) -> Result<ImportItem, BackendError> {
-        let staging = context.root.join(format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/staging"
-        ));
+        let staging = context
+            .resolve_project_path(&item_staging_relative_path(context, session_id, item_id)?)?;
+        let batch_operation = is_batch_operation_task(tasks, task_id);
         if let Err(error) = cleanup_terminal_item_staging(&staging) {
-            task_call(tasks.append_log(
-                task_id,
-                LogLevel::Warn,
-                format!(
-                    "Import cancellation could not fully remove temporary media: {}",
-                    error.code
-                ),
-            ))?;
+            if batch_operation {
+                // The operation-level summary is published by the worker
+                // cohort; item cleanup warnings remain durable item facts.
+            } else {
+                task_call(tasks.append_log(
+                    task_id,
+                    LogLevel::Warn,
+                    format!(
+                        "Import cancellation could not fully remove temporary media: {}",
+                        error.code
+                    ),
+                ))?;
+            }
         }
         let item = self.mutate_item(context, files, session_id, item_id, |item| {
             if item.status == ImportItemStatus::Skipped {
@@ -3110,9 +3394,10 @@ impl ImportV2Service {
             Ok(())
         })?;
         remove_clipboard_session_input(context, session_id, &item.input);
-        if tasks
-            .get_task(task_id)
-            .is_some_and(|task| task.status != TaskStatus::Cancelled)
+        if !batch_operation
+            && tasks
+                .get_task(task_id)
+                .is_some_and(|task| task.status != TaskStatus::Cancelled)
         {
             task_call(tasks.cancel_task(task_id))?;
         }
@@ -3144,6 +3429,7 @@ impl ImportV2Service {
         if item.task_id.as_deref() != Some(task_id) {
             return;
         }
+        let batch_operation = is_batch_operation_task(tasks, task_id);
         if matches!(
             item.status,
             ImportItemStatus::Inspecting
@@ -3164,7 +3450,8 @@ impl ImportV2Service {
                     ImportStage::Extract,
                 );
             }
-        } else if item.status == ImportItemStatus::Failed
+        } else if !batch_operation
+            && item.status == ImportItemStatus::Failed
             && tasks.get_task(task_id).is_some_and(|task| {
                 !matches!(
                     task.status,
@@ -3190,18 +3477,20 @@ impl ImportV2Service {
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
-        let staging = context.root.join(format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/staging"
-        ));
+        let staging = context
+            .resolve_project_path(&item_staging_relative_path(context, session_id, item_id)?)?;
+        let batch_operation = is_batch_operation_task(tasks, task_id);
         if let Err(cleanup_error) = cleanup_terminal_item_staging(&staging) {
-            task_call(tasks.append_log(
-                task_id,
-                LogLevel::Warn,
-                format!(
-                    "Import failure could not fully remove temporary media: {}",
-                    cleanup_error.code
-                ),
-            ))?;
+            if !batch_operation {
+                task_call(tasks.append_log(
+                    task_id,
+                    LogLevel::Warn,
+                    format!(
+                        "Import failure could not fully remove temporary media: {}",
+                        cleanup_error.code
+                    ),
+                ))?;
+            }
         }
         self.mutate_item(context, files, session_id, item_id, |item| {
             transition_item(item, ImportItemStatus::Failed)?;
@@ -3213,9 +3502,11 @@ impl ImportV2Service {
             item.issue = Some(issue);
             Ok(())
         })?;
-        task_call(tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into()))?;
-        task_call(tasks.set_error(task_id, issue_safe_error(&error)))?;
-        task_call(tasks.transition_status(task_id, TaskStatus::Failed))?;
+        if !batch_operation {
+            task_call(tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into()))?;
+            task_call(tasks.set_error(task_id, issue_safe_error(&error)))?;
+            task_call(tasks.transition_status(task_id, TaskStatus::Failed))?;
+        }
         Err(issue_safe_error(&error))
     }
     fn finish_waiting_login(
@@ -3234,12 +3525,14 @@ impl ImportV2Service {
             item.issue = Some(ImportIssue::for_web_code(&error.code, stage));
             Ok(())
         })?;
-        task_call(tasks.append_log(
-            task_id,
-            LogLevel::Warn,
-            "Web import is waiting for user authentication.".into(),
-        ))?;
-        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        if !is_batch_operation_task(tasks, task_id) {
+            task_call(tasks.append_log(
+                task_id,
+                LogLevel::Warn,
+                "Web import is waiting for user authentication.".into(),
+            ))?;
+            task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        }
         Ok(item)
     }
 
@@ -3279,16 +3572,18 @@ impl ImportV2Service {
             item.issue = Some(issue);
             Ok(())
         })?;
-        task_call(tasks.append_log(
-            task_id,
-            LogLevel::Warn,
-            if asr_available {
-                "Media import is waiting for explicit local ASR authorization.".into()
-            } else {
-                "Media import is waiting for the local ASR capability.".into()
-            },
-        ))?;
-        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        if !is_batch_operation_task(tasks, task_id) {
+            task_call(tasks.append_log(
+                task_id,
+                LogLevel::Warn,
+                if asr_available {
+                    "Media import is waiting for explicit local ASR authorization.".into()
+                } else {
+                    "Media import is waiting for the local ASR capability.".into()
+                },
+            ))?;
+            task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        }
         Ok(item)
     }
 
@@ -3309,12 +3604,14 @@ impl ImportV2Service {
             item.issue = Some(issue_from_engine_error(&error, stage));
             Ok(())
         })?;
-        task_call(tasks.append_log(
-            task_id,
-            LogLevel::Warn,
-            "Media import is waiting for an explicit subtitle selection.".into(),
-        ))?;
-        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        if !is_batch_operation_task(tasks, task_id) {
+            task_call(tasks.append_log(
+                task_id,
+                LogLevel::Warn,
+                "Media import is waiting for an explicit subtitle selection.".into(),
+            ))?;
+            task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        }
         Ok(item)
     }
 
@@ -3364,12 +3661,14 @@ impl ImportV2Service {
             item.issue = Some(issue);
             Ok(())
         })?;
-        task_call(tasks.append_log(
-            task_id,
-            LogLevel::Warn,
-            "The import is waiting for the local OCR capability.".into(),
-        ))?;
-        task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        if !is_batch_operation_task(tasks, task_id) {
+            task_call(tasks.append_log(
+                task_id,
+                LogLevel::Warn,
+                "The import is waiting for the local OCR capability.".into(),
+            ))?;
+            task_call(tasks.transition_status(task_id, TaskStatus::WaitingForConfirmation))?;
+        }
         Ok(item)
     }
 
@@ -3386,27 +3685,26 @@ impl ImportV2Service {
     {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
-        let mut session = self.sessions.load(context, files, session_id)?;
-        let should_refresh_targets = {
-            let item = find_item_mut(&mut session, item_id)?;
-            let before = new_source_reservation_fingerprint(item);
-            mutation(item)?;
-            before != new_source_reservation_fingerprint(item)
-        };
+        let mut item = self
+            .sessions
+            .load_item(context, files, session_id, item_id)?;
+        let before = new_source_reservation_fingerprint(&item);
+        mutation(&mut item)?;
+        let should_refresh_targets = before != new_source_reservation_fingerprint(&item);
         if should_refresh_targets {
+            let mut session = self.sessions.load(context, files, session_id)?;
+            *find_item_mut(&mut session, item_id)? = item.clone();
             crate::services::import_v2::commit::refresh_new_source_wiki_targets(
                 context,
                 files,
                 &mut session,
             )?;
+            let item = find_item_mut(&mut session, item_id)?.clone();
+            persist_derived(&self.sessions, context, files, session)?;
+            return Ok(item);
         }
-        let item = session
-            .items
-            .iter()
-            .find(|item| item.item_id == item_id)
-            .cloned()
-            .ok_or_else(item_not_found)?;
-        persist_derived(&self.sessions, context, files, session)?;
+        self.sessions
+            .write_item(context, files, session_id, &item)?;
         Ok(item)
     }
 
@@ -4555,6 +4853,55 @@ fn task_call<T>(result: Result<T, String>) -> Result<T, BackendError> {
     result.map_err(|_| task_error("Import task state could not be updated."))
 }
 
+fn is_batch_operation_task(tasks: &TaskService, task_id: &str) -> bool {
+    tasks
+        .get_task(task_id)
+        .and_then(|task| task.batch_id)
+        .as_deref()
+        .is_some_and(|batch_id| batch_id.starts_with(IMPORT_BATCH_OPERATION_MARKER))
+}
+
+fn is_batch_claimable(item: &ImportItem) -> bool {
+    matches!(
+        item.status,
+        ImportItemStatus::Queued
+            | ImportItemStatus::Failed
+            | ImportItemStatus::WaitingCapability
+            | ImportItemStatus::WaitingLogin
+            | ImportItemStatus::WaitingAuthorization
+            | ImportItemStatus::Cancelled
+            | ImportItemStatus::Skipped
+            | ImportItemStatus::Paused
+            | ImportItemStatus::PreviewReady
+    )
+}
+
+fn item_staging_relative_path(
+    context: &ProjectContext,
+    session_id: &str,
+    item_id: &str,
+) -> Result<String, BackendError> {
+    Ok(format!(
+        "{}/items/{item_id}/staging",
+        session_relative_root(context, session_id)?
+    ))
+}
+
+fn session_relative_root(
+    context: &ProjectContext,
+    session_id: &str,
+) -> Result<String, BackendError> {
+    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
+        BackendError::new(
+            IMPORT_V2_STATE_INVALID,
+            "Import state is unavailable for this project layout.",
+            true,
+            false,
+        )
+    })?;
+    Ok(format!("{root}/{session_id}"))
+}
+
 fn web_result_marks_restricted_content(staging: &Path, metadata_path: Option<&str>) -> bool {
     let Some(metadata_path) = metadata_path else {
         return false;
@@ -4664,7 +5011,10 @@ fn remove_clipboard_session_input(context: &ProjectContext, session_id: &str, in
     if input.kind != ImportInputKind::ClipboardText {
         return;
     }
-    let expected_prefix = format!(".app/import-sessions/{session_id}/inputs/");
+    let Ok(expected_root) = session_relative_root(context, session_id) else {
+        return;
+    };
+    let expected_prefix = format!("{expected_root}/inputs/");
     if !input
         .locator
         .replace('\\', "/")
