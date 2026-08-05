@@ -796,7 +796,10 @@ mod tests {
                 state.git_service.changed_paths(&context).unwrap(),
             )
             .unwrap();
-        let backup_path = plan.operations[0].backup_path.clone();
+        let backup_path = plan.operations[0]
+            .backup_path
+            .clone()
+            .expect("graph-cache repair plans always declare a backup path");
         let action = PendingAction {
             id: plan.repair_plan_id.clone(),
             action_type: PendingActionType::RepairProject,

@@ -755,11 +755,19 @@ impl AppState {
                 return Err(error);
             }
         };
-        self.task_service
+        if let Err(message) = self
+            .task_service
             .rebind_workflows_for_root(&context.root, None)
-            .map_err(|message| {
-                BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
-            })?;
+        {
+            let _ = self.project_registry.revoke_trust(project_id, &context.root);
+            let _ = self.project_service.revoke_project_trust(&context.root);
+            return Err(BackendError::new(
+                "WORKFLOW_PERSISTENCE_REBIND_FAILED",
+                message,
+                true,
+                true,
+            ));
+        }
         Ok(context)
     }
 
@@ -768,14 +776,23 @@ impl AppState {
             .project_trust_transition
             .lock()
             .map_err(|_| trust_transition_locked())?;
-        self.project_registry.revoke_trust(project_id, root)?;
-        let durable_result = self.project_service.revoke_project_trust(root);
+        self.task_service
+            .request_cancel_active_workflows_for_root(root)
+            .map_err(|message| {
+                BackendError::new(
+                    "WORKFLOW_TRUST_REVOCATION_CANCEL_FAILED",
+                    message,
+                    true,
+                    true,
+                )
+            })?;
         self.task_service
             .rebind_workflows_for_root(root, None)
             .map_err(|message| {
                 BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
             })?;
-        durable_result
+        self.project_service.revoke_project_trust(root)?;
+        self.project_registry.revoke_trust(project_id, root)
     }
 }
 
