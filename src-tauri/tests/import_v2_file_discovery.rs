@@ -498,6 +498,37 @@ fn enforces_file_count_size_duplicates_and_cancellation() {
 }
 
 #[test]
+fn batch_a_expected_red_counts_one_discovery_callback_per_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    for count in [100usize, 1_000, 10_000] {
+        let input = temp.path().join(format!("input-{count}"));
+        fs::create_dir_all(&input).unwrap();
+        for index in 0..count {
+            fs::write(input.join(format!("{index:05}.md")), "# fixture").unwrap();
+        }
+        let mut callback_invocations = 0usize;
+        let mut callback_items = 0usize;
+        let result = FileDiscoveryService::default()
+            .scan(
+                &context(&project),
+                &[input],
+                FileScanPolicy::default(),
+                |batch| {
+                    callback_invocations += 1;
+                    callback_items += batch.len();
+                },
+                || false,
+            )
+            .unwrap();
+        assert_eq!(result.files.len(), count);
+        assert_eq!(callback_invocations, count, "expected-red control-plane baseline for {count} files");
+        assert_eq!(callback_items, count, "Batch E must replace this with a bounded event assertion");
+    }
+}
+
+#[test]
 fn requires_real_ooxml_structure_and_sniffs_magic() {
     let temp = tempfile::tempdir().unwrap();
     let fake = temp.path().join("fake.docx");
