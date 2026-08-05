@@ -664,6 +664,15 @@ pub struct BackendTask {
 - `SourceVersionService`：管理别名、版本、人工编辑基线、时间线和恢复。
 - `CompileService`：消费显式 `sourceId + versionId` change set，不属于导入提交事务。
 
+Import V2 的批量控制面合同：
+
+- `start_import_batch_v2` 为一个 item cohort 创建并返回一个持久化 operation `BackendTask`；operation marker 是 `import-v2-operation:<session_id>`，共享一个 cancellation token，聚合进度 / 日志与 `import://session-patch` 最多每 100ms flush 一次，terminal 强制 flush。
+- `ImportItem.task_id` 是 operation claim，不表示每个 item 拥有独立 `TaskService` 任务。逐项 JSON / session summary 是 partial success、waiting、preview、failed、skipped、cancelled 和 retry 的事实来源。
+- `start_import_items_v2` 保持原 `Vec<BackendTask>` wire contract，仅服务 `<= 200` 的兼容调用；更大 cohort 返回 `IMPORT_BATCH_COMMAND_REQUIRED`。
+- `accept_import_scan_v2` / `discard_import_scan_v2` 只消费 layout-defined import-state root 中的保存扫描，并把当前 layout 解析、trusted + writable 检查、scan 重验和全部 app-state 写入放在同一个 authority transition 临界区。无 Tauri 依赖的 `scan_confirmation` use-case 负责 totals、project/root/session/task identity、token、全部来源 fingerprint、总量 / 单表两阶段授权、幂等 accepted/discarded 状态和“确认前无 session inputs”；command 只负责 typed DTO、`AppState`、持久化与 task glue。
+- discovery hard file limit 在首个越界项处返回 typed error，不持久化可接受的部分 scan。XLSX 输出量由受限 OOXML worksheet 条目保守估算；旧 XLS 无可靠内建 Sheet 计数时把总输出估算标为未知并强制确认，而不是按单输出放行。
+- React 通过 `taskStore.upsertTasks` 和 `importStore.patchItems` 对每个 flush 各做一次主要 store commit；command/event 响应必须通过 project key、session ID、identity / authority revision 与 epoch guards。
+
 目标存储规则（括号内路径均为新建原生知识库映射，兼容知识库使用 `ProjectLayout`）：
 
 - evidence root（`raw/`）保存不可变原文件、网页 / 平台证据、原图、字幕、OCR / ASR 原始输出和版本证据。

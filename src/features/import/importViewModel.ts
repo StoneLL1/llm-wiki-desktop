@@ -22,6 +22,12 @@ export interface ImportSessionProgress {
   needsAction?: number;
 }
 
+export interface ImportViewModelSnapshot {
+  visibleItems: ImportItem[];
+  counts: ImportQueueCounts;
+  progress: ImportSessionProgress;
+}
+
 const ACTIVE_STATUSES: ReadonlySet<ImportItemStatus> = new Set([
   "queued",
   "inspecting",
@@ -61,6 +67,75 @@ export const selectVisibleItems = (
     default:
       return activeQueue;
   }
+};
+
+export const selectImportViewModel = (
+  session: ImportSession | null,
+  filter: ImportQueueFilter,
+): ImportViewModelSnapshot => {
+  const items = session?.items ?? [];
+  const visibleItems: ImportItem[] = [];
+  const counts: ImportQueueCounts = {
+    all: 0,
+    active: 0,
+    ready: 0,
+    needsAction: 0,
+    failed: 0,
+    completed: 0,
+    waiting: 0,
+  };
+  const progress: ImportSessionProgress = {
+    completed: 0,
+    total: items.length,
+    active: 0,
+    processed: 0,
+    failed: 0,
+    cancelled: 0,
+    needsAction: 0,
+  };
+  for (const item of items) {
+    const active = isImportItemActive(item);
+    const presentation = presentImportItem(item);
+    const ready = presentation.userState === "ready";
+    const needsAction = presentation.userState === "needs_action";
+    const completed = item.status === "completed";
+    const skipped = item.status === "skipped";
+    const failed = item.status === "failed";
+    const cancelled = item.status === "cancelled";
+    const processed = [
+      "preview_ready",
+      "needs_merge",
+      "completed",
+      "failed",
+      "cancelled",
+      "skipped",
+    ].includes(item.status);
+    if (completed) progress.completed += 1;
+    if (active) progress.active += 1;
+    if (processed) progress.processed = (progress.processed ?? 0) + 1;
+    if (failed) progress.failed = (progress.failed ?? 0) + 1;
+    if (cancelled) progress.cancelled = (progress.cancelled ?? 0) + 1;
+    if (needsAction) progress.needsAction = (progress.needsAction ?? 0) + 1;
+    if (completed || skipped) {
+      if (completed) counts.completed += 1;
+      continue;
+    }
+    counts.all += 1;
+    if (active) counts.active += 1;
+    if (ready) counts.ready += 1;
+    if (needsAction) counts.needsAction += 1;
+    if (failed) counts.failed += 1;
+    if (["waiting_capability", "waiting_login", "waiting_authorization"].includes(item.status)) {
+      counts.waiting = (counts.waiting ?? 0) + 1;
+    }
+    const visible = filter === "all"
+      || (filter === "active" && active)
+      || (filter === "ready" && ready)
+      || (filter === "needs_action" && needsAction)
+      || (filter === "failed" && failed);
+    if (visible) visibleItems.push(item);
+  }
+  return { visibleItems, counts, progress };
 };
 export const selectQueueCounts = (session: ImportSession | null): ImportQueueCounts => {
   const items = (session?.items ?? []).filter(

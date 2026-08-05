@@ -16,6 +16,7 @@ import type {
   SelectImportSubtitleV2Request,
   StageImportManualMergeV2Request,
   StartImportItemsV2Request,
+  StartImportBatchV2Request,
 } from "./importV2";
 import type {
   AcceptImportAgentCandidateRequest,
@@ -32,6 +33,9 @@ import type {
 } from "./importV2Activation";
 import type {
   AddImportPathsV2Request,
+  AcceptImportScanV2Request,
+  AcceptImportScanV2Result,
+  DiscardImportScanV2Request,
   FileScanResult,
   GetImportScanResultV2Request,
 } from "./importV2File";
@@ -95,6 +99,8 @@ export interface ImportV2CommandNames {
   readonly addPaths: "start_add_import_paths_v2";
   readonly addText: "add_import_text_v2";
   readonly getScanResult: "get_import_scan_result_v2";
+  readonly acceptScan: "accept_import_scan_v2";
+  readonly discardScan: "discard_import_scan_v2";
   readonly addUrl: "add_import_url_v2";
   readonly discoverCollection: "discover_import_collection_v2";
   readonly loadCollectionPage: "load_import_collection_page_v2";
@@ -107,6 +113,7 @@ export interface ImportV2CommandNames {
   readonly setItemResolution: "set_import_item_resolution_v2";
   readonly stageManualMerge: "stage_import_manual_merge_v2";
   readonly startItems: "start_import_items_v2";
+  readonly startBatch: "start_import_batch_v2";
   readonly cancelBatch: "cancel_import_batch_v2";
   readonly cancelItem: "cancel_import_item_v2";
   readonly skipItem: "skip_import_item_v2";
@@ -149,6 +156,8 @@ export interface ImportV2Api {
   readonly addPaths: (request: AddImportPathsV2Request) => Promise<BackendTask>;
   readonly addText: (request: AddImportTextV2Request) => Promise<ImportSession>;
   readonly getScanResult: (request: GetImportScanResultV2Request) => Promise<FileScanResult>;
+  readonly acceptScan: (request: AcceptImportScanV2Request) => Promise<AcceptImportScanV2Result>;
+  readonly discardScan: (request: DiscardImportScanV2Request) => Promise<FileScanResult>;
   readonly addUrl: (request: AddImportUrlV2Request) => Promise<ImportSession>;
   readonly discoverCollection: (request: DiscoverImportCollectionV2Request) => Promise<ImportCollectionPreview | null>;
   readonly loadCollectionPage: (request: LoadImportCollectionPageV2Request) => Promise<ImportCollectionPage>;
@@ -161,6 +170,7 @@ export interface ImportV2Api {
   readonly setItemResolution: (request: SetImportItemResolutionV2Request) => Promise<ImportItem>;
   readonly stageManualMerge: (request: StageImportManualMergeV2Request) => Promise<ImportItem>;
   readonly startItems: (request: StartImportItemsV2Request) => Promise<BackendTask[]>;
+  readonly startBatch: (request: StartImportBatchV2Request) => Promise<BackendTask>;
   readonly cancelBatch: (request: CancelImportBatchV2Request) => Promise<BackendTask[]>;
   readonly cancelItem: (request: CancelImportItemV2Request) => Promise<ImportSession>;
   readonly skipItem: (request: CancelImportItemV2Request) => Promise<ImportSession>;

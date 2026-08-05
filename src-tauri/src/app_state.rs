@@ -529,36 +529,66 @@ impl AppState {
         context: &ProjectContext,
     ) -> Result<(), BackendError> {
         self.with_workflow_access(context, |access| {
-            let health = self
-                .project_assessment_service
-                .inspect_current(context.root.to_string_lossy().as_ref())?
-                .health;
-            if access.trust != WorkflowProjectTrust::Trusted {
-                return Err(BackendError::new(
-                    "PROJECT_WRITE_REQUIRES_TRUST",
-                    "Trust this knowledge base before changing project files.",
-                    true,
-                    true,
-                ));
-            }
-            if health != crate::models::project::ProjectHealth::Healthy {
-                return Err(BackendError::new(
-                    "PROJECT_WRITE_STATE_UNAVAILABLE",
-                    "Project health does not permit a safe write.",
-                    true,
-                    true,
-                ));
-            }
-            if access.filesystem_access != WorkflowFilesystemAccess::Writable {
-                return Err(BackendError::new(
-                    "PROJECT_WRITE_READ_ONLY",
-                    "This knowledge base is currently read-only.",
-                    true,
-                    true,
-                ));
-            }
-            Ok(())
+            self.validate_project_write_access(context, &access)
         })
+    }
+
+    /// Resolve the current layout and hold the authority transition lock for
+    /// the entire mutation. Saved Import scans use this seam so a concurrent
+    /// trust revocation cannot land between validation and app-state writes.
+    pub(crate) fn with_current_project_write_access<T>(
+        &self,
+        project_id: &str,
+        asserted_root: &str,
+        operation: impl FnOnce(&ProjectContext) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let _transition = self
+            .project_trust_transition
+            .lock()
+            .map_err(|_| trust_transition_locked())?;
+        let context = self
+            .project_registry
+            .resolve(project_id, Path::new(asserted_root))
+            .and_then(ProjectContext::with_resolved_layout)?;
+        let access = self.resolve_workflow_access_locked(&context)?;
+        self.validate_project_write_access(&context, &access)?;
+        operation(&context)
+    }
+
+    fn validate_project_write_access(
+        &self,
+        context: &ProjectContext,
+        access: &crate::services::WorkflowAccessSnapshot,
+    ) -> Result<(), BackendError> {
+        let health = self
+            .project_assessment_service
+            .inspect_current(context.root.to_string_lossy().as_ref())?
+            .health;
+        if access.trust != WorkflowProjectTrust::Trusted {
+            return Err(BackendError::new(
+                "PROJECT_WRITE_REQUIRES_TRUST",
+                "Trust this knowledge base before changing project files.",
+                true,
+                true,
+            ));
+        }
+        if health != crate::models::project::ProjectHealth::Healthy {
+            return Err(BackendError::new(
+                "PROJECT_WRITE_STATE_UNAVAILABLE",
+                "Project health does not permit a safe write.",
+                true,
+                true,
+            ));
+        }
+        if access.filesystem_access != WorkflowFilesystemAccess::Writable {
+            return Err(BackendError::new(
+                "PROJECT_WRITE_READ_ONLY",
+                "This knowledge base is currently read-only.",
+                true,
+                true,
+            ));
+        }
+        Ok(())
     }
 
     /// Content writes require a layout-specific root in addition to the
@@ -1668,5 +1698,82 @@ mod project_registry_tests {
         let access = state.resolve_workflow_access(&context).unwrap();
         assert_eq!(access.trust, WorkflowProjectTrust::Untrusted);
         cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn project_write_critical_section_rejects_restricted_authority_and_blocks_revocation() {
+        let (restricted_state, restricted_config) =
+            state_with_temp_config("project-write-restricted-config");
+        let restricted_project = compatible_project("project-write-restricted");
+        restricted_state
+            .project_registry
+            .register("restricted", &restricted_project)
+            .unwrap();
+        let restricted_error = restricted_state
+            .with_current_project_write_access(
+                "restricted",
+                restricted_project.to_string_lossy().as_ref(),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert_eq!(restricted_error.code, "PROJECT_WRITE_REQUIRES_TRUST");
+
+        let (state, config) = state_with_temp_config("project-write-transition-config");
+        let state = Arc::new(state);
+        let project = strict_native_project("project-write-transition");
+        state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_state = Arc::clone(&state);
+        let worker_project = project.clone();
+        let worker_entered = Arc::clone(&entered);
+        let worker_release = Arc::clone(&release);
+        let write_worker = std::thread::spawn(move || {
+            worker_state
+                .with_current_project_write_access(
+                    "project-a",
+                    worker_project.to_string_lossy().as_ref(),
+                    |_| {
+                        worker_entered.wait();
+                        worker_release.wait();
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        });
+        entered.wait();
+
+        let revoke_state = Arc::clone(&state);
+        let revoke_project = project.clone();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_worker = std::thread::spawn(move || {
+            revoke_state
+                .revoke_project_trust("project-a", &revoke_project)
+                .unwrap();
+            revoked_tx.send(()).unwrap();
+        });
+        assert!(revoked_rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+        release.wait();
+        write_worker.join().unwrap();
+        revoked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        revoke_worker.join().unwrap();
+        let revoked_error = state
+            .with_current_project_write_access(
+                "project-a",
+                project.to_string_lossy().as_ref(),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert_eq!(revoked_error.code, "PROJECT_WRITE_REQUIRES_TRUST");
+        cleanup_paths(&[
+            &restricted_project,
+            &restricted_config,
+            &project,
+            &config,
+        ]);
     }
 }

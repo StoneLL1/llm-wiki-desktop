@@ -36,9 +36,11 @@ export interface FileIdentity {
 }
 export interface LargeDataEstimate {
   rowCount: number;
+  sheetCount?: number;
   estimatedOutputFiles: number;
   totalBytes: number;
   requiresConfirmation: boolean;
+  estimateComplete?: boolean;
 }
 export interface DiscoveredFile {
   sourcePath: string; relativePath: string; displayName: string; format: FileFormat;
@@ -51,7 +53,32 @@ export interface SkippedFile {
 export interface FileScanPolicy {
   maxDepth: number; maxFiles: number; maxFileBytes: number; includeHidden: boolean;
 }
-export interface FileScanResult { files: DiscoveredFile[]; skipped: SkippedFile[]; truncated: boolean }
+export type ImportScanConfirmationReason = "file_count" | "total_bytes" | "estimated_output_files";
+export interface ImportScanTotals {
+  fileCount: number;
+  totalBytes: number;
+  estimatedOutputFiles?: number;
+  requiresConfirmation: boolean;
+  reasons: ImportScanConfirmationReason[];
+}
+export interface FileScanResult {
+  files: DiscoveredFile[];
+  skipped: SkippedFile[];
+  truncated: boolean;
+  scanIdentity?: ImportScanIdentity;
+  totals?: ImportScanTotals;
+  confirmationToken?: string;
+  acceptedAt?: string;
+  aggregateConfirmedAt?: string;
+  discardedAt?: string;
+}
+
+export interface ImportScanIdentity {
+  projectId: string;
+  projectRootPath: string;
+  sessionId: string;
+  taskId: string;
+}
 export interface CapabilityRequirement {
   capabilityId: string; minimumVersion?: string; protocolVersion: string;
   targetTriple: string; acceptedLicenseExpressions: string[];
@@ -69,4 +96,19 @@ export interface GetImportScanResultV2Request {
   projectRootPath: string;
   sessionId: string;
   taskId: string;
+}
+
+export interface AcceptImportScanV2Request extends GetImportScanResultV2Request {
+  confirmationToken: string;
+  acknowledgeAggregate?: boolean;
+  sourcePaths?: string[];
+}
+
+export interface AcceptImportScanV2Result {
+  session: import("./importV2").ImportSession;
+  scan: FileScanResult;
+}
+
+export interface DiscardImportScanV2Request extends GetImportScanResultV2Request {
+  confirmationToken: string;
 }

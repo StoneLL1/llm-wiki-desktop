@@ -195,14 +195,15 @@ describe("recoverTasksForProject", () => {
     expect(useTaskStore.getState().tasks).toEqual([]);
   });
 
-  it("records one store publication per current task update as the Batch A expected-red baseline", () => {
+  it("upserts a task cohort with one store publication", () => {
     let publications = 0;
     const unsubscribe = useTaskStore.subscribe(() => { publications += 1; });
-    for (let index = 0; index < 100; index += 1) {
-      useTaskStore.getState().upsertTask({ ...task(`task-${index}`, "project-a"), updatedAt: `2026-06-21T00:00:${index % 60}Z` });
-    }
+    useTaskStore.getState().upsertTasks(Array.from({ length: 100 }, (_, index) => ({
+      ...task(`task-${index}`, "project-a"),
+      updatedAt: `2026-06-21T00:00:${index % 60}Z`,
+    })));
     unsubscribe();
-    expect(publications).toBe(100);
+    expect(publications).toBe(1);
     expect(useTaskStore.getState().tasks).toHaveLength(100);
   });
 

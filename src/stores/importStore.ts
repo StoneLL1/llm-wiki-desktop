@@ -35,6 +35,7 @@ interface ImportState {
   attachSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
   replaceSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
   replaceItem: (projectKey: string, item: ImportItem, epoch?: number) => boolean;
+  patchItems: (projectKey: string, items: readonly ImportItem[], epoch?: number) => boolean;
   resetProjectPresentation: (projectKey: string) => void;
   beginSessionEpoch: (projectKey: string) => number;
   selectItem: (itemId: string | null) => void;
@@ -122,6 +123,30 @@ export const useImportStore = create<ImportState>((set, get) => ({
         current.itemId === item.itemId ? item : current,
       ),
     };
+    set({ session, selectedItemId: selectedItemIdFor(session, state.selectedItemId) });
+    return true;
+  },
+  patchItems: (projectKey, items, epoch) => {
+    const state = get();
+    if (!scopeAccepts(state, projectKey, epoch) || !state.session) return false;
+    if (items.length === 0) return true;
+    const patches = new Map(items.map((item) => [item.itemId, item]));
+    let changed = false;
+    const session = {
+      ...state.session,
+      items: state.session.items.map((current) => {
+        const patch = patches.get(current.itemId);
+        if (!patch) return current;
+        patches.delete(current.itemId);
+        changed = true;
+        return patch;
+      }),
+    };
+    if (patches.size > 0) {
+      session.items.push(...patches.values());
+      changed = true;
+    }
+    if (!changed) return false;
     set({ session, selectedItemId: selectedItemIdFor(session, state.selectedItemId) });
     return true;
   },

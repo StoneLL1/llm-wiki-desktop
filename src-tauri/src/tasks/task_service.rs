@@ -225,6 +225,18 @@ impl TaskService {
             .emit(event_type, project_id, task_id, payload);
     }
 
+    pub fn emit_import_session_patch(
+        &self,
+        payload: crate::models::import_v2::ImportSessionPatchEvent,
+    ) {
+        self.emit(
+            crate::models::task::BackendEventType::ImportSessionPatch,
+            Some(payload.project_id.clone()),
+            Some(payload.batch_id.clone()),
+            payload,
+        );
+    }
+
     pub fn create_task(
         &self,
         task_type: TaskType,

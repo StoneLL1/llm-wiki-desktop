@@ -16,10 +16,18 @@ import type {
   SelectImportSubtitleV2Request,
   StageImportManualMergeV2Request,
   StartImportItemsV2Request,
+  StartImportBatchV2Request,
   CancelImportItemV2Request,
   CancelImportBatchV2Request,
 } from "../types/importV2";
-import type { AddImportPathsV2Request, FileScanResult, GetImportScanResultV2Request } from "../types/importV2File";
+import type {
+  AcceptImportScanV2Request,
+  AcceptImportScanV2Result,
+  AddImportPathsV2Request,
+  DiscardImportScanV2Request,
+  FileScanResult,
+  GetImportScanResultV2Request,
+} from "../types/importV2File";
 import type {
   AddImportCollectionItemsV2Request,
   AddImportUrlV2Request,
@@ -89,6 +97,8 @@ const commandNames: ImportV2CommandNames = {
   addPaths: "start_add_import_paths_v2",
   addText: "add_import_text_v2",
   getScanResult: "get_import_scan_result_v2",
+  acceptScan: "accept_import_scan_v2",
+  discardScan: "discard_import_scan_v2",
   addUrl: "add_import_url_v2",
   discoverCollection: "discover_import_collection_v2",
   loadCollectionPage: "load_import_collection_page_v2",
@@ -101,6 +111,7 @@ const commandNames: ImportV2CommandNames = {
   setItemResolution: "set_import_item_resolution_v2",
   stageManualMerge: "stage_import_manual_merge_v2",
   startItems: "start_import_items_v2",
+  startBatch: "start_import_batch_v2",
   cancelBatch: "cancel_import_batch_v2",
   cancelItem: "cancel_import_item_v2",
   skipItem: "skip_import_item_v2",
@@ -146,6 +157,8 @@ export const importV2Api: ImportV2Api = {
   addPaths: (value: AddImportPathsV2Request) => request<BackendTask>(commandNames.addPaths, value),
   addText: (value: AddImportTextV2Request) => request<ImportSession>(commandNames.addText, value),
   getScanResult: (value: GetImportScanResultV2Request) => request<FileScanResult>(commandNames.getScanResult, value),
+  acceptScan: (value: AcceptImportScanV2Request) => request<AcceptImportScanV2Result>(commandNames.acceptScan, value),
+  discardScan: (value: DiscardImportScanV2Request) => request<FileScanResult>(commandNames.discardScan, value),
   addUrl: (value: AddImportUrlV2Request) => request<ImportSession>(commandNames.addUrl, value),
   discoverCollection: (value: DiscoverImportCollectionV2Request) => request<ImportCollectionPreview | null>(commandNames.discoverCollection, value),
   loadCollectionPage: (value: LoadImportCollectionPageV2Request) => request<ImportCollectionPage>(commandNames.loadCollectionPage, value),
@@ -158,6 +171,7 @@ export const importV2Api: ImportV2Api = {
   setItemResolution: (value: SetImportItemResolutionV2Request) => request<ImportItem>(commandNames.setItemResolution, value),
   stageManualMerge: (value: StageImportManualMergeV2Request) => request<ImportItem>(commandNames.stageManualMerge, value),
   startItems: (value: StartImportItemsV2Request) => request<BackendTask[]>(commandNames.startItems, value),
+  startBatch: (value: StartImportBatchV2Request) => request<BackendTask>(commandNames.startBatch, value),
   cancelBatch: (value: CancelImportBatchV2Request) => request<BackendTask[]>(commandNames.cancelBatch, value),
   cancelItem: (value: CancelImportItemV2Request) => request<ImportSession>(commandNames.cancelItem, value),
   skipItem: (value: CancelImportItemV2Request) => request<ImportSession>(commandNames.skipItem, value),

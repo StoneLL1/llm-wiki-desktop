@@ -19,6 +19,7 @@ const OOXML_MAX_UNCOMPRESSED: u64 = 64 * 1024 * 1024;
 const LARGE_DATA_BYTES: u64 = 8 * 1024 * 1024;
 const LARGE_DATA_ROWS: u64 = 10_000;
 const LARGE_DATA_ROWS_PER_FILE: u64 = 5_000;
+const LARGE_DATA_OUTPUT_FILES: u32 = 2_000;
 pub const DISCOVERY_BATCH_SIZE: usize = 128;
 
 #[derive(Default)]
@@ -46,6 +47,12 @@ impl FileDiscoveryService {
             files: Vec::new(),
             skipped: Vec::new(),
             truncated: false,
+            scan_identity: None,
+            totals: Default::default(),
+            confirmation_token: None,
+            accepted_at: None,
+            aggregate_confirmed_at: None,
+            discarded_at: None,
         };
         let mut visited_dirs = HashSet::new();
         let mut visited_files = HashSet::new();
@@ -196,17 +203,7 @@ impl FileDiscoveryService {
                 );
                 continue;
             }
-            if result.files.len() >= policy.max_files as usize {
-                result.truncated = true;
-                skip(
-                    &mut result,
-                    &path,
-                    relative,
-                    FileSkipReason::FileLimitExceeded,
-                    format!("Maximum file count is {}.", policy.max_files),
-                );
-                continue;
-            }
+            enforce_file_count_limit(result.files.len(), policy.max_files)?;
             let prefix = read_prefix(&path)?;
             let (format, identity) = match identify_file(&path, &prefix) {
                 Ok(value) => value,
@@ -264,6 +261,27 @@ impl FileDiscoveryService {
             on_batch(&pending);
         }
         Ok(result)
+    }
+
+    pub fn revalidate_discovered_file(&self, file: &DiscoveredFile) -> Result<(), BackendError> {
+        let path = PathBuf::from(&file.source_path);
+        let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+        if metadata.file_type().is_symlink() || is_windows_reparse(&metadata) || !metadata.is_file()
+        {
+            return Err(error(
+                "IMPORT_SCAN_SOURCE_CHANGED",
+                "A discovered source is no longer the same regular file.",
+            ));
+        }
+        let canonical = fs::canonicalize(&path).map_err(io_error)?;
+        let current = source_identity(&canonical, &metadata)?;
+        if current != file.source_identity {
+            return Err(error(
+                "IMPORT_SCAN_SOURCE_CHANGED",
+                "A discovered source changed after confirmation was requested. Scan it again.",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -821,28 +839,105 @@ fn estimate_large_data(
     format: FileFormat,
     size_bytes: u64,
 ) -> Result<Option<LargeDataEstimate>, BackendError> {
-    if format != FileFormat::Csv {
-        return Ok(None);
+    match format {
+        FileFormat::Csv => {
+            let row_count = fs::read(path)
+                .map_err(io_error)?
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count() as u64
+                + 1;
+            let requires_confirmation =
+                size_bytes >= LARGE_DATA_BYTES || row_count >= LARGE_DATA_ROWS;
+            Ok(Some(LargeDataEstimate {
+                row_count,
+                sheet_count: None,
+                estimated_output_files: if requires_confirmation {
+                    ((row_count + LARGE_DATA_ROWS_PER_FILE - 1) / LARGE_DATA_ROWS_PER_FILE)
+                        .saturating_add(1)
+                        .min(u32::MAX as u64) as u32
+                } else {
+                    1
+                },
+                total_bytes: size_bytes,
+                requires_confirmation,
+                estimate_complete: true,
+            }))
+        }
+        FileFormat::Xlsx => {
+            let sheet_count = estimate_xlsx_sheet_count(path)?;
+            let estimated_output_files = sheet_count.saturating_add(1).max(1);
+            Ok(Some(LargeDataEstimate {
+                row_count: 0,
+                sheet_count: Some(sheet_count),
+                estimated_output_files,
+                total_bytes: size_bytes,
+                requires_confirmation: size_bytes >= LARGE_DATA_BYTES
+                    || estimated_output_files > LARGE_DATA_OUTPUT_FILES,
+                estimate_complete: true,
+            }))
+        }
+        FileFormat::Xls => Ok(Some(LargeDataEstimate {
+            row_count: 0,
+            sheet_count: None,
+            estimated_output_files: 1,
+            total_bytes: size_bytes,
+            // The built-in discovery layer cannot safely enumerate BIFF
+            // worksheets without parsing the OLE stream. Keep the estimate
+            // explicitly incomplete and require acknowledgement instead of
+            // presenting a false one-output guarantee.
+            requires_confirmation: true,
+            estimate_complete: false,
+        })),
+        _ => Ok(None),
     }
-    let row_count = fs::read(path)
-        .map_err(io_error)?
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count() as u64
-        + 1;
-    let requires_confirmation = size_bytes >= LARGE_DATA_BYTES || row_count >= LARGE_DATA_ROWS;
-    Ok(Some(LargeDataEstimate {
-        row_count,
-        estimated_output_files: if requires_confirmation {
-            ((row_count + LARGE_DATA_ROWS_PER_FILE - 1) / LARGE_DATA_ROWS_PER_FILE)
-                .saturating_add(1)
-                .min(u32::MAX as u64) as u32
-        } else {
-            1
-        },
-        total_bytes: size_bytes,
-        requires_confirmation,
-    }))
+}
+
+fn estimate_xlsx_sheet_count(path: &Path) -> Result<u32, BackendError> {
+    let mut archive = ZipArchive::new(File::open(path).map_err(io_error)?).map_err(|_| {
+        error(
+            "IMPORT_FILE_INVALID_OOXML",
+            "OOXML container is not a valid ZIP archive.",
+        )
+    })?;
+    if archive.len() > OOXML_MAX_ENTRIES {
+        return Err(error(
+            "IMPORT_FILE_INVALID_OOXML",
+            "OOXML archive has too many entries.",
+        ));
+    }
+    let mut sheets = 0u32;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|_| {
+            error(
+                "IMPORT_FILE_INVALID_OOXML",
+                "OOXML central directory is invalid.",
+            )
+        })?;
+        let name = entry.name().replace('\\', "/");
+        if name.starts_with("xl/worksheets/") && name.ends_with(".xml") {
+            sheets = sheets.saturating_add(1);
+        }
+    }
+    Ok(sheets)
+}
+
+fn enforce_file_count_limit(discovered: usize, max_files: u32) -> Result<(), BackendError> {
+    if discovered < max_files as usize {
+        return Ok(());
+    }
+    Err(BackendError::new(
+        "IMPORT_FILE_HARD_LIMIT_EXCEEDED",
+        format!(
+            "The selection contains more than {max_files} supported files. Select fewer files or a smaller folder and try again."
+        ),
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({
+        "limit": max_files,
+        "discovered": discovered.saturating_add(1),
+    })))
 }
 fn read_prefix(path: &Path) -> Result<Vec<u8>, BackendError> {
     let file = File::open(path).map_err(io_error)?;

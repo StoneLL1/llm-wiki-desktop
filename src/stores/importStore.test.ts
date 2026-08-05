@@ -96,6 +96,28 @@ describe("Import V2 session store", () => {
     expect(useImportStore.getState().session?.items[0].status).toBe("queued");
   });
 
+  it("applies a cohort patch in one publication and rejects a stale epoch", () => {
+    useImportStore.getState().attachSession(projectA, session([item("one"), item("two")]));
+    const epoch = useImportStore.getState().sessionEpoch;
+    let publications = 0;
+    const unsubscribe = useImportStore.subscribe(() => { publications += 1; });
+
+    expect(useImportStore.getState().patchItems(projectA, [
+      item("one", "preview_ready"),
+      item("two", "failed"),
+      item("three", "queued"),
+    ], epoch)).toBe(true);
+    expect(useImportStore.getState().patchItems(projectA, [item("one", "completed")], epoch + 1)).toBe(false);
+    unsubscribe();
+
+    expect(publications).toBe(1);
+    expect(useImportStore.getState().session?.items.map(({ status }) => status)).toEqual([
+      "preview_ready",
+      "failed",
+      "queued",
+    ]);
+  });
+
   it.each<ImportQueueFilter>(["all", "active", "ready", "needs_action", "failed", "completed"])(
     "stores queue filter %s and item-scoped dialog identities",
     (filter) => {

@@ -172,7 +172,68 @@ describe("ImportDiscoveryStatus", () => {
       />,
     );
     expect(screen.getByText(/12,345 rows/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /continue with all rows/i }));
+    fireEvent.click(screen.getByRole("button", { name: /continue with large data/i }));
     expect(onConfirmLargeData).toHaveBeenCalledWith([sourcePath]);
+  });
+
+  it("presents aggregate file, byte, and output totals before accepting a large scan", () => {
+    const onConfirmScan = vi.fn();
+    const scan: FileScanResult = {
+      files: [{
+        sourcePath: "D:/资料/超大表格.csv",
+        relativePath: "资料/超大表格.csv",
+        displayName: "超大表格.csv",
+        format: "csv",
+        contentKind: "document",
+        sizeBytes: 9_000_000,
+        identity: {
+          extension: "csv",
+          magic: "delimited-text",
+          mime: "text/csv",
+          detectionMethod: "structured_text",
+          extensionMismatch: false,
+        },
+        sourceIdentity: {
+          canonicalPath: "D:/资料/超大表格.csv",
+          sizeBytes: 9_000_000,
+          modifiedNanos: null,
+          fileId: null,
+          sha256: "a".repeat(64),
+          magic: "b".repeat(64),
+        },
+        largeData: {
+          rowCount: 12_345,
+          estimatedOutputFiles: 4,
+          totalBytes: 9_000_000,
+          requiresConfirmation: true,
+        },
+      }],
+      skipped: [],
+      truncated: false,
+      totals: {
+        fileCount: 1_200,
+        totalBytes: 2_500_000_000,
+        estimatedOutputFiles: 2_400,
+        requiresConfirmation: true,
+        reasons: ["file_count", "total_bytes", "estimated_output_files"],
+      },
+      confirmationToken: "scan-token",
+    };
+
+    render(
+      <ImportDiscoveryStatus
+        task={task("succeeded")}
+        scan={scan}
+        onCancel={vi.fn()}
+        onDismiss={vi.fn()}
+        onConfirmScan={onConfirmScan}
+      />,
+    );
+
+    expect(screen.getByText(/1,200 files/i)).toBeInTheDocument();
+    expect(screen.getByText(/many source files/i)).toBeInTheDocument();
+    expect(screen.getByText(/12,345 rows/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /confirm total and add safe files/i }));
+    expect(onConfirmScan).toHaveBeenCalledWith();
   });
 });

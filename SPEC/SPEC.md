@@ -350,6 +350,10 @@ SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发�
 6. 用户点击“导入到来源库”，后端以 `sourceId` 为原子单元写入布局定义的 evidence、来源版本状态和 Source 页面；新建原生知识库映射为 `raw/`、`.app/sources/` 与 `wiki/sources/`。
 7. 导入完成后可查看 Sources，或另行点击“用这些来源更新 Wiki”启动独立编译。
 
+文件发现的总文件数、总字节数和预计输出文件数由后端汇总并判断软确认阈值。达到阈值时，扫描结果先持久化到 layout-defined import state root，活动 session 不增加 item；界面展示总量、触发原因、跳过项和每个超大表格的独立估算。总量确认只接受普通文件，超大 Excel / CSV 继续等待独立确认；两阶段都消费同一 scan task/result，不重新扫描目录，并在当前 trusted + writable authority 临界区重验 layout import-state root、项目、根目录、session、task、确认 token、保存的 totals 与全部来源 fingerprint。hard file limit 直接拒绝而不生成部分扫描；取消只标记该扫描已丢弃，不删除或改写来源文件。
+
+一次“处理 N 项”由一个可取消的 operation `BackendTask` 表示，`ImportItem` / session JSON 仍是逐项 partial success、waiting、preview、failed、skipped、cancelled 与 retry 的事实来源。前端通过最多每 100ms 一次的 `import://session-patch` 批量更新 item，并在 terminal cohort 只刷新一次 session summary；旧 `start_import_items_v2` 继续为 `<= 200` 的兼容调用者注册，大批调用使用 `start_import_batch_v2`。
+
 导入层负责无损证据与可读来源；下列路径是新建原生知识库映射：
 
 - `raw/`：不可变原文件、页面证据、原始图片、字幕、OCR / ASR 原始输出和版本证据。

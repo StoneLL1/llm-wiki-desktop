@@ -186,9 +186,17 @@ pub struct DiscoveredFile {
 #[serde(rename_all = "camelCase")]
 pub struct LargeDataEstimate {
     pub row_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_count: Option<u32>,
     pub estimated_output_files: u32,
     pub total_bytes: u64,
     pub requires_confirmation: bool,
+    #[serde(default = "serde_default_true")]
+    pub estimate_complete: bool,
+}
+
+fn serde_default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -226,6 +234,46 @@ pub struct FileScanResult {
     pub files: Vec<DiscoveredFile>,
     pub skipped: Vec<SkippedFile>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_identity: Option<ImportScanIdentity>,
+    #[serde(default)]
+    pub totals: ImportScanTotals,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_confirmed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discarded_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportScanIdentity {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub session_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportScanConfirmationReason {
+    FileCount,
+    TotalBytes,
+    EstimatedOutputFiles,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportScanTotals {
+    pub file_count: u32,
+    pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_output_files: Option<u64>,
+    pub requires_confirmation: bool,
+    pub reasons: Vec<ImportScanConfirmationReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

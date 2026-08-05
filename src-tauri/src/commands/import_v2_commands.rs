@@ -10,7 +10,7 @@ use crate::errors::{BackendError, IMPORT_V2_ENGINE_PANICKED};
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportBatchResult, ImportCompletion, ImportInput, ImportItem,
     ImportItemResolution, ImportItemStatus, ImportRecoveryAction, ImportResourceMode,
-    ImportSession, ImportThreeWayMergeContext,
+    ImportSession, ImportSessionPatchCounts, ImportSessionPatchEvent, ImportThreeWayMergeContext,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -42,6 +42,7 @@ struct ImportWorkerJob {
 #[derive(Clone)]
 struct BatchOperationJob {
     state: Arc<Mutex<BatchOperationState>>,
+    pending_items: Arc<Mutex<HashMap<String, ImportItem>>>,
 }
 
 macro_rules! request {
@@ -636,6 +637,7 @@ pub fn start_import_batch_v2(
         state: Arc::new(Mutex::new(BatchOperationState::new(
             request.item_ids.len() as u64
         ))),
+        pending_items: Arc::new(Mutex::new(HashMap::new())),
     };
     let jobs = request
         .item_ids
@@ -879,6 +881,26 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
     let Some(operation) = &job.batch_operation else {
         return;
     };
+    let item = state
+        .resolve_project_context(&job.project_id, &job.project_root_path)
+        .and_then(|context| {
+            state.import_v2_service.load_item(
+                &context,
+                &state.file_store,
+                &job.session_id,
+                &job.item_id,
+            )
+        })
+        .ok();
+    // Serializing the item buffer around outcome recording guarantees that a
+    // terminal patch cannot overtake an earlier worker's item snapshot.
+    let mut pending_items = operation
+        .pending_items
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(item) = item {
+        pending_items.insert(item.item_id.clone(), item);
+    }
     let mut control = BatchExecutionControl::new(
         &state.task_service,
         &job.task_id,
@@ -887,6 +909,15 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
     let Ok((completed, total, summary, publish)) = control.record_outcome(outcome) else {
         return;
     };
+    let patch_items = if publish {
+        pending_items
+            .drain()
+            .map(|(_, item)| item)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    drop(pending_items);
     if publish {
         let _ = control.flush_progress(
             completed,
@@ -900,6 +931,23 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
                 summary.ready, summary.waiting, summary.failed, summary.cancelled
             ),
         );
+        state
+            .task_service
+            .emit_import_session_patch(ImportSessionPatchEvent {
+                project_id: job.project_id.clone(),
+                project_root_path: job.project_root_path.clone(),
+                session_id: job.session_id.clone(),
+                batch_id: job.task_id.clone(),
+                items: patch_items,
+                counts: ImportSessionPatchCounts {
+                    total,
+                    processed: completed,
+                    succeeded: summary.ready,
+                    waiting: summary.waiting,
+                    failed: summary.failed + summary.systemic_errors,
+                    cancelled: summary.cancelled,
+                },
+            });
     }
     if completed != total {
         return;
