@@ -118,6 +118,11 @@ describe("recoverTasksForProject", () => {
     useTaskStore.getState().setTasks([{
       ...task("task-a", "project-a"),
       batchId: "batch-a",
+      operation: {
+        kind: "import_batch",
+        sessionId: "session-a",
+        itemCount: 1,
+      },
     }]);
 
     useTaskStore.getState().setTasks([{
@@ -131,6 +136,11 @@ describe("recoverTasksForProject", () => {
     expect(useTaskStore.getState().tasks[0]).toMatchObject({
       status: "succeeded",
       batchId: "batch-a",
+      operation: {
+        kind: "import_batch",
+        sessionId: "session-a",
+        itemCount: 1,
+      },
     });
   });
 

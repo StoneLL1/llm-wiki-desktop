@@ -1,4 +1,6 @@
 {
+  "importV2.progress.preparing": "正在准备导入…",
+  "importV2.progress.starting": "正在启动导入…",
   "projectAssessment.layoutUnsafeEntrySkipped": "已排除链接条目 {{path}}，且未读取其目标内容。",
   "projectAssessment.layoutUnsafeEntryUnknown": "未知路径",
   "projectAssessment.warning.PROJECT_GIT_UNAVAILABLE": "无法安全检查 Git 状态。Markdown 仍可读取，但 Git 操作已禁用。",

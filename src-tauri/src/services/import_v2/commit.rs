@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::errors::{
-    BackendError, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED, IMPORT_V2_QUALITY_FAILED,
-    IMPORT_V2_STATE_INVALID,
+    BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED,
+    IMPORT_V2_QUALITY_FAILED, IMPORT_V2_STATE_INVALID,
 };
 use crate::models::git::CheckpointPurpose;
 use crate::models::import_v2::{
@@ -460,6 +460,32 @@ impl ImportV2Service {
         restricted_content_acknowledged: bool,
         before_commit: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<Option<ImportBatchResult>, BackendError> {
+        self.finalize_exact_duplicate_cancellable(
+            context,
+            file_store,
+            git_service,
+            session_id,
+            item_id,
+            restricted_content_acknowledged,
+            || false,
+            before_commit,
+        )
+    }
+
+    pub fn finalize_exact_duplicate_cancellable<C>(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        git_service: &GitService,
+        session_id: &str,
+        item_id: &str,
+        restricted_content_acknowledged: bool,
+        cancelled: C,
+        before_commit: impl FnOnce() -> Result<(), BackendError>,
+    ) -> Result<Option<ImportBatchResult>, BackendError>
+    where
+        C: Fn() -> bool,
+    {
         let session = self.sessions.load(context, file_store, session_id)?;
         let Some(item) = session.items.iter().find(|item| item.item_id == item_id) else {
             return Err(commit_error(
@@ -508,7 +534,7 @@ impl ImportV2Service {
                 file_store,
                 git_service,
                 &request,
-                || false,
+                &cancelled,
                 |_| {},
                 Some((item_id, &fingerprint)),
                 before_commit,
@@ -516,6 +542,7 @@ impl ImportV2Service {
         })();
         let batch = match attempt {
             Ok(batch) => batch,
+            Err(error) if error.code == IMPORT_V2_CANCELLED => return Err(error),
             Err(error) => {
                 if !self.record_exact_duplicate_commit_failure(
                     context,
@@ -5124,6 +5151,34 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                     .recovery_actions
                     .contains(&ImportRecoveryAction::Retry)
         }));
+    }
+
+    #[test]
+    fn exact_duplicate_cancellation_does_not_relabel_the_item_as_failed() {
+        let mut fixture = CommitFixture::two_ready_items();
+        fixture.prepare_exact_duplicate();
+
+        let error = fixture
+            .service
+            .finalize_exact_duplicate_cancellable(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &fixture.session_id,
+                &fixture.first_item_id,
+                true,
+                || true,
+                || Ok(()),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
+        let reopened = fixture
+            .service
+            .load_session(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        assert_eq!(reopened.items[0].status, ImportItemStatus::PreviewReady);
+        assert!(reopened.items[0].issue.is_none());
     }
 
     #[test]

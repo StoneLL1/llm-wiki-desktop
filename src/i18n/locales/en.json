@@ -1793,6 +1793,8 @@
   "importV2.discovery.scanning": "Scanning sources",
   "importV2.discovery.stage": "Discovering files",
   "importV2.progress.working": "Working",
+  "importV2.progress.preparing": "Preparing import…",
+  "importV2.progress.starting": "Starting import…",
   "importV2.discovery.discovered": "{{count}} discovered",
   "importV2.discovery.added": "{{count}} added",
   "importV2.discovery.skipped": "{{count}} skipped",

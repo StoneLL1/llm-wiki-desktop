@@ -10,7 +10,7 @@ import { fetchTasks, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { ImportSession, ImportSessionPatchEvent } from "../../types/importV2";
 import type { FileScanResult } from "../../types/importV2File";
-import { isTerminalStatus, type BackendEvent, type BackendTask } from "../../types/task";
+import { isImportBatchOperationTask, isTerminalStatus, type BackendEvent, type BackendTask } from "../../types/task";
 import { importWorkflowErrorMessage } from "./useImportSessionScope";
 import { mergeImportItemTask } from "./importTaskProgress";
 
@@ -250,7 +250,7 @@ export function useImportTaskCoordinator({
     epoch: number,
   ) => {
     const operation = tasks.length === 1
-      && tasks[0]?.batchId?.startsWith("import-v2-operation:")
+      && tasks[0] && isImportBatchOperationTask(tasks[0])
       ? tasks[0]
       : null;
     if (operation) {
@@ -404,7 +404,8 @@ export function useImportTaskCoordinator({
       (task) => useTaskStore.getState().tasks.find((current) => current.id === task.id) ?? task,
     );
     const operation = resolvedTasks.length === 1
-      && resolvedTasks[0]?.batchId?.startsWith("import-v2-operation:");
+      && resolvedTasks[0] !== undefined
+      && isImportBatchOperationTask(resolvedTasks[0]);
     resolvedTasks.forEach((task, index) => {
       const itemId = itemIds[index];
       if (!operation && itemId) syncItemTask(task, itemId, requestKey, epoch, true);
@@ -413,7 +414,7 @@ export function useImportTaskCoordinator({
     recordItemBatch(resolvedTasks, itemIds, requestKey, epoch, sessionId);
     const terminalIds = registerItemTasks(resolvedTasks, itemIds, requestKey, epoch);
     const operationTask = resolvedTasks.length === 1
-      && resolvedTasks[0]?.batchId?.startsWith("import-v2-operation:")
+      && resolvedTasks[0] && isImportBatchOperationTask(resolvedTasks[0])
       ? resolvedTasks[0]
       : null;
     if (operationTask) {
@@ -466,12 +467,10 @@ export function useImportTaskCoordinator({
       });
       trackStartedItems([task], acceptedIds, requestKey, epoch, current.sessionId);
     } catch (error) {
-      if (isScopeCurrent(requestKey, epoch)) {
-        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
-      }
       endPendingItems(acceptedIds, requestKey, epoch);
+      throw error;
     }
-  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, pushToast, rootPath, t, trackStartedItems]);
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, rootPath, trackStartedItems]);
 
   const settlePathTask = useCallback((task: BackendTask): boolean => {
     const pending = pendingPathTasks.current.get(task.id);
@@ -481,7 +480,11 @@ export function useImportTaskCoordinator({
     if (task.status === "succeeded") {
       void refreshForScope(pending.projectKey, pending.epoch)
         .then(() => startNewQueuedItems(pending.projectKey, pending.epoch, pending.existingItemIds))
-        .catch(() => undefined)
+        .catch((error) => {
+          if (isScopeCurrent(pending.projectKey, pending.epoch)) {
+            pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+          }
+        })
         .finally(pending.settleQueue);
       const currentSessionId = useImportStore.getState().session?.sessionId;
       if (currentSessionId) {
@@ -491,7 +494,7 @@ export function useImportTaskCoordinator({
       pending.settleQueue();
     }
     return true;
-  }, [loadDiscoveryScan, refreshForScope, startNewQueuedItems]);
+  }, [isScopeCurrent, loadDiscoveryScan, pushToast, refreshForScope, startNewQueuedItems, t]);
 
   const settleConfirmationTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
     pendingConfirmationTasks.current.delete(task.id);
@@ -652,7 +655,7 @@ export function useImportTaskCoordinator({
     if (confirmation && isTerminalStatus(task.status)) {
       settleConfirmationTask(task, confirmation);
     }
-    if (pendingItem?.operation && isTerminalTaskEvent(event)) {
+    if (pendingItem?.operation) {
       settleOperationTask(task);
     } else {
       settleItemTask(task);
@@ -849,7 +852,7 @@ export function useImportTaskCoordinator({
       if (!item.taskId) continue;
       const task = tasksById.get(item.taskId);
       if (!task || task.projectId !== projectId || isSettledImportTask(task)) continue;
-      if (task.batchId?.startsWith("import-v2-operation:")) {
+      if (isImportBatchOperationTask(task)) {
         const itemIds = operationItems.get(task.id) ?? [];
         itemIds.push(item.itemId);
         operationItems.set(task.id, itemIds);

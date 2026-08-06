@@ -7,6 +7,7 @@ use crate::models::task::{BackendTask, TaskActivity, TaskStatus, TaskType};
 use crate::models::workflow::{
     WorkflowFilesystemAccess, WorkflowPersistenceMode, WorkflowProjectTrust, WorkflowRunPage,
 };
+use crate::services::import_v2::is_import_batch_operation_task;
 use crate::tasks::task_model::LogLine;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,15 +158,24 @@ pub fn cancel_task(
             .get_task(&request.task_id)
             .ok_or_else(|| BackendError::new("TASK_NOT_FOUND", "Task not found.", false, false));
     }
-    let result = if state
-        .task_service
-        .get_task(&request.task_id)
-        .is_some_and(|task| {
-            matches!(
-                task.task_type,
-                TaskType::LlmRequest | TaskType::SourceAiOrganize
-            )
-        }) {
+    let task = state.task_service.get_task(&request.task_id);
+    if let Some(task) = task
+        .as_ref()
+        .filter(|task| is_import_batch_operation_task(task))
+    {
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        return crate::commands::import_v2_commands::cancel_import_operation_for_state(
+            &state, &context, task,
+        )
+        .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false));
+    }
+    let result = if task.is_some_and(|task| {
+        matches!(
+            task.task_type,
+            TaskType::LlmRequest | TaskType::SourceAiOrganize
+        )
+    }) {
         state.task_service.request_cancel(&request.task_id)
     } else {
         state.task_service.cancel_task(&request.task_id)

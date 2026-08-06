@@ -7,7 +7,7 @@ import { useImportStore } from "../../stores/importStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { ImportItem, ImportSession } from "../../types/importV2";
-import { isTerminalStatus, type BackendTask } from "../../types/task";
+import { isImportBatchOperationTask, isTerminalStatus, type BackendTask } from "../../types/task";
 import type { ImportBatchProgress, ImportBatchTask } from "./importWorkflow";
 import { hasImportTauriRuntime } from "./useImportSessionScope";
 
@@ -210,7 +210,7 @@ function recoverImportBatchRecords(
   for (const item of session.items) {
     if (!item.taskId) continue;
     const task = taskById.get(item.taskId);
-    const isOperation = task?.batchId?.startsWith("import-v2-operation:") ?? false;
+    const isOperation = task ? isImportBatchOperationTask(task) : false;
     if (!isOperation && !isRecoverableImportItemStatus(item.status)) continue;
     if (task && isTerminalStatus(task.status) && !isOperation) continue;
     if (isOperation) {
@@ -298,7 +298,7 @@ export function useImportBatchController({
     const currentSession = useImportStore.getState().session;
     const itemById = new Map((currentSession?.items ?? []).map((item) => [item.itemId, item]));
     const operationTask = tasks.length === 1
-      && tasks[0]?.batchId?.startsWith("import-v2-operation:")
+      && tasks[0] && isImportBatchOperationTask(tasks[0])
       ? tasks[0]
       : null;
     const batchId = operationTask?.id

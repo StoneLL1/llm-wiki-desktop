@@ -224,9 +224,12 @@ function preferFreshTask(current: BackendTask, incoming: BackendTask): BackendTa
   // Older task snapshots/events may not carry the optional grouping field.
   // Preserve it when the task is otherwise newer so a refresh cannot make a
   // visible batch disappear from the Import view.
-  return incoming.batchId === undefined && current.batchId !== undefined
+  const withBatch = incoming.batchId === undefined && current.batchId !== undefined
     ? { ...incoming, batchId: current.batchId }
     : incoming;
+  return withBatch.operation === undefined && current.operation !== undefined
+    ? { ...withBatch, operation: current.operation }
+    : withBatch;
 }
 
 /**

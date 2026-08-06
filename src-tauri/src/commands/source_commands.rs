@@ -873,6 +873,7 @@ mod tests {
             task_type: TaskType::SourceAiOrganize,
             project_id: Some("project-1".into()),
             batch_id: None,
+            operation: None,
             title: "Source AI".into(),
             status: TaskStatus::Failed,
             progress: None,

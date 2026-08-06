@@ -5,6 +5,7 @@ import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { importProjectKey, useImportStore } from "../../stores/importStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useToastStore } from "../../stores/toastStore";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { ImportCompletion, ImportItem, ImportSession } from "../../types/importV2";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
@@ -203,6 +204,7 @@ beforeEach(() => {
   tauriInvoke.mockResolvedValue([]);
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   useImportStore.getState().reset();
+  useToastStore.setState({ toasts: [] });
   useProjectStore.setState({ authority: null });
   useTaskStore.setState({
     activeProjectId: projectA.projectId,
@@ -244,7 +246,12 @@ beforeEach(() => {
   api.startItems.mockResolvedValue([]);
   api.startBatch.mockResolvedValue({
     ...task("batch-operation"),
-    batchId: `import-v2-operation:session-${projectA.projectId}`,
+    batchId: "batch-operation",
+    operation: {
+      kind: "import_batch",
+      sessionId: `session-${projectA.projectId}`,
+      itemCount: 1,
+    },
   });
   api.cancelItem.mockResolvedValue(session(projectA.projectId));
   api.acceptScan.mockResolvedValue({
@@ -679,7 +686,17 @@ describe("useImportWorkflow", () => {
     const existing = item("existing.md", "preview_ready");
     api.createSession.mockResolvedValue(session(projectA.projectId, [existing]));
     api.addUrl.mockResolvedValue(session(projectA.projectId, [existing, item("url-1")]));
-    const started = task("url-task");
+    const started = {
+      ...task("url-task"),
+      batchId: "url-task",
+      title: "Import example.com",
+      operation: {
+        kind: "import_batch" as const,
+        sessionId: "session-project-a",
+        itemCount: 1,
+        sourceLabel: "example.com",
+      },
+    };
     api.startBatch.mockResolvedValue(started);
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
     await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
@@ -698,6 +715,22 @@ describe("useImportWorkflow", () => {
       itemIds: ["url-1"],
     });
     expect(useTaskStore.getState().tasks).toContainEqual(started);
+  });
+
+  it("rejects URL addition when operation startup fails so the form can retain the URL", async () => {
+    api.addUrl.mockResolvedValue(session(projectA.projectId, [item("url-retry")]));
+    api.startBatch.mockRejectedValue(new Error("operation task unavailable"));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    await act(async () => {
+      await expect(result.current.addUrl("https://example.com/retry")).rejects.toThrow(
+        "operation task unavailable",
+      );
+    });
+
+    expect(result.current.pendingItemIds?.has("url-retry")).toBe(false);
+    expect(useToastStore.getState().toasts).toHaveLength(1);
   });
 
   it("adds reviewed clipboard text and starts only the new queued item", async () => {

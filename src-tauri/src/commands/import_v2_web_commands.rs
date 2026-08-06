@@ -1,6 +1,6 @@
 use crate::{
     app_state::AppState,
-    commands::import_v2_commands::{start_import_items_for_state, StartImportItemsV2Request},
+    commands::import_v2_commands::{start_import_batch_for_state, StartImportBatchV2Request},
     errors::BackendError,
     models::{
         import_v2::{
@@ -604,10 +604,10 @@ pub fn complete_import_login_v2(
         );
         return Err(error);
     }
-    let tasks = match start_import_items_for_state(
+    let tasks = match start_import_batch_for_state(
         app,
         &state,
-        StartImportItemsV2Request {
+        StartImportBatchV2Request {
             project_id: request.project_id.clone(),
             project_root_path: request.project_root_path.clone(),
             session_id: request.import_session_id.clone(),
@@ -615,7 +615,7 @@ pub fn complete_import_login_v2(
             recovery_action: None,
         },
     ) {
-        Ok(tasks) => tasks,
+        Ok(task) => vec![task],
         Err(error) => {
             let _ = state.import_v2_service.unbind_authenticated_profiles(
                 &request.project_id,

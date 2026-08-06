@@ -22,6 +22,7 @@ pub(crate) trait ImportExecutionControl {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ImportOperationSummary {
     pub ready: u64,
+    pub completed: u64,
     pub waiting: u64,
     pub failed: u64,
     pub cancelled: u64,
@@ -31,10 +32,21 @@ pub(crate) struct ImportOperationSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImportItemRunOutcome {
     Ready,
+    Completed,
     Waiting,
     Failed,
     Cancelled,
     SystemicError,
+}
+
+pub(crate) fn batch_terminal_status(summary: &ImportOperationSummary) -> TaskStatus {
+    if summary.failed > 0 || summary.systemic_errors > 0 {
+        TaskStatus::Failed
+    } else if summary.waiting > 0 {
+        TaskStatus::WaitingForConfirmation
+    } else {
+        TaskStatus::Succeeded
+    }
 }
 
 #[derive(Debug)]
@@ -70,6 +82,7 @@ impl BatchOperationState {
         self.completed += 1;
         match outcome {
             ImportItemRunOutcome::Ready => self.summary.ready += 1,
+            ImportItemRunOutcome::Completed => self.summary.completed += 1,
             ImportItemRunOutcome::Waiting => self.summary.waiting += 1,
             ImportItemRunOutcome::Failed => self.summary.failed += 1,
             ImportItemRunOutcome::Cancelled => self.summary.cancelled += 1,
@@ -104,6 +117,32 @@ mod tests {
         assert_eq!(
             publishes, 10,
             "nine throttled updates plus terminal flush in one second"
+        );
+    }
+
+    #[test]
+    fn partial_failure_or_attention_never_reports_success() {
+        assert_eq!(
+            batch_terminal_status(&ImportOperationSummary {
+                failed: 1,
+                ..Default::default()
+            }),
+            TaskStatus::Failed
+        );
+        assert_eq!(
+            batch_terminal_status(&ImportOperationSummary {
+                waiting: 1,
+                ..Default::default()
+            }),
+            TaskStatus::WaitingForConfirmation
+        );
+        assert_eq!(
+            batch_terminal_status(&ImportOperationSummary {
+                ready: 1,
+                completed: 1,
+                ..Default::default()
+            }),
+            TaskStatus::Succeeded
         );
     }
 

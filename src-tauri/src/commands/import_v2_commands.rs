@@ -16,9 +16,12 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::agent_candidate::AgentCandidateService;
 use crate::services::import_v2::execution_control::{
-    BatchExecutionControl, BatchOperationState, ImportExecutionControl, ImportItemRunOutcome,
+    batch_terminal_status, BatchExecutionControl, BatchOperationState, ImportExecutionControl,
+    ImportItemRunOutcome,
 };
-use crate::services::import_v2::{batch_operation_marker, IMPORT_BATCH_OPERATION_MARKER};
+use crate::services::import_v2::{
+    import_batch_operation_session_id, is_import_batch_operation_task,
+};
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
@@ -411,11 +414,10 @@ pub fn cancel_import_item_v2(
     }
     let bound_task_id = item.task_id.clone();
     if bound_task_id.as_deref().is_some_and(|task_id| {
-        state.task_service.get_task(task_id).is_some_and(|task| {
-            task.batch_id
-                .as_deref()
-                .is_some_and(|batch| batch.starts_with(IMPORT_BATCH_OPERATION_MARKER))
-        })
+        state
+            .task_service
+            .get_task(task_id)
+            .is_some_and(|task| is_import_batch_operation_task(&task))
     }) {
         state.import_v2_service.cancel_batch_item(
             &context,
@@ -610,53 +612,163 @@ pub fn start_import_batch_v2(
     state: State<'_, AppState>,
     request: StartImportBatchV2Request,
 ) -> Result<BackendTask, BackendError> {
+    start_import_batch_for_state(app, &state, request)
+}
+
+pub(crate) fn start_import_batch_for_state(
+    app: AppHandle,
+    state: &AppState,
+    request: StartImportBatchV2Request,
+) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let task = state.import_v2_service.begin_batch_operation(
+    let task = state.import_v2_service.create_batch_operation_task(
         &context,
         &state.file_store,
         &state.task_service,
         &request.session_id,
         &request.item_ids,
     )?;
-    if let Err(error) = state
+    let running_task = match state
         .task_service
         .transition_status(&task.id, TaskStatus::Running)
     {
-        let _ = state.task_service.set_error(&task.id, task_error(&error));
-        let _ = state
-            .task_service
-            .transition_status(&task.id, TaskStatus::Failed);
-        return Err(task_error(&error));
-    }
+        Ok(task) => task,
+        Err(error) => {
+            let _ = state.task_service.set_error(&task.id, task_error(&error));
+            let _ = state
+                .task_service
+                .transition_status(&task.id, TaskStatus::Failed);
+            return Err(task_error(&error));
+        }
+    };
+    let _ = state.task_service.update_progress(
+        &task.id,
+        0,
+        Some(request.item_ids.len() as u64),
+        Some("Preparing import".into()),
+    );
     let worker_limit = state
         .settings_service
         .read_settings(&context)
         .map(|settings| configured_import_worker_limit(settings.max_concurrent_tasks))
         .unwrap_or(DEFAULT_IMPORT_WORKER_LIMIT);
-    let operation = BatchOperationJob {
-        state: Arc::new(Mutex::new(BatchOperationState::new(
-            request.item_ids.len() as u64
-        ))),
-        pending_items: Arc::new(Mutex::new(HashMap::new())),
-    };
-    let jobs = request
-        .item_ids
-        .into_iter()
-        .map(|item_id| ImportWorkerJob {
-            app: app.clone(),
-            project_id: request.project_id.clone(),
-            project_root_path: request.project_root_path.clone(),
-            session_id: request.session_id.clone(),
-            item_id,
-            task_id: task.id.clone(),
-            recovery_action: request.recovery_action.clone(),
-            batch_operation: Some(operation.clone()),
-        })
-        .collect::<Vec<_>>();
-    // Binding above completes before this enqueue.  A failed binding therefore
-    // cannot leave a partial cohort with workers already running.
-    enqueue_import_jobs(jobs, worker_limit);
-    Ok(task)
+    let background_app = app.clone();
+    let operation_task_id = task.id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let panic_app = background_app.clone();
+        let panic_task_id = operation_task_id.clone();
+        let panic_project_id = request.project_id.clone();
+        let panic_project_root_path = request.project_root_path.clone();
+        let panic_session_id = request.session_id.clone();
+        let panic_item_ids = request.item_ids.clone();
+        let preparation_job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = background_app.state::<AppState>();
+            let preparation = state
+                .resolve_project_context(&request.project_id, &request.project_root_path)
+                .and_then(|context| {
+                    state.import_v2_service.prepare_batch_operation(
+                        &context,
+                        &state.file_store,
+                        &state.task_service,
+                        &request.session_id,
+                        &operation_task_id,
+                        &request.item_ids,
+                        || state.task_service.is_cancelled(&operation_task_id),
+                    )
+                });
+            let replaced_task_ids = match preparation {
+                Ok(task_ids) => task_ids,
+                Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
+                    let _ = state.task_service.finalize_cancellation(&operation_task_id);
+                    return;
+                }
+                Err(error) => {
+                    fail_task_unless_cancelled(&state, &operation_task_id, error);
+                    return;
+                }
+            };
+            for replaced_task_id in replaced_task_ids {
+                if state
+                    .task_service
+                    .get_task(&replaced_task_id)
+                    .is_some_and(|task| task.status == TaskStatus::WaitingForConfirmation)
+                {
+                    let _ = state.task_service.cancel_task(&replaced_task_id);
+                }
+            }
+            if state.task_service.is_cancelled(&operation_task_id) {
+                if let Ok(context) =
+                    state.resolve_project_context(&request.project_id, &request.project_root_path)
+                {
+                    for item_id in &request.item_ids {
+                        let _ = state.import_v2_service.cancel_batch_item(
+                            &context,
+                            &state.file_store,
+                            &request.session_id,
+                            item_id,
+                        );
+                    }
+                }
+                let _ = state.task_service.finalize_cancellation(&operation_task_id);
+                return;
+            }
+            let _ = state.task_service.update_progress(
+                &operation_task_id,
+                0,
+                Some(request.item_ids.len() as u64),
+                Some("Starting import".into()),
+            );
+            let operation = BatchOperationJob {
+                state: Arc::new(Mutex::new(BatchOperationState::new(
+                    request.item_ids.len() as u64
+                ))),
+                pending_items: Arc::new(Mutex::new(HashMap::new())),
+            };
+            let jobs = request
+                .item_ids
+                .into_iter()
+                .map(|item_id| ImportWorkerJob {
+                    app: background_app.clone(),
+                    project_id: request.project_id.clone(),
+                    project_root_path: request.project_root_path.clone(),
+                    session_id: request.session_id.clone(),
+                    item_id,
+                    task_id: operation_task_id.clone(),
+                    recovery_action: request.recovery_action.clone(),
+                    batch_operation: Some(operation.clone()),
+                })
+                .collect::<Vec<_>>();
+            // The atomic claim completes before enqueue, so failed or cancelled
+            // preparation cannot leave a partially running cohort.
+            enqueue_import_jobs(jobs, worker_limit);
+        }));
+        if preparation_job.is_err() {
+            let state = panic_app.state::<AppState>();
+            if let Ok(context) =
+                state.resolve_project_context(&panic_project_id, &panic_project_root_path)
+            {
+                for item_id in panic_item_ids {
+                    let _ = state.import_v2_service.cancel_batch_item(
+                        &context,
+                        &state.file_store,
+                        &panic_session_id,
+                        &item_id,
+                    );
+                }
+            }
+            fail_task_unless_cancelled(
+                &state,
+                &panic_task_id,
+                BackendError::new(
+                    IMPORT_V2_ENGINE_PANICKED,
+                    "Import batch preparation stopped unexpectedly.",
+                    true,
+                    false,
+                ),
+            );
+        }
+    });
+    Ok(running_task)
 }
 
 fn configured_import_worker_limit(value: u64) -> usize {
@@ -794,46 +906,54 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
                     job.recovery_action.as_ref(),
                 )?;
             }
-            if job.batch_operation.is_some() {
-                return Ok(());
-            }
             let restricted_content_acknowledged = state
                 .file_store
                 .exists(&context, RESTRICTED_CONTENT_ACK_PATH);
-            if let Some(batch) = state.import_v2_service.finalize_exact_duplicate(
-                &context,
-                &state.file_store,
-                &state.git_service,
-                &job.session_id,
-                &job.item_id,
-                restricted_content_acknowledged,
-                || {
+            if let Some(batch) = state
+                .import_v2_service
+                .finalize_exact_duplicate_cancellable(
+                    &context,
+                    &state.file_store,
+                    &state.git_service,
+                    &job.session_id,
+                    &job.item_id,
+                    restricted_content_acknowledged,
+                    || state.task_service.is_cancelled(&job.task_id),
+                    || {
+                        if job.batch_operation.is_some() {
+                            Ok(())
+                        } else {
+                            state
+                                .task_service
+                                .transition_status(&job.task_id, TaskStatus::Running)
+                                .map(|_| ())
+                                .map_err(|error| task_error(&error))
+                        }
+                    },
+                )?
+            {
+                if job.batch_operation.is_none() {
                     state
                         .task_service
-                        .transition_status(&job.task_id, TaskStatus::Running)
-                        .map(|_| ())
-                        .map_err(|error| task_error(&error))
-                },
-            )? {
-                state
-                    .task_service
-                    .complete_running_with_result(
-                        &job.task_id,
-                        TaskResult {
-                            summary: "Duplicate already exists; its locator was recorded.".into(),
-                            affected_paths: vec![format!(
-                                ".app/import-history/{}.json",
-                                batch.batch_id
-                            )],
-                            reference: Some(TaskResultReference::ImportV2SessionPreview {
-                                session_id: batch.session_id.clone(),
-                                batch_id: Some(batch.batch_id.clone()),
-                                completion: batch.completion.clone(),
-                            }),
-                            pending_action: None,
-                        },
-                    )
-                    .map_err(|error| task_error(&error))?;
+                        .complete_running_with_result(
+                            &job.task_id,
+                            TaskResult {
+                                summary: "Duplicate already exists; its locator was recorded."
+                                    .into(),
+                                affected_paths: vec![format!(
+                                    ".app/import-history/{}.json",
+                                    batch.batch_id
+                                )],
+                                reference: Some(TaskResultReference::ImportV2SessionPreview {
+                                    session_id: batch.session_id.clone(),
+                                    batch_id: Some(batch.batch_id.clone()),
+                                    completion: batch.completion.clone(),
+                                }),
+                                pending_action: None,
+                            },
+                        )
+                        .map_err(|error| task_error(&error))?;
+                }
             }
             Ok(())
         });
@@ -841,6 +961,16 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
         let outcome = match result {
             Ok(()) => classify_batch_item_outcome(&state, job),
             Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
+                if let Ok(context) =
+                    state.resolve_project_context(&job.project_id, &job.project_root_path)
+                {
+                    let _ = state.import_v2_service.cancel_batch_item(
+                        &context,
+                        &state.file_store,
+                        &job.session_id,
+                        &job.item_id,
+                    );
+                }
                 ImportItemRunOutcome::Cancelled
             }
             Err(_) => classify_batch_item_outcome(&state, job),
@@ -872,6 +1002,7 @@ fn classify_batch_item_outcome(state: &AppState, job: &ImportWorkerJob) -> Impor
         | ImportItemStatus::WaitingAuthorization
         | ImportItemStatus::Paused => ImportItemRunOutcome::Waiting,
         ImportItemStatus::Cancelled | ImportItemStatus::Skipped => ImportItemRunOutcome::Cancelled,
+        ImportItemStatus::Completed => ImportItemRunOutcome::Completed,
         ImportItemStatus::Failed => ImportItemRunOutcome::Failed,
         _ => ImportItemRunOutcome::SystemicError,
     }
@@ -927,8 +1058,12 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
         let _ = control.log(
             LogLevel::Info,
             format!(
-                "Import batch progress: ready {}, waiting {}, failed {}, cancelled {}.",
-                summary.ready, summary.waiting, summary.failed, summary.cancelled
+                "Import batch progress: ready {}, completed {}, waiting {}, failed {}, cancelled {}.",
+                summary.ready,
+                summary.completed,
+                summary.waiting,
+                summary.failed,
+                summary.cancelled
             ),
         );
         state
@@ -942,7 +1077,7 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
                 counts: ImportSessionPatchCounts {
                     total,
                     processed: completed,
-                    succeeded: summary.ready,
+                    succeeded: summary.ready + summary.completed,
                     waiting: summary.waiting,
                     failed: summary.failed + summary.systemic_errors,
                     cancelled: summary.cancelled,
@@ -953,37 +1088,57 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
         return;
     }
     let _ = control.flush_progress(total, total, "Import batch complete".into());
-    if control.is_cancelled() {
-        // `request_cancel` intentionally keeps a running operation in
-        // Cancelling while workers reach a safe point. The final worker owns
-        // the single terminal transition; there are no child tasks to settle.
-        let _ = state.task_service.cancel_task(&job.task_id);
-        return;
-    }
-    if summary.systemic_errors > 0 {
-        let _ = state.task_service.set_error(
-            &job.task_id,
-            BackendError::new(
+    let (terminal_status, terminal_error) = if summary.systemic_errors > 0 {
+        (
+            TaskStatus::Failed,
+            Some(BackendError::new(
                 "IMPORT_BATCH_SYSTEMIC_FAILURE",
                 "One or more batch workers stopped before reporting an item outcome.",
                 true,
                 true,
-            ),
-        );
-        let _ = state
-            .task_service
-            .transition_status(&job.task_id, TaskStatus::Failed);
-        return;
-    }
-    let _ = state.task_service.complete_running_with_result(&job.task_id, TaskResult {
+            )),
+        )
+    } else {
+        let status = batch_terminal_status(&summary);
+        let error = (status == TaskStatus::Failed).then(|| {
+            BackendError::new(
+                "IMPORT_BATCH_ITEM_FAILURE",
+                "One or more import items failed.",
+                true,
+                true,
+            )
+        });
+        (status, error)
+    };
+    let result = TaskResult {
         summary: format!(
-            "Import batch completed: {} preview-ready, {} waiting for attention, {} failed, {} cancelled.",
-            summary.ready, summary.waiting, summary.failed, summary.cancelled
+            "Import preparation completed: {} preview-ready, {} duplicate aliases recorded, {} waiting for attention, {} failed, {} cancelled.",
+            summary.ready,
+            summary.completed,
+            summary.waiting,
+            summary.failed,
+            summary.cancelled
         ),
         affected_paths: Vec::new(),
-        reference: None,
+        reference: Some(TaskResultReference::ImportV2SessionPreview {
+            session_id: job.session_id.clone(),
+            batch_id: None,
+            completion: None,
+        }),
         pending_action: None,
-    });
+    };
+    if let Err(error) = state.task_service.finish_running_operation(
+        &job.task_id,
+        result,
+        terminal_status,
+        terminal_error,
+    ) {
+        let _ = state.task_service.append_log(
+            &job.task_id,
+            LogLevel::Error,
+            format!("Import operation could not publish its final state: {error}"),
+        );
+    }
 }
 
 /// Cancel only the import tasks belonging to one backend-issued batch. The
@@ -998,21 +1153,14 @@ pub fn cancel_import_batch_v2(
         return Err(task_error("Import batch id must not be empty."));
     }
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _session =
-        state
-            .import_v2_service
-            .load_session(&context, &state.file_store, &request.session_id)?;
+    state
+        .import_v2_service
+        .load_session(&context, &state.file_store, &request.session_id)?;
     if let Some(task) = state.task_service.get_task(&request.batch_id) {
         if task.project_id.as_deref() == Some(request.project_id.as_str())
-            && task.batch_id.as_deref()
-                == Some(batch_operation_marker(&request.session_id).as_str())
+            && import_batch_operation_session_id(&task) == Some(request.session_id.as_str())
         {
-            // One operation owns one cancellation token.  `request_cancel`
-            // leaves cleanup to the bounded workers rather than publishing a
-            // premature terminal state or iterating hidden child tasks.
-            return state
-                .task_service
-                .request_cancel(&task.id)
+            return cancel_import_operation_for_state(&state, &context, &task)
                 .map(|task| vec![task])
                 .map_err(|error| task_error(&error));
         }
@@ -1048,6 +1196,45 @@ pub fn cancel_import_batch_v2(
                 .map_err(|error| task_error(&error))
         })
         .collect()
+}
+
+pub(crate) fn cancel_import_operation_for_state(
+    state: &AppState,
+    context: &ProjectContext,
+    task: &BackendTask,
+) -> Result<BackendTask, String> {
+    let session_id = import_batch_operation_session_id(task)
+        .ok_or_else(|| "Task is not an import operation.".to_string())?;
+    let session = state
+        .import_v2_service
+        .load_session(context, &state.file_store, session_id)
+        .map_err(|error| error.message)?;
+    let (requested, previous_status) = state
+        .task_service
+        .request_cancel_with_previous_status(&task.id)?;
+    if previous_status != TaskStatus::WaitingForConfirmation {
+        return Ok(requested);
+    }
+
+    for item in session
+        .items
+        .iter()
+        .filter(|item| item.task_id.as_deref() == Some(task.id.as_str()))
+    {
+        if let Err(error) = state.import_v2_service.cancel_batch_item(
+            context,
+            &state.file_store,
+            session_id,
+            &item.item_id,
+        ) {
+            let _ = state.task_service.set_error(&task.id, error.clone());
+            let _ = state
+                .task_service
+                .transition_status(&task.id, TaskStatus::Failed);
+            return Err(error.message);
+        }
+    }
+    state.task_service.finalize_cancellation(&task.id)
 }
 
 fn prepare_all<T>(
@@ -1205,11 +1392,10 @@ fn settle_confirmed_preview_tasks(
         if !settled.insert(task_id.clone()) {
             continue;
         }
-        if task_service.get_task(task_id).is_some_and(|task| {
-            task.batch_id
-                .as_deref()
-                .is_some_and(|batch| batch.starts_with(IMPORT_BATCH_OPERATION_MARKER))
-        }) {
+        if task_service
+            .get_task(task_id)
+            .is_some_and(|task| is_import_batch_operation_task(&task))
+        {
             // A batch operation task ends after its worker cohort drains; it
             // is never a preview confirmation task for any individual item.
             continue;
@@ -1450,13 +1636,14 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let tasks = TaskService::default();
         let operation = tasks
-            .create_project_task_with_batch(
-                TaskType::Import,
+            .create_project_import_operation_task(
                 "project".into(),
                 root.clone(),
+                root.join(".app/tasks"),
                 "batch".into(),
-                true,
-                IMPORT_BATCH_OPERATION_MARKER.into(),
+                "session".into(),
+                2,
+                None,
             )
             .unwrap();
         tasks
