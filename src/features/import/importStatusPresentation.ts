@@ -188,6 +188,8 @@ const ITEM_TO_ISSUE_ACTION: Readonly<Partial<Record<ImportItemAction, ImportPrim
 };
 
 export const IMPORT_PROGRESS_LABEL_KEYS: Record<string, string> = {
+  "Preparing import": "importV2.progress.preparing",
+  "Starting import": "importV2.progress.starting",
   "Inspecting input": "importV2.itemStatus.inspecting",
   "Extracting source": "importV2.itemStatus.extracting",
   "Validating preview": "importV2.itemStatus.validating",

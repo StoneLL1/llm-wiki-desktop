@@ -6,7 +6,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::models::task::{
-    BackendTask, StreamDelta, TaskActivity, TaskProgress, TaskResult, TaskStatus, TaskType,
+    BackendTask, StreamDelta, TaskActivity, TaskOperation, TaskProgress, TaskResult, TaskStatus,
+    TaskType,
 };
 use crate::models::workflow::{
     WorkflowErrorSummary, WorkflowExecutionState, WorkflowPendingAction, WorkflowPersistenceMode,
@@ -253,6 +254,7 @@ impl TaskService {
             title,
             cancellable,
             None,
+            None,
             false,
             None,
             persistence_dir,
@@ -276,6 +278,7 @@ impl TaskService {
             title,
             cancellable,
             None,
+            None,
             true,
             None,
             Some(persistence_dir),
@@ -298,6 +301,7 @@ impl TaskService {
             Some(project_root),
             title,
             cancellable,
+            None,
             None,
             false,
             None,
@@ -338,9 +342,41 @@ impl TaskService {
             title,
             cancellable,
             Some(batch_id),
+            None,
             true,
             None,
             Some(persistence_dir),
+        )
+    }
+
+    /// Create the single persisted task that owns one Import V2 operation.
+    /// Its id is also the operation identity; typed metadata carries the
+    /// session relationship and presentation facts.
+    pub fn create_project_import_operation_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+        session_id: String,
+        item_count: u64,
+        source_label: Option<String>,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportBatch {
+                session_id,
+                item_count,
+                source_label,
+            }),
+            true,
+            None,
+            Some(task_state_root),
         )
     }
 
@@ -359,6 +395,7 @@ impl TaskService {
             Some(project_root),
             title,
             true,
+            None,
             None,
             require_persistence,
             Some(workflow),
@@ -384,6 +421,7 @@ impl TaskService {
         title: String,
         cancellable: bool,
         batch_id: Option<String>,
+        operation: Option<TaskOperation>,
         require_persistence: bool,
         workflow: Option<WorkflowExecutionState>,
         persistence_dir: Option<PathBuf>,
@@ -391,12 +429,14 @@ impl TaskService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let token = self.cancellation.register(&id);
+        let batch_id = operation.as_ref().map(|_| id.clone()).or(batch_id);
 
         let task = BackendTask {
             id: id.clone(),
             task_type: task_type.clone(),
             project_id: project_id.clone(),
             batch_id,
+            operation,
             title,
             status: TaskStatus::Queued,
             progress: None,
@@ -1443,7 +1483,7 @@ impl TaskService {
 
         self.cancellation.cancel(id);
 
-        if status == TaskStatus::Queued {
+        if matches!(status, TaskStatus::Queued | TaskStatus::Cancelling) {
             self.transition_status(id, TaskStatus::Cancelled)
         } else {
             self.transition_status(id, TaskStatus::Cancelling)?;
@@ -1457,13 +1497,26 @@ impl TaskService {
     /// the token, so callers cannot start a replacement operation while the
     /// original still owns its resources.
     pub fn request_cancel(&self, id: &str) -> Result<BackendTask, String> {
-        let tasks = self.tasks.read().expect("lock poisoned");
+        self.request_cancel_with_previous_status(id)
+            .map(|(task, _)| task)
+    }
+
+    /// Atomic cancellation request plus the status observed before the
+    /// request. Domain coordinators use the previous status to distinguish an
+    /// active worker (which must finish cleanup) from an already-drained
+    /// attention task (which the command can settle itself).
+    pub fn request_cancel_with_previous_status(
+        &self,
+        id: &str,
+    ) -> Result<(BackendTask, TaskStatus), String> {
+        let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
-            .get(id)
+            .get_mut(id)
             .ok_or_else(|| format!("Task not found: {id}"))?;
         if !entry.task.cancellable {
             return Err(format!("Task is not cancellable: {id}"));
         }
+        let previous_status = entry.task.status.clone();
         if matches!(
             entry.task.status,
             TaskStatus::Succeeded
@@ -1471,19 +1524,59 @@ impl TaskService {
                 | TaskStatus::Cancelled
                 | TaskStatus::Interrupted
         ) {
-            return Ok(entry.task.clone());
+            return Ok((entry.task.clone(), previous_status));
         }
-        let status = entry.task.status.clone();
-        drop(tasks);
-        self.cancellation.cancel(id);
-        if status == TaskStatus::Queued {
-            self.transition_status(id, TaskStatus::Cancelled)
-        } else if status == TaskStatus::Cancelling {
-            self.get_task(id)
-                .ok_or_else(|| format!("Task not found: {id}"))
+        entry.cancellation.cancel();
+        let next_status = if previous_status == TaskStatus::Queued {
+            TaskStatus::Cancelled
+        } else if previous_status == TaskStatus::Cancelling {
+            TaskStatus::Cancelling
         } else {
-            self.transition_status(id, TaskStatus::Cancelling)
+            TaskStatus::Cancelling
+        };
+        entry.task.status = next_status.clone();
+        let now = Utc::now().to_rfc3339();
+        entry.task.updated_at = now.clone();
+        if next_status == TaskStatus::Cancelled {
+            entry.task.completed_at = Some(now);
         }
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        self.persist_current_task(id)?;
+        let event_type = if next_status == TaskStatus::Cancelled {
+            crate::models::task::BackendEventType::TaskCancelled
+        } else {
+            crate::models::task::BackendEventType::TaskUpdated
+        };
+        self.emit(event_type, pid, Some(tid), task.clone());
+        Ok((task, previous_status))
+    }
+
+    /// Publish the terminal state after a deferred cancellation has reached a
+    /// worker-owned safe point. This deliberately does not request
+    /// cancellation: callers must first use `request_cancel`, then finish any
+    /// cleanup before calling this method.
+    pub fn finalize_cancellation(&self, id: &str) -> Result<BackendTask, String> {
+        let task = self
+            .get_task(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if matches!(
+            task.status,
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+        ) {
+            return Ok(task);
+        }
+        if task.status != TaskStatus::Cancelling || !self.cancellation.is_cancelled(id) {
+            return Err(format!(
+                "Task cancellation has not reached a finalizable state: {id}"
+            ));
+        }
+        self.transition_status(id, TaskStatus::Cancelled)
     }
 
     pub fn set_result(&self, id: &str, result: TaskResult) -> Result<BackendTask, String> {
@@ -1548,6 +1641,78 @@ impl TaskService {
             Some(tid),
             task.clone(),
         );
+        Ok(task)
+    }
+
+    /// Atomically finish a multi-item operation. Cancellation wins if its
+    /// shared token was set before this lock is acquired, so the final worker
+    /// cannot strand the task in `cancelling` between result and status writes.
+    pub fn finish_running_operation(
+        &self,
+        id: &str,
+        result: TaskResult,
+        desired_status: TaskStatus,
+        error: Option<crate::errors::BackendError>,
+    ) -> Result<BackendTask, String> {
+        if !matches!(
+            desired_status,
+            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::WaitingForConfirmation
+        ) {
+            return Err("Operation finish status is invalid".into());
+        }
+        if (desired_status == TaskStatus::Failed) != error.is_some() {
+            return Err("Operation failure status and error must agree".into());
+        }
+
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        let cancelled =
+            entry.task.status == TaskStatus::Cancelling || entry.cancellation.is_cancelled();
+        if !cancelled && entry.task.status != TaskStatus::Running {
+            return Err(format!("Task is no longer running: {id}"));
+        }
+        let previous = entry.task.clone();
+        let now = Utc::now().to_rfc3339();
+        if cancelled {
+            entry.task.status = TaskStatus::Cancelled;
+            entry.task.result = None;
+            entry.task.error = None;
+            entry.task.completed_at = Some(now.clone());
+        } else {
+            entry.task.status = desired_status.clone();
+            entry.task.result = Some(result);
+            entry.task.error = error;
+            entry.task.completed_at =
+                matches!(desired_status, TaskStatus::Succeeded | TaskStatus::Failed)
+                    .then(|| now.clone());
+        }
+        entry.task.updated_at = now;
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+
+        if let Err(error) = self.persist_current_task(id) {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.task = previous;
+            }
+            drop(tasks);
+            let _ = self.persist_current_task(id);
+            return Err(error);
+        }
+        let event_type = match task.status {
+            TaskStatus::Succeeded => crate::models::task::BackendEventType::TaskCompleted,
+            TaskStatus::Failed => crate::models::task::BackendEventType::TaskFailed,
+            TaskStatus::Cancelled => crate::models::task::BackendEventType::TaskCancelled,
+            TaskStatus::WaitingForConfirmation => {
+                crate::models::task::BackendEventType::ConfirmationRequested
+            }
+            _ => unreachable!("validated operation finish status"),
+        };
+        self.emit(event_type, pid, Some(tid), task.clone());
         Ok(task)
     }
 
@@ -1932,8 +2097,9 @@ impl TaskService {
                                     TaskStatus::Running
                                         | TaskStatus::Queued
                                         | TaskStatus::Cancelling
-                                        | TaskStatus::WaitingForConfirmation
-                                ) {
+                                ) || (task.status == TaskStatus::WaitingForConfirmation
+                                    && !task.is_import_operation())
+                                {
                                     task.status = TaskStatus::Failed;
                                     task.error = Some(crate::errors::BackendError::new(
                                         "TASK_RECOVERY",
@@ -2104,7 +2270,7 @@ mod tests {
     use crate::services::{EnqueueWorkflow, WorkflowCoordinator};
     use crate::tasks::task_events::CapturedEvent;
     use crate::tasks::task_model::LogLevel;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
 
     fn workflow_request(root: &Path, task_state_root: Option<PathBuf>) -> EnqueueWorkflow {
         EnqueueWorkflow {
@@ -2143,6 +2309,149 @@ mod tests {
         match outcome {
             WorkflowStartOutcome::Created { run } => run,
             WorkflowStartOutcome::Existing { .. } => panic!("expected new workflow"),
+        }
+    }
+
+    #[test]
+    fn deferred_cancellation_stays_nonterminal_until_worker_finalizes_it() {
+        let service = TaskService::default();
+        let task = service.create_task(TaskType::Import, None, "import".into(), true);
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+
+        let cancelling = service.request_cancel(&task.id).unwrap();
+        assert_eq!(cancelling.status, TaskStatus::Cancelling);
+        assert!(service.is_cancelled(&task.id));
+
+        let cancelled = service.finalize_cancellation(&task.id).unwrap();
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert!(cancelled.completed_at.is_some());
+        assert_eq!(
+            service.finalize_cancellation(&task.id).unwrap().status,
+            TaskStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn cancellation_cannot_be_finalized_without_a_request() {
+        let service = TaskService::default();
+        let task = service.create_task(TaskType::Import, None, "import".into(), true);
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+
+        assert!(service.finalize_cancellation(&task.id).is_err());
+        assert_eq!(
+            service.get_task(&task.id).unwrap().status,
+            TaskStatus::Running
+        );
+    }
+
+    #[test]
+    fn import_operation_uses_the_resolved_compatible_task_root() {
+        let project = tempfile::tempdir().unwrap();
+        let compatible_tasks = project.path().join(".app/compat/tasks");
+        let service = TaskService::default();
+        let task = service
+            .create_project_import_operation_task(
+                "compatible".into(),
+                project.path().to_path_buf(),
+                compatible_tasks.clone(),
+                "Import https://example.com".into(),
+                "session-1".into(),
+                1,
+                Some("https://example.com".into()),
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .finish_running_operation(
+                &task.id,
+                TaskResult {
+                    summary: "waiting".into(),
+                    affected_paths: Vec::new(),
+                    reference: None,
+                    pending_action: None,
+                },
+                TaskStatus::WaitingForConfirmation,
+                None,
+            )
+            .unwrap();
+
+        assert!(compatible_tasks.join(format!("{}.json", task.id)).is_file());
+        assert!(!project
+            .path()
+            .join(".app/tasks")
+            .join(format!("{}.json", task.id))
+            .exists());
+
+        let restarted = TaskService::default();
+        let recovered = restarted
+            .set_project_context(
+                "compatible".into(),
+                project.path().to_path_buf(),
+                compatible_tasks,
+            )
+            .unwrap();
+        assert!(recovered.iter().any(|candidate| {
+            candidate.id == task.id
+                && candidate.operation == task.operation
+                && candidate.status == TaskStatus::WaitingForConfirmation
+        }));
+    }
+
+    #[test]
+    fn final_worker_and_cancel_request_never_leave_an_operation_cancelling() {
+        for _ in 0..32 {
+            let service = Arc::new(TaskService::default());
+            let task = service.create_task(TaskType::Import, None, "import".into(), true);
+            service
+                .transition_status(&task.id, TaskStatus::Running)
+                .unwrap();
+            let barrier = Arc::new(Barrier::new(3));
+
+            let cancel_service = Arc::clone(&service);
+            let cancel_id = task.id.clone();
+            let cancel_barrier = Arc::clone(&barrier);
+            let cancel = std::thread::spawn(move || {
+                cancel_barrier.wait();
+                let (task, previous) =
+                    cancel_service.request_cancel_with_previous_status(&cancel_id)?;
+                if previous == TaskStatus::WaitingForConfirmation {
+                    cancel_service.finalize_cancellation(&cancel_id)
+                } else {
+                    Ok(task)
+                }
+            });
+
+            let finish_service = Arc::clone(&service);
+            let finish_id = task.id.clone();
+            let finish_barrier = Arc::clone(&barrier);
+            let finish = std::thread::spawn(move || {
+                finish_barrier.wait();
+                finish_service.finish_running_operation(
+                    &finish_id,
+                    TaskResult {
+                        summary: "ready".into(),
+                        affected_paths: Vec::new(),
+                        reference: None,
+                        pending_action: None,
+                    },
+                    TaskStatus::WaitingForConfirmation,
+                    None,
+                )
+            });
+
+            barrier.wait();
+            let _ = cancel.join().unwrap();
+            let _ = finish.join().unwrap();
+            assert!(matches!(
+                service.get_task(&task.id).unwrap().status,
+                TaskStatus::Cancelled | TaskStatus::WaitingForConfirmation
+            ));
         }
     }
 

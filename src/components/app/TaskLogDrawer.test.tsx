@@ -239,6 +239,28 @@ describe("TaskLogDrawer", () => {
     expect(useTaskStore.getState().selectedTaskId).toBe("batch-task-2");
   });
 
+  it("shows a typed URL operation as one task instead of a numbered batch", () => {
+    const operation = {
+      ...runningTask,
+      id: "url-operation",
+      batchId: "url-operation",
+      title: "Import https://example.com/article",
+      operation: {
+        kind: "import_batch" as const,
+        sessionId: "session-1",
+        itemCount: 1,
+        sourceLabel: "https://example.com/article",
+      },
+    };
+    useTaskStore.setState({ tasks: [operation], selectedTaskId: operation.id });
+
+    render(<TaskLogDrawer />);
+
+    expect(screen.getByRole("button", { name: /Import https:\/\/example.com\/article/ })).toBeInTheDocument();
+    expect(screen.queryByText("Import batches")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Batch 1/)).not.toBeInTheDocument();
+  });
+
   it("moves focus into the drawer and returns it to the opener", async () => {
     useTaskStore.setState({ drawerOpen: false, selectedTaskId: null });
 

@@ -47,13 +47,12 @@ use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 use sha2::{Digest, Sha256};
 
-/// Persisted marker on the one task representing a bulk operation.  Legacy
-/// item tasks retain their existing UUID batch IDs, so recovery can identify
-/// this ownership rule without an in-memory registry.
-pub(crate) const IMPORT_BATCH_OPERATION_MARKER: &str = "import-v2-operation";
+pub(crate) fn import_batch_operation_session_id(task: &BackendTask) -> Option<&str> {
+    task.import_operation_session_id()
+}
 
-pub(crate) fn batch_operation_marker(session_id: &str) -> String {
-    format!("{IMPORT_BATCH_OPERATION_MARKER}:{session_id}")
+pub(crate) fn is_import_batch_operation_task(task: &BackendTask) -> bool {
+    task.is_import_operation()
 }
 
 pub struct ImportV2Service {
@@ -901,8 +900,35 @@ impl ImportV2Service {
         index: &HashMap<String, usize>,
         bindings: &[(String, String)],
     ) -> Result<(), BackendError> {
+        self.bind_item_task_ids_from_snapshot_with_cancel(
+            context,
+            files,
+            session_id,
+            session,
+            index,
+            bindings,
+            || false,
+        )
+    }
+
+    fn bind_item_task_ids_from_snapshot_with_cancel<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        session: &mut ImportSession,
+        index: &HashMap<String, usize>,
+        bindings: &[(String, String)],
+        mut should_cancel: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnMut() -> bool,
+    {
         let mut seen = HashSet::with_capacity(bindings.len());
         for (item_id, task_id) in bindings {
+            if should_cancel() {
+                return Err(cancelled_error());
+            }
             if !seen.insert(item_id.as_str()) {
                 return Err(task_error("Import item bindings must be unique."));
             }
@@ -928,6 +954,9 @@ impl ImportV2Service {
         let mut originals = Vec::with_capacity(bindings.len());
         let mut replacements = Vec::with_capacity(bindings.len());
         for (item_id, task_id) in bindings {
+            if should_cancel() {
+                return Err(cancelled_error());
+            }
             let position = *index.get(item_id).expect("bindings were validated above");
             let item = &mut session.items[position];
             let before = item.clone();
@@ -935,14 +964,154 @@ impl ImportV2Service {
             originals.push(before);
             replacements.push(item.clone());
         }
-        self.sessions.write_item_cohort_if_unchanged(
+        self.sessions.write_item_cohort_if_unchanged_with_cancel(
             context,
             files,
             session_id,
             &originals,
             &replacements,
+            should_cancel,
         )?;
         Ok(())
+    }
+
+    /// Create the persisted operation before expensive cohort preparation so
+    /// callers can return an observable, cancellable task immediately.
+    pub fn create_batch_operation_task(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<BackendTask, BackendError> {
+        if item_ids.is_empty() {
+            return Err(BackendError::new(
+                "IMPORT_BATCH_EMPTY",
+                "Choose at least one import item before starting a batch.",
+                false,
+                true,
+            ));
+        }
+        let source_label = if item_ids.len() == 1 {
+            Some(
+                self.sessions
+                    .load_item(context, files, session_id, &item_ids[0])?
+                    .input
+                    .display_name,
+            )
+        } else {
+            None
+        };
+        let title = source_label
+            .as_ref()
+            .map(|label| format!("Import {label}"))
+            .unwrap_or_else(|| format!("Import {} sources", item_ids.len()));
+        tasks
+            .create_project_import_operation_task(
+                context.project_id.clone(),
+                context.root.clone(),
+                import_operation_task_state_root(context)?,
+                title,
+                session_id.to_string(),
+                item_ids.len() as u64,
+                source_label,
+            )
+            .map_err(|error| task_error(&error))
+    }
+
+    /// Validate and atomically claim an already-created operation cohort.
+    /// Replaced task ids are returned so callers can settle superseded login
+    /// or attention operations after the new claim is durable.
+    pub fn prepare_batch_operation<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        task_id: &str,
+        item_ids: &[String],
+        mut should_cancel: F,
+    ) -> Result<Vec<String>, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        if should_cancel() {
+            return Err(cancelled_error());
+        }
+        let _guard = self.lock()?;
+        self.preflight_locked(context)?;
+        let mut session = self.sessions.load(context, files, session_id)?;
+        if should_cancel() {
+            return Err(cancelled_error());
+        }
+        let index = session
+            .items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.item_id.clone(), position))
+            .collect::<HashMap<_, _>>();
+        let mut unique = HashSet::with_capacity(item_ids.len());
+        let mut replaced_task_ids = HashSet::new();
+        for item_id in item_ids {
+            if should_cancel() {
+                return Err(cancelled_error());
+            }
+            if !unique.insert(item_id.as_str()) {
+                return Err(task_error("Import item ids must be unique."));
+            }
+            let Some(position) = index.get(item_id) else {
+                return Err(item_not_found());
+            };
+            let item = &session.items[*position];
+            if !is_batch_claimable(item) {
+                return Err(task_error(
+                    "Import item is already claimed by another operation.",
+                ));
+            }
+            if let Some(previous) = item.task_id.as_ref().filter(|id| id.as_str() != task_id) {
+                if let Some(previous_task) = tasks.get_task(previous) {
+                    if !matches!(
+                        previous_task.status,
+                        TaskStatus::WaitingForConfirmation
+                            | TaskStatus::Succeeded
+                            | TaskStatus::Failed
+                            | TaskStatus::Cancelled
+                            | TaskStatus::Interrupted
+                    ) {
+                        return Err(task_error(
+                            "Import item is owned by another active operation.",
+                        ));
+                    }
+                }
+                replaced_task_ids.insert(previous.clone());
+            }
+        }
+        // A waiting operation may own a mixed cohort while login/capability
+        // recovery resumes only a subset. Settle the old task only when every
+        // item it still owns is part of this new atomic claim; otherwise it
+        // remains the truthful attention record for the untouched items.
+        replaced_task_ids.retain(|previous| {
+            session.items.iter().all(|candidate| {
+                candidate.task_id.as_deref() != Some(previous.as_str())
+                    || unique.contains(candidate.item_id.as_str())
+            })
+        });
+        let bindings = item_ids
+            .iter()
+            .cloned()
+            .map(|item_id| (item_id, task_id.to_string()))
+            .collect::<Vec<_>>();
+        self.bind_item_task_ids_from_snapshot_with_cancel(
+            context,
+            files,
+            session_id,
+            &mut session,
+            &index,
+            &bindings,
+            should_cancel,
+        )?;
+        Ok(replaced_task_ids.into_iter().collect())
     }
 
     /// Create the one persistent control-plane task for a bulk import and
@@ -989,14 +1158,25 @@ impl ImportV2Service {
             }
         }
 
+        let source_label = (item_ids.len() == 1).then(|| {
+            session.items[*index.get(&item_ids[0]).expect("validated item")]
+                .input
+                .display_name
+                .clone()
+        });
+        let title = source_label
+            .as_ref()
+            .map(|label| format!("Import {label}"))
+            .unwrap_or_else(|| format!("Import {} sources", item_ids.len()));
         let task = tasks
-            .create_project_task_with_batch(
-                TaskType::Import,
+            .create_project_import_operation_task(
                 context.project_id.clone(),
                 context.root.clone(),
-                format!("Import batch ({})", item_ids.len()),
-                true,
-                batch_operation_marker(session_id),
+                import_operation_task_state_root(context)?,
+                title,
+                session_id.to_string(),
+                item_ids.len() as u64,
+                source_label,
             )
             .map_err(|error| task_error(&error))?;
         let bindings = item_ids
@@ -3738,9 +3918,14 @@ impl ImportV2Service {
         Ok(item)
     }
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
-        self.mutation_lock
+        // This lock serializes durable filesystem transactions; it does not
+        // protect an in-memory invariant. FileTransaction rolls back during
+        // unwind, so recovering a poisoned guard keeps later imports usable
+        // after a worker panic without exposing a half-applied cohort.
+        Ok(self
+            .mutation_lock
             .lock()
-            .map_err(|_| task_error("Import session mutation lock is unavailable."))
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     pub(crate) fn with_agent_candidate_action_lock<T>(
@@ -4849,6 +5034,12 @@ fn ocr_source_image_number(path: &Path, fallback_index: usize) -> usize {
         .filter(|value| *value > 0)
         .unwrap_or(fallback_index + 1)
 }
+fn import_operation_task_state_root(context: &ProjectContext) -> Result<PathBuf, BackendError> {
+    let relative = context.layout.task_state_root.as_deref().ok_or_else(|| {
+        task_error("The project does not provide a writable task state root for import.")
+    })?;
+    context.resolve_project_path(relative)
+}
 fn task_call<T>(result: Result<T, String>) -> Result<T, BackendError> {
     result.map_err(|_| task_error("Import task state could not be updated."))
 }
@@ -4856,9 +5047,7 @@ fn task_call<T>(result: Result<T, String>) -> Result<T, BackendError> {
 fn is_batch_operation_task(tasks: &TaskService, task_id: &str) -> bool {
     tasks
         .get_task(task_id)
-        .and_then(|task| task.batch_id)
-        .as_deref()
-        .is_some_and(|batch_id| batch_id.starts_with(IMPORT_BATCH_OPERATION_MARKER))
+        .is_some_and(|task| is_import_batch_operation_task(&task))
 }
 
 fn is_batch_claimable(item: &ImportItem) -> bool {
@@ -5076,7 +5265,7 @@ mod tests {
         ImportSession, ImportSessionStatus, ImportStage,
     };
     use crate::models::paths::ProjectContext;
-    use crate::models::task::{BackendTask, TaskStatus, TaskType};
+    use crate::models::task::{BackendTask, TaskOperation, TaskStatus, TaskType};
     use crate::services::import_v2::engine::{
         EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
     };
@@ -5097,6 +5286,224 @@ mod tests {
             source_identity: None,
             media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
         }
+    }
+
+    #[test]
+    fn non_import_tasks_cannot_impersonate_legacy_or_typed_import_operations() {
+        let tasks = TaskService::default();
+        let mut malformed = tasks.create_task(TaskType::Export, None, "export".into(), true);
+        malformed.batch_id = Some("import-v2-operation:session-1".into());
+        assert!(!is_import_batch_operation_task(&malformed));
+
+        malformed.operation = Some(TaskOperation::ImportBatch {
+            session_id: "session-1".into(),
+            item_count: 1,
+            source_label: None,
+        });
+        assert!(!is_import_batch_operation_task(&malformed));
+    }
+
+    #[test]
+    fn a_panicked_mutation_does_not_disable_later_imports() {
+        let service = ImportV2Service::default();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = service.mutation_lock.lock().unwrap();
+            panic!("simulated mutation panic");
+        }));
+        assert!(poisoned.is_err());
+        assert!(service.mutation_lock.is_poisoned());
+
+        let (context, root) = test_context("mutation-lock-panic-recovery");
+        let session = service
+            .create_session(
+                &context,
+                &FileStore::default(),
+                ImportResourceMode::Balanced,
+            )
+            .unwrap();
+
+        assert!(!session.session_id.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_second_operation_cannot_steal_an_active_item_claim() {
+        let service = ImportV2Service::default();
+        let tasks = TaskService::default();
+        let files = FileStore::default();
+        let (context, root) = test_context("active-operation-claim");
+        let session = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = service
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![test_file_input("one.pdf")],
+            )
+            .unwrap();
+        let item_id = session.items[0].item_id.clone();
+        let first = service
+            .create_batch_operation_task(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                std::slice::from_ref(&item_id),
+            )
+            .unwrap();
+        tasks
+            .transition_status(&first.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .prepare_batch_operation(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &first.id,
+                std::slice::from_ref(&item_id),
+                || false,
+            )
+            .unwrap();
+
+        let second = service
+            .create_batch_operation_task(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                std::slice::from_ref(&item_id),
+            )
+            .unwrap();
+        tasks
+            .transition_status(&second.id, TaskStatus::Running)
+            .unwrap();
+        let error = service
+            .prepare_batch_operation(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &second.id,
+                std::slice::from_ref(&item_id),
+                || false,
+            )
+            .unwrap_err();
+
+        assert!(error.message.contains("another active operation"));
+        let reopened = service
+            .load_session(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(
+            reopened.items[0].task_id.as_deref(),
+            Some(first.id.as_str())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_can_claim_one_item_from_a_drained_mixed_operation() {
+        let service = ImportV2Service::default();
+        let tasks = TaskService::default();
+        let files = FileStore::default();
+        let (context, root) = test_context("mixed-operation-recovery");
+        let session = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = service
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![test_file_input("login.pdf"), test_file_input("ready.pdf")],
+            )
+            .unwrap();
+        let item_ids = session
+            .items
+            .iter()
+            .map(|item| item.item_id.clone())
+            .collect::<Vec<_>>();
+        let first = service
+            .create_batch_operation_task(&context, &files, &tasks, &session.session_id, &item_ids)
+            .unwrap();
+        tasks
+            .transition_status(&first.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .prepare_batch_operation(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &first.id,
+                &item_ids,
+                || false,
+            )
+            .unwrap();
+        let mut drained = service
+            .load_session(&context, &files, &session.session_id)
+            .unwrap();
+        drained.items[0].status = ImportItemStatus::WaitingLogin;
+        drained.items[1].status = ImportItemStatus::PreviewReady;
+        service.sessions.save(&context, &files, &drained).unwrap();
+        tasks
+            .finish_running_operation(
+                &first.id,
+                TaskResult {
+                    summary: "waiting".into(),
+                    affected_paths: Vec::new(),
+                    reference: None,
+                    pending_action: None,
+                },
+                TaskStatus::WaitingForConfirmation,
+                None,
+            )
+            .unwrap();
+
+        let resumed_id = item_ids[0].clone();
+        let second = service
+            .create_batch_operation_task(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                std::slice::from_ref(&resumed_id),
+            )
+            .unwrap();
+        tasks
+            .transition_status(&second.id, TaskStatus::Running)
+            .unwrap();
+        let fully_replaced = service
+            .prepare_batch_operation(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &second.id,
+                std::slice::from_ref(&resumed_id),
+                || false,
+            )
+            .unwrap();
+
+        assert!(fully_replaced.is_empty());
+        let reopened = service
+            .load_session(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(
+            reopened.items[0].task_id.as_deref(),
+            Some(second.id.as_str())
+        );
+        assert_eq!(
+            reopened.items[1].task_id.as_deref(),
+            Some(first.id.as_str())
+        );
+        assert_eq!(
+            tasks.get_task(&first.id).unwrap().status,
+            TaskStatus::WaitingForConfirmation
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

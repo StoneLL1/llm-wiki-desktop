@@ -1,5 +1,9 @@
 # 踩坑清单 (gotchas.txt)
 
+Import operation cancellation can stick at `cancelling` or publish a stale success — Root cause: cancellation requests and final worker results used separate status writes, while already-drained waiting operations had no worker left to finalize cancellation — How to avoid: decide cancellation versus worker outcome atomically under the task lock, and let domain cleanup finalize cancellation for drained waiting operations.
+
+Compatible-project Import tasks can leak into the native `.app/tasks` path — Root cause: a persistent operation constructor derived its task path from the project root instead of the backend-authoritative resolved layout — How to avoid: pass the resolved `taskStateRoot` explicitly into persistent task creation and cover native and compatible layouts in restart tests.
+
 Aggregate Import confirmation cannot double as per-spreadsheet authorization — Root cause: a single accepted boolean makes the total-size acknowledgement silently admit every large CSV/XLSX and can also let a legacy `largeDataConfirmed` flag bypass the new aggregate gate — How to avoid: persist aggregate and item-risk acknowledgements separately, admit only ordinary files at the aggregate stage, keep risky spreadsheets pending on the same saved scan, and test both directions independently.
 
 Hidden per-item TaskService entries cannot stand in for one batch operation task — Root cause: giving every item an in-memory or transient task makes cancellation, recovery, confirmation, and terminal aggregation ambiguous even if only one task is shown in the UI — How to avoid: create exactly one persisted operation task, use its cancellation token and throttled aggregate facts, and keep each ImportItem/session JSON as the only item lifecycle state machine.

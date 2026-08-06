@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::errors::{BackendError, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED};
+use crate::errors::{
+    BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -752,6 +754,20 @@ impl FileTransaction {
         &mut self,
         writes: &[(PathBuf, Vec<u8>, String)],
     ) -> Result<(), BackendError> {
+        self.write_many_if_hash_matches_with_cancel(writes, || false)
+    }
+
+    /// Cancellable form used by large import cohort claims. Cancellation is
+    /// checked only at transaction-safe boundaries; `Drop` rolls back any
+    /// prepared or installed replacements before the error escapes.
+    pub fn write_many_if_hash_matches_with_cancel<F>(
+        &mut self,
+        writes: &[(PathBuf, Vec<u8>, String)],
+        mut should_cancel: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnMut() -> bool,
+    {
         if writes.is_empty() {
             return Ok(());
         }
@@ -760,6 +776,9 @@ impl FileTransaction {
         }
         let mut pending = Vec::with_capacity(writes.len());
         for (path, desired, expected_hash) in writes {
+            if should_cancel() {
+                return Err(transaction_cancelled_error());
+            }
             let parent = path.parent().ok_or_else(staging_safe_io_error)?;
             let temporary = write_synced_temp(parent, path, desired)?;
             let guard = parent.join(format!(".wiki-guard-{}", uuid::Uuid::new_v4()));
@@ -790,9 +809,15 @@ impl FileTransaction {
                 desired: desired.clone(),
             });
         }
+        if should_cancel() {
+            return Err(transaction_cancelled_error());
+        }
         self.install_cohort_journal(&pending)?;
         let mut changed_parents = HashSet::new();
         for replacement in pending {
+            if should_cancel() {
+                return Err(transaction_cancelled_error());
+            }
             let parent = replacement
                 .path
                 .parent()
@@ -813,6 +838,9 @@ impl FileTransaction {
             )?;
             std::fs::remove_file(&replacement.guard)
                 .map_err(|error| io_error(error, &replacement.guard))?;
+        }
+        if should_cancel() {
+            return Err(transaction_cancelled_error());
         }
         for parent in changed_parents {
             sync_parent(&parent)?;
@@ -1187,6 +1215,10 @@ impl Drop for FileTransaction {
             let _ = self.rollback();
         }
     }
+}
+
+fn transaction_cancelled_error() -> BackendError {
+    BackendError::new(IMPORT_V2_CANCELLED, "Import was cancelled.", true, false)
 }
 
 fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
@@ -2225,7 +2257,8 @@ mod tests {
         digest_bytes, set_before_checked_displace_hook, set_before_new_install_hook,
         set_before_recovery_final_mutation_hook, set_before_recovery_mutation_hook,
         set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
-        set_recovery_process_death_hook, FileTransaction, IMPORT_V2_COMMIT_CONFLICT,
+        set_recovery_process_death_hook, FileTransaction, IMPORT_V2_CANCELLED,
+        IMPORT_V2_COMMIT_CONFLICT,
     };
     use sha2::Digest;
     use std::path::Path;
@@ -2280,6 +2313,48 @@ mod tests {
         assert!(writes
             .iter()
             .all(|(path, _, _)| std::fs::read(path).unwrap() == b"after"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_checked_cohort_rolls_back_after_the_first_install() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-cohort-cancel-install-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let items = root.join(".app/import-sessions/s/items");
+        std::fs::create_dir_all(&items).unwrap();
+        let writes = ["one.json", "two.json"]
+            .into_iter()
+            .map(|name| {
+                let path = items.join(name);
+                std::fs::write(&path, b"before").unwrap();
+                (path, b"after".to_vec(), digest_bytes(b"before"))
+            })
+            .collect::<Vec<_>>();
+        let mut checks = 0usize;
+        let error;
+        {
+            let mut transaction = FileTransaction::new_for_project(&root);
+            error = transaction
+                .write_many_if_hash_matches_with_cancel(&writes, || {
+                    checks += 1;
+                    // Two prepare checks + the pre-journal check + the first
+                    // install check have passed. Cancel immediately before
+                    // the second install, after the first file was replaced.
+                    checks == 5
+                })
+                .unwrap_err();
+            assert_eq!(std::fs::read(&writes[0].0).unwrap(), b"after");
+        }
+
+        assert_eq!(error.code, IMPORT_V2_CANCELLED);
+        assert!(writes
+            .iter()
+            .all(|(path, _, _)| std::fs::read(path).unwrap() == b"before"));
+        assert_eq!(std::fs::read_dir(&items).unwrap().count(), 2);
+        let journals = root.join(".app/import-v2-journal");
+        assert!(!journals.exists() || std::fs::read_dir(journals).unwrap().next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

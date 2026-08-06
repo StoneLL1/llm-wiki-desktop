@@ -13,6 +13,11 @@ pub struct BackendTask {
     /// backwards-compatible and absent for non-grouped tasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
+    /// Typed user-operation metadata. This is deliberately separate from
+    /// `batch_id`: the latter is an identity, while this payload describes
+    /// how the task must be presented and controlled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<TaskOperation>,
     pub title: String,
     pub status: TaskStatus,
     pub progress: Option<TaskProgress>,
@@ -23,6 +28,27 @@ pub struct BackendTask {
     pub log_path: Option<String>,
     pub result: Option<TaskResult>,
     pub error: Option<BackendError>,
+}
+
+pub(crate) const LEGACY_IMPORT_OPERATION_PREFIX: &str = "import-v2-operation:";
+
+impl BackendTask {
+    pub(crate) fn import_operation_session_id(&self) -> Option<&str> {
+        if self.task_type != TaskType::Import {
+            return None;
+        }
+        match self.operation.as_ref() {
+            Some(TaskOperation::ImportBatch { session_id, .. }) => Some(session_id.as_str()),
+            None => self
+                .batch_id
+                .as_deref()
+                .and_then(|value| value.strip_prefix(LEGACY_IMPORT_OPERATION_PREFIX)),
+        }
+    }
+
+    pub(crate) fn is_import_operation(&self) -> bool {
+        self.import_operation_session_id().is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,6 +78,21 @@ pub enum TaskStatus {
     Succeeded,
     Failed,
     Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum TaskOperation {
+    ImportBatch {
+        session_id: String,
+        item_count: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_label: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -216,8 +257,8 @@ pub enum TaskActivityStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendEvent, BackendEventType, BackendTask, TaskProgress, TaskResult, TaskResultReference,
-        TaskStatus, TaskType,
+        BackendEvent, BackendEventType, BackendTask, TaskOperation, TaskProgress, TaskResult,
+        TaskResultReference, TaskStatus, TaskType,
     };
     use crate::errors::BackendError;
     use serde_json::json;
@@ -266,6 +307,7 @@ mod tests {
             task_type: TaskType::GraphBuild,
             project_id: Some("project-1".to_string()),
             batch_id: None,
+            operation: None,
             title: "Build graph".to_string(),
             status: TaskStatus::Running,
             progress: Some(TaskProgress {
@@ -292,6 +334,7 @@ mod tests {
         assert_eq!(value["taskType"], json!("graph_build"));
         assert_eq!(value["projectId"], json!("project-1"));
         assert!(value.get("batchId").is_none());
+        assert!(value.get("operation").is_none());
         assert_eq!(value["startedAt"], json!("2026-06-19T00:00:00Z"));
         assert_eq!(value["progress"]["current"], json!(1));
         assert_eq!(
@@ -322,6 +365,21 @@ mod tests {
         });
         let task: BackendTask = serde_json::from_value(value).unwrap();
         assert_eq!(task.batch_id.as_deref(), Some("batch-1"));
+        assert!(task.operation.is_none());
+    }
+
+    #[test]
+    fn serializes_typed_import_operation_metadata() {
+        let operation = TaskOperation::ImportBatch {
+            session_id: "session-1".into(),
+            item_count: 1,
+            source_label: Some("https://example.com/article".into()),
+        };
+        let value = serde_json::to_value(&operation).unwrap();
+        assert_eq!(value["kind"], json!("import_batch"));
+        assert_eq!(value["sessionId"], json!("session-1"));
+        assert_eq!(value["itemCount"], json!(1));
+        assert_eq!(value["sourceLabel"], json!("https://example.com/article"));
     }
 
     #[test]

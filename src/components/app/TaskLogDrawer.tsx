@@ -21,7 +21,7 @@ import { hydrateAndSelectWorkflowRun } from "../../services/workflowNavigation";
 import { fetchTaskActivities, fetchTaskLogs, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { BackendTask, LogLine, TaskStatus } from "../../types/task";
-import { isTerminalStatus } from "../../types/task";
+import { isImportBatchOperationTask, isTerminalStatus } from "../../types/task";
 import { AgentActivityTimeline } from "../agent/AgentActivityTimeline";
 import { IMPORT_PROGRESS_LABEL_KEYS, isMeasuredImportProgress } from "../../features/import/importStatusPresentation";
 import {
@@ -192,10 +192,12 @@ export function TaskLogDrawer() {
   const [logsPinned, setLogsPinned] = useState(true);
 
   const sorted = useMemo(() => sortTasks(tasks, sortMode), [tasks, sortMode]);
-  // Batched imports already expose their child tasks in the batch section;
-  // repeating them in the main list makes child actions ambiguous and harms
-  // keyboard navigation.
-  const visibleSorted = useMemo(() => sorted.filter((task) => !task.batchId), [sorted]);
+  // Current Import V2 operations are already the one user-visible task. Only
+  // legacy per-item grouped tasks belong in the folded batch section.
+  const visibleSorted = useMemo(
+    () => sorted.filter((task) => !task.batchId || isImportBatchOperationTask(task)),
+    [sorted],
+  );
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
   const selectedLogs = selectedTaskId ? logs[selectedTaskId] ?? [] : [];
@@ -222,7 +224,7 @@ export function TaskLogDrawer() {
   const importBatches = useMemo<ImportBatchView[]>(() => {
     const grouped = new Map<string, BackendTask[]>();
     tasks
-      .filter((task) => task.taskType === "import" && task.batchId)
+      .filter((task) => task.taskType === "import" && task.batchId && !isImportBatchOperationTask(task))
       .forEach((task) => {
         const batchId = task.batchId!;
         grouped.set(batchId, [...(grouped.get(batchId) ?? []), task]);

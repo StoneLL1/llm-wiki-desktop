@@ -520,6 +520,28 @@ impl SessionStore {
         originals: &[ImportItem],
         replacements: &[ImportItem],
     ) -> Result<(), BackendError> {
+        self.write_item_cohort_if_unchanged_with_cancel(
+            context,
+            _file_store,
+            session_id,
+            originals,
+            replacements,
+            || false,
+        )
+    }
+
+    pub(crate) fn write_item_cohort_if_unchanged_with_cancel<F>(
+        &self,
+        context: &ProjectContext,
+        _file_store: &FileStore,
+        session_id: &str,
+        originals: &[ImportItem],
+        replacements: &[ImportItem],
+        mut should_cancel: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnMut() -> bool,
+    {
         if originals.len() != replacements.len() {
             return Err(invalid_session(
                 "Import item cohort does not match its snapshot.",
@@ -528,6 +550,14 @@ impl SessionStore {
         let root = session_root(context, session_id)?;
         let mut writes = Vec::with_capacity(originals.len());
         for (before, after) in originals.iter().zip(replacements) {
+            if should_cancel() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import was cancelled.",
+                    true,
+                    false,
+                ));
+            }
             if before.item_id != after.item_id {
                 return Err(invalid_session("Import item cohort identity changed."));
             }
@@ -546,7 +576,7 @@ impl SessionStore {
             ));
         }
         let mut transaction = FileTransaction::new_for_project(&context.root);
-        transaction.write_many_if_hash_matches(&writes)?;
+        transaction.write_many_if_hash_matches_with_cancel(&writes, should_cancel)?;
         transaction.commit()
     }
 
@@ -974,6 +1004,53 @@ mod tests {
             .update_item(&context, &files, &session.session_id, item)
             .unwrap_err();
         assert_eq!(error.code, crate::errors::IMPORT_V2_STATE_INVALID);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_cohort_claim_rolls_back_every_item() {
+        let (context, root) = test_context("session-cohort-cancel");
+        let files = FileStore::default();
+        let store = SessionStore::default();
+        let session = store
+            .create(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = store
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                vec![test_file_input("one.pdf"), test_file_input("two.pdf")],
+            )
+            .unwrap();
+        let originals = session.items.clone();
+        let replacements = originals
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.task_id = Some("operation-1".into());
+                item
+            })
+            .collect::<Vec<_>>();
+        let mut checks = 0usize;
+
+        let error = store
+            .write_item_cohort_if_unchanged_with_cancel(
+                &context,
+                &files,
+                &session.session_id,
+                &originals,
+                &replacements,
+                || {
+                    checks += 1;
+                    checks >= 4
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
+        let reopened = store.load(&context, &files, &session.session_id).unwrap();
+        assert!(reopened.items.iter().all(|item| item.task_id.is_none()));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

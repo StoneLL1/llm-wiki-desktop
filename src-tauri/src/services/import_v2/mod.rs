@@ -50,6 +50,6 @@ pub mod wechat_web_engine;
 mod test_support;
 
 #[cfg(feature = "gui")]
-pub(crate) use orchestrator::{batch_operation_marker, IMPORT_BATCH_OPERATION_MARKER};
+pub(crate) use orchestrator::{import_batch_operation_session_id, is_import_batch_operation_task};
 pub use orchestrator::{routes_for_format, ImportV2Service};
 pub use session_store::{CollectionImportInput, SessionStore};

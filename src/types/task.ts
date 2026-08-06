@@ -45,6 +45,13 @@ export interface TaskProgress {
   label: string | null;
 }
 
+export type TaskOperation = {
+  kind: "import_batch";
+  sessionId: string;
+  itemCount: number;
+  sourceLabel?: string | null;
+};
+
 export interface TaskResult {
   summary: string;
   affectedPaths: string[];
@@ -93,6 +100,8 @@ export interface BackendTask {
   projectId: string | null;
   /** Stable identity shared by tasks created from one import operation. */
   batchId?: string | null;
+  /** Typed semantics for a user-visible operation; absent on legacy tasks. */
+  operation?: TaskOperation | null;
   title: string;
   status: TaskStatus;
   progress: TaskProgress | null;
@@ -205,3 +214,18 @@ export const isTerminalStatus = (status: TaskStatus): boolean =>
   status === "failed" ||
   status === "cancelled" ||
   status === "interrupted";
+
+const LEGACY_IMPORT_OPERATION_PREFIX = "import-v2-operation:";
+
+/** Recognize current typed operations and persisted pre-cutover tasks. */
+export const isImportBatchOperationTask = (task: BackendTask): boolean =>
+  task.taskType === "import"
+  && (task.operation?.kind === "import_batch"
+    || task.batchId?.startsWith(LEGACY_IMPORT_OPERATION_PREFIX) === true);
+
+export const importBatchOperationSessionId = (task: BackendTask): string | null => {
+  if (task.operation?.kind === "import_batch") return task.operation.sessionId;
+  return task.batchId?.startsWith(LEGACY_IMPORT_OPERATION_PREFIX)
+    ? task.batchId.slice(LEGACY_IMPORT_OPERATION_PREFIX.length)
+    : null;
+};

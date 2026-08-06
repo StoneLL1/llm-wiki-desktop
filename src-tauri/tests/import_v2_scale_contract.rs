@@ -6,6 +6,7 @@ use llm_wiki_desktop_lib::models::import_v2::{
 };
 use llm_wiki_desktop_lib::models::import_v2_file::FileScanPolicy;
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
+use llm_wiki_desktop_lib::models::task::TaskOperation;
 use llm_wiki_desktop_lib::services::import_v2::file_discovery::FileDiscoveryService;
 use llm_wiki_desktop_lib::services::import_v2::{ImportV2Service, SessionStore};
 use llm_wiki_desktop_lib::services::FileStore;
@@ -150,6 +151,16 @@ fn batch_cohort_uses_one_operation_task_and_binds_ten_thousand_items() {
         .unwrap();
 
     assert_eq!(tasks.list_tasks(None).len(), 1);
+    assert_eq!(operation.batch_id.as_deref(), Some(operation.id.as_str()));
+    assert_eq!(operation.title, "Import 10000 sources");
+    assert_eq!(
+        operation.operation,
+        Some(TaskOperation::ImportBatch {
+            session_id: session.session_id.clone(),
+            item_count: 10_000,
+            source_label: None,
+        })
+    );
     let rebound = service
         .load_session(&context, &files, &session.session_id)
         .unwrap();
@@ -157,6 +168,55 @@ fn batch_cohort_uses_one_operation_task_and_binds_ten_thousand_items() {
         .items
         .iter()
         .all(|item| item.task_id.as_deref() == Some(operation.id.as_str())));
+}
+
+#[test]
+fn singleton_url_operation_uses_source_title_and_unique_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("url-operation", root.path().to_path_buf());
+    let files = FileStore::default();
+    let service = ImportV2Service::default();
+    let tasks = TaskService::default();
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let url = "https://example.com/article";
+    let session = service
+        .add_inputs(
+            &context,
+            &files,
+            &session.session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: url.into(),
+                locator: url.into(),
+                normalized_locator: Some(url.into()),
+                source_identity: None,
+                media_save_mode: Default::default(),
+            }],
+        )
+        .unwrap();
+
+    let operation = service
+        .create_batch_operation_task(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &[session.items[0].item_id.clone()],
+        )
+        .unwrap();
+
+    assert_eq!(operation.batch_id.as_deref(), Some(operation.id.as_str()));
+    assert_eq!(operation.title, format!("Import {url}"));
+    assert_eq!(
+        operation.operation,
+        Some(TaskOperation::ImportBatch {
+            session_id: session.session_id,
+            item_count: 1,
+            source_label: Some(url.into()),
+        })
+    );
 }
 
 #[test]
