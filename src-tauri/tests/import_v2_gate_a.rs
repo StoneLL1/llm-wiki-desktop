@@ -16,7 +16,7 @@ use llm_wiki_desktop_lib::{
             platform_provider::{extract_platform_collection, Platform},
             source_finalization::parse_final_source,
             source_registry::SourceRegistry,
-            url_policy::{SessionWebTarget, UrlPolicy},
+            url_policy::{PrivateTargetGrant, SessionWebTarget, UrlPolicy},
             web_fetch::{WebFetchArtifact, WebFetchPolicy},
             web_target_store::WebTargetStore,
             CollectionImportInput, ImportV2Service,
@@ -606,6 +606,7 @@ impl WebArtifactSource for FixtureWebArtifactSource {
         &self,
         target: SessionWebTarget,
         _policy: WebFetchPolicy,
+        _private_grant: Option<&PrivateTargetGrant>,
         _item_id: &str,
         cancellation: &CancellationToken,
     ) -> Result<WebFetchArtifact, BackendError> {

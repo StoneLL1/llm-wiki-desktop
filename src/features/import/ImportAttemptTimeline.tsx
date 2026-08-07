@@ -45,6 +45,7 @@ export function ImportAttemptTimeline({ attempts }: ImportAttemptTimelineProps) 
                   <span>·</span>
                   <span>{attempt.outcome}</span>
                 </div>
+                {attempt.errorCode ? <div className="mt-0.5 break-all font-mono text-[10.5px] text-[var(--danger)]">{attempt.errorCode}</div> : null}
                 {attempt.warnings.length > 0 ? (
                   <ul className="mt-1 list-disc pl-4 font-mono text-[10.5px] text-[var(--warning-text)]">
                     {attempt.warnings.map((warning) => <li key={warning}>{warning}</li>)}

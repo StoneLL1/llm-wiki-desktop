@@ -21,6 +21,9 @@ use crate::services::import_v2::media_router::{
     link_or_copy, move_staged_file, TemporaryMediaWorkspace,
 };
 use crate::services::import_v2::pack_protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::services::import_v2::platform_network_policy::{
+    trusted_platform_page_host_suffixes, upgrade_trusted_platform_page_to_https,
+};
 use crate::services::import_v2::redaction::redact_sensitive_text;
 use crate::services::import_v2::subtitle::render_subtitle_markdown;
 use crate::services::import_v2::url_policy::UrlPolicy;
@@ -203,6 +206,30 @@ impl ImportEngine for PackProcessEngine {
         if let Some(profile) = authenticated_profile {
             command.env("LLM_WIKI_CONNECTOR_PROFILE", profile);
         }
+        if self.descriptor.route == "web.generic.browser"
+            && request.input.kind == ImportInputKind::Url
+        {
+            if let Some(grant) = self
+                .web_targets
+                .private_for_operation(&request.item_id, &request.task_id)?
+            {
+                let authority = serde_json::json!({
+                    "scheme": &grant.scheme,
+                    "host": &grant.host,
+                    "port": grant.port,
+                    "resolvedIps": grant
+                        .resolved_ips
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                });
+                command.env(
+                    "LLM_WIKI_PRIVATE_TARGET_AUTHORITY",
+                    serde_json::to_string(&authority)
+                        .map_err(|_| engine_error("The private target authority is invalid."))?,
+                );
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -359,6 +386,9 @@ impl ImportEngine for PackProcessEngine {
                     response.remote_assets,
                     cancellation,
                     self.domain_limiter.clone(),
+                    self.web_targets
+                        .private_for_operation(&request.item_id, &request.task_id)?
+                        .as_ref(),
                     report_progress,
                 )?;
                 validate_engine_result(&request.staging_root, &result)?;
@@ -447,7 +477,8 @@ fn prepare_web_request(
         &request.input.locator,
         request.input.normalized_locator.as_deref(),
     )?;
-    let private_grant = targets.take_private(&request.item_id)?;
+    let target = upgrade_trusted_platform_page_to_https(target)?;
+    let private_grant = targets.private_for_operation(&request.item_id, &request.task_id)?;
     let sensitive = matches!(target.public.host.as_str(), "mp.weixin.qq.com")
         || target.public.host.ends_with(".xiaohongshu.com")
         || target.public.host == "xiaohongshu.com"
@@ -473,7 +504,13 @@ fn prepare_web_request(
                 .acquire(&target.public.host, sensitive)
                 .await
                 .map_err(|_| engine_error("The domain limiter is unavailable."))?;
-            let policy = WebFetchPolicy::default();
+            let page_hosts = trusted_platform_page_host_suffixes(target.request_url.as_str());
+            let mut policy = WebFetchPolicy::default();
+            if !page_hosts.is_empty() {
+                policy.require_https = true;
+                policy.allowed_host_suffixes =
+                    page_hosts.iter().map(|suffix| (*suffix).into()).collect();
+            }
             fetch_with_safe_retries(target, &policy, private_grant, &item_id, &token).await
         })
     })
@@ -509,6 +546,7 @@ fn prepare_browser_request(
         &request.input.locator,
         request.input.normalized_locator.as_deref(),
     )?;
+    let target = upgrade_trusted_platform_page_to_https(target)?;
     let mut prepared = request.clone();
     prepared.input.locator = target.request_url.to_string();
     prepared.input.normalized_locator = Some(target.public.public_url);
@@ -772,6 +810,7 @@ fn localize_remote_assets(
     assets: Vec<RemoteAssetRequest>,
     cancellation: &CancellationToken,
     limiter: Arc<DomainLimiter>,
+    private_grant: Option<&crate::services::import_v2::url_policy::PrivateTargetGrant>,
     report_progress: &EngineProgressReporter<'_>,
 ) -> Result<(), BackendError> {
     let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
@@ -915,6 +954,7 @@ fn localize_remote_assets(
             .as_ref()
             .map(|workspace| workspace.path().join("response.bin"));
         let worker_destination = streamed_path.clone();
+        let worker_private_grant = private_grant.cloned();
         let limiter = limiter.clone();
         let report_download = matches!(
             content,
@@ -935,7 +975,7 @@ fn localize_remote_assets(
                 fetch_with_safe_retries_to_path(
                     target,
                     &policy,
-                    None,
+                    worker_private_grant,
                     &item_id,
                     worker_destination.as_deref(),
                     &token,
@@ -1954,6 +1994,7 @@ mod tests {
             Vec::new(),
             &CancellationToken::new(),
             Arc::new(DomainLimiter::default()),
+            None,
             &|_| Ok(()),
         )
         .unwrap_err();

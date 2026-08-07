@@ -9,7 +9,7 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
-import { extractAccountSummary, hasPlatformAuthentication, isPinnedTargetHost, isPlatformNavigationHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, platformNavigationHosts, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
+import { extractAccountSummary, hasPlatformAuthentication, isConfinedTargetUrl, isPinnedTargetHost, isPlatformNavigationHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, platformNavigationHosts, privateTargetAuthorityMatches, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
 import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractPlatformPayloadFromValue, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, platformHasVideoEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence, xiaohongshuImageEvidenceReady, xiaohongshuImageOcrRequired } from "./platform-extract.mjs";
 import { isLoginChallengeState, redactJsonValue, redactSensitiveText, sanitizePublicUrl } from "./snapshot-policy.mjs";
 import { assertLinuxBrowserDependencies } from "./linux-deps.mjs";
@@ -24,6 +24,15 @@ const { chromium } = await import("playwright");
 const line = await new Promise((resolve) => { let data = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (chunk) => { data += chunk; }); process.stdin.on("end", () => resolve(data.trim())); });
 const rpc = JSON.parse(line);
 const params = rpc.params;
+const privateTargetAuthority = (() => {
+  try {
+    const parsed = JSON.parse(process.env.LLM_WIKI_PRIVATE_TARGET_AUTHORITY || "null");
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.resolvedIps)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+})();
 
 function escapeHtml(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -31,13 +40,24 @@ function escapeHtml(value) {
 
 class RpcHandled extends Error {}
 
+function resolutionOptions(url, platform) {
+  const reviewedPlatformHost = url.protocol === "https:"
+    && platform !== "generic"
+    && isPlatformNavigationHost(platform, url.hostname);
+  return {
+    allowBenchmarkFakeIp: reviewedPlatformHost,
+    allowedAddresses: privateTargetAuthorityMatches(privateTargetAuthority, url) ? privateTargetAuthority.resolvedIps : [],
+  };
+}
+
 async function launchPinned(profile, target, headless, platform = "generic") {
   assertLinuxBrowserDependencies(chromium.executablePath());
   const hosts = new Set([target.hostname, ...platformNavigationHosts(platform)]);
   const mappings = [];
   for (const host of hosts) {
     try {
-      mappings.push(`MAP ${host} ${await resolvePinnedAddress(host)}`);
+      const candidate = host === target.hostname ? target : new URL(`https://${host}/`);
+      mappings.push(`MAP ${host} ${await resolvePinnedAddress(host, undefined, resolutionOptions(candidate, platform))}`);
     } catch (error) {
       if (host === target.hostname) throw error;
     }
@@ -55,11 +75,15 @@ async function confinePage(page, target, platform) {
   await page.route("**/*", async (route) => {
     let requestUrl;
     try { requestUrl = new URL(route.request().url()); } catch { await route.abort("blockedbyclient"); return; }
-    let allowed = isPinnedTargetHost(target.hostname, requestUrl.hostname);
+    let allowed = isConfinedTargetUrl(target, requestUrl, privateTargetAuthority);
     const navigationHost = platform !== "generic" && isPlatformNavigationHost(platform, requestUrl.hostname);
     const assetHost = platform !== "generic"
       && isTrustedPlatformAssetHost(platform, target.hostname, requestUrl.hostname)
       && !navigationHost;
+    if (navigationHost && requestUrl.protocol !== "https:") {
+      await route.abort("blockedbyclient");
+      return;
+    }
     if (assetHost) {
       // Media/CDN URLs are emitted as remoteAsset notifications and fetched
       // by Rust's pinned HTTP client. Chromium must not resolve them again.
@@ -68,7 +92,8 @@ async function confinePage(page, target, platform) {
     }
     if (!allowed && navigationHost) {
       try {
-        await resolvePinnedAddress(requestUrl.hostname);
+        if (requestUrl.protocol !== "https:") throw new Error("platform navigation requires HTTPS");
+        await resolvePinnedAddress(requestUrl.hostname, undefined, resolutionOptions(requestUrl, platform));
         allowed = true;
       } catch {
         allowed = false;
@@ -86,7 +111,7 @@ async function isAllowedAssetUrl(platform, target, candidate) {
   if (!isSecureAssetProtocol(candidate.protocol)) return false;
   if (platform === "generic" && isPinnedTargetHost(target.hostname, candidate.hostname)) {
     try {
-      await resolvePinnedAddress(candidate.hostname);
+      await resolvePinnedAddress(candidate.hostname, undefined, resolutionOptions(candidate, platform));
       return true;
     } catch {
       return false;
@@ -94,7 +119,7 @@ async function isAllowedAssetUrl(platform, target, candidate) {
   }
   if (!isTrustedPlatformAssetHost(platform, target.hostname, candidate.hostname)) return false;
   try {
-    await resolvePinnedAddress(candidate.hostname);
+    await resolvePinnedAddress(candidate.hostname, undefined, { allowBenchmarkFakeIp: true });
     return true;
   } catch {
     return false;
@@ -119,10 +144,14 @@ function subtitleCandidates(document, baseUrl) {
 }
 
 if (rpc.method === "browser.login") {
-  const sourceUrl = params.url;
+  let sourceUrl = params.url;
   const target = new URL(sourceUrl);
   const platform = params.platform;
   if (!isPlatformNavigationHost(platform, target.hostname)) throw new Error("browser platform does not match target host");
+  if (target.protocol === "http:" && !target.port) {
+    target.protocol = "https:";
+    sourceUrl = target.href;
+  }
   const profile = path.resolve(params.profilePath);
   await fs.mkdir(profile, { recursive: true });
   const context = await launchPinned(profile, target, false, platform);
@@ -165,6 +194,7 @@ if (rpc.method === "browser.login") {
 function platformForHost(hostname) {
   const host = hostname.toLowerCase();
   if (host === "mp.weixin.qq.com") return "wechat";
+  if (host === "zhihu.com" || host.endsWith(".zhihu.com")) return "zhihu";
   if (host === "b23.tv" || host === "bilibili.com" || host.endsWith(".bilibili.com")) return "bilibili";
   if (host === "xiaohongshu.com"
     || host.endsWith(".xiaohongshu.com")
@@ -173,6 +203,7 @@ function platformForHost(hostname) {
     || host === "xhslink.cn"
     || host.endsWith(".xhslink.cn")) return "xiaohongshu";
   if (host === "douyin.com" || host.endsWith(".douyin.com") || host === "iesdouyin.com" || host.endsWith(".iesdouyin.com")) return "douyin";
+  if (host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com") || host === "t.co") return "x";
   return "generic";
 }
 

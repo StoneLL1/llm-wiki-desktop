@@ -130,7 +130,7 @@ async fn redirect_to_a_different_private_origin_requires_a_new_grant() {
         .await
         .unwrap_err();
     source_join.join().unwrap();
-    assert_eq!(error.code, "IMPORT_V2_URL_REJECTED");
+    assert_eq!(error.code, "IMPORT_V2_PRIVATE_TARGET_BLOCKED");
     drop(destination_join);
 }
 

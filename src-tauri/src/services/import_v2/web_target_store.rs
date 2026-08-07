@@ -75,6 +75,7 @@ pub struct CollectionSelection {
 pub struct WebTargetStore {
     secrets: SecretService,
     private_grants: Arc<Mutex<HashMap<String, PrivateTargetGrant>>>,
+    active_private_grants: Arc<Mutex<HashMap<(String, String), PrivateTargetGrant>>>,
     asr_grants: Arc<Mutex<HashMap<(String, String, String), BilibiliAsrGrant>>>,
     asr_reservations: Arc<Mutex<HashSet<(String, String, String)>>>,
     authenticated_profiles: Arc<Mutex<HashMap<(String, String, String), PathBuf>>>,
@@ -101,6 +102,7 @@ impl Default for WebTargetStore {
         Self {
             secrets: SecretService::default(),
             private_grants: Arc::new(Mutex::new(HashMap::new())),
+            active_private_grants: Arc::new(Mutex::new(HashMap::new())),
             asr_grants: Arc::new(Mutex::new(HashMap::new())),
             asr_reservations: Arc::new(Mutex::new(HashSet::new())),
             authenticated_profiles: Arc::new(Mutex::new(HashMap::new())),
@@ -113,6 +115,7 @@ impl WebTargetStore {
         Self {
             secrets,
             private_grants: Arc::new(Mutex::new(HashMap::new())),
+            active_private_grants: Arc::new(Mutex::new(HashMap::new())),
             asr_grants: Arc::new(Mutex::new(HashMap::new())),
             asr_reservations: Arc::new(Mutex::new(HashSet::new())),
             authenticated_profiles: Arc::new(Mutex::new(HashMap::new())),
@@ -326,6 +329,55 @@ impl WebTargetStore {
             .lock()
             .map_err(|_| store_error())?
             .remove(item_id))
+    }
+
+    pub fn claim_private_for_operation(
+        &self,
+        item_id: &str,
+        operation_id: &str,
+    ) -> Result<(), BackendError> {
+        let grant = {
+            let mut pending = self.private_grants.lock().map_err(|_| store_error())?;
+            pending.retain(|_, grant| grant.expires_at > chrono::Utc::now());
+            pending.remove(item_id)
+        };
+        let mut active = self
+            .active_private_grants
+            .lock()
+            .map_err(|_| store_error())?;
+        active.retain(|_, grant| grant.expires_at > chrono::Utc::now());
+        active.remove(&(item_id.to_owned(), operation_id.to_owned()));
+        if let Some(grant) = grant {
+            active.insert((item_id.to_owned(), operation_id.to_owned()), grant);
+        }
+        Ok(())
+    }
+
+    pub fn private_for_operation(
+        &self,
+        item_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<PrivateTargetGrant>, BackendError> {
+        let mut active = self
+            .active_private_grants
+            .lock()
+            .map_err(|_| store_error())?;
+        active.retain(|_, grant| grant.expires_at > chrono::Utc::now());
+        Ok(active
+            .get(&(item_id.to_owned(), operation_id.to_owned()))
+            .cloned())
+    }
+
+    pub fn release_private_operation(
+        &self,
+        item_id: &str,
+        operation_id: &str,
+    ) -> Result<(), BackendError> {
+        self.active_private_grants
+            .lock()
+            .map_err(|_| store_error())?
+            .remove(&(item_id.to_owned(), operation_id.to_owned()));
+        Ok(())
     }
     pub fn authorize_bilibili_asr(&self, grant: BilibiliAsrGrant) -> Result<(), BackendError> {
         let key = (

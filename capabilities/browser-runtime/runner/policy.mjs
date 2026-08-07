@@ -28,7 +28,7 @@ const PLATFORM_NAVIGATION_HOSTS = Object.freeze({
   bilibili: ["b23.tv", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "space.bilibili.com", "api.bilibili.com"],
   xiaohongshu: ["xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com", "www.xhslink.com", "xhslink.cn", "www.xhslink.cn", "edith.xiaohongshu.com"],
   douyin: ["douyin.com", "www.douyin.com", "m.douyin.com", "v.douyin.com", "iesdouyin.com", "www.iesdouyin.com"],
-  x: ["x.com", "www.x.com", "twitter.com", "www.twitter.com"],
+  x: ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "t.co"],
 });
 
 const PLATFORM_ASSET_HOSTS = Object.freeze({
@@ -48,15 +48,55 @@ export function isBlockedAddress(address) {
   return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19));
 }
 
-export async function resolvePinnedAddress(host, lookup = dns.lookup) {
+export function isBenchmarkFakeIp(address) {
+  if (net.isIP(address) !== 4) return false;
+  const [a, b] = address.split(".").map(Number);
+  return a === 198 && (b === 18 || b === 19);
+}
+
+export async function resolvePinnedAddress(host, lookup = dns.lookup, options = {}) {
   if (host === "localhost" || host.endsWith(".localhost")) throw new Error("blocked host");
   const answers = await lookup(host, { all: true, verbatim: true });
-  if (!answers.length || answers.some(({ address }) => isBlockedAddress(address))) throw new Error("blocked DNS answer");
+  if (!answers.length) throw new Error("blocked DNS answer");
+  const addresses = answers.map(({ address }) => address);
+  const allowedAddresses = new Set(options.allowedAddresses || []);
+  const explicitlyPinned = allowedAddresses.size > 0
+    && addresses.every((address) => allowedAddresses.has(address));
+  const reviewedFakeIpTunnel = Boolean(options.allowBenchmarkFakeIp)
+    && addresses.every(isBenchmarkFakeIp);
+  if (addresses.some(isBlockedAddress) && !explicitlyPinned && !reviewedFakeIpTunnel) {
+    throw new Error("blocked DNS answer");
+  }
   return answers[0].address;
 }
 
 export function isPinnedTargetHost(targetHost, candidateHost) {
   return candidateHost.toLowerCase() === targetHost.toLowerCase();
+}
+
+function defaultNetworkPort(url) {
+  return Number(url.port || (url.protocol === "https:" ? 443 : 80));
+}
+
+export function privateTargetAuthorityMatches(authority, url) {
+  return Boolean(authority
+    && String(authority.scheme || "") === url.protocol.slice(0, -1)
+    && String(authority.host || "").toLowerCase() === url.hostname.toLowerCase()
+    && Number(authority.port) === defaultNetworkPort(url));
+}
+
+export function isConfinedTargetUrl(target, candidate, privateAuthority = null) {
+  if (!isPinnedTargetHost(target.hostname, candidate.hostname)) return false;
+  if (privateTargetAuthorityMatches(privateAuthority, target)) {
+    return candidate.protocol === target.protocol
+      && defaultNetworkPort(candidate) === defaultNetworkPort(target);
+  }
+  if (target.protocol === "http:" && !target.port) {
+    return (candidate.protocol === "http:" && defaultNetworkPort(candidate) === 80)
+      || (candidate.protocol === "https:" && defaultNetworkPort(candidate) === 443);
+  }
+  return candidate.protocol === target.protocol
+    && defaultNetworkPort(candidate) === defaultNetworkPort(target);
 }
 
 export function isSecureAssetProtocol(protocol) {
