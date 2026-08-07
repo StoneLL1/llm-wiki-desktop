@@ -94,6 +94,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         started_at: chrono::Utc::now().to_rfc3339(),
         completed_at: Some(chrono::Utc::now().to_rfc3339()),
         outcome: AttemptOutcome::Succeeded,
+        error_code: None,
         warnings: Vec::new(),
     });
     let mut session = ImportSession::new("session-a", "project-a", ImportResourceMode::Balanced);

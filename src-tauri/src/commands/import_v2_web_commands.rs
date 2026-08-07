@@ -19,6 +19,9 @@ use crate::{
     },
     services::import_v2::{
         connector_session::ConnectorSessionRef,
+        platform_network_policy::{
+            trusted_platform_page_host_suffixes, upgrade_trusted_platform_page_to_https,
+        },
         platform_provider::{extract_platform_collection, looks_like_collection_url, Platform},
         remote_media_retention::build_remote_media_retention_plan,
         session_store::CollectionImportInput,
@@ -77,6 +80,7 @@ pub fn add_import_url_v2(
 ) -> Result<ImportSession, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let target = UrlPolicy.normalize_for_session(&request.url)?;
+    let target = upgrade_trusted_platform_page_to_https(target)?;
     let reference = state.import_v2_service.store_web_target(&target)?;
     let result = state.import_v2_service.add_inputs(
         &context,
@@ -110,6 +114,10 @@ pub async fn discover_import_collection_v2(
     if !looks_like_collection_url(&target.public.public_url) {
         return Ok(None);
     }
+    let allowed_host_suffixes = trusted_platform_page_host_suffixes(&target.public.public_url)
+        .iter()
+        .map(|suffix| (*suffix).into())
+        .collect();
     let artifact = WebFetchService
         .fetch(
             target.clone(),
@@ -119,6 +127,8 @@ pub async fn discover_import_collection_v2(
                 max_attempts_per_route: 1,
                 total_timeout_ms: 30_000,
                 content: WebFetchContent::Page,
+                require_https: true,
+                allowed_host_suffixes,
                 ..WebFetchPolicy::default()
             },
             None,

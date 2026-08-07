@@ -151,8 +151,14 @@ describe("ImportRightPanel", () => {
   });
 
   it("shows stable user copy and keeps raw errors, routes, and engines in technical details", async () => {
+    const failedAttempt = {
+      ...item().attempts[0],
+      outcome: "failed" as const,
+      errorCode: "IMPORT_V2_PRIVATE_TARGET_BLOCKED",
+    };
     renderPanel(item({
       status: "failed",
+      attempts: [failedAttempt],
       issue: {
         code: "LOGIN_REQUIRED",
         message: "raw connector message",
@@ -173,6 +179,7 @@ describe("ImportRightPanel", () => {
     expect(technical).toHaveTextContent("raw connector message");
     expect(technical).toHaveTextContent("native_markdown");
     expect(technical).toHaveTextContent("core-markdown 2.0.0");
+    expect(technical).toHaveTextContent("IMPORT_V2_PRIVATE_TARGET_BLOCKED");
   });
 
   it("does not let a stale preview replace the newly selected item", async () => {

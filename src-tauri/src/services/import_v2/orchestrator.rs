@@ -1258,6 +1258,7 @@ impl ImportV2Service {
                 started_at: chrono::Utc::now().to_rfc3339(),
                 completed_at: None,
                 outcome: AttemptOutcome::Failed,
+                error_code: None,
                 warnings: Vec::new(),
             });
             Ok(())
@@ -1994,6 +1995,8 @@ impl ImportV2Service {
                 );
             }
         }
+        self.web_targets
+            .release_private_operation(item_id, task_id)?;
         result
     }
 
@@ -2024,6 +2027,11 @@ impl ImportV2Service {
         if pre_cancelled {
             return self.finish_cancelled(context, files, tasks, session_id, item_id, task_id);
         }
+        // A private-target confirmation is single-use. Consume it once at the
+        // operation boundary, then let only this operation's bounded route
+        // fallback chain reuse the active grant.
+        self.web_targets
+            .claim_private_for_operation(item_id, task_id)?;
         if task_lifecycle {
             self.start_claimed_task(context, files, tasks, session_id, item_id, task_id)?;
             task_call(tasks.update_progress(
@@ -2238,6 +2246,7 @@ impl ImportV2Service {
                         &descriptor,
                         started_at,
                         crate::models::import_v2::AttemptOutcome::Failed,
+                        Some(error.code.clone()),
                         Vec::new(),
                     )?;
                     if is_web_user_wait(&error) {
@@ -2376,6 +2385,7 @@ impl ImportV2Service {
                     &descriptor,
                     started_at.clone(),
                     crate::models::import_v2::AttemptOutcome::Failed,
+                    Some(error.code.clone()),
                     candidate.warnings.clone(),
                 )?;
                 last_error = Some(error);
@@ -2473,6 +2483,7 @@ impl ImportV2Service {
                     &descriptor,
                     started_at.clone(),
                     crate::models::import_v2::AttemptOutcome::Failed,
+                    Some(error.code.clone()),
                     candidate.warnings.clone(),
                 )?;
                 last_error = Some(error);
@@ -2489,6 +2500,7 @@ impl ImportV2Service {
                     &descriptor,
                     started_at.clone(),
                     crate::models::import_v2::AttemptOutcome::Failed,
+                    Some(crate::errors::IMPORT_V2_QUALITY_FAILED.into()),
                     candidate.warnings.clone(),
                 )?;
                 last_error = Some(BackendError::new(
@@ -2522,6 +2534,7 @@ impl ImportV2Service {
                         &descriptor,
                         started_at,
                         crate::models::import_v2::AttemptOutcome::Succeeded,
+                        None,
                         candidate.warnings.clone(),
                     )?;
                     request.chained_input = Some(converted.clone());
@@ -2591,6 +2604,17 @@ impl ImportV2Service {
         {
             Ok(preview) => preview,
             Err(error) => {
+                self.record_attempt(
+                    context,
+                    files,
+                    session_id,
+                    item_id,
+                    &descriptor,
+                    started_at,
+                    crate::models::import_v2::AttemptOutcome::Failed,
+                    Some(error.code.clone()),
+                    result.warnings.clone(),
+                )?;
                 return self.finish_failed(
                     context,
                     files,
@@ -2600,7 +2624,7 @@ impl ImportV2Service {
                     task_id,
                     error,
                     ImportStage::Validate,
-                )
+                );
             }
         };
         let mut resolution_session = self.load_session(context, files, session_id)?;
@@ -2659,6 +2683,7 @@ impl ImportV2Service {
                 started_at,
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 outcome: crate::models::import_v2::AttemptOutcome::Succeeded,
+                error_code: None,
                 warnings: result.warnings.clone(),
             });
             Ok(())
@@ -3038,6 +3063,7 @@ impl ImportV2Service {
             ),
             Err(_) => (crate::models::import_v2::AttemptOutcome::Failed, Vec::new()),
         };
+        let error_code = outcome.as_ref().err().map(|error| error.code.clone());
         self.record_attempt(
             context,
             files,
@@ -3046,6 +3072,7 @@ impl ImportV2Service {
             &descriptor,
             started_at,
             outcome_kind,
+            error_code,
             warnings,
         )?;
         outcome.map(|(result, _)| result)
@@ -3259,6 +3286,7 @@ impl ImportV2Service {
                         &descriptor,
                         started_at,
                         crate::models::import_v2::AttemptOutcome::Succeeded,
+                        None,
                         value.1.warnings.clone(),
                     )?;
                     value
@@ -3272,6 +3300,7 @@ impl ImportV2Service {
                         &descriptor,
                         started_at,
                         crate::models::import_v2::AttemptOutcome::Failed,
+                        Some(error.code.clone()),
                         Vec::new(),
                     )?;
                     first_ocr_error.get_or_insert_with(|| error.clone());
@@ -3424,6 +3453,7 @@ impl ImportV2Service {
         descriptor: &crate::services::import_v2::engine::EngineDescriptor,
         started_at: String,
         outcome: crate::models::import_v2::AttemptOutcome,
+        error_code: Option<String>,
         warnings: Vec<String>,
     ) -> Result<ImportItem, BackendError> {
         self.mutate_item(context, files, session_id, item_id, |item| {
@@ -3435,6 +3465,7 @@ impl ImportV2Service {
                 started_at,
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 outcome,
+                error_code,
                 warnings,
             });
             Ok(())
@@ -5175,9 +5206,41 @@ fn issue_from_engine_error_for_input(
         } else {
             &error.code
         };
-        return ImportIssue::for_web_code(code, stage);
+        let mut issue = ImportIssue::for_web_code(code, stage);
+        if let Some(message) = safe_web_error_message(&error.code) {
+            issue.message = message.into();
+        }
+        return issue;
     }
     issue_from_engine_error(error, stage)
+}
+
+fn safe_web_error_message(code: &str) -> Option<&'static str> {
+    match code {
+        "IMPORT_V2_URL_REJECTED" => Some("URL was rejected by the import safety policy."),
+        "IMPORT_V2_REDIRECT_REJECTED" => {
+            Some("A redirect left the permitted URL or host boundary.")
+        }
+        "IMPORT_V2_PRIVATE_TARGET_BLOCKED" => Some(
+            "The target resolved to a private or reserved network address and needs explicit authorization.",
+        ),
+        "IMPORT_V2_DNS_FAILED" => Some("DNS resolution failed."),
+        "IMPORT_V2_TLS_OR_FETCH_FAILED" => Some("TLS or HTTP connection failed."),
+        "IMPORT_V2_FETCH_FAILED" => Some("The web request could not be started."),
+        "IMPORT_V2_RESPONSE_FAILED" => {
+            Some("The remote service returned an unsuccessful status.")
+        }
+        "IMPORT_V2_RESPONSE_TOO_LARGE" => {
+            Some("The response exceeded the configured byte limit.")
+        }
+        "IMPORT_V2_CONTENT_REJECTED" => {
+            Some("The response content type is not allowed for this import route.")
+        }
+        "IMPORT_V2_CONNECTOR_RATE_LIMITED" => {
+            Some("The remote service is temporarily unavailable or rate limited.")
+        }
+        _ => None,
+    }
 }
 
 fn stable_file_error_code(code: &str) -> &'static str {
@@ -5286,6 +5349,44 @@ mod tests {
             source_identity: None,
             media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
         }
+    }
+
+    #[test]
+    fn url_network_failures_use_canonical_public_messages() {
+        let error = BackendError::new(
+            "IMPORT_V2_URL_REJECTED",
+            "sensitive://secret-bearing-internal-detail",
+            false,
+            true,
+        );
+
+        let issue = issue_from_engine_error_for_input(
+            &error,
+            ImportStage::Extract,
+            &crate::models::import_v2::ImportInputKind::Url,
+        );
+
+        assert_eq!(issue.code, error.code);
+        assert_eq!(
+            issue.message,
+            "URL was rejected by the import safety policy."
+        );
+        assert!(!issue.message.contains("sensitive"));
+
+        let rate_limited = issue_from_engine_error_for_input(
+            &BackendError::new(
+                "IMPORT_V2_CONNECTOR_RATE_LIMITED",
+                "do not persist this producer detail",
+                true,
+                false,
+            ),
+            ImportStage::Extract,
+            &crate::models::import_v2::ImportInputKind::Url,
+        );
+        assert_eq!(
+            rate_limited.message,
+            "The remote service is temporarily unavailable or rate limited."
+        );
     }
 
     #[test]
@@ -6451,6 +6552,7 @@ mod tests {
                 &descriptor,
                 "2026-07-27T00:00:00Z".into(),
                 AttemptOutcome::Succeeded,
+                None,
                 vec!["metadata-only warning".into()],
             )
             .unwrap();
@@ -7383,6 +7485,9 @@ mod tests {
         let reopened = fixture.reopen();
         assert_eq!(reopened.items[0].status, ImportItemStatus::Failed);
         assert!(reopened.items[0].preview.is_none());
+        assert!(reopened.items[0].attempts.iter().any(|attempt| {
+            attempt.error_code.as_deref() == Some(crate::errors::IMPORT_V2_QUALITY_FAILED)
+        }));
         assert_eq!(
             fixture.tasks.get_task(&task.id).unwrap().status,
             TaskStatus::Failed

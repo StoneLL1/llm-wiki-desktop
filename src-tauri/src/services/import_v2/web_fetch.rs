@@ -167,7 +167,16 @@ impl WebFetchService {
             let connected = *resolved
                 .first()
                 .ok_or_else(|| err("IMPORT_V2_DNS_FAILED", "DNS returned no addresses.", true))?;
-            policy.validate_resolved_target(&target, &resolved, connected, grant, item_id)?;
+            let trusted_fake_ip_host =
+                limits.require_https && !limits.allowed_host_suffixes.is_empty();
+            policy.validate_resolved_target_for_fetch(
+                &target,
+                &resolved,
+                connected,
+                grant,
+                item_id,
+                trusted_fake_ip_host,
+            )?;
             let client = Client::builder()
                 .redirect(Policy::none())
                 .connect_timeout(Duration::from_millis(limits.connect_timeout_ms))

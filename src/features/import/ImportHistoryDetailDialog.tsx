@@ -129,6 +129,7 @@ function AttemptRow({ attempt, index }: { attempt: AttemptRecord; index: number 
       <div className="mt-0.5 break-words font-mono text-[10.5px] text-[var(--text-muted)]">
         {attempt.route} · {attempt.engineId} {attempt.engineVersion} · {attempt.stage}
       </div>
+      {attempt.errorCode ? <div className="mt-0.5 break-all font-mono text-[10.5px] text-[var(--danger)]">{attempt.errorCode}</div> : null}
       {duration ? <div className="mt-0.5 text-[10.5px] text-[var(--text-muted)]">{t("importV2.history.duration", { duration })}</div> : null}
       {attempt.warnings.length > 0 ? <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[10.5px] text-[var(--warning-text)]">{attempt.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
     </li>

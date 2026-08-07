@@ -10,6 +10,7 @@ use crate::services::import_v2::engine::{
     EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
 };
 use crate::services::import_v2::markdown_normalizer::{decode_text, html_to_markdown};
+use crate::services::import_v2::platform_network_policy::upgrade_trusted_platform_page_to_https;
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchService};
 use crate::services::import_v2::web_target_store::WebTargetStore;
@@ -80,7 +81,11 @@ impl ImportEngine for WechatWebEngine {
             &request.input.locator,
             request.input.normalized_locator.as_deref(),
         )?;
+        let target = upgrade_trusted_platform_page_to_https(target)?;
         let item_id = request.item_id.clone();
+        let private_grant = self
+            .web_targets
+            .private_for_operation(&item_id, &request.task_id)?;
         let token = cancellation.clone();
         let artifact = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -90,8 +95,12 @@ impl ImportEngine for WechatWebEngine {
             runtime.block_on(WebFetchService::default().fetch(
                 target,
                 &UrlPolicy::default(),
-                &WebFetchPolicy::default(),
-                None,
+                &WebFetchPolicy {
+                    require_https: true,
+                    allowed_host_suffixes: vec!["mp.weixin.qq.com".into()],
+                    ..WebFetchPolicy::default()
+                },
+                private_grant.as_ref(),
                 &item_id,
                 |_| {},
                 || token.is_cancelled(),
@@ -249,6 +258,12 @@ fn localize_wechat_images(
         let mut policy = WebFetchPolicy::default();
         policy.content = WebFetchContent::Image;
         policy.max_response_bytes = MAX_WECHAT_IMAGE_BYTES;
+        policy.require_https = true;
+        policy.allowed_host_suffixes = vec![
+            "mmbiz.qpic.cn".into(),
+            "mmbiz.qlogo.cn".into(),
+            "res.wx.qq.com".into(),
+        ];
         let fetched = runtime.block_on(WebFetchService::default().fetch(
             target,
             &UrlPolicy::default(),

@@ -49,6 +49,51 @@ fn private_grant_is_scoped_to_one_item_and_consumed_once() {
 }
 
 #[test]
+fn private_grant_is_consumed_once_but_shared_inside_one_operation() {
+    let store = WebTargetStore::new(SecretService::memory());
+    store
+        .authorize_private(PrivateTargetGrant {
+            item_id: "item-a".into(),
+            scheme: "https".into(),
+            host: "intranet.example".into(),
+            port: 443,
+            resolved_ips: vec!["198.18.0.50".parse().unwrap()],
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+        })
+        .unwrap();
+
+    store
+        .claim_private_for_operation("item-a", "operation-a")
+        .unwrap();
+    assert!(store
+        .private_for_operation("item-a", "operation-a")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .private_for_operation("item-a", "operation-a")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .private_for_operation("item-a", "operation-b")
+        .unwrap()
+        .is_none());
+    store
+        .release_private_operation("item-a", "operation-a")
+        .unwrap();
+    assert!(store
+        .private_for_operation("item-a", "operation-a")
+        .unwrap()
+        .is_none());
+    store
+        .claim_private_for_operation("item-a", "operation-b")
+        .unwrap();
+    assert!(store
+        .private_for_operation("item-a", "operation-b")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn secure_reference_cannot_be_rebound_to_another_public_target() {
     let store = WebTargetStore::new(SecretService::memory());
     let target = UrlPolicy

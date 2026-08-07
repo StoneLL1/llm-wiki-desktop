@@ -1734,6 +1734,7 @@ fn fetch_remote_image(
             content: WebFetchContent::Image,
             ..WebFetchPolicy::default()
         },
+        None,
         item_id,
         cancellation,
     )?;

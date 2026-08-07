@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { URL } from "node:url";
 
-import { extractAccountSummary, hasPlatformAuthentication, isBlockedAddress, isPinnedTargetHost, isPlatformCookieDomain, isPlatformNavigationHost, isPlatformTargetHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, resolvePinnedAddress, sanitizeAccountLabel, sanitizeCookieBackup } from "./policy.mjs";
+import { extractAccountSummary, hasPlatformAuthentication, isBlockedAddress, isConfinedTargetUrl, isPinnedTargetHost, isPlatformCookieDomain, isPlatformNavigationHost, isPlatformTargetHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, resolvePinnedAddress, sanitizeAccountLabel, sanitizeCookieBackup } from "./policy.mjs";
 
 for (const address of ["127.0.0.1", "10.0.0.1", "169.254.169.254", "192.168.1.1", "224.0.0.1", "::1", "fc00::1", "fe80::1"]) {
   assert.equal(isBlockedAddress(address), true, address);
@@ -10,6 +11,12 @@ assert.equal(isBlockedAddress("93.184.216.34"), false);
 assert.equal(isPinnedTargetHost("mp.weixin.qq.com", "mp.weixin.qq.com"), true);
 assert.equal(isPinnedTargetHost("mp.weixin.qq.com", "mmbiz.qpic.cn"), false);
 assert.equal(isPinnedTargetHost("example.com", "example.com.evil.test"), false);
+const privateAuthority = { scheme: "http", host: "intranet.example", port: 8080 };
+const privateTarget = new URL("http://intranet.example:8080/page");
+assert.equal(isConfinedTargetUrl(privateTarget, new URL("http://intranet.example:8080/next"), privateAuthority), true);
+assert.equal(isConfinedTargetUrl(privateTarget, new URL("http://intranet.example:8081/next"), privateAuthority), false);
+assert.equal(isConfinedTargetUrl(privateTarget, new URL("https://intranet.example/next"), privateAuthority), false);
+assert.equal(isConfinedTargetUrl(new URL("http://example.com/page"), new URL("https://example.com/next")), true);
 assert.equal(isPlatformTargetHost("wechat", "mp.weixin.qq.com"), true);
 assert.equal(isPlatformTargetHost("wechat", "mp.weixin.qq.com.evil.test"), false);
 assert.equal(isPlatformTargetHost("x", "mobile.twitter.com"), true);
@@ -18,6 +25,18 @@ assert.equal(isPlatformTargetHost("x", "example.com"), false);
 const lookup = async () => [{ address: "93.184.216.34" }, { address: "93.184.216.35" }];
 assert.equal(await resolvePinnedAddress("example.com", lookup), "93.184.216.34");
 await assert.rejects(() => resolvePinnedAddress("example.com", async () => [{ address: "93.184.216.34" }, { address: "127.0.0.1" }]));
+const fakeLookup = async () => [{ address: "198.18.0.50" }, { address: "198.19.0.51" }];
+await assert.rejects(() => resolvePinnedAddress("example.com", fakeLookup));
+assert.equal(
+  await resolvePinnedAddress("www.bilibili.com", fakeLookup, { allowBenchmarkFakeIp: true }),
+  "198.18.0.50",
+);
+await assert.rejects(() => resolvePinnedAddress("example.com", async () => [{ address: "198.18.0.50" }, { address: "192.168.1.8" }], { allowBenchmarkFakeIp: true }));
+assert.equal(
+  await resolvePinnedAddress("intranet.example", fakeLookup, { allowedAddresses: ["198.18.0.50", "198.19.0.51"] }),
+  "198.18.0.50",
+);
+await assert.rejects(() => resolvePinnedAddress("intranet.example", fakeLookup, { allowedAddresses: ["198.18.0.50"] }));
 
 assert.equal(hasPlatformAuthentication("bilibili", "www.bilibili.com", [{ name: "SESSDATA", value: "session", domain: ".bilibili.com" }]), true);
 assert.equal(isPlatformCookieDomain("bilibili", ".bilibili.com"), true);

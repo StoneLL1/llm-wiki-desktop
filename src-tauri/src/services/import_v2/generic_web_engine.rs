@@ -17,12 +17,15 @@ use crate::services::import_v2::markdown_normalizer::{
 use crate::services::import_v2::media_router::{
     link_or_copy, move_staged_file, TemporaryMediaWorkspace,
 };
+use crate::services::import_v2::platform_network_policy::{
+    trusted_platform_page_host_suffixes, upgrade_trusted_platform_page_to_https,
+};
 use crate::services::import_v2::platform_provider::{
     extract_platform_document, Platform, PlatformSubtitleKind,
 };
 use crate::services::import_v2::redaction::redact_sensitive_text;
 use crate::services::import_v2::subtitle::{parse_subtitle_segments, render_subtitle_markdown};
-use crate::services::import_v2::url_policy::{SessionWebTarget, UrlPolicy};
+use crate::services::import_v2::url_policy::{PrivateTargetGrant, SessionWebTarget, UrlPolicy};
 use crate::services::import_v2::web_fetch::{
     WebFetchArtifact, WebFetchContent, WebFetchPolicy, WebFetchProgress, WebFetchService,
 };
@@ -44,6 +47,7 @@ pub trait WebArtifactSource: Send + Sync {
         &self,
         target: SessionWebTarget,
         policy: WebFetchPolicy,
+        private_grant: Option<&PrivateTargetGrant>,
         item_id: &str,
         cancellation: &CancellationToken,
     ) -> Result<WebFetchArtifact, BackendError>;
@@ -61,10 +65,12 @@ impl WebArtifactSource for NetworkWebArtifactSource {
         &self,
         target: SessionWebTarget,
         policy: WebFetchPolicy,
+        private_grant: Option<&PrivateTargetGrant>,
         item_id: &str,
         cancellation: &CancellationToken,
     ) -> Result<WebFetchArtifact, BackendError> {
         let item_id = item_id.to_owned();
+        let private_grant = private_grant.cloned();
         let cancellation = cancellation.clone();
         let worker = std::thread::Builder::new()
             .name("import-web-fetch".into())
@@ -77,7 +83,7 @@ impl WebArtifactSource for NetworkWebArtifactSource {
                     target,
                     &UrlPolicy::default(),
                     &policy,
-                    None,
+                    private_grant.as_ref(),
                     &item_id,
                     |_| {},
                     || cancellation.is_cancelled(),
@@ -203,8 +209,26 @@ impl ImportEngine for GenericWebEngine {
             &request.input.locator,
             request.input.normalized_locator.as_deref(),
         )?;
+        let target = upgrade_trusted_platform_page_to_https(target)?;
         let item_id = request.item_id.clone();
+        let private_grant = self
+            .web_targets
+            .private_for_operation(&item_id, &request.task_id)?;
         let mut fetch_policy = WebFetchPolicy::default();
+        let requested_locator = request
+            .input
+            .normalized_locator
+            .as_deref()
+            .unwrap_or(&request.input.locator);
+        let requested_platform = Platform::from_url(requested_locator);
+        let trusted_page_hosts = trusted_platform_page_host_suffixes(requested_locator);
+        if !trusted_page_hosts.is_empty() {
+            fetch_policy.require_https = true;
+            fetch_policy.allowed_host_suffixes = trusted_page_hosts
+                .iter()
+                .map(|suffix| (*suffix).into())
+                .collect();
+        }
         let direct_media_url = is_direct_media_locator(&request.input);
         let direct_image_url = is_direct_image_locator(&request.input);
         if direct_media_url {
@@ -214,19 +238,16 @@ impl ImportEngine for GenericWebEngine {
             fetch_policy.content = WebFetchContent::Image;
             fetch_policy.max_response_bytes = 8 * 1024 * 1024;
         }
-        let page_artifact =
-            self.artifact_source
-                .fetch(target, fetch_policy, &item_id, cancellation);
+        let page_artifact = self.artifact_source.fetch(
+            target,
+            fetch_policy,
+            private_grant.as_ref(),
+            &item_id,
+            cancellation,
+        );
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
-        let requested_platform = Platform::from_url(
-            request
-                .input
-                .normalized_locator
-                .as_deref()
-                .unwrap_or(&request.input.locator),
-        );
         let bilibili_api_request = page_artifact.as_ref().ok().map(|artifact| {
             let mut resolved = request.clone();
             resolved.input.normalized_locator = Some(artifact.final_public_url.clone());
@@ -433,6 +454,7 @@ impl ImportEngine for GenericWebEngine {
                 &artifact.final_public_url,
                 platform,
                 self.artifact_source.as_ref(),
+                private_grant.as_ref(),
             ) {
                 Ok(image) => {
                     if platform.is_some_and(|platform| {
@@ -538,6 +560,7 @@ impl ImportEngine for GenericWebEngine {
                     &artifact.final_public_url,
                     platform,
                     self.artifact_source.as_ref(),
+                    private_grant.as_ref(),
                 ) {
                     Ok(subtitle_artifact) => {
                         if platform.is_some_and(|platform| {
@@ -741,6 +764,7 @@ impl ImportEngine for GenericWebEngine {
                                 .unwrap_or(&request.input.locator),
                             &download_path,
                             report_progress,
+                            private_grant.as_ref(),
                         ) {
                             Ok(media) => Some((media, Some(download))),
                             Err(error) if transcription_ready => {
@@ -1808,6 +1832,7 @@ fn fetch_media_to_file(
     referer: &str,
     destination: &Path,
     report_progress: &EngineProgressReporter<'_>,
+    private_grant: Option<&PrivateTargetGrant>,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
     report_progress(EngineProgress {
         current: 0,
@@ -1819,6 +1844,7 @@ fn fetch_media_to_file(
     let referer = referer.to_string();
     let destination = destination.to_path_buf();
     let token = cancellation.clone();
+    let private_grant = private_grant.cloned();
     let worker_stop = CancellationToken::new();
     let worker_stop_for_fetch = worker_stop.clone();
     let (progress_sender, progress_receiver) = std::sync::mpsc::channel::<WebFetchProgress>();
@@ -1846,7 +1872,7 @@ fn fetch_media_to_file(
                         .collect(),
                     ..WebFetchPolicy::default()
                 },
-                None,
+                private_grant.as_ref(),
                 &item_id,
                 &destination,
                 move |progress| {
@@ -1911,6 +1937,7 @@ fn fetch_image(
     referer: &str,
     platform: Option<Platform>,
     artifact_source: &dyn WebArtifactSource,
+    private_grant: Option<&PrivateTargetGrant>,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
     let target = UrlPolicy.normalize_for_session(url)?;
     artifact_source.fetch(
@@ -1928,6 +1955,7 @@ fn fetch_image(
                 .collect(),
             ..WebFetchPolicy::default()
         },
+        private_grant,
         item_id,
         cancellation,
     )
@@ -1940,6 +1968,7 @@ fn fetch_subtitle(
     referer: &str,
     platform: Option<Platform>,
     artifact_source: &dyn WebArtifactSource,
+    private_grant: Option<&PrivateTargetGrant>,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
     let target = UrlPolicy.normalize_for_session(url)?;
     artifact_source.fetch(
@@ -1957,6 +1986,7 @@ fn fetch_subtitle(
                 .collect(),
             ..WebFetchPolicy::default()
         },
+        private_grant,
         item_id,
         cancellation,
     )
@@ -2054,6 +2084,7 @@ mod tests {
                 NetworkWebArtifactSource.fetch(
                     target,
                     WebFetchPolicy::default(),
+                    None,
                     "runtime-boundary",
                     &cancellation,
                 )

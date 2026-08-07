@@ -519,6 +519,8 @@ pub struct AttemptRecord {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub outcome: AttemptOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -600,7 +602,11 @@ impl ImportIssue {
             "IMPORT_V2_ENGINE_UNAVAILABLE" => (true, true, vec![InstallBrowserCapability]),
             _ => (true, false, vec![RetryRoute, SwitchRoute]),
         };
-        recovery_actions.extend([Skip, ViewLog]);
+        for action in [Skip, ViewLog] {
+            if !recovery_actions.contains(&action) {
+                recovery_actions.push(action);
+            }
+        }
         let message = if code == "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED" {
             "The current account cannot access this content."
         } else {
@@ -934,6 +940,61 @@ mod tests {
         assert!(issue
             .recovery_actions
             .contains(&ImportRecoveryAction::InstallOcrCapability));
+    }
+
+    #[test]
+    fn web_issue_recovery_actions_are_unique() {
+        for code in [
+            "IMPORT_WEB_LOGIN_REQUIRED",
+            "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED",
+            "IMPORT_V2_URL_REJECTED",
+            "IMPORT_V2_PRIVATE_TARGET_BLOCKED",
+            "IMPORT_V2_RESPONSE_TOO_LARGE",
+            "IMPORT_V2_CONNECTOR_RATE_LIMITED",
+            "IMPORT_WEB_CONTENT_REMOVED",
+            "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED",
+            "IMPORT_WEB_MEDIA_UNAVAILABLE",
+            "IMPORT_WEB_STRUCTURE_CHANGED",
+            "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
+            "IMPORT_WEB_OCR_UNAVAILABLE",
+            "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING",
+            "IMPORT_V2_ENGINE_UNAVAILABLE",
+        ] {
+            let issue = ImportIssue::for_web_code(code, ImportStage::Extract);
+            for (index, action) in issue.recovery_actions.iter().enumerate() {
+                assert!(
+                    !issue.recovery_actions[..index].contains(action),
+                    "{code} repeats {action:?}"
+                );
+            }
+            assert_eq!(
+                issue.recovery_actions.last(),
+                Some(&ImportRecoveryAction::ViewLog),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn attempt_error_code_is_additive_and_legacy_safe() {
+        let legacy = r#"{
+            "route":"web.generic.readability",
+            "engineId":"builtin.web-http",
+            "engineVersion":"0.1.0",
+            "stage":"extract",
+            "startedAt":"2026-08-07T00:00:00Z",
+            "completedAt":null,
+            "outcome":"failed",
+            "warnings":[]
+        }"#;
+        let mut attempt: AttemptRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(attempt.error_code, None);
+
+        attempt.error_code = Some("IMPORT_V2_PRIVATE_TARGET_BLOCKED".into());
+        assert_eq!(
+            serde_json::to_value(attempt).unwrap()["errorCode"],
+            "IMPORT_V2_PRIVATE_TARGET_BLOCKED"
+        );
     }
 
     #[test]

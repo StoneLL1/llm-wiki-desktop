@@ -328,6 +328,8 @@ fn fetch_json(
                 max_response_bytes: 8 * 1024 * 1024,
                 content: WebFetchContent::Page,
                 referer: Some(referer),
+                require_https: true,
+                allowed_host_suffixes: vec!["bilibili.com".into()],
                 ..WebFetchPolicy::default()
             },
             None,

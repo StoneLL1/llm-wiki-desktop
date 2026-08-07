@@ -267,6 +267,7 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
         started_at: chrono::Utc::now().to_rfc3339(),
         completed_at: Some(chrono::Utc::now().to_rfc3339()),
         outcome: AttemptOutcome::Failed,
+        error_code: Some("IMPORT_WEB_STRUCTURE_CHANGED".into()),
         warnings: vec!["baseline failure".into()],
     });
     session.items.push(item);
