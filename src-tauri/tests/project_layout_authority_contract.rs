@@ -1,17 +1,33 @@
 use std::sync::atomic::AtomicBool;
 
 use llm_wiki_desktop_lib::app_state::ProjectRegistry;
-use llm_wiki_desktop_lib::models::layout::{inspect_native_layout, resolve_layout, NativeLayoutState};
+use llm_wiki_desktop_lib::models::layout::{
+    inspect_native_layout, resolve_layout, NativeLayoutState,
+};
 use llm_wiki_desktop_lib::models::project::{ProjectFormat, ProjectHealth};
 use llm_wiki_desktop_lib::services::assess_project_folder;
 
 fn legacy_native(root: &std::path::Path, missing: &str) {
     for directory in [
-        ".app/chats", ".app/tasks", "raw/sources/pdfs", "raw/sources/docs",
-        "raw/sources/slides", "raw/sources/sheets", "raw/sources/markdown",
-        "raw/sources/links", "raw/sources/other", "raw/extracted", "raw/assets",
-        "wiki/entities", "wiki/concepts", "wiki/sources", "wiki/queries", "wiki/synthesis",
-        "wiki/comparisons", "exports/html", "skills",
+        ".app/chats",
+        ".app/tasks",
+        "raw/sources/pdfs",
+        "raw/sources/docs",
+        "raw/sources/slides",
+        "raw/sources/sheets",
+        "raw/sources/markdown",
+        "raw/sources/links",
+        "raw/sources/other",
+        "raw/extracted",
+        "raw/assets",
+        "wiki/entities",
+        "wiki/concepts",
+        "wiki/sources",
+        "wiki/queries",
+        "wiki/synthesis",
+        "wiki/comparisons",
+        "exports/html",
+        "skills",
     ] {
         if directory != missing && !directory.starts_with(&format!("{missing}/")) {
             std::fs::create_dir_all(root.join(directory)).unwrap();
@@ -55,7 +71,6 @@ fn native_legacy_repairable_state_advertises_a_repair_plan() {
     assert!(assessment.repair_available);
 }
 
-
 #[test]
 fn batch_a_expected_red_witnesses_cannot_be_silenced_by_test_controls() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -70,7 +85,10 @@ fn batch_a_expected_red_witnesses_cannot_be_silenced_by_test_controls() {
         let source = std::fs::read_to_string(root.join(relative)).unwrap();
         let forbidden = [["ig", "nore"].concat(), ["should", "_panic"].concat()];
         for forbidden in forbidden {
-            assert!(!source.contains(&forbidden), "{relative} contains {forbidden}");
+            assert!(
+                !source.contains(&forbidden),
+                "{relative} contains {forbidden}"
+            );
         }
     }
     let frontend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
@@ -83,7 +101,10 @@ fn batch_a_expected_red_witnesses_cannot_be_silenced_by_test_controls() {
     ] {
         let source = std::fs::read_to_string(frontend_root.join(relative)).unwrap();
         for forbidden in [[".", "skip"].concat(), [".", "only"].concat()] {
-            assert!(!source.contains(&forbidden), "{relative} contains {forbidden}");
+            assert!(
+                !source.contains(&forbidden),
+                "{relative} contains {forbidden}"
+            );
         }
     }
 }
@@ -97,18 +118,48 @@ fn expected_red_evidence_is_unique_valid_json_and_keeps_green_targets_visible() 
     let evidence: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(evidence["baseline"]["discoveryCallbacksFor100Files"], 100);
     assert_eq!(evidence["baseline"]["operationTasksFor10000Items"], 10_000);
-    assert_eq!(evidence["baseline"]["frontendStorePublicationsFor10000TerminalItems"], 10_000);
-    assert_eq!(evidence["greenTargets"]["maxOperationTasksFor10000Items"], 1);
+    assert_eq!(
+        evidence["baseline"]["frontendStorePublicationsFor10000TerminalItems"],
+        10_000
+    );
+    assert_eq!(
+        evidence["greenTargets"]["maxOperationTasksFor10000Items"],
+        1
+    );
     assert_eq!(evidence["greenTargets"]["maxItemWritesForOneItemUpdate"], 1);
 
     let witnesses = evidence["witnesses"].as_array().unwrap();
     let expected_witnesses = [
-        ("project_layout_authority_contract.rs", "legacy_native_layout_inspection_agrees_on_a_repairable_missing_task_root", true),
-        ("project_layout_authority_contract.rs", "native_legacy_repairable_state_advertises_a_repair_plan", true),
-        ("import_v2_file_discovery.rs", "batch_a_expected_red_counts_one_discovery_callback_per_file", true),
-        ("import_v2_scale_contract.rs", "expected_red_single_item_update_rewrites_every_persisted_item_file", true),
-        ("import_v2_file_orchestration.rs", "batch_a_expected_red_task_service_creates_one_backend_task_per_item_at_scale", true),
-        ("../../src/features/import/importScaleContract.test.ts", "records one frontend store publication per terminal item under the current path", false),
+        (
+            "project_layout_authority_contract.rs",
+            "legacy_native_layout_inspection_agrees_on_a_repairable_missing_task_root",
+            true,
+        ),
+        (
+            "project_layout_authority_contract.rs",
+            "native_legacy_repairable_state_advertises_a_repair_plan",
+            true,
+        ),
+        (
+            "import_v2_file_discovery.rs",
+            "batch_a_expected_red_counts_one_discovery_callback_per_file",
+            true,
+        ),
+        (
+            "import_v2_scale_contract.rs",
+            "expected_red_single_item_update_rewrites_every_persisted_item_file",
+            true,
+        ),
+        (
+            "import_v2_file_orchestration.rs",
+            "batch_a_expected_red_task_service_creates_one_backend_task_per_item_at_scale",
+            true,
+        ),
+        (
+            "../../src/features/import/importScaleContract.test.ts",
+            "records one frontend store publication per terminal item under the current path",
+            false,
+        ),
     ];
     assert_eq!(witnesses.len(), expected_witnesses.len());
     for (index, (expected_file, expected_test, is_rust)) in expected_witnesses.iter().enumerate() {
@@ -121,12 +172,18 @@ fn expected_red_evidence_is_unique_valid_json_and_keeps_green_targets_visible() 
         } else {
             format!("it(\"{expected_test}\"")
         };
-        assert!(source.contains(&declaration), "missing executable expected-red witness {expected_test} in {expected_file}");
+        assert!(
+            source.contains(&declaration),
+            "missing executable expected-red witness {expected_test} in {expected_file}"
+        );
     }
     for witness in witnesses {
         let file = witness["file"].as_str().unwrap();
         let test = witness["test"].as_str().unwrap();
         let source = std::fs::read_to_string(manifest.join("tests").join(file)).unwrap();
-        assert!(source.contains(test), "missing required expected-red witness {test} in {file}");
+        assert!(
+            source.contains(test),
+            "missing required expected-red witness {test} in {file}"
+        );
     }
 }

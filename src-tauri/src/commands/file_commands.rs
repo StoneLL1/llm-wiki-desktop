@@ -527,12 +527,16 @@ fn execute_claimed_project_authority_action(
                         true,
                     ));
                 }
-                state.git_service.create_scoped_checkpoint(
-                    &context,
-                    crate::models::git::CheckpointPurpose::HighRiskOperation,
-                    "Checkpoint before compatible layout mapping update",
-                    &[crate::models::layout::COMPATIBLE_LAYOUT_MAPPING_PATH.to_string()],
-                )?.commit_hash.is_some()
+                state
+                    .git_service
+                    .create_scoped_checkpoint(
+                        &context,
+                        crate::models::git::CheckpointPurpose::HighRiskOperation,
+                        "Checkpoint before compatible layout mapping update",
+                        &[crate::models::layout::COMPATIBLE_LAYOUT_MAPPING_PATH.to_string()],
+                    )?
+                    .commit_hash
+                    .is_some()
             } else {
                 false
             };
@@ -541,7 +545,9 @@ fn execute_claimed_project_authority_action(
                 &mapping,
                 expected_hash.as_deref(),
             )?;
-            state.project_assessment_service.invalidate(&assessment_id)?;
+            state
+                .project_assessment_service
+                .invalidate(&assessment_id)?;
             Ok(ConfirmedAction {
                 action,
                 status: ConfirmationStatus::Confirmed,

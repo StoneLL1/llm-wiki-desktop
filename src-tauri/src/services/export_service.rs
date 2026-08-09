@@ -12,8 +12,8 @@ use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
 use crate::services::import_v2::source_registry::SourceManifest;
 use crate::services::SearchService;
-use crate::utils::path_utils::normalize_project_path;
 use crate::utils::path_safety::validate_existing_project_directory;
+use crate::utils::path_utils::normalize_project_path;
 use crate::utils::time_utils::now_rfc3339;
 
 const PAGE_EXCERPT_CHARS: usize = 600;
@@ -1601,7 +1601,11 @@ mod tests {
         let (context, root) = tmp_context("output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path_for(&context, ExportType::BeautifulRead, Some("wiki/concepts/Agent.md"))
+            .build_output_relative_path_for(
+                &context,
+                ExportType::BeautifulRead,
+                Some("wiki/concepts/Agent.md"),
+            )
             .unwrap();
         assert!(path.starts_with("exports/html/"), "got {path}");
         assert!(path.ends_with(".html"));
@@ -1627,7 +1631,11 @@ mod tests {
         let (context, root) = tmp_context("cjk-output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path_for(&context, ExportType::KnowledgeCard, Some("wiki/概念/My Page!.md"))
+            .build_output_relative_path_for(
+                &context,
+                ExportType::KnowledgeCard,
+                Some("wiki/概念/My Page!.md"),
+            )
             .unwrap();
         let file = path.rsplit('/').next().unwrap();
         assert!(file.starts_with("my-page"));
@@ -1641,7 +1649,11 @@ mod tests {
         let (context, root) = tmp_context("empty-output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path_for(&context, ExportType::KnowledgeCard, Some("wiki/!!!.md"))
+            .build_output_relative_path_for(
+                &context,
+                ExportType::KnowledgeCard,
+                Some("wiki/!!!.md"),
+            )
             .unwrap();
         assert!(path.starts_with("exports/html/export-"));
         std::fs::remove_dir_all(root).unwrap();
@@ -1696,7 +1708,11 @@ mod tests {
         let (context, root) = tmp_context("report-output-path");
         let service = ExportService::default();
         let path = service
-            .build_output_relative_path_for(&context, ExportType::ProjectReport, Some("wiki/concepts/agent.md"))
+            .build_output_relative_path_for(
+                &context,
+                ExportType::ProjectReport,
+                Some("wiki/concepts/agent.md"),
+            )
             .expect("project report path");
         assert!(
             path.starts_with("exports/html/project-report-"),

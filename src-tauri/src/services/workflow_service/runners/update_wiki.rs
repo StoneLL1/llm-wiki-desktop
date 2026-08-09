@@ -1652,8 +1652,8 @@ pub fn update_wiki_candidate_is_valid_for_workflow(
     if expected_sources != persisted_sources {
         return false;
     }
-    let Ok(context) = ProjectContext::new("workflow-recovery", project_root.to_path_buf())
-        .with_resolved_layout()
+    let Ok(context) =
+        ProjectContext::new("workflow-recovery", project_root.to_path_buf()).with_resolved_layout()
     else {
         return false;
     };

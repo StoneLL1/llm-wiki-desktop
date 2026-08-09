@@ -48,7 +48,26 @@ impl WorkflowCoordinator {
             .operation_lock
             .lock()
             .map_err(|_| "Workflow coordinator lock is unavailable")?;
-        self.enqueue_locked(tasks, request, true)
+        self.enqueue_locked(tasks, request, true, None)
+    }
+
+    pub fn enqueue_for_owner(
+        &self,
+        tasks: &TaskService,
+        request: EnqueueWorkflow,
+        expected_identity_key: &str,
+        expected_identity_revision: &str,
+    ) -> Result<WorkflowStartOutcome, String> {
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        self.enqueue_locked(
+            tasks,
+            request,
+            true,
+            Some((expected_identity_key, expected_identity_revision)),
+        )
     }
 
     fn enqueue_locked(
@@ -56,8 +75,14 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         request: EnqueueWorkflow,
         deduplicate: bool,
+        expected_owner: Option<(&str, &str)>,
     ) -> Result<WorkflowStartOutcome, String> {
         let identity = project_identity(&request.project_root)?;
+        if expected_owner.is_some_and(|(key, revision)| {
+            identity.canonical_identity_key != key || identity.identity_revision != revision
+        }) {
+            return Err("Workflow project identity changed before task creation".into());
+        }
         request.execution_options.validate()?;
         let task_state_root = request
             .task_state_root
@@ -461,6 +486,7 @@ impl WorkflowCoordinator {
         &self,
         tasks: &TaskService,
         task_id: &str,
+        project_id: String,
         project_root: PathBuf,
         task_state_root: Option<PathBuf>,
     ) -> Result<WorkflowStartOutcome, String> {
@@ -499,18 +525,17 @@ impl WorkflowCoordinator {
         let mut execution_options = tasks
             .workflow_execution_options(task_id)
             .ok_or_else(|| format!("Workflow execution options missing: {task_id}"))?;
+        execution_options.preparation_fingerprint = None;
         let mut baseline_fingerprint = original.baseline_fingerprint.clone();
         let was_persistent = tasks.workflow_persistence_dir(task_id).is_some()
             || original.persistence_transition
                 == Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly);
         let is_persistent = task_state_root.is_some();
         if completed_generate {
-            let context = crate::models::paths::ProjectContext::new(
-                original.project_id.clone(),
-                project_root.clone(),
-            )
-            .with_resolved_layout()
-            .map_err(|error| error.message)?;
+            let context =
+                crate::models::paths::ProjectContext::new(project_id.clone(), project_root.clone())
+                    .with_resolved_layout()
+                    .map_err(|error| error.message)?;
             if let WorkflowScope::GenerateContent {
                 output_path: Some(output_path),
                 ..
@@ -528,7 +553,7 @@ impl WorkflowCoordinator {
         let outcome = self.enqueue_locked(
             tasks,
             EnqueueWorkflow {
-                project_id: original.project_id.clone(),
+                project_id,
                 project_root,
                 task_state_root,
                 title: format!("Retry {:?}", original.kind),
@@ -546,6 +571,10 @@ impl WorkflowCoordinator {
                 }),
             },
             false,
+            Some((
+                &original.canonical_identity_key,
+                &original.identity_revision,
+            )),
         )?;
         match outcome {
             WorkflowStartOutcome::Created { run } => {

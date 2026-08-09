@@ -2,6 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 use std::sync::RwLock;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use chrono::{Duration, Utc};
 use serde::Serialize;
 
@@ -29,6 +32,46 @@ use super::persistence::project_identity;
 use super::preferences::{WorkflowPreference, WorkflowPreferences};
 
 const PREPARATION_TTL_MINUTES: i64 = 15;
+const STARTED_PREPARATION_TTL_HOURS: i64 = 24;
+const MAX_PREPARATIONS_PER_IDENTITY: usize = 64;
+const MAX_PREPARATIONS_GLOBAL: usize = 512;
+const MAX_STARTED_PREPARATIONS_PER_IDENTITY: usize = 128;
+const MAX_STARTED_PREPARATIONS_GLOBAL: usize = 1_024;
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparationCostSnapshot {
+    route_catalog_loads: usize,
+    agent_probes: usize,
+    markdown_enumerations: usize,
+    baseline_hashes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROUTE_CATALOG_LOADS: Cell<usize> = const { Cell::new(0) };
+    static AGENT_PROBES: Cell<usize> = const { Cell::new(0) };
+    static MARKDOWN_ENUMERATIONS: Cell<usize> = const { Cell::new(0) };
+    static BASELINE_HASHES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_preparation_costs() {
+    ROUTE_CATALOG_LOADS.set(0);
+    AGENT_PROBES.set(0);
+    MARKDOWN_ENUMERATIONS.set(0);
+    BASELINE_HASHES.set(0);
+}
+
+#[cfg(test)]
+fn preparation_costs() -> PreparationCostSnapshot {
+    PreparationCostSnapshot {
+        route_catalog_loads: ROUTE_CATALOG_LOADS.get(),
+        agent_probes: AGENT_PROBES.get(),
+        markdown_enumerations: MARKDOWN_ENUMERATIONS.get(),
+        baseline_hashes: BASELINE_HASHES.get(),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -102,8 +145,17 @@ struct PreparedRecord {
     route_selection: Option<WorkflowRouteSelection>,
     execution_options: WorkflowExecutionOptions,
     preparation_fingerprint: String,
+    created_at: chrono::DateTime<Utc>,
     expires_at: chrono::DateTime<Utc>,
-    started_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StartedPreparationRecord {
+    preparation_revision: String,
+    task_id: String,
+    owner: String,
+    started_at: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,9 +175,26 @@ struct PreparationSnapshot {
     available_routes: Vec<WorkflowRouteSelection>,
 }
 
+struct CapturedBaseline {
+    summary: WorkflowBaselineSummary,
+    has_readable_markdown: bool,
+}
+
+#[derive(Default)]
+struct PreparationRecords {
+    prepared: HashMap<String, PreparedRecord>,
+    started: HashMap<String, StartedPreparationRecord>,
+}
+
 #[derive(Default)]
 pub struct WorkflowPreparationService {
-    records: RwLock<HashMap<String, PreparedRecord>>,
+    records: RwLock<PreparationRecords>,
+}
+
+pub(crate) enum PreparationStartLookup {
+    Started(String),
+    Prepared,
+    Missing,
 }
 
 pub fn overview_prerequisites(
@@ -226,13 +295,8 @@ impl WorkflowPreparationService {
                 && !snapshot.prerequisites.iter().any(|item| item.blocking)
         });
         let preparation_id = uuid::Uuid::new_v4().to_string();
-        let preparation_revision = hex_sha256(
-            format!(
-                "workflow-preparation-v1\n{}\n{}",
-                preparation_id, snapshot.preparation_fingerprint
-            )
-            .as_bytes(),
-        );
+        let preparation_revision =
+            preparation_revision_for(&preparation_id, &snapshot.preparation_fingerprint);
         let preparation = WorkflowPreparation {
             schema_version: WORKFLOW_SCHEMA_VERSION,
             preparation_id: preparation_id.clone(),
@@ -251,40 +315,59 @@ impl WorkflowPreparationService {
             available_wiki_pages: snapshot.available_wiki_pages,
             available_routes: snapshot.available_routes,
         };
+        let mut stored_preparation = preparation.clone();
+        stored_preparation.available_source_versions.clear();
+        stored_preparation.available_wiki_pages.clear();
+        stored_preparation.available_routes.clear();
+        let now = Utc::now();
         let record = PreparedRecord {
-            preparation: preparation.clone(),
+            preparation: stored_preparation,
             authority_revision: snapshot.authority_revision,
             route_selection: applied_remembered_input
                 .and_then(|remembered| remembered.route_selection)
                 .or(input.route_selection),
             execution_options: WorkflowExecutionOptions {
                 preparation_revision,
+                preparation_fingerprint: Some(snapshot.preparation_fingerprint.clone()),
                 ..snapshot.execution_options
             },
             preparation_fingerprint: snapshot.preparation_fingerprint,
-            expires_at: Utc::now() + Duration::minutes(PREPARATION_TTL_MINUTES),
-            started_task_id: None,
+            created_at: now,
+            expires_at: now + Duration::minutes(PREPARATION_TTL_MINUTES),
         };
-        self.records
-            .write()
-            .map_err(|_| preparation_lock_error())?
-            .insert(preparation_id, record);
+        let owner = preparation_owner(&record.preparation);
+        let mut records = self.records.write().map_err(|_| preparation_lock_error())?;
+        prune_preparation_records(&mut records, now);
+        records.prepared.insert(preparation_id, record);
+        enforce_prepared_caps(&mut records, &owner);
         Ok(preparation)
     }
 
-    pub fn started_task_id(
+    pub(crate) fn lookup_for_start(
         &self,
         preparation_id: &str,
         preparation_revision: &str,
-    ) -> Result<Option<String>, BackendError> {
-        let records = self.records.read().map_err(|_| preparation_lock_error())?;
-        let Some(record) = records.get(preparation_id) else {
-            return Ok(None);
-        };
-        if record.preparation.preparation_revision != preparation_revision {
-            return Err(stale_preparation_error());
+        identity_key: &str,
+        identity_revision: &str,
+    ) -> Result<PreparationStartLookup, BackendError> {
+        let now = Utc::now();
+        let mut records = self.records.write().map_err(|_| preparation_lock_error())?;
+        prune_preparation_records(&mut records, now);
+        if let Some(record) = records.started.get(preparation_id) {
+            if record.preparation_revision != preparation_revision
+                || record.owner != owner_key(identity_key, identity_revision)
+            {
+                return Err(stale_preparation_error());
+            }
+            return Ok(PreparationStartLookup::Started(record.task_id.clone()));
         }
-        Ok(record.started_task_id.clone())
+        if let Some(record) = records.prepared.get(preparation_id) {
+            if record.preparation.preparation_revision != preparation_revision {
+                return Err(stale_preparation_error());
+            }
+            return Ok(PreparationStartLookup::Prepared);
+        }
+        Ok(PreparationStartLookup::Missing)
     }
 
     pub fn mark_started(
@@ -292,22 +375,40 @@ impl WorkflowPreparationService {
         preparation_id: &str,
         preparation_revision: &str,
         task_id: &str,
+        identity_key: &str,
+        identity_revision: &str,
     ) -> Result<(), BackendError> {
+        let now = Utc::now();
         let mut records = self.records.write().map_err(|_| preparation_lock_error())?;
-        let record = records
-            .get_mut(preparation_id)
-            .ok_or_else(stale_preparation_error)?;
-        if record.preparation.preparation_revision != preparation_revision {
-            return Err(stale_preparation_error());
-        }
-        match record.started_task_id.as_deref() {
-            Some(existing) if existing != task_id => Err(stale_preparation_error()),
-            Some(_) => Ok(()),
-            None => {
-                record.started_task_id = Some(task_id.into());
+        prune_preparation_records(&mut records, now);
+        if let Some(existing) = records.started.get(preparation_id) {
+            return if existing.preparation_revision == preparation_revision
+                && existing.task_id == task_id
+            {
                 Ok(())
+            } else {
+                Err(stale_preparation_error())
+            };
+        }
+        if let Some(record) = records.prepared.remove(preparation_id) {
+            if record.preparation.preparation_revision != preparation_revision {
+                records.prepared.insert(preparation_id.to_string(), record);
+                return Err(stale_preparation_error());
             }
         }
+        let owner = owner_key(identity_key, identity_revision);
+        records.started.insert(
+            preparation_id.to_string(),
+            StartedPreparationRecord {
+                preparation_revision: preparation_revision.to_string(),
+                task_id: task_id.to_string(),
+                owner: owner.clone(),
+                started_at: now,
+                expires_at: now + Duration::hours(STARTED_PREPARATION_TTL_HOURS),
+            },
+        );
+        enforce_started_caps(&mut records, &owner);
+        Ok(())
     }
 
     pub fn validate_for_start(
@@ -316,16 +417,14 @@ impl WorkflowPreparationService {
         preparation_id: &str,
         preparation_revision: &str,
     ) -> Result<ValidatedWorkflowStart, BackendError> {
-        let record = self
-            .records
-            .read()
-            .map_err(|_| preparation_lock_error())?
-            .get(preparation_id)
-            .cloned()
-            .ok_or_else(stale_preparation_error)?;
-        if record.expires_at < Utc::now()
-            || record.preparation.preparation_revision != preparation_revision
-        {
+        let now = Utc::now();
+        let record = {
+            let mut records = self.records.write().map_err(|_| preparation_lock_error())?;
+            prune_preparation_records(&mut records, now);
+            records.prepared.get(preparation_id).cloned()
+        }
+        .ok_or_else(stale_preparation_error)?;
+        if record.preparation.preparation_revision != preparation_revision {
             return Err(stale_preparation_error());
         }
         let refreshed = build_snapshot(
@@ -396,6 +495,97 @@ impl WorkflowPreparationService {
     }
 }
 
+fn preparation_owner(preparation: &WorkflowPreparation) -> String {
+    owner_key(
+        &preparation.project_access.canonical_identity_key,
+        &preparation.project_access.identity_revision,
+    )
+}
+
+fn owner_key(identity_key: &str, identity_revision: &str) -> String {
+    format!("{identity_key}:{identity_revision}")
+}
+
+pub(crate) fn preparation_revision_for(
+    preparation_id: &str,
+    preparation_fingerprint: &str,
+) -> String {
+    hex_sha256(
+        format!("workflow-preparation-v1\n{preparation_id}\n{preparation_fingerprint}").as_bytes(),
+    )
+}
+
+fn prune_preparation_records(records: &mut PreparationRecords, now: chrono::DateTime<Utc>) {
+    records
+        .prepared
+        .retain(|_, record| record.expires_at >= now);
+    records.started.retain(|_, record| record.expires_at >= now);
+}
+
+fn enforce_prepared_caps(records: &mut PreparationRecords, owner: &str) {
+    while records
+        .prepared
+        .values()
+        .filter(|record| preparation_owner(&record.preparation) == owner)
+        .count()
+        > MAX_PREPARATIONS_PER_IDENTITY
+    {
+        let oldest = records
+            .prepared
+            .iter()
+            .filter(|(_, record)| preparation_owner(&record.preparation) == owner)
+            .min_by_key(|(_, record)| record.created_at)
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else {
+            break;
+        };
+        records.prepared.remove(&oldest);
+    }
+    while records.prepared.len() > MAX_PREPARATIONS_GLOBAL {
+        let oldest = records
+            .prepared
+            .iter()
+            .min_by_key(|(_, record)| record.created_at)
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else {
+            break;
+        };
+        records.prepared.remove(&oldest);
+    }
+}
+
+fn enforce_started_caps(records: &mut PreparationRecords, owner: &str) {
+    while records
+        .started
+        .values()
+        .filter(|record| record.owner == owner)
+        .count()
+        > MAX_STARTED_PREPARATIONS_PER_IDENTITY
+    {
+        let oldest = records
+            .started
+            .iter()
+            .filter(|(_, record)| record.owner == owner)
+            .min_by_key(|(_, record)| record.started_at)
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else {
+            break;
+        };
+        records.started.remove(&oldest);
+    }
+    while records.started.len() > MAX_STARTED_PREPARATIONS_GLOBAL {
+        let oldest = records
+            .started
+            .iter()
+            .min_by_key(|(_, record)| record.started_at)
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else {
+            break;
+        };
+        records.started.remove(&oldest);
+    }
+}
+
 fn build_snapshot(
     environment: &WorkflowPreparationEnvironment<'_>,
     input: &PrepareWorkflowInput,
@@ -443,7 +633,7 @@ fn build_snapshot(
     let route = route_resolution.route;
     let output = output_summary(environment.context, &scope)?;
     let git_policy = git_policy(environment.context, &scope)?;
-    let baseline = capture_baseline(environment.context, &scope, &source_versions)?;
+    let captured_baseline = capture_baseline(environment.context, &scope, &source_versions)?;
     let mut prerequisites = prerequisites(
         environment.context,
         &scope,
@@ -453,7 +643,9 @@ fn build_snapshot(
         &wiki_pages,
         &git_policy,
         route_resolution.prerequisite_action,
+        captured_baseline.has_readable_markdown,
     );
+    let baseline = captured_baseline.summary;
     let restricted_content_revision = match &scope {
         WorkflowScope::GenerateContent {
             artifact_type,
@@ -506,6 +698,7 @@ fn build_snapshot(
     };
     let execution_options = WorkflowExecutionOptions {
         preparation_revision: "pending".into(),
+        preparation_fingerprint: None,
         existing_target_hash,
         restricted_content_acknowledgement_revision: None,
         remote_provider_acknowledgement_revision: None,
@@ -577,12 +770,16 @@ impl RouteCatalog {
     }
 
     fn load(environment: &WorkflowPreparationEnvironment<'_>) -> Result<Self, BackendError> {
+        #[cfg(test)]
+        ROUTE_CATALOG_LOADS.with(|count| count.set(count.get() + 1));
         let settings = environment
             .settings_service
             .read_settings(environment.context)?;
         let agents = AgentKind::ALL
             .into_iter()
             .map(|kind| {
+                #[cfg(test)]
+                AGENT_PROBES.with(|count| count.set(count.get() + 1));
                 let info = environment
                     .agent_service
                     .detect_agent(kind, settings.agent_default == Some(kind));
@@ -894,6 +1091,7 @@ fn prerequisites(
     wiki_pages: &[String],
     git_policy: &WorkflowGitPolicy,
     route_prerequisite_action: Option<WorkflowPrerequisiteAction>,
+    has_readable_markdown: bool,
 ) -> Vec<WorkflowPrerequisite> {
     let mut items = Vec::new();
     let local_quick = matches!(
@@ -973,12 +1171,11 @@ fn prerequisites(
                 ));
             }
         }
-        WorkflowScope::HealthCheck { .. } if wiki_pages.is_empty() && sources.is_empty() => items
-            .push(prerequisite(
-                "WORKFLOW_MARKDOWN_REQUIRED",
-                prerequisite_message_key(&WorkflowPrerequisiteAction::ImportSources).into(),
-                WorkflowPrerequisiteAction::ImportSources,
-            )),
+        WorkflowScope::HealthCheck { .. } if !has_readable_markdown => items.push(prerequisite(
+            "WORKFLOW_MARKDOWN_REQUIRED",
+            prerequisite_message_key(&WorkflowPrerequisiteAction::ImportSources).into(),
+            WorkflowPrerequisiteAction::ImportSources,
+        )),
         WorkflowScope::GenerateContent { .. } if wiki_pages.is_empty() => items.push(prerequisite(
             "WORKFLOW_WIKI_REQUIRED",
             prerequisite_message_key(&WorkflowPrerequisiteAction::UpdateWiki).into(),
@@ -1006,7 +1203,7 @@ fn capture_baseline(
     context: &ProjectContext,
     scope: &WorkflowScope,
     current_sources: &[SourceVersionRef],
-) -> Result<WorkflowBaselineSummary, BackendError> {
+) -> Result<CapturedBaseline, BackendError> {
     let mut parts = vec![canonical_json(scope).map_err(serialization_error)?];
     let selected = match scope {
         WorkflowScope::UpdateWiki {
@@ -1027,8 +1224,10 @@ fn capture_baseline(
             ));
         }
     }
-    let files = baseline_files(context, scope)?;
+    let (files, has_readable_markdown) = baseline_files(context, scope)?;
     for relative in &files {
+        #[cfg(test)]
+        BASELINE_HASHES.with(|count| count.set(count.get() + 1));
         let hash = FileStore.file_hash(context, relative)?;
         parts.push(format!("file:{relative}:{hash}"));
     }
@@ -1049,10 +1248,13 @@ fn capture_baseline(
         parts.extend(export_service.workflow_baseline_entries(context, &files, output_path)?);
     }
     parts.sort();
-    Ok(WorkflowBaselineSummary {
-        fingerprint: hex_sha256(parts.join("\n").as_bytes()),
-        captured_at: Utc::now().to_rfc3339(),
-        item_count: files.len() as u64 + selected.len() as u64,
+    Ok(CapturedBaseline {
+        summary: WorkflowBaselineSummary {
+            fingerprint: hex_sha256(parts.join("\n").as_bytes()),
+            captured_at: Utc::now().to_rfc3339(),
+            item_count: files.len() as u64 + selected.len() as u64,
+        },
+        has_readable_markdown,
     })
 }
 
@@ -1061,18 +1263,22 @@ pub fn workflow_baseline_for_scope(
     scope: &WorkflowScope,
 ) -> Result<WorkflowBaselineSummary, BackendError> {
     let current_sources = CompileService::list_source_versions(context)?;
-    capture_baseline(context, scope, &current_sources)
+    Ok(capture_baseline(context, scope, &current_sources)?.summary)
 }
 
 fn baseline_files(
     context: &ProjectContext,
     scope: &WorkflowScope,
-) -> Result<Vec<String>, BackendError> {
-    let mut files = match scope {
+) -> Result<(Vec<String>, bool), BackendError> {
+    let (mut files, has_readable_markdown) = match scope {
         WorkflowScope::GenerateContent { page_paths, .. } if !page_paths.is_empty() => {
-            page_paths.clone()
+            (page_paths.clone(), true)
         }
-        _ => list_readable_markdown(context)?,
+        _ => {
+            let files = list_readable_markdown(context)?;
+            let has_readable_markdown = !files.is_empty();
+            (files, has_readable_markdown)
+        }
     };
     for document in [
         &context.layout.purpose_context,
@@ -1086,7 +1292,7 @@ fn baseline_files(
     }
     files.sort();
     files.dedup();
-    Ok(files)
+    Ok((files, has_readable_markdown))
 }
 
 fn output_summary(
@@ -1193,6 +1399,8 @@ fn list_wiki_pages(context: &ProjectContext) -> Result<Vec<String>, BackendError
 }
 
 fn list_readable_markdown(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+    #[cfg(test)]
+    MARKDOWN_ENUMERATIONS.with(|count| count.set(count.get() + 1));
     let mut files = context
         .list_markdown_files_for_roles(&[
             crate::models::layout::ProjectMarkdownRootRole::Source,
@@ -1528,4 +1736,245 @@ fn serialization_error(message: String) -> BackendError {
         true,
         false,
     )
+}
+
+#[cfg(test)]
+mod batch_zero_cost_tests {
+    use super::*;
+
+    struct DeterministicMissingProcessRunner;
+
+    impl crate::services::ProcessRunner for DeterministicMissingProcessRunner {
+        fn find_executable(&self, _command: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn run_with_timeout(
+            &self,
+            _command: &str,
+            _args: &[&str],
+            _timeout: std::time::Duration,
+        ) -> Result<String, BackendError> {
+            panic!("missing-agent fixture must not spawn a process")
+        }
+
+        fn run_capture(
+            &self,
+            _invocation: &crate::services::AgentInvocation,
+        ) -> Result<(String, String), BackendError> {
+            panic!("overview fixture must not capture a process")
+        }
+
+        fn run_task_streaming(
+            &self,
+            _invocation: &crate::services::AgentInvocation,
+            _tasks: &crate::tasks::TaskService,
+            _task_id: &str,
+        ) -> Result<String, BackendError> {
+            panic!("overview fixture must not stream a process")
+        }
+    }
+
+    #[test]
+    fn overview_counts_real_route_probe_markdown_and_hash_work_for_scale_fixture() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/scale")).unwrap();
+        for index in 0..1_000 {
+            std::fs::write(
+                root.path().join(format!("wiki/scale/page-{index:04}.md")),
+                format!("# Page {index}\n"),
+            )
+            .unwrap();
+        }
+        let context = ProjectContext::new("baseline-project", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let secrets = SecretService::memory();
+        let agents =
+            AgentService::with_runner(std::sync::Arc::new(DeterministicMissingProcessRunner));
+        let preferences = WorkflowPreferences::default();
+        let environment = WorkflowPreparationEnvironment {
+            context: &context,
+            access: WorkflowAccessSnapshot {
+                trust: WorkflowProjectTrust::Untrusted,
+                trust_kind: None,
+                filesystem_access: WorkflowFilesystemAccess::ReadOnly,
+                persistence: WorkflowPersistenceMode::MemoryOnly,
+                git_state: WorkflowGitState::Unavailable,
+                authority_revision: "baseline-authority".into(),
+            },
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        };
+
+        reset_preparation_costs();
+        let result = overview_prerequisites(&preferences, &environment).unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(AgentKind::ALL.len(), 4, "Batch 0 freezes four Agent kinds");
+        assert_eq!(
+            preparation_costs(),
+            PreparationCostSnapshot {
+                route_catalog_loads: 3,
+                agent_probes: 12,
+                markdown_enumerations: 3,
+                baseline_hashes: 3_000,
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod batch_one_record_tests {
+    use super::*;
+
+    fn prepared_record(
+        identity_key: &str,
+        ordinal: i64,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> PreparedRecord {
+        let created_at = expires_at - Duration::minutes(10) + Duration::milliseconds(ordinal);
+        let preparation_revision = format!("{ordinal:064x}");
+        PreparedRecord {
+            preparation: WorkflowPreparation {
+                schema_version: WORKFLOW_SCHEMA_VERSION,
+                preparation_id: format!("preparation-{ordinal}"),
+                preparation_revision: preparation_revision.clone(),
+                project_access: WorkflowProjectAccessSummary {
+                    project_id: format!("runtime-{identity_key}"),
+                    canonical_identity_key: identity_key.to_string(),
+                    identity_revision: "revision".into(),
+                    trust: WorkflowProjectTrust::Trusted,
+                    filesystem_access: WorkflowFilesystemAccess::Writable,
+                    persistence: WorkflowPersistenceMode::MemoryOnly,
+                    git_state: WorkflowGitState::Unavailable,
+                },
+                kind: WorkflowKind::HealthCheck,
+                scope: WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::LocalQuick,
+                },
+                baseline: WorkflowBaselineSummary {
+                    fingerprint: "a".repeat(64),
+                    captured_at: created_at.to_rfc3339(),
+                    item_count: 0,
+                },
+                route: Some(WorkflowRoute::Local {
+                    route_revision: "local-v1".into(),
+                }),
+                prerequisites: Vec::new(),
+                output: WorkflowOutputSummary {
+                    label_key: "workflows.output.healthReport".into(),
+                    location: None,
+                    may_change_wiki: false,
+                },
+                git_policy: WorkflowGitPolicy::NotRequired,
+                requires_scope_confirmation: true,
+                quick_rerun_eligible: false,
+                available_source_versions: Vec::new(),
+                available_wiki_pages: Vec::new(),
+                available_routes: Vec::new(),
+            },
+            authority_revision: "authority".into(),
+            route_selection: None,
+            execution_options: WorkflowExecutionOptions {
+                preparation_revision,
+                ..WorkflowExecutionOptions::default()
+            },
+            preparation_fingerprint: "b".repeat(64),
+            created_at,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn global_and_started_caps_are_hard_and_oldest_first() {
+        let mut records = PreparationRecords::default();
+        let expiry = Utc::now() + Duration::minutes(10);
+        for ordinal in 0..(MAX_PREPARATIONS_GLOBAL as i64 + 8) {
+            let identity_key = format!("owner-{}", ordinal % 10);
+            records.prepared.insert(
+                format!("prepared-{ordinal}"),
+                prepared_record(&identity_key, ordinal, expiry),
+            );
+        }
+        enforce_prepared_caps(&mut records, "owner-0:revision");
+        assert_eq!(records.prepared.len(), MAX_PREPARATIONS_GLOBAL);
+        assert!(!records.prepared.contains_key("prepared-0"));
+        assert!(records
+            .prepared
+            .contains_key(&format!("prepared-{}", MAX_PREPARATIONS_GLOBAL + 7)));
+
+        for ordinal in 0..=MAX_STARTED_PREPARATIONS_PER_IDENTITY {
+            records.started.insert(
+                format!("started-{ordinal}"),
+                StartedPreparationRecord {
+                    preparation_revision: format!("{ordinal:064x}"),
+                    task_id: format!("task-{ordinal}"),
+                    owner: "started-owner".into(),
+                    started_at: Utc::now() + Duration::milliseconds(ordinal as i64),
+                    expires_at: expiry,
+                },
+            );
+        }
+        enforce_started_caps(&mut records, "started-owner");
+        assert_eq!(
+            records
+                .started
+                .values()
+                .filter(|record| record.owner == "started-owner")
+                .count(),
+            MAX_STARTED_PREPARATIONS_PER_IDENTITY
+        );
+        assert!(!records.started.contains_key("started-0"));
+
+        records.started.clear();
+        let started_base = Utc::now();
+        for ordinal in 0..(MAX_STARTED_PREPARATIONS_GLOBAL + 8) {
+            let owner = format!("global-owner-{}", ordinal % 32);
+            records.started.insert(
+                format!("global-started-{ordinal}"),
+                StartedPreparationRecord {
+                    preparation_revision: format!("{ordinal:064x}"),
+                    task_id: format!("global-task-{ordinal}"),
+                    owner,
+                    started_at: started_base + Duration::milliseconds(ordinal as i64),
+                    expires_at: expiry,
+                },
+            );
+        }
+        enforce_started_caps(&mut records, "global-owner-7");
+        assert_eq!(records.started.len(), MAX_STARTED_PREPARATIONS_GLOBAL);
+        assert!(!records.started.contains_key("global-started-0"));
+        assert!(records.started.contains_key(&format!(
+            "global-started-{}",
+            MAX_STARTED_PREPARATIONS_GLOBAL + 7
+        )));
+    }
+
+    #[test]
+    fn prune_removes_expired_prepared_and_started_records() {
+        let now = Utc::now();
+        let mut records = PreparationRecords::default();
+        records.prepared.insert(
+            "expired-prepared".into(),
+            prepared_record("owner", 1, now - Duration::seconds(1)),
+        );
+        records.started.insert(
+            "expired-started".into(),
+            StartedPreparationRecord {
+                preparation_revision: "revision".into(),
+                task_id: "task".into(),
+                owner: "owner:revision".into(),
+                started_at: now - Duration::hours(25),
+                expires_at: now - Duration::seconds(1),
+            },
+        );
+
+        prune_preparation_records(&mut records, now);
+
+        assert!(records.prepared.is_empty());
+        assert!(records.started.is_empty());
+    }
 }

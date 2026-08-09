@@ -913,20 +913,36 @@ impl AppState {
 #[cfg(test)]
 mod project_registry_tests {
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Barrier};
     use std::time::Duration;
 
     use super::{AppState, ProjectRegistry, ProjectTrustAuthority, ProjectWriteRootKind};
     use crate::errors::PROJECT_CONTEXT_MISMATCH;
     use crate::models::project::{ProjectTemplate, ProjectTrustKind};
+    use crate::models::task::TaskStatus;
     use crate::models::workflow::{
         HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
         WorkflowKind, WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectTrust,
-        WorkflowRoute, WorkflowScope, WorkflowStartOutcome,
+        WorkflowResult, WorkflowRoute, WorkflowRun, WorkflowScope, WorkflowStage,
+        WorkflowStageStatus, WorkflowStartOutcome,
     };
     use crate::services::{
-        workflow_stages, EnqueueWorkflow, ProjectAssessmentService, ProjectService,
+        workflow_stages, EnqueueWorkflow, ProjectAssessmentService, ProjectService, WorkflowRunner,
     };
+
+    #[derive(Default)]
+    struct CountingWorkflowRunner(AtomicUsize);
+
+    impl WorkflowRunner for CountingWorkflowRunner {
+        fn kind(&self) -> WorkflowKind {
+            WorkflowKind::UpdateWiki
+        }
+
+        fn start(&self, _run: WorkflowRun) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     fn temp_project(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1430,6 +1446,139 @@ mod project_registry_tests {
                 Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
             );
         }
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn claimed_snapshot_still_dispatches_after_real_trust_revocation() {
+        fn enqueue(state: &AppState, project: &std::path::Path, revision: &str) -> WorkflowRun {
+            let outcome = state
+                .workflow_service
+                .coordinator
+                .enqueue(
+                    &state.task_service,
+                    EnqueueWorkflow {
+                        project_id: "project-a".into(),
+                        project_root: project.to_path_buf(),
+                        task_state_root: Some(project.join(".app/tasks")),
+                        title: "Update Wiki".into(),
+                        kind: WorkflowKind::UpdateWiki,
+                        scope: WorkflowScope::UpdateWiki {
+                            mode: crate::models::workflow::UpdateWikiMode::ChangedSources,
+                            source_versions: Vec::new(),
+                        },
+                        route: Some(WorkflowRoute::Agent {
+                            agent: crate::models::agent::AgentKind::Codex,
+                            model: Some("test-model".into()),
+                            route_revision: "test-agent-route".into(),
+                        }),
+                        baseline_fingerprint: revision.into(),
+                        execution_options: WorkflowExecutionOptions {
+                            preparation_revision: revision.into(),
+                            ..WorkflowExecutionOptions::default()
+                        },
+                        stages: vec![WorkflowStage {
+                            id: "prepare".into(),
+                            ordinal: 1,
+                            status: WorkflowStageStatus::Pending,
+                            label_key: "prepare".into(),
+                            started_at: None,
+                            completed_at: None,
+                            current_item: None,
+                            progress: None,
+                            decision: None,
+                        }],
+                        retry: None,
+                    },
+                )
+                .unwrap();
+            match outcome {
+                WorkflowStartOutcome::Created { run } => run,
+                WorkflowStartOutcome::Existing { .. } => panic!("workflow must be unique"),
+            }
+        }
+
+        let (state, config) = state_with_temp_config("dispatch-after-revoke-config");
+        let state = Arc::new(state);
+        let project = strict_native_project("dispatch-after-revoke");
+        state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let runner = Arc::new(CountingWorkflowRunner::default());
+        state
+            .workflow_service
+            .register_runner(runner.clone())
+            .unwrap();
+        let active = enqueue(&state, &project, "active-revision");
+        let queued = enqueue(&state, &project, "queued-revision");
+        state
+            .task_service
+            .start_workflow_stage(&active.task_id, "prepare")
+            .unwrap();
+        state
+            .task_service
+            .complete_workflow_stage(&active.task_id, "prepare")
+            .unwrap();
+        let (claimed_tx, claimed_rx) = mpsc::channel();
+        let (dispatch_tx, dispatch_rx) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let active_task_id = active.task_id.clone();
+        let worker = std::thread::spawn(move || {
+            let (_, claimed) = worker_state
+                .workflow_service
+                .coordinator
+                .complete_and_claim_next(
+                    &worker_state.task_service,
+                    &active_task_id,
+                    WorkflowResult::UpdateWiki {
+                        created: 0,
+                        updated: 0,
+                        skipped: 0,
+                        deleted: 0,
+                        conflicted: 0,
+                        affected_paths: Vec::new(),
+                        checkpoint_hash: None,
+                        final_commit: None,
+                    },
+                )
+                .unwrap();
+            let stale_claimed = claimed.expect("the queued workflow must be claimed");
+            claimed_tx.send(stale_claimed.clone()).unwrap();
+            dispatch_rx.recv().unwrap();
+            worker_state
+                .workflow_service
+                .dispatch_claimed_run(&stale_claimed)
+                .unwrap()
+        });
+        let stale_claimed = claimed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("timed out waiting for a real queue claim");
+        assert_eq!(stale_claimed.task_id, queued.task_id);
+
+        state.revoke_project_trust("project-a", &project).unwrap();
+        assert_eq!(
+            state
+                .project_registry
+                .resolve_authority("project-a", &project)
+                .unwrap()
+                .trust,
+            ProjectTrustAuthority::Untrusted,
+        );
+        dispatch_tx.send(()).unwrap();
+        assert!(worker.join().unwrap());
+
+        assert_eq!(runner.0.load(Ordering::SeqCst), 1);
+        let current = state
+            .task_service
+            .get_workflow_run(&queued.task_id)
+            .unwrap();
+        assert_eq!(current.persistence, WorkflowPersistenceMode::MemoryOnly);
+        assert_eq!(
+            state.task_service.get_task(&queued.task_id).unwrap().status,
+            TaskStatus::Cancelling,
+            "pre-fix witness: stale claimed snapshot dispatches after real trust revocation",
+        );
         cleanup_paths(&[&project, &config]);
     }
 

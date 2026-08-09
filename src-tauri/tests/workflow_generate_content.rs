@@ -213,6 +213,7 @@ impl Fixture {
                     baseline_fingerprint: baseline.fingerprint,
                     execution_options: WorkflowExecutionOptions {
                         preparation_revision: "generate-test-v1".into(),
+                        preparation_fingerprint: None,
                         existing_target_hash,
                         restricted_content_acknowledgement_revision: restricted_ack,
                         remote_provider_acknowledgement_revision: acknowledge_remote
@@ -314,6 +315,7 @@ async fn new_artifact_completes_exactly_nine_stages_without_git_and_is_exports_r
         .retry(
             &fixture.tasks,
             &task_id,
+            fixture.context.project_id.clone(),
             fixture.context.root.clone(),
             Some(fixture.context.app_dir.join("tasks")),
         )

@@ -269,7 +269,9 @@ impl CompatibleLayoutMapping {
 
     pub fn validate_existing_roots(&self, root: &Path) -> Result<(), BackendError> {
         if self.schema_version != COMPATIBLE_LAYOUT_MAPPING_VERSION {
-            return Err(invalid_compatible_mapping("The compatible layout mapping version is unsupported."));
+            return Err(invalid_compatible_mapping(
+                "The compatible layout mapping version is unsupported.",
+            ));
         }
         let mut roots = Vec::new();
         if let Some(wiki_root) = self.wiki_write_root.as_deref() {
@@ -545,10 +547,18 @@ fn discover_compatible_layout(
     };
     if let Some(mapping) = compatible_mapping.as_ref() {
         if let Some(wiki_root) = mapping.wiki_write_root.as_deref() {
-            add_mapped_markdown_root(&mut markdown_roots, wiki_root, ProjectMarkdownRootRole::Wiki);
+            add_mapped_markdown_root(
+                &mut markdown_roots,
+                wiki_root,
+                ProjectMarkdownRootRole::Wiki,
+            );
         }
         if let Some(source_root) = mapping.source_write_root.as_deref() {
-            add_mapped_markdown_root(&mut markdown_roots, source_root, ProjectMarkdownRootRole::Source);
+            add_mapped_markdown_root(
+                &mut markdown_roots,
+                source_root,
+                ProjectMarkdownRootRole::Source,
+            );
         }
     }
     Ok(ProjectLayoutResolution {
@@ -635,12 +645,15 @@ pub fn read_compatible_layout_mapping(
         Err(error) => Err(layout_io_error(error, &path)),
         Ok(_) => {
             let safe_path = validate_existing_project_file(root, &path).map_err(|_| {
-                invalid_compatible_mapping("The compatible layout mapping is not a safe regular file.")
+                invalid_compatible_mapping(
+                    "The compatible layout mapping is not a safe regular file.",
+                )
             })?;
             let bytes = fs::read(&safe_path).map_err(|error| layout_io_error(error, &safe_path))?;
-            let mapping = serde_json::from_slice::<CompatibleLayoutMapping>(&bytes).map_err(|_| {
-                invalid_compatible_mapping("The compatible layout mapping is not valid JSON.")
-            })?;
+            let mapping =
+                serde_json::from_slice::<CompatibleLayoutMapping>(&bytes).map_err(|_| {
+                    invalid_compatible_mapping("The compatible layout mapping is not valid JSON.")
+                })?;
             mapping.validate_existing_roots(root)?;
             Ok(Some(mapping))
         }
@@ -651,11 +664,15 @@ fn validate_compatible_root(root: &Path, relative: &str, field: &str) -> Result<
     validate_compatible_relative_input(relative, field)?;
     let normalized = normalize_project_path(relative);
     if normalized.starts_with(".app/") || normalized == ".app" {
-        return Err(invalid_compatible_mapping(&format!("{field} cannot point into app-owned compatibility state.")));
+        return Err(invalid_compatible_mapping(&format!(
+            "{field} cannot point into app-owned compatibility state."
+        )));
     }
     let path = resolve_layout_path(root, &normalized)?;
     validate_existing_project_directory(root, &path).map_err(|_| {
-        invalid_compatible_mapping(&format!("{field} must be an existing safe directory inside the project."))
+        invalid_compatible_mapping(&format!(
+            "{field} must be an existing safe directory inside the project."
+        ))
     })?;
     Ok(())
 }
@@ -663,17 +680,26 @@ fn validate_compatible_root(root: &Path, relative: &str, field: &str) -> Result<
 fn validate_compatible_relative_input(relative: &str, field: &str) -> Result<(), BackendError> {
     if relative.is_empty()
         || Path::new(relative).is_absolute()
-        || relative.split(['/', '\\']).any(|part| part.is_empty() || part == "." || part == "..")
+        || relative
+            .split(['/', '\\'])
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
-        return Err(invalid_compatible_mapping(&format!("{field} must be a non-empty project-relative directory.")));
+        return Err(invalid_compatible_mapping(&format!(
+            "{field} must be a non-empty project-relative directory."
+        )));
     }
     Ok(())
 }
 
-fn compatible_root_identity(root: &Path, relative: &str) -> Result<(PathBuf, String), BackendError> {
+fn compatible_root_identity(
+    root: &Path,
+    relative: &str,
+) -> Result<(PathBuf, String), BackendError> {
     let path = resolve_layout_path(root, relative)?;
     let canonical = path.canonicalize().map_err(|_| {
-        invalid_compatible_mapping("Functional directories must remain available while configuring compatibility.")
+        invalid_compatible_mapping(
+            "Functional directories must remain available while configuring compatibility.",
+        )
     })?;
     let portable_key = canonical
         .to_string_lossy()
@@ -1198,9 +1224,11 @@ mod tests {
         assert!(resolution.layout.markdown_roots.iter().any(|item| {
             item.path == "知识库" && item.role == ProjectMarkdownRootRole::Wiki
         }));
-        assert!(resolution.layout.markdown_roots.iter().any(|item| {
-            item.path == "资料" && item.role == ProjectMarkdownRootRole::Source
-        }));
+        assert!(resolution
+            .layout
+            .markdown_roots
+            .iter()
+            .any(|item| { item.path == "资料" && item.role == ProjectMarkdownRootRole::Source }));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1221,9 +1249,10 @@ mod tests {
         assert!(resolution.layout.wiki_write_root.is_none());
         assert!(resolution.layout.source_write_root.is_none());
         assert!(resolution.layout.export_root.is_none());
-        assert!(resolution.warnings.iter().any(|warning| {
-            warning.code == ProjectLayoutWarningCode::InvalidCompatibleMapping
-        }));
+        assert!(resolution
+            .warnings
+            .iter()
+            .any(|warning| { warning.code == ProjectLayoutWarningCode::InvalidCompatibleMapping }));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1231,13 +1260,9 @@ mod tests {
     fn compatible_mapping_rejects_app_owned_and_missing_roots() {
         let root = temp_root("compatible-mapping-root-validation");
         fs::create_dir_all(root.join("pages")).unwrap();
-        let app_owned = CompatibleLayoutMapping::validated(
-            &root,
-            Some(".app/compat".into()),
-            None,
-            None,
-        )
-        .expect_err("app-owned state cannot become a wiki root");
+        let app_owned =
+            CompatibleLayoutMapping::validated(&root, Some(".app/compat".into()), None, None)
+                .expect_err("app-owned state cannot become a wiki root");
         assert_eq!(app_owned.code, "PROJECT_COMPAT_LAYOUT_INVALID");
         let missing = CompatibleLayoutMapping::validated(
             &root,

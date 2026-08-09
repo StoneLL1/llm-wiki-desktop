@@ -1,11 +1,117 @@
 {
-  "generated_at": "2026-08-05T06:15:20.099849+00:00",
+  "generated_at": "2026-08-09T02:55:01.569236+00:00",
   "nodes": {
-    "src_tauri_src_services_import_v2_file_discovery_filediscoveryservice": {
-      "code_fingerprint": "7ae4e5f3c33d4b0823e2af0c9cd0f4a3d581cdf0ad144ed6f71c560c265ab0e5",
-      "label": "FileDiscoveryService",
-      "last": "2026-08-05T06:10:38.704537+00:00",
+    "src_services_importv2api_importv2api": {
+      "code_fingerprint": "03b4a0c77425f1d54519eb7aa57147562c00a539d470ea231de729e9725bcbc5",
+      "label": "importV2Api",
+      "last": "2026-08-06T14:24:16.576057+00:00",
       "provenance": [
+        {
+          "date": "2026-08-06T14:24:16.576057+00:00",
+          "outcome": "useful",
+          "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
+        }
+      ],
+      "score": 0.943408735,
+      "source_file": "src/services/importV2Api.ts",
+      "status": "tentative",
+      "uses": 1
+    },
+    "src_tauri_src_commands_import_v2_commands": {
+      "code_fingerprint": "14728db788cf3bade083a2fb4d681a4f61f9786af076a2e06a3237ebf4eb8d16",
+      "label": "import_v2_commands.rs",
+      "last": "2026-08-06T14:24:16.576057+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-06T14:24:16.576057+00:00",
+          "outcome": "useful",
+          "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
+        },
+        {
+          "date": "2026-08-05T15:26:21.889169+00:00",
+          "outcome": "useful",
+          "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
+        }
+      ],
+      "score": 1.866188814,
+      "source_file": "src-tauri/src/commands/import_v2_commands.rs",
+      "status": "preferred",
+      "uses": 2
+    },
+    "src_tauri_src_commands_import_v2_web_commands": {
+      "code_fingerprint": "4a2b8bdd42ceebf83245c8d3a11c7b3761ba06980832c1d5597dd5e96f218bcd",
+      "label": "import_v2_web_commands.rs",
+      "last": "2026-08-06T14:24:16.576057+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-06T14:24:16.576057+00:00",
+          "outcome": "useful",
+          "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
+        }
+      ],
+      "score": 0.943408735,
+      "source_file": "src-tauri/src/commands/import_v2_web_commands.rs",
+      "status": "tentative",
+      "uses": 1
+    },
+    "src_tauri_src_models_paths_projectcontext": {
+      "code_fingerprint": "36b9391d0ef17ce5e1321c3847cde965c142145ad888b03319d39dcf7634de7c",
+      "label": "ProjectContext",
+      "last": "2026-08-05T12:42:03.108793+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-05T12:42:03.108793+00:00",
+          "outcome": "useful",
+          "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
+        }
+      ],
+      "score": 0.920350453,
+      "source_file": "src-tauri/src/models/paths.rs",
+      "status": "tentative",
+      "uses": 1
+    },
+    "src_tauri_src_services_file_store_filestore": {
+      "code_fingerprint": "03449c1d00f92420c956b190bcafec2d17d1ff27c23ad22845c85243c069269f",
+      "label": "FileStore",
+      "last": "2026-08-05T12:42:03.108793+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-05T12:42:03.108793+00:00",
+          "outcome": "useful",
+          "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
+        }
+      ],
+      "score": 0.920350453,
+      "source_file": "src-tauri/src/services/file_store.rs",
+      "status": "tentative",
+      "uses": 1
+    },
+    "src_tauri_src_services_import_v2_commit": {
+      "code_fingerprint": "0cb81d64c25a1af69572377cc7b10b460fead7c5947fca39c476797bea319aa1",
+      "label": "commit.rs",
+      "last": "2026-08-05T15:26:21.889169+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-05T15:26:21.889169+00:00",
+          "outcome": "useful",
+          "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
+        }
+      ],
+      "score": 0.92278008,
+      "source_file": "src-tauri/src/services/import_v2/commit.rs",
+      "status": "tentative",
+      "uses": 1
+    },
+    "src_tauri_src_services_import_v2_file_discovery_filediscoveryservice": {
+      "code_fingerprint": "33dc7ff5f1fe7e89b6a287ff8a9aeaaac7df732680d2959c27c8642d217cd271",
+      "label": "FileDiscoveryService",
+      "last": "2026-08-05T06:16:43.499711+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-05T06:16:43.499711+00:00",
+          "outcome": "useful",
+          "q": "参考这个 为我写执行这个修复计划的 提示词"
+        },
         {
           "date": "2026-08-05T06:10:38.704537+00:00",
           "outcome": "useful",
@@ -17,16 +123,52 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 1.999454301,
+      "score": 2.743493626,
       "source_file": "src-tauri/src/services/import_v2/file_discovery.rs",
+      "status": "preferred",
+      "uses": 3
+    },
+    "src_tauri_src_services_import_v2_orchestrator": {
+      "code_fingerprint": "2511ceae8926c89ebd18435d92a1796344ee3a5e8e1a1dfd0d7bbc72407ed2d3",
+      "label": "orchestrator.rs",
+      "last": "2026-08-06T14:24:16.576057+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-06T14:24:16.576057+00:00",
+          "outcome": "useful",
+          "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
+        },
+        {
+          "date": "2026-08-05T15:26:21.889169+00:00",
+          "outcome": "useful",
+          "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
+        }
+      ],
+      "score": 1.866188814,
+      "source_file": "src-tauri/src/services/import_v2/orchestrator.rs",
       "status": "preferred",
       "uses": 2
     },
     "src_tauri_src_services_import_v2_session_store_sessionstore": {
-      "code_fingerprint": "281672ab546cb802516e1f2b52a5dfe1646bbd482ba6eb97491c7f4e7f52cf10",
+      "code_fingerprint": "31c9a5c67a9fffe5624efdcbbf6d2fbe72776411d881ba24838e45d5b7635b35",
       "label": "SessionStore",
-      "last": "2026-08-05T06:10:38.704537+00:00",
+      "last": "2026-08-06T14:24:16.576057+00:00",
       "provenance": [
+        {
+          "date": "2026-08-06T14:24:16.576057+00:00",
+          "outcome": "useful",
+          "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
+        },
+        {
+          "date": "2026-08-05T15:26:21.889169+00:00",
+          "outcome": "useful",
+          "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
+        },
+        {
+          "date": "2026-08-05T06:16:43.499711+00:00",
+          "outcome": "useful",
+          "q": "参考这个 为我写执行这个修复计划的 提示词"
+        },
         {
           "date": "2026-08-05T06:10:38.704537+00:00",
           "outcome": "useful",
@@ -38,16 +180,63 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 1.999454301,
+      "score": 4.609682441,
       "source_file": "src-tauri/src/services/import_v2/session_store.rs",
+      "status": "preferred",
+      "uses": 5
+    },
+    "src_tauri_src_services_import_v2_source_lifecycle_tests_source_mode_requires_source_type_and_a_valid_registry_binding": {
+      "code_fingerprint": "8d47859650b33dd5fe877eedc0ce2ec1a17f792b7864a8368227475c81d9bbf4",
+      "label": "source_mode_requires_source_type_and_a_valid_registry_binding()",
+      "last": "2026-08-06T01:18:58.456620+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-06T01:18:58.456620+00:00",
+          "outcome": "useful",
+          "q": "能帮我单独修复一下这个知识库项目吗"
+        }
+      ],
+      "score": 0.931596146,
+      "source_file": "src-tauri/src/services/import_v2/source_lifecycle_tests.rs",
+      "status": "tentative",
+      "uses": 1
+    },
+    "src_tauri_src_services_workflow_service_mod_workflowservice": {
+      "code_fingerprint": "e87ba2f26d2b2fbd98382e29be1cf22fda246021efbe49b1a0cedfec75c947b8",
+      "label": "WorkflowService",
+      "last": "2026-08-06T01:18:58.456620+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-06T01:18:58.456620+00:00",
+          "outcome": "useful",
+          "q": "能帮我单独修复一下这个知识库项目吗"
+        },
+        {
+          "date": "2026-08-05T12:42:03.108793+00:00",
+          "outcome": "useful",
+          "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
+        }
+      ],
+      "score": 1.8519466,
+      "source_file": "src-tauri/src/services/workflow_service/mod.rs",
       "status": "preferred",
       "uses": 2
     },
     "src_tauri_src_services_workflow_service_preparation_workflowaccesssnapshot": {
-      "code_fingerprint": "caebdaaf4d58411dd622741cf57182efea90f05fe8028e7bd5bbca552d42e7dc",
+      "code_fingerprint": "500058e1f90022e2edc4e43de8b0d33ca167d2591538d62063e37ddd0c4be642",
       "label": "WorkflowAccessSnapshot",
-      "last": "2026-08-05T06:10:38.704537+00:00",
+      "last": "2026-08-05T12:42:03.108793+00:00",
       "provenance": [
+        {
+          "date": "2026-08-05T12:42:03.108793+00:00",
+          "outcome": "useful",
+          "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
+        },
+        {
+          "date": "2026-08-05T06:16:43.499711+00:00",
+          "outcome": "useful",
+          "q": "参考这个 为我写执行这个修复计划的 提示词"
+        },
         {
           "date": "2026-08-05T06:10:38.704537+00:00",
           "outcome": "useful",
@@ -59,10 +248,36 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 1.999454301,
+      "score": 3.663844079,
       "source_file": "src-tauri/src/services/workflow_service/preparation.rs",
       "status": "preferred",
-      "uses": 2
+      "uses": 4
+    },
+    "src_tauri_src_tasks_task_service_taskservice": {
+      "code_fingerprint": "79811119b58a48f4326eb0fefc16f5e043a2ce206669e131d93a617454ea7fb0",
+      "label": "TaskService",
+      "last": "2026-08-06T14:24:16.576057+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-06T14:24:16.576057+00:00",
+          "outcome": "useful",
+          "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
+        },
+        {
+          "date": "2026-08-05T15:26:21.889169+00:00",
+          "outcome": "useful",
+          "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
+        },
+        {
+          "date": "2026-08-05T06:16:43.499711+00:00",
+          "outcome": "useful",
+          "q": "参考这个 为我写执行这个修复计划的 提示词"
+        }
+      ],
+      "score": 2.780866665,
+      "source_file": "src-tauri/src/tasks/task_service.rs",
+      "status": "preferred",
+      "uses": 3
     }
   },
   "version": 1

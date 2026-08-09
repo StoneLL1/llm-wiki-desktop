@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -26,6 +29,23 @@ use crate::utils::path_safety::{
 };
 
 const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
+
+#[cfg(test)]
+thread_local! {
+    static TASK_PERSISTENCE_WRITES: Cell<usize> = const { Cell::new(0) };
+    static TASK_EVENT_EMISSIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_task_costs() {
+    TASK_PERSISTENCE_WRITES.set(0);
+    TASK_EVENT_EMISSIONS.set(0);
+}
+
+#[cfg(test)]
+fn task_costs() -> (usize, usize) {
+    (TASK_PERSISTENCE_WRITES.get(), TASK_EVENT_EMISSIONS.get())
+}
 
 fn legacy_task_schema_version() -> u32 {
     1
@@ -220,6 +240,8 @@ impl TaskService {
         task_id: Option<String>,
         payload: T,
     ) {
+        #[cfg(test)]
+        TASK_EVENT_EMISSIONS.with(|count| count.set(count.get() + 1));
         self.event_bus
             .read()
             .expect("lock poisoned")
@@ -757,6 +779,28 @@ impl TaskService {
             .workflow
             .as_ref()
             .map(|workflow| workflow.execution_options.clone())
+    }
+
+    pub(crate) fn find_workflow_run_by_execution_options<F>(
+        &self,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        matches: F,
+    ) -> Option<WorkflowRun>
+    where
+        F: Fn(&crate::models::workflow::WorkflowExecutionOptions) -> bool,
+    {
+        let tasks = self.tasks.read().expect("lock poisoned");
+        tasks.values().find_map(|entry| {
+            let workflow = entry.workflow.as_ref()?;
+            if workflow.canonical_identity_key != canonical_identity_key
+                || workflow.identity_revision != identity_revision
+                || !matches(&workflow.execution_options)
+            {
+                return None;
+            }
+            workflow.to_run(&entry.task)
+        })
     }
 
     pub(crate) fn workflow_execution_state(
@@ -2249,6 +2293,8 @@ fn write_persisted_task(
     FileStore
         .write_json_atomic_absolute(&path, persisted)
         .map_err(|error| format!("Failed to write task file: {}", error.message))?;
+    #[cfg(test)]
+    TASK_PERSISTENCE_WRITES.with(|count| count.set(count.get() + 1));
     Ok(path)
 }
 
@@ -2681,6 +2727,53 @@ mod tests {
         let (event_bus, events) = EventBus::new_test_capture();
         let service = TaskService::with_event_bus(event_bus);
         (service, events)
+    }
+
+    #[test]
+    fn workflow_progress_counts_real_persistence_and_event_bus_work_at_scale() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, events) = make_service();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        events.lock().unwrap().clear();
+        reset_task_costs();
+
+        for current in 1..=500 {
+            service
+                .update_workflow_stage_progress(
+                    &run.task_id,
+                    "read",
+                    Some(format!("wiki/scale/page-{current:04}.md")),
+                    current,
+                    Some(500),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(task_costs(), (500, 1_000));
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1_000);
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|event| event.event_type == BackendEventType::WorkflowUpdated)
+                .count(),
+            500,
+        );
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|event| event.event_type == BackendEventType::TaskUpdated)
+                .count(),
+            500,
+        );
     }
 
     #[cfg(unix)]
