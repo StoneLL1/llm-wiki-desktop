@@ -47,6 +47,24 @@ beforeEach(() => {
 });
 
 describe("lintStore", () => {
+  it("does not cancel an existing confirmation for guarded workflow-result navigation", async () => {
+    useLintStore.setState({
+      fixConfirm: {
+        pendingAction: { id: "existing-confirmation" },
+      } as never,
+    });
+
+    const opened = await useLintStore.getState().openHistoryReport(
+      { projectId: "p", projectRootPath: "/x", id: "report-a" },
+      () => true,
+      true,
+    );
+
+    expect(opened).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(useLintStore.getState().fixConfirm).not.toBeNull();
+  });
+
   it("loads the local lint report", async () => {
     invokeMock.mockResolvedValueOnce(report());
     await useLintStore.getState().runLocalLint(PROJECT.projectId, PROJECT.rootPath);

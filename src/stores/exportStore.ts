@@ -30,6 +30,8 @@ function errorMessage(error: unknown): string {
 }
 
 const ROUTE_PREFERENCE: ExportRoutePreference = "auto";
+let loadExportsEpoch = 0;
+let loadPreviewEpoch = 0;
 
 /**
  * Caller-supplied export preferences. All optional so the bare 4-arg call
@@ -53,7 +55,7 @@ export interface ExportState {
   previewMode: ExportPreviewMode;
   error: string | null;
 
-  loadExports: (projectId: string, rootPath: string) => Promise<void>;
+  loadExports: (projectId: string, rootPath: string, commitGuard?: () => boolean) => Promise<void>;
   startExport: (
     projectId: string,
     rootPath: string,
@@ -68,7 +70,7 @@ export interface ExportState {
     prefs?: ExportPrefs,
   ) => Promise<string | null>;
   clearRunningTask: () => void;
-  loadPreview: (request: ReadExportPreviewRequest, id: string) => Promise<void>;
+  loadPreview: (request: ReadExportPreviewRequest, id: string, commitGuard?: () => boolean) => Promise<void>;
   clearPreview: () => void;
   setPreviewMode: (mode: ExportPreviewMode) => void;
   toggleBookmark: (projectId: string, rootPath: string, recordId: string) => Promise<void>;
@@ -87,20 +89,30 @@ const initial = {
   error: null as string | null,
 };
 
-export const useExportStore = create<ExportState>((set) => ({
+export const useExportStore = create<ExportState>((set, get) => ({
   ...initial,
 
-  loadExports: async (projectId, rootPath) => {
+  loadExports: async (projectId, rootPath, commitGuard = () => true) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
+    const requestEpoch = ++loadExportsEpoch;
+    const previous = { loading: get().loading, error: get().error };
     set({ loading: true, error: null });
     try {
       const request: ListExportsRequest = { projectId, projectRootPath: rootPath };
       const records = await invoke<ExportRecord[]>("list_exports", { request });
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== loadExportsEpoch) return;
+      if (!commitGuard()) {
+        set({ loading: false, error: previous.loading ? null : previous.error });
+        return;
+      }
       set({ records, loading: false });
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== loadExportsEpoch) return;
+      if (!commitGuard()) {
+        set({ loading: false, error: previous.loading ? null : previous.error });
+        return;
+      }
       set({ loading: false, error: errorMessage(error) });
     }
   },
@@ -163,16 +175,30 @@ export const useExportStore = create<ExportState>((set) => ({
 
   clearRunningTask: () => set({ runningTaskId: null }),
 
-  loadPreview: async (request, id) => {
+  loadPreview: async (request, id, commitGuard = () => true) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
+    const requestEpoch = ++loadPreviewEpoch;
+    const previous = {
+      previewHtml: get().previewHtml,
+      previewId: get().previewId,
+      error: get().error,
+    };
     set({ error: null });
     try {
       const html = await invoke<string>("read_export_preview", { request });
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== loadPreviewEpoch) return;
+      if (!commitGuard()) {
+        set(previous);
+        return;
+      }
       set({ previewHtml: html, previewId: id });
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== loadPreviewEpoch) return;
+      if (!commitGuard()) {
+        set(previous);
+        return;
+      }
       set({ previewHtml: null, previewId: null, error: errorMessage(error) });
     }
   },
@@ -233,7 +259,11 @@ export const useExportStore = create<ExportState>((set) => ({
     }
   },
 
-  reset: () => set({ ...initial }),
+  reset: () => {
+    loadExportsEpoch += 1;
+    loadPreviewEpoch += 1;
+    set({ ...initial });
+  },
 }));
 
 // Re-exported for tests; mirrors lintStore's selectAllIssues helper shape.

@@ -1,7 +1,12 @@
 import { CircleAlert, LoaderCircle, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import type { WorkflowOverviewStatus } from "../../stores/workflowStore";
+import {
+  useWorkflowStore,
+  workflowOperationPending,
+  type WorkflowOperationError,
+  type WorkflowOverviewStatus,
+} from "../../stores/workflowStore";
 import type { WorkflowKind, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
 import { WorkflowRow } from "./WorkflowRow";
 import { WORKFLOW_KINDS } from "./workflowPresentation";
@@ -19,7 +24,7 @@ export function WorkflowsOverviewView({
 }: {
   overview: WorkflowsOverview | null;
   overviewStatus: WorkflowOverviewStatus;
-  error: string | null;
+  error: WorkflowOperationError | string | null;
   runs: WorkflowRun[];
   onRetry: () => void;
   onPrepare: (kind: WorkflowKind) => void;
@@ -28,6 +33,9 @@ export function WorkflowsOverviewView({
   onContinueQueue: () => void;
 }) {
   const { t } = useTranslation();
+  const operations = useWorkflowStore((state) => state.operations);
+  const errorSummary = typeof error === "string" ? error : error?.summary ?? null;
+  const technicalDetails = typeof error === "string" ? null : error?.technicalDetails ?? null;
   if (!overview) {
     const failed = overviewStatus === "error";
     return (
@@ -45,7 +53,8 @@ export function WorkflowsOverviewView({
         )}
         <h2>{t(failed ? "workflows.loadError.title" : "workflows.loading.title")}</h2>
         <p>{t(failed ? "workflows.loadError.description" : "workflows.loading.description")}</p>
-        {failed && error ? <code className="workflow-empty__detail">{error}</code> : null}
+        {failed && errorSummary ? <code className="workflow-empty__detail">{errorSummary}</code> : null}
+        {failed && technicalDetails ? <details><summary>{t("workflows.error.technicalDetails")}</summary><pre>{technicalDetails}</pre></details> : null}
         {failed ? (
           <button className="btn btn--secondary workflow-empty__retry" type="button" onClick={onRetry}>
             <RefreshCw size={14} aria-hidden="true" />
@@ -64,7 +73,7 @@ export function WorkflowsOverviewView({
       {runs.some((run) => run.displayStatus === "queued" && run.continuationRequired) ? (
         <div className="workflow-attention">
           <p>{t("workflows.recovery.queuedDescription")}</p>
-          <button className="btn btn--primary" type="button" onClick={onContinueQueue}>
+          <button className="btn btn--primary" disabled={workflowOperationPending(operations, "queue:continue")} type="button" onClick={onContinueQueue}>
             {t("workflows.action.continueQueue")}
           </button>
         </div>
@@ -78,7 +87,17 @@ export function WorkflowsOverviewView({
             : null;
           return (
             <div key={kind} role="listitem">
-              <WorkflowRow row={row} activeRun={activeRun} onPrepare={() => onPrepare(kind)} onPrerequisite={onPrerequisite} onOpenRun={onOpenRun} />
+              <WorkflowRow
+                row={row}
+                activeRun={activeRun}
+                pending={activeRun
+                  ? workflowOperationPending(operations, `task:${activeRun.taskId}:open`)
+                  : workflowOperationPending(operations, `prepare:${kind}`)
+                    || workflowOperationPending(operations, "prerequisite:project:")}
+                onPrepare={() => onPrepare(kind)}
+                onPrerequisite={onPrerequisite}
+                onOpenRun={onOpenRun}
+              />
             </div>
           );
         })}

@@ -2,6 +2,7 @@ import { ArrowDown, ArrowLeft, ArrowUp, RotateCcw, Square } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useWorkflowStore, workflowOperationPending } from "../../stores/workflowStore";
 import type { WorkflowRun } from "../../types/workflow";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowPipeline } from "./WorkflowPipeline";
@@ -19,6 +20,27 @@ export function WorkflowTaskDetail({
   onOpenLogs: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
+  const operations = useWorkflowStore((state) => state.operations);
+  const taskMutationPending = Object.entries(operations).some(([key, operation]) =>
+    operation.pending
+    && key.startsWith(`task:${run.taskId}:`)
+    && !key.includes(":hydrate:")
+    && !key.endsWith(":open")
+    && !key.endsWith(":open-result"),
+  );
+  const openResultPending = workflowOperationPending(
+    operations,
+    `task:${run.taskId}:open-result`,
+  );
+  const prepareCurrentPending = workflowOperationPending(operations, `prepare:${run.kind}`);
+  const prepareNextPending = recommendedWorkflowOperationPending(
+    operations,
+    run.result?.kind === "update_wiki"
+      ? "health_check"
+      : run.result?.kind === "health_check" && run.result.errorCount === 0
+        ? "generate_content"
+        : null,
+  );
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [retryMenuOpen, setRetryMenuOpen] = useState(false);
   const retryOptionsId = useId();
@@ -105,10 +127,10 @@ export function WorkflowTaskDetail({
             </details>
           ))}
           <div className="workflow-actions">
-            <button className="btn btn--primary" onClick={() => void controller.confirm(run.taskId, run.pendingAction!.id)} type="button">
+            <button className="btn btn--primary" disabled={taskMutationPending} onClick={() => void controller.confirm(run.taskId, run.pendingAction!.id)} type="button">
               {t("workflows.action.applyChanges", { count: run.pendingAction.affectedPaths.length })}
             </button>
-            <button className="btn btn--secondary" onClick={() => void controller.discard(run.taskId)} type="button">
+            <button className="btn btn--secondary" disabled={taskMutationPending} onClick={() => void controller.discard(run.taskId)} type="button">
               {t("workflows.action.discard")}
             </button>
           </div>
@@ -129,8 +151,8 @@ export function WorkflowTaskDetail({
           <h3 className="workflow-section-title">{t("workflows.result.title")}</h3>
           <dl className="workflow-result">{Object.entries(run.result).filter(([key]) => key !== "kind").map(([key, value]) => <div key={key}><dt>{t(`workflows.result.${key}`)}</dt><dd>{Array.isArray(value) ? value.join(", ") : typeof value === "boolean" ? (value ? t("workflows.result.yes") : t("workflows.result.no")) : value ?? "—"}</dd></div>)}</dl>
           <div className="workflow-actions mt-3">
-            <button className="btn btn--primary" type="button" onClick={() => void controller.openResult(run)}>{t("workflows.action.openResult")}</button>
-            {recommendedNext ? <button className="btn btn--secondary" type="button" onClick={() => void controller.prepare(recommendedNext)}>{t("workflows.action.prepareNext", { workflow: t(workflowKindKey(recommendedNext)) })}</button> : null}
+            <button className="btn btn--primary" disabled={openResultPending} type="button" onClick={() => void controller.openResult(run)}>{t("workflows.action.openResult")}</button>
+            {recommendedNext ? <button className="btn btn--secondary" disabled={taskMutationPending || prepareNextPending} type="button" onClick={() => void controller.prepare(recommendedNext)}>{t("workflows.action.prepareNext", { workflow: t(workflowKindKey(recommendedNext)) })}</button> : null}
           </div>
         </section>
       ) : null}
@@ -139,21 +161,22 @@ export function WorkflowTaskDetail({
         <section className="workflow-attention" role="alert">
           <p>{t("workflows.cancel.confirmDescription")}</p>
           <div className="workflow-actions">
-            <button className="btn btn--danger" type="button" onClick={() => { setConfirmingCancel(false); void controller.cancel(run.taskId); }}>{t("workflows.action.confirmCancel")}</button>
+            <button className="btn btn--danger" disabled={taskMutationPending} type="button" onClick={() => { setConfirmingCancel(false); void controller.cancel(run.taskId); }}>{t("workflows.action.confirmCancel")}</button>
             <button className="btn btn--secondary" type="button" onClick={() => setConfirmingCancel(false)}>{t("workflows.action.keepRunning")}</button>
           </div>
         </section>
       ) : null}
 
       <div className="workflow-actions">
-        {(run.displayStatus === "running" || run.displayStatus === "queued") && run.cancellable !== false ? <button className="btn btn--secondary" onClick={requestCancel} type="button"><Square aria-hidden="true" size={13} />{t("workflows.action.cancel")}</button> : null}
-        {undoAvailable ? <button className="btn btn--secondary" onClick={() => void controller.undoCancel(run.taskId)} type="button"><RotateCcw aria-hidden="true" size={13} />{t("workflows.action.undoCancel")}</button> : null}
+        {(run.displayStatus === "running" || run.displayStatus === "queued") && run.cancellable !== false ? <button className="btn btn--secondary" disabled={taskMutationPending} onClick={requestCancel} type="button"><Square aria-hidden="true" size={13} />{t("workflows.action.cancel")}</button> : null}
+        {undoAvailable ? <button className="btn btn--secondary" disabled={taskMutationPending} onClick={() => void controller.undoCancel(run.taskId)} type="button"><RotateCcw aria-hidden="true" size={13} />{t("workflows.action.undoCancel")}</button> : null}
         {retryable || rerunnable ? (
           <div>
             <button
               aria-controls={retryOptionsId}
               aria-expanded={retryMenuOpen}
               className="btn btn--secondary"
+              disabled={taskMutationPending || prepareCurrentPending}
               onClick={() => setRetryMenuOpen((open) => !open)}
               type="button"
             >
@@ -167,17 +190,24 @@ export function WorkflowTaskDetail({
                 id={retryOptionsId}
                 role="group"
               >
-                {retryable ? <button type="button" onClick={() => { setRetryMenuOpen(false); void controller.retry(run.taskId); }}>{t("workflows.retry.sameSettings")}</button> : null}
-                <button type="button" onClick={() => { setRetryMenuOpen(false); void controller.adjustAndPrepare(run); }}>{t("workflows.retry.adjustSettings")}</button>
-                <button type="button" onClick={() => { setRetryMenuOpen(false); void controller.adjustAndPrepare(run, true); }}>{t("workflows.retry.openSettings")}</button>
+                {retryable ? <button disabled={taskMutationPending} type="button" onClick={() => { setRetryMenuOpen(false); void controller.retry(run.taskId); }}>{t("workflows.retry.sameSettings")}</button> : null}
+                <button disabled={taskMutationPending || prepareCurrentPending} type="button" onClick={() => { setRetryMenuOpen(false); void controller.adjustAndPrepare(run); }}>{t("workflows.retry.adjustSettings")}</button>
+                <button disabled={taskMutationPending || prepareCurrentPending} type="button" onClick={() => { setRetryMenuOpen(false); void controller.adjustAndPrepare(run, true); }}>{t("workflows.retry.openSettings")}</button>
               </div>
             ) : null}
           </div>
         ) : null}
         <button className="btn btn--ghost" onClick={() => onOpenLogs(run.taskId)} type="button">{t("workflows.action.viewLogs")}</button>
-        {run.displayStatus === "queued" && queueIndex > 0 ? <button aria-label={t("workflows.action.moveUp")} className="btn btn--ghost btn--icon" onClick={() => void controller.reorder(run.taskId, queuedRuns[queueIndex - 1]?.taskId ?? null)} title={t("workflows.action.moveUp")} type="button"><ArrowUp aria-hidden="true" size={14} /></button> : null}
-        {run.displayStatus === "queued" && queueIndex >= 0 && queueIndex < queuedRuns.length - 1 ? <button aria-label={t("workflows.action.moveDown")} className="btn btn--ghost btn--icon" onClick={() => void controller.reorder(run.taskId, queuedRuns[queueIndex + 2]?.taskId ?? null)} title={t("workflows.action.moveDown")} type="button"><ArrowDown aria-hidden="true" size={14} /></button> : null}
+        {run.displayStatus === "queued" && queueIndex > 0 ? <button aria-label={t("workflows.action.moveUp")} className="btn btn--ghost btn--icon" disabled={taskMutationPending} onClick={() => void controller.reorder(run.taskId, queuedRuns[queueIndex - 1]?.taskId ?? null)} title={t("workflows.action.moveUp")} type="button"><ArrowUp aria-hidden="true" size={14} /></button> : null}
+        {run.displayStatus === "queued" && queueIndex >= 0 && queueIndex < queuedRuns.length - 1 ? <button aria-label={t("workflows.action.moveDown")} className="btn btn--ghost btn--icon" disabled={taskMutationPending} onClick={() => void controller.reorder(run.taskId, queuedRuns[queueIndex + 2]?.taskId ?? null)} title={t("workflows.action.moveDown")} type="button"><ArrowDown aria-hidden="true" size={14} /></button> : null}
       </div>
     </div>
   );
+}
+
+function recommendedWorkflowOperationPending(
+  operations: Parameters<typeof workflowOperationPending>[0],
+  kind: WorkflowRun["kind"] | null,
+): boolean {
+  return kind ? workflowOperationPending(operations, `prepare:${kind}`) : false;
 }

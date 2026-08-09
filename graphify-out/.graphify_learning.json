@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-09T02:55:01.569236+00:00",
+  "generated_at": "2026-08-09T08:52:38.305968+00:00",
   "nodes": {
     "src_services_importv2api_importv2api": {
       "code_fingerprint": "03b4a0c77425f1d54519eb7aa57147562c00a539d470ea231de729e9725bcbc5",
@@ -12,10 +12,31 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 0.943408735,
+      "score": 0.938011036,
       "source_file": "src/services/importV2Api.ts",
       "status": "tentative",
       "uses": 1
+    },
+    "src_tauri_src_app_state_appstate": {
+      "code_fingerprint": "0bcc4b660cf5405aa298a50731e5bab0a74bd0c7ad42cb8b0dbec67cff33cad5",
+      "label": "AppState",
+      "last": "2026-08-09T08:29:45.959089+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-09T08:29:45.959089+00:00",
+          "outcome": "useful",
+          "q": "Re-review Batch 2 fixes for trust freeze confirmation cancellation launch and persistence"
+        },
+        {
+          "date": "2026-08-09T08:06:59.127225+00:00",
+          "outcome": "useful",
+          "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
+        }
+      ],
+      "score": 1.99890084,
+      "source_file": "src-tauri/src/app_state.rs",
+      "status": "preferred",
+      "uses": 2
     },
     "src_tauri_src_commands_import_v2_commands": {
       "code_fingerprint": "14728db788cf3bade083a2fb4d681a4f61f9786af076a2e06a3237ebf4eb8d16",
@@ -33,7 +54,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 1.866188814,
+      "score": 1.855511443,
       "source_file": "src-tauri/src/commands/import_v2_commands.rs",
       "status": "preferred",
       "uses": 2
@@ -49,10 +70,31 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 0.943408735,
+      "score": 0.938011036,
       "source_file": "src-tauri/src/commands/import_v2_web_commands.rs",
       "status": "tentative",
       "uses": 1
+    },
+    "src_tauri_src_models_confirmation_confirmationregistry": {
+      "code_fingerprint": "921779bc8f822e3cc88a19c369e83f8f010d53f7381f219f4e05733e22f0df53",
+      "label": "ConfirmationRegistry",
+      "last": "2026-08-09T08:29:45.959089+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-09T08:29:45.959089+00:00",
+          "outcome": "useful",
+          "q": "Re-review Batch 2 fixes for trust freeze confirmation cancellation launch and persistence"
+        },
+        {
+          "date": "2026-08-09T08:06:59.127225+00:00",
+          "outcome": "useful",
+          "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
+        }
+      ],
+      "score": 1.99890084,
+      "source_file": "src-tauri/src/models/confirmation.rs",
+      "status": "preferred",
+      "uses": 2
     },
     "src_tauri_src_models_paths_projectcontext": {
       "code_fingerprint": "36b9391d0ef17ce5e1321c3847cde965c142145ad888b03319d39dcf7634de7c",
@@ -65,8 +107,24 @@
           "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
         }
       ],
-      "score": 0.920350453,
+      "score": 0.915084682,
       "source_file": "src-tauri/src/models/paths.rs",
+      "status": "tentative",
+      "uses": 1
+    },
+    "src_tauri_src_services_agent_service_agentservice": {
+      "code_fingerprint": "e11a78926a125e153ac548cb636058bf92372159e0c010853c0c921d69185958",
+      "label": "AgentService",
+      "last": "2026-08-09T03:56:03.536117+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-09T03:56:03.536117+00:00",
+          "outcome": "useful",
+          "q": "根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化"
+        }
+      ],
+      "score": 0.995252665,
+      "source_file": "src-tauri/src/services/agent_service.rs",
       "status": "tentative",
       "uses": 1
     },
@@ -81,7 +139,7 @@
           "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
         }
       ],
-      "score": 0.920350453,
+      "score": 0.915084682,
       "source_file": "src-tauri/src/services/file_store.rs",
       "status": "tentative",
       "uses": 1
@@ -97,7 +155,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 0.92278008,
+      "score": 0.917500407,
       "source_file": "src-tauri/src/services/import_v2/commit.rs",
       "status": "tentative",
       "uses": 1
@@ -123,7 +181,7 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 2.743493626,
+      "score": 2.727796769,
       "source_file": "src-tauri/src/services/import_v2/file_discovery.rs",
       "status": "preferred",
       "uses": 3
@@ -144,7 +202,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 1.866188814,
+      "score": 1.855511443,
       "source_file": "src-tauri/src/services/import_v2/orchestrator.rs",
       "status": "preferred",
       "uses": 2
@@ -180,7 +238,7 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 4.609682441,
+      "score": 4.583308212,
       "source_file": "src-tauri/src/services/import_v2/session_store.rs",
       "status": "preferred",
       "uses": 5
@@ -196,16 +254,52 @@
           "q": "能帮我单独修复一下这个知识库项目吗"
         }
       ],
-      "score": 0.931596146,
+      "score": 0.926266033,
       "source_file": "src-tauri/src/services/import_v2/source_lifecycle_tests.rs",
       "status": "tentative",
       "uses": 1
     },
-    "src_tauri_src_services_workflow_service_mod_workflowservice": {
-      "code_fingerprint": "e87ba2f26d2b2fbd98382e29be1cf22fda246021efbe49b1a0cedfec75c947b8",
-      "label": "WorkflowService",
-      "last": "2026-08-06T01:18:58.456620+00:00",
+    "src_tauri_src_services_workflow_service_coordinator_workflowcoordinator": {
+      "code_fingerprint": "6379a86fc9e2b271ecbb5636c910832593432d3422f250d30147b39a9e578bbe",
+      "label": "WorkflowCoordinator",
+      "last": "2026-08-09T08:29:45.959089+00:00",
       "provenance": [
+        {
+          "date": "2026-08-09T08:29:45.959089+00:00",
+          "outcome": "useful",
+          "q": "Re-review Batch 2 fixes for trust freeze confirmation cancellation launch and persistence"
+        },
+        {
+          "date": "2026-08-09T08:06:59.127225+00:00",
+          "outcome": "useful",
+          "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
+        }
+      ],
+      "score": 1.99890084,
+      "source_file": "src-tauri/src/services/workflow_service/coordinator.rs",
+      "status": "preferred",
+      "uses": 2
+    },
+    "src_tauri_src_services_workflow_service_mod_workflowservice": {
+      "code_fingerprint": "6d01ef11188c9df6ad421e828d4d15a18b945bc84c68748d2b902faac23f935d",
+      "label": "WorkflowService",
+      "last": "2026-08-09T08:29:45.959089+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-09T08:29:45.959089+00:00",
+          "outcome": "useful",
+          "q": "Re-review Batch 2 fixes for trust freeze confirmation cancellation launch and persistence"
+        },
+        {
+          "date": "2026-08-09T08:06:59.127225+00:00",
+          "outcome": "useful",
+          "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
+        },
+        {
+          "date": "2026-08-09T03:56:03.536117+00:00",
+          "outcome": "useful",
+          "q": "根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化"
+        },
         {
           "date": "2026-08-06T01:18:58.456620+00:00",
           "outcome": "useful",
@@ -217,16 +311,21 @@
           "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
         }
       ],
-      "score": 1.8519466,
+      "score": 4.83550422,
       "source_file": "src-tauri/src/services/workflow_service/mod.rs",
       "status": "preferred",
-      "uses": 2
+      "uses": 5
     },
     "src_tauri_src_services_workflow_service_preparation_workflowaccesssnapshot": {
-      "code_fingerprint": "500058e1f90022e2edc4e43de8b0d33ca167d2591538d62063e37ddd0c4be642",
+      "code_fingerprint": "c7c00dab14974e8f22d8115d8df3636450d68abab9add92d532d54e8e5dadb3e",
       "label": "WorkflowAccessSnapshot",
-      "last": "2026-08-05T12:42:03.108793+00:00",
+      "last": "2026-08-09T03:56:03.536117+00:00",
       "provenance": [
+        {
+          "date": "2026-08-09T03:56:03.536117+00:00",
+          "outcome": "useful",
+          "q": "根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化"
+        },
         {
           "date": "2026-08-05T12:42:03.108793+00:00",
           "outcome": "useful",
@@ -248,16 +347,31 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 3.663844079,
+      "score": 4.638134115,
       "source_file": "src-tauri/src/services/workflow_service/preparation.rs",
       "status": "preferred",
-      "uses": 4
+      "uses": 5
     },
     "src_tauri_src_tasks_task_service_taskservice": {
-      "code_fingerprint": "79811119b58a48f4326eb0fefc16f5e043a2ce206669e131d93a617454ea7fb0",
+      "code_fingerprint": "2963a8a3c852b314adee4b01fcf48100097623c00742ea2db847c778d52f09a9",
       "label": "TaskService",
-      "last": "2026-08-06T14:24:16.576057+00:00",
+      "last": "2026-08-09T08:29:45.959089+00:00",
       "provenance": [
+        {
+          "date": "2026-08-09T08:29:45.959089+00:00",
+          "outcome": "useful",
+          "q": "Re-review Batch 2 fixes for trust freeze confirmation cancellation launch and persistence"
+        },
+        {
+          "date": "2026-08-09T08:06:59.127225+00:00",
+          "outcome": "useful",
+          "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
+        },
+        {
+          "date": "2026-08-09T03:56:03.536117+00:00",
+          "outcome": "useful",
+          "q": "根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化"
+        },
         {
           "date": "2026-08-06T14:24:16.576057+00:00",
           "outcome": "useful",
@@ -267,17 +381,12 @@
           "date": "2026-08-05T15:26:21.889169+00:00",
           "outcome": "useful",
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
-        },
-        {
-          "date": "2026-08-05T06:16:43.499711+00:00",
-          "outcome": "useful",
-          "q": "参考这个 为我写执行这个修复计划的 提示词"
         }
       ],
-      "score": 2.780866665,
+      "score": 5.759109483,
       "source_file": "src-tauri/src/tasks/task_service.rs",
       "status": "preferred",
-      "uses": 3
+      "uses": 6
     }
   },
   "version": 1

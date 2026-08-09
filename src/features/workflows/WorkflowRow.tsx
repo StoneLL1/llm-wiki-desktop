@@ -13,12 +13,14 @@ const icons = {
 export function WorkflowRow({
   row,
   activeRun,
+  pending,
   onPrepare,
   onPrerequisite,
   onOpenRun,
 }: {
   row: WorkflowOverviewRow;
   activeRun: WorkflowRun | null;
+  pending: boolean;
   onPrepare: () => void;
   onPrerequisite: (action: NonNullable<WorkflowOverviewRow["prerequisite"]>["action"]) => void;
   onOpenRun: (taskId: string) => void;
@@ -52,12 +54,13 @@ export function WorkflowRow({
         <span>{t(workflowStatusKey(state))}</span>
       </div>
       {activeRun ? (
-        <button className="btn btn--secondary btn--sm" onClick={() => onOpenRun(activeRun.taskId)} type="button">
+        <button className="btn btn--secondary btn--sm" disabled={pending} onClick={() => onOpenRun(activeRun.taskId)} type="button">
           {t("workflows.action.open")}
         </button>
       ) : (
         <button
           className="btn btn--secondary btn--sm"
+          disabled={pending}
           onClick={() => opensProjectWorkbench ? onPrerequisite(prerequisite.action) : onPrepare()}
           type="button"
         >
