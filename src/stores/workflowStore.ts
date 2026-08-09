@@ -59,6 +59,7 @@ export interface WorkflowState {
   setOverviewStatus: (status: WorkflowOverviewStatus) => void;
   replaceRuns: (runs: WorkflowRun[]) => void;
   upsertRun: (run: WorkflowRun) => void;
+  upsertRuns: (runs: readonly WorkflowRun[]) => void;
   hydrateDecisionReview: (taskId: string, actionId: string, review: WorkflowDecisionReview) => void;
   setPreparation: (preparation: WorkflowPreparation | null) => void;
   selectRun: (taskId: string | null) => void;
@@ -147,13 +148,19 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   upsertRun: (run) =>
     set((state) => {
       const previous = state.runs.find((candidate) => candidate.taskId === run.taskId);
-      if (previous && Date.parse(previous.updatedAt) > Date.parse(run.updatedAt)) return state;
+      if (previous && !shouldAcceptWorkflowRun(previous, run)) return state;
       return {
         runs: sortRuns([
           ...state.runs.filter((candidate) => candidate.taskId !== run.taskId),
           preserveHydratedDecisionReview(previous, run),
         ]),
       };
+    }),
+  upsertRuns: (incoming) =>
+    set((state) => {
+      if (incoming.length === 0) return state;
+      const runs = mergeRunSnapshots(state.runs, [...incoming]);
+      return { runs: sortRuns(runs) };
     }),
   hydrateDecisionReview: (taskId, actionId, decisionReview) =>
     set((state) => {
@@ -268,11 +275,26 @@ function mergeRunSnapshots(current: WorkflowRun[], incoming: WorkflowRun[]): Wor
   const merged = new Map(current.map((run) => [run.taskId, run]));
   for (const run of incoming) {
     const previous = merged.get(run.taskId);
-    if (!previous || Date.parse(run.updatedAt) >= Date.parse(previous.updatedAt)) {
+    if (!previous || shouldAcceptWorkflowRun(previous, run)) {
       merged.set(run.taskId, preserveHydratedDecisionReview(previous, run));
     }
   }
   return [...merged.values()];
+}
+
+const TERMINAL_WORKFLOW_STATUSES = new Set<WorkflowRun["displayStatus"]>([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+function shouldAcceptWorkflowRun(previous: WorkflowRun, incoming: WorkflowRun): boolean {
+  if (
+    TERMINAL_WORKFLOW_STATUSES.has(previous.displayStatus)
+    && !TERMINAL_WORKFLOW_STATUSES.has(incoming.displayStatus)
+  ) return false;
+  return Date.parse(incoming.updatedAt) >= Date.parse(previous.updatedAt);
 }
 
 function preserveHydratedDecisionReview(

@@ -244,7 +244,7 @@ describe("TaskLogDrawer", () => {
     expect(useTaskStore.getState().selectedTaskId).toBe("batch-task-2");
   });
 
-  it("records closed-drawer renders for 1,000 task/log/activity/output events", async () => {
+  it("keeps the heavy drawer body unmounted across 1,000 task/log/activity/output events", async () => {
     useTaskStore.setState({
       tasks: [],
       logs: {},
@@ -260,8 +260,9 @@ describe("TaskLogDrawer", () => {
         <TaskLogDrawer />
       </Profiler>,
     );
-    await waitFor(() => expect(commits).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(commits).toBeGreaterThanOrEqual(1));
     const mountCommits = commits;
+    const invokeCount = invokeMock.mock.calls.length;
 
     for (let index = 0; index < WORKFLOW_BASELINE_SIZES.drawerEvents; index += 1) {
       const event = makeDrawerEventPayload(index);
@@ -277,7 +278,8 @@ describe("TaskLogDrawer", () => {
     }
 
     expect(document.querySelector(".task-drawer")).toBeNull();
-    expect(commits - mountCommits).toBe(WORKFLOW_BASELINE_SIZES.drawerEvents);
+    expect(commits - mountCommits).toBe(0);
+    expect(invokeMock.mock.calls.length - invokeCount).toBe(0);
   }, 30_000);
 
   it("shows a typed URL operation as one task instead of a numbered batch", () => {
@@ -300,6 +302,48 @@ describe("TaskLogDrawer", () => {
     expect(screen.getByRole("button", { name: /Import https:\/\/example.com\/article/ })).toBeInTheDocument();
     expect(screen.queryByText("Import batches")).not.toBeInTheDocument();
     expect(screen.queryByText(/Batch 1/)).not.toBeInTheDocument();
+  });
+
+  it("renders only the latest 500 log lines while retaining the complete log snapshot", async () => {
+    const lines = Array.from({ length: 600 }, (_, index) => ({
+      timestamp: `2026-08-10T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}Z`,
+      level: "info" as const,
+      message: `bounded-log-${index}`,
+    }));
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_task_logs") return Promise.resolve(lines);
+      if (command === "get_task_activities") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useTaskStore.setState({ logs: { [runningTask.id]: lines } });
+
+    const { container } = render(<TaskLogDrawer />);
+
+    expect(container.querySelectorAll(".terminal__line")).toHaveLength(500);
+    expect(screen.queryByText("bounded-log-99")).not.toBeInTheDocument();
+    expect(screen.getByText("bounded-log-100")).toBeInTheDocument();
+    expect(useTaskStore.getState().logs[runningTask.id]).toHaveLength(600);
+  });
+
+  it("does not re-render an open drawer for unrelated task log updates", () => {
+    let commits = 0;
+    render(
+      <Profiler id="open-drawer" onRender={() => { commits += 1; }}>
+        <TaskLogDrawer />
+      </Profiler>,
+    );
+    const initialCommits = commits;
+
+    act(() => {
+      useTaskStore.setState((state) => ({
+        logs: {
+          ...state.logs,
+          "unrelated-task": [{ timestamp: "2026-08-10T00:00:00Z", level: "info", message: "unrelated" }],
+        },
+      }));
+    });
+
+    expect(commits - initialCommits).toBe(0);
   });
 
   it("moves focus into the drawer and returns it to the opener", async () => {

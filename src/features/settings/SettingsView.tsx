@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Clock,
@@ -26,6 +26,10 @@ import { SecuritySettings, type ProviderSecretRow } from "./SecuritySettings";
 import { UpdateSettings } from "./UpdateSettings";
 import { ImportCompatibilitySettings } from "./ImportCompatibilitySettings";
 import type { ImportWorkflow } from "../import/importWorkflow";
+import {
+  invalidateNotificationPermissionEpoch,
+  requestNotificationPermissionFromUser,
+} from "../../services/notifications";
 
 export interface SettingsViewProps {
   initialSection?: SettingsSectionKey;
@@ -121,6 +125,16 @@ export function SettingsView({
     (state) => state.revokeAllChatConvenienceAuthorizations,
   );
   const persistPatch = useSettingsStore((state) => state.persistPatch);
+  const notificationProjectKey = `${project.projectId}\0${project.rootPath}`;
+  const notificationSaveTailRef = useRef<Promise<unknown>>(Promise.resolve());
+  const notificationScopeRef = useRef({ key: notificationProjectKey, generation: 0 });
+  if (notificationScopeRef.current.key !== notificationProjectKey) {
+    notificationScopeRef.current = {
+      key: notificationProjectKey,
+      generation: notificationScopeRef.current.generation + 1,
+    };
+    notificationSaveTailRef.current = Promise.resolve();
+  }
 
   useEffect(() => {
     void loadSettings(project.projectId, project.rootPath);
@@ -148,6 +162,11 @@ export function SettingsView({
     if (refreshCapabilities) {
       await onRefreshCapabilities();
     }
+  };
+
+  const requestNotificationPermission = async () => {
+    invalidateNotificationPermissionEpoch();
+    await requestNotificationPermissionFromUser();
   };
 
   const providerStatuses = providers.map((provider) => ({
@@ -294,8 +313,30 @@ export function SettingsView({
             <BackgroundTaskSettings
               closeBehavior={settings.closeBehavior}
               contextWindow={settings.contextWindow}
+              systemNotifications={settings.systemNotifications}
               onChangeCloseBehavior={(closeBehavior) => { void savePatch({ closeBehavior }); }}
               onChangeContextWindow={(contextWindow) => { void savePatch({ contextWindow }); }}
+              onChangeSystemNotification={(key, enabled) => {
+                const owner = { ...notificationScopeRef.current };
+                const save = notificationSaveTailRef.current.then(async () => {
+                  if (
+                    notificationScopeRef.current.key !== owner.key
+                    || notificationScopeRef.current.generation !== owner.generation
+                  ) return false;
+                  const latest = useSettingsStore.getState().settings.systemNotifications;
+                  await savePatch({
+                    systemNotifications: { ...latest, [key]: enabled },
+                  });
+                  return notificationScopeRef.current.key === owner.key
+                    && notificationScopeRef.current.generation === owner.generation;
+                });
+                notificationSaveTailRef.current = save.catch(() => undefined);
+                if (enabled) void save.then((saved) => {
+                  if (saved) return requestNotificationPermission();
+                  return undefined;
+                }, () => undefined);
+              }}
+              onRequestNotificationPermission={() => { void requestNotificationPermission(); }}
             />
           ) : null}
 

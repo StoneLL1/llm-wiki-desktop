@@ -36,6 +36,7 @@ let cache: CachedEntry | null = null;
 export function useProjectStatus(
   projectId: string,
   rootPath: string,
+  enabled = true,
 ): ProjectStatusSnapshot | null {
   const key = `${projectId}@${rootPath}`;
   const [snapshot, setSnapshot] = useState<ProjectStatusSnapshot | null>(
@@ -43,7 +44,7 @@ export function useProjectStatus(
   );
 
   useEffect(() => {
-    if (!hasTauri() || !projectId || !rootPath) return;
+    if (!enabled || !hasTauri() || !projectId || !rootPath) return;
     if (cache && cache.key === key) {
       setSnapshot(cache.snapshot);
       return;
@@ -69,7 +70,7 @@ export function useProjectStatus(
     return () => {
       active = false;
     };
-  }, [key, projectId, rootPath]);
+  }, [enabled, key, projectId, rootPath]);
 
-  return snapshot;
+  return enabled ? snapshot : null;
 }

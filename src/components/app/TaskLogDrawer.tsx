@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import {
   X,
   Square,
@@ -20,7 +21,7 @@ import { useProjectStore } from "../../stores/projectStore";
 import { hydrateAndSelectWorkflowRun } from "../../services/workflowNavigation";
 import { fetchTaskActivities, fetchTaskLogs, cancelTaskRequest } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
-import type { BackendTask, LogLine, TaskStatus } from "../../types/task";
+import type { BackendTask, LogLine, TaskActivity, TaskStatus } from "../../types/task";
 import { isImportBatchOperationTask, isTerminalStatus } from "../../types/task";
 import { AgentActivityTimeline } from "../agent/AgentActivityTimeline";
 import { IMPORT_PROGRESS_LABEL_KEYS, isMeasuredImportProgress } from "../../features/import/importStatusPresentation";
@@ -45,6 +46,9 @@ const LEVEL_BADGE_CLASS: Record<string, string> = {
   error: "lvl-err",
   debug: "lvl-info",
 };
+
+const EMPTY_ACTIVITIES: TaskActivity[] = [];
+const EMPTY_LOGS: LogLine[] = [];
 
 function StatusIcon({ status }: { status: TaskStatus }) {
   const { t } = useTranslation();
@@ -163,13 +167,45 @@ interface ImportBatchView {
 }
 
 export function TaskLogDrawer() {
+  const drawerOpen = useTaskStore((state) => state.drawerOpen);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const wasDrawerOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (drawerOpen && !wasDrawerOpenRef.current) {
+      returnFocusRef.current = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+      requestAnimationFrame(() => closeButtonRef.current?.focus());
+    } else if (!drawerOpen && wasDrawerOpenRef.current) {
+      const opener = returnFocusRef.current;
+      if (opener?.isConnected) opener.focus();
+      returnFocusRef.current = null;
+    }
+    wasDrawerOpenRef.current = drawerOpen;
+  }, [drawerOpen]);
+
+  return drawerOpen ? <TaskLogDrawerBody closeButtonRef={closeButtonRef} /> : null;
+}
+
+function TaskLogDrawerBody({
+  closeButtonRef,
+}: {
+  closeButtonRef: RefObject<HTMLButtonElement | null>;
+}) {
   const { t } = useTranslation();
   const tasks = useTaskStore((s) => s.tasks);
-  const logs = useTaskStore((s) => s.logs);
-  const activities = useTaskStore((s) => s.activities);
-  const taskOutputs = useTaskStore((s) => s.taskOutputs);
-  const drawerOpen = useTaskStore((s) => s.drawerOpen);
   const selectedTaskId = useTaskStore((s) => s.selectedTaskId);
+  const selectedLogs = useTaskStore((s) =>
+    s.selectedTaskId ? s.logs[s.selectedTaskId] ?? EMPTY_LOGS : EMPTY_LOGS,
+  );
+  const selectedActivities = useTaskStore((s) =>
+    s.selectedTaskId ? s.activities[s.selectedTaskId] ?? EMPTY_ACTIVITIES : EMPTY_ACTIVITIES,
+  );
+  const selectedOutput = useTaskStore((s) =>
+    s.selectedTaskId ? s.taskOutputs[s.selectedTaskId] ?? "" : "",
+  );
   const closeDrawer = useTaskStore((s) => s.closeDrawer);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
   const selectTask = useTaskStore((s) => s.selectTask);
@@ -184,11 +220,8 @@ export function TaskLogDrawer() {
   });
   const [cancellingTaskIds, setCancellingTaskIds] = useState<ReadonlySet<string>>(new Set());
   const cancellingTaskIdsRef = useRef(new Set<string>());
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
-  const returnFocusRef = useRef<HTMLElement | null>(null);
-  const wasDrawerOpenRef = useRef(false);
   const [logsPinned, setLogsPinned] = useState(true);
 
   const sorted = useMemo(() => sortTasks(tasks, sortMode), [tasks, sortMode]);
@@ -200,9 +233,7 @@ export function TaskLogDrawer() {
   );
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
-  const selectedLogs = selectedTaskId ? logs[selectedTaskId] ?? [] : [];
-  const selectedActivities = selectedTaskId ? activities[selectedTaskId] ?? [] : [];
-  const selectedOutput = selectedTaskId ? taskOutputs[selectedTaskId] ?? "" : "";
+  const visibleLogs = selectedLogs.slice(-500);
   const selectedProgressLabel = selectedTask?.progress?.label
     ? selectedTask.taskType === "import"
       ? t(IMPORT_PROGRESS_LABEL_KEYS[selectedTask.progress.label] ?? "importV2.progress.working")
@@ -221,7 +252,19 @@ export function TaskLogDrawer() {
       waitingForConfirmation: importTasks.filter((task) => task.status === "waiting_for_confirmation").length,
     };
   }, [tasks]);
+  const legacyBatchTaskIds = useMemo(
+    () => tasks
+      .filter((task) => task.taskType === "import" && task.batchId && !isImportBatchOperationTask(task))
+      .map((task) => task.id),
+    [tasks],
+  );
+  const legacyBatchLogs = useTaskStore(useShallow((state) =>
+    legacyBatchTaskIds.map((taskId) => state.logs[taskId] ?? EMPTY_LOGS),
+  ));
   const importBatches = useMemo<ImportBatchView[]>(() => {
+    const logsByTaskId = new Map(
+      legacyBatchTaskIds.map((taskId, index) => [taskId, legacyBatchLogs[index] ?? EMPTY_LOGS]),
+    );
     const grouped = new Map<string, BackendTask[]>();
     tasks
       .filter((task) => task.taskType === "import" && task.batchId && !isImportBatchOperationTask(task))
@@ -239,7 +282,7 @@ export function TaskLogDrawer() {
         const failed = batchTasks.filter((task) => task.status === "failed").length;
         const cancelled = batchTasks.filter((task) => task.status === "cancelled").length;
         const batchLogs = batchTasks
-          .flatMap((task) => (logs[task.id] ?? []).map((line) => ({ taskTitle: task.title, line })))
+          .flatMap((task) => (logsByTaskId.get(task.id) ?? EMPTY_LOGS).map((line) => ({ taskTitle: task.title, line })))
           .sort((first, second) => first.line.timestamp.localeCompare(second.line.timestamp))
           .slice(-24);
         const status: TaskStatus = active > 0
@@ -253,7 +296,7 @@ export function TaskLogDrawer() {
               : "succeeded";
         return { id, title: batchTasks[0]?.title ?? id.slice(0, 8), tasks: batchTasks, processed, active, failed, cancelled, waitingForConfirmation, status, logs: batchLogs };
       });
-  }, [logs, tasks]);
+  }, [legacyBatchLogs, legacyBatchTaskIds, tasks]);
 
   const selectSortMode = (mode: TaskSortMode) => {
     setSortMode(mode);
@@ -300,19 +343,6 @@ export function TaskLogDrawer() {
   }, [loadActivities, loadLogs, selectedTaskId]);
 
   useEffect(() => {
-    if (drawerOpen && !wasDrawerOpenRef.current) {
-      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      requestAnimationFrame(() => closeButtonRef.current?.focus());
-    } else if (!drawerOpen && wasDrawerOpenRef.current) {
-      const opener = returnFocusRef.current;
-      if (opener?.isConnected) opener.focus();
-      returnFocusRef.current = null;
-    }
-    wasDrawerOpenRef.current = drawerOpen;
-  }, [drawerOpen]);
-
-  useEffect(() => {
-    if (!drawerOpen) return;
     const handleDrawerKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -340,7 +370,7 @@ export function TaskLogDrawer() {
     };
     document.addEventListener("keydown", handleDrawerKeyDown);
     return () => document.removeEventListener("keydown", handleDrawerKeyDown);
-  }, [closeDrawer, drawerOpen]);
+  }, [closeDrawer]);
 
   const handleCancel = async (taskId: string) => {
     if (cancellingTaskIdsRef.current.has(taskId)) return;
@@ -361,7 +391,14 @@ export function TaskLogDrawer() {
 
   const handleCopyLogs = async () => {
     if (!selectedTaskId || selectedLogs.length === 0) return;
-    const text = selectedLogs
+    try {
+      await fetchTaskLogs(selectedTaskId);
+    } catch {
+      pushToast("error", t("task.logsCopyError"));
+      return;
+    }
+    const completeLogs = useTaskStore.getState().logs[selectedTaskId] ?? selectedLogs;
+    const text = completeLogs
       .map((line) => `${line.timestamp.slice(11, 19)} [${LEVEL_BADGE[line.level] ?? "INFO"}] ${line.message}`)
       .join("\n");
     try {
@@ -395,9 +432,10 @@ export function TaskLogDrawer() {
   const footerDuration = selectedTask
     ? computeDurationLabel(selectedTask.startedAt, selectedTask.completedAt)
     : null;
-  const footerBytes = new Blob(
-    selectedLogs.map((line) => `${line.message}\n`),
-  ).size;
+  const footerBytes = useMemo(
+    () => new Blob(selectedLogs.map((line) => `${line.message}\n`)).size,
+    [selectedLogs],
+  );
 
   const handleLogScroll = () => {
     const element = logScrollRef.current;
@@ -417,8 +455,6 @@ export function TaskLogDrawer() {
     const element = logScrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
   }, [logsPinned, selectedLogs.length, selectedActivities.length, selectedOutput.length]);
-
-  if (!drawerOpen) return null;
 
   return (
       <div
@@ -698,7 +734,12 @@ export function TaskLogDrawer() {
                       {t("task.drawer.noLogs")}
                     </div>
                   ) : (
-                    selectedLogs.map((line, i) => <LogLineView key={i} line={line} />)
+                    visibleLogs.map((line, i) => (
+                      <LogLineView
+                        key={selectedLogs.length - visibleLogs.length + i}
+                        line={line}
+                      />
+                    ))
                   )}
                 </div>
                 {!logsPinned ? (

@@ -4,6 +4,7 @@ import { useProjectStore } from "../stores/projectStore";
 import { useToastStore } from "../stores/toastStore";
 import i18next from "i18next";
 import {
+  invalidateNotificationPermissionEpoch,
   notifyTaskEvent,
   registerNotificationActionListener,
 } from "../services/notifications";
@@ -111,8 +112,12 @@ export function useTaskEvents(): void {
         // Notification actions are unavailable in browser-only development.
       });
 
+    const refreshPermissionEpoch = () => invalidateNotificationPermissionEpoch();
+    window.addEventListener("focus", refreshPermissionEpoch);
+
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", refreshPermissionEpoch);
       unlisteners.forEach((fn) => fn());
     };
   }, [pushToast]);

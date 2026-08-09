@@ -73,6 +73,17 @@ describe("workflowStore", () => {
     expect(useWorkflowStore.getState().runs[0]?.updatedAt).toBe("2026-08-01T03:00:00Z");
   });
 
+  it("does not let late progress reopen a terminal workflow run", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.getState().upsertRun(run("run-a", "2026-08-01T03:00:00Z"));
+    useWorkflowStore.getState().upsertRuns([{
+      ...run("run-a", "2026-08-01T04:00:00Z"),
+      displayStatus: "running",
+      completedAt: null,
+    }]);
+    expect(useWorkflowStore.getState().runs[0]?.displayStatus).toBe("completed");
+  });
+
   it("preserves hydrated decision evidence when list and event snapshots omit it", () => {
     useWorkflowStore.getState().activateProject("project-a\0D:/a");
     const decisionReview = {

@@ -45,6 +45,18 @@ export function useImportWorkflow(
   taskLauncher: TaskLauncher,
 ): ImportWorkflow {
   const { t } = useTranslation();
+  const importActive = activeView === "import";
+  const inactiveSnapshotRef = useRef({
+    session: useImportStore.getState().session,
+    completion: useImportStore.getState().completion,
+    selectedItemId: useImportStore.getState().selectedItemId,
+    filter: useImportStore.getState().filter,
+    isConfirming: useImportStore.getState().isConfirming,
+    mutationKeys: useImportStore.getState().mutationKeys,
+    sessionEpoch: useImportStore.getState().sessionEpoch,
+    taskList: useTaskStore.getState().tasks,
+    tasksHydrated: useTaskStore.getState().tasksHydrated,
+  });
   const {
     projectId,
     rootPath,
@@ -61,16 +73,29 @@ export function useImportWorkflow(
     isSessionMutationRevisionCurrent,
     refreshForScope,
   } = useImportSessionScope(project, activeView);
-  const session = useImportStore((state) => state.session);
-  const completion = useImportStore((state) => state.completion);
-  const selectedItemId = useImportStore((state) => state.selectedItemId);
-  const filter = useImportStore((state) => state.filter);
-  const isConfirming = useImportStore((state) => state.isConfirming);
-  const taskList = useTaskStore((state) => state.tasks);
-  const tasksHydrated = useTaskStore((state) => state.tasksHydrated);
+  const session = useImportStore((state) => importActive ? state.session : inactiveSnapshotRef.current.session);
+  const completion = useImportStore((state) => importActive ? state.completion : inactiveSnapshotRef.current.completion);
+  const selectedItemId = useImportStore((state) => importActive ? state.selectedItemId : inactiveSnapshotRef.current.selectedItemId);
+  const filter = useImportStore((state) => importActive ? state.filter : inactiveSnapshotRef.current.filter);
+  const isConfirming = useImportStore((state) => importActive ? state.isConfirming : inactiveSnapshotRef.current.isConfirming);
+  const taskList = useTaskStore((state) => importActive ? state.tasks : inactiveSnapshotRef.current.taskList);
+  const tasksHydrated = useTaskStore((state) => importActive ? state.tasksHydrated : inactiveSnapshotRef.current.tasksHydrated);
   const pushToast = useToastStore((state) => state.pushToast);
-  const mutationKeys = useImportStore((state) => state.mutationKeys);
-  const sessionEpoch = useImportStore((state) => state.sessionEpoch);
+  const mutationKeys = useImportStore((state) => importActive ? state.mutationKeys : inactiveSnapshotRef.current.mutationKeys);
+  const sessionEpoch = useImportStore((state) => importActive ? state.sessionEpoch : inactiveSnapshotRef.current.sessionEpoch);
+  if (importActive) {
+    inactiveSnapshotRef.current = {
+      session,
+      completion,
+      selectedItemId,
+      filter,
+      isConfirming,
+      mutationKeys,
+      sessionEpoch,
+      taskList,
+      tasksHydrated,
+    };
+  }
   const isAddingPaths = [...mutationKeys].some((key) => key.startsWith(`add-paths:${projectKey}:`));
   const isAddingText = [...mutationKeys].some((key) => key.startsWith(`add-text:${projectKey}:`));
   const isAddingUrl = [...mutationKeys].some((key) => key.startsWith(`add-url:${projectKey}:`));
