@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("react-i18next", () => ({
@@ -52,10 +52,10 @@ describe("Workflows Batch 0 deterministic scale fixtures", () => {
     expect(makeHistoryAttempts()).toHaveLength(WORKFLOW_BASELINE_SIZES.historyAttempts);
     const review = makeDecisionReview();
     expect(review.fileDiffs).toHaveLength(WORKFLOW_BASELINE_SIZES.diffFiles);
-    expect(review.fileDiffs.every((item) => item.diff.length === WORKFLOW_BASELINE_SIZES.diffBytes)).toBe(true);
+    expect(review.fileDiffs.every((item) => item.diff?.length === WORKFLOW_BASELINE_SIZES.diffBytes)).toBe(true);
   }, 30_000);
 
-  it("records the current unbounded Preparation DOM baseline at 10,000 options", () => {
+  it("bounds Preparation DOM and supports searching and selecting the current results", () => {
     const view = render(
       <WorkflowPreparationView
         preparation={makePreparationWithOptions()}
@@ -65,12 +65,22 @@ describe("Workflows Batch 0 deterministic scale fixtures", () => {
         onStart={vi.fn()}
       />,
     );
-    expect(view.container.querySelectorAll(".workflow-scope-items label")).toHaveLength(
-      WORKFLOW_BASELINE_SIZES.scopeOptions,
-    );
+    expect(view.container.querySelectorAll(".workflow-scope-items label").length).toBeLessThanOrEqual(200);
+    expect(screen.queryByLabelText("source-00200:version-00200")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.nextOptions" }));
+    expect(screen.getByLabelText("source-00200:version-00200")).toBeInTheDocument();
+    expect(view.container.querySelectorAll(".workflow-scope-items label").length).toBeLessThanOrEqual(200);
+    fireEvent.change(screen.getByLabelText("workflows.preparation.searchOptions"), {
+      target: { value: "source-09999" },
+    });
+    expect(view.container.querySelectorAll(".workflow-scope-items label")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.selectResults" }));
+    expect(screen.getByText("workflows.preparation.selectionCount")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.clearSelection" }));
+    expect(screen.getByLabelText("source-09999:version-09999")).not.toBeChecked();
   }, 30_000);
 
-  it("records the current unbounded History DOM baseline at 10,000 attempts", () => {
+  it("keeps the History DOM bounded for 10,000 attempts", () => {
     useWorkflowStore.setState({ historyCursor: null, historyKind: null, historyStatus: null });
     const view = render(
       <WorkflowHistoryView
@@ -80,12 +90,10 @@ describe("Workflows Batch 0 deterministic scale fixtures", () => {
         onOpen={vi.fn()}
       />,
     );
-    expect(view.container.querySelectorAll(".workflow-history__run")).toHaveLength(
-      WORKFLOW_BASELINE_SIZES.historyAttempts,
-    );
+    expect(view.container.querySelectorAll(".workflow-history__run").length).toBeLessThanOrEqual(200);
   }, 30_000);
 
-  it("records the current eager Diff DOM and payload baseline", () => {
+  it("mounts decision diff text only when a file disclosure opens", () => {
     const review = makeDecisionReview();
     const affectedPaths = review.fileDiffs.map((item) => item.path);
     const run = makeBaselineRun(0, {
@@ -109,10 +117,8 @@ describe("Workflows Batch 0 deterministic scale fixtures", () => {
         run={run}
       />,
     );
-    const diffNodes = view.container.querySelectorAll(".workflow-file-diff pre");
-    expect(diffNodes).toHaveLength(WORKFLOW_BASELINE_SIZES.diffFiles);
-    expect([...diffNodes].reduce((total, node) => total + (node.textContent?.length ?? 0), 0)).toBe(
-      WORKFLOW_BASELINE_SIZES.diffFiles * WORKFLOW_BASELINE_SIZES.diffBytes,
-    );
+    expect(view.container.querySelectorAll(".workflow-file-diff pre")).toHaveLength(0);
+    fireEvent.click(view.container.querySelector(".workflow-file-diff summary")!);
+    expect(view.container.querySelectorAll(".workflow-file-diff pre")).toHaveLength(1);
   }, 30_000);
 });

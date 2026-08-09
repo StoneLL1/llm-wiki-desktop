@@ -309,7 +309,7 @@ describe("useWorkflowsController", () => {
       workflowKind: "health_check",
       displayStatus: "failed",
       cursor: null,
-      limit: 100,
+      limit: 50,
     }));
   });
 
@@ -1212,9 +1212,85 @@ describe("useWorkflowsController", () => {
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a"));
     await act(() => result.current.loadHistoryMore());
-    expect(mocks.listRuns).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "cursor-a", limit: 100 }));
-    expect(useWorkflowStore.getState().runs.map((item) => item.taskId)).toContain("run-b");
+    expect(mocks.listRuns).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "cursor-a", limit: 50 }));
+    expect(useWorkflowStore.getState().historyRuns.map((item) => item.taskId)).toContain("run-b");
     expect(useWorkflowStore.getState().historyCursor).toBeNull();
+  });
+
+  it("reloads history once with server filters and clears the previous cursor", async () => {
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: "cursor-a" })
+      .mockResolvedValueOnce({ runs: [], nextCursor: null });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a"));
+
+    await act(() => result.current.filterHistory("health_check", "failed"));
+
+    expect(mocks.listRuns).toHaveBeenCalledTimes(2);
+    expect(mocks.listRuns).toHaveBeenLastCalledWith(expect.objectContaining({
+      workflowKind: "health_check",
+      displayStatus: "failed",
+      cursor: null,
+      limit: 50,
+    }));
+    expect(useWorkflowStore.getState()).toMatchObject({
+      historyKind: "health_check",
+      historyStatus: "failed",
+      historyCursor: null,
+    });
+  });
+
+  it("keeps a stale filter response from overwriting the latest filter page", async () => {
+    const stale = deferred<{ runs: WorkflowRun[]; nextCursor: string | null }>();
+    const latest = { ...run, taskId: "latest-filter-run", displayStatus: "failed" as const };
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: null })
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce({ runs: [latest], nextCursor: null });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(mocks.listRuns).toHaveBeenCalledTimes(1));
+
+    let stalePromise!: Promise<void>;
+    act(() => { stalePromise = result.current.filterHistory("health_check", null); });
+    await waitFor(() => expect(mocks.listRuns).toHaveBeenCalledTimes(2));
+    await act(() => result.current.filterHistory("health_check", "failed"));
+    await act(async () => {
+      stale.resolve({ runs: [{ ...run, taskId: "stale-filter-run" }], nextCursor: "stale-cursor" });
+      await stalePromise;
+    });
+
+    expect(useWorkflowStore.getState().historyRuns.some((item) => item.taskId === "stale-filter-run")).toBe(false);
+    expect(useWorkflowStore.getState().historyRuns.some((item) => item.taskId === latest.taskId)).toBe(true);
+    expect(useWorkflowStore.getState().historyCursor).toBeNull();
+  });
+
+  it("keeps a stale full history refresh from overwriting a newer filter page", async () => {
+    const stale = deferred<{ runs: WorkflowRun[]; nextCursor: string | null }>();
+    const latest = { ...run, taskId: "latest-filter-run", displayStatus: "failed" as const };
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: null })
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce({ runs: [latest], nextCursor: null });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(mocks.listRuns).toHaveBeenCalledTimes(1));
+    mocks.getOverview.mockResolvedValueOnce({
+      ...overview,
+      projectAccess: { ...overview.projectAccess!, identityRevision: "foreign-revision" },
+    });
+
+    useWorkflowStore.setState({ surface: "history" });
+    let refreshPromise!: Promise<void>;
+    act(() => { refreshPromise = result.current.refresh(); });
+    await waitFor(() => expect(mocks.listRuns).toHaveBeenCalledTimes(2));
+    await act(() => result.current.filterHistory("health_check", "failed"));
+    await act(async () => {
+      stale.resolve({ runs: [{ ...run, taskId: "stale-refresh-run" }], nextCursor: "stale-cursor" });
+      await refreshPromise;
+    });
+
+    expect(useWorkflowStore.getState().historyRuns.map((item) => item.taskId)).toEqual([latest.taskId]);
+    expect(useWorkflowStore.getState().historyCursor).toBeNull();
+    expect(useWorkflowStore.getState().overview?.projectAccess?.identityRevision).toBe("revision-a");
   });
 
   it("rejects a paginated history page from a different canonical identity", async () => {

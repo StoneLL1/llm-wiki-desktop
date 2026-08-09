@@ -9,6 +9,7 @@ import {
   continueQueuedWorkflows,
   discardWorkflowResult,
   getWorkflowRun,
+  getWorkflowFileDiff,
   getWorkflowsOverview,
   listWorkflowRuns,
   prepareWorkflow,
@@ -392,6 +393,11 @@ describe("workflow API", () => {
         "list_workflow_runs",
       ],
       [getWorkflowRun, runRequest, "get_workflow_run"],
+      [
+        getWorkflowFileDiff,
+        { ...runRequest, pendingActionId: "action-1", fileId: "file-00000000", cursor: null, limitBytes: 65536 },
+        "get_workflow_file_diff",
+      ],
       [cancelWorkflowRun, runRequest, "cancel_workflow_run"],
       [undoCancelQueuedWorkflow, runRequest, "undo_cancel_queued_workflow"],
       [

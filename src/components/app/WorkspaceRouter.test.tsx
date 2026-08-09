@@ -91,6 +91,7 @@ const workflowsController: WorkflowsController = {
   confirm: vi.fn(),
   discard: vi.fn(),
   continueQueue: vi.fn(),
+  filterHistory: vi.fn(),
   loadHistoryMore: vi.fn(),
   handlePrerequisite: vi.fn(),
   backToOverview: vi.fn(),

@@ -17,6 +17,7 @@ impl WorkflowOverviewService {
         WorkflowsOverview {
             schema_version: WORKFLOW_SCHEMA_VERSION,
             project_access: None,
+            recent_runs: Vec::new(),
             rows: fixed_kinds()
                 .into_iter()
                 .map(|kind| WorkflowOverviewRow {
@@ -82,6 +83,7 @@ impl WorkflowOverviewService {
         Ok(WorkflowsOverview {
             schema_version: WORKFLOW_SCHEMA_VERSION,
             project_access: Some(access),
+            recent_runs: owner_runs.iter().take(5).cloned().collect(),
             rows,
         })
     }

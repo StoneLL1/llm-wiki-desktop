@@ -52,8 +52,6 @@ pub use secret_service::SecretService;
 pub use settings_service::SettingsService;
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
-#[cfg(feature = "gui")]
-pub(crate) use workflow_service::update_wiki_decision_review_for_workflow;
 pub use workflow_service::{
     cancel_generate_content_confirmation, canonical_json, confirm_generate_content_overwrite,
     confirm_update_wiki_review, discard_generate_content_candidate, discard_update_wiki_candidate,
@@ -72,4 +70,9 @@ pub use workflow_service::{
     WorkflowLaunchRegistry, WorkflowPersistenceBinding, WorkflowPreference, WorkflowPreferences,
     WorkflowPreparationEnvironment, WorkflowPreparationService, WorkflowRunner, WorkflowService,
     WorkflowStageSink, WorkflowTrustTransition,
+};
+#[cfg(feature = "gui")]
+pub(crate) use workflow_service::{
+    update_wiki_decision_review_for_workflow, update_wiki_decision_review_summary_for_workflow,
+    update_wiki_file_diff_for_workflow,
 };

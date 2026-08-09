@@ -34,12 +34,14 @@ import {
 } from "../../services/workflowNavigation";
 import type { ProjectSummary } from "../../types/project";
 import type {
+  WorkflowDisplayStatus,
   WorkflowKind,
   WorkflowProjectAccessSummary,
   WorkflowPrerequisiteAction,
   WorkflowRouteSelection,
   WorkflowPreparation,
   WorkflowRun,
+  WorkflowRunSummary,
   WorkflowScope,
   WorkflowStartOutcome,
 } from "../../types/workflow";
@@ -141,7 +143,7 @@ function workflowEventMatchesAccess(
 }
 
 function workflowRunMatchesAccess(
-  run: WorkflowRun,
+  run: Pick<WorkflowRun, "projectId" | "canonicalIdentityKey" | "identityRevision">,
   projectId: string,
   access: WorkflowProjectAccessSummary,
 ): boolean {
@@ -182,6 +184,7 @@ export interface WorkflowsController {
   confirm: (taskId: string, actionId: string) => Promise<void>;
   discard: (taskId: string) => Promise<void>;
   continueQueue: () => Promise<void>;
+  filterHistory: (kind: WorkflowKind | null, status: WorkflowDisplayStatus | null) => Promise<void>;
   loadHistoryMore: () => Promise<void>;
   handlePrerequisite: (action: WorkflowPrerequisiteAction) => void;
   backToOverview: () => void;
@@ -335,8 +338,10 @@ export function useWorkflowsController(
     refreshIntent: number,
   ): Promise<boolean> => {
     if (!enabledRef.current || !hasTauri()) return false;
-    if (includeHistory) historyRequestRef.current += 1;
+    const historyRequest = includeHistory ? ++historyRequestRef.current : historyRequestRef.current;
     const state = useWorkflowStore.getState();
+    const historyKind = state.historyKind;
+    const historyStatus = state.historyStatus;
     const refreshRequest = ++refreshRequestRef.current;
     const requestGuard = captureWorkflowRequestGuard(state);
     const projectRequest = request();
@@ -355,14 +360,14 @@ export function useWorkflowsController(
       const historyResultPromise = includeHistory && projectRequest.projectId && projectRequest.projectRootPath
         ? settle(listWorkflowRuns({
             ...projectRequest,
-            workflowKind: state.historyKind,
-            displayStatus: state.historyStatus,
+            workflowKind: historyKind,
+            displayStatus: historyStatus,
             cursor: null,
-            limit: 100,
+            limit: 50,
           }))
         : Promise.resolve({
             ok: true as const,
-            value: { runs: [] as WorkflowRun[], nextCursor: null },
+            value: { runs: [] as WorkflowRunSummary[], nextCursor: null },
           });
       const [overviewResult, historyResult] = await Promise.all([
         overviewResultPromise,
@@ -386,6 +391,30 @@ export function useWorkflowsController(
         return false;
       }
       const overview = overviewResult.value;
+      const overviewAccess = overview.projectAccess;
+      const currentAuthority = useProjectStore.getState().authority;
+      const authorityMatchesOverview = !overviewAccess
+        ? !currentAuthority || currentAuthority.projectId !== project.projectId
+        : !currentAuthority
+          || currentAuthority.projectId !== projectRequest.projectId
+          || (currentAuthority.canonicalIdentityKey === overviewAccess.canonicalIdentityKey
+            && currentAuthority.identityRevision === overviewAccess.identityRevision);
+      if (!authorityMatchesOverview) {
+        latest.failOperation(operationKey, operationRequest, {
+          summary: i18next.t("workflows.error.historyIdentityMismatch"),
+          technicalDetails: "WORKFLOW_AUTHORITY_IDENTITY_MISMATCH",
+        });
+        if (!latest.overview) latest.setOverviewStatus("error");
+        return false;
+      }
+      const historyRequestIsCurrent = includeHistory
+        && historyRequestRef.current === historyRequest
+        && latest.historyKind === historyKind
+        && latest.historyStatus === historyStatus;
+      if (includeHistory && !historyRequestIsCurrent) {
+        latest.setOverviewSnapshot(overview);
+        return true;
+      }
       if (!historyResult.ok) {
         if (!latest.overview) latest.setOverviewStatus("error");
         latest.failOperation(
@@ -395,25 +424,15 @@ export function useWorkflowsController(
         );
         return false;
       }
-      const overviewAccess = overview.projectAccess;
-      const currentAuthority = useProjectStore.getState().authority;
-      const authorityMatchesOverview = !overviewAccess
-        ? !currentAuthority || currentAuthority.projectId !== project.projectId
-        : !currentAuthority
-          || currentAuthority.projectId !== projectRequest.projectId
-          || (currentAuthority.canonicalIdentityKey === overviewAccess.canonicalIdentityKey
-            && currentAuthority.identityRevision === overviewAccess.identityRevision);
       const historyMatchesOverview = overviewAccess
         ? historyResult.value.runs.every((run) =>
             workflowRunMatchesAccess(run, projectRequest.projectId, overviewAccess),
           )
         : historyResult.value.runs.length === 0;
-      if (!authorityMatchesOverview || !historyMatchesOverview) {
+      if (!historyMatchesOverview) {
         latest.failOperation(operationKey, operationRequest, {
           summary: i18next.t("workflows.error.historyIdentityMismatch"),
-          technicalDetails: authorityMatchesOverview
-            ? "WORKFLOW_HISTORY_IDENTITY_MISMATCH"
-            : "WORKFLOW_AUTHORITY_IDENTITY_MISMATCH",
+          technicalDetails: "WORKFLOW_HISTORY_IDENTITY_MISMATCH",
         });
         if (!latest.overview) latest.setOverviewStatus("error");
         return false;
@@ -733,16 +752,18 @@ export function useWorkflowsController(
     try {
       const page = await listWorkflowRuns({
         ...request(),
-        workflowKind: null,
-        displayStatus: null,
+        workflowKind: state.historyKind,
+        displayStatus: state.historyStatus,
         cursor,
-        limit: 100,
+        limit: 50,
       });
       const latest = useWorkflowStore.getState();
       const latestAccess = latest.overview?.projectAccess;
       if (
         !workflowRequestGuardMatchesAuthority(guard, project)
         || latest.historyCursor !== cursor
+        || latest.historyKind !== state.historyKind
+        || latest.historyStatus !== state.historyStatus
         || historyRequestRef.current !== historyRequest
         || !latestAccess
         || latestAccess.canonicalIdentityKey !== expectedAccess.canonicalIdentityKey
@@ -759,8 +780,7 @@ export function useWorkflowsController(
         });
         return;
       }
-      latest.replaceRuns(page.runs);
-      latest.setHistoryCursor(page.nextCursor);
+      latest.appendHistoryPage(page.runs, page.nextCursor);
     } catch (error) {
       if (
         workflowRequestGuardMatchesAuthority(guard, project)
@@ -776,6 +796,64 @@ export function useWorkflowsController(
       useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
     }
   }, [enabled, request]);
+
+  const filterHistory = useCallback(async (
+    kind: WorkflowKind | null,
+    status: WorkflowDisplayStatus | null,
+  ) => {
+    if (!enabledRef.current || !hasTauri()) return;
+    const state = useWorkflowStore.getState();
+    const expectedAccess = state.overview?.projectAccess;
+    if (!expectedAccess) return;
+    state.setHistoryFilters(kind, status);
+    const historyRequest = ++historyRequestRef.current;
+    const guard = captureWorkflowRequestGuard(useWorkflowStore.getState());
+    const operationKey = "history:filter";
+    const operationRequest = useWorkflowStore.getState().beginOperation(operationKey);
+    try {
+      const page = await listWorkflowRuns({
+        ...request(),
+        workflowKind: kind,
+        displayStatus: status,
+        cursor: null,
+        limit: 50,
+      });
+      const latest = useWorkflowStore.getState();
+      const latestAccess = latest.overview?.projectAccess;
+      if (
+        !workflowRequestGuardMatchesAuthority(guard, project)
+        || historyRequestRef.current !== historyRequest
+        || latest.historyKind !== kind
+        || latest.historyStatus !== status
+        || !latestAccess
+        || latestAccess.canonicalIdentityKey !== expectedAccess.canonicalIdentityKey
+        || latestAccess.identityRevision !== expectedAccess.identityRevision
+      ) return;
+      if (!page.runs.every((run) => workflowRunMatchesAccess(run, project.projectId, latestAccess))) {
+        latest.failOperation(operationKey, operationRequest, {
+          summary: i18next.t("workflows.error.historyIdentityMismatch"),
+          technicalDetails: "WORKFLOW_HISTORY_IDENTITY_MISMATCH",
+        });
+        return;
+      }
+      latest.replaceHistoryPage(page.runs, page.nextCursor);
+    } catch (error) {
+      if (
+        workflowRequestGuardMatchesAuthority(guard, project)
+        && historyRequestRef.current === historyRequest
+        && useWorkflowStore.getState().historyKind === kind
+        && useWorkflowStore.getState().historyStatus === status
+      ) {
+        useWorkflowStore.getState().failOperation(
+          operationKey,
+          operationRequest,
+          operationError("workflows.operationError.history", error),
+        );
+      }
+    } finally {
+      useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
+    }
+  }, [project, request]);
 
   return useMemo(
     () => ({
@@ -905,6 +983,7 @@ export function useWorkflowsController(
         "workflows.operationError.task",
         () => continueQueuedWorkflows(request()),
       ),
+      filterHistory,
       loadHistoryMore,
       handlePrerequisite: (action) => {
         if (action === "import_sources") {
@@ -1003,6 +1082,7 @@ export function useWorkflowsController(
       },
     }),
     [
+      filterHistory,
       loadHistoryMore,
       openSettings,
       onProjectPrerequisite,

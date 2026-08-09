@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -16,9 +17,9 @@ use crate::models::task::{
     TaskType,
 };
 use crate::models::workflow::{
-    WorkflowErrorSummary, WorkflowExecutionState, WorkflowPendingAction, WorkflowPersistenceMode,
-    WorkflowPersistenceTransition, WorkflowResult, WorkflowRun, WorkflowStageStatus,
-    WORKFLOW_SCHEMA_VERSION,
+    WorkflowDisplayStatus, WorkflowErrorSummary, WorkflowExecutionState, WorkflowKind,
+    WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowResult,
+    WorkflowRun, WorkflowRunSummary, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
@@ -44,6 +45,22 @@ struct WorkflowPersistenceLane {
     trailing_flush_generation: u64,
     pending_error: Option<String>,
 }
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct WorkflowHistoryIndexKey {
+    canonical_identity_key: String,
+    identity_revision: String,
+    kind: Option<WorkflowKind>,
+    status: Option<WorkflowDisplayStatus>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowHistoryIndexEntry {
+    started_at: String,
+    task_id: String,
+}
+
+type WorkflowHistoryIndex = (u64, Arc<Vec<WorkflowHistoryIndexEntry>>);
 
 struct WorkflowPersistenceClock {
     started_at: Instant,
@@ -286,6 +303,8 @@ pub struct TaskService {
     task_persistence_dirs: Arc<RwLock<HashMap<String, PathBuf>>>,
     workflow_persistence_lanes: Arc<RwLock<HashMap<String, Arc<Mutex<WorkflowPersistenceLane>>>>>,
     workflow_persistence_clock: Arc<WorkflowPersistenceClock>,
+    workflow_history_revision: Arc<AtomicU64>,
+    workflow_history_indices: Arc<RwLock<HashMap<WorkflowHistoryIndexKey, WorkflowHistoryIndex>>>,
     #[cfg(test)]
     injected_persistence_failures: Arc<Mutex<HashMap<String, usize>>>,
     #[cfg(test)]
@@ -313,6 +332,8 @@ impl Default for TaskService {
             task_persistence_dirs: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_lanes: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
+            workflow_history_revision: Arc::new(AtomicU64::new(0)),
+            workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(test)]
             injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -345,6 +366,8 @@ impl TaskService {
             task_persistence_dirs: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_lanes: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
+            workflow_history_revision: Arc::new(AtomicU64::new(0)),
+            workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(test)]
             injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -678,6 +701,9 @@ impl TaskService {
                 return Err(error);
             }
             eprintln!("Failed to persist new task {}: {}", id, error);
+        }
+        if task.task_type == TaskType::Workflow {
+            self.bump_workflow_history_revision();
         }
 
         use crate::models::task::BackendEventType::TaskUpdated;
@@ -1014,6 +1040,9 @@ impl TaskService {
                 line,
             );
         }
+        if !task_updates.is_empty() {
+            self.bump_workflow_history_revision();
+        }
         for (project_id, task_id, run) in task_updates {
             self.emit(
                 crate::models::task::BackendEventType::WorkflowUpdated,
@@ -1203,6 +1232,95 @@ impl TaskService {
         runs
     }
 
+    pub fn page_workflow_runs(
+        &self,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        kind: Option<WorkflowKind>,
+        status: Option<WorkflowDisplayStatus>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> (Vec<WorkflowRunSummary>, bool) {
+        let key = WorkflowHistoryIndexKey {
+            canonical_identity_key: canonical_identity_key.to_string(),
+            identity_revision: identity_revision.to_string(),
+            kind,
+            status,
+        };
+        let revision = self.workflow_history_revision.load(Ordering::Acquire);
+        let cached = self
+            .workflow_history_indices
+            .read()
+            .expect("lock poisoned")
+            .get(&key)
+            .filter(|(cached_revision, _)| *cached_revision == revision)
+            .map(|(_, entries)| Arc::clone(entries));
+        let entries = cached.unwrap_or_else(|| {
+            let tasks = self.tasks.read().expect("lock poisoned");
+            let mut entries = tasks
+                .values()
+                .filter_map(|entry| {
+                    let workflow = entry.workflow.as_ref()?;
+                    if workflow.canonical_identity_key != key.canonical_identity_key
+                        || workflow.identity_revision != key.identity_revision
+                        || key.kind.as_ref().is_some_and(|kind| &workflow.kind != kind)
+                    {
+                        return None;
+                    }
+                    let run = workflow.to_run(&entry.task)?;
+                    if key
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| &run.display_status != status)
+                    {
+                        return None;
+                    }
+                    Some(WorkflowHistoryIndexEntry {
+                        started_at: run.started_at,
+                        task_id: run.task_id,
+                    })
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| {
+                right
+                    .started_at
+                    .cmp(&left.started_at)
+                    .then_with(|| right.task_id.cmp(&left.task_id))
+            });
+            let entries = Arc::new(entries);
+            self.workflow_history_indices
+                .write()
+                .expect("lock poisoned")
+                .insert(key.clone(), (revision, Arc::clone(&entries)));
+            entries
+        });
+        let start = after.map_or(0, |cursor| {
+            entries.partition_point(|entry| {
+                (entry.started_at.as_str(), entry.task_id.as_str()) >= cursor
+            })
+        });
+        let end = start.saturating_add(limit).min(entries.len());
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let runs = entries[start..end]
+            .iter()
+            .filter_map(|entry| {
+                let task = tasks.get(&entry.task_id)?;
+                let run = task.workflow.as_ref()?.to_run(&task.task)?;
+                Some(WorkflowRunSummary::from(&run))
+            })
+            .collect();
+        (runs, end < entries.len())
+    }
+
+    fn bump_workflow_history_revision(&self) {
+        self.workflow_history_revision
+            .fetch_add(1, Ordering::AcqRel);
+        self.workflow_history_indices
+            .write()
+            .expect("lock poisoned")
+            .clear();
+    }
+
     fn workflow_persistence_lane(&self, id: &str) -> Arc<Mutex<WorkflowPersistenceLane>> {
         if let Some(lane) = self
             .workflow_persistence_lanes
@@ -1289,6 +1407,7 @@ impl TaskService {
         {
             entry.task.completed_at = Some(entry.task.updated_at.clone());
         }
+        let history_changed = previous_task.status != entry.task.status;
 
         let persisted = PersistedTaskEntry {
             schema_version: PERSISTED_TASK_SCHEMA_VERSION,
@@ -1398,6 +1517,9 @@ impl TaskService {
             }
         }
 
+        if history_changed {
+            self.bump_workflow_history_revision();
+        }
         self.emit(
             crate::models::task::BackendEventType::WorkflowUpdated,
             task.project_id.clone(),
@@ -2509,6 +2631,7 @@ impl TaskService {
         let before = tasks.len();
         let mut removed_ids = Vec::new();
         let mut removed_paths = Vec::new();
+        let mut removed_workflow = false;
         tasks.retain(|id, entry| {
             let is_terminal = matches!(
                 entry.task.status,
@@ -2518,6 +2641,7 @@ impl TaskService {
                     | TaskStatus::Interrupted
             );
             if is_terminal {
+                removed_workflow |= entry.workflow.is_some();
                 removed_ids.push(id.clone());
                 if let Some(path) = &entry.persisted_path {
                     removed_paths.push((id.clone(), path.clone()));
@@ -2547,6 +2671,9 @@ impl TaskService {
             .write()
             .expect("lock poisoned")
             .retain(|id, _| !removed_ids.contains(id));
+        if removed_workflow {
+            self.bump_workflow_history_revision();
+        }
         removed_count
     }
 
@@ -2577,10 +2704,12 @@ impl TaskService {
                 .collect::<Vec<_>>()
         };
         let mut removed_paths = Vec::new();
+        let mut removed_workflow = false;
         {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             for id in &matching_ids {
                 if let Some(entry) = tasks.remove(id) {
+                    removed_workflow |= entry.workflow.is_some();
                     if let Some(path) = entry.persisted_path {
                         removed_paths.push((id.clone(), path));
                     }
@@ -2603,6 +2732,9 @@ impl TaskService {
             .write()
             .expect("lock poisoned")
             .retain(|id, _| !matching_ids.contains(id));
+        if removed_workflow {
+            self.bump_workflow_history_revision();
+        }
         matching_ids.len()
     }
 
@@ -3318,6 +3450,105 @@ mod tests {
             WorkflowStartOutcome::Created { run } => run,
             WorkflowStartOutcome::Existing { .. } => panic!("expected new workflow"),
         }
+    }
+
+    #[test]
+    fn history_pages_reuse_the_ordered_index_across_progress_updates() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let mut created = Vec::new();
+        for index in 0..3 {
+            let mut request = workflow_request(root.path(), None);
+            request.baseline_fingerprint = format!("baseline-{index}");
+            request.execution_options.preparation_revision = format!("prep-{index}");
+            created.push(created_workflow(
+                coordinator.enqueue(&service, request).unwrap(),
+            ));
+        }
+        let identity_key = created[0].canonical_identity_key.clone();
+        let identity_revision = created[0].identity_revision.clone();
+        let (first_page, has_more) =
+            service.page_workflow_runs(&identity_key, &identity_revision, None, None, None, 2);
+        assert_eq!(first_page.len(), 2);
+        assert!(has_more);
+        let index_revision = service.workflow_history_revision.load(Ordering::Acquire);
+
+        service
+            .start_workflow_stage(&created[0].task_id, "read")
+            .unwrap();
+        service
+            .update_workflow_stage_progress(&created[0].task_id, "read", None, 1, Some(3))
+            .unwrap();
+        assert_eq!(
+            service.workflow_history_revision.load(Ordering::Acquire),
+            index_revision,
+            "ordinary progress must not invalidate history ordering",
+        );
+
+        let cursor = first_page.last().unwrap();
+        let (second_page, _) = service.page_workflow_runs(
+            &identity_key,
+            &identity_revision,
+            None,
+            None,
+            Some((&cursor.started_at, &cursor.task_id)),
+            2,
+        );
+        assert_eq!(second_page.len(), 1);
+        assert_ne!(second_page[0].task_id, first_page[0].task_id);
+    }
+
+    #[test]
+    fn removing_a_completed_workflow_invalidates_the_history_index() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let mut created = Vec::new();
+        for index in 0..2 {
+            let mut request = workflow_request(root.path(), None);
+            request.baseline_fingerprint = format!("remove-baseline-{index}");
+            request.execution_options.preparation_revision = format!("remove-prep-{index}");
+            created.push(created_workflow(
+                coordinator.enqueue(&service, request).unwrap(),
+            ));
+        }
+        let identity_key = created[0].canonical_identity_key.clone();
+        let identity_revision = created[0].identity_revision.clone();
+        let first_id = created
+            .iter()
+            .find(|run| run.display_status == WorkflowDisplayStatus::Running)
+            .unwrap()
+            .task_id
+            .clone();
+        service.start_workflow_stage(&first_id, "read").unwrap();
+        service.complete_workflow_stage(&first_id, "read").unwrap();
+        service
+            .complete_workflow(
+                &first_id,
+                WorkflowResult::HealthCheck {
+                    report_id: None,
+                    persistent: false,
+                    error_count: 0,
+                    warning_count: 0,
+                    info_count: 0,
+                },
+            )
+            .unwrap();
+
+        let cached = service
+            .page_workflow_runs(&identity_key, &identity_revision, None, None, None, 2)
+            .0;
+        assert_eq!(cached.len(), 2);
+        let cached_revision = service.workflow_history_revision.load(Ordering::Acquire);
+        assert_eq!(service.remove_completed_for_root(root.path()), 1);
+        assert!(service.workflow_history_revision.load(Ordering::Acquire) > cached_revision);
+
+        let (remaining, has_more) =
+            service.page_workflow_runs(&identity_key, &identity_revision, None, None, None, 1);
+        assert_eq!(remaining.len(), 1);
+        assert_ne!(remaining[0].task_id, first_id);
+        assert!(!has_more);
     }
 
     #[test]

@@ -1611,7 +1611,7 @@ pub fn update_wiki_decision_review(
     project_root: &std::path::Path,
 ) -> Option<WorkflowDecisionReview> {
     let descriptor = load_valid_update_wiki_candidate(task_id, project_root, None)?;
-    update_wiki_decision_review_from_descriptor(project_root, descriptor)
+    update_wiki_decision_review_from_descriptor(project_root, descriptor, true)
 }
 
 pub(crate) fn update_wiki_decision_review_for_workflow(
@@ -1620,12 +1620,62 @@ pub(crate) fn update_wiki_decision_review_for_workflow(
     workflow: &crate::models::workflow::WorkflowExecutionState,
 ) -> Option<WorkflowDecisionReview> {
     let descriptor = load_update_wiki_candidate_for_workflow(task_id, project_root, workflow)?;
-    update_wiki_decision_review_from_descriptor(project_root, descriptor)
+    update_wiki_decision_review_from_descriptor(project_root, descriptor, true)
+}
+
+pub(crate) fn update_wiki_decision_review_summary_for_workflow(
+    task_id: &str,
+    project_root: &std::path::Path,
+    workflow: &crate::models::workflow::WorkflowExecutionState,
+) -> Option<WorkflowDecisionReview> {
+    let descriptor = load_update_wiki_candidate_for_workflow(task_id, project_root, workflow)?;
+    update_wiki_decision_review_from_descriptor(project_root, descriptor, false)
+}
+
+pub(crate) fn update_wiki_file_diff_for_workflow(
+    task_id: &str,
+    project_root: &std::path::Path,
+    workflow: &crate::models::workflow::WorkflowExecutionState,
+    file_id: &str,
+) -> Option<WorkflowFileDiff> {
+    let index = usize::from_str_radix(file_id.strip_prefix("file-")?, 16).ok()?;
+    let descriptor = load_update_wiki_candidate_for_workflow(task_id, project_root, workflow)?;
+    let files = &descriptor.candidate.manifest.files;
+    if let Some(file) = files.get(index) {
+        let diff = CompileService::candidate_diff(&CompileManifest {
+            files: vec![file.clone()],
+            deletions: Vec::new(),
+            summary: descriptor.candidate.manifest.summary.clone(),
+        });
+        return Some(WorkflowFileDiff {
+            file_id: file_id.to_string(),
+            path: file.path.clone(),
+            diff_bytes: diff.len(),
+            diff: Some(diff),
+        });
+    }
+    let deletion = descriptor
+        .candidate
+        .manifest
+        .deletions
+        .get(index.checked_sub(files.len())?)?;
+    let diff = CompileService::candidate_diff(&CompileManifest {
+        files: Vec::new(),
+        deletions: vec![deletion.clone()],
+        summary: descriptor.candidate.manifest.summary.clone(),
+    });
+    Some(WorkflowFileDiff {
+        file_id: file_id.to_string(),
+        path: deletion.clone(),
+        diff_bytes: diff.len(),
+        diff: Some(diff),
+    })
 }
 
 fn update_wiki_decision_review_from_descriptor(
     project_root: &std::path::Path,
     descriptor: PersistedUpdateWikiCandidate,
+    include_diffs: bool,
 ) -> Option<WorkflowDecisionReview> {
     let context = ProjectContext::new("workflow-review", project_root.to_path_buf())
         .with_resolved_layout()
@@ -1653,23 +1703,40 @@ fn update_wiki_decision_review_from_descriptor(
         .manifest
         .files
         .iter()
-        .map(|file| WorkflowFileDiff {
-            path: file.path.clone(),
-            diff: CompileService::candidate_diff(&CompileManifest {
-                files: vec![file.clone()],
-                deletions: Vec::new(),
-                summary: descriptor.candidate.manifest.summary.clone(),
-            }),
+        .map(|file| {
+            let diff = include_diffs.then(|| {
+                CompileService::candidate_diff(&CompileManifest {
+                    files: vec![file.clone()],
+                    deletions: Vec::new(),
+                    summary: descriptor.candidate.manifest.summary.clone(),
+                })
+            });
+            WorkflowFileDiff {
+                file_id: String::new(),
+                path: file.path.clone(),
+                diff_bytes: diff.as_ref().map_or_else(
+                    || candidate_file_diff_len(&file.path, Some(&file.content)),
+                    String::len,
+                ),
+                diff,
+            }
         })
         .collect::<Vec<_>>();
     file_diffs.extend(descriptor.candidate.manifest.deletions.iter().map(|path| {
-        WorkflowFileDiff {
-            path: path.clone(),
-            diff: CompileService::candidate_diff(&CompileManifest {
+        let diff = include_diffs.then(|| {
+            CompileService::candidate_diff(&CompileManifest {
                 files: Vec::new(),
                 deletions: vec![path.clone()],
                 summary: descriptor.candidate.manifest.summary.clone(),
-            }),
+            })
+        });
+        WorkflowFileDiff {
+            file_id: String::new(),
+            path: path.clone(),
+            diff_bytes: diff
+                .as_ref()
+                .map_or_else(|| candidate_file_diff_len(path, None), String::len),
+            diff,
         }
     }));
     Some(WorkflowDecisionReview {
@@ -1678,6 +1745,54 @@ fn update_wiki_decision_review_from_descriptor(
         user_edits_detected,
         file_diffs,
     })
+}
+
+fn candidate_file_diff_len(path: &str, content: Option<&str>) -> usize {
+    let mut bytes = "```diff\n".len() + "```".len();
+    if let Some(content) = content {
+        bytes += "--- ".len()
+            + path.len()
+            + " (current)\n+++ ".len()
+            + path.len()
+            + " (candidate)\n".len();
+        bytes += content
+            .lines()
+            .map(|line| 1 + line.len() + 1)
+            .sum::<usize>();
+    } else {
+        bytes += "--- ".len() + path.len() + "\n+++ /dev/null\n".len();
+    }
+    bytes
+}
+
+#[cfg(test)]
+mod batch6_diff_summary_tests {
+    use super::*;
+
+    #[test]
+    fn summary_diff_lengths_match_materialized_diffs_without_retaining_diff_text() {
+        let file = crate::models::compile::CompileFile::new(
+            "wiki/规模/页面.md",
+            "first line\nsecond line\n",
+        );
+        let materialized = CompileService::candidate_diff(&CompileManifest {
+            files: vec![file.clone()],
+            deletions: Vec::new(),
+            summary: String::new(),
+        });
+        assert_eq!(
+            candidate_file_diff_len(&file.path, Some(&file.content)),
+            materialized.len(),
+        );
+
+        let deletion = "wiki/删除/页面.md";
+        let materialized = CompileService::candidate_diff(&CompileManifest {
+            files: Vec::new(),
+            deletions: vec![deletion.into()],
+            summary: String::new(),
+        });
+        assert_eq!(candidate_file_diff_len(deletion, None), materialized.len());
+    }
 }
 
 pub fn update_wiki_candidate_is_valid_for_workflow(

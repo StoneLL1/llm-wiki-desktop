@@ -6,6 +6,7 @@ import type {
   WorkflowKind,
   WorkflowPreparation,
   WorkflowRun,
+  WorkflowRunSummary,
   WorkflowsOverview,
 } from "../types/workflow";
 
@@ -39,6 +40,7 @@ export interface WorkflowState {
   overview: WorkflowsOverview | null;
   overviewStatus: WorkflowOverviewStatus;
   runs: WorkflowRun[];
+  historyRuns: WorkflowRunSummary[];
   preparation: WorkflowPreparation | null;
   selectedTaskId: string | null;
   surface: WorkflowsSurface;
@@ -52,12 +54,14 @@ export interface WorkflowState {
   reset: () => void;
   setProjectSnapshot: (
     overview: WorkflowsOverview,
-    runs: WorkflowRun[],
+    runs: WorkflowRunSummary[],
     historyCursor: string | null,
   ) => void;
   setOverviewSnapshot: (overview: WorkflowsOverview) => void;
   setOverviewStatus: (status: WorkflowOverviewStatus) => void;
   replaceRuns: (runs: WorkflowRun[]) => void;
+  replaceHistoryPage: (runs: WorkflowRunSummary[], cursor: string | null) => void;
+  appendHistoryPage: (runs: WorkflowRunSummary[], cursor: string | null) => void;
   upsertRun: (run: WorkflowRun) => void;
   upsertRuns: (runs: readonly WorkflowRun[]) => void;
   hydrateDecisionReview: (taskId: string, actionId: string, review: WorkflowDecisionReview) => void;
@@ -81,6 +85,7 @@ const initialState = {
   overview: null,
   overviewStatus: "idle" as WorkflowOverviewStatus,
   runs: [] as WorkflowRun[],
+  historyRuns: [] as WorkflowRunSummary[],
   preparation: null,
   selectedTaskId: null,
   surface: "overview" as WorkflowsSurface,
@@ -106,11 +111,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set((state) => {
       const identityChanged = workflowIdentityChanged(state.overview, overview);
       const identityGuard = identityGuardOf(overview);
+      const legacyFullRuns = runs.filter((run): run is WorkflowRun => "scope" in run);
       return {
         overview,
         identityGuard,
         overviewStatus: "ready" as WorkflowOverviewStatus,
-        runs: sortRuns(mergeRunSnapshots(identityChanged ? [] : state.runs, runs)),
+        runs: sortRuns(mergeRunSnapshots(identityChanged ? [] : state.runs, overview.recentRuns ?? legacyFullRuns)),
+        historyRuns: sortHistoryRuns(runs),
         historyCursor,
         ...(identityChanged
           ? {
@@ -133,6 +140,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         ...(identityChanged
           ? {
               runs: [],
+              historyRuns: [],
               historyCursor: null,
               preparation: null,
               selectedTaskId: null,
@@ -145,22 +153,27 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   setOverviewStatus: (overviewStatus) => set({ overviewStatus }),
   replaceRuns: (runs) =>
     set((state) => ({ runs: sortRuns(mergeRunSnapshots(state.runs, runs)) })),
+  replaceHistoryPage: (runs, historyCursor) =>
+    set(() => ({
+      historyRuns: sortHistoryRuns(runs),
+      historyCursor,
+    })),
+  appendHistoryPage: (runs, historyCursor) =>
+    set((state) => ({
+      historyRuns: sortHistoryRuns(mergeHistorySnapshots(state.historyRuns, runs)),
+      historyCursor,
+    })),
   upsertRun: (run) =>
     set((state) => {
-      const previous = state.runs.find((candidate) => candidate.taskId === run.taskId);
-      if (previous && !shouldAcceptWorkflowRun(previous, run)) return state;
-      return {
-        runs: sortRuns([
-          ...state.runs.filter((candidate) => candidate.taskId !== run.taskId),
-          preserveHydratedDecisionReview(previous, run),
-        ]),
-      };
+      const runs = upsertSortedRun(state.runs, run);
+      return runs === state.runs ? state : { runs };
     }),
   upsertRuns: (incoming) =>
     set((state) => {
       if (incoming.length === 0) return state;
-      const runs = mergeRunSnapshots(state.runs, [...incoming]);
-      return { runs: sortRuns(runs) };
+      let runs = state.runs;
+      for (const run of incoming) runs = upsertSortedRun(runs, run);
+      return runs === state.runs ? state : { runs };
     }),
   hydrateDecisionReview: (taskId, actionId, decisionReview) =>
     set((state) => {
@@ -206,7 +219,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     };
   }),
   setHistoryFilters: (historyKind, historyStatus) =>
-    set({ historyKind, historyStatus }),
+    set({ historyKind, historyStatus, historyRuns: [], historyCursor: null }),
   setHistoryCursor: (historyCursor) => set({ historyCursor }),
   beginOperation: (key) => {
     const requestId = ++workflowOperationSequence;
@@ -271,6 +284,19 @@ function sortRuns(runs: WorkflowRun[]): WorkflowRun[] {
   return [...runs].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
+function sortHistoryRuns(runs: WorkflowRunSummary[]): WorkflowRunSummary[] {
+  return [...runs].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+}
+
+function mergeHistorySnapshots(
+  current: WorkflowRunSummary[],
+  incoming: WorkflowRunSummary[],
+): WorkflowRunSummary[] {
+  const merged = new Map(current.map((run) => [run.taskId, run]));
+  for (const run of incoming) merged.set(run.taskId, run);
+  return [...merged.values()];
+}
+
 function mergeRunSnapshots(current: WorkflowRun[], incoming: WorkflowRun[]): WorkflowRun[] {
   const merged = new Map(current.map((run) => [run.taskId, run]));
   for (const run of incoming) {
@@ -280,6 +306,31 @@ function mergeRunSnapshots(current: WorkflowRun[], incoming: WorkflowRun[]): Wor
     }
   }
   return [...merged.values()];
+}
+
+function upsertSortedRun(current: WorkflowRun[], incoming: WorkflowRun): WorkflowRun[] {
+  const previousIndex = current.findIndex((candidate) => candidate.taskId === incoming.taskId);
+  const previous = previousIndex >= 0 ? current[previousIndex] : undefined;
+  if (previous && !shouldAcceptWorkflowRun(previous, incoming)) return current;
+  const accepted = preserveHydratedDecisionReview(previous, incoming);
+  if (previous && previous.updatedAt === accepted.updatedAt) {
+    const next = [...current];
+    next[previousIndex] = accepted;
+    return next;
+  }
+  const next = previousIndex >= 0
+    ? [...current.slice(0, previousIndex), ...current.slice(previousIndex + 1)]
+    : [...current];
+  const acceptedTime = Date.parse(accepted.updatedAt);
+  let low = 0;
+  let high = next.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Date.parse(next[middle].updatedAt) < acceptedTime) high = middle;
+    else low = middle + 1;
+  }
+  next.splice(low, 0, accepted);
+  return next;
 }
 
 const TERMINAL_WORKFLOW_STATUSES = new Set<WorkflowRun["displayStatus"]>([

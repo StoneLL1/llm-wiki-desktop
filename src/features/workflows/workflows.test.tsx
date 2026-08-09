@@ -1,13 +1,17 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const i18nMocks = vi.hoisted(() => ({
   t: (key: string) => key,
 }));
+const workflowApiMocks = vi.hoisted(() => ({ getWorkflowFileDiff: vi.fn() }));
 
 vi.mock("react-i18next", () => ({
   initReactI18next: { type: "3rdParty", init: vi.fn() },
   useTranslation: () => ({ t: (key: string) => i18nMocks.t(key) }),
+}));
+vi.mock("../../services/workflowApi", () => ({
+  getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
 }));
 
 import type { WorkflowPreparation, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
@@ -43,6 +47,7 @@ const overview: WorkflowsOverview = {
 afterEach(() => {
   i18nMocks.t = (key: string) => key;
   useWorkflowStore.getState().reset();
+  workflowApiMocks.getWorkflowFileDiff.mockReset();
 });
 
 describe("Workflows overview", () => {
@@ -473,6 +478,57 @@ describe("Workflows overview", () => {
     ] as never);
     expect(groups).toHaveLength(1);
     expect(groups[0]?.runs.map((run) => run.taskId)).toEqual(["first", "retry"]);
+  });
+
+  it("loads one guarded diff page only when its disclosure opens", async () => {
+    workflowApiMocks.getWorkflowFileDiff.mockResolvedValue({
+      fileId: "file-00000000",
+      path: "wiki/中文/长路径.md",
+      diff: "@@ first chunk @@",
+      nextCursor: null,
+      truncated: false,
+    });
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const waiting = {
+      schemaVersion: 1, taskId: "waiting-diff", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
+      pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/中文/长路径.md"], candidate: { kind: "task_owned", candidateId: "candidate-a" }, expiresAt: null, checkpointHash: null },
+      decisionReview: { reason: "review", counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [{ fileId: "file-00000000", path: "wiki/中文/长路径.md", diffBytes: 300_000, diff: null }] },
+      result: null, error: null, startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
+    } satisfies WorkflowRun;
+
+    const view = render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(workflowApiMocks.getWorkflowFileDiff).not.toHaveBeenCalled();
+    expect(view.container.querySelectorAll(".workflow-file-diff pre")).toHaveLength(0);
+
+    fireEvent.click(view.container.querySelector(".workflow-file-diff summary")!);
+
+    await waitFor(() => expect(workflowApiMocks.getWorkflowFileDiff).toHaveBeenCalledTimes(1));
+    expect(workflowApiMocks.getWorkflowFileDiff).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "waiting-diff",
+      pendingActionId: "action-a",
+      fileId: "file-00000000",
+      cursor: null,
+      limitBytes: 64 * 1024,
+    }));
+    expect(await screen.findByText("@@ first chunk @@")).toBeInTheDocument();
+  });
+
+  it("groups 10,000 attempts in linear time while preserving stable attempt order", () => {
+    const startedAt = performance.now();
+    const attempts = Array.from({ length: 10_000 }, (_, index) => ({
+      taskId: index === 0 ? "first" : `retry-${index}`,
+      updatedAt: `2026-08-01T00:${String(index % 60).padStart(2, "0")}:00Z`,
+      retry: index === 0 ? null : { attemptOf: "first", attemptNumber: index + 1 },
+    })) as WorkflowRun[];
+
+    const groups = groupWorkflowAttempts(attempts);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.runs).toHaveLength(10_000);
+    expect(groups[0]?.runs[0]?.taskId).toBe("first");
+    expect(groups[0]?.runs.at(-1)?.taskId).toBe("retry-9999");
+    expect(performance.now() - startedAt).toBeLessThan(200);
   });
 });
 

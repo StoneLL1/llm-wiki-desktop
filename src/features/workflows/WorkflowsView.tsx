@@ -22,6 +22,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const overview = useWorkflowStore((state) => state.overview);
   const overviewStatus = useWorkflowStore((state) => state.overviewStatus);
   const runs = useWorkflowStore((state) => state.runs);
+  const historyRuns = useWorkflowStore((state) => state.historyRuns);
   const preparation = useWorkflowStore((state) => state.preparation);
   const selectedTaskId = useWorkflowStore((state) => state.selectedTaskId);
   const surface = useWorkflowStore((state) => state.surface);
@@ -93,7 +94,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const content = !overview
     ? overviewView
     : surface === "history"
-      ? <WorkflowHistoryView runs={runs} onBack={controller.backToOverview} onOpen={(taskId) => void controller.openRun(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
+      ? <WorkflowHistoryView runs={historyRuns} onBack={controller.backToOverview} onFilter={(kind, status) => void controller.filterHistory(kind, status)} onOpen={(taskId) => void controller.openRun(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
       : surface === "preparation" && preparation
         ? <WorkflowPreparationView preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onReprepare={(scope, route) => void controller.prepare(preparation.kind, scope, route)} onStart={(restricted, remote) => void controller.startPrepared(restricted, remote)} />
         : surface === "detail" && selectedRun
