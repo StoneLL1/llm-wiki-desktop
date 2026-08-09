@@ -1296,6 +1296,113 @@ impl TaskService {
         Ok(updated)
     }
 
+    pub(crate) fn finalize_workflow_cancellation(&self, id: &str) -> Result<WorkflowRun, String> {
+        self.mutate_workflow(id, |task, workflow| {
+            if matches!(
+                task.status,
+                TaskStatus::Succeeded
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Interrupted
+            ) {
+                return Ok(());
+            }
+            if task.status != TaskStatus::Cancelling || !self.cancellation.is_cancelled(id) {
+                return Err(format!(
+                    "Workflow cancellation has not reached a finalizable state: {id}"
+                ));
+            }
+            task.status = TaskStatus::Cancelled;
+            task.cancellable = false;
+            workflow.pending_action = None;
+            workflow.queue_position = None;
+            workflow.continuation_required = false;
+            workflow.error = None;
+            for stage in &mut workflow.stages {
+                stage.decision = None;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn reject_workflow_dispatch(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        error: WorkflowErrorSummary,
+    ) -> Result<WorkflowRun, String> {
+        self.reject_workflow_execution(id, status, error, false)
+    }
+
+    pub(crate) fn interrupt_workflow_confirmation(
+        &self,
+        id: &str,
+        error: WorkflowErrorSummary,
+    ) -> Result<WorkflowRun, String> {
+        self.reject_workflow_execution(id, TaskStatus::Interrupted, error, true)
+    }
+
+    fn reject_workflow_execution(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        error: WorkflowErrorSummary,
+        allow_waiting_confirmation: bool,
+    ) -> Result<WorkflowRun, String> {
+        if !matches!(status, TaskStatus::Failed | TaskStatus::Interrupted) {
+            return Err("Dispatch rejection must use Failed or Interrupted".into());
+        }
+        let cancellation = self.cancellation.get(id);
+        self.mutate_workflow(id, |task, workflow| {
+            if cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(format!("Workflow cancellation was requested: {id}"));
+            }
+            let eligible = task.status == TaskStatus::Running
+                || (allow_waiting_confirmation
+                    && task.status == TaskStatus::WaitingForConfirmation);
+            if !eligible {
+                return Err(format!(
+                    "Workflow is not rejectable from its current state: {id}"
+                ));
+            }
+            let now = Utc::now().to_rfc3339();
+            let stage_index = workflow
+                .current_stage_id
+                .as_deref()
+                .and_then(|current| workflow.stages.iter().position(|stage| stage.id == current))
+                .or_else(|| {
+                    workflow
+                        .stages
+                        .iter()
+                        .position(|stage| stage.status == WorkflowStageStatus::Pending)
+                });
+            if let Some(stage_index) = stage_index {
+                let stage = &mut workflow.stages[stage_index];
+                stage.status = WorkflowStageStatus::Failed;
+                stage.started_at.get_or_insert_with(|| now.clone());
+                stage.completed_at = Some(now);
+                stage.decision = None;
+                workflow.current_stage_id = Some(stage.id.clone());
+            }
+            workflow.pending_action = None;
+            workflow.queue_position = None;
+            workflow.continuation_required = false;
+            workflow.error = Some(error.clone());
+            task.error = Some(crate::errors::BackendError::new(
+                error.code.clone(),
+                error.message_key.clone(),
+                error.recoverable,
+                error.user_action_required,
+            ));
+            task.status = status.clone();
+            task.cancellable = false;
+            Ok(())
+        })
+    }
+
     /// Trust revocation cancels only active workflow execution for the
     /// asserted project root. Queued runs remain queued and must pass a fresh
     /// authority check before dispatch.

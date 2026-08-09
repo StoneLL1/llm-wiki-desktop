@@ -3,11 +3,12 @@ use tauri::State;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::confirmation::{ConfirmationExecution, ConfirmationStatus, PendingActionType};
+use crate::models::confirmation::{ConfirmationExecution, PendingActionType};
 use crate::models::workflow::{
-    WorkflowDecisionCounts, WorkflowDecisionReview, WorkflowDisplayStatus, WorkflowFileDiff,
-    WorkflowKind, WorkflowPreparation, WorkflowRouteSelection, WorkflowRun, WorkflowRunPage,
-    WorkflowScope, WorkflowStartOutcome, WorkflowsOverview,
+    WorkflowDecisionCounts, WorkflowDecisionReview, WorkflowDisplayStatus, WorkflowErrorSummary,
+    WorkflowFileDiff, WorkflowKind, WorkflowPreparation, WorkflowPrerequisiteAction,
+    WorkflowRouteSelection, WorkflowRun, WorkflowRunPage, WorkflowScope, WorkflowStartOutcome,
+    WorkflowsOverview,
 };
 use crate::services::{
     resolve_workflow_persistence_binding, restore_generate_content_confirmation,
@@ -132,8 +133,8 @@ pub fn start_workflow(
     request: StartWorkflowRequest,
 ) -> Result<WorkflowStartOutcome, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.with_workflow_access(&context, |access| {
-        state.workflow_service.start_with_acknowledgements(
+    let outcome = state.with_workflow_access(&context, |access| {
+        state.workflow_service.enqueue_with_acknowledgements(
             &context,
             access,
             &state.settings_service,
@@ -145,7 +146,15 @@ pub fn start_workflow(
             request.acknowledge_restricted_content,
             request.acknowledge_remote_provider,
         )
-    })
+    })?;
+    if let WorkflowStartOutcome::Created { run } = &outcome {
+        if run.display_status == WorkflowDisplayStatus::Running {
+            state
+                .workflow_service
+                .dispatch_claimed_run(&state.task_service, run)?;
+        }
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -199,6 +208,31 @@ pub fn list_workflow_runs(
     let limit = request.limit.clamp(1, 100);
     let has_more = runs.len() > limit;
     runs.truncate(limit);
+    let next_runs = state.with_workflow_access(&context, |_| {
+        let mut next_runs = Vec::new();
+        for run in &mut runs {
+            let Some(pending) = run.pending_action.clone() else {
+                continue;
+            };
+            match hydrate_workflow_confirmation(&state, &context, run, &pending) {
+                Ok(review) => run.decision_review = Some(review),
+                Err(error) => {
+                    let (interrupted, next) =
+                        interrupt_unconfirmable_workflow(&state, &context, run, &pending, error)?;
+                    *run = interrupted;
+                    if let Some(next) = next {
+                        next_runs.push(next);
+                    }
+                }
+            }
+        }
+        Ok(next_runs)
+    })?;
+    for next in next_runs {
+        state
+            .workflow_service
+            .dispatch_claimed_run(&state.task_service, &next)?;
+    }
     let next_cursor = has_more
         .then(|| {
             runs.last()
@@ -215,76 +249,163 @@ pub fn get_workflow_run(
 ) -> Result<WorkflowRun, BackendError> {
     let context = require_workflow_project(&state, &request)?;
     let mut run = workflow_run(&state, &request.task_id)?;
-    if let Some(pending) = run.pending_action.as_ref() {
-        match &run.kind {
-            WorkflowKind::UpdateWiki => restore_update_wiki_confirmation(
-                &context,
-                &run,
-                &state.task_service,
-                &state.confirmation_registry,
-            )?,
-            WorkflowKind::GenerateContent => restore_generate_content_confirmation(
-                &context,
-                &run,
-                &state.task_service,
-                &state.confirmation_registry,
-            )?,
-            WorkflowKind::HealthCheck => {}
+    let next = if let Some(pending) = run.pending_action.clone() {
+        state.with_workflow_access(&context, |_| {
+            match hydrate_workflow_confirmation(&state, &context, &run, &pending) {
+                Ok(review) => {
+                    run.decision_review = Some(review);
+                    Ok(None)
+                }
+                Err(error) => {
+                    let (interrupted, next) =
+                        interrupt_unconfirmable_workflow(&state, &context, &run, &pending, error)?;
+                    run = interrupted;
+                    Ok(next)
+                }
+            }
+        })?
+    } else {
+        None
+    };
+    if let Some(next) = next {
+        state
+            .workflow_service
+            .dispatch_claimed_run(&state.task_service, &next)?;
+    }
+    Ok(run)
+}
+
+pub(crate) fn interrupt_unconfirmable_workflow(
+    state: &AppState,
+    context: &crate::models::paths::ProjectContext,
+    run: &WorkflowRun,
+    pending: &crate::models::workflow::WorkflowPendingAction,
+    error: BackendError,
+) -> Result<(WorkflowRun, Option<WorkflowRun>), BackendError> {
+    let _ = state
+        .confirmation_registry
+        .cancel_workflow_binding(context, run, pending);
+    match &run.kind {
+        WorkflowKind::UpdateWiki => {
+            let _ = crate::services::discard_update_wiki_candidate(&run.task_id);
         }
-        let stored = state.confirmation_registry.peek(&pending.id)?;
-        let affected = stored.action.affected_paths.len() as u32;
-        let counts = match stored.action.action_type {
-            PendingActionType::OverwriteFile => WorkflowDecisionCounts {
-                overwritten: affected,
-                ..WorkflowDecisionCounts::default()
+        WorkflowKind::GenerateContent => {
+            let _ = crate::services::discard_generate_content_candidate(&run.task_id);
+        }
+        WorkflowKind::HealthCheck => {}
+    }
+    state
+        .workflow_service
+        .coordinator
+        .interrupt_invalid_confirmation(
+            &state.task_service,
+            &run.task_id,
+            WorkflowErrorSummary {
+                code: error.code,
+                message_key: error.message,
+                recoverable: false,
+                user_action_required: true,
+                suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
             },
-            PendingActionType::DeleteFile => WorkflowDecisionCounts {
-                deleted: affected,
-                ..WorkflowDecisionCounts::default()
-            },
-            _ => WorkflowDecisionCounts {
-                modified: affected,
-                ..WorkflowDecisionCounts::default()
-            },
-        };
-        let file_diffs = stored
-            .action
-            .preview
-            .as_ref()
-            .and_then(|preview| preview.diff.as_ref())
-            .map(|diff| {
-                vec![WorkflowFileDiff {
-                    path: stored
-                        .action
-                        .affected_paths
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "candidate".into()),
-                    diff: diff.clone(),
-                }]
-            })
-            .unwrap_or_default();
-        let generic_review = WorkflowDecisionReview {
+        )
+        .map_err(|message| workflow_error("WORKFLOW_CONFIRMATION_RECOVERY_FAILED", message))
+}
+
+fn hydrate_workflow_confirmation(
+    state: &AppState,
+    context: &crate::models::paths::ProjectContext,
+    run: &WorkflowRun,
+    pending: &crate::models::workflow::WorkflowPendingAction,
+) -> Result<WorkflowDecisionReview, BackendError> {
+    match &run.kind {
+        WorkflowKind::UpdateWiki => restore_update_wiki_confirmation(
+            context,
+            run,
+            &state.task_service,
+            &state.confirmation_registry,
+        )?,
+        WorkflowKind::GenerateContent => restore_generate_content_confirmation(
+            context,
+            run,
+            &state.task_service,
+            &state.confirmation_registry,
+        )?,
+        WorkflowKind::HealthCheck => {}
+    }
+    let stored = state.confirmation_registry.peek(&pending.id)?;
+    if !crate::models::confirmation::workflow_execution_matches(
+        &run.kind,
+        stored.execution.as_ref(),
+        context,
+        run,
+        pending,
+    ) {
+        return Err(workflow_error(
+            "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
+            "The confirmation execution plan does not match this workflow run.",
+        ));
+    }
+    let affected = stored.action.affected_paths.len() as u32;
+    let counts = match stored.action.action_type {
+        PendingActionType::OverwriteFile => WorkflowDecisionCounts {
+            overwritten: affected,
+            ..WorkflowDecisionCounts::default()
+        },
+        PendingActionType::DeleteFile => WorkflowDecisionCounts {
+            deleted: affected,
+            ..WorkflowDecisionCounts::default()
+        },
+        _ => WorkflowDecisionCounts {
+            modified: affected,
+            ..WorkflowDecisionCounts::default()
+        },
+    };
+    let file_diffs = stored
+        .action
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.diff.as_ref())
+        .map(|diff| {
+            vec![WorkflowFileDiff {
+                path: stored
+                    .action
+                    .affected_paths
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "candidate".into()),
+                diff: diff.clone(),
+            }]
+        })
+        .unwrap_or_default();
+    if run.kind == WorkflowKind::UpdateWiki {
+        let workflow = state
+            .task_service
+            .workflow_execution_state(&run.task_id)
+            .ok_or_else(|| {
+                workflow_error(
+                    "WORKFLOW_CANDIDATE_STALE",
+                    "The persisted workflow candidate is no longer valid.",
+                )
+            })?;
+        crate::services::update_wiki_decision_review_for_workflow(
+            &run.task_id,
+            &context.root,
+            &workflow,
+        )
+        .ok_or_else(|| {
+            workflow_error(
+                "WORKFLOW_CANDIDATE_STALE",
+                "The persisted workflow candidate is no longer valid.",
+            )
+        })
+    } else {
+        Ok(WorkflowDecisionReview {
             reason: stored.action.message,
             counts,
             user_edits_detected: stored.action.action_type == PendingActionType::MergeConflict,
             file_diffs,
-        };
-        run.decision_review = if run.kind == WorkflowKind::UpdateWiki {
-            Some(
-                crate::services::update_wiki_decision_review(&run.task_id, &context.root)
-                    .ok_or_else(|| {
-                        workflow_error(
-                            "WORKFLOW_CANDIDATE_STALE",
-                            "The persisted workflow candidate is no longer valid.",
-                        )
-                    })?,
-            )
-        } else {
-            Some(generic_review)
-        };
+        })
     }
-    Ok(run)
 }
 
 #[tauri::command]
@@ -292,8 +413,12 @@ pub fn cancel_workflow_run(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
-    require_workflow_project(&state, &request)?;
-    cancel_or_discard_workflow(&state, &request.task_id, false)
+    let context = require_workflow_project(&state, &request)?;
+    let (run, next) = state.with_workflow_access(&context, |_| {
+        cancel_or_discard_workflow(&state, &context, &request.task_id, false)
+    })?;
+    dispatch_next(&state, next)?;
+    Ok(run)
 }
 
 #[tauri::command]
@@ -393,7 +518,9 @@ pub(crate) fn retry_workflow_for_state(
         WorkflowStartOutcome::Created { run } | WorkflowStartOutcome::Existing { run } => run,
     };
     if matches!(outcome, WorkflowStartOutcome::Created { .. }) {
-        state.workflow_service.dispatch_claimed_run(run)?;
+        state
+            .workflow_service
+            .dispatch_claimed_run(&state.task_service, run)?;
     }
     Ok(outcome)
 }
@@ -483,7 +610,7 @@ pub fn confirm_workflow_action(
     };
     let context = require_workflow_project(&state, &run_request)?;
     let run = workflow_run(&state, &run_request.task_id)?;
-    let pending = run.pending_action.as_ref().ok_or_else(|| {
+    let pending = run.pending_action.clone().ok_or_else(|| {
         workflow_error(
             "WORKFLOW_CONFIRMATION_NOT_FOUND",
             "The workflow is not waiting for a confirmation.",
@@ -510,27 +637,59 @@ pub fn confirm_workflow_action(
         }
         state.require_workflow_content_write_root(&context, &run.kind)?;
         let stored = state.confirmation_registry.claim(&request.action_id)?;
-        if !confirmation_execution_matches(
+        if !crate::models::confirmation::workflow_execution_matches(
             &run.kind,
             stored.execution.as_ref(),
             &context,
-            &run_request.task_id,
+            &run,
+            &pending,
         ) {
             let _ = state
                 .confirmation_registry
                 .finish_claim(&request.action_id, false);
-            return Err(workflow_error(
-                "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
-                "The confirmation execution plan does not match this workflow run.",
-            ));
+            let _ = state
+                .confirmation_registry
+                .cancel_workflow_binding(&context, &run, &pending);
+            match &run.kind {
+                WorkflowKind::UpdateWiki => {
+                    let _ = crate::services::discard_update_wiki_candidate(&run.task_id);
+                }
+                WorkflowKind::GenerateContent => {
+                    let _ = crate::services::discard_generate_content_candidate(&run.task_id);
+                }
+                WorkflowKind::HealthCheck => {}
+            }
+            let (_, next) = state
+                .workflow_service
+                .coordinator
+                .interrupt_invalid_confirmation(
+                    &state.task_service,
+                    &run.task_id,
+                    WorkflowErrorSummary {
+                        code: "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH".into(),
+                        message_key: "workflows.error.prepareAgain".into(),
+                        recoverable: false,
+                        user_action_required: true,
+                        suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
+                    },
+                )
+                .map_err(|message| workflow_error("WORKFLOW_CONFIRMATION_FAILED", message))?;
+            return Ok(Err((
+                workflow_error(
+                    "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
+                    "The confirmation execution plan does not match this workflow run.",
+                ),
+                next,
+            )));
         }
-        let execution_result = match (run.kind, stored.execution) {
+        let execution_result = match (run.kind.clone(), stored.execution) {
             (
                 WorkflowKind::GenerateContent,
                 Some(ConfirmationExecution::GenerateContentOverwrite {
                     project_id,
                     root_path,
                     task_id,
+                    ..
                 }),
             ) if project_id == context.project_id
                 && root_path == context.root.to_string_lossy()
@@ -551,6 +710,7 @@ pub fn confirm_workflow_action(
                     project_id,
                     root_path,
                     task_id,
+                    ..
                 }),
             ) if project_id == context.project_id
                 && root_path == context.root.to_string_lossy()
@@ -620,8 +780,12 @@ pub fn discard_workflow_result(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
-    require_workflow_project(&state, &request)?;
-    cancel_or_discard_workflow(&state, &request.task_id, true)
+    let context = require_workflow_project(&state, &request)?;
+    let (run, next) = state.with_workflow_access(&context, |_| {
+        cancel_or_discard_workflow(&state, &context, &request.task_id, true)
+    })?;
+    dispatch_next(&state, next)?;
+    Ok(run)
 }
 
 fn require_workflow_project(
@@ -669,12 +833,12 @@ fn workflow_run(state: &AppState, task_id: &str) -> Result<WorkflowRun, BackendE
 
 fn cancel_or_discard_workflow(
     state: &AppState,
+    context: &crate::models::paths::ProjectContext,
     task_id: &str,
     require_waiting: bool,
-) -> Result<WorkflowRun, BackendError> {
+) -> Result<(WorkflowRun, Option<WorkflowRun>), BackendError> {
     let before = workflow_run(state, task_id)?;
-    let was_waiting = before.display_status == WorkflowDisplayStatus::WaitingForConfirmation;
-    if require_waiting && !was_waiting {
+    if require_waiting && before.display_status != WorkflowDisplayStatus::WaitingForConfirmation {
         return Err(workflow_error(
             "WORKFLOW_RESULT_NOT_DISCARDABLE",
             "Only a workflow result waiting for confirmation can be discarded.",
@@ -685,11 +849,17 @@ fn cancel_or_discard_workflow(
         .coordinator
         .cancel(&state.task_service, task_id)
         .map_err(|message| workflow_error("WORKFLOW_CANCEL_FAILED", message))?;
-    if was_waiting {
-        if let Some(action) = before.pending_action {
-            let _ = state
+    let cancelling = workflow_run(state, task_id)?;
+    if let Some(action) = cancelling.pending_action.as_ref() {
+        if let Err(error) =
+            state
                 .confirmation_registry
-                .confirm(&action.id, ConfirmationStatus::Cancelled);
+                .cancel_workflow_binding(context, &cancelling, action)
+        {
+            if error.code == "CONFIRMATION_IN_USE" {
+                return Ok((cancelling, None));
+            }
+            return Err(error);
         }
         let _ = crate::services::discard_update_wiki_candidate(task_id);
         let _ = crate::services::discard_generate_content_candidate(task_id);
@@ -698,10 +868,9 @@ fn cancel_or_discard_workflow(
             .coordinator
             .finish_cancelled_and_claim_next(&state.task_service, task_id)
             .map_err(|message| workflow_error("WORKFLOW_CANCEL_FAILED", message))?;
-        dispatch_next(state, next)?;
-        return Ok(cancelled);
+        return Ok((cancelled, next));
     }
-    workflow_run(state, task_id)
+    Ok((cancelling, None))
 }
 
 fn generate_content_services(state: &AppState) -> GenerateContentExecutionServices<'_> {
@@ -719,41 +888,11 @@ fn generate_content_services(state: &AppState) -> GenerateContentExecutionServic
     }
 }
 
-fn confirmation_execution_matches(
-    kind: &WorkflowKind,
-    execution: Option<&ConfirmationExecution>,
-    context: &crate::models::paths::ProjectContext,
-    task_id: &str,
-) -> bool {
-    let matches_binding = |project_id: &str, root_path: &str, bound_task_id: &str| {
-        project_id == context.project_id
-            && root_path == context.root.to_string_lossy()
-            && bound_task_id == task_id
-    };
-    match (kind, execution) {
-        (
-            WorkflowKind::GenerateContent,
-            Some(ConfirmationExecution::GenerateContentOverwrite {
-                project_id,
-                root_path,
-                task_id,
-            }),
-        ) => matches_binding(project_id, root_path, task_id),
-        (
-            WorkflowKind::UpdateWiki,
-            Some(ConfirmationExecution::UpdateWikiReview {
-                project_id,
-                root_path,
-                task_id,
-            }),
-        ) => matches_binding(project_id, root_path, task_id),
-        _ => false,
-    }
-}
-
 fn dispatch_next(state: &AppState, next: Option<WorkflowRun>) -> Result<(), BackendError> {
     if let Some(next) = next {
-        state.workflow_service.dispatch_claimed_run(&next)?;
+        state
+            .workflow_service
+            .dispatch_claimed_run(&state.task_service, &next)?;
     }
     Ok(())
 }

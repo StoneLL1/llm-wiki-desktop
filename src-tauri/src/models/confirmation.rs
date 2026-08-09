@@ -161,12 +161,20 @@ pub enum ConfirmationExecution {
     GenerateContentOverwrite {
         project_id: String,
         root_path: String,
+        canonical_identity_key: String,
+        identity_revision: String,
         task_id: String,
+        action_id: String,
+        candidate: crate::models::workflow::WorkflowCandidateReference,
     },
     UpdateWikiReview {
         project_id: String,
         root_path: String,
+        canonical_identity_key: String,
+        identity_revision: String,
         task_id: String,
+        action_id: String,
+        candidate: crate::models::workflow::WorkflowCandidateReference,
     },
     DeleteWikiPage {
         project_id: String,
@@ -217,9 +225,6 @@ impl ConfirmationRegistry {
     ) -> Result<(), BackendError> {
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let executing = self.executing.lock().map_err(|_| registry_locked())?;
-        if executing.contains(&action.id) {
-            return Err(confirmation_in_use(&action.id));
-        }
         if let Some(existing) = actions.get_mut(&action.id) {
             if existing.action.action_type != action.action_type
                 || existing.action.risk_level != action.risk_level
@@ -229,12 +234,22 @@ impl ConfirmationRegistry {
             {
                 return Err(confirmation_id_conflict(&action.id));
             }
+            if executing.contains(&action.id) {
+                return if existing.execution.as_ref() == Some(&execution) {
+                    Ok(())
+                } else {
+                    Err(confirmation_in_use(&action.id))
+                };
+            }
 
             // The persisted action remains authoritative. Reopening the same
             // canonical root may only refresh the runtime project id carried
             // by an otherwise identical execution binding.
             existing.execution = Some(execution);
             return Ok(());
+        }
+        if executing.contains(&action.id) {
+            return Err(confirmation_in_use(&action.id));
         }
         actions.insert(
             action.id.clone(),
@@ -388,6 +403,137 @@ impl ConfirmationRegistry {
             .with_details(serde_json::json!({ "actionId": action_id }))
         })
     }
+
+    /// Remove a workflow confirmation only when the complete persisted/runtime
+    /// binding still belongs to the asserted run. A colliding foreign action id
+    /// is deliberately left untouched.
+    pub fn cancel_workflow_binding(
+        &self,
+        context: &crate::models::paths::ProjectContext,
+        run: &crate::models::workflow::WorkflowRun,
+        pending: &crate::models::workflow::WorkflowPendingAction,
+    ) -> Result<bool, BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        let executing = self.executing.lock().map_err(|_| registry_locked())?;
+        let matches = actions.get(&pending.id).is_some_and(|stored| {
+            stored.action.id == pending.id
+                && stored.action.action_type == pending.action_type
+                && stored.action.risk_level == pending.risk_level
+                && stored.action.affected_paths == pending.affected_paths
+                && stored.action.checkpoint_hash == pending.checkpoint_hash
+                && workflow_execution_matches(
+                    &run.kind,
+                    stored.execution.as_ref(),
+                    context,
+                    run,
+                    pending,
+                )
+        });
+        if !matches {
+            return Ok(false);
+        }
+        if executing.contains(&pending.id) {
+            self.cancel_requested
+                .lock()
+                .map_err(|_| registry_locked())?
+                .insert(pending.id.clone());
+            return Err(confirmation_in_use(&pending.id));
+        }
+        if matches {
+            actions.remove(&pending.id);
+        }
+        Ok(matches)
+    }
+
+    /// Removes only the exact workflow action published by a runner. This is
+    /// used when publication succeeds but the task cannot enter its waiting
+    /// state (for example because cancellation won the race).
+    pub fn remove_exact_execution(
+        &self,
+        action_id: &str,
+        execution: &ConfirmationExecution,
+    ) -> Result<bool, BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        let executing = self.executing.lock().map_err(|_| registry_locked())?;
+        if executing.contains(action_id) {
+            return Err(confirmation_in_use(action_id));
+        }
+        let matches = actions
+            .get(action_id)
+            .is_some_and(|stored| stored.execution.as_ref() == Some(execution));
+        if matches {
+            actions.remove(action_id);
+        }
+        Ok(matches)
+    }
+}
+
+pub fn workflow_execution_matches(
+    kind: &crate::models::workflow::WorkflowKind,
+    execution: Option<&ConfirmationExecution>,
+    context: &crate::models::paths::ProjectContext,
+    run: &crate::models::workflow::WorkflowRun,
+    pending: &crate::models::workflow::WorkflowPendingAction,
+) -> bool {
+    let matches_binding =
+        |project_id: &str,
+         root_path: &str,
+         identity_key: &str,
+         identity_revision: &str,
+         bound_task_id: &str,
+         action_id: &str,
+         candidate: &crate::models::workflow::WorkflowCandidateReference| {
+            project_id == context.project_id
+                && canonical_roots_match(root_path, &context.root.to_string_lossy())
+                && identity_key == run.canonical_identity_key
+                && identity_revision == run.identity_revision
+                && bound_task_id == run.task_id
+                && action_id == pending.id
+                && pending.candidate.as_ref() == Some(candidate)
+        };
+    match (kind, execution) {
+        (
+            crate::models::workflow::WorkflowKind::GenerateContent,
+            Some(ConfirmationExecution::GenerateContentOverwrite {
+                project_id,
+                root_path,
+                canonical_identity_key,
+                identity_revision,
+                task_id,
+                action_id,
+                candidate,
+            }),
+        ) => matches_binding(
+            project_id,
+            root_path,
+            canonical_identity_key,
+            identity_revision,
+            task_id,
+            action_id,
+            candidate,
+        ),
+        (
+            crate::models::workflow::WorkflowKind::UpdateWiki,
+            Some(ConfirmationExecution::UpdateWikiReview {
+                project_id,
+                root_path,
+                canonical_identity_key,
+                identity_revision,
+                task_id,
+                action_id,
+                candidate,
+            }),
+        ) => matches_binding(
+            project_id,
+            root_path,
+            canonical_identity_key,
+            identity_revision,
+            task_id,
+            action_id,
+            candidate,
+        ),
+        _ => false,
+    }
 }
 
 fn registry_locked() -> BackendError {
@@ -423,30 +569,93 @@ fn restoration_binding_matches(
     existing: Option<&ConfirmationExecution>,
     replacement: &ConfirmationExecution,
 ) -> bool {
-    let same_root_and_task = |existing_root: &str, existing_task: &str, root: &str, task: &str| {
-        existing_task == task && canonical_roots_match(existing_root, root)
-    };
+    let same_binding =
+        |existing_root: &str,
+         existing_identity_key: &str,
+         existing_revision: &str,
+         existing_task: &str,
+         existing_action: &str,
+         existing_candidate: &crate::models::workflow::WorkflowCandidateReference,
+         root: &str,
+         identity_key: &str,
+         revision: &str,
+         task: &str,
+         action: &str,
+         candidate: &crate::models::workflow::WorkflowCandidateReference| {
+            existing_identity_key == identity_key
+                && existing_revision == revision
+                && existing_task == task
+                && existing_action == action
+                && existing_candidate == candidate
+                && canonical_roots_match(existing_root, root)
+        };
     match (existing, replacement) {
         (
             Some(ConfirmationExecution::GenerateContentOverwrite {
                 root_path: existing_root,
+                canonical_identity_key: existing_identity_key,
+                identity_revision: existing_revision,
                 task_id: existing_task,
+                action_id: existing_action,
+                candidate: existing_candidate,
                 ..
             }),
             ConfirmationExecution::GenerateContentOverwrite {
-                root_path, task_id, ..
+                root_path,
+                canonical_identity_key,
+                identity_revision,
+                task_id,
+                action_id,
+                candidate,
+                ..
             },
-        ) => same_root_and_task(existing_root, existing_task, root_path, task_id),
+        ) => same_binding(
+            existing_root,
+            existing_identity_key,
+            existing_revision,
+            existing_task,
+            existing_action,
+            existing_candidate,
+            root_path,
+            canonical_identity_key,
+            identity_revision,
+            task_id,
+            action_id,
+            candidate,
+        ),
         (
             Some(ConfirmationExecution::UpdateWikiReview {
                 root_path: existing_root,
+                canonical_identity_key: existing_identity_key,
+                identity_revision: existing_revision,
                 task_id: existing_task,
+                action_id: existing_action,
+                candidate: existing_candidate,
                 ..
             }),
             ConfirmationExecution::UpdateWikiReview {
-                root_path, task_id, ..
+                root_path,
+                canonical_identity_key,
+                identity_revision,
+                task_id,
+                action_id,
+                candidate,
+                ..
             },
-        ) => same_root_and_task(existing_root, existing_task, root_path, task_id),
+        ) => same_binding(
+            existing_root,
+            existing_identity_key,
+            existing_revision,
+            existing_task,
+            existing_action,
+            existing_candidate,
+            root_path,
+            canonical_identity_key,
+            identity_revision,
+            task_id,
+            action_id,
+            candidate,
+        ),
         _ => false,
     }
 }
@@ -486,6 +695,11 @@ mod tests {
     use super::{
         ActionPreview, ConfirmationExecution, ConfirmationRegistry, ConfirmationStatus,
         PendingAction, PendingActionType, RiskLevel,
+    };
+    use crate::models::paths::ProjectContext;
+    use crate::models::workflow::{
+        UpdateWikiMode, WorkflowCandidateReference, WorkflowDisplayStatus, WorkflowKind,
+        WorkflowPendingAction, WorkflowPersistenceMode, WorkflowRun, WorkflowScope,
     };
     use serde_json::json;
 
@@ -684,6 +898,93 @@ mod tests {
         }
     }
 
+    fn generate_binding(
+        project_id: &str,
+        root_path: String,
+        task_id: &str,
+    ) -> ConfirmationExecution {
+        ConfirmationExecution::GenerateContentOverwrite {
+            project_id: project_id.into(),
+            root_path,
+            canonical_identity_key: "identity".into(),
+            identity_revision: "revision".into(),
+            task_id: task_id.into(),
+            action_id: "generate".into(),
+            candidate: crate::models::workflow::WorkflowCandidateReference::TaskOwned {
+                candidate_id: "candidate-generate".into(),
+            },
+        }
+    }
+
+    fn update_binding(project_id: &str, root_path: String, task_id: &str) -> ConfirmationExecution {
+        ConfirmationExecution::UpdateWikiReview {
+            project_id: project_id.into(),
+            root_path,
+            canonical_identity_key: "identity".into(),
+            identity_revision: "revision".into(),
+            task_id: task_id.into(),
+            action_id: "update".into(),
+            candidate: crate::models::workflow::WorkflowCandidateReference::TaskOwned {
+                candidate_id: "candidate-update".into(),
+            },
+        }
+    }
+
+    fn with_identity(mut binding: ConfirmationExecution, identity: &str) -> ConfirmationExecution {
+        match &mut binding {
+            ConfirmationExecution::GenerateContentOverwrite {
+                canonical_identity_key,
+                ..
+            }
+            | ConfirmationExecution::UpdateWikiReview {
+                canonical_identity_key,
+                ..
+            } => *canonical_identity_key = identity.into(),
+            _ => unreachable!(),
+        }
+        binding
+    }
+
+    fn with_action(mut binding: ConfirmationExecution, action: &str) -> ConfirmationExecution {
+        match &mut binding {
+            ConfirmationExecution::GenerateContentOverwrite { action_id, .. }
+            | ConfirmationExecution::UpdateWikiReview { action_id, .. } => {
+                *action_id = action.into()
+            }
+            _ => unreachable!(),
+        }
+        binding
+    }
+
+    fn with_revision(mut binding: ConfirmationExecution, revision: &str) -> ConfirmationExecution {
+        match &mut binding {
+            ConfirmationExecution::GenerateContentOverwrite {
+                identity_revision, ..
+            }
+            | ConfirmationExecution::UpdateWikiReview {
+                identity_revision, ..
+            } => *identity_revision = revision.into(),
+            _ => unreachable!(),
+        }
+        binding
+    }
+
+    fn with_candidate(
+        mut binding: ConfirmationExecution,
+        candidate_id: &str,
+    ) -> ConfirmationExecution {
+        match &mut binding {
+            ConfirmationExecution::GenerateContentOverwrite { candidate, .. }
+            | ConfirmationExecution::UpdateWikiReview { candidate, .. } => {
+                *candidate = crate::models::workflow::WorkflowCandidateReference::TaskOwned {
+                    candidate_id: candidate_id.into(),
+                }
+            }
+            _ => unreachable!(),
+        }
+        binding
+    }
+
     #[test]
     fn workflow_confirmation_restore_rebinds_only_project_id_for_same_root_and_task() {
         let root = tempfile::tempdir().unwrap();
@@ -691,29 +992,29 @@ mod tests {
         for (id, original, replacement) in [
             (
                 "generate",
-                ConfirmationExecution::GenerateContentOverwrite {
-                    project_id: "runtime-a".into(),
-                    root_path: root.path().to_string_lossy().into_owned(),
-                    task_id: "task-generate".into(),
-                },
-                ConfirmationExecution::GenerateContentOverwrite {
-                    project_id: "runtime-b".into(),
-                    root_path: alias.to_string_lossy().into_owned(),
-                    task_id: "task-generate".into(),
-                },
+                generate_binding(
+                    "runtime-a",
+                    root.path().to_string_lossy().into_owned(),
+                    "task-generate",
+                ),
+                generate_binding(
+                    "runtime-b",
+                    alias.to_string_lossy().into_owned(),
+                    "task-generate",
+                ),
             ),
             (
                 "update",
-                ConfirmationExecution::UpdateWikiReview {
-                    project_id: "runtime-a".into(),
-                    root_path: root.path().to_string_lossy().into_owned(),
-                    task_id: "task-update".into(),
-                },
-                ConfirmationExecution::UpdateWikiReview {
-                    project_id: "runtime-b".into(),
-                    root_path: alias.to_string_lossy().into_owned(),
-                    task_id: "task-update".into(),
-                },
+                update_binding(
+                    "runtime-a",
+                    root.path().to_string_lossy().into_owned(),
+                    "task-update",
+                ),
+                update_binding(
+                    "runtime-b",
+                    alias.to_string_lossy().into_owned(),
+                    "task-update",
+                ),
             ),
         ] {
             let registry = ConfirmationRegistry::default();
@@ -741,52 +1042,116 @@ mod tests {
         for (id, original, mismatches) in [
             (
                 "generate",
-                ConfirmationExecution::GenerateContentOverwrite {
-                    project_id: "runtime-a".into(),
-                    root_path: root.path().to_string_lossy().into_owned(),
-                    task_id: "task-generate".into(),
-                },
+                generate_binding(
+                    "runtime-a",
+                    root.path().to_string_lossy().into_owned(),
+                    "task-generate",
+                ),
                 vec![
-                    ConfirmationExecution::GenerateContentOverwrite {
-                        project_id: "runtime-b".into(),
-                        root_path: other_root.path().to_string_lossy().into_owned(),
-                        task_id: "task-generate".into(),
-                    },
-                    ConfirmationExecution::GenerateContentOverwrite {
-                        project_id: "runtime-b".into(),
-                        root_path: root.path().to_string_lossy().into_owned(),
-                        task_id: "other-task".into(),
-                    },
-                    ConfirmationExecution::UpdateWikiReview {
-                        project_id: "runtime-b".into(),
-                        root_path: root.path().to_string_lossy().into_owned(),
-                        task_id: "task-generate".into(),
-                    },
+                    generate_binding(
+                        "runtime-b",
+                        other_root.path().to_string_lossy().into_owned(),
+                        "task-generate",
+                    ),
+                    generate_binding(
+                        "runtime-b",
+                        root.path().to_string_lossy().into_owned(),
+                        "other-task",
+                    ),
+                    with_identity(
+                        generate_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-generate",
+                        ),
+                        "other-identity",
+                    ),
+                    with_revision(
+                        generate_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-generate",
+                        ),
+                        "other-revision",
+                    ),
+                    with_action(
+                        generate_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-generate",
+                        ),
+                        "other-action",
+                    ),
+                    with_candidate(
+                        generate_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-generate",
+                        ),
+                        "other-candidate",
+                    ),
+                    update_binding(
+                        "runtime-b",
+                        root.path().to_string_lossy().into_owned(),
+                        "task-generate",
+                    ),
                 ],
             ),
             (
                 "update",
-                ConfirmationExecution::UpdateWikiReview {
-                    project_id: "runtime-a".into(),
-                    root_path: root.path().to_string_lossy().into_owned(),
-                    task_id: "task-update".into(),
-                },
+                update_binding(
+                    "runtime-a",
+                    root.path().to_string_lossy().into_owned(),
+                    "task-update",
+                ),
                 vec![
-                    ConfirmationExecution::UpdateWikiReview {
-                        project_id: "runtime-b".into(),
-                        root_path: other_root.path().to_string_lossy().into_owned(),
-                        task_id: "task-update".into(),
-                    },
-                    ConfirmationExecution::UpdateWikiReview {
-                        project_id: "runtime-b".into(),
-                        root_path: root.path().to_string_lossy().into_owned(),
-                        task_id: "other-task".into(),
-                    },
-                    ConfirmationExecution::GenerateContentOverwrite {
-                        project_id: "runtime-b".into(),
-                        root_path: root.path().to_string_lossy().into_owned(),
-                        task_id: "task-update".into(),
-                    },
+                    update_binding(
+                        "runtime-b",
+                        other_root.path().to_string_lossy().into_owned(),
+                        "task-update",
+                    ),
+                    update_binding(
+                        "runtime-b",
+                        root.path().to_string_lossy().into_owned(),
+                        "other-task",
+                    ),
+                    with_identity(
+                        update_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-update",
+                        ),
+                        "other-identity",
+                    ),
+                    with_revision(
+                        update_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-update",
+                        ),
+                        "other-revision",
+                    ),
+                    with_action(
+                        update_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-update",
+                        ),
+                        "other-action",
+                    ),
+                    with_candidate(
+                        update_binding(
+                            "runtime-b",
+                            root.path().to_string_lossy().into_owned(),
+                            "task-update",
+                        ),
+                        "other-candidate",
+                    ),
+                    generate_binding(
+                        "runtime-b",
+                        root.path().to_string_lossy().into_owned(),
+                        "task-update",
+                    ),
                 ],
             ),
         ] {
@@ -812,11 +1177,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let registry = ConfirmationRegistry::default();
         let action = workflow_action("executing");
-        let original = ConfirmationExecution::UpdateWikiReview {
-            project_id: "runtime-a".into(),
-            root_path: root.path().to_string_lossy().into_owned(),
-            task_id: "task-update".into(),
-        };
+        let original = update_binding(
+            "runtime-a",
+            root.path().to_string_lossy().into_owned(),
+            "task-update",
+        );
         registry
             .register_with_execution(action.clone(), Some(original.clone()))
             .unwrap();
@@ -825,16 +1190,105 @@ mod tests {
         let error = registry
             .restore_with_execution(
                 action.clone(),
-                ConfirmationExecution::UpdateWikiReview {
-                    project_id: "runtime-b".into(),
-                    root_path: root.path().to_string_lossy().into_owned(),
-                    task_id: "task-update".into(),
-                },
+                update_binding(
+                    "runtime-b",
+                    root.path().to_string_lossy().into_owned(),
+                    "task-update",
+                ),
             )
             .unwrap_err();
         assert_eq!(error.code, "CONFIRMATION_IN_USE");
         let claimed = registry.peek(&action.id).unwrap();
         assert_eq!(claimed.action, action);
         assert_eq!(claimed.execution, Some(original));
+    }
+
+    #[test]
+    fn workflow_confirmation_restore_is_idempotent_while_the_exact_binding_is_claimed() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = ConfirmationRegistry::default();
+        let action = workflow_action("update");
+        let binding = update_binding(
+            "runtime-a",
+            root.path().to_string_lossy().into_owned(),
+            "task-update",
+        );
+        registry
+            .register_with_execution(action.clone(), Some(binding.clone()))
+            .unwrap();
+        registry.claim(&action.id).unwrap();
+
+        registry
+            .restore_with_execution(action.clone(), binding.clone())
+            .expect("list/get hydration must be idempotent during the same confirmation claim");
+        registry.finish_claim(&action.id, false).unwrap();
+        assert_eq!(registry.peek(&action.id).unwrap().execution, Some(binding));
+    }
+
+    #[test]
+    fn foreign_claimed_action_id_collision_does_not_request_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("runtime-a", root.path().to_path_buf());
+        let registry = ConfirmationRegistry::default();
+        let action = workflow_action("update");
+        let binding = update_binding(
+            "runtime-a",
+            root.path().to_string_lossy().into_owned(),
+            "task-foreign",
+        );
+        registry
+            .register_with_execution(action.clone(), Some(binding.clone()))
+            .unwrap();
+        registry.claim(&action.id).unwrap();
+
+        let pending = WorkflowPendingAction {
+            id: action.id.clone(),
+            action_type: action.action_type.clone(),
+            risk_level: action.risk_level.clone(),
+            affected_paths: action.affected_paths.clone(),
+            candidate: Some(WorkflowCandidateReference::TaskOwned {
+                candidate_id: "candidate-update".into(),
+            }),
+            expires_at: action.expires_at.clone(),
+            checkpoint_hash: action.checkpoint_hash.clone(),
+        };
+        let run = WorkflowRun {
+            schema_version: 1,
+            task_id: "task-malicious".into(),
+            project_id: context.project_id.clone(),
+            canonical_identity_key: "identity".into(),
+            identity_revision: "revision".into(),
+            kind: WorkflowKind::UpdateWiki,
+            display_status: WorkflowDisplayStatus::WaitingForConfirmation,
+            scope: WorkflowScope::UpdateWiki {
+                mode: UpdateWikiMode::ChangedSources,
+                source_versions: Vec::new(),
+            },
+            route: None,
+            fingerprint: "fingerprint".into(),
+            baseline_fingerprint: "baseline".into(),
+            persistence: WorkflowPersistenceMode::MemoryOnly,
+            persistence_transition: None,
+            stages: Vec::new(),
+            current_stage_id: None,
+            queue_position: None,
+            continuation_required: false,
+            retry: None,
+            pending_action: Some(pending.clone()),
+            decision_review: None,
+            result: None,
+            error: None,
+            started_at: "2026-08-09T00:00:00Z".into(),
+            updated_at: "2026-08-09T00:00:00Z".into(),
+            completed_at: None,
+            cancellable: true,
+            undo_cancel_until: None,
+        };
+
+        assert!(!registry
+            .cancel_workflow_binding(&context, &run, &pending)
+            .unwrap());
+        registry.finish_claim(&action.id, false).unwrap();
+        assert_eq!(registry.peek(&action.id).unwrap().execution, Some(binding));
     }
 }

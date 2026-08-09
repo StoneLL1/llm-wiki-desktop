@@ -26,7 +26,7 @@ use crate::tasks::TaskService;
 use super::super::{
     fingerprint::{canonical_json, hex_sha256},
     preparation::workflow_baseline_for_scope,
-    WorkflowCoordinator, WorkflowRunner, WorkflowStageSink,
+    WorkflowCoordinator, WorkflowExternalLaunchPermit, WorkflowRunner, WorkflowStageSink,
 };
 
 const READ_MARKDOWN: &str = "read_markdown";
@@ -78,10 +78,47 @@ pub async fn run_health_check(
     run: WorkflowRun,
     services: &HealthCheckExecutionServices<'_>,
 ) -> Option<WorkflowRun> {
+    let external_permit = WorkflowExternalLaunchPermit::prevalidated(&run);
+    let report_run = run.clone();
+    run_health_check_authorized(
+        context,
+        run,
+        services,
+        || Ok(external_permit),
+        move || {
+            Ok(services
+                .task_service
+                .workflow_persistence_dir(&report_run.task_id)
+                .is_some()
+                .then(|| WorkflowExternalLaunchPermit::prevalidated(&report_run)))
+        },
+    )
+    .await
+}
+
+pub async fn run_health_check_authorized<F, P>(
+    context: &ProjectContext,
+    run: WorkflowRun,
+    services: &HealthCheckExecutionServices<'_>,
+    authorize_external_launch: F,
+    authorize_report_write: P,
+) -> Option<WorkflowRun>
+where
+    F: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
+    P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
+{
     let task_id = run.task_id.clone();
-    run_health_check_with_deep(context, run, services, move |prompt, route| async move {
-        execute_prepared_deep_route(context, services, &task_id, &route, prompt).await
-    })
+    run_health_check_with_deep_and_report_authority(
+        context,
+        run,
+        services,
+        move |prompt, route| async move {
+            let publication = authorize_external_launch()?.begin()?;
+            execute_prepared_deep_route(context, services, &task_id, &route, prompt, publication)
+                .await
+        },
+        authorize_report_write,
+    )
     .await
 }
 
@@ -98,21 +135,46 @@ where
     F: FnOnce(String, WorkflowRoute) -> Fut,
     Fut: Future<Output = Result<String, BackendError>>,
 {
-    match execute_health_check(context, &run, services, deep_check).await {
+    let report_run = run.clone();
+    run_health_check_with_deep_and_report_authority(context, run, services, deep_check, move || {
+        Ok(services
+            .task_service
+            .workflow_persistence_dir(&report_run.task_id)
+            .is_some()
+            .then(|| WorkflowExternalLaunchPermit::prevalidated(&report_run)))
+    })
+    .await
+}
+
+pub async fn run_health_check_with_deep_and_report_authority<F, Fut, P>(
+    context: &ProjectContext,
+    run: WorkflowRun,
+    services: &HealthCheckExecutionServices<'_>,
+    deep_check: F,
+    report_authority: P,
+) -> Option<WorkflowRun>
+where
+    F: FnOnce(String, WorkflowRoute) -> Fut,
+    Fut: Future<Output = Result<String, BackendError>>,
+    P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
+{
+    match execute_health_check(context, &run, services, deep_check, report_authority).await {
         Ok(next) => next,
         Err(error) => finish_error(&run, services, error),
     }
 }
 
-async fn execute_health_check<F, Fut>(
+async fn execute_health_check<F, Fut, P>(
     context: &ProjectContext,
     run: &WorkflowRun,
     services: &HealthCheckExecutionServices<'_>,
     deep_check: F,
+    mut report_authority: P,
 ) -> Result<Option<WorkflowRun>, BackendError>
 where
     F: FnOnce(String, WorkflowRoute) -> Fut,
     Fut: Future<Output = Result<String, BackendError>>,
+    P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
 {
     let started = Instant::now();
     let task_id = run.task_id.as_str();
@@ -277,7 +339,7 @@ where
         .task_service
         .workflow_persistence_dir(task_id)
         .is_some();
-    let report = HealthCheckReport {
+    let mut report = HealthCheckReport {
         report_id: task_id.to_string(),
         task_id: task_id.to_string(),
         mode: mode.clone(),
@@ -300,17 +362,60 @@ where
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         generated_at: crate::utils::time_utils::now_rfc3339(),
     };
-    services
-        .lint_service
-        .store_health_check_report_guarded(context, &report, || {
-            ensure_not_cancelled(services.task_service, task_id)?;
-            if workflow_baseline_for_scope(context, &run.scope)?.fingerprint
-                != run.baseline_fingerprint
-            {
-                return Err(baseline_changed());
+    loop {
+        let expected_persistent = report.persistent;
+        let report_publication = report_authority()?;
+        if report_publication.is_some() != expected_persistent {
+            report.persistent = services
+                .task_service
+                .workflow_persistence_dir(task_id)
+                .is_some();
+            continue;
+        }
+        let report_publication = report_publication
+            .map(WorkflowExternalLaunchPermit::begin)
+            .transpose()?;
+        let stored =
+            services
+                .lint_service
+                .store_health_check_report_guarded(context, &report, || {
+                    ensure_not_cancelled(services.task_service, task_id)?;
+                    if services
+                        .task_service
+                        .workflow_persistence_dir(task_id)
+                        .is_some()
+                        != expected_persistent
+                    {
+                        return Err(BackendError::new(
+                            "WORKFLOW_PERSISTENCE_CHANGED",
+                            "Workflow persistence changed while preparing the health-check report.",
+                            true,
+                            true,
+                        ));
+                    }
+                    if workflow_baseline_for_scope(context, &run.scope)?.fingerprint
+                        != run.baseline_fingerprint
+                    {
+                        return Err(baseline_changed());
+                    }
+                    Ok(())
+                });
+        match stored {
+            Ok(_) => {
+                if let Some(publication) = report_publication {
+                    publication.started();
+                }
+                break;
             }
-            Ok(())
-        })?;
+            Err(error) if error.code == "WORKFLOW_PERSISTENCE_CHANGED" => {
+                report.persistent = services
+                    .task_service
+                    .workflow_persistence_dir(task_id)
+                    .is_some();
+            }
+            Err(error) => return Err(error),
+        }
+    }
     sink.progress(WRITE_REPORT, Some(report.report_id.clone()), 1, Some(1))
         .map_err(task_error)?;
     sink.complete(WRITE_REPORT).map_err(task_error)?;
@@ -320,7 +425,7 @@ where
     let (_, next) = sink
         .finish(WorkflowResult::HealthCheck {
             report_id: Some(report.report_id),
-            persistent,
+            persistent: report.persistent,
             error_count: error_count as u64,
             warning_count: warning_count as u64,
             info_count: info_count as u64,
@@ -335,6 +440,7 @@ async fn execute_prepared_deep_route(
     task_id: &str,
     route: &WorkflowRoute,
     prompt: String,
+    publication: super::super::WorkflowLaunchPublication,
 ) -> Result<String, BackendError> {
     match route {
         WorkflowRoute::Local { .. } => Err(route_unavailable()),
@@ -352,9 +458,13 @@ async fn execute_prepared_deep_route(
             let workspace = create_lint_workspace(task_id)?;
             let _guard = WorkspaceGuard(workspace.clone());
             let invocation = AgentService::lint_invocation(*agent, &workspace, &prompt)?;
-            services
-                .agent_service
-                .run_lint_streaming(&invocation, services.task_service, task_id)
+            let result = services.agent_service.run_lint_streaming(
+                &invocation,
+                services.task_service,
+                task_id,
+            );
+            publication.started();
+            result
         }
         WorkflowRoute::Byok {
             provider, model, ..
@@ -377,7 +487,7 @@ async fn execute_prepared_deep_route(
             let completion = services
                 .llm_service
                 .complete(&config, secret.as_deref(), &prompt);
-            crate::tasks::byok_progress::poll_with_progress(
+            let result = crate::tasks::byok_progress::poll_with_progress(
                 services.task_service,
                 task_id,
                 "Checking",
@@ -389,7 +499,9 @@ async fn execute_prepared_deep_route(
                     "WORKFLOW_CANCELLED",
                     "Health Check was cancelled.",
                 )
-            })?
+            });
+            publication.started();
+            result?
         }
     }
 }

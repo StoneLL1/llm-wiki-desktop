@@ -35,7 +35,7 @@ use super::super::{
     fingerprint::{canonical_json, hex_sha256},
     persistence::project_identity,
     preparation::workflow_baseline_for_scope,
-    WorkflowCoordinator, WorkflowRunner, WorkflowStageSink,
+    WorkflowCoordinator, WorkflowExternalLaunchPermit, WorkflowRunner, WorkflowStageSink,
 };
 
 const CONFIRM_SCOPE: &str = "confirm_scope";
@@ -90,9 +90,23 @@ pub async fn run_generate_content(
     run: WorkflowRun,
     services: &GenerateContentExecutionServices<'_>,
 ) -> Option<WorkflowRun> {
+    let permit = WorkflowExternalLaunchPermit::prevalidated(&run);
+    run_generate_content_authorized(context, run, services, || Ok(permit)).await
+}
+
+pub async fn run_generate_content_authorized<F>(
+    context: &ProjectContext,
+    run: WorkflowRun,
+    services: &GenerateContentExecutionServices<'_>,
+    authorize_external_launch: F,
+) -> Option<WorkflowRun>
+where
+    F: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
+{
     let task_id = run.task_id.clone();
     run_generate_content_with_generator(context, run, services, move |prompt, route| async move {
-        execute_prepared_route(context, services, &task_id, &route, prompt).await
+        let publication = authorize_external_launch()?.begin()?;
+        execute_prepared_route(context, services, &task_id, &route, prompt, publication).await
     })
     .await
 }
@@ -303,7 +317,7 @@ where
                 true,
             )
         })?;
-        let pending = persist_overwrite_candidate(
+        let (pending, execution) = persist_overwrite_candidate(
             context,
             run,
             services,
@@ -343,7 +357,13 @@ where
             },
             current_target_hash.as_deref() != Some(expected_hash.as_str()),
         )?;
-        sink.wait(WRITE_EXPORT, pending).map_err(task_error)?;
+        let action_id = pending.id.clone();
+        if let Err(message) = sink.wait(WRITE_EXPORT, pending) {
+            let _ = services
+                .confirmation_registry
+                .remove_exact_execution(&action_id, &execution);
+            return Err(task_error(message));
+        }
         return Ok(None);
     }
     if current_target_hash.is_some() {
@@ -433,6 +453,7 @@ async fn execute_prepared_route(
     task_id: &str,
     route: &WorkflowRoute,
     prompt: String,
+    publication: super::super::WorkflowLaunchPublication,
 ) -> Result<String, BackendError> {
     match route {
         WorkflowRoute::Local { .. } => Err(route_unavailable()),
@@ -440,12 +461,14 @@ async fn execute_prepared_route(
             let workspace = create_agent_workspace(task_id)?;
             let _guard = WorkspaceGuard(workspace.clone());
             let invocation = AgentService::html_export_invocation(*agent, &workspace, &prompt)?;
-            services.agent_service.run_export_streaming(
+            let result = services.agent_service.run_export_streaming(
                 *agent,
                 &invocation,
                 services.task_service,
                 task_id,
-            )
+            );
+            publication.started();
+            result
         }
         WorkflowRoute::Byok {
             provider, model, ..
@@ -468,7 +491,7 @@ async fn execute_prepared_route(
             let completion = services
                 .llm_service
                 .complete(&config, secret.as_deref(), &prompt);
-            crate::tasks::byok_progress::poll_with_progress(
+            let result = crate::tasks::byok_progress::poll_with_progress(
                 services.task_service,
                 task_id,
                 "Generating artifact",
@@ -480,7 +503,9 @@ async fn execute_prepared_route(
                     "WORKFLOW_CANCELLED",
                     "Generate Content was cancelled.",
                 )
-            })?
+            });
+            publication.started();
+            result?
         }
     }
 }
@@ -687,7 +712,7 @@ fn persist_overwrite_candidate(
     services: &GenerateContentExecutionServices<'_>,
     candidate: PersistedGenerateContentCandidate,
     conflict: bool,
-) -> Result<WorkflowPendingAction, BackendError> {
+) -> Result<(WorkflowPendingAction, ConfirmationExecution), BackendError> {
     ensure_candidate_root_safe()?;
     let workspace = candidate_workspace(&run.task_id)?;
     if workspace.exists() {
@@ -762,28 +787,38 @@ fn persist_overwrite_candidate(
         expires_at: None,
         checkpoint_hash: Some(candidate.checkpoint_hash.clone()),
     };
-    if let Err(error) = services.confirmation_registry.register_with_execution(
-        action,
-        Some(ConfirmationExecution::GenerateContentOverwrite {
-            project_id: context.project_id.clone(),
-            root_path: context.root.to_string_lossy().into_owned(),
-            task_id: run.task_id.clone(),
-        }),
-    ) {
+    let execution = ConfirmationExecution::GenerateContentOverwrite {
+        project_id: context.project_id.clone(),
+        root_path: context.root.to_string_lossy().into_owned(),
+        canonical_identity_key: run.canonical_identity_key.clone(),
+        identity_revision: run.identity_revision.clone(),
+        task_id: run.task_id.clone(),
+        action_id: action_id.clone(),
+        candidate: WorkflowCandidateReference::TaskOwned {
+            candidate_id: format!("{}:{candidate_hash}", run.task_id),
+        },
+    };
+    if let Err(error) = services
+        .confirmation_registry
+        .register_with_execution(action, Some(execution.clone()))
+    {
         let _ = std::fs::remove_dir_all(&workspace);
         return Err(error);
     }
-    Ok(WorkflowPendingAction {
-        id: action_id,
-        action_type,
-        risk_level: RiskLevel::High,
-        affected_paths: vec![candidate.output_path],
-        candidate: Some(WorkflowCandidateReference::TaskOwned {
-            candidate_id: format!("{}:{candidate_hash}", run.task_id),
-        }),
-        expires_at: None,
-        checkpoint_hash: Some(candidate.checkpoint_hash),
-    })
+    Ok((
+        WorkflowPendingAction {
+            id: action_id,
+            action_type,
+            risk_level: RiskLevel::High,
+            affected_paths: vec![candidate.output_path],
+            candidate: Some(WorkflowCandidateReference::TaskOwned {
+                candidate_id: format!("{}:{candidate_hash}", run.task_id),
+            }),
+            expires_at: None,
+            checkpoint_hash: Some(candidate.checkpoint_hash),
+        },
+        execution,
+    ))
 }
 
 pub fn confirm_generate_content_overwrite(
@@ -818,7 +853,12 @@ pub fn confirm_generate_content_overwrite(
     let candidate_binding = run.pending_action.as_ref().and_then(workflow_candidate_id);
     if run.display_status != crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
         || !candidate_binding.is_some_and(|candidate_id| {
-            generate_content_candidate_is_valid_for_workflow(candidate_id, &context.root, &workflow)
+            generate_content_candidate_is_valid_for_workflow(
+                task_id,
+                candidate_id,
+                &context.root,
+                &workflow,
+            )
         })
     {
         let error = BackendError::new(
@@ -1086,6 +1126,7 @@ pub fn restore_generate_content_confirmation(
         )
     })?;
     if !generate_content_candidate_is_valid_for_workflow(
+        &run.task_id,
         candidate_binding,
         &context.root,
         &workflow,
@@ -1146,7 +1187,18 @@ pub fn restore_generate_content_confirmation(
         ConfirmationExecution::GenerateContentOverwrite {
             project_id: context.project_id.clone(),
             root_path: context.root.to_string_lossy().into_owned(),
+            canonical_identity_key: run.canonical_identity_key.clone(),
+            identity_revision: run.identity_revision.clone(),
             task_id: run.task_id.clone(),
+            action_id: pending.id.clone(),
+            candidate: pending.candidate.clone().ok_or_else(|| {
+                BackendError::new(
+                    "WORKFLOW_CONFIRMATION_CANDIDATE_MISSING",
+                    "The persisted confirmation has no candidate binding.",
+                    true,
+                    true,
+                )
+            })?,
         },
     )
 }
@@ -1205,6 +1257,7 @@ fn workflow_candidate_id(pending: &WorkflowPendingAction) -> Option<&str> {
 }
 
 pub fn generate_content_candidate_is_valid_for_workflow(
+    expected_task_id: &str,
     candidate_id: &str,
     project_root: &Path,
     workflow: &WorkflowExecutionState,
@@ -1212,6 +1265,9 @@ pub fn generate_content_candidate_is_valid_for_workflow(
     let Some((task_id, expected_candidate_hash)) = candidate_id.split_once(':') else {
         return false;
     };
+    if task_id != expected_task_id {
+        return false;
+    }
     let Some(candidate) =
         load_generate_content_candidate(task_id, project_root, expected_candidate_hash)
     else {

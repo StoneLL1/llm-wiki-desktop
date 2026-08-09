@@ -11,12 +11,13 @@ use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::settings::Settings;
 use llm_wiki_desktop_lib::models::workflow::{
-    WorkflowArtifactType, WorkflowDisplayStatus, WorkflowExecutionOptions, WorkflowKind,
-    WorkflowRoute, WorkflowScope, WorkflowStageStatus, WorkflowStartOutcome,
+    WorkflowArtifactType, WorkflowDisplayStatus, WorkflowExecutionOptions, WorkflowExecutionState,
+    WorkflowKind, WorkflowRoute, WorkflowScope, WorkflowStageStatus, WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
     confirm_generate_content_overwrite, discard_generate_content_candidate,
-    restore_generate_content_confirmation, run_generate_content_with_generator,
+    generate_content_candidate_is_valid_for_workflow, restore_generate_content_confirmation,
+    run_generate_content_authorized, run_generate_content_with_generator,
     workflow_baseline_for_scope, workflow_stages, AgentInvocation, AgentService, EnqueueWorkflow,
     ExportService, GenerateContentExecutionServices, GitService, LlmService, ProcessRunner,
     SearchService, SecretService, SettingsService, WorkflowCoordinator,
@@ -253,6 +254,36 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 #[tokio::test]
+async fn external_launch_guard_runs_immediately_before_provider_invocation() {
+    let fixture = Fixture::new("launch-authority");
+    let output = "exports/html/denied.html";
+    let run = fixture.enqueue(
+        WorkflowArtifactType::ProjectReport,
+        Vec::new(),
+        output,
+        None,
+        None,
+    );
+    let task_id = run.task_id.clone();
+    run_generate_content_authorized(&fixture.context, run, &fixture.services(), || {
+        Err(BackendError::new(
+            "WORKFLOW_EXTERNAL_LAUNCH_REVOKED",
+            "revoked at deterministic launch barrier",
+            true,
+            true,
+        ))
+    })
+    .await;
+
+    let denied = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        denied.error.unwrap().code,
+        "WORKFLOW_EXTERNAL_LAUNCH_REVOKED"
+    );
+    assert!(!fixture.context.root.join(output).exists());
+}
+
+#[tokio::test]
 async fn new_artifact_completes_exactly_nine_stages_without_git_and_is_exports_readable() {
     let fixture = Fixture::new("new");
     let output = "exports/html/主题 阅读.html";
@@ -414,6 +445,53 @@ async fn existing_target_gets_checkpoint_then_waits_and_a_racing_edit_becomes_co
         "concurrent edit"
     );
 
+    let candidate_id = match pending.candidate.as_ref().unwrap() {
+        llm_wiki_desktop_lib::models::workflow::WorkflowCandidateReference::TaskOwned {
+            candidate_id,
+        } => candidate_id,
+        _ => unreachable!("Generate Content candidates must be task-owned"),
+    };
+    let candidate_root = std::env::temp_dir().join("llm-wiki-desktop-generate-content");
+    let descriptor = candidate_root.join(&task_id).join("candidate.json");
+    let foreign_task_id = uuid::Uuid::new_v4().to_string();
+    let foreign_workspace = candidate_root.join(&foreign_task_id);
+    fs::create_dir(&foreign_workspace).unwrap();
+    let mut foreign_descriptor: serde_json::Value =
+        serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
+    foreign_descriptor["taskId"] = serde_json::Value::String(foreign_task_id.clone());
+    let foreign_bytes = serde_json::to_vec_pretty(&foreign_descriptor).unwrap();
+    fs::write(foreign_workspace.join("candidate.json"), &foreign_bytes).unwrap();
+    let forged_candidate_id = format!("{}:{:x}", foreign_task_id, Sha256::digest(&foreign_bytes));
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .context
+                .app_dir
+                .join("tasks")
+                .join(format!("{task_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let workflow: WorkflowExecutionState =
+        serde_json::from_value(snapshot["workflow"].clone()).unwrap();
+    assert!(generate_content_candidate_is_valid_for_workflow(
+        &task_id,
+        candidate_id,
+        &fixture.context.root,
+        &workflow,
+    ));
+    assert!(
+        !generate_content_candidate_is_valid_for_workflow(
+            &task_id,
+            &forged_candidate_id,
+            &fixture.context.root,
+            &workflow,
+        ),
+        "a copied candidate owned by another task must not hydrate this workflow"
+    );
+    fs::remove_dir_all(foreign_workspace).unwrap();
+
     let restarted = TaskService::default();
     let reopened_context =
         ProjectContext::new("reopened-runtime-project", fixture.context.root.clone());
@@ -441,10 +519,6 @@ async fn existing_target_gets_checkpoint_then_waits_and_a_racing_edit_becomes_co
         Some(ConfirmationExecution::GenerateContentOverwrite { project_id, .. })
             if project_id == reopened_context.project_id
     ));
-    let descriptor = std::env::temp_dir()
-        .join("llm-wiki-desktop-generate-content")
-        .join(&task_id)
-        .join("candidate.json");
     fs::OpenOptions::new()
         .append(true)
         .open(descriptor)

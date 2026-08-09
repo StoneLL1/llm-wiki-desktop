@@ -634,7 +634,8 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
         pending.candidate,
         Some(llm_wiki_desktop_lib::models::workflow::WorkflowCandidateReference::TaskOwned {
             candidate_id
-        }) if candidate_id == run.task_id
+        }) if candidate_id.starts_with(&format!("{}:", run.task_id))
+            && candidate_id.len() == run.task_id.len() + 65
     ));
     let stored = confirmations.peek(&pending.id).unwrap();
     assert!(stored
@@ -681,6 +682,24 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
         Some(ConfirmationExecution::UpdateWikiReview { project_id, .. })
             if project_id == reopened_context.project_id
     ));
+    let descriptor_path = candidate_workspace.join("workflow-candidate.json");
+    let mut rewritten: serde_json::Value =
+        serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+    rewritten["candidate"]["plan"]["summary"] =
+        serde_json::Value::String("semantically valid but not reviewed".into());
+    fs::write(
+        &descriptor_path,
+        serde_json::to_vec_pretty(&rewritten).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        update_wiki_candidate_is_valid(&run.task_id, &context.root),
+        "the negative case must remain semantically valid"
+    );
+    let tampered =
+        restore_update_wiki_confirmation(&reopened_context, &recovered, &restarted, &confirmations)
+            .unwrap_err();
+    assert_eq!(tampered.code, "WORKFLOW_CONFIRMATION_RECOVERY_FAILED");
     fs::remove_dir_all(candidate_workspace).ok();
     fs::remove_dir_all(root).ok();
 }
