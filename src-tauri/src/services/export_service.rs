@@ -512,6 +512,22 @@ impl ExportService {
         Ok(entries)
     }
 
+    pub(crate) fn workflow_baseline_entries_from_resources(
+        &self,
+        context: &ProjectContext,
+        resources: &[String],
+        output_relative: &str,
+    ) -> Result<Vec<String>, BackendError> {
+        let output_relative = self.validate_workflow_output_path(context, output_relative)?;
+        let mut entries = self.workflow_resource_entries_from_paths(context, resources)?;
+        let target_hash = self
+            .file_store
+            .file_hash_if_exists(context, &output_relative)?
+            .unwrap_or_else(|| "missing".into());
+        entries.push(format!("target:{output_relative}:{target_hash}"));
+        Ok(entries)
+    }
+
     pub fn workflow_resource_entries(
         &self,
         context: &ProjectContext,
@@ -522,12 +538,34 @@ impl ExportService {
             let Ok(markdown) = self.file_store.read_markdown(context, page_path) else {
                 continue;
             };
-            for reference in markdown_resource_references(&markdown) {
-                if let Some(relative) = resolve_markdown_resource(page_path, &reference)? {
-                    resources.insert(relative);
-                }
+            for relative in Self::workflow_resource_paths_from_markdown(page_path, &markdown)? {
+                resources.insert(relative);
             }
         }
+        self.workflow_resource_entries_from_paths(
+            context,
+            &resources.into_iter().collect::<Vec<_>>(),
+        )
+    }
+
+    pub(crate) fn workflow_resource_paths_from_markdown(
+        page_path: &str,
+        markdown: &str,
+    ) -> Result<Vec<String>, BackendError> {
+        let mut resources = BTreeSet::new();
+        for reference in markdown_resource_references(markdown) {
+            if let Some(relative) = resolve_markdown_resource(page_path, &reference)? {
+                resources.insert(relative);
+            }
+        }
+        Ok(resources.into_iter().collect())
+    }
+
+    fn workflow_resource_entries_from_paths(
+        &self,
+        context: &ProjectContext,
+        resources: &[String],
+    ) -> Result<Vec<String>, BackendError> {
         let mut entries = Vec::new();
         for resource in resources {
             let hash = self

@@ -1,5 +1,9 @@
 # 踩坑清单 (gotchas.txt)
 
+Helper-level inventory counters can report one while the filesystem is walked repeatedly — Root cause: separate Source, Wiki/Mixed, and readable helpers each call the same role-aware root walker, but counters placed at helper entry only measure logical calls — How to avoid: inventory all relevant roles once per request, derive role-specific views from that snapshot, and put regression counters at the real root-walk boundary.
+
+Refactoring Markdown parsing can silently turn a streaming path into an unbounded content cache — Root cause: collecting every successfully read Markdown `String` before extracting resource references retains the entire project during Project Report execution — How to avoid: keep execution paths page-streaming and cache only bounded derived hashes/resource paths inside the short-lived request snapshot.
+
 Permission epoch invalidation can accidentally duplicate or poison an OS permission prompt — Root cause: clearing a real request-in-flight promise or checking/caching denied in the new epoch before joining the old prompt creates duplicate requests or a false denied cache after the user grants — How to avoid: join the global OS request before any epoch-local precheck, let epoch guard only control cache commits, then force one fresh current-epoch check after joining an older request.
 
 Serialized project-scoped UI saves can outlive their owner project — Root cause: a queued callback may capture project A identifiers but begin after project B becomes current, causing optimistic global-store state to bind to the wrong scope — How to avoid: bind queues to project key plus generation, invalidate the tail synchronously on project change, and verify ownership both before and after each queued save.
