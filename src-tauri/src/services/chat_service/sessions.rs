@@ -225,8 +225,11 @@ impl ChatService {
             })?;
         message.saved_path = Some(path.to_string());
         session.updated_at = now_rfc3339();
-        self.file_store
-            .write_json_atomic(context, &session_path(context, &session.id)?, &session)?;
+        self.file_store.write_json_atomic(
+            context,
+            &session_path(context, &session.id)?,
+            &session,
+        )?;
         Ok(session)
     }
 

@@ -66,8 +66,13 @@ impl SettingsService {
         global.remote_provider_disclosure_revision =
             existing_global.remote_provider_disclosure_revision;
         store.write_json_atomic_absolute(&self.global_settings_path(), &global)?;
-        let settings_path = project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
-        let agent_config_path = project_state_path(context, context.layout.agent_config_path.as_deref(), "agent configuration")?;
+        let settings_path =
+            project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
+        let agent_config_path = project_state_path(
+            context,
+            context.layout.agent_config_path.as_deref(),
+            "agent configuration",
+        )?;
         store.write_json_atomic(context, settings_path, &settings.to_project_file())?;
         store.write_json_atomic(
             context,
@@ -90,8 +95,13 @@ impl SettingsService {
             default_agent: agent,
         };
         let store = FileStore;
-        let settings_path = project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
-        let agent_config_path = project_state_path(context, context.layout.agent_config_path.as_deref(), "agent configuration")?;
+        let settings_path =
+            project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
+        let agent_config_path = project_state_path(
+            context,
+            context.layout.agent_config_path.as_deref(),
+            "agent configuration",
+        )?;
         store.write_json_atomic(context, agent_config_path, &config)?;
         store.write_json_atomic(context, settings_path, &settings.to_project_file())?;
         Ok(config)
@@ -338,7 +348,9 @@ fn project_state_path<'a>(
     path.ok_or_else(|| {
         BackendError::new(
             "PROJECT_LAYOUT_STATE_UNAVAILABLE",
-            format!("Project {feature} state is unavailable until compatible features are enabled."),
+            format!(
+                "Project {feature} state is unavailable until compatible features are enabled."
+            ),
             true,
             true,
         )

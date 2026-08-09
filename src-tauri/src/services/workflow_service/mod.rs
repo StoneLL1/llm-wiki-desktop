@@ -9,6 +9,9 @@ pub mod stage_sink;
 
 use std::sync::{Arc, RwLock};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
 use crate::models::workflow::{
@@ -62,6 +65,8 @@ pub struct WorkflowService {
     pub preferences: WorkflowPreferences,
     pub overview: WorkflowOverviewService,
     runners: RwLock<Vec<Arc<dyn WorkflowRunner>>>,
+    #[cfg(test)]
+    start_after_prepared_lookup: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Default for WorkflowService {
@@ -72,11 +77,33 @@ impl Default for WorkflowService {
             preferences: WorkflowPreferences::default(),
             overview: WorkflowOverviewService,
             runners: RwLock::new(Vec::new()),
+            #[cfg(test)]
+            start_after_prepared_lookup: Mutex::new(None),
         }
     }
 }
 
 impl WorkflowService {
+    #[cfg(test)]
+    fn set_start_after_prepared_lookup_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self
+            .start_after_prepared_lookup
+            .lock()
+            .expect("lock poisoned") = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn run_start_after_prepared_lookup_hook(&self) {
+        let hook = self
+            .start_after_prepared_lookup
+            .lock()
+            .expect("lock poisoned")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     pub fn register_runner(&self, runner: Arc<dyn WorkflowRunner>) -> Result<(), BackendError> {
         let kind = runner.kind();
         let mut runners = self.runners.write().map_err(|_| runner_lock_error())?;
@@ -138,32 +165,34 @@ impl WorkflowService {
         acknowledge_restricted_content: bool,
         acknowledge_remote_provider: bool,
     ) -> Result<WorkflowStartOutcome, BackendError> {
-        if let Some(task_id) = self
-            .preparation
-            .started_task_id(preparation_id, preparation_revision)?
-        {
-            let run = tasks.get_workflow_run(&task_id).ok_or_else(|| {
-                BackendError::new(
-                    "WORKFLOW_PREPARATION_STALE",
-                    "The workflow created from this preparation is no longer available.",
-                    true,
-                    true,
-                )
-            })?;
-            let identity = project_identity(&context.root).map_err(|message| {
-                BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false)
-            })?;
-            if run.canonical_identity_key != identity.canonical_identity_key
-                || run.identity_revision != identity.identity_revision
-            {
-                return Err(BackendError::new(
-                    "WORKFLOW_PREPARATION_STALE",
-                    "The preparation belongs to a different project identity.",
-                    true,
-                    true,
-                ));
+        let identity = project_identity(&context.root).map_err(|message| {
+            BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false)
+        })?;
+        let preparation_lookup = self.preparation.lookup_for_start(
+            preparation_id,
+            preparation_revision,
+            &identity.canonical_identity_key,
+            &identity.identity_revision,
+        )?;
+        match preparation_lookup {
+            preparation::PreparationStartLookup::Started(task_id) => {
+                return existing_preparation_run(tasks, context, &task_id);
             }
-            return Ok(WorkflowStartOutcome::Existing { run });
+            preparation::PreparationStartLookup::Missing => {
+                if let Some(outcome) = recover_preparation_run(
+                    tasks,
+                    context,
+                    &identity,
+                    preparation_id,
+                    preparation_revision,
+                )? {
+                    return Ok(outcome);
+                }
+            }
+            preparation::PreparationStartLookup::Prepared => {
+                #[cfg(test)]
+                self.run_start_after_prepared_lookup_hook();
+            }
         }
         let environment = WorkflowPreparationEnvironment {
             context,
@@ -172,11 +201,39 @@ impl WorkflowService {
             secret_service,
             agent_service,
         };
-        let mut validated = self.preparation.validate_for_start(
+        let mut validated = match self.preparation.validate_for_start(
             &environment,
             preparation_id,
             preparation_revision,
-        )?;
+        ) {
+            Ok(validated) => validated,
+            Err(error) if error.code == "WORKFLOW_PREPARATION_STALE" => {
+                match self.preparation.lookup_for_start(
+                    preparation_id,
+                    preparation_revision,
+                    &identity.canonical_identity_key,
+                    &identity.identity_revision,
+                )? {
+                    preparation::PreparationStartLookup::Started(task_id) => {
+                        return existing_preparation_run(tasks, context, &task_id);
+                    }
+                    preparation::PreparationStartLookup::Missing => {
+                        if let Some(outcome) = recover_preparation_run(
+                            tasks,
+                            context,
+                            &identity,
+                            preparation_id,
+                            preparation_revision,
+                        )? {
+                            return Ok(outcome);
+                        }
+                    }
+                    preparation::PreparationStartLookup::Prepared => {}
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         if let crate::models::workflow::WorkflowScope::GenerateContent {
             artifact_type,
             page_paths,
@@ -250,7 +307,7 @@ impl WorkflowService {
             })?;
         let outcome = self
             .coordinator
-            .enqueue(
+            .enqueue_for_owner(
                 tasks,
                 EnqueueWorkflow {
                     project_id: context.project_id.clone(),
@@ -265,13 +322,20 @@ impl WorkflowService {
                     stages: validated.stages.clone(),
                     retry: None,
                 },
+                &validated.preparation.project_access.canonical_identity_key,
+                &validated.preparation.project_access.identity_revision,
             )
             .map_err(|message| BackendError::new("WORKFLOW_START_FAILED", message, true, false))?;
         let run = match &outcome {
             WorkflowStartOutcome::Created { run } | WorkflowStartOutcome::Existing { run } => run,
         };
-        self.preparation
-            .mark_started(preparation_id, preparation_revision, &run.task_id)?;
+        self.preparation.mark_started(
+            preparation_id,
+            preparation_revision,
+            &run.task_id,
+            &run.canonical_identity_key,
+            &run.identity_revision,
+        )?;
         if self
             .preparation
             .remember_started(&self.preferences, context, &validated)
@@ -357,6 +421,65 @@ impl WorkflowService {
     }
 }
 
+fn existing_preparation_run(
+    tasks: &TaskService,
+    context: &ProjectContext,
+    task_id: &str,
+) -> Result<WorkflowStartOutcome, BackendError> {
+    let run = tasks.get_workflow_run(task_id).ok_or_else(|| {
+        BackendError::new(
+            "WORKFLOW_PREPARATION_STALE",
+            "The workflow created from this preparation is no longer available.",
+            true,
+            true,
+        )
+    })?;
+    current_preparation_run(context, run)
+}
+
+fn recover_preparation_run(
+    tasks: &TaskService,
+    context: &ProjectContext,
+    identity: &ProjectWorkflowIdentity,
+    preparation_id: &str,
+    preparation_revision: &str,
+) -> Result<Option<WorkflowStartOutcome>, BackendError> {
+    let run = tasks.find_workflow_run_by_execution_options(
+        &identity.canonical_identity_key,
+        &identity.identity_revision,
+        |options| {
+            options
+                .preparation_fingerprint
+                .as_ref()
+                .is_some_and(|fingerprint| {
+                    preparation::preparation_revision_for(preparation_id, fingerprint)
+                        == preparation_revision
+                })
+        },
+    );
+    run.map(|run| current_preparation_run(context, run))
+        .transpose()
+}
+
+fn current_preparation_run(
+    context: &ProjectContext,
+    run: WorkflowRun,
+) -> Result<WorkflowStartOutcome, BackendError> {
+    let identity = project_identity(&context.root)
+        .map_err(|message| BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false))?;
+    if run.canonical_identity_key != identity.canonical_identity_key
+        || run.identity_revision != identity.identity_revision
+    {
+        return Err(BackendError::new(
+            "WORKFLOW_PREPARATION_STALE",
+            "The preparation belongs to a replaced project identity.",
+            true,
+            true,
+        ));
+    }
+    Ok(WorkflowStartOutcome::Existing { run })
+}
+
 fn runner_lock_error() -> BackendError {
     BackendError::new(
         "WORKFLOW_RUNNER_REGISTRY_LOCKED",
@@ -364,4 +487,125 @@ fn runner_lock_error() -> BackendError {
         true,
         false,
     )
+}
+
+#[cfg(test)]
+mod batch_one_start_race_tests {
+    use super::*;
+    use crate::models::project::ProjectTrustKind;
+    use crate::models::workflow::{
+        HealthCheckMode, WorkflowFilesystemAccess, WorkflowGitState, WorkflowPersistenceMode,
+        WorkflowProjectTrust, WorkflowScope,
+    };
+    use std::sync::mpsc;
+
+    struct NoopHealthRunner;
+
+    impl WorkflowRunner for NoopHealthRunner {
+        fn kind(&self) -> WorkflowKind {
+            WorkflowKind::HealthCheck
+        }
+
+        fn start(&self, _run: WorkflowRun) {}
+    }
+
+    fn trusted_access() -> WorkflowAccessSnapshot {
+        WorkflowAccessSnapshot {
+            trust: WorkflowProjectTrust::Trusted,
+            trust_kind: Some(ProjectTrustKind::Native),
+            filesystem_access: WorkflowFilesystemAccess::Writable,
+            persistence: WorkflowPersistenceMode::Persistent,
+            git_state: WorkflowGitState::Clean,
+            authority_revision: "batch-one-race-authority".into(),
+        }
+    }
+
+    #[test]
+    fn prepared_to_started_race_recovers_existing_deterministically() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("wiki")).unwrap();
+        std::fs::write(project.path().join("wiki/page.md"), "# race\n").unwrap();
+        let context = Arc::new(ProjectContext::new(
+            "batch-one-race",
+            project.path().to_path_buf(),
+        ));
+        let config = tempfile::tempdir().unwrap();
+        let settings = Arc::new(SettingsService::with_config_dir(
+            config.path().to_path_buf(),
+        ));
+        let secrets = Arc::new(SecretService::memory());
+        let agents = Arc::new(AgentService::default());
+        let tasks = Arc::new(TaskService::default());
+        let service = Arc::new(WorkflowService::default());
+        service.register_runner(Arc::new(NoopHealthRunner)).unwrap();
+        let preparation = service
+            .prepare(
+                &WorkflowPreparationEnvironment {
+                    context: &context,
+                    access: trusted_access(),
+                    settings_service: &settings,
+                    secret_service: &secrets,
+                    agent_service: &agents,
+                },
+                PrepareWorkflowInput {
+                    kind: WorkflowKind::HealthCheck,
+                    scope: Some(WorkflowScope::HealthCheck {
+                        mode: HealthCheckMode::LocalQuick,
+                    }),
+                    route_selection: None,
+                },
+            )
+            .unwrap();
+
+        let (lookup_reached_tx, lookup_reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        service.set_start_after_prepared_lookup_hook(Box::new(move || {
+            lookup_reached_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let racing_service = Arc::clone(&service);
+        let racing_context = Arc::clone(&context);
+        let racing_settings = Arc::clone(&settings);
+        let racing_secrets = Arc::clone(&secrets);
+        let racing_agents = Arc::clone(&agents);
+        let racing_tasks = Arc::clone(&tasks);
+        let racing_preparation = preparation.clone();
+        let racing = std::thread::spawn(move || {
+            racing_service.start(
+                &racing_context,
+                trusted_access(),
+                &racing_settings,
+                &racing_secrets,
+                &racing_agents,
+                &racing_tasks,
+                &racing_preparation.preparation_id,
+                &racing_preparation.preparation_revision,
+            )
+        });
+
+        lookup_reached_rx.recv().unwrap();
+        let created = service
+            .start(
+                &context,
+                trusted_access(),
+                &settings,
+                &secrets,
+                &agents,
+                &tasks,
+                &preparation.preparation_id,
+                &preparation.preparation_revision,
+            )
+            .unwrap();
+        let created_task_id = match created {
+            WorkflowStartOutcome::Created { run } => run.task_id,
+            WorkflowStartOutcome::Existing { .. } => panic!("controlled winner must create"),
+        };
+        release_tx.send(()).unwrap();
+        let recovered = racing.join().unwrap().unwrap();
+        match recovered {
+            WorkflowStartOutcome::Existing { run } => assert_eq!(run.task_id, created_task_id),
+            WorkflowStartOutcome::Created { .. } => panic!("racing start must recover Existing"),
+        }
+        assert_eq!(tasks.list_workflow_runs().len(), 1);
+    }
 }

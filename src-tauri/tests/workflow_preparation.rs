@@ -1,3 +1,4 @@
+use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
@@ -8,13 +9,46 @@ use llm_wiki_desktop_lib::models::workflow::{
     WorkflowRun, WorkflowScope, WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
-    project_identity, resolve_workflow_persistence_binding, AgentService, PrepareWorkflowInput,
-    SecretService, SettingsService, WorkflowAccessSnapshot, WorkflowPreference,
-    WorkflowPreferences, WorkflowPreparationEnvironment, WorkflowRunner, WorkflowService,
+    project_identity, resolve_workflow_persistence_binding, AgentInvocation, AgentService,
+    PrepareWorkflowInput, ProcessRunner, SecretService, SettingsService, WorkflowAccessSnapshot,
+    WorkflowPreference, WorkflowPreferences, WorkflowPreparationEnvironment, WorkflowRunner,
+    WorkflowService,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::time::Duration;
+
+struct NoAgents;
+
+impl ProcessRunner for NoAgents {
+    fn find_executable(&self, _command: &str) -> Option<PathBuf> {
+        None
+    }
+
+    fn run_with_timeout(
+        &self,
+        _command: &str,
+        _args: &[&str],
+        _timeout: Duration,
+    ) -> Result<String, BackendError> {
+        Ok(String::new())
+    }
+
+    fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        Ok((String::new(), String::new()))
+    }
+
+    fn run_task_streaming(
+        &self,
+        _invocation: &AgentInvocation,
+        _tasks: &TaskService,
+        _task_id: &str,
+    ) -> Result<String, BackendError> {
+        Ok(String::new())
+    }
+}
 
 fn project() -> (tempfile::TempDir, ProjectContext) {
     let root = tempfile::tempdir().unwrap();
@@ -475,6 +509,85 @@ fn validated_start_deduplicates_and_enables_quick_rerun() {
 }
 
 #[test]
+fn concurrent_same_preparation_start_is_always_idempotent() {
+    let (_root, context) = project();
+    let config = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsService::with_config_dir(
+        config.path().to_path_buf(),
+    ));
+    let secrets = Arc::new(SecretService::memory());
+    let agents = Arc::new(AgentService::with_runner(Arc::new(NoAgents)));
+    let service = Arc::new(WorkflowService::default());
+    let tasks = Arc::new(TaskService::default());
+    service
+        .register_runner(Arc::new(CountingRunner::default()))
+        .unwrap();
+    let context = Arc::new(context);
+    let trusted = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::Writable,
+        WorkflowPersistenceMode::Persistent,
+    );
+    let preparation = prepare(
+        &service,
+        &context,
+        trusted.clone(),
+        &settings,
+        &secrets,
+        &agents,
+    );
+    let workers = 24;
+    let barrier = Arc::new(Barrier::new(workers));
+    let handles = (0..workers)
+        .map(|_| {
+            let service = Arc::clone(&service);
+            let tasks = Arc::clone(&tasks);
+            let context = Arc::clone(&context);
+            let settings = Arc::clone(&settings);
+            let secrets = Arc::clone(&secrets);
+            let agents = Arc::clone(&agents);
+            let barrier = Arc::clone(&barrier);
+            let trusted = trusted.clone();
+            let preparation_id = preparation.preparation_id.clone();
+            let preparation_revision = preparation.preparation_revision.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                service.start(
+                    &context,
+                    trusted,
+                    &settings,
+                    &secrets,
+                    &agents,
+                    &tasks,
+                    &preparation_id,
+                    &preparation_revision,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, WorkflowStartOutcome::Created { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, WorkflowStartOutcome::Existing { .. }))
+            .count(),
+        workers - 1
+    );
+    assert_eq!(tasks.list_workflow_runs().len(), 1);
+}
+
+#[test]
 fn queued_runs_are_not_dispatched_before_the_coordinator_claims_them() {
     let (root, context) = project();
     let config = tempfile::tempdir().unwrap();
@@ -800,6 +913,276 @@ fn preferences_round_trip_unicode_and_reject_unknown_workflow_kinds() {
             &WorkflowPersistenceMode::Persistent,
         )
         .is_err());
+}
+
+fn concurrent_preference(kind: WorkflowKind, marker: usize) -> WorkflowPreference {
+    let scope = match kind {
+        WorkflowKind::UpdateWiki => WorkflowScope::UpdateWiki {
+            mode: llm_wiki_desktop_lib::models::workflow::UpdateWikiMode::ChangedSources,
+            source_versions: Vec::new(),
+        },
+        WorkflowKind::HealthCheck => WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::LocalQuick,
+        },
+        WorkflowKind::GenerateContent => WorkflowScope::GenerateContent {
+            artifact_type: WorkflowArtifactType::ProjectReport,
+            page_paths: Vec::new(),
+            output_path: Some(format!("exports/html/report-{marker}.html")),
+        },
+    };
+    WorkflowPreference {
+        kind,
+        scope,
+        route: None,
+        baseline_fingerprint: format!("{marker:064x}"),
+        preparation_fingerprint: format!("{:064x}", marker + 1),
+        saved_at: String::new(),
+    }
+}
+
+#[test]
+fn concurrent_preference_remember_preserves_all_workflow_kinds() {
+    let root = tempfile::tempdir().unwrap();
+    let mut context = ProjectContext::new("并发偏好", root.path().to_path_buf());
+    context.layout.workflow_state_root = Some(".app/workflows".into());
+    let context = Arc::new(context);
+    let identity = project_identity(&context.root).unwrap();
+    let workers = 48;
+    let barrier = Arc::new(Barrier::new(workers));
+    let handles = (0..workers)
+        .map(|index| {
+            let context = Arc::clone(&context);
+            let barrier = Arc::clone(&barrier);
+            let identity_key = identity.canonical_identity_key.clone();
+            let identity_revision = identity.identity_revision.clone();
+            std::thread::spawn(move || {
+                let kind = match index % 3 {
+                    0 => WorkflowKind::UpdateWiki,
+                    1 => WorkflowKind::HealthCheck,
+                    _ => WorkflowKind::GenerateContent,
+                };
+                barrier.wait();
+                WorkflowPreferences::default()
+                    .remember(
+                        &context,
+                        &identity_key,
+                        &identity_revision,
+                        &WorkflowPersistenceMode::Persistent,
+                        concurrent_preference(kind, index),
+                    )
+                    .unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let entries = WorkflowPreferences::default()
+        .load(
+            &context,
+            &identity.canonical_identity_key,
+            &identity.identity_revision,
+            &WorkflowPersistenceMode::Persistent,
+        )
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].kind, WorkflowKind::UpdateWiki);
+    assert_eq!(entries[1].kind, WorkflowKind::HealthCheck);
+    assert_eq!(entries[2].kind, WorkflowKind::GenerateContent);
+    assert!(entries
+        .iter()
+        .all(|entry| chrono::DateTime::parse_from_rfc3339(&entry.saved_at).is_ok()));
+}
+
+#[cfg(unix)]
+fn create_directory_link(target: &std::path::Path, link: &std::path::Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(windows)]
+fn create_directory_link(target: &std::path::Path, link: &std::path::Path) {
+    let output = std::process::Command::new("cmd")
+        .arg("/c")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "junction setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn preference_write_rejects_workflow_root_link_escape() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let link = root.path().join("偏好链接");
+    create_directory_link(outside.path(), &link);
+    let mut context = ProjectContext::new("link-escape", root.path().to_path_buf());
+    context.layout.workflow_state_root = Some("偏好链接".into());
+    let identity = project_identity(&context.root).unwrap();
+    let error = WorkflowPreferences::default()
+        .remember(
+            &context,
+            &identity.canonical_identity_key,
+            &identity.identity_revision,
+            &WorkflowPersistenceMode::Persistent,
+            concurrent_preference(WorkflowKind::HealthCheck, 1),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error.code.as_str(),
+        "PATH_OUTSIDE_PROJECT" | "PATH_UNSAFE_LINK" | "PATH_INVALID"
+    ));
+    assert!(!outside.path().join("preferences.json").exists());
+}
+
+#[test]
+fn preparation_capacity_evicts_old_unstarted_tokens_but_keeps_started_replay() {
+    let (_root, context) = project();
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    let secrets = SecretService::memory();
+    let agents = AgentService::with_runner(Arc::new(NoAgents));
+    let service = WorkflowService::default();
+    let tasks = TaskService::default();
+    let runner = Arc::new(CountingRunner::default());
+    service.register_runner(runner).unwrap();
+    let trusted = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::Writable,
+        WorkflowPersistenceMode::Persistent,
+    );
+
+    let started = prepare(
+        &service,
+        &context,
+        trusted.clone(),
+        &settings,
+        &secrets,
+        &agents,
+    );
+    let first_outcome = service
+        .start(
+            &context,
+            trusted.clone(),
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &started.preparation_id,
+            &started.preparation_revision,
+        )
+        .unwrap();
+    let first_task_id = match first_outcome {
+        WorkflowStartOutcome::Created { run } | WorkflowStartOutcome::Existing { run } => {
+            run.task_id
+        }
+    };
+    let oldest_unstarted = prepare(
+        &service,
+        &context,
+        trusted.clone(),
+        &settings,
+        &secrets,
+        &agents,
+    );
+    for _ in 0..80 {
+        let _ = prepare(
+            &service,
+            &context,
+            trusted.clone(),
+            &settings,
+            &secrets,
+            &agents,
+        );
+    }
+
+    let stale = service.preparation.validate_for_start(
+        &WorkflowPreparationEnvironment {
+            context: &context,
+            access: trusted.clone(),
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        },
+        &oldest_unstarted.preparation_id,
+        &oldest_unstarted.preparation_revision,
+    );
+    assert_eq!(stale.unwrap_err().code, "WORKFLOW_PREPARATION_STALE");
+
+    for marker in 0..128 {
+        std::fs::write(
+            context.root.join("wiki/cap-pressure.md"),
+            format!("# cap pressure {marker}\n"),
+        )
+        .unwrap();
+        let preparation = prepare(
+            &service,
+            &context,
+            trusted.clone(),
+            &settings,
+            &secrets,
+            &agents,
+        );
+        let outcome = service
+            .start(
+                &context,
+                trusted.clone(),
+                &settings,
+                &secrets,
+                &agents,
+                &tasks,
+                &preparation.preparation_id,
+                &preparation.preparation_revision,
+            )
+            .unwrap();
+        assert!(matches!(outcome, WorkflowStartOutcome::Created { .. }));
+    }
+    let replay = service
+        .start(
+            &context,
+            trusted,
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &started.preparation_id,
+            &started.preparation_revision,
+        )
+        .unwrap();
+    match replay {
+        WorkflowStartOutcome::Existing { run } => assert_eq!(run.task_id, first_task_id),
+        WorkflowStartOutcome::Created { .. } => {
+            panic!("started preparation replay duplicated a task")
+        }
+    }
+
+    let other_root = tempfile::tempdir().unwrap();
+    let other_context = ProjectContext::new("other-project", other_root.path().to_path_buf());
+    let cross_root = service
+        .start(
+            &other_context,
+            access(
+                WorkflowProjectTrust::Trusted,
+                WorkflowFilesystemAccess::Writable,
+                WorkflowPersistenceMode::Persistent,
+            ),
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &started.preparation_id,
+            &started.preparation_revision,
+        )
+        .unwrap_err();
+    assert_eq!(cross_root.code, "WORKFLOW_PREPARATION_STALE");
 }
 
 #[test]

@@ -414,25 +414,24 @@ impl ProjectService {
             Some(hash) => WriteMode::OverwriteIfHashMatches(hash.to_string()),
             None => WriteMode::CreateNew,
         };
-        FileStore.write_json_atomic_checked(
-            context,
-            COMPATIBLE_LAYOUT_MAPPING_PATH,
-            mapping,
-            mode,
-        )
-        .map_err(|error| {
-            if matches!(error.code.as_str(), "FILE_HASH_MISMATCH" | "FILE_ALREADY_EXISTS" | "FILE_NOT_FOUND") {
-                BackendError::new(
-                    "PROJECT_COMPAT_LAYOUT_CHANGED",
-                    "The compatible layout mapping changed after preview. Prepare it again.",
-                    true,
-                    true,
-                )
-                .with_details(serde_json::json!({ "path": COMPATIBLE_LAYOUT_MAPPING_PATH }))
-            } else {
-                error
-            }
-        })?;
+        FileStore
+            .write_json_atomic_checked(context, COMPATIBLE_LAYOUT_MAPPING_PATH, mapping, mode)
+            .map_err(|error| {
+                if matches!(
+                    error.code.as_str(),
+                    "FILE_HASH_MISMATCH" | "FILE_ALREADY_EXISTS" | "FILE_NOT_FOUND"
+                ) {
+                    BackendError::new(
+                        "PROJECT_COMPAT_LAYOUT_CHANGED",
+                        "The compatible layout mapping changed after preview. Prepare it again.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "path": COMPATIBLE_LAYOUT_MAPPING_PATH }))
+                } else {
+                    error
+                }
+            })?;
         validate_existing_project_file(&root, &mapping_path).map_err(|message| {
             compatibility_path_unsafe_error(
                 "Compatible layout mapping became unsafe after writing.",

@@ -204,7 +204,11 @@ impl GitService {
         if !self.repository_status(context)?.is_repository {
             return Ok(false);
         }
-        Ok(run_git(context, &["ls-files", "--error-unmatch", "--", relative_path]).is_ok())
+        Ok(run_git(
+            context,
+            &["ls-files", "--error-unmatch", "--", relative_path],
+        )
+        .is_ok())
     }
 
     pub fn verify_checkpoint_state(

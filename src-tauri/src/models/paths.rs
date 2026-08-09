@@ -106,7 +106,8 @@ impl ProjectContext {
         if self.layout.app_state_root.as_deref() != Some(".app/compat") {
             return Ok(normalized);
         }
-        let (legacy_root, mapped_root) = if normalized == ".app" || normalized.starts_with(".app/") {
+        let (legacy_root, mapped_root) = if normalized == ".app" || normalized.starts_with(".app/")
+        {
             (".app", self.layout.app_state_root.as_deref())
         } else if normalized == "raw" || normalized.starts_with("raw/") {
             ("raw", self.layout.source_write_root.as_deref())
@@ -130,7 +131,10 @@ impl ProjectContext {
         if normalized == mapped_root || normalized.starts_with(&format!("{mapped_root}/")) {
             return Ok(normalized);
         }
-        let suffix = normalized.strip_prefix(legacy_root).unwrap_or_default().trim_start_matches('/');
+        let suffix = normalized
+            .strip_prefix(legacy_root)
+            .unwrap_or_default()
+            .trim_start_matches('/');
         Ok(if suffix.is_empty() {
             mapped_root.to_string()
         } else {
@@ -466,10 +470,24 @@ mod tests {
         let context = ProjectContext::new("compatible", root.path().to_path_buf())
             .with_resolved_layout()
             .unwrap();
-        assert_eq!(context.resolve_project_path(".app/chats/a.json").unwrap(), root.path().join(".app/compat/chats/a.json"));
-        assert_eq!(context.resolve_project_path("wiki/页面.md").unwrap(), root.path().join("笔记/页面.md"));
-        assert_eq!(context.resolve_project_path("raw/source.md").unwrap(), root.path().join("资料/source.md"));
-        assert_eq!(context.resolve_project_path("exports/html/card.html").unwrap(), root.path().join("导出/html/card.html"));
+        assert_eq!(
+            context.resolve_project_path(".app/chats/a.json").unwrap(),
+            root.path().join(".app/compat/chats/a.json")
+        );
+        assert_eq!(
+            context.resolve_project_path("wiki/页面.md").unwrap(),
+            root.path().join("笔记/页面.md")
+        );
+        assert_eq!(
+            context.resolve_project_path("raw/source.md").unwrap(),
+            root.path().join("资料/source.md")
+        );
+        assert_eq!(
+            context
+                .resolve_project_path("exports/html/card.html")
+                .unwrap(),
+            root.path().join("导出/html/card.html")
+        );
     }
 
     #[test]
@@ -482,7 +500,10 @@ mod tests {
             .with_resolved_layout()
             .unwrap();
         for path in ["wiki/page.md", "raw/source.md", "exports/html/card.html"] {
-            assert_eq!(context.resolve_project_path(path).unwrap_err().code, "PROJECT_LAYOUT_ROOT_UNAVAILABLE");
+            assert_eq!(
+                context.resolve_project_path(path).unwrap_err().code,
+                "PROJECT_LAYOUT_ROOT_UNAVAILABLE"
+            );
         }
     }
 

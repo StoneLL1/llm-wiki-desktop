@@ -1,0 +1,4 @@
+interface:
+  display_name: "LLM Wiki Desktop Context"
+  short_description: "Current architecture and context map"
+  default_prompt: "Use $llm-wiki-desktop-context to load the current ownership boundaries and verification rules before changing this project."

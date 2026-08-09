@@ -1,6 +1,9 @@
+#[path = "support/workflow_baseline.rs"]
+mod workflow_baseline;
+
 use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
-use llm_wiki_desktop_lib::models::task::BackendEventType;
+use llm_wiki_desktop_lib::models::task::{BackendEventType, TaskStatus};
 use llm_wiki_desktop_lib::models::workflow::{
     UpdateWikiMode, WorkflowArtifactType, WorkflowDisplayStatus, WorkflowExecutionOptions,
     WorkflowKind, WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPersistenceTransition,
@@ -12,6 +15,7 @@ use llm_wiki_desktop_lib::tasks::task_events::EventBus;
 use llm_wiki_desktop_lib::tasks::TaskService;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
+use workflow_baseline::{controlled_race, RacePoint};
 
 fn stage() -> WorkflowStage {
     WorkflowStage {
@@ -61,6 +65,32 @@ fn created(outcome: WorkflowStartOutcome) -> llm_wiki_desktop_lib::models::workf
         WorkflowStartOutcome::Created { run } => run,
         WorkflowStartOutcome::Existing { .. } => panic!("expected a new workflow"),
     }
+}
+
+#[test]
+fn enqueue_for_owner_rejects_same_path_identity_replacement() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("同路径项目");
+    let old_root = parent.path().join("旧项目实体");
+    std::fs::create_dir_all(&root).unwrap();
+    let expected = project_identity(&root).unwrap();
+    std::fs::rename(&root, &old_root).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let replacement = project_identity(&root).unwrap();
+    assert_ne!(expected.identity_revision, replacement.identity_revision);
+
+    let tasks = TaskService::default();
+    let error = WorkflowCoordinator::default()
+        .enqueue_for_owner(
+            &tasks,
+            request(&root, "runtime-replacement", "v1", "owner-guard"),
+            &expected.canonical_identity_key,
+            &expected.identity_revision,
+        )
+        .unwrap_err();
+
+    assert!(error.contains("identity changed"));
+    assert!(tasks.list_workflow_runs().is_empty());
 }
 
 fn empty_update_wiki_result() -> WorkflowResult {
@@ -349,6 +379,7 @@ fn queued_cancel_and_undo_are_idempotent_and_retry_links_a_new_attempt() {
             .retry(
                 &service,
                 &first.task_id,
+                first.project_id.clone(),
                 PathBuf::from(temp.path()),
                 Some(temp.path().join(".app/tasks")),
             )
@@ -369,6 +400,7 @@ fn queued_cancel_and_undo_are_idempotent_and_retry_links_a_new_attempt() {
         .retry(
             &service,
             &first.task_id,
+            first.project_id.clone(),
             other_root.path().to_path_buf(),
             Some(other_root.path().join(".app/tasks")),
         )
@@ -418,9 +450,16 @@ fn retry_uses_new_memory_only_authority_without_updating_the_old_task_file() {
 
     let retry = created(
         coordinator
-            .retry(&service, &original.task_id, temp.path().to_path_buf(), None)
+            .retry(
+                &service,
+                &original.task_id,
+                "new-runtime-project-id".into(),
+                temp.path().to_path_buf(),
+                None,
+            )
             .unwrap(),
     );
+    assert_eq!(retry.project_id, "new-runtime-project-id");
     assert_eq!(
         retry.persistence_transition,
         Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
@@ -477,6 +516,7 @@ fn retry_uses_new_unicode_persistence_root_without_backfilling_the_old_attempt()
             .retry(
                 &service,
                 &original.task_id,
+                original.project_id.clone(),
                 temp.path().to_path_buf(),
                 Some(new_root.clone()),
             )
@@ -988,6 +1028,58 @@ fn concurrent_identical_starts_are_atomic() {
         .collect::<Vec<_>>();
     assert_eq!(ids[0], ids[1]);
     assert_eq!(service.list_workflow_runs().len(), 1);
+}
+
+#[test]
+fn cancel_after_real_queue_claim_is_deterministic_before_first_stage() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = Arc::new(TaskService::default());
+    let coordinator = Arc::new(WorkflowCoordinator::default());
+    let active = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v1", "active-window"))
+            .unwrap(),
+    );
+    let queued = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v2", "cancel-window"))
+            .unwrap(),
+    );
+    service
+        .start_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    service
+        .complete_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    let (controller, worker_window) = controlled_race();
+    let worker_service = service.clone();
+    let worker_coordinator = coordinator.clone();
+    let worker = std::thread::spawn(move || {
+        let (_, claimed) = worker_coordinator
+            .complete_and_claim_next(&worker_service, &active.task_id, empty_update_wiki_result())
+            .unwrap();
+        let claimed = claimed.expect("queued workflow must be claimed");
+        worker_window.pause_at(RacePoint::Claimed);
+        worker_window.pause_at(RacePoint::FirstStage);
+        let result = worker_service.start_workflow_stage(&claimed.task_id, "prepare");
+        (claimed.task_id, result)
+    });
+
+    controller.wait_for(RacePoint::Claimed);
+    let cancelled = coordinator.cancel(&service, &queued.task_id).unwrap();
+    assert_eq!(cancelled.display_status, WorkflowDisplayStatus::Running);
+    controller.release();
+    controller.wait_for(RacePoint::FirstStage);
+    controller.release();
+
+    let (claimed_task_id, first_stage) = worker.join().unwrap();
+    assert_eq!(claimed_task_id, queued.task_id);
+    assert!(first_stage.is_err());
+    assert_eq!(
+        service.get_task(&queued.task_id).unwrap().status,
+        TaskStatus::Cancelling,
+        "pre-fix baseline: a rejected first-stage start has no shared finalizer",
+    );
 }
 
 #[test]

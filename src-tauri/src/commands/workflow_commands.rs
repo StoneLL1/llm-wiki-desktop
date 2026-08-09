@@ -383,6 +383,7 @@ pub(crate) fn retry_workflow_for_state(
             .retry(
                 &state.task_service,
                 &request.task_id,
+                context.project_id.clone(),
                 context.root.clone(),
                 replay.persistence.task_state_root,
             )

@@ -4,19 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendEvent } from "../../types/task";
 import type { WorkflowPreparation, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
 import { useNavigationStore } from "../../stores/navigationStore";
+import { useProjectStore } from "../../stores/projectStore";
 import { useWorkflowStore } from "../../stores/workflowStore";
+import { makeWorkflowEventBurst } from "./workflowBaselineFixtures";
 
 const mocks = vi.hoisted(() => ({
   getOverview: vi.fn(),
   listRuns: vi.fn(),
+  getRun: vi.fn(),
   prepare: vi.fn(),
+  start: vi.fn(),
   listener: null as ((event: BackendEvent) => void) | null,
 }));
 
 vi.mock("../../services/workflowApi", () => ({
   getWorkflowsOverview: mocks.getOverview,
   listWorkflowRuns: mocks.listRuns,
-  prepareWorkflow: mocks.prepare, startWorkflow: vi.fn(), cancelWorkflowRun: vi.fn(),
+  getWorkflowRun: mocks.getRun,
+  prepareWorkflow: mocks.prepare, startWorkflow: mocks.start, cancelWorkflowRun: vi.fn(),
   undoCancelQueuedWorkflow: vi.fn(), reorderQueuedWorkflow: vi.fn(), retryWorkflow: vi.fn(),
   confirmWorkflowAction: vi.fn(), discardWorkflowResult: vi.fn(), continueQueuedWorkflows: vi.fn(),
 }));
@@ -94,6 +99,7 @@ describe("useWorkflowsController", () => {
   beforeEach(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
     useWorkflowStore.getState().reset();
+    useProjectStore.setState({ currentProject: project });
     useNavigationStore.setState({
       activeView: "workflows",
       settingsOpen: false,
@@ -103,7 +109,9 @@ describe("useWorkflowsController", () => {
     mocks.listener = null;
     mocks.getOverview.mockReset().mockResolvedValue(overview);
     mocks.listRuns.mockReset().mockResolvedValue({ runs: [], nextCursor: null });
+    mocks.getRun.mockReset().mockResolvedValue(run);
     mocks.prepare.mockReset().mockResolvedValue(preparation);
+    mocks.start.mockReset().mockResolvedValue({ kind: "created", run });
   });
   afterEach(() => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
@@ -117,6 +125,117 @@ describe("useWorkflowsController", () => {
     expect(useWorkflowStore.getState().runs).toEqual([]);
     act(() => mocks.listener?.({ eventId: "2", eventType: "workflow_updated", projectId: "project-a", taskId: "run-a", timestamp: run.updatedAt, payload: run }));
     expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("run-a");
+  });
+
+  it("counts overview, history, detail, prepare, and start calls independently", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+
+    await act(() => result.current.openRun(run.taskId));
+    await act(() => result.current.prepare("health_check"));
+    await act(() => result.current.startPrepared(false, false));
+
+    expect({
+      overview: mocks.getOverview.mock.calls.length,
+      history: mocks.listRuns.mock.calls.length,
+      detail: mocks.getRun.mock.calls.length,
+      prepare: mocks.prepare.mock.calls.length,
+      start: mocks.start.mock.calls.length,
+    }).toEqual({ overview: 2, history: 2, detail: 1, prepare: 1, start: 1 });
+  });
+
+  it("records the pre-fix refresh amplification and preserves the terminal event from a 200-event burst", async () => {
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+
+    const events = makeWorkflowEventBurst(200, {
+      taskId: run.taskId,
+      projectId: run.projectId,
+      canonicalIdentityKey: run.canonicalIdentityKey,
+      identityRevision: run.identityRevision,
+    });
+    const terminalRun = events.at(-1)!.payload;
+    const refreshGate = deferred<WorkflowsOverview>();
+    mocks.getOverview.mockReturnValue(refreshGate.promise);
+
+    act(() => {
+      for (const event of events) {
+        mocks.listener?.(event);
+      }
+    });
+
+    expect(mocks.getOverview).toHaveBeenCalledTimes(201);
+    expect(mocks.listRuns).toHaveBeenCalledTimes(201);
+    expect(mocks.getRun).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState().runs[0]).toMatchObject({
+      taskId: run.taskId,
+      displayStatus: "completed",
+      completedAt: terminalRun.completedAt,
+    });
+
+    await act(async () => refreshGate.resolve(overview));
+    await waitFor(() => expect(useWorkflowStore.getState().loading).toBe(false));
+  });
+
+  it("records that a same-root identity replacement does not reject an older prepare response", async () => {
+    const oldPreparation = deferred<WorkflowPreparation>();
+    const replacementOverview: WorkflowsOverview = {
+      ...overview,
+      projectAccess: { ...overview.projectAccess!, identityRevision: "revision-b" },
+    };
+    mocks.prepare.mockReset().mockReturnValueOnce(oldPreparation.promise);
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+
+    let request!: Promise<void>;
+    act(() => { request = result.current.prepare("health_check"); });
+    act(() => useWorkflowStore.setState({ overview: replacementOverview }));
+    await act(async () => {
+      oldPreparation.resolve(preparation);
+      await request;
+    });
+
+    expect(useWorkflowStore.getState().overview?.projectAccess?.identityRevision).toBe("revision-b");
+    expect(useWorkflowStore.getState().preparation?.projectAccess.identityRevision).toBe("revision-a");
+  });
+
+  it("records that perform commits an in-flight revision-a start after same-root replacement", async () => {
+    const replacementOverview: WorkflowsOverview = {
+      ...overview,
+      projectAccess: { ...overview.projectAccess!, identityRevision: "revision-b" },
+    };
+    const staleStart = deferred<{ kind: "created"; run: WorkflowRun }>();
+    const postStartOverview = deferred<WorkflowsOverview>();
+    mocks.start.mockReset().mockReturnValueOnce(staleStart.promise);
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    useWorkflowStore.setState({
+      preparation,
+    });
+    mocks.getOverview.mockReturnValueOnce(postStartOverview.promise);
+
+    let request!: Promise<void>;
+    act(() => { request = result.current.startPrepared(false, false); });
+    expect(mocks.start).toHaveBeenCalledWith(expect.objectContaining({
+      preparationId: preparation.preparationId,
+      preparationRevision: preparation.preparationRevision,
+    }));
+    act(() => useWorkflowStore.setState({
+      overview: replacementOverview,
+      preparation: {
+        ...preparation,
+        projectAccess: replacementOverview.projectAccess!,
+        preparationRevision: "revision-b",
+      },
+    }));
+    await act(async () => staleStart.resolve({ kind: "created", run }));
+    await waitFor(() => expect(useWorkflowStore.getState().selectedTaskId).toBe(run.taskId));
+    expect(useWorkflowStore.getState().runs[0]?.identityRevision).toBe("revision-a");
+
+    await act(async () => {
+      postStartOverview.resolve(replacementOverview);
+      await request;
+    });
   });
 
   it("loads the backend no-project overview instead of treating an empty project as uninitialized", async () => {

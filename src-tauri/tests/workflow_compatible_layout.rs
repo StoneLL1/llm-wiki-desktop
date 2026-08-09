@@ -1,10 +1,12 @@
+use llm_wiki_desktop_lib::models::layout::{ProjectMarkdownRoot, ProjectMarkdownRootRole};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::workflow::{
-    WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind, WorkflowPersistenceMode,
-    WorkflowPrerequisiteAction, WorkflowProjectTrust,
+    HealthCheckMode, WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind,
+    WorkflowPersistenceMode, WorkflowPrerequisiteAction, WorkflowProjectTrust, WorkflowScope,
 };
 use llm_wiki_desktop_lib::services::{
-    AgentService, SecretService, SettingsService, WorkflowAccessSnapshot, WorkflowService,
+    AgentService, PrepareWorkflowInput, SecretService, SettingsService, WorkflowAccessSnapshot,
+    WorkflowPreparationEnvironment, WorkflowService,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 
@@ -31,7 +33,10 @@ fn compatible_enablement_uses_app_owned_state_roots_without_content_write_roots(
     let context = ProjectContext::new("compatible", root.path().to_path_buf())
         .with_resolved_layout()
         .unwrap();
-    assert_eq!(context.layout.app_state_root.as_deref(), Some(".app/compat"));
+    assert_eq!(
+        context.layout.app_state_root.as_deref(),
+        Some(".app/compat")
+    );
     assert_eq!(
         context.layout.task_state_root.as_deref(),
         Some(".app/compat/tasks")
@@ -78,7 +83,11 @@ fn compatible_restricted_overview_keeps_readable_markdown_without_creating_state
         Some("WORKFLOW_PROJECT_UNTRUSTED"),
         "The overview must report blocking prerequisites instead of requiring an unmapped export root."
     );
-    let health = overview.rows.iter().find(|row| row.kind == WorkflowKind::HealthCheck).unwrap();
+    let health = overview
+        .rows
+        .iter()
+        .find(|row| row.kind == WorkflowKind::HealthCheck)
+        .unwrap();
     assert_ne!(
         health.prerequisite.as_ref().map(|item| &item.action),
         Some(&WorkflowPrerequisiteAction::ImportSources),
@@ -95,7 +104,6 @@ fn compatible_restricted_overview_keeps_readable_markdown_without_creating_state
         .any(|path| path.ends_with("主题.md")));
     assert!(!root.path().join(".app").exists());
 }
-
 
 #[test]
 fn compatible_fixture_matrix_keeps_nashsu_and_custom_markdown_roots_read_only() {
@@ -136,4 +144,54 @@ fn compatible_fixture_matrix_keeps_nashsu_and_custom_markdown_roots_read_only() 
         .unwrap()
         .iter()
         .any(|path| path.ends_with("page.md")));
+}
+
+#[test]
+fn source_only_malformed_markdown_can_prepare_local_quick_health() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("资料")).unwrap();
+    std::fs::write(
+        root.path().join("资料/损坏-frontmatter.md"),
+        "---\ntitle: [broken\n---\n# still readable as Markdown evidence\n",
+    )
+    .unwrap();
+    let mut context = ProjectContext::new("source-only", root.path().to_path_buf());
+    context.layout.markdown_roots = vec![ProjectMarkdownRoot {
+        path: "资料".into(),
+        role: ProjectMarkdownRootRole::Source,
+        exclude: None,
+    }];
+    context.layout.wiki_write_root = None;
+    context.layout.source_write_root = None;
+    context.layout.workflow_state_root = None;
+
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    let secrets = SecretService::memory();
+    let agents = AgentService::default();
+    let preparation = WorkflowService::default()
+        .prepare(
+            &WorkflowPreparationEnvironment {
+                context: &context,
+                access: restricted_access(),
+                settings_service: &settings,
+                secret_service: &secrets,
+                agent_service: &agents,
+            },
+            PrepareWorkflowInput {
+                kind: WorkflowKind::HealthCheck,
+                scope: Some(WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::LocalQuick,
+                }),
+                route_selection: None,
+            },
+        )
+        .unwrap();
+
+    assert!(!preparation
+        .prerequisites
+        .iter()
+        .any(|item| item.code == "WORKFLOW_MARKDOWN_REQUIRED"));
+    assert_eq!(preparation.baseline.item_count, 1);
+    assert!(!root.path().join(".app").exists());
 }

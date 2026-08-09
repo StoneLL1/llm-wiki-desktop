@@ -505,13 +505,15 @@ pub fn configure_compatible_layout(
     };
     state.confirmation_registry.register_with_execution(
         action.clone(),
-        Some(crate::models::confirmation::ConfirmationExecution::ConfigureCompatibleLayout {
-            assessment_id: request.assessment_id,
-            project_id: request.project_id,
-            root_path: request.project_root_path,
-            mapping,
-            expected_hash,
-        }),
+        Some(
+            crate::models::confirmation::ConfirmationExecution::ConfigureCompatibleLayout {
+                assessment_id: request.assessment_id,
+                project_id: request.project_id,
+                root_path: request.project_root_path,
+                mapping,
+                expected_hash,
+            },
+        ),
     )?;
     Ok(action)
 }

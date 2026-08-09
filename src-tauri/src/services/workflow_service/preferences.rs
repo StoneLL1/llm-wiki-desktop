@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,9 @@ use crate::models::workflow::{
 use crate::services::FileStore;
 
 const PREFERENCES_SCHEMA_VERSION: u32 = 1;
-const PREFERENCES_PATH: &str = ".app/workflows/preferences.json";
+const PREFERENCES_FILE_NAME: &str = "preferences.json";
+static PREFERENCE_OPERATION_LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -55,20 +57,32 @@ impl WorkflowPreferences {
         persistence: &WorkflowPersistenceMode,
     ) -> Result<Vec<WorkflowPreference>, BackendError> {
         let owner = owner_key(identity_key, identity_revision);
-        if matches!(persistence, WorkflowPersistenceMode::MemoryOnly) {
+        let operation_lock = self.operation_lock(&owner)?;
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| preferences_lock_error())?;
+        self.load_unlocked(context, &owner, persistence)
+    }
+
+    fn load_unlocked(
+        &self,
+        context: &ProjectContext,
+        owner: &str,
+        persistence: &WorkflowPersistenceMode,
+    ) -> Result<Vec<WorkflowPreference>, BackendError> {
+        let Some(path) = preferences_path(context, persistence) else {
             return Ok(self
                 .memory
                 .read()
                 .map_err(|_| preferences_lock_error())?
-                .get(&owner)
+                .get(owner)
                 .cloned()
                 .unwrap_or_default());
-        }
-        let path = context.resolve_project_path(PREFERENCES_PATH)?;
-        if !path.is_file() {
+        };
+        if !context.resolve_project_path(&path)?.is_file() {
             return Ok(Vec::new());
         }
-        let value: WorkflowPreferencesFile = FileStore.read_json(context, PREFERENCES_PATH)?;
+        let value: WorkflowPreferencesFile = FileStore.read_json(context, &path)?;
         if value.schema_version != PREFERENCES_SCHEMA_VERSION {
             return Err(BackendError::new(
                 "WORKFLOW_PREFERENCES_VERSION_UNSUPPORTED",
@@ -90,28 +104,61 @@ impl WorkflowPreferences {
         mut preference: WorkflowPreference,
     ) -> Result<(), BackendError> {
         validate_preference(&preference)?;
+        let owner = owner_key(identity_key, identity_revision);
+        let operation_lock = self.operation_lock(&owner)?;
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| preferences_lock_error())?;
         preference.saved_at = Utc::now().to_rfc3339();
-        let mut entries = self.load(context, identity_key, identity_revision, persistence)?;
+        let mut entries = self.load_unlocked(context, &owner, persistence)?;
         entries.retain(|entry| entry.kind != preference.kind);
         entries.push(preference);
         entries.sort_by_key(|entry| workflow_order(&entry.kind));
 
-        if matches!(persistence, WorkflowPersistenceMode::MemoryOnly) {
+        let Some(path) = preferences_path(context, persistence) else {
             self.memory
                 .write()
                 .map_err(|_| preferences_lock_error())?
-                .insert(owner_key(identity_key, identity_revision), entries);
+                .insert(owner, entries);
             return Ok(());
-        }
+        };
         FileStore.write_json_atomic(
             context,
-            PREFERENCES_PATH,
+            &path,
             &WorkflowPreferencesFile {
                 schema_version: PREFERENCES_SCHEMA_VERSION,
                 entries,
             },
         )
     }
+
+    fn operation_lock(&self, owner: &str) -> Result<Arc<Mutex<()>>, BackendError> {
+        let mut locks = PREFERENCE_OPERATION_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| preferences_lock_error())?;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(owner).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(owner.to_string(), Arc::downgrade(&lock));
+        Ok(lock)
+    }
+}
+
+fn preferences_path(
+    context: &ProjectContext,
+    persistence: &WorkflowPersistenceMode,
+) -> Option<String> {
+    if matches!(persistence, WorkflowPersistenceMode::MemoryOnly) {
+        return None;
+    }
+    context
+        .layout
+        .workflow_state_root
+        .as_deref()
+        .map(|root| format!("{}/{PREFERENCES_FILE_NAME}", root.trim_end_matches('/')))
 }
 
 fn validate_entries(entries: &[WorkflowPreference]) -> Result<(), BackendError> {

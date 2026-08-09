@@ -197,10 +197,11 @@ fn run_export_task(
                 // output path can't be derived we skip the record (the task is
                 // still marked Failed either way).
                 let title = title_for(&context, failed_type, failed_source.as_deref());
-                if let Ok(output_path) = state
-                    .export_service
-                    .build_output_relative_path_for(&context, failed_type, failed_source.as_deref())
-                {
+                if let Ok(output_path) = state.export_service.build_output_relative_path_for(
+                    &context,
+                    failed_type,
+                    failed_source.as_deref(),
+                ) {
                     let record = ExportService::new_failed_record(
                         failed_type,
                         title,
@@ -371,9 +372,11 @@ async fn run_export(
 
     let artifact = state.export_service.validate_html_artifact(&raw_html)?;
 
-    let output_path = state
-        .export_service
-        .build_output_relative_path_for(context, directive.export_type, directive.source_path.as_deref())?;
+    let output_path = state.export_service.build_output_relative_path_for(
+        context,
+        directive.export_type,
+        directive.source_path.as_deref(),
+    )?;
     state.export_service.write_html_checked(
         context,
         &output_path,

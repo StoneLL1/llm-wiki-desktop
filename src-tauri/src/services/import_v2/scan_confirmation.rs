@@ -332,9 +332,7 @@ mod tests {
 
     use super::*;
     use crate::models::import_v2::{ImportResourceMode, ImportSessionStatus};
-    use crate::models::import_v2_file::{
-        FileScanPolicy, FileSkipReason, LargeDataEstimate,
-    };
+    use crate::models::import_v2_file::{FileScanPolicy, FileSkipReason, LargeDataEstimate};
     use crate::models::paths::ProjectContext;
 
     fn empty_session(project_id: &str) -> ImportSession {
@@ -512,12 +510,9 @@ mod tests {
         assert!(!requires_item_confirmation(&aggregate.files[0]));
 
         scan.aggregate_confirmed_at = Some("aggregate-confirmed".into());
-        let item_risk = select_saved_scan_files(
-            &scan,
-            false,
-            Some(std::slice::from_ref(&risky.source_path)),
-        )
-        .unwrap();
+        let item_risk =
+            select_saved_scan_files(&scan, false, Some(std::slice::from_ref(&risky.source_path)))
+                .unwrap();
         assert!(!item_risk.mark_aggregate_confirmed);
         assert!(item_risk.fully_accepted);
         assert_eq!(item_risk.files, vec![risky]);
@@ -585,12 +580,9 @@ mod tests {
             )
             .unwrap();
 
-        let plan = prepare_scan_staging(
-            &mut scan,
-            &empty_session("xlsx-estimate"),
-            false,
-            || "xlsx-token".into(),
-        );
+        let plan = prepare_scan_staging(&mut scan, &empty_session("xlsx-estimate"), false, || {
+            "xlsx-token".into()
+        });
         assert!(plan.aggregate_confirmation_pending);
         assert!(plan.item_confirmation_pending);
         assert!(plan.inputs.is_empty());
@@ -672,8 +664,8 @@ mod tests {
                 Some(&selected_paths),
                 &session,
             )
-                .unwrap_err()
-                .code,
+            .unwrap_err()
+            .code,
             "IMPORT_SCAN_CONFIRMATION_INVALID"
         );
         let wrong_identity = ImportScanIdentity {
@@ -689,8 +681,8 @@ mod tests {
                 Some(&selected_paths),
                 &session,
             )
-                .unwrap_err()
-                .code,
+            .unwrap_err()
+            .code,
             "IMPORT_SCAN_CONFIRMATION_INVALID"
         );
         let mut changed_totals = scan.clone();
@@ -704,8 +696,8 @@ mod tests {
                 Some(&selected_paths),
                 &session,
             )
-                .unwrap_err()
-                .code,
+            .unwrap_err()
+            .code,
             "IMPORT_SCAN_CONFIRMATION_INVALID"
         );
         std::fs::write(root.path().join("source.md"), "# Changed\n").unwrap();
@@ -718,8 +710,8 @@ mod tests {
                 Some(&selected_paths),
                 &session,
             )
-                .unwrap_err()
-                .code,
+            .unwrap_err()
+            .code,
             "IMPORT_SCAN_SOURCE_CHANGED"
         );
     }

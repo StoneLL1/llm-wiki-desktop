@@ -137,6 +137,8 @@ pub enum WorkflowScope {
 pub struct WorkflowExecutionOptions {
     pub preparation_revision: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing_target_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restricted_content_acknowledgement_revision: Option<String>,
@@ -147,6 +149,9 @@ pub struct WorkflowExecutionOptions {
 impl WorkflowExecutionOptions {
     pub fn validate(&self) -> Result<(), String> {
         validate_revision("preparationRevision", &self.preparation_revision)?;
+        if let Some(fingerprint) = self.preparation_fingerprint.as_deref() {
+            validate_revision("preparationFingerprint", fingerprint)?;
+        }
         if let Some(hash) = self.existing_target_hash.as_deref() {
             if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err("existingTargetHash must be a SHA-256 hex digest".into());

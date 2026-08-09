@@ -84,7 +84,11 @@ fn batch_a_expected_red_task_service_creates_one_backend_task_per_item_at_scale(
                 .unwrap();
             task_ids.push(task.id);
         }
-        assert_eq!(task_ids.len(), count, "current BackendTask baseline for {count} items");
+        assert_eq!(
+            task_ids.len(),
+            count,
+            "current BackendTask baseline for {count} items"
+        );
         assert_eq!(service.list_tasks(None).len(), count);
     }
 }

@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { Profiler } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendTask } from "../../types/task";
 
@@ -23,6 +24,10 @@ vi.mock("react-i18next", () => ({
 import { TaskLogDrawer } from "./TaskLogDrawer";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
+import {
+  WORKFLOW_BASELINE_SIZES,
+  makeDrawerEventPayload,
+} from "../../features/workflows/workflowBaselineFixtures";
 
 const runningTask: BackendTask = {
   id: "task-1",
@@ -238,6 +243,42 @@ describe("TaskLogDrawer", () => {
     fireEvent.click(screen.getByRole("button", { name: /Import second$/ }));
     expect(useTaskStore.getState().selectedTaskId).toBe("batch-task-2");
   });
+
+  it("records closed-drawer renders for 1,000 task/log/activity/output events", async () => {
+    useTaskStore.setState({
+      tasks: [],
+      logs: {},
+      activities: {},
+      taskOutputs: {},
+      drawerOpen: false,
+      selectedTaskId: null,
+      runningCount: 0,
+    });
+    let commits = 0;
+    render(
+      <Profiler id="closed-task-drawer" onRender={() => { commits += 1; }}>
+        <TaskLogDrawer />
+      </Profiler>,
+    );
+    await waitFor(() => expect(commits).toBeGreaterThanOrEqual(2));
+    const mountCommits = commits;
+
+    for (let index = 0; index < WORKFLOW_BASELINE_SIZES.drawerEvents; index += 1) {
+      const event = makeDrawerEventPayload(index);
+      act(() => {
+        useTaskStore.setState((state) => ({
+          tasks: [...state.tasks, event.task],
+          logs: { ...state.logs, [event.task.id]: [event.log] },
+          activities: { ...state.activities, [event.task.id]: [event.activity] },
+          taskOutputs: { ...state.taskOutputs, [event.task.id]: event.output },
+          runningCount: state.runningCount + 1,
+        }));
+      });
+    }
+
+    expect(document.querySelector(".task-drawer")).toBeNull();
+    expect(commits - mountCommits).toBe(WORKFLOW_BASELINE_SIZES.drawerEvents);
+  }, 30_000);
 
   it("shows a typed URL operation as one task instead of a numbered batch", () => {
     const operation = {

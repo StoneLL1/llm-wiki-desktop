@@ -1,3 +1,6 @@
+#[path = "support/workflow_baseline.rs"]
+mod workflow_baseline;
+
 use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
 use llm_wiki_desktop_lib::models::task::{BackendEventType, TaskStatus, TaskType};
 use llm_wiki_desktop_lib::models::workflow::{
@@ -8,6 +11,8 @@ use llm_wiki_desktop_lib::models::workflow::{
 use llm_wiki_desktop_lib::services::{project_identity, EnqueueWorkflow, WorkflowCoordinator};
 use llm_wiki_desktop_lib::tasks::task_events::EventBus;
 use llm_wiki_desktop_lib::tasks::TaskService;
+use std::sync::Arc;
+use workflow_baseline::{controlled_race, RacePoint};
 
 fn stage() -> WorkflowStage {
     WorkflowStage {
@@ -105,6 +110,51 @@ fn restart_interrupts_running_and_holds_queued_until_explicit_continuation() {
     assert!(continued.iter().any(|run| {
         run.task_id == queued.task_id && run.display_status == WorkflowDisplayStatus::Running
     }));
+}
+
+#[test]
+fn worker_finish_after_cancel_uses_a_deterministic_recovery_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = Arc::new(TaskService::default());
+    let coordinator = Arc::new(WorkflowCoordinator::default());
+    let run = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "finish-window"))
+            .unwrap(),
+    );
+    service.start_workflow_stage(&run.task_id, "apply").unwrap();
+    let (controller, worker_window) = controlled_race();
+    let worker_service = service.clone();
+    let worker_coordinator = coordinator.clone();
+    let task_id = run.task_id.clone();
+    let worker = std::thread::spawn(move || {
+        worker_window.pause_at(RacePoint::WorkerFinish);
+        worker_coordinator.complete_and_claim_next(
+            &worker_service,
+            &task_id,
+            llm_wiki_desktop_lib::models::workflow::WorkflowResult::UpdateWiki {
+                created: 0,
+                updated: 0,
+                skipped: 0,
+                deleted: 0,
+                conflicted: 0,
+                affected_paths: Vec::new(),
+                checkpoint_hash: None,
+                final_commit: None,
+            },
+        )
+    });
+
+    controller.wait_for(RacePoint::WorkerFinish);
+    coordinator.cancel(&service, &run.task_id).unwrap();
+    controller.release();
+
+    assert!(worker.join().unwrap().is_err());
+    assert_eq!(
+        service.get_task(&run.task_id).unwrap().status,
+        TaskStatus::Cancelling,
+        "pre-fix baseline: worker completion rejected after cancellation has no shared finalizer",
+    );
 }
 
 #[test]
