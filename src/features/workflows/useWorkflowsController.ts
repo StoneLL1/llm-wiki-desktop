@@ -50,6 +50,13 @@ interface PendingWorkflowEvent {
 }
 
 const MAX_PENDING_WORKFLOW_EVENTS = 256;
+const WORKFLOW_PROGRESS_FLUSH_MS = 100;
+const TERMINAL_WORKFLOW_STATUSES = new Set<WorkflowRun["displayStatus"]>([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -232,16 +239,21 @@ export function useWorkflowsController(
   });
   const onProjectPrerequisite = options?.onProjectPrerequisite;
   const activeKeyRef = useRef(projectKey);
+  const enabledRef = useRef(enabled);
   const refreshRequestRef = useRef(0);
+  const refreshIntentRef = useRef(0);
   const historyRequestRef = useRef(0);
-  const refreshInFlightRef = useRef<Map<string, number>>(new Map());
+  const overviewWaveRef = useRef<Map<string, Promise<void>>>(new Map());
+  const overviewWaveEpochRef = useRef<Map<string, number>>(new Map());
+  const trailingOverviewRef = useRef<Map<string, { includeHistory: boolean; intent: number }>>(new Map());
   const pendingEventsRef = useRef<Map<string, PendingWorkflowEvent>>(new Map());
-  const pendingRefreshVersionRef = useRef<Map<string, number>>(new Map());
-  const attemptedPendingRefreshVersionRef = useRef<Map<string, number>>(new Map());
+  const progressEventsRef = useRef<Map<string, PendingWorkflowEvent>>(new Map());
+  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prepareRequestRef = useRef(0);
   const waitingHydrationRef = useRef<Map<string, Promise<void>>>(new Map());
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const openSettings = useNavigationStore((state) => state.openSettings);
+  enabledRef.current = enabled;
 
   const request = useCallback(
     () => ({ projectId: project.projectId, projectRootPath: project.rootPath }),
@@ -317,29 +329,34 @@ export function useWorkflowsController(
     waitingHydrationRef.current.set(inFlightKey, hydration);
   }, [project.projectId, request]);
 
-  const refresh = useCallback(async (requestedMode?: "init" | "reconcile") => {
-    if (!enabled || !hasTauri()) return;
-    historyRequestRef.current += 1;
+  const runOverviewRefresh = useCallback(async (
+    includeHistory: boolean,
+    requestedMode: "init" | "reconcile",
+    refreshIntent: number,
+  ): Promise<boolean> => {
+    if (!enabledRef.current || !hasTauri()) return false;
+    if (includeHistory) historyRequestRef.current += 1;
     const state = useWorkflowStore.getState();
     const refreshRequest = ++refreshRequestRef.current;
     const requestGuard = captureWorkflowRequestGuard(state);
-    const authorityIdentityGuard = workflowAuthorityIdentity(project);
+    const projectRequest = request();
+    const projectScope = {
+      projectId: projectRequest.projectId,
+      rootPath: projectRequest.projectRootPath,
+    };
+    const authorityIdentityGuard = workflowAuthorityIdentity(projectScope);
     const operationKey = requestedMode === "reconcile" || state.overview
       ? "overview:reconcile"
       : "overview:init";
     const operationRequest = state.beginOperation(operationKey);
-    refreshInFlightRef.current.set(
-      projectKey,
-      (refreshInFlightRef.current.get(projectKey) ?? 0) + 1,
-    );
     if (!state.overview) state.setOverviewStatus("loading");
     try {
-      const overviewResultPromise = settle(getWorkflowsOverview(request()));
-      const historyResultPromise = project.projectId && project.rootPath
+      const overviewResultPromise = settle(getWorkflowsOverview(projectRequest));
+      const historyResultPromise = includeHistory && projectRequest.projectId && projectRequest.projectRootPath
         ? settle(listWorkflowRuns({
-            ...request(),
-            workflowKind: null,
-            displayStatus: null,
+            ...projectRequest,
+            workflowKind: state.historyKind,
+            displayStatus: state.historyStatus,
             cursor: null,
             limit: 100,
           }))
@@ -353,10 +370,12 @@ export function useWorkflowsController(
       ]);
       const latest = useWorkflowStore.getState();
       if (
-        !workflowRequestScopeMatches(requestGuard)
-        || workflowAuthorityIdentity(project) !== authorityIdentityGuard
+        !enabledRef.current
+        || !workflowRequestScopeMatches(requestGuard)
+        || workflowAuthorityIdentity(projectScope) !== authorityIdentityGuard
         || refreshRequestRef.current !== refreshRequest
-      ) return;
+        || refreshIntentRef.current !== refreshIntent
+      ) return false;
       if (!overviewResult.ok) {
         latest.setOverviewStatus("error");
         latest.failOperation(
@@ -364,7 +383,7 @@ export function useWorkflowsController(
           operationRequest,
           operationError("workflows.operationError.overview", overviewResult.error),
         );
-        return;
+        return false;
       }
       const overview = overviewResult.value;
       if (!historyResult.ok) {
@@ -374,19 +393,19 @@ export function useWorkflowsController(
           operationRequest,
           operationError("workflows.operationError.history", historyResult.error),
         );
-        return;
+        return false;
       }
       const overviewAccess = overview.projectAccess;
       const currentAuthority = useProjectStore.getState().authority;
       const authorityMatchesOverview = !overviewAccess
         ? !currentAuthority || currentAuthority.projectId !== project.projectId
         : !currentAuthority
-          || currentAuthority.projectId !== project.projectId
+          || currentAuthority.projectId !== projectRequest.projectId
           || (currentAuthority.canonicalIdentityKey === overviewAccess.canonicalIdentityKey
             && currentAuthority.identityRevision === overviewAccess.identityRevision);
       const historyMatchesOverview = overviewAccess
         ? historyResult.value.runs.every((run) =>
-            workflowRunMatchesAccess(run, project.projectId, overviewAccess),
+            workflowRunMatchesAccess(run, projectRequest.projectId, overviewAccess),
           )
         : historyResult.value.runs.length === 0;
       if (!authorityMatchesOverview || !historyMatchesOverview) {
@@ -397,27 +416,32 @@ export function useWorkflowsController(
             : "WORKFLOW_AUTHORITY_IDENTITY_MISMATCH",
         });
         if (!latest.overview) latest.setOverviewStatus("error");
-        return;
+        return false;
       }
-      latest.setProjectSnapshot(overview, historyResult.value.runs, historyResult.value.nextCursor);
+      if (includeHistory) {
+        latest.setProjectSnapshot(overview, historyResult.value.runs, historyResult.value.nextCursor);
+      } else {
+        latest.setOverviewSnapshot(overview);
+      }
       if (overviewAccess) {
         const pendingEvents = [...pendingEventsRef.current.values()];
         pendingEventsRef.current.clear();
-        for (const pendingEvent of pendingEvents) {
-          if (workflowEventMatchesAccess(pendingEvent, project.projectId, overviewAccess)) {
-            latest.upsertRun(pendingEvent.run);
-            hydrateSelectedWaitingRun(pendingEvent.run);
-          }
+        const accepted = pendingEvents.filter((pendingEvent) =>
+          workflowEventMatchesAccess(pendingEvent, projectRequest.projectId, overviewAccess),
+        );
+        latest.upsertRuns(accepted.map((pendingEvent) => pendingEvent.run));
+        for (const pendingEvent of accepted) {
+          hydrateSelectedWaitingRun(pendingEvent.run);
         }
-        pendingRefreshVersionRef.current.delete(projectKey);
-        attemptedPendingRefreshVersionRef.current.delete(projectKey);
       }
+      return true;
     } catch (error) {
       const latest = useWorkflowStore.getState();
       if (
         workflowRequestScopeMatches(requestGuard)
-        && workflowAuthorityIdentity(project) === authorityIdentityGuard
+        && workflowAuthorityIdentity(projectScope) === authorityIdentityGuard
         && refreshRequestRef.current === refreshRequest
+        && refreshIntentRef.current === refreshIntent
       ) {
         if (!latest.overview) latest.setOverviewStatus("error");
         latest.failOperation(
@@ -426,37 +450,108 @@ export function useWorkflowsController(
           operationError("workflows.operationError.overview", error),
         );
       }
+      return false;
     } finally {
-      const remainingRefreshes = Math.max(
-        0,
-        (refreshInFlightRef.current.get(projectKey) ?? 1) - 1,
+      useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
+    }
+  }, [hydrateSelectedWaitingRun, projectKey, request]);
+
+  const runOverviewWave = useCallback(async (
+    includeHistory: boolean,
+    supersedeActive = true,
+  ) => {
+    if (!enabledRef.current || !hasTauri()) return;
+    const existing = overviewWaveRef.current.get(projectKey);
+    const currentRequestEpoch = useWorkflowStore.getState().requestEpoch;
+    if (
+      existing
+      && !useWorkflowStore.getState().overview
+      && overviewWaveEpochRef.current.get(projectKey) === currentRequestEpoch
+      && !supersedeActive
+    ) {
+      const currentIntent = refreshIntentRef.current;
+      const pending = trailingOverviewRef.current.get(projectKey);
+      trailingOverviewRef.current.set(projectKey, {
+        includeHistory: (pending?.includeHistory ?? false) || includeHistory,
+        intent: Math.max(pending?.intent ?? currentIntent, currentIntent),
+      });
+      await existing;
+      return;
+    }
+    const intent = ++refreshIntentRef.current;
+    if (existing) {
+      const pending = trailingOverviewRef.current.get(projectKey);
+      trailingOverviewRef.current.set(projectKey, {
+        includeHistory: (pending?.includeHistory ?? false) || includeHistory,
+        intent,
+      });
+      await existing;
+      return;
+    }
+    const wave = (async () => {
+      await runOverviewRefresh(
+        includeHistory,
+        includeHistory ? "init" : "reconcile",
+        intent,
       );
-      if (remainingRefreshes === 0) refreshInFlightRef.current.delete(projectKey);
-      else refreshInFlightRef.current.set(projectKey, remainingRefreshes);
-      const latest = useWorkflowStore.getState();
-      latest.finishOperation(operationKey, operationRequest);
-      if (remainingRefreshes === 0 && activeKeyRef.current === projectKey) {
-        const pendingVersion = pendingRefreshVersionRef.current.get(projectKey) ?? 0;
-        const attemptedVersion = attemptedPendingRefreshVersionRef.current.get(projectKey) ?? 0;
-        if (pendingVersion > attemptedVersion) {
-          // A buffered event gets one coalesced follow-up after the current
-          // refresh wave. Keeping the version until a successful identity
-          // check prevents a failed or superseded request from losing the
-          // event, without creating an unbounded retry loop.
-          attemptedPendingRefreshVersionRef.current.set(projectKey, pendingVersion);
-          void refresh("reconcile");
-        }
+      const trailing = trailingOverviewRef.current.get(projectKey);
+      if (
+        trailing
+        && enabledRef.current
+        && activeKeyRef.current === projectKey
+      ) {
+        trailingOverviewRef.current.delete(projectKey);
+        await runOverviewRefresh(trailing.includeHistory, "reconcile", trailing.intent);
+      }
+    })();
+    overviewWaveRef.current.set(projectKey, wave);
+    overviewWaveEpochRef.current.set(projectKey, currentRequestEpoch);
+    let followup: { includeHistory: boolean; intent: number } | undefined;
+    try {
+      await wave;
+    } finally {
+      if (overviewWaveRef.current.get(projectKey) === wave) {
+        overviewWaveRef.current.delete(projectKey);
+        overviewWaveEpochRef.current.delete(projectKey);
+        followup = trailingOverviewRef.current.get(projectKey);
+        if (followup) trailingOverviewRef.current.delete(projectKey);
       }
     }
-  }, [enabled, hydrateSelectedWaitingRun, project.projectId, project.rootPath, projectKey, request]);
+    // A boundary arriving during the trailing pass owns a new bounded wave;
+    // the completed wave above never grows beyond first + one trailing invoke.
+    if (followup && enabledRef.current && activeKeyRef.current === projectKey) {
+      await runOverviewWave(followup.includeHistory);
+    }
+  }, [projectKey, runOverviewRefresh]);
+
+  const reconcileOverview = useCallback(
+    () => runOverviewWave(false, false),
+    [runOverviewWave],
+  );
+
+  const refresh = useCallback(async () => {
+    const state = useWorkflowStore.getState();
+    await runOverviewWave(!state.overview || state.surface === "history");
+  }, [runOverviewWave]);
 
   useEffect(() => {
     activeKeyRef.current = projectKey;
     pendingEventsRef.current.clear();
-    pendingRefreshVersionRef.current.clear();
-    attemptedPendingRefreshVersionRef.current.clear();
+    progressEventsRef.current.clear();
+    trailingOverviewRef.current.clear();
+    if (progressTimerRef.current) {
+      clearTimeout(progressTimerRef.current);
+      progressTimerRef.current = null;
+    }
     waitingHydrationRef.current.clear();
     useWorkflowStore.getState().activateProject(projectKey);
+    return () => {
+      if (progressTimerRef.current) {
+        clearTimeout(progressTimerRef.current);
+        progressTimerRef.current = null;
+      }
+      progressEventsRef.current.clear();
+    };
   }, [authorityIdentity, projectKey]);
 
   useEffect(() => {
@@ -464,8 +559,34 @@ export function useWorkflowsController(
   }, [authorityIdentity, enabled, refresh]);
 
   useEffect(
-    () =>
-      registerTaskEventListener((event) => {
+    () => {
+      if (!enabled) return undefined;
+      const flushProgressEvents = () => {
+        progressTimerRef.current = null;
+        if (!enabledRef.current || activeKeyRef.current !== projectKey) {
+          progressEventsRef.current.clear();
+          return;
+        }
+        const state = useWorkflowStore.getState();
+        const access = state.overview?.projectAccess;
+        if (!access) return;
+        const accepted = [...progressEventsRef.current.values()]
+          .filter((pendingEvent) => workflowEventMatchesAccess(
+            pendingEvent,
+            project.projectId,
+            access,
+          ));
+        progressEventsRef.current.clear();
+        state.upsertRuns(accepted.map((pendingEvent) => pendingEvent.run));
+      };
+      const scheduleProgressFlush = () => {
+        if (progressTimerRef.current) return;
+        progressTimerRef.current = setTimeout(
+          flushProgressEvents,
+          WORKFLOW_PROGRESS_FLUSH_MS,
+        );
+      };
+      const unsubscribe = registerTaskEventListener((event) => {
         if (event.eventType !== "workflow_updated" || activeKeyRef.current !== projectKey) return;
         const run = event.payload as WorkflowRun;
         const state = useWorkflowStore.getState();
@@ -478,11 +599,7 @@ export function useWorkflowsController(
             eventProjectId: event.projectId,
             run,
           });
-          pendingRefreshVersionRef.current.set(
-            projectKey,
-            (pendingRefreshVersionRef.current.get(projectKey) ?? 0) + 1,
-          );
-          if ((refreshInFlightRef.current.get(projectKey) ?? 0) === 0) void refresh("reconcile");
+          void reconcileOverview();
           return;
         }
         if (
@@ -491,11 +608,32 @@ export function useWorkflowsController(
         ) {
           return;
         }
+        const ordinaryProgress = run.displayStatus === "running" && !run.pendingAction;
+        if (ordinaryProgress) {
+          keepLatestPendingEvent(progressEventsRef.current, {
+            eventProjectId: event.projectId,
+            run,
+          });
+          scheduleProgressFlush();
+          return;
+        }
+        progressEventsRef.current.delete(run.taskId);
         state.upsertRun(run);
         hydrateSelectedWaitingRun(run);
-        void refresh("reconcile");
-      }),
-    [hydrateSelectedWaitingRun, project.projectId, projectKey, refresh],
+        void runOverviewWave(
+          state.surface === "history" && TERMINAL_WORKFLOW_STATUSES.has(run.displayStatus),
+        );
+      });
+      return () => {
+        unsubscribe();
+        if (progressTimerRef.current) {
+          clearTimeout(progressTimerRef.current);
+          progressTimerRef.current = null;
+        }
+        progressEventsRef.current.clear();
+      };
+    },
+    [enabled, hydrateSelectedWaitingRun, project.projectId, projectKey, reconcileOverview, runOverviewWave],
   );
 
   const perform = useCallback(
@@ -522,7 +660,7 @@ export function useWorkflowsController(
           latest.upsertRun(result);
           useWorkflowStore.getState().selectRun(result.taskId);
         }
-        await refresh("reconcile");
+        await reconcileOverview();
       } catch (error) {
         if (workflowRequestGuardMatchesAuthority(guard, project)) {
           useWorkflowStore.getState().failOperation(
@@ -535,7 +673,7 @@ export function useWorkflowsController(
         useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
       }
     },
-    [commitOutcome, project.projectId, refresh],
+    [commitOutcome, project.projectId, reconcileOverview],
   );
 
   const prepareKind = useCallback(
@@ -545,7 +683,7 @@ export function useWorkflowsController(
         && project.rootPath
         && !useWorkflowStore.getState().identityGuard.canonicalIdentityKey
       ) {
-        await refresh("init");
+        await refresh();
       }
       const state = useWorkflowStore.getState();
       const prepareRequest = ++prepareRequestRef.current;

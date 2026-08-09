@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
@@ -345,6 +345,27 @@ beforeEach(() => {
 });
 
 describe("useImportWorkflow", () => {
+  it("does not re-render an inactive Workflows route for unrelated task updates", async () => {
+    const taskLauncher = launcher();
+    let renders = 0;
+    function InactiveImportController() {
+      renders += 1;
+      useImportWorkflow(projectA, "workflows", taskLauncher);
+      return null;
+    }
+    render(<InactiveImportController />);
+    await act(async () => { await Promise.resolve(); });
+    const initialRenders = renders;
+
+    act(() => {
+      for (let index = 0; index < 100; index += 1) {
+        useTaskStore.setState({ tasks: [task(`unrelated-${index}`)] });
+      }
+    });
+
+    expect(renders - initialRenders).toBe(0);
+  });
+
   it("bootstraps readiness and creates a balanced draft when no unfinished session exists", async () => {
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
 

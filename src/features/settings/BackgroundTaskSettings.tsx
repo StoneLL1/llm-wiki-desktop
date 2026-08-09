@@ -1,11 +1,14 @@
-import type { CloseBehavior } from "../../types/settings";
+import type { CloseBehavior, SystemNotificationPrefs } from "../../types/settings";
 import { useTranslation } from "react-i18next";
 
 interface BackgroundTaskSettingsProps {
   closeBehavior: CloseBehavior;
   contextWindow: number;
+  systemNotifications: SystemNotificationPrefs;
   onChangeCloseBehavior: (behavior: CloseBehavior) => void;
   onChangeContextWindow: (contextWindow: number) => void;
+  onChangeSystemNotification: (key: keyof SystemNotificationPrefs, enabled: boolean) => void;
+  onRequestNotificationPermission: () => void;
 }
 
 const contextOptions = [4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 1_000_000];
@@ -13,8 +16,11 @@ const contextOptions = [4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 
 export function BackgroundTaskSettings({
   closeBehavior,
   contextWindow,
+  systemNotifications,
   onChangeCloseBehavior,
   onChangeContextWindow,
+  onChangeSystemNotification,
+  onRequestNotificationPermission,
 }: BackgroundTaskSettingsProps) {
   const { t } = useTranslation();
 
@@ -61,6 +67,33 @@ export function BackgroundTaskSettings({
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="grid gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[12px] font-medium text-[var(--text-secondary)]">{t("settings.background.notifications")}</div>
+            <div className="mt-1 text-[11px] text-[var(--text-muted)]">{t("settings.background.notificationsHelp")}</div>
+          </div>
+          <button className="btn btn--secondary" type="button" onClick={onRequestNotificationPermission}>
+            {t("settings.background.notificationPermission")}
+          </button>
+        </div>
+        {([
+          ["onTaskCompleted", "settings.background.notifyCompleted"],
+          ["onTaskFailed", "settings.background.notifyFailed"],
+          ["onConfirmationNeeded", "settings.background.notifyConfirmation"],
+        ] as const).map(([key, label]) => (
+          <label className="flex items-center justify-between gap-3 text-[12px]" key={key}>
+            <span>{t(label)}</span>
+            <input
+              aria-label={t(label)}
+              checked={systemNotifications[key]}
+              onChange={(event) => onChangeSystemNotification(key, event.target.checked)}
+              type="checkbox"
+            />
+          </label>
+        ))}
       </div>
     </section>
   );

@@ -1,5 +1,11 @@
 # 踩坑清单 (gotchas.txt)
 
+Permission epoch invalidation can accidentally duplicate or poison an OS permission prompt — Root cause: clearing a real request-in-flight promise or checking/caching denied in the new epoch before joining the old prompt creates duplicate requests or a false denied cache after the user grants — How to avoid: join the global OS request before any epoch-local precheck, let epoch guard only control cache commits, then force one fresh current-epoch check after joining an older request.
+
+Serialized project-scoped UI saves can outlive their owner project — Root cause: a queued callback may capture project A identifiers but begin after project B becomes current, causing optimistic global-store state to bind to the wrong scope — How to avoid: bind queues to project key plus generation, invalidate the tail synchronously on project change, and verify ownership both before and after each queued save.
+
+Real latency tests become flaky when they time testing-library polling instead of the state commit — Root cause: `waitFor` scheduling delay under the parallel full gate is unrelated to event-to-store visibility and can push a correct 100ms flush beyond a 150ms assertion — How to avoid: subscribe directly to the measured store slice and record `performance.now()` at the exact matching snapshot commit.
+
 An older hydrated Workflow review can be lost behind a newer sparse event — Root cause: generic `updatedAt` monotonic upsert correctly rejects the older detail snapshot even though it contains the only `decisionReview` for the same pending action — How to avoid: after revalidating current project, authority identity, selection, task, and action, merge only the hydrated review into the current run instead of replacing newer event facts.
 
 Identity-guard rollback can inherit another request's transient loading state — Root cause: overlapping request B snapshots `loading=true` or a temporary selection written by A, then restores that transient snapshot after A loses ownership — How to avoid: combine monotonic owner epochs with the last stable presentation snapshot, and test A/B deferred overlap where only the current owner may commit or roll back.

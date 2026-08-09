@@ -69,7 +69,7 @@ export function makeBaselineRun(index = 0, overrides: Partial<WorkflowRun> = {})
 }
 
 export function makeWorkflowEventBurst(
-  count = WORKFLOW_BASELINE_SIZES.workflowEvents,
+  count: number = WORKFLOW_BASELINE_SIZES.workflowEvents,
   runOverrides: Partial<WorkflowRun> = {},
 ) {
   return Array.from({ length: count }, (_, index) => {

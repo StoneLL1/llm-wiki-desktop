@@ -128,8 +128,24 @@ describe("useWorkflowsController", () => {
     mocks.discard.mockReset().mockResolvedValue({ ...run, displayStatus: "cancelled" });
   });
   afterEach(() => {
+    vi.useRealTimers();
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
     vi.clearAllMocks();
+  });
+
+  it("does not attach the workflow event controller outside the Workflows route", async () => {
+    const { rerender } = renderHook(
+      ({ enabled }) => useWorkflowsController(project, enabled),
+      { initialProps: { enabled: false } },
+    );
+
+    expect(mocks.listener).toBeNull();
+    expect(mocks.getOverview).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(mocks.listener).not.toBeNull());
+    rerender({ enabled: false });
+    expect(mocks.listener).toBeNull();
   });
 
   it("accepts only workflow events matching the active canonical identity revision", async () => {
@@ -138,7 +154,7 @@ describe("useWorkflowsController", () => {
     act(() => mocks.listener?.({ eventId: "1", eventType: "workflow_updated", projectId: "project-a", taskId: "run-a", timestamp: run.updatedAt, payload: { ...run, identityRevision: "stale" } }));
     expect(useWorkflowStore.getState().runs).toEqual([]);
     act(() => mocks.listener?.({ eventId: "2", eventType: "workflow_updated", projectId: "project-a", taskId: "run-a", timestamp: run.updatedAt, payload: run }));
-    expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("run-a");
+    await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("run-a"));
   });
 
   it("counts overview, history, detail, prepare, and start calls independently", async () => {
@@ -155,10 +171,10 @@ describe("useWorkflowsController", () => {
       detail: mocks.getRun.mock.calls.length,
       prepare: mocks.prepare.mock.calls.length,
       start: mocks.start.mock.calls.length,
-    }).toEqual({ overview: 2, history: 2, detail: 1, prepare: 1, start: 1 });
+    }).toEqual({ overview: 2, history: 1, detail: 1, prepare: 1, start: 1 });
   });
 
-  it("records the pre-fix refresh amplification and preserves the terminal event from a 200-event burst", async () => {
+  it("coalesces a 200-event burst without refreshing history and preserves the terminal event", async () => {
     renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
 
@@ -178,8 +194,8 @@ describe("useWorkflowsController", () => {
       }
     });
 
-    expect(mocks.getOverview).toHaveBeenCalledTimes(201);
-    expect(mocks.listRuns).toHaveBeenCalledTimes(201);
+    expect(mocks.getOverview).toHaveBeenCalledTimes(2);
+    expect(mocks.listRuns).toHaveBeenCalledTimes(1);
     expect(mocks.getRun).not.toHaveBeenCalled();
     expect(useWorkflowStore.getState().runs[0]).toMatchObject({
       taskId: run.taskId,
@@ -189,6 +205,211 @@ describe("useWorkflowsController", () => {
 
     await act(async () => refreshGate.resolve(overview));
     await waitFor(() => expect(useWorkflowStore.getState().operations["overview:reconcile"]?.pending ?? false).toBe(false));
+  });
+
+  it("batches ordinary progress near 10Hz without overview or history reconciliation", async () => {
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    vi.useFakeTimers();
+    const overviewCalls = mocks.getOverview.mock.calls.length;
+    const historyCalls = mocks.listRuns.mock.calls.length;
+    let observedCommits = 0;
+    const unsubscribe = useWorkflowStore.subscribe((state, previous) => {
+      if (state.runs !== previous.runs) observedCommits += 1;
+    });
+
+    const events = makeWorkflowEventBurst(50, {
+      taskId: run.taskId,
+      projectId: run.projectId,
+      canonicalIdentityKey: run.canonicalIdentityKey,
+      identityRevision: run.identityRevision,
+    }).slice(0, -1);
+    act(() => events.forEach((event) => mocks.listener?.(event)));
+    expect(useWorkflowStore.getState().runs).toEqual([]);
+
+    act(() => vi.advanceTimersByTime(100));
+    expect(useWorkflowStore.getState().runs[0]?.updatedAt).toBe(events.at(-1)?.payload.updatedAt);
+    expect(observedCommits).toBe(1);
+    expect(mocks.getOverview).toHaveBeenCalledTimes(overviewCalls);
+    expect(mocks.listRuns).toHaveBeenCalledTimes(historyCalls);
+    unsubscribe();
+  });
+
+  it("keeps one overview invoke in flight and schedules at most one trailing reconcile", async () => {
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    const firstReconcile = deferred<WorkflowsOverview>();
+    mocks.getOverview.mockReturnValueOnce(firstReconcile.promise).mockResolvedValue(overview);
+    const boundary = { ...run, displayStatus: "completed" as const, completedAt: "2026-08-01T00:00:02Z" };
+
+    act(() => {
+      for (let index = 0; index < 50; index += 1) {
+        mocks.listener?.({
+          eventId: `terminal-${index}`,
+          eventType: "workflow_updated",
+          projectId: run.projectId,
+          taskId: run.taskId,
+          timestamp: boundary.completedAt,
+          payload: { ...boundary, updatedAt: `2026-08-01T00:00:${String(index).padStart(2, "0")}Z` },
+        });
+      }
+    });
+
+    expect(mocks.getOverview).toHaveBeenCalledTimes(2);
+    await act(async () => firstReconcile.resolve(overview));
+    await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(3));
+    expect(mocks.listRuns).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts a fresh wave when a history boundary arrives during the trailing pass", async () => {
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    const firstPass = deferred<WorkflowsOverview>();
+    const trailingPass = deferred<WorkflowsOverview>();
+    mocks.getOverview
+      .mockReturnValueOnce(firstPass.promise)
+      .mockReturnValueOnce(trailingPass.promise)
+      .mockResolvedValue(overview);
+    const boundary = { ...run, displayStatus: "completed" as const, completedAt: "2026-08-01T00:00:02Z" };
+
+    act(() => mocks.listener?.({
+      eventId: "first-boundary",
+      eventType: "workflow_updated",
+      projectId: run.projectId,
+      taskId: run.taskId,
+      timestamp: boundary.completedAt,
+      payload: boundary,
+    }));
+    act(() => mocks.listener?.({
+      eventId: "coalesced-boundary",
+      eventType: "workflow_updated",
+      projectId: run.projectId,
+      taskId: run.taskId,
+      timestamp: boundary.completedAt,
+      payload: { ...boundary, updatedAt: "2026-08-01T00:00:03Z" },
+    }));
+    await act(async () => firstPass.resolve(overview));
+    await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(3));
+
+    act(() => useWorkflowStore.getState().setSurface("history"));
+    act(() => useWorkflowStore.getState().setHistoryFilters("health_check", "failed"));
+    act(() => mocks.listener?.({
+      eventId: "history-boundary-during-trailing",
+      eventType: "workflow_updated",
+      projectId: run.projectId,
+      taskId: run.taskId,
+      timestamp: boundary.completedAt,
+      payload: { ...boundary, updatedAt: "2026-08-01T00:00:04Z" },
+    }));
+    await act(async () => trailingPass.resolve(overview));
+
+    await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(mocks.listRuns).toHaveBeenCalledTimes(2));
+    expect(mocks.listRuns).toHaveBeenLastCalledWith(expect.objectContaining({
+      workflowKind: "health_check",
+      displayStatus: "failed",
+      cursor: null,
+      limit: 100,
+    }));
+  });
+
+  it("keeps the measured workflow store slice within 25 commits for 200 events over two seconds", async () => {
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    vi.useFakeTimers();
+    const events = makeWorkflowEventBurst(200, {
+      taskId: run.taskId,
+      projectId: run.projectId,
+      canonicalIdentityKey: run.canonicalIdentityKey,
+      identityRevision: run.identityRevision,
+    });
+    let commits = 0;
+    const emittedAt = new Map<string, number>();
+    const progressLatencies: number[] = [];
+    let terminalLatency = Number.POSITIVE_INFINITY;
+    const unsubscribe = useWorkflowStore.subscribe((state, previous) => {
+      if (
+        state.runs !== previous.runs
+        || state.overview !== previous.overview
+        || state.historyCursor !== previous.historyCursor
+      ) commits += 1;
+      const visible = state.runs[0];
+      if (visible && visible !== previous.runs[0]) {
+        const started = emittedAt.get(visible.updatedAt);
+        if (started !== undefined) {
+          const latency = Date.now() - started;
+          if (visible.displayStatus === "running") progressLatencies.push(latency);
+          else terminalLatency = latency;
+        }
+      }
+    });
+
+    await act(async () => {
+      for (const event of events) {
+        emittedAt.set(event.payload.updatedAt, Date.now());
+        mocks.listener?.(event);
+        vi.advanceTimersByTime(10);
+      }
+      await Promise.resolve();
+    });
+
+    expect(commits).toBeLessThanOrEqual(25);
+    const sortedLatencies = [...progressLatencies].sort((a, b) => a - b);
+    const p95Index = Math.max(0, Math.ceil(sortedLatencies.length * 0.95) - 1);
+    expect(sortedLatencies[p95Index]).toBeLessThanOrEqual(150);
+    expect(terminalLatency).toBeLessThanOrEqual(250);
+    expect(useWorkflowStore.getState().runs[0]?.displayStatus).toBe("completed");
+    expect(mocks.listRuns).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("keeps real event-to-store visibility within the local latency budget", async () => {
+    renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    const ordinary = makeWorkflowEventBurst(50, {
+      taskId: run.taskId,
+      projectId: run.projectId,
+      canonicalIdentityKey: run.canonicalIdentityKey,
+      identityRevision: run.identityRevision,
+    }).slice(0, -1);
+    const progressStarted = performance.now();
+    let resolveProgress!: (latency: number) => void;
+    const progressVisible = new Promise<number>((resolve) => { resolveProgress = resolve; });
+    const unsubscribeProgress = useWorkflowStore.subscribe((state) => {
+      if (state.runs[0]?.updatedAt === ordinary.at(-1)?.payload.updatedAt) {
+        resolveProgress(performance.now() - progressStarted);
+      }
+    });
+    act(() => ordinary.forEach((event) => mocks.listener?.(event)));
+    const progressLatency = await progressVisible;
+    unsubscribeProgress();
+
+    const terminalUpdatedAt = "2026-08-10T00:10:00.000Z";
+    const terminal = {
+      ...ordinary.at(-1)!,
+      eventId: "real-latency-terminal",
+      timestamp: terminalUpdatedAt,
+      payload: {
+        ...ordinary.at(-1)!.payload,
+        displayStatus: "completed" as const,
+        updatedAt: terminalUpdatedAt,
+        completedAt: terminalUpdatedAt,
+      },
+    };
+    const terminalStarted = performance.now();
+    let resolveTerminal!: (latency: number) => void;
+    const terminalVisible = new Promise<number>((resolve) => { resolveTerminal = resolve; });
+    const unsubscribeTerminal = useWorkflowStore.subscribe((state) => {
+      if (state.runs[0]?.displayStatus === "completed") {
+        resolveTerminal(performance.now() - terminalStarted);
+      }
+    });
+    act(() => mocks.listener?.(terminal));
+    const terminalLatency = await terminalVisible;
+    unsubscribeTerminal();
+
+    expect(progressLatency).toBeLessThanOrEqual(150);
+    expect(terminalLatency).toBeLessThanOrEqual(250);
   });
 
   it("rejects an older prepare response after a same-root identity replacement", async () => {
@@ -629,7 +850,7 @@ describe("useWorkflowsController", () => {
       projectId: project.projectId,
       taskId: run.taskId,
       timestamp: run.updatedAt,
-      payload: run,
+      payload: { ...run, displayStatus: "completed", completedAt: run.updatedAt },
     }));
 
     expect(useWorkflowStore.getState().operations["overview:init"]?.pending ?? false).toBe(false);
@@ -716,7 +937,7 @@ describe("useWorkflowsController", () => {
     await act(async () => pendingOverview.resolve(overview));
 
     await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe(run.taskId));
-    expect(mocks.getOverview).toHaveBeenCalledTimes(1);
+    expect(mocks.getOverview).toHaveBeenCalledTimes(2);
   });
 
   it("keeps only the newest buffered event for the same task", async () => {
@@ -968,9 +1189,14 @@ describe("useWorkflowsController", () => {
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(mocks.getOverview).toHaveBeenCalledTimes(1));
 
-    await act(() => result.current.refresh());
-    await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("new-run"));
+    let refreshPromise!: Promise<void>;
+    act(() => {
+      refreshPromise = result.current.refresh();
+    });
+    expect(mocks.getOverview).toHaveBeenCalledTimes(1);
     await act(async () => oldOverview.resolve(overview));
+    await act(async () => refreshPromise);
+    await waitFor(() => expect(useWorkflowStore.getState().runs[0]?.taskId).toBe("new-run"));
 
     expect(useWorkflowStore.getState().overview?.projectAccess).toMatchObject({
       canonicalIdentityKey: "identity-b",
@@ -1023,6 +1249,7 @@ describe("useWorkflowsController", () => {
       loadMorePromise = result.current.loadHistoryMore();
     });
     await waitFor(() => expect(mocks.listRuns).toHaveBeenCalledTimes(2));
+    act(() => useWorkflowStore.getState().setSurface("history"));
     await act(() => result.current.refresh());
     await waitFor(() => expect(useWorkflowStore.getState().runs.some((item) => item.taskId === freshRun.taskId)).toBe(true));
 

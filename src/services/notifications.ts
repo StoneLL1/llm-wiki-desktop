@@ -16,29 +16,98 @@ import { useTaskStore } from "../stores/taskStore";
 import type { BackendEvent, BackendTask } from "../types/task";
 import type { WorkflowDisplayStatus, WorkflowRun } from "../types/workflow";
 
-let permissionGranted: boolean | null = null;
+type NotificationPermissionState = "unknown" | "granted" | "denied";
+
+let permissionEpoch = 0;
+let permissionState: { epoch: number; value: NotificationPermissionState } = {
+  epoch: permissionEpoch,
+  value: "unknown",
+};
+let permissionCheckInFlight: { epoch: number; promise: Promise<boolean> } | null = null;
+let permissionRequestInFlight: { epoch: number; promise: Promise<boolean> } | null = null;
 const notifiedWorkflowStatus = new Map<string, WorkflowDisplayStatus>();
+const notifyingWorkflowStatus = new Set<string>();
 const ALLOWED_WORKFLOW_STATUSES = new Set<WorkflowDisplayStatus>([
   "waiting_for_confirmation",
   "completed",
   "failed",
 ]);
 
-async function ensurePermission(): Promise<boolean> {
-  if (permissionGranted === true) return true;
-  let granted = await isPermissionGranted();
-  if (!granted) granted = (await requestPermission()) === "granted";
-  permissionGranted = granted;
-  return granted;
+export function invalidateNotificationPermissionEpoch(): void {
+  permissionEpoch += 1;
+  permissionState = { epoch: permissionEpoch, value: "unknown" };
+  permissionCheckInFlight = null;
 }
 
-function taskFromPayload(payload: unknown): BackendTask | null {
-  return payload && typeof payload === "object" ? (payload as BackendTask) : null;
+async function checkPermission(): Promise<boolean> {
+  if (permissionState.epoch === permissionEpoch && permissionState.value !== "unknown") {
+    return permissionState.value === "granted";
+  }
+  if (permissionCheckInFlight?.epoch === permissionEpoch) {
+    return permissionCheckInFlight.promise;
+  }
+  const epoch = permissionEpoch;
+  const promise = isPermissionGranted()
+    .then((granted) => {
+      if (permissionEpoch === epoch) {
+        permissionState = { epoch, value: granted ? "granted" : "denied" };
+      }
+      return permissionEpoch === epoch && granted;
+    })
+    .finally(() => {
+      if (permissionCheckInFlight?.epoch === epoch) permissionCheckInFlight = null;
+    });
+  permissionCheckInFlight = { epoch, promise };
+  return promise;
 }
 
-function safeWorkflowSummary(run: WorkflowRun): string {
+export async function requestNotificationPermissionFromUser(): Promise<boolean> {
+  const callerEpoch = permissionEpoch;
+  const joinRequest = async (
+    activeRequest: NonNullable<typeof permissionRequestInFlight>,
+  ): Promise<boolean> => {
+    const granted = await activeRequest.promise.catch(() => false);
+    if (permissionEpoch !== callerEpoch) return false;
+    if (activeRequest.epoch === callerEpoch) return granted;
+    permissionState = { epoch: callerEpoch, value: "unknown" };
+    permissionCheckInFlight = null;
+    return checkPermission().catch(() => false);
+  };
+  if (permissionRequestInFlight) return joinRequest(permissionRequestInFlight);
+  if (await checkPermission().catch(() => false)) return true;
+  if (permissionEpoch !== callerEpoch) return false;
+  if (permissionRequestInFlight) return joinRequest(permissionRequestInFlight);
+  const epoch = permissionEpoch;
+  const promise = Promise.resolve()
+    .then(() => requestPermission())
+    .then((result) => {
+      const granted = result === "granted";
+      if (permissionEpoch === epoch) {
+        permissionState = { epoch, value: granted ? "granted" : "denied" };
+      }
+      return permissionEpoch === epoch && granted;
+    })
+    .finally(() => {
+      if (permissionRequestInFlight?.promise === promise) permissionRequestInFlight = null;
+    });
+  permissionRequestInFlight = { epoch, promise };
+  return promise;
+}
+
+function taskFromPayload(payload: unknown, taskId: string): BackendTask | null {
+  if (!payload || typeof payload !== "object") return null;
+  const task = payload as Partial<BackendTask>;
+  return task.id === taskId
+    && typeof task.taskType === "string"
+    && typeof task.status === "string"
+    ? task as BackendTask
+    : null;
+}
+
+function safeWorkflowSummary(run: WorkflowRun): string | null {
   if (!run.result) return i18next.t(`workflows.status.${run.displayStatus}`);
   if (run.result.kind === "update_wiki") {
+    if (![run.result.created, run.result.updated, run.result.deleted, run.result.conflicted].every(Number.isFinite)) return null;
     return i18next.t("notification.workflow.updateSummary", {
       changed: run.result.created + run.result.updated,
       deleted: run.result.deleted,
@@ -46,14 +115,76 @@ function safeWorkflowSummary(run: WorkflowRun): string {
     });
   }
   if (run.result.kind === "health_check") {
+    if (![run.result.errorCount, run.result.warningCount].every(Number.isFinite)) return null;
     return i18next.t("notification.workflow.healthSummary", {
       errors: run.result.errorCount,
       warnings: run.result.warningCount,
     });
   }
+  if (run.result.kind !== "generate_content" || !Array.isArray(run.result.outputPaths)) return null;
   return i18next.t("notification.workflow.generateSummary", {
     count: run.result.outputPaths.length,
   });
+}
+
+function workflowNotificationOptions(event: BackendEvent, run: WorkflowRun): Options | null {
+  if (
+    !run
+    || typeof run !== "object"
+    || typeof run.taskId !== "string"
+    || !run.taskId
+    || typeof run.projectId !== "string"
+    || !["update_wiki", "health_check", "generate_content"].includes(run.kind)
+    || !ALLOWED_WORKFLOW_STATUSES.has(run.displayStatus)
+    || !("result" in run)
+    || (run.result !== null && typeof run.result !== "object")
+    || (run.result != null && run.result.kind !== run.kind)
+  ) return null;
+  const body = safeWorkflowSummary(run);
+  if (!body) return null;
+  const projectName =
+    useProjectStore.getState().currentProject.projectId === run.projectId
+      ? useProjectStore.getState().currentProject.name
+      : useProjectStore.getState().recentProjects.find((project) => project.projectId === run.projectId)?.name
+        ?? i18next.t("notification.workflow.unknownProject");
+  return {
+    title: i18next.t("notification.workflow.title", {
+      project: projectName,
+      workflow: i18next.t(`workflows.kind.${run.kind}`),
+    }),
+    body,
+    extra: workflowExtra(event, run),
+  };
+}
+
+function taskNotificationOptions(event: BackendEvent, task: BackendTask | null): Options | null {
+  if (!event.taskId) return null;
+  if (event.payload !== null && !task) return null;
+  if (task?.taskType === "workflow") return null;
+  if (event.eventType === "task_completed") {
+    return {
+      title: i18next.t("notification.taskCompleted.title"),
+      body: i18next.t("notification.taskCompleted.bodyGeneric"),
+      extra: { taskId: event.taskId, eventType: event.eventType },
+    };
+  }
+  if (event.eventType === "task_failed") {
+    return {
+      title: i18next.t("notification.taskFailed.title"),
+      body: i18next.t("notification.taskFailed.bodyGeneric", {
+        reason: i18next.t("notification.taskFailed.unknown"),
+      }),
+      extra: { taskId: event.taskId, eventType: event.eventType },
+    };
+  }
+  if (event.eventType === "confirmation_requested") {
+    return {
+      title: i18next.t("notification.confirmationNeeded.title"),
+      body: i18next.t("notification.confirmationNeeded.bodyGeneric"),
+      extra: { taskId: event.taskId, eventType: event.eventType },
+    };
+  }
+  return null;
 }
 
 function workflowExtra(event: BackendEvent, run: WorkflowRun): Record<string, string> {
@@ -121,7 +252,6 @@ export async function registerNotificationActionListener(): Promise<() => void> 
 
 export async function notifyTaskEvent(event: BackendEvent): Promise<void> {
   const settings = useSettingsStore.getState().settings.systemNotifications;
-  const t = i18next.t;
 
   if (event.eventType === "workflow_updated") {
     const run = event.payload as WorkflowRun;
@@ -132,44 +262,32 @@ export async function notifyTaskEvent(event: BackendEvent): Promise<void> {
       : run.displayStatus === "failed"
         ? settings.onTaskFailed
         : settings.onConfirmationNeeded;
-    if (!enabled || !(await ensurePermission().catch(() => false))) return;
+    if (!enabled) return;
+    const notificationKey = `${run.taskId}\0${run.displayStatus}`;
+    if (notifyingWorkflowStatus.has(notificationKey)) return;
+    const options = workflowNotificationOptions(event, run);
+    if (!options) return;
+    notifyingWorkflowStatus.add(notificationKey);
+    if (!(await checkPermission().catch(() => false))) {
+      notifyingWorkflowStatus.delete(notificationKey);
+      return;
+    }
     notifiedWorkflowStatus.set(run.taskId, run.displayStatus);
-    const projectName =
-      useProjectStore.getState().currentProject.projectId === run.projectId
-        ? useProjectStore.getState().currentProject.name
-        : useProjectStore.getState().recentProjects.find((project) => project.projectId === run.projectId)?.name ?? t("notification.workflow.unknownProject");
-    await sendNotification({
-      title: t("notification.workflow.title", {
-        project: projectName,
-        workflow: t(`workflows.kind.${run.kind}`),
-      }),
-      body: safeWorkflowSummary(run),
-      extra: workflowExtra(event, run),
-    });
+    try {
+      await sendNotification(options);
+    } finally {
+      notifyingWorkflowStatus.delete(notificationKey);
+    }
     return;
   }
 
-  if (!event.taskId || !(await ensurePermission().catch(() => false))) return;
-  const task = taskFromPayload(event.payload);
-  if (task?.taskType === "workflow") return;
-  if (event.eventType === "task_completed" && settings.onTaskCompleted) {
-    await sendNotification({
-      title: t("notification.taskCompleted.title"),
-      body: task ? t("notification.taskCompleted.body", { title: task.title }) : t("notification.taskCompleted.bodyGeneric"),
-      extra: { taskId: event.taskId, eventType: event.eventType },
-    });
-  } else if (event.eventType === "task_failed" && settings.onTaskFailed) {
-    const reason = task?.error?.message ?? t("notification.taskFailed.unknown");
-    await sendNotification({
-      title: t("notification.taskFailed.title"),
-      body: task ? t("notification.taskFailed.body", { title: task.title, reason }) : t("notification.taskFailed.bodyGeneric", { reason }),
-      extra: { taskId: event.taskId, eventType: event.eventType },
-    });
-  } else if (event.eventType === "confirmation_requested" && settings.onConfirmationNeeded) {
-    await sendNotification({
-      title: t("notification.confirmationNeeded.title"),
-      body: task ? t("notification.confirmationNeeded.body", { title: task.title }) : t("notification.confirmationNeeded.bodyGeneric"),
-      extra: { taskId: event.taskId, eventType: event.eventType },
-    });
-  }
+  if (!event.taskId) return;
+  const task = taskFromPayload(event.payload, event.taskId);
+  const eligible = (event.eventType === "task_completed" && settings.onTaskCompleted)
+    || (event.eventType === "task_failed" && settings.onTaskFailed)
+    || (event.eventType === "confirmation_requested" && settings.onConfirmationNeeded);
+  if (!eligible) return;
+  const options = taskNotificationOptions(event, task);
+  if (!options || !(await checkPermission().catch(() => false))) return;
+  await sendNotification(options);
 }

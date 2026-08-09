@@ -7,13 +7,14 @@ import { RelatedPagesPanel } from "../../features/wiki/RelatedPagesPanel";
 import { SourceRightPanel } from "../../features/wiki/SourceRightPanel";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
-import { useNavigationStore } from "../../stores/navigationStore";
+import { useNavigationStore, type AppView } from "../../stores/navigationStore";
 import { useGraphStore } from "../../stores/graphStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useImportStore } from "../../stores/importStore";
 import { useProjectStatus } from "../../hooks/useProjectStatus";
-import type { GraphState, IndexState } from "../../types/project";
+import type { GraphState, IndexState, ProjectSummary } from "../../types/project";
+import type { BackendTask } from "../../types/task";
 import { RightPanelHeader } from "./RightPanelHeader";
 import { ViewErrorBoundary } from "./ViewErrorBoundary";
 import { ViewFallback } from "./ViewFallback";
@@ -26,53 +27,14 @@ const PageChatPanel = lazy(() =>
   import("../../features/chat/PageChatPanel").then((m) => ({ default: m.PageChatPanel })),
 );
 
+const EMPTY_TASKS: BackendTask[] = [];
+const EMPTY_GRAPH_TYPE_FILTER = new Set<never>();
+const EMPTY_CHAT_SAVE_STATUS: Record<string, never> = {};
+
 export function RightContextPanel() {
   const { t } = useTranslation();
   const activeView = useNavigationStore((state) => state.activeView);
-  const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
-  const setActiveView = useNavigationStore((state) => state.setActiveView);
-  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
-  const closeWikiAssistant = useNavigationStore((state) => state.closeWikiAssistant);
   const currentProject = useProjectStore((state) => state.currentProject);
-  const authority = useProjectStore((state) => state.authority);
-  const pendingAction = useProjectStore((state) => state.pendingAction);
-  const tasks = useTaskStore((state) => state.tasks);
-  const importSession = useImportStore((state) => state.session);
-  const importSelectedItemId = useImportStore((state) => state.selectedItemId);
-  const wikiContent = useWikiStore((state) => state.page);
-  const wikiPage = wikiContent?.meta ?? null;
-  const wikiTree = useWikiStore((state) => state.tree);
-  const openWikiPage = useWikiStore((state) => state.openPage);
-  const graphData = useGraphStore((state) => state.data);
-  const graphStatus = useGraphStore((state) => state.status);
-  const graphCached = useGraphStore((state) => state.cached);
-  const graphLayoutStale = useGraphStore((state) => state.layoutStale);
-  const graphSelectedId = useGraphStore((state) => state.selectedNodeId);
-  const graphFocusedId = useGraphStore((state) => state.focusedNodeId);
-  const graphSearch = useGraphStore((state) => state.search);
-  const setGraphSelectedNode = useGraphStore((state) => state.setSelectedNode);
-  const setGraphFocusedNode = useGraphStore((state) => state.setFocusedNodeId);
-  const graphTypeFilter = useGraphStore((state) => state.typeFilter);
-  const graphDegreeThreshold = useGraphStore((state) => state.degreeThreshold);
-  const toggleGraphType = useGraphStore((state) => state.toggleTypeFilter);
-  const setGraphDegreeThreshold = useGraphStore((state) => state.setDegreeThreshold);
-  const graphExportPng = useGraphStore((state) => state.exportPng);
-  const graphRecomputeLayout = useGraphStore((state) => state.recomputeLayout);
-  const chatSession = useChatStore((state) => state.activeSession);
-  const chatLoadingSession = useChatStore((state) => state.loadingSession);
-  const chatSendTaskId = useChatStore((state) => state.sendTaskId);
-  const chatSendSessionId = useChatStore((state) => state.sendSessionId);
-  const chatSendStarting = useChatStore((state) => state.sendStarting);
-  // Subscribe (don't getState) so the save button re-renders when the
-  // per-message saveStatus map or the saveAnswer action identity changes.
-  const chatSaveStatus = useChatStore((state) => state.saveStatus);
-  const chatSaveInFlightMessageId = useChatStore((state) => state.saveInFlightMessageId);
-  const chatConvenienceMutationKey = useChatStore((state) => state.convenienceMutationKey);
-  const chatSaveAnswer = useChatStore((state) => state.saveAnswer);
-  const chatOverwriteRequest = useChatStore((state) => state.overwriteRequest);
-  const [chatCopied, setChatCopied] = useState(false);
-
-  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
 
   if (!currentProject.projectId || !currentProject.rootPath) {
     return (
@@ -99,6 +61,60 @@ export function RightContextPanel() {
   if (activeView === "workflows") {
     return <WorkflowsRightPanel />;
   }
+
+  return <ProjectRightContextPanel activeView={activeView} currentProject={currentProject} />;
+}
+
+function ProjectRightContextPanel({
+  activeView,
+  currentProject,
+}: {
+  activeView: AppView;
+  currentProject: ProjectSummary;
+}) {
+  const { t } = useTranslation();
+  const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
+  const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
+  const closeWikiAssistant = useNavigationStore((state) => state.closeWikiAssistant);
+  const summaryView = !["chat", "wiki", "graph", "import"].includes(activeView);
+  const authority = useProjectStore((state) => summaryView ? state.authority : null);
+  const pendingAction = useProjectStore((state) => summaryView ? state.pendingAction : null);
+  const tasks = useTaskStore((state) => activeView === "chat" || summaryView ? state.tasks : EMPTY_TASKS);
+  const importSession = useImportStore((state) => activeView === "import" ? state.session : null);
+  const importSelectedItemId = useImportStore((state) => activeView === "import" ? state.selectedItemId : null);
+  const wikiContent = useWikiStore((state) => activeView === "wiki" ? state.page : null);
+  const wikiPage = wikiContent?.meta ?? null;
+  const wikiTree = useWikiStore((state) => activeView === "wiki" ? state.tree : null);
+  const openWikiPage = useWikiStore((state) => state.openPage);
+  const graphRelevant = activeView === "graph" || activeView === "wiki";
+  const graphData = useGraphStore((state) => graphRelevant ? state.data : null);
+  const graphStatus = useGraphStore((state) => activeView === "graph" ? state.status : "idle");
+  const graphCached = useGraphStore((state) => activeView === "graph" && state.cached);
+  const graphLayoutStale = useGraphStore((state) => activeView === "graph" && state.layoutStale);
+  const graphSelectedId = useGraphStore((state) => activeView === "graph" ? state.selectedNodeId : null);
+  const graphFocusedId = useGraphStore((state) => activeView === "graph" ? state.focusedNodeId : null);
+  const graphSearch = useGraphStore((state) => activeView === "graph" ? state.search : "");
+  const setGraphSelectedNode = useGraphStore((state) => state.setSelectedNode);
+  const setGraphFocusedNode = useGraphStore((state) => state.setFocusedNodeId);
+  const graphTypeFilter = useGraphStore((state) => activeView === "graph" ? state.typeFilter : EMPTY_GRAPH_TYPE_FILTER);
+  const graphDegreeThreshold = useGraphStore((state) => activeView === "graph" ? state.degreeThreshold : 0);
+  const toggleGraphType = useGraphStore((state) => state.toggleTypeFilter);
+  const setGraphDegreeThreshold = useGraphStore((state) => state.setDegreeThreshold);
+  const graphExportPng = useGraphStore((state) => activeView === "graph" ? state.exportPng : null);
+  const graphRecomputeLayout = useGraphStore((state) => activeView === "graph" ? state.recomputeLayout : null);
+  const chatSession = useChatStore((state) => activeView === "chat" ? state.activeSession : null);
+  const chatLoadingSession = useChatStore((state) => activeView === "chat" && state.loadingSession);
+  const chatSendTaskId = useChatStore((state) => activeView === "chat" ? state.sendTaskId : null);
+  const chatSendSessionId = useChatStore((state) => activeView === "chat" ? state.sendSessionId : null);
+  const chatSendStarting = useChatStore((state) => activeView === "chat" && state.sendStarting);
+  const chatSaveStatus = useChatStore((state) => activeView === "chat" ? state.saveStatus : EMPTY_CHAT_SAVE_STATUS);
+  const chatSaveInFlightMessageId = useChatStore((state) => activeView === "chat" ? state.saveInFlightMessageId : null);
+  const chatConvenienceMutationKey = useChatStore((state) => activeView === "chat" ? state.convenienceMutationKey : null);
+  const chatSaveAnswer = useChatStore((state) => state.saveAnswer);
+  const chatOverwriteRequest = useChatStore((state) => activeView === "chat" ? state.overwriteRequest : null);
+  const [chatCopied, setChatCopied] = useState(false);
+  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath, summaryView);
 
   const openPage = (path: string) => {
     void openWikiPage(currentProject.projectId, currentProject.rootPath, path);
