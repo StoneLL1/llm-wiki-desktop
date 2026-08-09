@@ -94,7 +94,9 @@ pub fn recover_workflow(
             workflow.continuation_required = true;
         }
         TaskStatus::Running | TaskStatus::Cancelling => interrupt(task, workflow),
-        TaskStatus::WaitingForConfirmation if !pending_action_is_valid(workflow, project_root) => {
+        TaskStatus::WaitingForConfirmation
+            if !pending_action_is_valid(&task.id, workflow, project_root) =>
+        {
             interrupt(task, workflow)
         }
         TaskStatus::WaitingForConfirmation
@@ -127,7 +129,11 @@ fn interrupt(task: &mut BackendTask, workflow: &mut WorkflowExecutionState) {
     });
 }
 
-pub fn pending_action_is_valid(workflow: &WorkflowExecutionState, project_root: &Path) -> bool {
+fn pending_action_is_valid(
+    task_id: &str,
+    workflow: &WorkflowExecutionState,
+    project_root: &Path,
+) -> bool {
     let Some(pending) = workflow.pending_action.as_ref() else {
         return false;
     };
@@ -157,11 +163,12 @@ pub fn pending_action_is_valid(workflow: &WorkflowExecutionState, project_root: 
             WorkflowCandidateReference::TaskOwned { candidate_id } => {
                 let valid = match workflow.kind {
                     WorkflowKind::UpdateWiki => super::runners::update_wiki::update_wiki_candidate_is_valid_for_workflow(
-                        candidate_id,
+                        task_id,
                         project_root,
                         workflow,
                     ),
                     WorkflowKind::GenerateContent => super::runners::generate_content::generate_content_candidate_is_valid_for_workflow(
+                        task_id,
                         candidate_id,
                         project_root,
                         workflow,

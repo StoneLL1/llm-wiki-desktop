@@ -28,7 +28,10 @@ use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 use serde::{Deserialize, Serialize};
 
-use super::super::{WorkflowCoordinator, WorkflowRunner, WorkflowStageSink};
+use super::super::fingerprint::{canonical_json, hex_sha256};
+use super::super::{
+    WorkflowCoordinator, WorkflowExternalLaunchPermit, WorkflowRunner, WorkflowStageSink,
+};
 
 const ANALYZE_SOURCES: &str = "analyze_sources";
 const CREATE_CHECKPOINT: &str = "create_checkpoint";
@@ -79,7 +82,20 @@ pub async fn run_update_wiki(
     run: WorkflowRun,
     services: &UpdateWikiExecutionServices<'_>,
 ) -> Option<WorkflowRun> {
-    match execute_update_wiki(context, &run, services).await {
+    let permit = WorkflowExternalLaunchPermit::prevalidated(&run);
+    run_update_wiki_authorized(context, run, services, || Ok(permit)).await
+}
+
+pub async fn run_update_wiki_authorized<F>(
+    context: &ProjectContext,
+    run: WorkflowRun,
+    services: &UpdateWikiExecutionServices<'_>,
+    authorize_external_launch: F,
+) -> Option<WorkflowRun>
+where
+    F: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
+{
+    match execute_update_wiki(context, &run, services, authorize_external_launch).await {
         Ok(UpdateWikiOutcome::Finished(next)) => next,
         Ok(UpdateWikiOutcome::Waiting | UpdateWikiOutcome::CommittedPendingReconciliation) => None,
         Err(error) => finish_error(&run, services, error),
@@ -92,11 +108,15 @@ enum UpdateWikiOutcome {
     CommittedPendingReconciliation,
 }
 
-async fn execute_update_wiki(
+async fn execute_update_wiki<F>(
     context: &ProjectContext,
     run: &WorkflowRun,
     services: &UpdateWikiExecutionServices<'_>,
-) -> Result<UpdateWikiOutcome, BackendError> {
+    authorize_external_launch: F,
+) -> Result<UpdateWikiOutcome, BackendError>
+where
+    F: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
+{
     let task_id = run.task_id.as_str();
     let sink = WorkflowStageSink::new(services.compile.task_service, services.coordinator, task_id);
     sink.start(ANALYZE_SOURCES).map_err(task_error)?;
@@ -182,6 +202,7 @@ async fn execute_update_wiki(
                 .map(|source| source.project_path.clone()),
             total: selected_sources.len() as u64,
         };
+        let publication = authorize_external_launch()?.begin()?;
         let candidate = CompileService::generate_candidate(
             context,
             &workspace,
@@ -194,7 +215,9 @@ async fn execute_update_wiki(
             &services.compile,
             &mut observer,
         )
-        .await?;
+        .await;
+        publication.started();
+        let candidate = candidate?;
         sink.progress(
             VALIDATE_STRUCTURE,
             candidate
@@ -263,7 +286,7 @@ async fn execute_update_wiki(
             .collect::<Vec<_>>();
         let current_hashes =
             current_manifest_hashes(context, &candidate.manifest, services.file_store)?;
-        persist_candidate_state(
+        let candidate_hash = persist_candidate_state(
             context,
             task_id,
             &candidate,
@@ -273,14 +296,15 @@ async fn execute_update_wiki(
             checkpoint.commit_hash.clone(),
         )?;
         let descriptor =
-            load_valid_update_wiki_candidate(task_id, &context.root).ok_or_else(|| {
-                BackendError::new(
-                    "WORKFLOW_CANDIDATE_STALE",
-                    "The Update Wiki candidate is no longer valid.",
-                    true,
-                    true,
-                )
-            })?;
+            load_valid_update_wiki_candidate(task_id, &context.root, Some(&candidate_hash))
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "WORKFLOW_CANDIDATE_STALE",
+                        "The Update Wiki candidate is no longer valid.",
+                        true,
+                        true,
+                    )
+                })?;
         apply_persisted_update_wiki_candidate(context, run, descriptor, services)
     }
     .await;
@@ -457,7 +481,7 @@ fn register_waiting_decision(
     baseline_hashes: &HashMap<String, String>,
     checkpoint_hash: Option<String>,
     services: &UpdateWikiExecutionServices<'_>,
-) -> Result<WorkflowPendingAction, BackendError> {
+) -> Result<(WorkflowPendingAction, ConfirmationExecution), BackendError> {
     let action_id = uuid::Uuid::new_v4().to_string();
     let current_hashes =
         current_manifest_hashes(context, &candidate.manifest, services.file_store)?;
@@ -467,7 +491,7 @@ fn register_waiting_decision(
         } => resolve_selected_versions(context, source_versions)?,
         _ => Vec::new(),
     };
-    persist_candidate_state(
+    let candidate_hash = persist_candidate_state(
         context,
         &run.task_id,
         candidate,
@@ -476,6 +500,7 @@ fn register_waiting_decision(
         baseline_hashes,
         checkpoint_hash.clone(),
     )?;
+    let candidate_id = format!("{}:{candidate_hash}", run.task_id);
     let action = PendingAction {
         id: action_id.clone(),
         action_type: PendingActionType::MergeConflict,
@@ -492,28 +517,35 @@ fn register_waiting_decision(
         expires_at: None,
         checkpoint_hash: checkpoint_hash.clone(),
     };
-    services.confirmation_registry.register_with_execution(
-        action,
-        Some(ConfirmationExecution::UpdateWikiReview {
-            project_id: context.project_id.clone(),
-            root_path: context.root.to_string_lossy().into_owned(),
-            task_id: run.task_id.clone(),
-        }),
-    )?;
-    Ok(WorkflowPendingAction {
-        id: action_id,
-        action_type: PendingActionType::MergeConflict,
-        risk_level: RiskLevel::High,
-        affected_paths: affected_paths.to_vec(),
-        candidate: Some(WorkflowCandidateReference::TaskOwned {
-            candidate_id: run.task_id.clone(),
-        }),
-        expires_at: None,
-        checkpoint_hash,
-    })
+    let execution = ConfirmationExecution::UpdateWikiReview {
+        project_id: context.project_id.clone(),
+        root_path: context.root.to_string_lossy().into_owned(),
+        canonical_identity_key: run.canonical_identity_key.clone(),
+        identity_revision: run.identity_revision.clone(),
+        task_id: run.task_id.clone(),
+        action_id: action_id.clone(),
+        candidate: WorkflowCandidateReference::TaskOwned {
+            candidate_id: candidate_id.clone(),
+        },
+    };
+    services
+        .confirmation_registry
+        .register_with_execution(action, Some(execution.clone()))?;
+    Ok((
+        WorkflowPendingAction {
+            id: action_id,
+            action_type: PendingActionType::MergeConflict,
+            risk_level: RiskLevel::High,
+            affected_paths: affected_paths.to_vec(),
+            candidate: Some(WorkflowCandidateReference::TaskOwned { candidate_id }),
+            expires_at: None,
+            checkpoint_hash,
+        },
+        execution,
+    ))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedUpdateWikiCandidate {
     schema_version: u32,
@@ -537,7 +569,7 @@ fn persist_candidate_state(
     current_hashes: &HashMap<String, String>,
     baseline_hashes: &HashMap<String, String>,
     checkpoint_hash: Option<String>,
-) -> Result<(), BackendError> {
+) -> Result<String, BackendError> {
     let workspace = workspace_for_task(task_id);
     let metadata = std::fs::symlink_metadata(&workspace).map_err(|error| {
         BackendError::new(
@@ -567,7 +599,7 @@ fn persist_candidate_state(
     }
     let identity =
         super::super::persistence::project_identity(&context.root).map_err(task_error)?;
-    let bytes = serde_json::to_vec_pretty(&PersistedUpdateWikiCandidate {
+    let descriptor = PersistedUpdateWikiCandidate {
         schema_version: 1,
         task_id: task_id.to_string(),
         project_identity_key: identity.canonical_identity_key,
@@ -578,8 +610,16 @@ fn persist_candidate_state(
         baseline_hashes: baseline_hashes.clone(),
         checkpoint_hash,
         reconciliation_result: None,
-    })
-    .map_err(|error| {
+    };
+    let candidate_hash = update_wiki_candidate_hash(&descriptor).ok_or_else(|| {
+        BackendError::new(
+            "WORKFLOW_CANDIDATE_PERSIST_FAILED",
+            "The Update Wiki candidate authority hash could not be computed.",
+            true,
+            true,
+        )
+    })?;
+    let bytes = serde_json::to_vec_pretty(&descriptor).map_err(|error| {
         BackendError::new(
             "WORKFLOW_CANDIDATE_PERSIST_FAILED",
             error.to_string(),
@@ -614,7 +654,15 @@ fn persist_candidate_state(
             false,
         ));
     }
-    Ok(())
+    Ok(candidate_hash)
+}
+
+fn update_wiki_candidate_hash(descriptor: &PersistedUpdateWikiCandidate) -> Option<String> {
+    let mut authority = descriptor.clone();
+    authority.reconciliation_result = None;
+    canonical_json(&authority)
+        .ok()
+        .map(|value| hex_sha256(value.as_bytes()))
 }
 
 fn persist_reconciliation_result(
@@ -661,7 +709,7 @@ pub fn persist_update_wiki_review(
     checkpoint_hash: Option<String>,
     services: &UpdateWikiExecutionServices<'_>,
 ) -> Result<WorkflowRun, BackendError> {
-    let pending = register_waiting_decision(
+    let (pending, execution) = register_waiting_decision(
         context,
         run,
         candidate,
@@ -670,13 +718,20 @@ pub fn persist_update_wiki_review(
         checkpoint_hash,
         services,
     )?;
-    WorkflowStageSink::new(
+    let action_id = pending.id.clone();
+    let result = WorkflowStageSink::new(
         services.compile.task_service,
         services.coordinator,
         &run.task_id,
     )
     .wait(REVIEW_RISK, pending)
-    .map_err(task_error)
+    .map_err(task_error);
+    if result.is_err() {
+        let _ = services
+            .confirmation_registry
+            .remove_exact_execution(&action_id, &execution);
+    }
+    result
 }
 
 #[derive(Debug)]
@@ -716,10 +771,11 @@ pub fn confirm_update_wiki_review(
             ),
             next: None,
         })?;
+    let descriptor = load_update_wiki_candidate_for_workflow(task_id, &context.root, &workflow);
     if run.kind != WorkflowKind::UpdateWiki
         || run.display_status
             != crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
-        || !update_wiki_candidate_is_valid_for_workflow(task_id, &context.root, &workflow)
+        || descriptor.is_none()
     {
         let error = BackendError::new(
             "WORKFLOW_CANDIDATE_STALE",
@@ -731,17 +787,7 @@ pub fn confirm_update_wiki_review(
         let _ = discard_update_wiki_candidate(task_id);
         return Err(UpdateWikiConfirmationFailure { error, next });
     }
-    let Some(descriptor) = load_valid_update_wiki_candidate(task_id, &context.root) else {
-        let error = BackendError::new(
-            "WORKFLOW_CANDIDATE_STALE",
-            "The Update Wiki candidate is unavailable.",
-            true,
-            true,
-        );
-        let next = finish_error(&run, services, error.clone());
-        let _ = discard_update_wiki_candidate(task_id);
-        return Err(UpdateWikiConfirmationFailure { error, next });
-    };
+    let descriptor = descriptor.expect("checked above");
     if let Err(message) = services
         .compile
         .task_service
@@ -834,23 +880,16 @@ pub fn restore_update_wiki_confirmation(
                 true,
             )
         })?;
-    if !update_wiki_candidate_is_valid_for_workflow(&run.task_id, &context.root, &workflow) {
+    let Some(descriptor) =
+        load_update_wiki_candidate_for_workflow(&run.task_id, &context.root, &workflow)
+    else {
         return Err(BackendError::new(
             "WORKFLOW_CONFIRMATION_RECOVERY_FAILED",
             "Update Wiki candidate is no longer valid.",
             true,
             true,
         ));
-    }
-    let descriptor =
-        load_valid_update_wiki_candidate(&run.task_id, &context.root).ok_or_else(|| {
-            BackendError::new(
-                "WORKFLOW_CONFIRMATION_RECOVERY_FAILED",
-                "Update Wiki candidate is unavailable.",
-                true,
-                true,
-            )
-        })?;
+    };
     registry.restore_with_execution(
         PendingAction {
             id: pending.id.clone(),
@@ -873,7 +912,18 @@ pub fn restore_update_wiki_confirmation(
         ConfirmationExecution::UpdateWikiReview {
             project_id: context.project_id.clone(),
             root_path: context.root.to_string_lossy().into_owned(),
+            canonical_identity_key: run.canonical_identity_key.clone(),
+            identity_revision: run.identity_revision.clone(),
             task_id: run.task_id.clone(),
+            action_id: pending.id.clone(),
+            candidate: pending.candidate.clone().ok_or_else(|| {
+                BackendError::new(
+                    "WORKFLOW_CONFIRMATION_CANDIDATE_MISSING",
+                    "The persisted confirmation has no candidate binding.",
+                    true,
+                    true,
+                )
+            })?,
         },
     )
 }
@@ -1511,14 +1561,14 @@ pub fn discard_update_wiki_candidate(task_id: &str) -> Result<(), BackendError> 
 }
 
 pub fn update_wiki_candidate_is_valid(task_id: &str, project_root: &std::path::Path) -> bool {
-    load_valid_update_wiki_candidate(task_id, project_root).is_some()
+    load_valid_update_wiki_candidate(task_id, project_root, None).is_some()
 }
 
 pub(crate) fn committed_update_wiki_result(
     task_id: &str,
     project_root: &std::path::Path,
 ) -> Option<WorkflowResult> {
-    let descriptor = load_valid_update_wiki_candidate(task_id, project_root)?;
+    let descriptor = load_valid_update_wiki_candidate(task_id, project_root, None)?;
     let mut result = descriptor.reconciliation_result?;
     let WorkflowResult::UpdateWiki {
         final_commit,
@@ -1560,7 +1610,23 @@ pub fn update_wiki_decision_review(
     task_id: &str,
     project_root: &std::path::Path,
 ) -> Option<WorkflowDecisionReview> {
-    let descriptor = load_valid_update_wiki_candidate(task_id, project_root)?;
+    let descriptor = load_valid_update_wiki_candidate(task_id, project_root, None)?;
+    update_wiki_decision_review_from_descriptor(project_root, descriptor)
+}
+
+pub(crate) fn update_wiki_decision_review_for_workflow(
+    task_id: &str,
+    project_root: &std::path::Path,
+    workflow: &crate::models::workflow::WorkflowExecutionState,
+) -> Option<WorkflowDecisionReview> {
+    let descriptor = load_update_wiki_candidate_for_workflow(task_id, project_root, workflow)?;
+    update_wiki_decision_review_from_descriptor(project_root, descriptor)
+}
+
+fn update_wiki_decision_review_from_descriptor(
+    project_root: &std::path::Path,
+    descriptor: PersistedUpdateWikiCandidate,
+) -> Option<WorkflowDecisionReview> {
     let context = ProjectContext::new("workflow-review", project_root.to_path_buf())
         .with_resolved_layout()
         .ok()?;
@@ -1619,9 +1685,34 @@ pub fn update_wiki_candidate_is_valid_for_workflow(
     project_root: &std::path::Path,
     workflow: &crate::models::workflow::WorkflowExecutionState,
 ) -> bool {
-    let Some(descriptor) = load_valid_update_wiki_candidate(task_id, project_root) else {
-        return false;
+    load_update_wiki_candidate_for_workflow(task_id, project_root, workflow).is_some()
+}
+
+fn load_update_wiki_candidate_for_workflow(
+    task_id: &str,
+    project_root: &std::path::Path,
+    workflow: &crate::models::workflow::WorkflowExecutionState,
+) -> Option<PersistedUpdateWikiCandidate> {
+    let Some(candidate_id) =
+        workflow
+            .pending_action
+            .as_ref()
+            .and_then(|pending| match pending.candidate.as_ref()? {
+                WorkflowCandidateReference::TaskOwned { candidate_id } => {
+                    Some(candidate_id.as_str())
+                }
+                WorkflowCandidateReference::ProjectRelative { .. } => None,
+            })
+    else {
+        return None;
     };
+    let Some((candidate_task_id, expected_hash)) = candidate_id.split_once(':') else {
+        return None;
+    };
+    if candidate_task_id != task_id || expected_hash.len() != 64 {
+        return None;
+    }
+    let descriptor = load_valid_update_wiki_candidate(task_id, project_root, Some(expected_hash))?;
     if workflow.kind != WorkflowKind::UpdateWiki
         || workflow.canonical_identity_key != descriptor.project_identity_key
         || workflow.identity_revision != descriptor.project_identity_revision
@@ -1632,13 +1723,13 @@ pub fn update_wiki_candidate_is_valid_for_workflow(
             != descriptor.checkpoint_hash.as_ref()
         || !workflow_route_matches_candidate(workflow.route.as_ref(), &descriptor.candidate.route)
     {
-        return false;
+        return None;
     }
     let WorkflowScope::UpdateWiki {
         source_versions, ..
     } = &workflow.scope
     else {
-        return false;
+        return None;
     };
     let expected_sources = source_versions
         .iter()
@@ -1650,18 +1741,18 @@ pub fn update_wiki_candidate_is_valid_for_workflow(
         .map(|source| (&source.source_id, &source.version_id))
         .collect::<std::collections::HashSet<_>>();
     if expected_sources != persisted_sources {
-        return false;
+        return None;
     }
     let Ok(context) =
         ProjectContext::new("workflow-recovery", project_root.to_path_buf()).with_resolved_layout()
     else {
-        return false;
+        return None;
     };
     if CompileService::resolve_source_versions(&context, &descriptor.source_versions).is_err() {
-        return false;
+        return None;
     }
     let Ok(known_sources) = CompileService::known_source_refs(&context) else {
-        return false;
+        return None;
     };
     CompileService::validate_workflow_manifest_semantics(
         &context,
@@ -1669,7 +1760,8 @@ pub fn update_wiki_candidate_is_valid_for_workflow(
         Some(&descriptor.candidate.plan),
         &known_sources,
     )
-    .is_ok()
+    .ok()?;
+    Some(descriptor)
 }
 
 fn workflow_route_matches_candidate(
@@ -1700,6 +1792,7 @@ fn workflow_route_matches_candidate(
 fn load_valid_update_wiki_candidate(
     task_id: &str,
     project_root: &std::path::Path,
+    expected_hash: Option<&str>,
 ) -> Option<PersistedUpdateWikiCandidate> {
     if uuid::Uuid::parse_str(task_id).is_err() {
         return None;
@@ -1738,6 +1831,11 @@ fn load_valid_update_wiki_candidate(
     let Ok(descriptor) = serde_json::from_slice::<PersistedUpdateWikiCandidate>(&bytes) else {
         return None;
     };
+    if expected_hash.is_some_and(|expected| {
+        update_wiki_candidate_hash(&descriptor).as_deref() != Some(expected)
+    }) {
+        return None;
+    }
     let Ok(identity) = super::super::persistence::project_identity(project_root) else {
         return None;
     };

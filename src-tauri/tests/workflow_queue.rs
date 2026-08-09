@@ -5,12 +5,15 @@ use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
 use llm_wiki_desktop_lib::models::task::{BackendEventType, TaskStatus};
 use llm_wiki_desktop_lib::models::workflow::{
-    UpdateWikiMode, WorkflowArtifactType, WorkflowDisplayStatus, WorkflowExecutionOptions,
-    WorkflowKind, WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPersistenceTransition,
-    WorkflowResult, WorkflowRoute, WorkflowScope, WorkflowSourceVersionRef, WorkflowStage,
-    WorkflowStageStatus, WorkflowStartOutcome,
+    HealthCheckMode, UpdateWikiMode, WorkflowArtifactType, WorkflowDisplayStatus,
+    WorkflowExecutionOptions, WorkflowKind, WorkflowPendingAction, WorkflowPersistenceMode,
+    WorkflowPersistenceTransition, WorkflowResult, WorkflowRoute, WorkflowScope,
+    WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
 };
-use llm_wiki_desktop_lib::services::{project_identity, EnqueueWorkflow, WorkflowCoordinator};
+use llm_wiki_desktop_lib::services::{
+    project_identity, EnqueueWorkflow, WorkflowCoordinator, WorkflowDispatchFailure,
+    WorkflowService,
+};
 use llm_wiki_desktop_lib::tasks::task_events::EventBus;
 use llm_wiki_desktop_lib::tasks::TaskService;
 use std::path::{Path, PathBuf};
@@ -28,6 +31,66 @@ fn stage() -> WorkflowStage {
         current_item: None,
         progress: None,
         decision: None,
+    }
+}
+
+#[test]
+fn unavailable_runner_finalizes_claim_and_does_not_strand_the_owner_queue() {
+    let temp = tempfile::tempdir().unwrap();
+    for kind in [
+        WorkflowKind::UpdateWiki,
+        WorkflowKind::HealthCheck,
+        WorkflowKind::GenerateContent,
+    ] {
+        let root = temp.path().join(format!("{kind:?}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let tasks = TaskService::default();
+        let workflows = WorkflowService::default();
+        let request_for = |version: &str, baseline: &str| {
+            let mut candidate = request(&root, "p", version, baseline);
+            candidate.kind = kind.clone();
+            candidate.scope = match kind {
+                WorkflowKind::UpdateWiki => candidate.scope,
+                WorkflowKind::HealthCheck => WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::Complete,
+                },
+                WorkflowKind::GenerateContent => WorkflowScope::GenerateContent {
+                    artifact_type: WorkflowArtifactType::ProjectReport,
+                    page_paths: vec!["wiki/page.md".into()],
+                    output_path: Some("exports/report.html".into()),
+                },
+            };
+            candidate
+        };
+        let active = created(
+            workflows
+                .coordinator
+                .enqueue(&tasks, request_for("v1", "missing-runner"))
+                .unwrap(),
+        );
+        let queued = created(
+            workflows
+                .coordinator
+                .enqueue(&tasks, request_for("v2", "next-runner"))
+                .unwrap(),
+        );
+
+        assert!(!workflows.dispatch_claimed_run(&tasks, &active).unwrap());
+        assert_eq!(
+            tasks
+                .get_workflow_run(&active.task_id)
+                .unwrap()
+                .display_status,
+            WorkflowDisplayStatus::Failed
+        );
+        assert_eq!(
+            tasks
+                .get_workflow_run(&queued.task_id)
+                .unwrap()
+                .display_status,
+            WorkflowDisplayStatus::Failed,
+            "the shared finalizer must claim and reject each runner kind exactly once"
+        );
     }
 }
 
@@ -731,6 +794,79 @@ fn terminal_transitions_claim_next_but_waiting_pauses_the_queue() {
 }
 
 #[test]
+fn invalid_waiting_confirmation_interrupts_and_claims_next_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let waiting = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v1", "b1"))
+            .unwrap(),
+    );
+    let queued = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v2", "b2"))
+            .unwrap(),
+    );
+    service
+        .start_workflow_stage(&waiting.task_id, "prepare")
+        .unwrap();
+    service
+        .wait_workflow_stage(
+            &waiting.task_id,
+            "prepare",
+            WorkflowPendingAction {
+                id: "invalid-action".into(),
+                action_type: PendingActionType::MergeConflict,
+                risk_level: RiskLevel::High,
+                affected_paths: vec!["wiki/page.md".into()],
+                candidate: None,
+                expires_at: None,
+                checkpoint_hash: None,
+            },
+        )
+        .unwrap();
+
+    let (interrupted, next) = coordinator
+        .interrupt_invalid_confirmation(
+            &service,
+            &waiting.task_id,
+            llm_wiki_desktop_lib::models::workflow::WorkflowErrorSummary {
+                code: "WORKFLOW_CONFIRMATION_RECOVERY_FAILED".into(),
+                message_key: "workflows.error.prepareAgain".into(),
+                recoverable: false,
+                user_action_required: true,
+                suggested_action: Some(
+                    llm_wiki_desktop_lib::models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
+                ),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        interrupted.display_status,
+        WorkflowDisplayStatus::Interrupted
+    );
+    assert!(interrupted.pending_action.is_none());
+    assert_eq!(next.unwrap().task_id, queued.task_id);
+    let (same, duplicate_next) = coordinator
+        .interrupt_invalid_confirmation(
+            &service,
+            &waiting.task_id,
+            llm_wiki_desktop_lib::models::workflow::WorkflowErrorSummary {
+                code: "WORKFLOW_CONFIRMATION_RECOVERY_FAILED".into(),
+                message_key: "workflows.error.prepareAgain".into(),
+                recoverable: false,
+                user_action_required: true,
+                suggested_action: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(same.display_status, WorkflowDisplayStatus::Interrupted);
+    assert!(duplicate_next.is_none());
+}
+
+#[test]
 fn cancelled_or_terminal_workflows_reject_stale_stage_updates() {
     let temp = tempfile::tempdir().unwrap();
     let service = TaskService::default();
@@ -1062,7 +1198,19 @@ fn cancel_after_real_queue_claim_is_deterministic_before_first_stage() {
         worker_window.pause_at(RacePoint::Claimed);
         worker_window.pause_at(RacePoint::FirstStage);
         let result = worker_service.start_workflow_stage(&claimed.task_id, "prepare");
-        (claimed.task_id, result)
+        let finalized = result.as_ref().err().map(|_| {
+            worker_coordinator
+                .reject_claimed_dispatch(
+                    &worker_service,
+                    &claimed.task_id,
+                    WorkflowDispatchFailure::stale(
+                        "WORKFLOW_DISPATCH_CANCELLED",
+                        "workflows.error.prepareAgain",
+                    ),
+                )
+                .unwrap()
+        });
+        (claimed.task_id, result, finalized)
     });
 
     controller.wait_for(RacePoint::Claimed);
@@ -1072,13 +1220,20 @@ fn cancel_after_real_queue_claim_is_deterministic_before_first_stage() {
     controller.wait_for(RacePoint::FirstStage);
     controller.release();
 
-    let (claimed_task_id, first_stage) = worker.join().unwrap();
+    let (claimed_task_id, first_stage, finalized) = worker.join().unwrap();
     assert_eq!(claimed_task_id, queued.task_id);
     assert!(first_stage.is_err());
     assert_eq!(
         service.get_task(&queued.task_id).unwrap().status,
-        TaskStatus::Cancelling,
-        "pre-fix baseline: a rejected first-stage start has no shared finalizer",
+        TaskStatus::Cancelled,
+        "a rejected first-stage start must finalize a concurrent cancellation",
+    );
+    assert_eq!(
+        finalized
+            .expect("dispatch rejection must be finalized")
+            .0
+            .display_status,
+        WorkflowDisplayStatus::Cancelled,
     );
 }
 

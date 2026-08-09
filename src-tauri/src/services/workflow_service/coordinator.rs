@@ -17,6 +17,34 @@ use super::persistence::project_identity;
 const UNDO_WINDOW_SECONDS: i64 = 10;
 
 #[derive(Debug, Clone)]
+pub enum WorkflowDispatchFailure {
+    Identity(WorkflowErrorSummary),
+    Stale(WorkflowErrorSummary),
+    Invariant(WorkflowErrorSummary),
+}
+
+impl WorkflowDispatchFailure {
+    pub fn identity(code: impl Into<String>, message_key: impl Into<String>) -> Self {
+        Self::Identity(dispatch_error(code, message_key, false))
+    }
+
+    pub fn stale(code: impl Into<String>, message_key: impl Into<String>) -> Self {
+        Self::Stale(dispatch_error(code, message_key, true))
+    }
+
+    pub fn invariant(code: impl Into<String>, message_key: impl Into<String>) -> Self {
+        Self::Invariant(dispatch_error(code, message_key, false))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowTrustTransition {
+    pub stopped_runs: Vec<WorkflowRun>,
+    pub continued_local_quick_runs: Vec<WorkflowRun>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EnqueueWorkflow {
     pub project_id: String,
     pub project_root: PathBuf,
@@ -298,6 +326,12 @@ impl WorkflowCoordinator {
         let owner = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+        if is_terminal(&owner) {
+            return Ok((owner, None));
+        }
+        if cancellation_wins(tasks, task_id) {
+            return self.cancel_and_claim_next_locked(tasks, &owner);
+        }
         let completed = tasks.complete_workflow(task_id, result)?;
         let next = self.claim_next_locked(
             tasks,
@@ -321,6 +355,12 @@ impl WorkflowCoordinator {
         let owner = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+        if is_terminal(&owner) {
+            return Ok((owner, None));
+        }
+        if cancellation_wins(tasks, task_id) {
+            return self.cancel_and_claim_next_locked(tasks, &owner);
+        }
         let failed = tasks.fail_workflow_stage(task_id, stage_id, error)?;
         let next = self.claim_next_locked(
             tasks,
@@ -342,7 +382,150 @@ impl WorkflowCoordinator {
         let owner = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
-        let cancelled = tasks.transition_workflow_status(task_id, TaskStatus::Cancelled)?;
+        if is_terminal(&owner) {
+            return Ok((owner, None));
+        }
+        self.cancel_and_claim_next_locked(tasks, &owner)
+    }
+
+    pub fn reject_claimed_dispatch(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        failure: WorkflowDispatchFailure,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        let current = tasks
+            .get_workflow_run(task_id)
+            .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+        if is_terminal(&current) {
+            return Ok((current, None));
+        }
+        if cancellation_wins(tasks, task_id) {
+            return self.cancel_and_claim_next_locked(tasks, &current);
+        }
+        if current.display_status == crate::models::workflow::WorkflowDisplayStatus::Queued
+            && current.continuation_required
+        {
+            return Ok((current, None));
+        }
+        let (status, error) = match failure {
+            WorkflowDispatchFailure::Identity(error) => (TaskStatus::Interrupted, error),
+            WorkflowDispatchFailure::Stale(error) => (TaskStatus::Failed, error),
+            WorkflowDispatchFailure::Invariant(error) => (TaskStatus::Interrupted, error),
+        };
+        let rejected = tasks.reject_workflow_dispatch(task_id, status, error)?;
+        let next = self.claim_next_locked(
+            tasks,
+            &current.canonical_identity_key,
+            &current.identity_revision,
+        )?;
+        Ok((rejected, next))
+    }
+
+    pub fn freeze_owner_for_trust_revocation(
+        &self,
+        tasks: &TaskService,
+        project_root: &std::path::Path,
+    ) -> Result<WorkflowTrustTransition, String> {
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        let runs = tasks
+            .list_workflow_runs()
+            .into_iter()
+            .filter(|run| tasks.task_belongs_to_root(&run.task_id, project_root))
+            .collect::<Vec<_>>();
+        let current_identity = super::persistence::project_identity(project_root).ok();
+        let project_is_readable = local_quick_project_is_readable(project_root);
+        let mut transition = WorkflowTrustTransition::default();
+        for run in &runs {
+            if run.display_status == crate::models::workflow::WorkflowDisplayStatus::Queued {
+                if let Err(error) =
+                    tasks.set_workflow_queue_state(&run.task_id, run.queue_position, true)
+                {
+                    transition.errors.push(error);
+                }
+            }
+        }
+        for run in runs {
+            if !matches!(
+                run.display_status,
+                crate::models::workflow::WorkflowDisplayStatus::Running
+                    | crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+            ) {
+                continue;
+            }
+            let local_quick = project_is_readable
+                && current_identity.as_ref().is_some_and(|identity| {
+                    identity.canonical_identity_key == run.canonical_identity_key
+                        && identity.identity_revision == run.identity_revision
+                })
+                && matches!(
+                    run.scope,
+                    WorkflowScope::HealthCheck {
+                        mode: crate::models::workflow::HealthCheckMode::LocalQuick
+                    }
+                )
+                && run.display_status == crate::models::workflow::WorkflowDisplayStatus::Running;
+            if local_quick {
+                transition.continued_local_quick_runs.push(run);
+                continue;
+            }
+            let was_waiting = run.display_status
+                == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation;
+            transition.stopped_runs.push(run.clone());
+            if let Err(error) = tasks.request_workflow_cancel(&run.task_id) {
+                transition.errors.push(error);
+                continue;
+            }
+            if was_waiting {
+                if let Err(error) = tasks.finalize_workflow_cancellation(&run.task_id) {
+                    transition.errors.push(error);
+                }
+            }
+        }
+        Ok(transition)
+    }
+
+    pub fn interrupt_invalid_confirmation(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        error: WorkflowErrorSummary,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        let current = tasks
+            .get_workflow_run(task_id)
+            .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+        if is_terminal(&current) {
+            return Ok((current, None));
+        }
+        if cancellation_wins(tasks, task_id) {
+            return self.cancel_and_claim_next_locked(tasks, &current);
+        }
+        let interrupted = tasks.interrupt_workflow_confirmation(task_id, error)?;
+        let next = self.claim_next_locked(
+            tasks,
+            &current.canonical_identity_key,
+            &current.identity_revision,
+        )?;
+        Ok((interrupted, next))
+    }
+
+    fn cancel_and_claim_next_locked(
+        &self,
+        tasks: &TaskService,
+        owner: &WorkflowRun,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        let cancelled = tasks.finalize_workflow_cancellation(&owner.task_id)?;
         let next = self.claim_next_locked(
             tasks,
             &owner.canonical_identity_key,
@@ -629,6 +812,28 @@ impl WorkflowCoordinator {
     }
 }
 
+fn local_quick_project_is_readable(project_root: &std::path::Path) -> bool {
+    let Ok(context) = crate::models::paths::ProjectContext::new(
+        "workflow-trust-revocation",
+        project_root.to_path_buf(),
+    )
+    .with_resolved_layout() else {
+        return false;
+    };
+    let roles = [
+        crate::models::layout::ProjectMarkdownRootRole::Wiki,
+        crate::models::layout::ProjectMarkdownRootRole::Source,
+        crate::models::layout::ProjectMarkdownRootRole::Mixed,
+    ];
+    context
+        .list_markdown_files_for_roles(&roles)
+        .is_ok_and(|files| {
+            files
+                .into_iter()
+                .all(|path| std::fs::File::open(path).is_ok())
+        })
+}
+
 fn reset_stage(mut stage: WorkflowStage) -> WorkflowStage {
     stage.status = crate::models::workflow::WorkflowStageStatus::Pending;
     stage.started_at = None;
@@ -637,6 +842,37 @@ fn reset_stage(mut stage: WorkflowStage) -> WorkflowStage {
     stage.progress = None;
     stage.decision = None;
     stage
+}
+
+fn dispatch_error(
+    code: impl Into<String>,
+    message_key: impl Into<String>,
+    recoverable: bool,
+) -> WorkflowErrorSummary {
+    WorkflowErrorSummary {
+        code: code.into(),
+        message_key: message_key.into(),
+        recoverable,
+        user_action_required: true,
+        suggested_action: Some(crate::models::workflow::WorkflowPrerequisiteAction::PrepareAgain),
+    }
+}
+
+fn cancellation_wins(tasks: &TaskService, task_id: &str) -> bool {
+    tasks.is_cancelled(task_id)
+        || tasks
+            .get_task(task_id)
+            .is_some_and(|task| task.status == TaskStatus::Cancelling)
+}
+
+fn is_terminal(run: &WorkflowRun) -> bool {
+    matches!(
+        run.display_status,
+        crate::models::workflow::WorkflowDisplayStatus::Completed
+            | crate::models::workflow::WorkflowDisplayStatus::Failed
+            | crate::models::workflow::WorkflowDisplayStatus::Cancelled
+            | crate::models::workflow::WorkflowDisplayStatus::Interrupted
+    )
 }
 
 fn canonical_task_state_root(

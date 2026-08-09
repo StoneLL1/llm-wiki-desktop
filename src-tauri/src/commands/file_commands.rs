@@ -189,7 +189,9 @@ pub fn confirm_pending_action(
                 },
             )?;
             if let Some(next) = next {
-                state.workflow_service.dispatch_claimed_run(&next)?;
+                state
+                    .workflow_service
+                    .dispatch_claimed_run(&state.task_service, &next)?;
             }
         }
         return Ok(ConfirmedAction {
@@ -236,6 +238,7 @@ pub fn confirm_pending_action(
             project_id,
             root_path,
             task_id,
+            ..
         }) => {
             let context = state.resolve_project_context(&project_id, &root_path)?;
             match confirm_generate_content_overwrite(
@@ -256,12 +259,16 @@ pub fn confirm_pending_action(
             ) {
                 Ok((_, next)) => {
                     if let Some(next) = next {
-                        state.workflow_service.dispatch_claimed_run(&next)?;
+                        state
+                            .workflow_service
+                            .dispatch_claimed_run(&state.task_service, &next)?;
                     }
                 }
                 Err(failure) => {
                     if let Some(next) = failure.next {
-                        state.workflow_service.dispatch_claimed_run(&next)?;
+                        state
+                            .workflow_service
+                            .dispatch_claimed_run(&state.task_service, &next)?;
                     }
                     return Err(failure.error);
                 }
@@ -944,7 +951,13 @@ mod tests {
             execution: Some(ConfirmationExecution::GenerateContentOverwrite {
                 project_id: "project-a".into(),
                 root_path: "D:/project-a".into(),
+                canonical_identity_key: "identity-a".into(),
+                identity_revision: "revision-a".into(),
                 task_id: "task-a".into(),
+                action_id: "generate-review".into(),
+                candidate: crate::models::workflow::WorkflowCandidateReference::TaskOwned {
+                    candidate_id: "task-a:candidate".into(),
+                },
             }),
         };
 

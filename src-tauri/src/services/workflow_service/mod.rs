@@ -1,5 +1,6 @@
 pub mod coordinator;
 pub mod fingerprint;
+pub mod launch_registry;
 pub mod overview;
 pub mod persistence;
 pub mod preferences;
@@ -21,8 +22,14 @@ use crate::services::{AgentService, SecretService, SettingsService};
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
-pub use coordinator::{EnqueueWorkflow, WorkflowCoordinator};
+pub use coordinator::{
+    EnqueueWorkflow, WorkflowCoordinator, WorkflowDispatchFailure, WorkflowTrustTransition,
+};
 pub use fingerprint::{canonical_json, workflow_fingerprint};
+pub use launch_registry::{
+    WorkflowExternalLaunchPermit, WorkflowLaunchCloseBarrier, WorkflowLaunchPublication,
+    WorkflowLaunchRegistry,
+};
 pub use overview::WorkflowOverviewService;
 pub(crate) use persistence::recover_workflow;
 pub use persistence::{project_identity, ProjectWorkflowIdentity};
@@ -35,18 +42,21 @@ pub use preparation::{
 pub use runners::generate_content::{
     cancel_generate_content_confirmation, confirm_generate_content_overwrite,
     discard_generate_content_candidate, generate_content_candidate_is_valid_for_workflow,
-    restore_generate_content_confirmation, run_generate_content,
+    restore_generate_content_confirmation, run_generate_content, run_generate_content_authorized,
     run_generate_content_with_generator, GenerateContentConfirmationFailure,
     GenerateContentExecutionServices, GenerateContentRunner,
 };
 pub use runners::health_check::{
-    run_health_check, run_health_check_with_deep, HealthCheckExecutionServices, HealthCheckRunner,
+    run_health_check, run_health_check_authorized, run_health_check_with_deep,
+    HealthCheckExecutionServices, HealthCheckRunner,
 };
+#[cfg(feature = "gui")]
+pub(crate) use runners::update_wiki::update_wiki_decision_review_for_workflow;
 pub use runners::update_wiki::{
     confirm_update_wiki_review, discard_update_wiki_candidate, persist_update_wiki_review,
-    restore_update_wiki_confirmation, run_update_wiki, update_wiki_candidate_is_valid,
-    update_wiki_decision_review, UpdateWikiConfirmationFailure, UpdateWikiExecutionServices,
-    UpdateWikiRunner,
+    restore_update_wiki_confirmation, run_update_wiki, run_update_wiki_authorized,
+    update_wiki_candidate_is_valid, update_wiki_decision_review, UpdateWikiConfirmationFailure,
+    UpdateWikiExecutionServices, UpdateWikiRunner,
 };
 pub use stage_sink::WorkflowStageSink;
 
@@ -164,6 +174,65 @@ impl WorkflowService {
         preparation_revision: &str,
         acknowledge_restricted_content: bool,
         acknowledge_remote_provider: bool,
+    ) -> Result<WorkflowStartOutcome, BackendError> {
+        self.start_with_acknowledgements_impl(
+            context,
+            access,
+            settings_service,
+            secret_service,
+            agent_service,
+            tasks,
+            preparation_id,
+            preparation_revision,
+            acknowledge_restricted_content,
+            acknowledge_remote_provider,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enqueue_with_acknowledgements(
+        &self,
+        context: &ProjectContext,
+        access: WorkflowAccessSnapshot,
+        settings_service: &SettingsService,
+        secret_service: &SecretService,
+        agent_service: &AgentService,
+        tasks: &TaskService,
+        preparation_id: &str,
+        preparation_revision: &str,
+        acknowledge_restricted_content: bool,
+        acknowledge_remote_provider: bool,
+    ) -> Result<WorkflowStartOutcome, BackendError> {
+        self.start_with_acknowledgements_impl(
+            context,
+            access,
+            settings_service,
+            secret_service,
+            agent_service,
+            tasks,
+            preparation_id,
+            preparation_revision,
+            acknowledge_restricted_content,
+            acknowledge_remote_provider,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_acknowledgements_impl(
+        &self,
+        context: &ProjectContext,
+        access: WorkflowAccessSnapshot,
+        settings_service: &SettingsService,
+        secret_service: &SecretService,
+        agent_service: &AgentService,
+        tasks: &TaskService,
+        preparation_id: &str,
+        preparation_revision: &str,
+        acknowledge_restricted_content: bool,
+        acknowledge_remote_provider: bool,
+        dispatch_immediately: bool,
     ) -> Result<WorkflowStartOutcome, BackendError> {
         let identity = project_identity(&context.root).map_err(|message| {
             BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false)
@@ -290,7 +359,7 @@ impl WorkflowService {
         validated
             .execution_options
             .remote_provider_acknowledgement_revision = remote_revision;
-        let runner = self
+        let _runner = self
             .runners
             .read()
             .map_err(|_| runner_lock_error())?
@@ -347,16 +416,67 @@ impl WorkflowService {
                 "Workflow preferences could not be saved; this run is unaffected.".into(),
             );
         }
-        if matches!(&outcome, WorkflowStartOutcome::Created { .. })
+        if dispatch_immediately
+            && matches!(&outcome, WorkflowStartOutcome::Created { .. })
             && run.display_status == WorkflowDisplayStatus::Running
         {
-            runner.start(run.clone());
+            self.dispatch_claimed_run(tasks, run)?;
         }
         Ok(outcome)
     }
 
-    pub fn dispatch_claimed_run(&self, run: &WorkflowRun) -> Result<bool, BackendError> {
-        if run.display_status != WorkflowDisplayStatus::Running {
+    pub fn dispatch_claimed_run(
+        &self,
+        tasks: &TaskService,
+        run: &WorkflowRun,
+    ) -> Result<bool, BackendError> {
+        let current = tasks.get_workflow_run(&run.task_id).ok_or_else(|| {
+            BackendError::new(
+                "WORKFLOW_DISPATCH_INVARIANT",
+                "The claimed workflow no longer exists.",
+                false,
+                true,
+            )
+        })?;
+        if tasks.is_cancelled(&run.task_id) {
+            let (_, next) = self
+                .coordinator
+                .reject_claimed_dispatch(
+                    tasks,
+                    &run.task_id,
+                    WorkflowDispatchFailure::stale(
+                        "WORKFLOW_DISPATCH_CANCELLED",
+                        "workflows.error.prepareAgain",
+                    ),
+                )
+                .map_err(|message| runner_dispatch_error(&message))?;
+            if let Some(next) = next {
+                self.dispatch_claimed_run(tasks, &next)?;
+            }
+            return Ok(false);
+        }
+        if current.display_status != WorkflowDisplayStatus::Running
+            || current.canonical_identity_key != run.canonical_identity_key
+            || current.identity_revision != run.identity_revision
+            || current.kind != run.kind
+            || current.fingerprint != run.fingerprint
+        {
+            if current.display_status == WorkflowDisplayStatus::Running {
+                let (_, next) = self
+                    .coordinator
+                    .reject_claimed_dispatch(
+                        tasks,
+                        &run.task_id,
+                        WorkflowDispatchFailure::invariant(
+                            "WORKFLOW_DISPATCH_INVARIANT",
+                            "workflows.error.prepareAgain",
+                        ),
+                    )
+                    .map_err(|message| runner_dispatch_error(&message))?;
+                if let Some(next) = next {
+                    self.dispatch_claimed_run(tasks, &next)?;
+                }
+            }
             return Ok(false);
         }
         let runner = self
@@ -365,17 +485,42 @@ impl WorkflowService {
             .map_err(|_| runner_lock_error())?
             .iter()
             .find(|runner| runner.kind() == run.kind)
-            .cloned()
-            .ok_or_else(|| {
-                BackendError::new(
-                    "WORKFLOW_RUNNER_UNAVAILABLE",
-                    "The claimed workflow runner is unavailable.",
-                    true,
-                    false,
+            .cloned();
+        let Some(runner) = runner else {
+            let (_, next) = self
+                .coordinator
+                .reject_claimed_dispatch(
+                    tasks,
+                    &run.task_id,
+                    WorkflowDispatchFailure::stale(
+                        "WORKFLOW_RUNNER_UNAVAILABLE",
+                        "workflows.error.configureExecutionRoute",
+                    ),
                 )
-            })?;
-        runner.start(run.clone());
+                .map_err(|message| runner_dispatch_error(&message))?;
+            if let Some(next) = next {
+                self.dispatch_claimed_run(tasks, &next)?;
+            }
+            return Ok(false);
+        };
+        runner.start(current);
         Ok(true)
+    }
+
+    pub fn reject_claimed_dispatch(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        failure: WorkflowDispatchFailure,
+    ) -> Result<WorkflowRun, BackendError> {
+        let (run, next) = self
+            .coordinator
+            .reject_claimed_dispatch(tasks, task_id, failure)
+            .map_err(|message| runner_dispatch_error(&message))?;
+        if let Some(next) = next {
+            self.dispatch_claimed_run(tasks, &next)?;
+        }
+        Ok(run)
     }
 
     pub fn project_overview(
@@ -484,6 +629,15 @@ fn runner_lock_error() -> BackendError {
     BackendError::new(
         "WORKFLOW_RUNNER_REGISTRY_LOCKED",
         "Workflow runners are temporarily unavailable.",
+        true,
+        false,
+    )
+}
+
+fn runner_dispatch_error(message: &str) -> BackendError {
+    BackendError::new(
+        "WORKFLOW_DISPATCH_FINALIZATION_FAILED",
+        message,
         true,
         false,
     )

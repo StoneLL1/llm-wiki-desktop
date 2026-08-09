@@ -20,6 +20,64 @@ fn startup_backend_error(error: errors::BackendError) -> String {
 }
 
 #[cfg(feature = "gui")]
+fn reject_workflow_dispatch(
+    state: &app_state::AppState,
+    task_id: &str,
+    code: &str,
+    message: String,
+) {
+    let failure = match code {
+        "WORKFLOW_PROJECT_IDENTITY_CHANGED"
+        | "WORKFLOW_IDENTITY_FAILED"
+        | "PROJECT_IDENTITY_FAILED"
+        | "PROJECT_CONTEXT_MISMATCH" => {
+            services::WorkflowDispatchFailure::identity(code, "workflows.error.prepareAgain")
+        }
+        "WORKFLOW_PROJECT_CONTEXT_MISSING" | "WORKFLOW_DISPATCH_INVARIANT" => {
+            services::WorkflowDispatchFailure::invariant(code, "workflows.error.prepareAgain")
+        }
+        _ => services::WorkflowDispatchFailure::stale(code, "workflows.error.prepareAgain"),
+    };
+    match state
+        .workflow_service
+        .reject_claimed_dispatch(&state.task_service, task_id, failure)
+    {
+        Ok(_) => {
+            if let Err(log_error) =
+                state
+                    .task_service
+                    .append_log(task_id, tasks::task_model::LogLevel::Error, message)
+            {
+                observe_workflow_adapter_error(task_id, "guard-log", &log_error);
+            }
+        }
+        Err(error) => observe_workflow_adapter_error(task_id, "guard-finalizer", &error.message),
+    }
+}
+
+#[cfg(feature = "gui")]
+fn dispatch_claimed_next(state: &app_state::AppState, next: &models::workflow::WorkflowRun) {
+    if let Err(error) = state
+        .workflow_service
+        .dispatch_claimed_run(&state.task_service, next)
+    {
+        observe_workflow_adapter_error(&next.task_id, "next-dispatch", &error.message);
+        if let Err(log_error) = state.task_service.append_log(
+            &next.task_id,
+            tasks::task_model::LogLevel::Error,
+            format!("Next workflow dispatch failed: {}", error.message),
+        ) {
+            observe_workflow_adapter_error(&next.task_id, "next-dispatch-log", &log_error);
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+fn observe_workflow_adapter_error(task_id: &str, phase: &str, message: &str) {
+    eprintln!("workflow_adapter_error task_id={task_id} phase={phase} message={message}");
+}
+
+#[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -41,37 +99,8 @@ pub fn run() {
                         let app = runner_handle.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = app.state::<app_state::AppState>();
-                            let fail_dispatch = |code: &str, message: String| {
-                                let sink = services::WorkflowStageSink::new(
-                                    &state.task_service,
-                                    &state.workflow_service.coordinator,
-                                    &run.task_id,
-                                );
-                                let _ = sink.start("analyze_sources");
-                                if let Ok((_, next)) = sink.fail(
-                                    "analyze_sources",
-                                    models::workflow::WorkflowErrorSummary {
-                                        code: code.into(),
-                                        message_key: "workflows.error.prepareAgain".into(),
-                                        recoverable: true,
-                                        user_action_required: true,
-                                        suggested_action: Some(
-                                            models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
-                                        ),
-                                    },
-                                ) {
-                                    if let Some(next) = next {
-                                        let _ = state.workflow_service.dispatch_claimed_run(&next);
-                                    }
-                                }
-                                let _ = state.task_service.append_log(
-                                    &run.task_id,
-                                    tasks::task_model::LogLevel::Error,
-                                    message,
-                                );
-                            };
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id) else {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_CONTEXT_MISSING",
                                     "Update Wiki task has no project root.".into(),
                                 );
@@ -83,7 +112,7 @@ pub fn run() {
                             {
                                 Ok(context) => context,
                                 Err(error) => {
-                                    fail_dispatch(&error.code, error.message);
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                     return;
                                 }
                             };
@@ -96,7 +125,7 @@ pub fn run() {
                                     identity
                                 }
                                 Ok(_) | Err(_) => {
-                                    fail_dispatch(
+                                    reject_workflow_dispatch(&state, &run.task_id,
                                         "WORKFLOW_PROJECT_IDENTITY_CHANGED",
                                         "Update Wiki project identity changed while queued.".into(),
                                     );
@@ -107,14 +136,14 @@ pub fn run() {
                             let access = match state.resolve_workflow_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
-                                    fail_dispatch(&error.code, error.message);
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                     return;
                                 }
                             };
                             if access.trust
                                 != models::workflow::WorkflowProjectTrust::Trusted
                             {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_UNTRUSTED",
                                     "Update Wiki cannot execute until the backend project-open trust policy supplies a current trusted access snapshot.".into(),
                                 );
@@ -123,7 +152,7 @@ pub fn run() {
                             if access.filesystem_access
                                 != models::workflow::WorkflowFilesystemAccess::Writable
                             {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_READ_ONLY",
                                     "Update Wiki project access is no longer writable.".into(),
                                 );
@@ -145,10 +174,16 @@ pub fn run() {
                                 confirmation_registry: &state.confirmation_registry,
                                 coordinator: &state.workflow_service.coordinator,
                             };
-                            if let Some(next) =
-                                services::run_update_wiki(&context, run, &update).await
+                            let authority_run = run.clone();
+                            if let Some(next) = services::run_update_wiki_authorized(
+                                &context,
+                                run,
+                                &update,
+                                || state.publish_workflow_external_launch(&context, &authority_run),
+                            )
+                            .await
                             {
-                                let _ = state.workflow_service.dispatch_claimed_run(&next);
+                                dispatch_claimed_next(&state, &next);
                             }
                         });
                     },
@@ -162,38 +197,9 @@ pub fn run() {
                         let app = health_runner_handle.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = app.state::<app_state::AppState>();
-                            let fail_dispatch = |code: &str, message: String| {
-                                let sink = services::WorkflowStageSink::new(
-                                    &state.task_service,
-                                    &state.workflow_service.coordinator,
-                                    &run.task_id,
-                                );
-                                let _ = sink.start("read_markdown");
-                                if let Ok((_, next)) = sink.fail(
-                                    "read_markdown",
-                                    models::workflow::WorkflowErrorSummary {
-                                        code: code.into(),
-                                        message_key: "workflows.error.prepareAgain".into(),
-                                        recoverable: true,
-                                        user_action_required: true,
-                                        suggested_action: Some(
-                                            models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
-                                        ),
-                                    },
-                                ) {
-                                    if let Some(next) = next {
-                                        let _ = state.workflow_service.dispatch_claimed_run(&next);
-                                    }
-                                }
-                                let _ = state.task_service.append_log(
-                                    &run.task_id,
-                                    tasks::task_model::LogLevel::Error,
-                                    message,
-                                );
-                            };
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_CONTEXT_MISSING",
                                     "Health Check task has no project root.".into(),
                                 );
@@ -205,7 +211,7 @@ pub fn run() {
                             {
                                 Ok(context) => context,
                                 Err(error) => {
-                                    fail_dispatch(&error.code, error.message);
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                     return;
                                 }
                             };
@@ -218,7 +224,7 @@ pub fn run() {
                                     identity
                                 }
                                 Ok(_) | Err(_) => {
-                                    fail_dispatch(
+                                    reject_workflow_dispatch(&state, &run.task_id,
                                         "WORKFLOW_PROJECT_IDENTITY_CHANGED",
                                         "Health Check project identity changed while queued."
                                             .into(),
@@ -230,7 +236,7 @@ pub fn run() {
                             let access = match state.resolve_workflow_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
-                                    fail_dispatch(&error.code, error.message);
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                     return;
                                 }
                             };
@@ -244,7 +250,7 @@ pub fn run() {
                                 && access.trust
                                     != models::workflow::WorkflowProjectTrust::Trusted
                             {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_UNTRUSTED",
                                     "Complete Health Check requires a current trusted project access snapshot."
                                         .into(),
@@ -261,10 +267,23 @@ pub fn run() {
                                 task_service: &state.task_service,
                                 coordinator: &state.workflow_service.coordinator,
                             };
-                            if let Some(next) =
-                                services::run_health_check(&context, run, &health).await
+                            let authority_run = run.clone();
+                            let report_authority_run = run.clone();
+                            if let Some(next) = services::run_health_check_authorized(
+                                &context,
+                                run,
+                                &health,
+                                || state.publish_workflow_external_launch(&context, &authority_run),
+                                || {
+                                    state.publish_workflow_persistent_report(
+                                        &context,
+                                        &report_authority_run,
+                                    )
+                                },
+                            )
+                            .await
                             {
-                                let _ = state.workflow_service.dispatch_claimed_run(&next);
+                                dispatch_claimed_next(&state, &next);
                             }
                         });
                     },
@@ -278,38 +297,9 @@ pub fn run() {
                         let app = generate_runner_handle.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = app.state::<app_state::AppState>();
-                            let fail_dispatch = |code: &str, message: String| {
-                                let sink = services::WorkflowStageSink::new(
-                                    &state.task_service,
-                                    &state.workflow_service.coordinator,
-                                    &run.task_id,
-                                );
-                                let _ = sink.start("confirm_scope");
-                                if let Ok((_, next)) = sink.fail(
-                                    "confirm_scope",
-                                    models::workflow::WorkflowErrorSummary {
-                                        code: code.into(),
-                                        message_key: "workflows.error.prepareAgain".into(),
-                                        recoverable: true,
-                                        user_action_required: true,
-                                        suggested_action: Some(
-                                            models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
-                                        ),
-                                    },
-                                ) {
-                                    if let Some(next) = next {
-                                        let _ = state.workflow_service.dispatch_claimed_run(&next);
-                                    }
-                                }
-                                let _ = state.task_service.append_log(
-                                    &run.task_id,
-                                    tasks::task_model::LogLevel::Error,
-                                    message,
-                                );
-                            };
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_CONTEXT_MISSING",
                                     "Generate Content task has no project root.".into(),
                                 );
@@ -321,7 +311,7 @@ pub fn run() {
                             {
                                 Ok(context) => context,
                                 Err(error) => {
-                                    fail_dispatch(&error.code, error.message);
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                     return;
                                 }
                             };
@@ -331,7 +321,7 @@ pub fn run() {
                                         == run.canonical_identity_key
                                         && identity.identity_revision == run.identity_revision => {}
                                 Ok(_) | Err(_) => {
-                                    fail_dispatch(
+                                    reject_workflow_dispatch(&state, &run.task_id,
                                         "WORKFLOW_PROJECT_IDENTITY_CHANGED",
                                         "Generate Content project identity changed while queued."
                                             .into(),
@@ -342,14 +332,14 @@ pub fn run() {
                             let access = match state.resolve_workflow_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
-                                    fail_dispatch(&error.code, error.message);
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                     return;
                                 }
                             };
                             if access.trust
                                 != models::workflow::WorkflowProjectTrust::Trusted
                             {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_UNTRUSTED",
                                     "Generate Content requires a current trusted project access snapshot."
                                         .into(),
@@ -359,7 +349,7 @@ pub fn run() {
                             if access.filesystem_access
                                 != models::workflow::WorkflowFilesystemAccess::Writable
                             {
-                                fail_dispatch(
+                                reject_workflow_dispatch(&state, &run.task_id,
                                     "WORKFLOW_PROJECT_READ_ONLY",
                                     "Generate Content project access is no longer writable.".into(),
                                 );
@@ -377,10 +367,16 @@ pub fn run() {
                                 task_service: &state.task_service,
                                 coordinator: &state.workflow_service.coordinator,
                             };
-                            if let Some(next) =
-                                services::run_generate_content(&context, run, &generate).await
+                            let authority_run = run.clone();
+                            if let Some(next) = services::run_generate_content_authorized(
+                                &context,
+                                run,
+                                &generate,
+                                || state.publish_workflow_external_launch(&context, &authority_run),
+                            )
+                            .await
                             {
-                                let _ = state.workflow_service.dispatch_claimed_run(&next);
+                                dispatch_claimed_next(&state, &next);
                             }
                         });
                     },

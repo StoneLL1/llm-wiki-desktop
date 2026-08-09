@@ -149,11 +149,16 @@ fn worker_finish_after_cancel_uses_a_deterministic_recovery_window() {
     coordinator.cancel(&service, &run.task_id).unwrap();
     controller.release();
 
-    assert!(worker.join().unwrap().is_err());
+    let (finalized, next) = worker
+        .join()
+        .unwrap()
+        .expect("worker completion must resolve a concurrent cancellation");
+    assert_eq!(finalized.display_status, WorkflowDisplayStatus::Cancelled);
+    assert!(next.is_none());
     assert_eq!(
         service.get_task(&run.task_id).unwrap().status,
-        TaskStatus::Cancelling,
-        "pre-fix baseline: worker completion rejected after cancellation has no shared finalizer",
+        TaskStatus::Cancelled,
+        "worker completion must not leave a cancellation suspended",
     );
 }
 

@@ -66,6 +66,7 @@ pub struct AppState {
     pub secret_service: SecretService,
     pub task_service: TaskService,
     pub workflow_service: WorkflowService,
+    pub workflow_launch_registry: crate::services::WorkflowLaunchRegistry,
     pub confirmation_registry: ConfirmationRegistry,
     pub(crate) project_trust_transition: Mutex<()>,
 }
@@ -520,6 +521,133 @@ impl AppState {
         })
     }
 
+    /// Issues an epoch-bound permit immediately before a workflow starts an
+    /// external Agent/BYOK invocation. The transition lock is released before
+    /// the blocking process/network call; the permit's publication guard then
+    /// prevents revocation from returning until that cancellable call has
+    /// either entered and returned or aborted.
+    pub(crate) fn publish_workflow_external_launch(
+        &self,
+        context: &ProjectContext,
+        run: &crate::models::workflow::WorkflowRun,
+    ) -> Result<crate::services::WorkflowExternalLaunchPermit, BackendError> {
+        self.with_workflow_access(context, |access| {
+            let current = self
+                .task_service
+                .get_workflow_run(&run.task_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "WORKFLOW_DISPATCH_INVARIANT",
+                        "The workflow disappeared before external execution.",
+                        false,
+                        true,
+                    )
+                })?;
+            if self.task_service.is_cancelled(&run.task_id)
+                || current.display_status
+                    != crate::models::workflow::WorkflowDisplayStatus::Running
+                || current.canonical_identity_key != run.canonical_identity_key
+                || current.identity_revision != run.identity_revision
+                || current.kind != run.kind
+                || current.fingerprint != run.fingerprint
+            {
+                return Err(BackendError::new(
+                    "WORKFLOW_EXTERNAL_LAUNCH_REVOKED",
+                    "Workflow authority changed before external execution started.",
+                    true,
+                    true,
+                ));
+            }
+            if access.trust != WorkflowProjectTrust::Trusted {
+                return Err(BackendError::new(
+                    "PROJECT_EXTERNAL_AI_REQUIRES_TRUST",
+                    "Trust this knowledge base before sending its content to an external AI or Agent.",
+                    true,
+                    true,
+                ));
+            }
+            if matches!(
+                run.kind,
+                crate::models::workflow::WorkflowKind::UpdateWiki
+                    | crate::models::workflow::WorkflowKind::GenerateContent
+            ) && access.filesystem_access != WorkflowFilesystemAccess::Writable
+            {
+                return Err(BackendError::new(
+                    "PROJECT_WRITE_REQUIRES_TRUST",
+                    "Current project authority no longer permits this workflow mutation.",
+                    true,
+                    true,
+                ));
+            }
+            self.workflow_launch_registry.issue(
+                &run.canonical_identity_key,
+                &run.task_id,
+                &access.authority_revision,
+            )
+        })
+    }
+
+    /// Publishes the short project-persistence window used by Local Quick
+    /// report storage. Trust revocation closes this epoch before rebinding the
+    /// workflow to memory-only and waits for any begun write before returning.
+    pub(crate) fn publish_workflow_persistent_report(
+        &self,
+        context: &ProjectContext,
+        run: &crate::models::workflow::WorkflowRun,
+    ) -> Result<Option<crate::services::WorkflowExternalLaunchPermit>, BackendError> {
+        self.with_workflow_access(context, |access| {
+            let current = self
+                .task_service
+                .get_workflow_run(&run.task_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "WORKFLOW_DISPATCH_INVARIANT",
+                        "The workflow disappeared before report persistence.",
+                        false,
+                        true,
+                    )
+                })?;
+            if self.task_service.is_cancelled(&run.task_id)
+                || current.display_status != crate::models::workflow::WorkflowDisplayStatus::Running
+                || current.canonical_identity_key != run.canonical_identity_key
+                || current.identity_revision != run.identity_revision
+                || current.kind != run.kind
+                || current.fingerprint != run.fingerprint
+            {
+                return Err(BackendError::new(
+                    "WORKFLOW_REPORT_AUTHORITY_CHANGED",
+                    "Workflow authority changed before report persistence.",
+                    true,
+                    true,
+                ));
+            }
+            if self
+                .task_service
+                .workflow_persistence_dir(&run.task_id)
+                .is_none()
+            {
+                return Ok(None);
+            }
+            if access.trust != WorkflowProjectTrust::Trusted
+                || access.filesystem_access != WorkflowFilesystemAccess::Writable
+            {
+                return Err(BackendError::new(
+                    "WORKFLOW_REPORT_AUTHORITY_CHANGED",
+                    "Persistent Health Check reports require current trusted writable authority.",
+                    true,
+                    true,
+                ));
+            }
+            self.workflow_launch_registry
+                .issue(
+                    &run.canonical_identity_key,
+                    &run.task_id,
+                    &access.authority_revision,
+                )
+                .map(Some)
+        })
+    }
+
     /// Project-scoped mutations may only use app state that the current
     /// authority proved both trusted and writable. This prevents restricted,
     /// Recovery, and read-only projects from creating `.app` state through a
@@ -886,27 +1014,139 @@ impl AppState {
     }
 
     pub fn revoke_project_trust(&self, project_id: &str, root: &Path) -> Result<(), BackendError> {
-        let _transition = self
+        let transition_guard = self
             .project_trust_transition
             .lock()
             .map_err(|_| trust_transition_locked())?;
-        self.task_service
-            .request_cancel_active_workflows_for_root(root)
-            .map_err(|message| {
-                BackendError::new(
+        let mut launch_owners = self
+            .task_service
+            .list_workflow_runs()
+            .into_iter()
+            .filter(|run| self.task_service.task_belongs_to_root(&run.task_id, root))
+            .map(|run| run.canonical_identity_key)
+            .collect::<std::collections::HashSet<_>>();
+        if let Ok(identity) = crate::services::project_identity(root) {
+            launch_owners.insert(identity.canonical_identity_key);
+        }
+        let launch_barriers = launch_owners
+            .into_iter()
+            .map(|owner| self.workflow_launch_registry.close_owner(&owner))
+            .collect::<Vec<_>>();
+        let mut first_error = None;
+        let (stopped_runs, retry_freeze) = match self
+            .workflow_service
+            .coordinator
+            .freeze_owner_for_trust_revocation(&self.task_service, root)
+        {
+            Ok(transition) => {
+                if let Some(message) = transition.errors.first() {
+                    first_error = Some(BackendError::new(
+                        "WORKFLOW_TRUST_REVOCATION_CANCEL_FAILED",
+                        message.clone(),
+                        true,
+                        true,
+                    ));
+                }
+                let retry = !transition.errors.is_empty();
+                (transition.stopped_runs, retry)
+            }
+            Err(message) => {
+                first_error = Some(BackendError::new(
                     "WORKFLOW_TRUST_REVOCATION_CANCEL_FAILED",
                     message,
                     true,
                     true,
-                )
-            })?;
-        self.task_service
-            .rebind_workflows_for_root(root, None)
-            .map_err(|message| {
-                BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
-            })?;
-        self.project_registry.revoke_trust(project_id, root)?;
-        self.project_service.revoke_project_trust(root)
+                ));
+                (Vec::new(), true)
+            }
+        };
+        let context = ProjectContext::new(project_id, root.to_path_buf());
+        self.cleanup_stopped_workflow_authority(&context, stopped_runs, &mut first_error);
+        if let Err(message) = self.task_service.rebind_workflows_for_root(root, None) {
+            if first_error.is_none() {
+                first_error = Some(BackendError::new(
+                    "WORKFLOW_PERSISTENCE_REBIND_FAILED",
+                    message,
+                    true,
+                    true,
+                ));
+            }
+        }
+        if retry_freeze {
+            match self
+                .workflow_service
+                .coordinator
+                .freeze_owner_for_trust_revocation(&self.task_service, root)
+            {
+                Ok(retry) => {
+                    self.cleanup_stopped_workflow_authority(
+                        &context,
+                        retry.stopped_runs,
+                        &mut first_error,
+                    );
+                    if first_error.is_none() {
+                        if let Some(message) = retry.errors.first() {
+                            first_error = Some(BackendError::new(
+                                "WORKFLOW_TRUST_REVOCATION_CANCEL_FAILED",
+                                message.clone(),
+                                true,
+                                true,
+                            ));
+                        }
+                    }
+                }
+                Err(message) if first_error.is_none() => {
+                    first_error = Some(BackendError::new(
+                        "WORKFLOW_TRUST_REVOCATION_CANCEL_FAILED",
+                        message,
+                        true,
+                        true,
+                    ));
+                }
+                Err(_) => {}
+            }
+        }
+        if let Err(error) = self.project_registry.revoke_trust(project_id, root) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+        if let Err(error) = self.project_service.revoke_project_trust(root) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+        drop(transition_guard);
+        for barrier in launch_barriers {
+            if let Err(error) = barrier.wait() {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn cleanup_stopped_workflow_authority(
+        &self,
+        context: &ProjectContext,
+        stopped_runs: Vec<crate::models::workflow::WorkflowRun>,
+        first_error: &mut Option<BackendError>,
+    ) {
+        for run in stopped_runs {
+            if let Some(pending) = run.pending_action.as_ref() {
+                if let Err(error) = self
+                    .confirmation_registry
+                    .cancel_workflow_binding(context, &run, pending)
+                {
+                    if first_error.is_none() {
+                        *first_error = Some(error);
+                    }
+                }
+            }
+            let _ = crate::services::discard_update_wiki_candidate(&run.task_id);
+            let _ = crate::services::discard_generate_content_candidate(&run.task_id);
+        }
     }
 }
 
@@ -919,11 +1159,15 @@ mod project_registry_tests {
 
     use super::{AppState, ProjectRegistry, ProjectTrustAuthority, ProjectWriteRootKind};
     use crate::errors::PROJECT_CONTEXT_MISMATCH;
+    use crate::models::confirmation::{
+        ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
+    };
     use crate::models::project::{ProjectTemplate, ProjectTrustKind};
     use crate::models::task::TaskStatus;
     use crate::models::workflow::{
-        HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
-        WorkflowKind, WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectTrust,
+        HealthCheckMode, WorkflowCandidateReference, WorkflowExecutionOptions,
+        WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind, WorkflowPendingAction,
+        WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectTrust,
         WorkflowResult, WorkflowRoute, WorkflowRun, WorkflowScope, WorkflowStage,
         WorkflowStageStatus, WorkflowStartOutcome,
     };
@@ -1395,8 +1639,9 @@ mod project_registry_tests {
     #[test]
     fn explicit_native_revoke_rebinds_every_existing_workflow_to_memory_only() {
         let (state, config) = state_with_temp_config("native-rebind-config");
+        let state = Arc::new(state);
         let project = strict_native_project("native-rebind");
-        state
+        let context = state
             .project_registry
             .register_trusted_native("project-a", &project)
             .unwrap();
@@ -1436,21 +1681,131 @@ mod project_registry_tests {
             task_ids.push(run.task_id);
         }
 
-        state.revoke_project_trust("project-a", &project).unwrap();
+        let active = state.task_service.get_workflow_run(&task_ids[0]).unwrap();
+        let report_publication = state
+            .publish_workflow_persistent_report(&context, &active)
+            .unwrap()
+            .expect("the persistent Local Quick run must publish a disk-write epoch")
+            .begin()
+            .unwrap();
+        let revoke_state = Arc::clone(&state);
+        let revoke_project = project.clone();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_worker = std::thread::spawn(move || {
+            revoke_state
+                .revoke_project_trust("project-a", &revoke_project)
+                .unwrap();
+            revoked_tx.send(()).unwrap();
+        });
+        assert!(
+            revoked_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "revoke must not return while a persistent report write can still begin"
+        );
+        report_publication.started();
+        revoked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        revoke_worker.join().unwrap();
 
-        for task_id in task_ids {
+        for (index, task_id) in task_ids.into_iter().enumerate() {
             let run = state.task_service.get_workflow_run(&task_id).unwrap();
             assert_eq!(run.persistence, WorkflowPersistenceMode::MemoryOnly);
             assert_eq!(
                 run.persistence_transition,
                 Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly)
             );
+            if index == 0 {
+                assert_eq!(
+                    run.display_status,
+                    crate::models::workflow::WorkflowDisplayStatus::Running
+                );
+                assert!(
+                    state
+                        .publish_workflow_persistent_report(&context, &run)
+                        .unwrap()
+                        .is_none(),
+                    "a revoked Local Quick run that was rebound successfully must use memory"
+                );
+            } else {
+                assert_eq!(
+                    run.display_status,
+                    crate::models::workflow::WorkflowDisplayStatus::Queued
+                );
+                assert!(run.continuation_required);
+            }
         }
+        assert!(!project.join(".app/lint-reports").exists());
         cleanup_paths(&[&project, &config]);
     }
 
     #[test]
-    fn claimed_snapshot_still_dispatches_after_real_trust_revocation() {
+    fn revoked_authority_cannot_reopen_a_lingering_local_quick_report_epoch() {
+        let (state, config) = state_with_temp_config("report-rebind-failure-config");
+        let project = strict_native_project("report-rebind-failure");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let run = match state
+            .workflow_service
+            .coordinator
+            .enqueue(
+                &state.task_service,
+                EnqueueWorkflow {
+                    project_id: "project-a".into(),
+                    project_root: project.clone(),
+                    task_state_root: Some(project.join(".app/tasks")),
+                    title: "Health Check".into(),
+                    kind: WorkflowKind::HealthCheck,
+                    scope: WorkflowScope::HealthCheck {
+                        mode: HealthCheckMode::LocalQuick,
+                    },
+                    route: Some(WorkflowRoute::Local {
+                        route_revision: "local-v1".into(),
+                    }),
+                    baseline_fingerprint: "report-rebind-failure".into(),
+                    execution_options: WorkflowExecutionOptions {
+                        preparation_revision: "report-rebind-failure".into(),
+                        ..WorkflowExecutionOptions::default()
+                    },
+                    stages: workflow_stages(&WorkflowKind::HealthCheck),
+                    retry: None,
+                },
+            )
+            .unwrap()
+        {
+            WorkflowStartOutcome::Created { run } => run,
+            WorkflowStartOutcome::Existing { .. } => panic!("workflow must be unique"),
+        };
+        assert!(state
+            .task_service
+            .workflow_persistence_dir(&run.task_id)
+            .is_some());
+
+        // Model the fail-closed state after trust authority was revoked but a
+        // persistence rebind failed and left the old directory attached.
+        state
+            .project_registry
+            .revoke_trust("project-a", &project)
+            .unwrap();
+        state
+            .project_service
+            .revoke_project_trust(&project)
+            .unwrap();
+        assert!(state
+            .task_service
+            .workflow_persistence_dir(&run.task_id)
+            .is_some());
+
+        let error = match state.publish_workflow_persistent_report(&context, &run) {
+            Err(error) => error,
+            Ok(_) => panic!("revoked authority must not reopen persistent report publication"),
+        };
+        assert_eq!(error.code, "WORKFLOW_REPORT_AUTHORITY_CHANGED");
+        assert!(!project.join(".app/lint-reports").exists());
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn claimed_snapshot_is_rejected_after_real_trust_revocation() {
         fn enqueue(state: &AppState, project: &std::path::Path, revision: &str) -> WorkflowRun {
             let outcome = state
                 .workflow_service
@@ -1548,7 +1903,7 @@ mod project_registry_tests {
             dispatch_rx.recv().unwrap();
             worker_state
                 .workflow_service
-                .dispatch_claimed_run(&stale_claimed)
+                .dispatch_claimed_run(&worker_state.task_service, &stale_claimed)
                 .unwrap()
         });
         let stale_claimed = claimed_rx
@@ -1566,9 +1921,9 @@ mod project_registry_tests {
             ProjectTrustAuthority::Untrusted,
         );
         dispatch_tx.send(()).unwrap();
-        assert!(worker.join().unwrap());
+        assert!(!worker.join().unwrap());
 
-        assert_eq!(runner.0.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.0.load(Ordering::SeqCst), 0);
         let current = state
             .task_service
             .get_workflow_run(&queued.task_id)
@@ -1576,8 +1931,222 @@ mod project_registry_tests {
         assert_eq!(current.persistence, WorkflowPersistenceMode::MemoryOnly);
         assert_eq!(
             state.task_service.get_task(&queued.task_id).unwrap().status,
-            TaskStatus::Cancelling,
-            "pre-fix witness: stale claimed snapshot dispatches after real trust revocation",
+            TaskStatus::Cancelled,
+            "a stale claimed snapshot must be rejected after real trust revocation",
+        );
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn trust_revocation_freezes_queued_work_before_stopping_mutating_active_run() {
+        let (state, config) = state_with_temp_config("revoke-freezes-queue-config");
+        let project = strict_native_project("revoke-freezes-queue");
+        state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let mut runs = Vec::new();
+        for revision in ["active", "queued-1", "queued-2"] {
+            let outcome = state
+                .workflow_service
+                .coordinator
+                .enqueue(
+                    &state.task_service,
+                    EnqueueWorkflow {
+                        project_id: "project-a".into(),
+                        project_root: project.clone(),
+                        task_state_root: Some(project.join(".app/tasks")),
+                        title: "Update Wiki".into(),
+                        kind: WorkflowKind::UpdateWiki,
+                        scope: WorkflowScope::UpdateWiki {
+                            mode: crate::models::workflow::UpdateWikiMode::ChangedSources,
+                            source_versions: Vec::new(),
+                        },
+                        route: Some(WorkflowRoute::Agent {
+                            agent: crate::models::agent::AgentKind::Codex,
+                            model: None,
+                            route_revision: "agent-v1".into(),
+                        }),
+                        baseline_fingerprint: revision.into(),
+                        execution_options: WorkflowExecutionOptions {
+                            preparation_revision: revision.into(),
+                            ..WorkflowExecutionOptions::default()
+                        },
+                        stages: workflow_stages(&WorkflowKind::UpdateWiki),
+                        retry: None,
+                    },
+                )
+                .unwrap();
+            let WorkflowStartOutcome::Created { run } = outcome else {
+                panic!("workflow must be unique")
+            };
+            runs.push(run);
+        }
+
+        state.revoke_project_trust("project-a", &project).unwrap();
+
+        assert_eq!(
+            state
+                .task_service
+                .get_task(&runs[0].task_id)
+                .unwrap()
+                .status,
+            TaskStatus::Cancelling
+        );
+        let (_, claimed) = state
+            .workflow_service
+            .coordinator
+            .reject_claimed_dispatch(
+                &state.task_service,
+                &runs[0].task_id,
+                crate::services::WorkflowDispatchFailure::stale(
+                    "WORKFLOW_PROJECT_UNTRUSTED",
+                    "workflows.error.prepareAgain",
+                ),
+            )
+            .unwrap();
+        assert!(claimed.is_none(), "the suspended queue must not auto-claim");
+        assert_eq!(
+            state
+                .task_service
+                .get_task(&runs[0].task_id)
+                .unwrap()
+                .status,
+            TaskStatus::Cancelled
+        );
+        for queued in &runs[1..] {
+            let current = state
+                .task_service
+                .get_workflow_run(&queued.task_id)
+                .unwrap();
+            assert_eq!(
+                current.display_status,
+                crate::models::workflow::WorkflowDisplayStatus::Queued
+            );
+            assert!(current.continuation_required);
+        }
+
+        state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        for queued in &runs[1..] {
+            let current = state
+                .task_service
+                .get_workflow_run(&queued.task_id)
+                .unwrap();
+            assert_eq!(
+                current.display_status,
+                crate::models::workflow::WorkflowDisplayStatus::Queued
+            );
+            assert!(
+                current.continuation_required,
+                "trust restoration must not auto-run queued work"
+            );
+        }
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn trust_revocation_removes_waiting_confirmation_authority_before_returning() {
+        let (state, config) = state_with_temp_config("revoke-waiting-confirmation-config");
+        let project = strict_native_project("revoke-waiting-confirmation");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let outcome = state
+            .workflow_service
+            .coordinator
+            .enqueue(
+                &state.task_service,
+                EnqueueWorkflow {
+                    project_id: context.project_id.clone(),
+                    project_root: context.root.clone(),
+                    task_state_root: Some(context.root.join(".app/tasks")),
+                    title: "Update Wiki".into(),
+                    kind: WorkflowKind::UpdateWiki,
+                    scope: WorkflowScope::UpdateWiki {
+                        mode: crate::models::workflow::UpdateWikiMode::ChangedSources,
+                        source_versions: Vec::new(),
+                    },
+                    route: None,
+                    baseline_fingerprint: "waiting".into(),
+                    execution_options: WorkflowExecutionOptions {
+                        preparation_revision: "waiting".into(),
+                        ..WorkflowExecutionOptions::default()
+                    },
+                    stages: workflow_stages(&WorkflowKind::UpdateWiki),
+                    retry: None,
+                },
+            )
+            .unwrap();
+        let WorkflowStartOutcome::Created { run } = outcome else {
+            panic!("workflow must be unique")
+        };
+        let stage_id = run.stages[0].id.clone();
+        let action_id = "waiting-action".to_string();
+        let candidate = WorkflowCandidateReference::TaskOwned {
+            candidate_id: run.task_id.clone(),
+        };
+        let pending = WorkflowPendingAction {
+            id: action_id.clone(),
+            action_type: PendingActionType::MergeConflict,
+            risk_level: RiskLevel::High,
+            affected_paths: vec!["wiki/index.md".into()],
+            candidate: Some(candidate.clone()),
+            expires_at: None,
+            checkpoint_hash: Some("checkpoint".into()),
+        };
+        state
+            .task_service
+            .start_workflow_stage(&run.task_id, &stage_id)
+            .unwrap();
+        state
+            .task_service
+            .wait_workflow_stage(&run.task_id, &stage_id, pending.clone())
+            .unwrap();
+        state
+            .confirmation_registry
+            .register_with_execution(
+                PendingAction {
+                    id: action_id.clone(),
+                    action_type: pending.action_type.clone(),
+                    title: "Review".into(),
+                    message: "Review".into(),
+                    risk_level: pending.risk_level.clone(),
+                    affected_paths: pending.affected_paths.clone(),
+                    preview: None,
+                    expires_at: None,
+                    checkpoint_hash: pending.checkpoint_hash.clone(),
+                },
+                Some(ConfirmationExecution::UpdateWikiReview {
+                    project_id: context.project_id.clone(),
+                    root_path: context.root.to_string_lossy().into_owned(),
+                    canonical_identity_key: run.canonical_identity_key.clone(),
+                    identity_revision: run.identity_revision.clone(),
+                    task_id: run.task_id.clone(),
+                    action_id: action_id.clone(),
+                    candidate,
+                }),
+            )
+            .unwrap();
+
+        state.revoke_project_trust("project-a", &project).unwrap();
+
+        let current = state.task_service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            current.display_status,
+            crate::models::workflow::WorkflowDisplayStatus::Cancelled
+        );
+        assert!(current.pending_action.is_none());
+        assert_eq!(
+            state
+                .confirmation_registry
+                .peek(&action_id)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_NOT_FOUND"
         );
         cleanup_paths(&[&project, &config]);
     }
@@ -1918,11 +2487,6 @@ mod project_registry_tests {
             )
             .unwrap_err();
         assert_eq!(revoked_error.code, "PROJECT_WRITE_REQUIRES_TRUST");
-        cleanup_paths(&[
-            &restricted_project,
-            &restricted_config,
-            &project,
-            &config,
-        ]);
+        cleanup_paths(&[&restricted_project, &restricted_config, &project, &config]);
     }
 }

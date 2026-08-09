@@ -50,20 +50,24 @@ pub use secret_service::SecretService;
 pub use settings_service::SettingsService;
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
+#[cfg(feature = "gui")]
+pub(crate) use workflow_service::update_wiki_decision_review_for_workflow;
 pub use workflow_service::{
     cancel_generate_content_confirmation, canonical_json, confirm_generate_content_overwrite,
     confirm_update_wiki_review, discard_generate_content_candidate, discard_update_wiki_candidate,
     generate_content_candidate_is_valid_for_workflow, persist_update_wiki_review, project_identity,
     resolve_workflow_persistence_binding, restore_generate_content_confirmation,
-    restore_update_wiki_confirmation, run_generate_content, run_generate_content_with_generator,
-    run_health_check, run_health_check_with_deep, run_update_wiki, update_wiki_candidate_is_valid,
-    update_wiki_decision_review, workflow_baseline_for_scope, workflow_fingerprint,
-    workflow_stages, EnqueueWorkflow, GenerateContentConfirmationFailure,
+    restore_update_wiki_confirmation, run_generate_content, run_generate_content_authorized,
+    run_generate_content_with_generator, run_health_check, run_health_check_authorized,
+    run_health_check_with_deep, run_update_wiki, run_update_wiki_authorized,
+    update_wiki_candidate_is_valid, update_wiki_decision_review, workflow_baseline_for_scope,
+    workflow_fingerprint, workflow_stages, EnqueueWorkflow, GenerateContentConfirmationFailure,
     GenerateContentExecutionServices, GenerateContentRunner, HealthCheckExecutionServices,
     HealthCheckRunner, PrepareWorkflowInput, ProjectWorkflowIdentity,
     UpdateWikiConfirmationFailure, UpdateWikiExecutionServices, UpdateWikiRunner,
-    ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowCoordinator,
-    WorkflowPersistenceBinding, WorkflowPreference, WorkflowPreferences,
+    ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowCoordinator, WorkflowDispatchFailure,
+    WorkflowExternalLaunchPermit, WorkflowLaunchCloseBarrier, WorkflowLaunchPublication,
+    WorkflowLaunchRegistry, WorkflowPersistenceBinding, WorkflowPreference, WorkflowPreferences,
     WorkflowPreparationEnvironment, WorkflowPreparationService, WorkflowRunner, WorkflowService,
-    WorkflowStageSink,
+    WorkflowStageSink, WorkflowTrustTransition,
 };
