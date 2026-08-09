@@ -23,6 +23,7 @@ pub enum LogLevel {
     Debug,
 }
 
+#[derive(Clone)]
 pub struct TaskEntry {
     pub task: BackendTask,
     pub cancellation: CancellationToken,
