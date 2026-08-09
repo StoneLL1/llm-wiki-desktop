@@ -10,7 +10,7 @@ export interface AiCapabilitiesWorkflow {
   agents: AgentInfo[];
   providers: ProviderStatus[];
   refreshing: boolean;
-  refresh: () => Promise<void>;
+  refresh: (forceRefresh?: boolean) => Promise<void>;
 }
 
 const hasTauri = (): boolean =>
@@ -49,13 +49,13 @@ export function useAiCapabilities(
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (forceRefresh = false) => {
     if (!hasTauri() || !projectId) return;
     const requestKey = projectKey;
     const epoch = ++requestEpoch.current;
     setRefreshing(true);
     try {
-      const request = { projectId, projectRootPath: rootPath };
+      const request = { projectId, projectRootPath: rootPath, forceRefresh };
       const [detectedAgents, providerStatuses] = await Promise.all([
         invoke<AgentInfo[]>("detect_agents", { request }),
         invoke<ProviderStatus[]>("list_llm_providers", { request }),

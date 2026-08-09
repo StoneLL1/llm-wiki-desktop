@@ -73,6 +73,38 @@ beforeEach(() => {
 });
 
 describe("useAiCapabilities", () => {
+  it("marks only explicit user refreshes as force refreshes", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "detect_agents") return Promise.resolve([]);
+      if (command === "list_llm_providers") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    const { result } = renderHook(() => useAiCapabilities(projectA, false));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(invokeMock.mock.calls.find(([command]) => command === "detect_agents")?.[1]).toEqual({
+      request: {
+        projectId: projectA.projectId,
+        projectRootPath: projectA.rootPath,
+        forceRefresh: false,
+      },
+    });
+
+    await act(async () => {
+      await result.current.refresh(true);
+    });
+    const detectRequests = invokeMock.mock.calls.filter(
+      ([command]) => command === "detect_agents",
+    );
+    expect(detectRequests.at(-1)?.[1]).toEqual({
+      request: {
+        projectId: projectA.projectId,
+        projectRootPath: projectA.rootPath,
+        forceRefresh: true,
+      },
+    });
+  });
+
   it("probes agents and providers in parallel and prefers an installed default agent", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "detect_agents") return Promise.resolve([installedAgent]);

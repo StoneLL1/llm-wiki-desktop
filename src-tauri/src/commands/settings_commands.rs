@@ -39,9 +39,11 @@ pub fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<Settings, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
+    let settings = state
         .settings_service
-        .save_settings(&context, &request.settings)
+        .save_settings(&context, &request.settings)?;
+    state.agent_service.invalidate_workflow_route_cache();
+    Ok(settings)
 }
 
 #[tauri::command]
