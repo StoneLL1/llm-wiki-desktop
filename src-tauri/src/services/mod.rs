@@ -19,7 +19,9 @@ mod settings_service;
 mod wiki_index;
 mod workflow_service;
 
-pub use agent_service::{AgentInvocation, AgentService, ProcessRunner, SystemProcessRunner};
+pub use agent_service::{
+    AgentInvocation, AgentProbeTarget, AgentService, ProcessRunner, SystemProcessRunner,
+};
 pub use bookmark_service::BookmarkService;
 pub use chat_convenience_service::{
     audit_changed_paths, classify_chat_intent, ChangedFile, ChatConvenienceService, ChatIntent,

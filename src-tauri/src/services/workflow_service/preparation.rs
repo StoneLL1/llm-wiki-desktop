@@ -56,6 +56,7 @@ struct PreparationTimingSnapshot {
     inventory_nanos: u64,
     route_nanos: u64,
     agent_nanos: u64,
+    slowest_agent_probe_nanos: u64,
     markdown_nanos: u64,
 }
 
@@ -69,6 +70,7 @@ thread_local! {
     static INVENTORY_NANOS: Cell<u64> = const { Cell::new(0) };
     static ROUTE_NANOS: Cell<u64> = const { Cell::new(0) };
     static AGENT_NANOS: Cell<u64> = const { Cell::new(0) };
+    static SLOWEST_AGENT_PROBE_NANOS: Cell<u64> = const { Cell::new(0) };
     static MARKDOWN_NANOS: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -82,6 +84,7 @@ fn reset_preparation_costs() {
     INVENTORY_NANOS.set(0);
     ROUTE_NANOS.set(0);
     AGENT_NANOS.set(0);
+    SLOWEST_AGENT_PROBE_NANOS.set(0);
     MARKDOWN_NANOS.set(0);
 }
 
@@ -91,6 +94,7 @@ fn preparation_timings() -> PreparationTimingSnapshot {
         inventory_nanos: INVENTORY_NANOS.get(),
         route_nanos: ROUTE_NANOS.get(),
         agent_nanos: AGENT_NANOS.get(),
+        slowest_agent_probe_nanos: SLOWEST_AGENT_PROBE_NANOS.get(),
         markdown_nanos: MARKDOWN_NANOS.get(),
     }
 }
@@ -295,7 +299,7 @@ impl RequestEvaluationSnapshot {
         let route_started = std::time::Instant::now();
         #[cfg(test)]
         let agent_before = AGENT_NANOS.get();
-        let route_catalog = RouteCatalog::load(environment)?;
+        let route_catalog = RouteCatalog::load(environment, &project_access)?;
         #[cfg(test)]
         {
             let route_total = u64::try_from(route_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -964,25 +968,44 @@ impl RouteCatalog {
         selections
     }
 
-    fn load(environment: &WorkflowPreparationEnvironment<'_>) -> Result<Self, BackendError> {
+    fn load(
+        environment: &WorkflowPreparationEnvironment<'_>,
+        project_access: &WorkflowProjectAccessSummary,
+    ) -> Result<Self, BackendError> {
         #[cfg(test)]
         ROUTE_CATALOG_LOADS.with(|count| count.set(count.get() + 1));
         let settings = environment
             .settings_service
             .read_settings(environment.context)?;
         let default_agent = settings.agent_default;
+        let settings_revision = hex_sha256(
+            canonical_json(&default_agent)
+                .map_err(serialization_error)?
+                .as_bytes(),
+        );
         #[cfg(test)]
         let agent_started = std::time::Instant::now();
         let detected_agents = std::thread::scope(|scope| {
             let handles = AgentKind::ALL
                 .into_iter()
                 .map(|kind| {
+                    let settings_revision = &settings_revision;
+                    let canonical_identity_key = &project_access.canonical_identity_key;
+                    let identity_revision = &project_access.identity_revision;
                     (
                         kind,
                         scope.spawn(move || {
-                            environment
-                                .agent_service
-                                .detect_agent(kind, default_agent == Some(kind))
+                            let started = std::time::Instant::now();
+                            let result = environment.agent_service.detect_agent_for_workflow_route(
+                                kind,
+                                default_agent == Some(kind),
+                                settings_revision,
+                                canonical_identity_key,
+                                identity_revision,
+                            );
+                            let elapsed =
+                                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                            (result, elapsed)
                         }),
                     )
                 })
@@ -1001,10 +1024,29 @@ impl RouteCatalog {
         #[cfg(test)]
         add_elapsed(&AGENT_NANOS, agent_started);
         #[cfg(test)]
-        AGENT_PROBES.with(|count| count.set(count.get() + detected_agents.len()));
+        AGENT_PROBES.with(|count| {
+            count.set(
+                count.get()
+                    + detected_agents
+                        .iter()
+                        .filter(|(_, ((_, probed), _))| *probed)
+                        .count(),
+            )
+        });
+        #[cfg(test)]
+        SLOWEST_AGENT_PROBE_NANOS.with(|slowest| {
+            slowest.set(
+                detected_agents
+                    .iter()
+                    .filter(|(_, ((_, probed), _))| *probed)
+                    .map(|(_, (_, elapsed))| *elapsed)
+                    .max()
+                    .unwrap_or(0),
+            )
+        });
         let agents = detected_agents
             .into_iter()
-            .map(|(kind, info)| {
+            .map(|(kind, ((info, _probed), _elapsed))| {
                 let revision = hex_sha256(
                     canonical_json(&(kind, &info.state, &info.version, &info.executable_path))
                         .unwrap_or_default()
@@ -2029,9 +2071,11 @@ fn serialization_error(message: String) -> BackendError {
 #[cfg(test)]
 mod batch_zero_cost_tests {
     use super::*;
+    use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+    use crate::models::settings::Settings;
     use crate::services::WorkflowService;
     use crate::tasks::TaskService;
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::sync::{mpsc, Arc, Mutex};
 
     struct DeterministicMissingProcessRunner;
@@ -2070,10 +2114,19 @@ mod batch_zero_cost_tests {
     struct ConcurrentProbeRunner {
         entered: mpsc::Sender<()>,
         releases: Mutex<VecDeque<mpsc::Receiver<()>>>,
+        resolved_commands: Mutex<HashSet<String>>,
     }
 
     impl crate::services::ProcessRunner for ConcurrentProbeRunner {
-        fn find_executable(&self, _command: &str) -> Option<std::path::PathBuf> {
+        fn find_executable(&self, command: &str) -> Option<std::path::PathBuf> {
+            if !self
+                .resolved_commands
+                .lock()
+                .expect("resolved command lock poisoned")
+                .insert(command.to_string())
+            {
+                return None;
+            }
             let release = self
                 .releases
                 .lock()
@@ -2187,10 +2240,67 @@ mod batch_zero_cost_tests {
                 source_inventories: 2,
                 markdown_root_inventories: 2,
                 route_catalog_loads: 2,
-                agent_probes: 8,
+                agent_probes: 4,
                 baseline_hashes: 2_000,
             },
-            "request-scoped reuse must not cache content or authority facts across requests"
+            "the TTL route cache may reuse Agent probes, but content and authority facts must remain request-fresh"
+        );
+    }
+
+    #[test]
+    fn provider_secret_availability_remains_request_fresh_while_agents_are_warm() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        let context = ProjectContext::new("provider-freshness", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let mut saved = Settings::default();
+        saved.llm_providers.push(LlmProviderConfig {
+            provider: LlmProviderKind::OpenAi,
+            model: "gpt-test".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            context_window: 8_192,
+            enabled: true,
+        });
+        settings.save_settings(&context, &saved).unwrap();
+        let secrets = SecretService::memory();
+        let agents = AgentService::with_runner(Arc::new(DeterministicMissingProcessRunner));
+        let environment = WorkflowPreparationEnvironment {
+            context: &context,
+            access: WorkflowAccessSnapshot {
+                trust: WorkflowProjectTrust::Trusted,
+                trust_kind: None,
+                filesystem_access: WorkflowFilesystemAccess::ReadOnly,
+                persistence: WorkflowPersistenceMode::MemoryOnly,
+                git_state: WorkflowGitState::Unavailable,
+                authority_revision: "provider-authority".into(),
+            },
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        };
+
+        reset_preparation_costs();
+        let without_secret = RequestEvaluationSnapshot::capture(&environment, false).unwrap();
+        assert!(!without_secret
+            .route_catalog
+            .available_selections()
+            .contains(&WorkflowRouteSelection::Byok {
+                provider: LlmProviderKind::OpenAi,
+            }));
+
+        secrets.set(LlmProviderKind::OpenAi, "secret").unwrap();
+        let with_secret = RequestEvaluationSnapshot::capture(&environment, false).unwrap();
+        assert!(with_secret.route_catalog.available_selections().contains(
+            &WorkflowRouteSelection::Byok {
+                provider: LlmProviderKind::OpenAi,
+            }
+        ));
+        assert_eq!(
+            preparation_costs().agent_probes,
+            AgentKind::ALL.len(),
+            "provider secret changes must stay live without invalidating warm Agent probes"
         );
     }
 
@@ -2282,6 +2392,7 @@ mod batch_zero_cost_tests {
         let agents = AgentService::with_runner(Arc::new(ConcurrentProbeRunner {
             entered: entered_tx,
             releases: Mutex::new(release_receivers),
+            resolved_commands: Mutex::new(HashSet::new()),
         }));
         let worker = std::thread::spawn(move || {
             WorkflowService::default().project_overview(
@@ -2361,57 +2472,92 @@ mod batch_zero_cost_tests {
                 .unwrap()
         };
         for _ in 0..5 {
+            agents.invalidate_workflow_route_cache();
+            reset_preparation_costs();
+            invoke();
             reset_preparation_costs();
             invoke();
         }
-        let mut total_ms = Vec::with_capacity(50);
-        let mut route_ms = Vec::with_capacity(50);
-        let mut agent_ms = Vec::with_capacity(50);
-        let mut inventory_ms = Vec::with_capacity(50);
-        let mut markdown_ms = Vec::with_capacity(50);
+        let mut warm_total_ms = Vec::with_capacity(50);
+        let mut warm_route_ms = Vec::with_capacity(50);
+        let mut warm_agent_ms = Vec::with_capacity(50);
+        let mut warm_inventory_ms = Vec::with_capacity(50);
+        let mut warm_markdown_ms = Vec::with_capacity(50);
+        let mut cold_agent_ms = Vec::with_capacity(50);
+        let mut cold_slowest_probe_ms = Vec::with_capacity(50);
         for _ in 0..50 {
+            agents.invalidate_workflow_route_cache();
+            reset_preparation_costs();
+            invoke();
+            let cold = preparation_timings();
+            let cold_agent = cold.agent_nanos as f64 / 1_000_000.0;
+            let cold_slowest = cold.slowest_agent_probe_nanos as f64 / 1_000_000.0;
+            assert_eq!(preparation_costs().agent_probes, AgentKind::ALL.len());
+            assert!(
+                cold_agent <= cold_slowest + 500.0,
+                "cold Agent phase must stay within the slowest probe plus 500ms: phase={cold_agent:.3}ms slowest={cold_slowest:.3}ms"
+            );
+            cold_agent_ms.push(cold_agent);
+            cold_slowest_probe_ms.push(cold_slowest);
+
             reset_preparation_costs();
             let started = std::time::Instant::now();
             invoke();
-            total_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
-            let timings = preparation_timings();
-            route_ms.push(timings.route_nanos as f64 / 1_000_000.0);
-            agent_ms.push(timings.agent_nanos as f64 / 1_000_000.0);
-            inventory_ms.push(timings.inventory_nanos as f64 / 1_000_000.0);
-            markdown_ms.push(timings.markdown_nanos as f64 / 1_000_000.0);
+            warm_total_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            let warm = preparation_timings();
+            warm_route_ms.push(warm.route_nanos as f64 / 1_000_000.0);
+            warm_agent_ms.push(warm.agent_nanos as f64 / 1_000_000.0);
+            warm_inventory_ms.push(warm.inventory_nanos as f64 / 1_000_000.0);
+            warm_markdown_ms.push(warm.markdown_nanos as f64 / 1_000_000.0);
+            assert_eq!(
+                preparation_costs().agent_probes,
+                0,
+                "TTL-warm overview must spawn no Agent probe subprocesses"
+            );
         }
-        let total = sample_stats(&total_ms);
-        let route = sample_stats(&route_ms);
-        let agent = sample_stats(&agent_ms);
-        let inventory = sample_stats(&inventory_ms);
-        let markdown = sample_stats(&markdown_ms);
+        let warm_total = sample_stats(&warm_total_ms);
+        let warm_route = sample_stats(&warm_route_ms);
+        let warm_agent = sample_stats(&warm_agent_ms);
+        let warm_inventory = sample_stats(&warm_inventory_ms);
+        let warm_markdown = sample_stats(&warm_markdown_ms);
+        let cold_agent = sample_stats(&cold_agent_ms);
+        let cold_slowest = sample_stats(&cold_slowest_probe_ms);
         let agent_kinds = AgentKind::ALL
             .iter()
             .map(|kind| format!("{kind:?}").to_ascii_lowercase())
             .collect::<Vec<_>>()
             .join(",");
         eprintln!(
-            "BATCH5_OVERVIEW_REFERENCE profile=release cache_mode=os_warm_request_fresh agent_kinds={} os={} arch={} parallelism={} samples=50 total_mean_ms={:.3} total_p95_ms={:.3} total_cv={:.4} route_non_agent_mean_ms={:.3} route_non_agent_p95_ms={:.3} agent_mean_ms={:.3} agent_p95_ms={:.3} inventory_mean_ms={:.3} inventory_p95_ms={:.3} markdown_mean_ms={:.3} markdown_p95_ms={:.3}",
+            "BATCH5B_OVERVIEW_REFERENCE profile=release cache_mode=explicit_cold_then_ttl_warm ttl_secs=30 agent_kinds={} os={} arch={} parallelism={} samples=50 warm_total_mean_ms={:.3} warm_total_p95_ms={:.3} warm_total_cv={:.4} warm_route_non_agent_mean_ms={:.3} warm_route_non_agent_p95_ms={:.3} warm_agent_mean_ms={:.3} warm_agent_p95_ms={:.3} warm_inventory_mean_ms={:.3} warm_inventory_p95_ms={:.3} warm_markdown_mean_ms={:.3} warm_markdown_p95_ms={:.3} cold_agent_mean_ms={:.3} cold_agent_p95_ms={:.3} cold_slowest_probe_mean_ms={:.3} cold_slowest_probe_p95_ms={:.3}",
             agent_kinds,
             std::env::consts::OS,
             std::env::consts::ARCH,
             std::thread::available_parallelism().map_or(0, |value| value.get()),
-            total.mean,
-            total.p95,
-            total.cv,
-            route.mean,
-            route.p95,
-            agent.mean,
-            agent.p95,
-            inventory.mean,
-            inventory.p95,
-            markdown.mean,
-            markdown.p95,
+            warm_total.mean,
+            warm_total.p95,
+            warm_total.cv,
+            warm_route.mean,
+            warm_route.p95,
+            warm_agent.mean,
+            warm_agent.p95,
+            warm_inventory.mean,
+            warm_inventory.p95,
+            warm_markdown.mean,
+            warm_markdown.p95,
+            cold_agent.mean,
+            cold_agent.p95,
+            cold_slowest.mean,
+            cold_slowest.p95,
+        );
+        assert!(warm_total.cv < 0.15, "warm overview CV must stay below 15%");
+        assert!(
+            warm_total.p95 <= 1_000.0,
+            "TTL-warm 1,000-Markdown overview p95 must stay within 1 second"
         );
         assert_eq!(preparation_costs().source_inventories, 1);
         assert_eq!(preparation_costs().markdown_root_inventories, 1);
         assert_eq!(preparation_costs().route_catalog_loads, 1);
-        assert_eq!(preparation_costs().agent_probes, AgentKind::ALL.len());
+        assert_eq!(preparation_costs().agent_probes, 0);
         assert_eq!(preparation_costs().baseline_hashes, 1_000);
     }
 

@@ -299,7 +299,7 @@ function ProjectWorkspaceController() {
         providers={providerWorkflow.providers}
         agents={capabilities.agents}
         importWorkflow={importWorkflow}
-        onRefreshCapabilities={capabilities.refresh}
+        onRefreshCapabilities={() => capabilities.refresh(true)}
         onSaveProvider={providerWorkflow.saveProvider}
         onSaveSecret={providerWorkflow.saveSecret}
         onDeleteSecret={providerWorkflow.deleteSecret}

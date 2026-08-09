@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,9 @@ use crate::services::FileStore;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
+const ROUTE_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
+const ROUTE_PROBE_CACHE_MAX_ENTRIES: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentInvocation {
     pub program: String,
@@ -23,8 +27,32 @@ pub struct AgentInvocation {
     pub cwd: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProbeTarget {
+    pub logical_command: String,
+    pub executable_path: Option<PathBuf>,
+    pub program: String,
+    pub leading_args: Vec<String>,
+}
+
 pub trait ProcessRunner: Send + Sync {
     fn find_executable(&self, command: &str) -> Option<PathBuf>;
+    fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+        AgentProbeTarget {
+            logical_command: command.to_string(),
+            executable_path: self.find_executable(command),
+            program: command.to_string(),
+            leading_args: Vec::new(),
+        }
+    }
+    fn run_probe_with_timeout(
+        &self,
+        target: &AgentProbeTarget,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, BackendError> {
+        self.run_with_timeout(&target.logical_command, args, timeout)
+    }
     fn run_with_timeout(
         &self,
         command: &str,
@@ -134,21 +162,64 @@ pub trait ProcessRunner: Send + Sync {
 #[derive(Default)]
 pub struct SystemProcessRunner;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AgentRouteProbeCacheKey {
+    kind: AgentKind,
+    executable_path: Option<String>,
+    program: String,
+    leading_args: Vec<String>,
+    executable_identities: Vec<ExecutableIdentity>,
+    path_generation: u64,
+    settings_revision: String,
+    canonical_identity_key: String,
+    identity_revision: String,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExecutableIdentity {
+    path: String,
+    length: u64,
+    modified_nanos: Option<u128>,
+    created_nanos: Option<u128>,
+}
+
+#[derive(Clone)]
+struct CachedAgentRouteProbe {
+    info: AgentInfo,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct AgentRouteProbeCache {
+    epoch: u64,
+    entries: HashMap<AgentRouteProbeCacheKey, CachedAgentRouteProbe>,
+    in_flight: HashSet<AgentRouteProbeCacheKey>,
+}
+
 pub struct AgentService {
     runner: Arc<dyn ProcessRunner>,
+    route_probe_cache: Mutex<AgentRouteProbeCache>,
+    route_probe_ready: Condvar,
 }
 
 impl Default for AgentService {
     fn default() -> Self {
         Self {
             runner: Arc::new(SystemProcessRunner),
+            route_probe_cache: Mutex::new(AgentRouteProbeCache::default()),
+            route_probe_ready: Condvar::new(),
         }
     }
 }
 
 impl AgentService {
     pub fn with_runner(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            route_probe_cache: Mutex::new(AgentRouteProbeCache::default()),
+            route_probe_ready: Condvar::new(),
+        }
     }
 
     pub fn is_available(&self, kind: AgentKind) -> bool {
@@ -264,10 +335,133 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         self.detect(kind, is_default)
     }
 
+    /// Reuse only the expensive Agent version/protocol probe used by Workflow
+    /// route presentation. The caller must continue to rebuild access, Git,
+    /// provider-secret, and content facts for every request.
+    pub(crate) fn detect_agent_for_workflow_route(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+        settings_revision: &str,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+    ) -> (AgentInfo, bool) {
+        self.detect_agent_for_workflow_route_at(
+            kind,
+            is_default,
+            settings_revision,
+            canonical_identity_key,
+            identity_revision,
+            Instant::now(),
+        )
+    }
+
+    fn detect_agent_for_workflow_route_at(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+        settings_revision: &str,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        now: Instant,
+    ) -> (AgentInfo, bool) {
+        loop {
+            let target = self.runner.resolve_probe_target(kind.command());
+            let mut cache = self
+                .route_probe_cache
+                .lock()
+                .expect("Agent route probe cache lock poisoned");
+            cache.entries.retain(|_, entry| entry.expires_at > now);
+            let key = agent_route_probe_cache_key(
+                kind,
+                &target,
+                settings_revision,
+                canonical_identity_key,
+                identity_revision,
+                cache.epoch,
+            );
+            if let Some(entry) = cache.entries.get(&key) {
+                return (entry.info.clone(), false);
+            }
+            if !cache.in_flight.insert(key.clone()) {
+                drop(
+                    self.route_probe_ready
+                        .wait(cache)
+                        .expect("Agent route probe cache lock poisoned"),
+                );
+                continue;
+            }
+            drop(cache);
+
+            let info = self.detect_with_target(kind, is_default, &target);
+            let refreshed_target = self.runner.resolve_probe_target(kind.command());
+            let refreshed_key = agent_route_probe_cache_key(
+                kind,
+                &refreshed_target,
+                settings_revision,
+                canonical_identity_key,
+                identity_revision,
+                key.epoch,
+            );
+            let mut cache = self
+                .route_probe_cache
+                .lock()
+                .expect("Agent route probe cache lock poisoned");
+            cache.in_flight.remove(&key);
+            if cache.epoch != key.epoch || refreshed_key != key {
+                self.route_probe_ready.notify_all();
+                drop(cache);
+                continue;
+            }
+            cache.entries.insert(
+                key.clone(),
+                CachedAgentRouteProbe {
+                    info: info.clone(),
+                    expires_at: now + ROUTE_PROBE_CACHE_TTL,
+                },
+            );
+            while cache.entries.len() > ROUTE_PROBE_CACHE_MAX_ENTRIES {
+                let Some(oldest) = cache
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.expires_at)
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                cache.entries.remove(&oldest);
+            }
+            self.route_probe_ready.notify_all();
+            return (info, true);
+        }
+    }
+
+    /// Manual Agent refresh/configuration actions advance the cache epoch. A
+    /// probe already in flight is discarded and retried against the new epoch,
+    /// so neither its caller nor the cache can observe stale detection data.
+    pub(crate) fn invalidate_workflow_route_cache(&self) {
+        let mut cache = self
+            .route_probe_cache
+            .lock()
+            .expect("Agent route probe cache lock poisoned");
+        cache.epoch = cache.epoch.wrapping_add(1);
+        cache.entries.clear();
+        self.route_probe_ready.notify_all();
+    }
+
     fn detect(&self, kind: AgentKind, is_default: bool) -> AgentInfo {
+        let target = self.runner.resolve_probe_target(kind.command());
+        self.detect_with_target(kind, is_default, &target)
+    }
+
+    fn detect_with_target(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+        target: &AgentProbeTarget,
+    ) -> AgentInfo {
         let command = kind.command();
-        let executable_path = self.runner.find_executable(command);
-        if executable_path.is_none() {
+        if target.executable_path.is_none() {
             return AgentInfo {
                 kind,
                 command: command.into(),
@@ -282,14 +476,14 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
 
         match self
             .runner
-            .run_with_timeout(command, &["--version"], Duration::from_secs(3))
+            .run_probe_with_timeout(target, &["--version"], Duration::from_secs(3))
         {
-            Ok(output) if invocation_supported(self.runner.as_ref(), kind, command) => AgentInfo {
+            Ok(output) if invocation_supported(self.runner.as_ref(), kind, target) => AgentInfo {
                 kind,
                 command: command.into(),
                 state: AgentDetectionState::Installed,
                 version: Some(first_non_empty_line(&output)),
-                executable_path: executable_path.map(|path| path.to_string_lossy().replace('\\', "/")),
+                executable_path: normalized_path(target.executable_path.as_deref()),
                 is_default,
                 install_guidance: Self::install_guidance(kind).into(),
                 error: None,
@@ -299,7 +493,7 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 command: command.into(),
                 state: AgentDetectionState::Failed,
                 version: None,
-                executable_path: executable_path.map(|path| path.to_string_lossy().replace('\\', "/")),
+                executable_path: normalized_path(target.executable_path.as_deref()),
                 is_default,
                 install_guidance: Self::install_guidance(kind).into(),
                 error: Some("Installed CLI does not expose the supported non-interactive invocation protocol.".into()),
@@ -309,7 +503,7 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 command: command.into(),
                 state: AgentDetectionState::Failed,
                 version: None,
-                executable_path: executable_path.map(|path| path.to_string_lossy().replace('\\', "/")),
+                executable_path: normalized_path(target.executable_path.as_deref()),
                 is_default,
                 install_guidance: Self::install_guidance(kind).into(),
                 error: Some(error.message),
@@ -939,6 +1133,39 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
 impl ProcessRunner for SystemProcessRunner {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
         find_executable(command)
+    }
+
+    fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+        let executable_path = find_executable(command);
+        let spawn_target = executable_path
+            .as_deref()
+            .map(resolved_spawn_target)
+            .unwrap_or_else(|| SpawnTarget {
+                program: command.to_string(),
+                leading_args: Vec::new(),
+            });
+        AgentProbeTarget {
+            logical_command: command.to_string(),
+            executable_path,
+            program: spawn_target.program,
+            leading_args: spawn_target.leading_args,
+        }
+    }
+
+    fn run_probe_with_timeout(
+        &self,
+        target: &AgentProbeTarget,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, BackendError> {
+        run_spawn_target_with_timeout(
+            &SpawnTarget {
+                program: target.program.clone(),
+                leading_args: target.leading_args.clone(),
+            },
+            args,
+            timeout,
+        )
     }
 
     fn run_with_timeout(
@@ -2008,13 +2235,96 @@ fn terminate_agent_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-fn invocation_supported(runner: &dyn ProcessRunner, kind: AgentKind, command: &str) -> bool {
+fn executable_identity(path: &Path) -> Option<ExecutableIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let to_nanos = |value: Result<std::time::SystemTime, std::io::Error>| {
+        value
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+    };
+    Some(ExecutableIdentity {
+        path: path.to_string_lossy().replace('\\', "/"),
+        length: metadata.len(),
+        modified_nanos: to_nanos(metadata.modified()),
+        created_nanos: to_nanos(metadata.created()),
+    })
+}
+
+fn normalized_path(path: Option<&Path>) -> Option<String> {
+    path.map(|path| path.to_string_lossy().replace('\\', "/"))
+}
+
+fn agent_probe_target_identities(target: &AgentProbeTarget) -> Vec<ExecutableIdentity> {
+    let mut paths = Vec::new();
+    if let Some(path) = target.executable_path.as_deref() {
+        paths.push(path.to_path_buf());
+    }
+    let program = PathBuf::from(&target.program);
+    if program.is_file() {
+        paths.push(program);
+    }
+    paths.extend(
+        target
+            .leading_args
+            .iter()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file()),
+    );
+    paths.sort_by_key(|path| path.to_string_lossy().replace('\\', "/"));
+    paths.dedup_by(|left, right| {
+        left.to_string_lossy().replace('\\', "/") == right.to_string_lossy().replace('\\', "/")
+    });
+    paths
+        .iter()
+        .filter_map(|path| executable_identity(path))
+        .collect()
+}
+
+fn agent_route_probe_cache_key(
+    kind: AgentKind,
+    target: &AgentProbeTarget,
+    settings_revision: &str,
+    canonical_identity_key: &str,
+    identity_revision: &str,
+    epoch: u64,
+) -> AgentRouteProbeCacheKey {
+    AgentRouteProbeCacheKey {
+        kind,
+        executable_path: normalized_path(target.executable_path.as_deref()),
+        program: target.program.replace('\\', "/"),
+        leading_args: target
+            .leading_args
+            .iter()
+            .map(|argument| argument.replace('\\', "/"))
+            .collect(),
+        executable_identities: agent_probe_target_identities(target),
+        path_generation: process_path_generation(),
+        settings_revision: settings_revision.to_string(),
+        canonical_identity_key: canonical_identity_key.to_string(),
+        identity_revision: identity_revision.to_string(),
+        epoch,
+    }
+}
+
+fn process_path_generation() -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::env::var_os("PATH").hash(&mut hasher);
+    std::env::var_os("PATHEXT").hash(&mut hasher);
+    hasher.finish()
+}
+
+fn invocation_supported(
+    runner: &dyn ProcessRunner,
+    kind: AgentKind,
+    target: &AgentProbeTarget,
+) -> bool {
     let args: &[&str] = match kind {
         AgentKind::Codex => &["exec", "--help"],
         AgentKind::Openclaw => &["agent", "exec", "--help"],
         _ => &["--help"],
     };
-    let Ok(help) = runner.run_with_timeout(command, args, Duration::from_secs(3)) else {
+    let Ok(help) = runner.run_probe_with_timeout(target, args, Duration::from_secs(3)) else {
         return false;
     };
     help_supports_invocation(kind, &help)
@@ -2144,6 +2454,16 @@ fn resolve_spawn_target(program: &str) -> SpawnTarget {
             leading_args: Vec::new(),
         };
     };
+    resolved_spawn_target(&resolved)
+}
+
+fn resolved_spawn_target(resolved: &Path) -> SpawnTarget {
+    if cfg!(not(windows)) {
+        return SpawnTarget {
+            program: resolved.to_string_lossy().into_owned(),
+            leading_args: Vec::new(),
+        };
+    }
     let is_batch = resolved
         .extension()
         .and_then(|ext| ext.to_str())
@@ -2155,7 +2475,7 @@ fn resolve_spawn_target(program: &str) -> SpawnTarget {
             leading_args: Vec::new(),
         };
     }
-    resolve_cmd_shim(&resolved).unwrap_or(SpawnTarget {
+    resolve_cmd_shim(resolved).unwrap_or(SpawnTarget {
         program: resolved.to_string_lossy().into_owned(),
         leading_args: Vec::new(),
     })
@@ -2531,6 +2851,14 @@ fn run_with_timeout(
     timeout: Duration,
 ) -> Result<String, BackendError> {
     let target = resolve_spawn_target(command);
+    run_spawn_target_with_timeout(&target, args, timeout)
+}
+
+fn run_spawn_target_with_timeout(
+    target: &SpawnTarget,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, BackendError> {
     let mut program = Command::new(&target.program);
     for leading in &target.leading_args {
         program.arg(leading);
@@ -2804,7 +3132,7 @@ mod tests {
     use super::*;
     use crate::models::task::TaskType;
     use std::collections::{BTreeSet, HashMap};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -2813,6 +3141,517 @@ mod tests {
         isolated_called: AtomicBool,
         event_hook_called: AtomicBool,
         credential_agent: Mutex<Option<AgentKind>>,
+    }
+
+    struct RouteCacheProbeRunner {
+        executable: PathBuf,
+        version_calls: AtomicUsize,
+    }
+
+    fn supported_claude_help() -> String {
+        [
+            "--print",
+            "--output-format",
+            "--verbose",
+            "--permission-mode",
+            "--settings",
+            "--bare",
+            "--safe-mode",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--no-chrome",
+            "--prompt-suggestions",
+            "--strict-mcp-config",
+            "--tools",
+            "--allowedTools",
+            "--json-schema",
+        ]
+        .join(" ")
+    }
+
+    impl ProcessRunner for RouteCacheProbeRunner {
+        fn find_executable(&self, _command: &str) -> Option<PathBuf> {
+            Some(self.executable.clone())
+        }
+
+        fn run_with_timeout(
+            &self,
+            _command: &str,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> Result<String, BackendError> {
+            if args == ["--version"] {
+                self.version_calls.fetch_add(1, Ordering::SeqCst);
+                return Ok("1.0.0".into());
+            }
+            Ok(supported_claude_help())
+        }
+
+        fn run_capture(
+            &self,
+            _invocation: &AgentInvocation,
+        ) -> Result<(String, String), BackendError> {
+            panic!("route probe fixture must not capture an Agent run")
+        }
+
+        fn run_task_streaming(
+            &self,
+            _invocation: &AgentInvocation,
+            _tasks: &TaskService,
+            _task_id: &str,
+        ) -> Result<String, BackendError> {
+            panic!("route probe fixture must not stream an Agent run")
+        }
+    }
+
+    #[test]
+    fn workflow_route_cache_keys_ttl_and_manual_epoch_are_fail_fresh() {
+        let executable_dir = tempfile::tempdir().unwrap();
+        let executable = executable_dir.path().join("claude-test");
+        std::fs::write(&executable, b"v1").unwrap();
+        let runner = Arc::new(RouteCacheProbeRunner {
+            executable,
+            version_calls: AtomicUsize::new(0),
+        });
+        let service = AgentService::with_runner(runner.clone());
+        let now = Instant::now();
+
+        let (first, first_probed) = service.detect_agent_for_workflow_route_at(
+            AgentKind::Claude,
+            false,
+            "settings-a",
+            "identity-a",
+            "revision-a",
+            now,
+        );
+        assert!(first_probed);
+        assert_eq!(first.state, AgentDetectionState::Installed);
+        let (warm, warm_probed) = service.detect_agent_for_workflow_route_at(
+            AgentKind::Claude,
+            false,
+            "settings-a",
+            "identity-a",
+            "revision-a",
+            now + Duration::from_secs(1),
+        );
+        assert!(!warm_probed);
+        assert_eq!(warm, first);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
+
+        let (settings_changed, settings_probed) = service.detect_agent_for_workflow_route_at(
+            AgentKind::Claude,
+            true,
+            "settings-b",
+            "identity-a",
+            "revision-a",
+            now + Duration::from_secs(2),
+        );
+        assert!(settings_probed);
+        assert!(settings_changed.is_default);
+        let (_, identity_probed) = service.detect_agent_for_workflow_route_at(
+            AgentKind::Claude,
+            true,
+            "settings-b",
+            "identity-a",
+            "revision-b",
+            now + Duration::from_secs(3),
+        );
+        assert!(identity_probed);
+
+        std::fs::write(&runner.executable, b"replacement-v2").unwrap();
+        let (_, executable_probed) = service.detect_agent_for_workflow_route_at(
+            AgentKind::Claude,
+            true,
+            "settings-b",
+            "identity-a",
+            "revision-b",
+            now + Duration::from_secs(4),
+        );
+        assert!(executable_probed);
+
+        service.invalidate_workflow_route_cache();
+        let (_, manual_refresh_probed) = service.detect_agent_for_workflow_route_at(
+            AgentKind::Claude,
+            true,
+            "settings-b",
+            "identity-a",
+            "revision-b",
+            now + Duration::from_secs(5),
+        );
+        assert!(manual_refresh_probed);
+        let (_, ttl_expired_probed) = service.detect_agent_for_workflow_route_at(
+            AgentKind::Claude,
+            true,
+            "settings-b",
+            "identity-a",
+            "revision-b",
+            now + Duration::from_secs(35),
+        );
+        assert!(ttl_expired_probed);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 6);
+    }
+
+    struct BlockingRouteProbeRunner {
+        executable: PathBuf,
+        resolve_calls: AtomicUsize,
+        version_calls: AtomicUsize,
+        generation: AtomicUsize,
+        release_first: Mutex<bool>,
+        release_ready: Condvar,
+    }
+
+    impl BlockingRouteProbeRunner {
+        fn release_first_probe(&self) {
+            *self.release_first.lock().unwrap() = true;
+            self.release_ready.notify_all();
+        }
+    }
+
+    impl ProcessRunner for BlockingRouteProbeRunner {
+        fn find_executable(&self, _command: &str) -> Option<PathBuf> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            Some(self.executable.clone())
+        }
+
+        fn run_with_timeout(
+            &self,
+            _command: &str,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> Result<String, BackendError> {
+            if args == ["--version"] {
+                let generation = self.generation.load(Ordering::SeqCst);
+                let call = self.version_calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    let mut released = self.release_first.lock().unwrap();
+                    while !*released {
+                        released = self.release_ready.wait(released).unwrap();
+                    }
+                }
+                return Ok(format!("{generation}.0.0"));
+            }
+            Ok(supported_claude_help())
+        }
+
+        fn run_capture(
+            &self,
+            _invocation: &AgentInvocation,
+        ) -> Result<(String, String), BackendError> {
+            panic!("route probe fixture must not capture an Agent run")
+        }
+
+        fn run_task_streaming(
+            &self,
+            _invocation: &AgentInvocation,
+            _tasks: &TaskService,
+            _task_id: &str,
+        ) -> Result<String, BackendError> {
+            panic!("route probe fixture must not stream an Agent run")
+        }
+    }
+
+    fn wait_for_atomic_at_least(value: &AtomicUsize, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while value.load(Ordering::SeqCst) < expected {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for probe fixture"
+            );
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn workflow_route_cache_single_flights_concurrent_misses() {
+        let executable_dir = tempfile::tempdir().unwrap();
+        let executable = executable_dir.path().join("claude-test");
+        std::fs::write(&executable, b"v1").unwrap();
+        let runner = Arc::new(BlockingRouteProbeRunner {
+            executable,
+            resolve_calls: AtomicUsize::new(0),
+            version_calls: AtomicUsize::new(0),
+            generation: AtomicUsize::new(1),
+            release_first: Mutex::new(false),
+            release_ready: Condvar::new(),
+        });
+        let service = Arc::new(AgentService::with_runner(runner.clone()));
+        let spawn_probe = |service: Arc<AgentService>| {
+            thread::spawn(move || {
+                service.detect_agent_for_workflow_route(
+                    AgentKind::Claude,
+                    false,
+                    "settings-a",
+                    "identity-a",
+                    "revision-a",
+                )
+            })
+        };
+
+        let first = spawn_probe(service.clone());
+        wait_for_atomic_at_least(&runner.version_calls, 1);
+        let second = spawn_probe(service);
+        wait_for_atomic_at_least(&runner.resolve_calls, 2);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
+
+        runner.release_first_probe();
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(first.1 || second.1);
+        assert!(!(first.1 && second.1));
+        assert_eq!(first.0, second.0);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn workflow_route_cache_retries_in_flight_probe_after_invalidation() {
+        let executable_dir = tempfile::tempdir().unwrap();
+        let executable = executable_dir.path().join("claude-test");
+        std::fs::write(&executable, b"v1").unwrap();
+        let runner = Arc::new(BlockingRouteProbeRunner {
+            executable,
+            resolve_calls: AtomicUsize::new(0),
+            version_calls: AtomicUsize::new(0),
+            generation: AtomicUsize::new(1),
+            release_first: Mutex::new(false),
+            release_ready: Condvar::new(),
+        });
+        let service = Arc::new(AgentService::with_runner(runner.clone()));
+        let worker_service = service.clone();
+        let probe = thread::spawn(move || {
+            worker_service.detect_agent_for_workflow_route(
+                AgentKind::Claude,
+                false,
+                "settings-a",
+                "identity-a",
+                "revision-a",
+            )
+        });
+        wait_for_atomic_at_least(&runner.version_calls, 1);
+
+        service.invalidate_workflow_route_cache();
+        runner.generation.store(2, Ordering::SeqCst);
+        runner.release_first_probe();
+
+        let (info, probed) = probe.join().unwrap();
+        assert!(probed);
+        assert_eq!(info.version.as_deref(), Some("2.0.0"));
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 2);
+    }
+
+    struct ShimTargetProbeRunner {
+        shim: PathBuf,
+        script: PathBuf,
+        version_calls: AtomicUsize,
+    }
+
+    impl ProcessRunner for ShimTargetProbeRunner {
+        fn find_executable(&self, _command: &str) -> Option<PathBuf> {
+            Some(self.shim.clone())
+        }
+
+        fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+            AgentProbeTarget {
+                logical_command: command.to_string(),
+                executable_path: Some(self.shim.clone()),
+                program: "node".to_string(),
+                leading_args: vec![self.script.to_string_lossy().into_owned()],
+            }
+        }
+
+        fn run_probe_with_timeout(
+            &self,
+            target: &AgentProbeTarget,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> Result<String, BackendError> {
+            assert_eq!(target.program, "node");
+            assert_eq!(
+                target.leading_args,
+                [self.script.to_string_lossy().into_owned()]
+            );
+            if args == ["--version"] {
+                self.version_calls.fetch_add(1, Ordering::SeqCst);
+                return Ok(std::fs::read_to_string(&self.script).unwrap());
+            }
+            Ok(supported_claude_help())
+        }
+
+        fn run_with_timeout(
+            &self,
+            _command: &str,
+            _args: &[&str],
+            _timeout: Duration,
+        ) -> Result<String, BackendError> {
+            panic!("route probe must use the already-resolved spawn target")
+        }
+
+        fn run_capture(
+            &self,
+            _invocation: &AgentInvocation,
+        ) -> Result<(String, String), BackendError> {
+            panic!("route probe fixture must not capture an Agent run")
+        }
+
+        fn run_task_streaming(
+            &self,
+            _invocation: &AgentInvocation,
+            _tasks: &TaskService,
+            _task_id: &str,
+        ) -> Result<String, BackendError> {
+            panic!("route probe fixture must not stream an Agent run")
+        }
+    }
+
+    #[test]
+    fn workflow_route_cache_keys_the_exact_spawn_target_behind_a_stable_shim() {
+        let executable_dir = tempfile::tempdir().unwrap();
+        let shim = executable_dir.path().join("claude.cmd");
+        let script = executable_dir.path().join("cli.js");
+        std::fs::write(&shim, b"stable shim").unwrap();
+        std::fs::write(&script, b"1.0.0").unwrap();
+        let runner = Arc::new(ShimTargetProbeRunner {
+            shim,
+            script: script.clone(),
+            version_calls: AtomicUsize::new(0),
+        });
+        let service = AgentService::with_runner(runner.clone());
+
+        let (first, first_probed) = service.detect_agent_for_workflow_route(
+            AgentKind::Claude,
+            false,
+            "settings-a",
+            "identity-a",
+            "revision-a",
+        );
+        assert!(first_probed);
+        assert_eq!(first.version.as_deref(), Some("1.0.0"));
+
+        std::fs::write(&script, b"2.0.0-replacement").unwrap();
+        let (second, second_probed) = service.detect_agent_for_workflow_route(
+            AgentKind::Claude,
+            false,
+            "settings-a",
+            "identity-a",
+            "revision-a",
+        );
+        assert!(second_probed);
+        assert_eq!(second.version.as_deref(), Some("2.0.0-replacement"));
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 2);
+    }
+
+    struct SwitchingTargetProbeRunner {
+        targets: [PathBuf; 2],
+        active_target: AtomicUsize,
+        version_calls: AtomicUsize,
+        release_first: Mutex<bool>,
+        release_ready: Condvar,
+    }
+
+    impl SwitchingTargetProbeRunner {
+        fn release_first_probe(&self) {
+            *self.release_first.lock().unwrap() = true;
+            self.release_ready.notify_all();
+        }
+    }
+
+    impl ProcessRunner for SwitchingTargetProbeRunner {
+        fn find_executable(&self, _command: &str) -> Option<PathBuf> {
+            Some(self.targets[self.active_target.load(Ordering::SeqCst)].clone())
+        }
+
+        fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+            let target = self.targets[self.active_target.load(Ordering::SeqCst)].clone();
+            AgentProbeTarget {
+                logical_command: command.to_string(),
+                executable_path: Some(target.clone()),
+                program: target.to_string_lossy().into_owned(),
+                leading_args: Vec::new(),
+            }
+        }
+
+        fn run_probe_with_timeout(
+            &self,
+            target: &AgentProbeTarget,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> Result<String, BackendError> {
+            if args == ["--version"] {
+                let call = self.version_calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    let mut released = self.release_first.lock().unwrap();
+                    while !*released {
+                        released = self.release_ready.wait(released).unwrap();
+                    }
+                }
+                return Ok(std::fs::read_to_string(&target.program).unwrap());
+            }
+            Ok(supported_claude_help())
+        }
+
+        fn run_with_timeout(
+            &self,
+            _command: &str,
+            _args: &[&str],
+            _timeout: Duration,
+        ) -> Result<String, BackendError> {
+            panic!("route probe must use the already-resolved spawn target")
+        }
+
+        fn run_capture(
+            &self,
+            _invocation: &AgentInvocation,
+        ) -> Result<(String, String), BackendError> {
+            panic!("route probe fixture must not capture an Agent run")
+        }
+
+        fn run_task_streaming(
+            &self,
+            _invocation: &AgentInvocation,
+            _tasks: &TaskService,
+            _task_id: &str,
+        ) -> Result<String, BackendError> {
+            panic!("route probe fixture must not stream an Agent run")
+        }
+    }
+
+    #[test]
+    fn workflow_route_cache_retries_when_resolution_changes_during_probe() {
+        let executable_dir = tempfile::tempdir().unwrap();
+        let target_a = executable_dir.path().join("claude-a");
+        let target_b = executable_dir.path().join("claude-b");
+        std::fs::write(&target_a, b"1.0.0").unwrap();
+        std::fs::write(&target_b, b"2.0.0").unwrap();
+        let runner = Arc::new(SwitchingTargetProbeRunner {
+            targets: [target_a, target_b.clone()],
+            active_target: AtomicUsize::new(0),
+            version_calls: AtomicUsize::new(0),
+            release_first: Mutex::new(false),
+            release_ready: Condvar::new(),
+        });
+        let service = Arc::new(AgentService::with_runner(runner.clone()));
+        let worker_service = service.clone();
+        let probe = thread::spawn(move || {
+            worker_service.detect_agent_for_workflow_route(
+                AgentKind::Claude,
+                false,
+                "settings-a",
+                "identity-a",
+                "revision-a",
+            )
+        });
+        wait_for_atomic_at_least(&runner.version_calls, 1);
+
+        runner.active_target.store(1, Ordering::SeqCst);
+        runner.release_first_probe();
+
+        let (info, probed) = probe.join().unwrap();
+        assert!(probed);
+        assert_eq!(info.version.as_deref(), Some("2.0.0"));
+        assert_eq!(
+            info.executable_path.as_deref(),
+            Some(target_b.to_string_lossy().replace('\\', "/").as_str())
+        );
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 2);
     }
 
     impl ProcessRunner for SourceAiRunnerProbe {

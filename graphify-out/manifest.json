@@ -320,9 +320,9 @@
     "semantic_hash": "3a13837767316299ee0939654827c272"
   },
   "src-tauri/src/commands/agent_commands.rs": {
-    "mtime": 1782222290.6881511,
-    "ast_hash": "15ee3bf183388bf46a2e4d1a823a9218",
-    "semantic_hash": "15ee3bf183388bf46a2e4d1a823a9218"
+    "mtime": 1786303844.689907,
+    "ast_hash": "185dd6027e350df87ac11c0a8dd2e4e1",
+    "semantic_hash": ""
   },
   "src-tauri/src/commands/chat_commands.rs": {
     "mtime": 1785927494.0722036,
@@ -415,9 +415,9 @@
     "semantic_hash": "995b020a286cc82904720cb6a20e7c3b"
   },
   "src-tauri/src/commands/settings_commands.rs": {
-    "mtime": 1785741902.1253898,
-    "ast_hash": "9587e5c73c82c6fb9d0f0305b647dc07",
-    "semantic_hash": "9587e5c73c82c6fb9d0f0305b647dc07"
+    "mtime": 1786302270.5163991,
+    "ast_hash": "0a134da2bc4fa12f983e714156feacc4",
+    "semantic_hash": ""
   },
   "src-tauri/src/commands/source_commands.rs": {
     "mtime": 1786027489.9027703,
@@ -605,8 +605,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/agent_service.rs": {
-    "mtime": 1785927493.5606678,
-    "ast_hash": "1597487f3b800d16f61cfdfbf6e2a084",
+    "mtime": 1786306310.4017043,
+    "ast_hash": "f14df0eac8237abd8f6f8fde570a8765",
     "semantic_hash": ""
   },
   "src-tauri/src/services/bookmark_service.rs": {
@@ -1015,8 +1015,8 @@
     "semantic_hash": "b2c0381a474da0a015eaf47b5a1046b7"
   },
   "src-tauri/src/services/mod.rs": {
-    "mtime": 1786266313.7976954,
-    "ast_hash": "c8a5078d38252b5e1c325e469c3707db",
+    "mtime": 1786303837.2432418,
+    "ast_hash": "668133fd94dd4a7485c370ceb5be10c3",
     "semantic_hash": ""
   },
   "src-tauri/src/services/project_service.rs": {
@@ -1115,8 +1115,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/preparation.rs": {
-    "mtime": 1786300267.4884892,
-    "ast_hash": "3a65dff07d5108b3a5ae3eedd71be63b",
+    "mtime": 1786305420.640485,
+    "ast_hash": "596ab4fb2bf88710cd340f62f71f59ea",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/runners/generate_content.rs": {
@@ -1345,9 +1345,9 @@
     "semantic_hash": "da65ba1f24ee53d627c2add5feaa6d91"
   },
   "src/components/app/WorkspaceController.tsx": {
-    "mtime": 1785746646.7302835,
-    "ast_hash": "56f50b20ca0251c4551793ec74a44d90",
-    "semantic_hash": "56f50b20ca0251c4551793ec74a44d90"
+    "mtime": 1786303866.9288473,
+    "ast_hash": "cc535b9f227399cbae6de94310ad1ae7",
+    "semantic_hash": ""
   },
   "src/components/app/WorkspaceRouter.lazy-error.test.tsx": {
     "mtime": 1785606331.70078,
@@ -2265,14 +2265,14 @@
     "semantic_hash": ""
   },
   "src/hooks/useAiCapabilities.test.tsx": {
-    "mtime": 1783747085.228504,
-    "ast_hash": "8fbf39e14554173b4bf88f7d096194be",
-    "semantic_hash": "8fbf39e14554173b4bf88f7d096194be"
+    "mtime": 1786303893.8172507,
+    "ast_hash": "5151c3b4c42bc96ad4d6a5b059338f03",
+    "semantic_hash": ""
   },
   "src/hooks/useAiCapabilities.ts": {
-    "mtime": 1783747085.228504,
-    "ast_hash": "b92ec0e9f00dda1ca00e0300b27daf10",
-    "semantic_hash": "b92ec0e9f00dda1ca00e0300b27daf10"
+    "mtime": 1786303852.9380977,
+    "ast_hash": "93e9056b37f37d4c0d65cc75dae8beec",
+    "semantic_hash": ""
   },
   "src/hooks/useChatStream.ts": {
     "mtime": 1784342538.1963904,
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786301656.0939653,
-    "ast_hash": "ec545a6fe24c1858e021ec514f9ebc83",
+    "mtime": 1786305472.407938,
+    "ast_hash": "ca20f8fd4b632b995c67669f1cebde72",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786301656.660154,
-    "ast_hash": "c3cdd2ee7d26a5d0c68a793dd136ec30",
+    "mtime": 1786306269.9135232,
+    "ast_hash": "71f37c81255be2df89fc916d07ce78b1",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -4215,8 +4215,13 @@
     "semantic_hash": ""
   },
   "docs/qa/workflows-remediation-batch5a-evidence.md": {
-    "mtime": 1786301655.535441,
-    "ast_hash": "6c2b938e608886d961fb64e74570bb4c",
+    "mtime": 1786301788.7132545,
+    "ast_hash": "9deb61a6efb4fdd3f7956801c32ec5fe",
+    "semantic_hash": ""
+  },
+  "docs/qa/workflows-remediation-batch5b-evidence.md": {
+    "mtime": 1786306269.2353873,
+    "ast_hash": "18e428b6d064df7cce49dfbca87ebad5",
     "semantic_hash": ""
   }
 }

@@ -10,6 +10,8 @@ use crate::models::agent::{AgentConfig, AgentInfo, SetDefaultAgentRequest};
 pub struct AgentProjectRequest {
     pub project_id: String,
     pub project_root_path: String,
+    #[serde(default)]
+    pub force_refresh: bool,
 }
 
 #[tauri::command]
@@ -19,7 +21,11 @@ pub fn detect_agents(
 ) -> Result<Vec<AgentInfo>, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     let config = crate::services::AgentService::load_config(&context)?;
-    Ok(state.agent_service.detect_agents(config.default_agent))
+    let agents = state.agent_service.detect_agents(config.default_agent);
+    if request.force_refresh {
+        state.agent_service.invalidate_workflow_route_cache();
+    }
+    Ok(agents)
 }
 
 #[tauri::command]
@@ -37,7 +43,9 @@ pub fn set_default_agent(
     request: SetDefaultAgentRequest,
 ) -> Result<AgentConfig, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
+    let config = state
         .settings_service
-        .save_agent_default(&context, request.agent)
+        .save_agent_default(&context, request.agent)?;
+    state.agent_service.invalidate_workflow_route_cache();
+    Ok(config)
 }
