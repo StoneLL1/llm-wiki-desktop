@@ -34,17 +34,24 @@ const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
 thread_local! {
     static TASK_PERSISTENCE_WRITES: Cell<usize> = const { Cell::new(0) };
     static TASK_EVENT_EMISSIONS: Cell<usize> = const { Cell::new(0) };
+    static TASK_PERSISTENCE_NANOS: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
 fn reset_task_costs() {
     TASK_PERSISTENCE_WRITES.set(0);
     TASK_EVENT_EMISSIONS.set(0);
+    TASK_PERSISTENCE_NANOS.set(0);
 }
 
 #[cfg(test)]
 fn task_costs() -> (usize, usize) {
     (TASK_PERSISTENCE_WRITES.get(), TASK_EVENT_EMISSIONS.get())
+}
+
+#[cfg(test)]
+fn task_persistence_nanos() -> u64 {
+    TASK_PERSISTENCE_NANOS.get()
 }
 
 fn legacy_task_schema_version() -> u32 {
@@ -2397,11 +2404,17 @@ fn write_persisted_task(
     // no-follow flags, so this narrows rather than eliminates the remaining
     // replacement window. Its random create-new temporary file still prevents
     // pre-creating the task's staging file itself.
+    #[cfg(test)]
+    let persistence_started = std::time::Instant::now();
     FileStore
         .write_json_atomic_absolute(&path, persisted)
         .map_err(|error| format!("Failed to write task file: {}", error.message))?;
     #[cfg(test)]
-    TASK_PERSISTENCE_WRITES.with(|count| count.set(count.get() + 1));
+    {
+        TASK_PERSISTENCE_WRITES.with(|count| count.set(count.get() + 1));
+        let elapsed = u64::try_from(persistence_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        TASK_PERSISTENCE_NANOS.with(|nanos| nanos.set(nanos.get().saturating_add(elapsed)));
+    }
     Ok(path)
 }
 
@@ -2881,6 +2894,94 @@ mod tests {
                 .count(),
             500,
         );
+    }
+
+    #[test]
+    #[ignore = "local release performance reference for the Batch 5C stop/go gate"]
+    fn workflow_progress_release_reference_reports_persistence_share() {
+        assert!(
+            !cfg!(debug_assertions),
+            "Batch 5C reference must run with cargo test --release"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let (service, events) = make_service();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        let update = || {
+            for current in 1..=500 {
+                service
+                    .update_workflow_stage_progress(
+                        &run.task_id,
+                        "read",
+                        Some(format!("wiki/scale/page-{current:04}.md")),
+                        current,
+                        Some(500),
+                    )
+                    .unwrap();
+            }
+        };
+        for _ in 0..5 {
+            events.lock().unwrap().clear();
+            reset_task_costs();
+            update();
+        }
+        let mut total_ms = Vec::with_capacity(50);
+        let mut persistence_ms = Vec::with_capacity(50);
+        for _ in 0..50 {
+            events.lock().unwrap().clear();
+            reset_task_costs();
+            let started = std::time::Instant::now();
+            update();
+            total_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            persistence_ms.push(task_persistence_nanos() as f64 / 1_000_000.0);
+        }
+        let total = task_sample_stats(&total_ms);
+        let persistence = task_sample_stats(&persistence_ms);
+        eprintln!(
+            "BATCH5_PROGRESS_REFERENCE profile=release cache_mode=os_warm storage=tempdir_same_volume os={} arch={} parallelism={} samples=50 updates_per_sample=500 total_mean_ms={:.3} total_p95_ms={:.3} total_cv={:.4} persistence_mean_ms={:.3} persistence_p95_ms={:.3} persistence_share={:.4}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::thread::available_parallelism().map_or(0, |value| value.get()),
+            total.mean,
+            total.p95,
+            total.cv,
+            persistence.mean,
+            persistence.p95,
+            persistence.mean / total.mean,
+        );
+        assert_eq!(task_costs(), (500, 1_000));
+    }
+
+    struct TaskSampleStats {
+        mean: f64,
+        p95: f64,
+        cv: f64,
+    }
+
+    fn task_sample_stats(samples: &[f64]) -> TaskSampleStats {
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|sample| (sample - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        let mut ordered = samples.to_vec();
+        ordered.sort_by(f64::total_cmp);
+        let p95_index = ((ordered.len() as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(ordered.len() - 1);
+        TaskSampleStats {
+            mean,
+            p95: ordered[p95_index],
+            cv: variance.sqrt() / mean,
+        }
     }
 
     #[cfg(unix)]

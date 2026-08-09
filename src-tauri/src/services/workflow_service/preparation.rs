@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 use std::sync::RwLock;
@@ -26,6 +27,7 @@ use crate::models::workflow::{
 use crate::services::{
     AgentService, CompileService, ExportService, FileStore, SecretService, SettingsService,
 };
+use crate::utils::path_utils::normalize_project_path;
 
 use super::fingerprint::{canonical_json, hex_sha256};
 use super::persistence::project_identity;
@@ -41,34 +43,71 @@ const MAX_STARTED_PREPARATIONS_GLOBAL: usize = 1_024;
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreparationCostSnapshot {
+    source_inventories: usize,
+    markdown_root_inventories: usize,
     route_catalog_loads: usize,
     agent_probes: usize,
-    markdown_enumerations: usize,
     baseline_hashes: usize,
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+struct PreparationTimingSnapshot {
+    inventory_nanos: u64,
+    route_nanos: u64,
+    agent_nanos: u64,
+    markdown_nanos: u64,
+}
+
+#[cfg(test)]
 thread_local! {
+    static SOURCE_INVENTORIES: Cell<usize> = const { Cell::new(0) };
+    static MARKDOWN_ROOT_INVENTORIES: Cell<usize> = const { Cell::new(0) };
     static ROUTE_CATALOG_LOADS: Cell<usize> = const { Cell::new(0) };
     static AGENT_PROBES: Cell<usize> = const { Cell::new(0) };
-    static MARKDOWN_ENUMERATIONS: Cell<usize> = const { Cell::new(0) };
     static BASELINE_HASHES: Cell<usize> = const { Cell::new(0) };
+    static INVENTORY_NANOS: Cell<u64> = const { Cell::new(0) };
+    static ROUTE_NANOS: Cell<u64> = const { Cell::new(0) };
+    static AGENT_NANOS: Cell<u64> = const { Cell::new(0) };
+    static MARKDOWN_NANOS: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
 fn reset_preparation_costs() {
+    SOURCE_INVENTORIES.set(0);
+    MARKDOWN_ROOT_INVENTORIES.set(0);
     ROUTE_CATALOG_LOADS.set(0);
     AGENT_PROBES.set(0);
-    MARKDOWN_ENUMERATIONS.set(0);
     BASELINE_HASHES.set(0);
+    INVENTORY_NANOS.set(0);
+    ROUTE_NANOS.set(0);
+    AGENT_NANOS.set(0);
+    MARKDOWN_NANOS.set(0);
+}
+
+#[cfg(test)]
+fn preparation_timings() -> PreparationTimingSnapshot {
+    PreparationTimingSnapshot {
+        inventory_nanos: INVENTORY_NANOS.get(),
+        route_nanos: ROUTE_NANOS.get(),
+        agent_nanos: AGENT_NANOS.get(),
+        markdown_nanos: MARKDOWN_NANOS.get(),
+    }
+}
+
+#[cfg(test)]
+fn add_elapsed(counter: &'static std::thread::LocalKey<Cell<u64>>, started: std::time::Instant) {
+    let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    counter.with(|value| value.set(value.get().saturating_add(elapsed)));
 }
 
 #[cfg(test)]
 fn preparation_costs() -> PreparationCostSnapshot {
     PreparationCostSnapshot {
+        source_inventories: SOURCE_INVENTORIES.get(),
+        markdown_root_inventories: MARKDOWN_ROOT_INVENTORIES.get(),
         route_catalog_loads: ROUTE_CATALOG_LOADS.get(),
         agent_probes: AGENT_PROBES.get(),
-        markdown_enumerations: MARKDOWN_ENUMERATIONS.get(),
         baseline_hashes: BASELINE_HASHES.get(),
     }
 }
@@ -180,6 +219,30 @@ struct CapturedBaseline {
     has_readable_markdown: bool,
 }
 
+struct CachedMarkdownFile {
+    hash: String,
+    resource_paths: Vec<String>,
+}
+
+struct RequestEvaluationSnapshot {
+    project_access: WorkflowProjectAccessSummary,
+    authority_revision: String,
+    source_versions: Vec<SourceVersionRef>,
+    resolved_sources: Vec<crate::services::ResolvedCompileSource>,
+    wiki_pages: Vec<String>,
+    readable_markdown: Vec<String>,
+    route_catalog: RouteCatalog,
+    collect_resource_paths: bool,
+    markdown_files: RefCell<HashMap<String, CachedMarkdownFile>>,
+}
+
+pub(super) struct WorkflowOverviewEvaluationSnapshot {
+    pub(super) prerequisites: Vec<(WorkflowKind, Option<WorkflowPrerequisite>, String)>,
+    pub(super) has_sources: bool,
+    pub(super) changed_source_count: usize,
+    pub(super) has_readable_markdown: bool,
+}
+
 #[derive(Default)]
 struct PreparationRecords {
     prepared: HashMap<String, PreparedRecord>,
@@ -197,42 +260,149 @@ pub(crate) enum PreparationStartLookup {
     Missing,
 }
 
-pub fn overview_prerequisites(
+impl RequestEvaluationSnapshot {
+    fn capture(
+        environment: &WorkflowPreparationEnvironment<'_>,
+        collect_resource_paths: bool,
+    ) -> Result<Self, BackendError> {
+        let identity = project_identity(&environment.context.root).map_err(|message| {
+            BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false)
+        })?;
+        let project_access = WorkflowProjectAccessSummary {
+            project_id: environment.context.project_id.clone(),
+            canonical_identity_key: identity.canonical_identity_key,
+            identity_revision: identity.identity_revision,
+            trust: environment.access.trust.clone(),
+            filesystem_access: environment.access.filesystem_access.clone(),
+            persistence: environment.access.persistence.clone(),
+            git_state: environment.access.git_state.clone(),
+        };
+        #[cfg(test)]
+        SOURCE_INVENTORIES.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        let inventory_started = std::time::Instant::now();
+        let source_versions = CompileService::list_source_versions(environment.context)?;
+        let resolved_sources = if source_versions.is_empty() {
+            Vec::new()
+        } else {
+            CompileService::resolve_source_versions(environment.context, &source_versions)?
+        };
+        let readable_markdown = list_markdown_inventory(environment.context)?;
+        let wiki_pages = wiki_pages_from_inventory(environment.context, &readable_markdown);
+        #[cfg(test)]
+        add_elapsed(&INVENTORY_NANOS, inventory_started);
+        #[cfg(test)]
+        let route_started = std::time::Instant::now();
+        #[cfg(test)]
+        let agent_before = AGENT_NANOS.get();
+        let route_catalog = RouteCatalog::load(environment)?;
+        #[cfg(test)]
+        {
+            let route_total = u64::try_from(route_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let agent_elapsed = AGENT_NANOS.get().saturating_sub(agent_before);
+            ROUTE_NANOS.with(|nanos| {
+                nanos.set(
+                    nanos
+                        .get()
+                        .saturating_add(route_total.saturating_sub(agent_elapsed)),
+                )
+            });
+        }
+        Ok(Self {
+            project_access,
+            authority_revision: environment.access.authority_revision.clone(),
+            source_versions,
+            resolved_sources,
+            wiki_pages,
+            readable_markdown,
+            route_catalog,
+            collect_resource_paths,
+            markdown_files: RefCell::new(HashMap::new()),
+        })
+    }
+
+    fn markdown_file<'a>(
+        &'a self,
+        context: &ProjectContext,
+        relative: &str,
+    ) -> Result<std::cell::Ref<'a, CachedMarkdownFile>, BackendError> {
+        if !self.markdown_files.borrow().contains_key(relative) {
+            #[cfg(test)]
+            BASELINE_HASHES.with(|count| count.set(count.get() + 1));
+            #[cfg(test)]
+            let markdown_started = std::time::Instant::now();
+            let bytes = FileStore.read_bytes(context, relative)?;
+            let hash = FileStore.content_hash(&bytes);
+            let resource_paths = if self.collect_resource_paths {
+                String::from_utf8(bytes)
+                    .ok()
+                    .map(|markdown| {
+                        ExportService::workflow_resource_paths_from_markdown(relative, &markdown)
+                    })
+                    .transpose()?
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            self.markdown_files.borrow_mut().insert(
+                relative.to_string(),
+                CachedMarkdownFile {
+                    hash,
+                    resource_paths,
+                },
+            );
+            #[cfg(test)]
+            add_elapsed(&MARKDOWN_NANOS, markdown_started);
+        }
+        Ok(std::cell::Ref::map(self.markdown_files.borrow(), |files| {
+            files
+                .get(relative)
+                .expect("request-scoped Markdown cache entry must exist")
+        }))
+    }
+
+    fn readable_markdown(&self, context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+        let _ = context;
+        Ok(self.readable_markdown.clone())
+    }
+}
+
+pub(super) fn overview_evaluation_snapshot(
     preferences: &WorkflowPreferences,
     environment: &WorkflowPreparationEnvironment<'_>,
-) -> Result<Vec<(WorkflowKind, Option<WorkflowPrerequisite>, String)>, BackendError> {
-    [
+) -> Result<WorkflowOverviewEvaluationSnapshot, BackendError> {
+    let evaluation = RequestEvaluationSnapshot::capture(environment, true)?;
+    let remembered = preferences.load(
+        environment.context,
+        &evaluation.project_access.canonical_identity_key,
+        &evaluation.project_access.identity_revision,
+        &evaluation.project_access.persistence,
+    )?;
+    let prerequisites = [
         WorkflowKind::UpdateWiki,
         WorkflowKind::HealthCheck,
         WorkflowKind::GenerateContent,
     ]
     .into_iter()
     .map(|kind| {
-        let mut snapshot = build_snapshot(
+        let mut snapshot = build_snapshot_from_evaluation(
             environment,
             &PrepareWorkflowInput {
                 kind: kind.clone(),
                 scope: None,
                 route_selection: None,
             },
+            &evaluation,
         )?;
-        if let Some(previous) = preferences
-            .load(
-                environment.context,
-                &snapshot.project_access.canonical_identity_key,
-                &snapshot.project_access.identity_revision,
-                &snapshot.project_access.persistence,
-            )?
-            .into_iter()
-            .find(|entry| entry.kind == kind)
-        {
-            let remembered = build_snapshot(
+        if let Some(previous) = remembered.iter().find(|entry| entry.kind == kind) {
+            let remembered = build_snapshot_from_evaluation(
                 environment,
                 &PrepareWorkflowInput {
                     kind: kind.clone(),
-                    scope: Some(previous.scope),
+                    scope: Some(previous.scope.clone()),
                     route_selection: route_selection(&previous.route),
                 },
+                &evaluation,
             );
             match remembered {
                 Ok(remembered) => snapshot = remembered,
@@ -246,7 +416,21 @@ pub fn overview_prerequisites(
             .min_by_key(|item| prerequisite_priority(&item.action));
         Ok((kind, prerequisite, snapshot.baseline.fingerprint))
     })
-    .collect()
+    .collect::<Result<Vec<_>, BackendError>>()?;
+    let has_readable_markdown = !evaluation.source_versions.is_empty()
+        || !evaluation
+            .readable_markdown(environment.context)?
+            .is_empty();
+    Ok(WorkflowOverviewEvaluationSnapshot {
+        prerequisites,
+        has_sources: !evaluation.source_versions.is_empty(),
+        changed_source_count: evaluation
+            .resolved_sources
+            .iter()
+            .filter(|source| !source.already_consumed)
+            .count(),
+        has_readable_markdown,
+    })
 }
 
 impl WorkflowPreparationService {
@@ -256,7 +440,11 @@ impl WorkflowPreparationService {
         environment: &WorkflowPreparationEnvironment<'_>,
         input: PrepareWorkflowInput,
     ) -> Result<WorkflowPreparation, BackendError> {
-        let mut snapshot = build_snapshot(environment, &input)?;
+        let evaluation = RequestEvaluationSnapshot::capture(
+            environment,
+            input.kind == WorkflowKind::GenerateContent,
+        )?;
+        let mut snapshot = build_snapshot_from_evaluation(environment, &input, &evaluation)?;
         let previous = preferences
             .load(
                 environment.context,
@@ -278,7 +466,7 @@ impl WorkflowPreparationService {
         });
         let mut applied_remembered_input = None;
         if let Some(remembered_input) = remembered_input.as_ref() {
-            match build_snapshot(environment, remembered_input) {
+            match build_snapshot_from_evaluation(environment, remembered_input, &evaluation) {
                 Ok(remembered) => {
                     snapshot = remembered;
                     applied_remembered_input = Some(remembered_input.clone());
@@ -590,57 +778,64 @@ fn build_snapshot(
     environment: &WorkflowPreparationEnvironment<'_>,
     input: &PrepareWorkflowInput,
 ) -> Result<PreparationSnapshot, BackendError> {
-    let identity = project_identity(&environment.context.root)
-        .map_err(|message| BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false))?;
-    let project_access = WorkflowProjectAccessSummary {
-        project_id: environment.context.project_id.clone(),
-        canonical_identity_key: identity.canonical_identity_key,
-        identity_revision: identity.identity_revision,
-        trust: environment.access.trust.clone(),
-        filesystem_access: environment.access.filesystem_access.clone(),
-        persistence: environment.access.persistence.clone(),
-        git_state: environment.access.git_state.clone(),
-    };
-    let source_versions = CompileService::list_source_versions(environment.context)?;
-    let resolved_sources = if source_versions.is_empty() {
-        Vec::new()
-    } else {
-        CompileService::resolve_source_versions(environment.context, &source_versions)?
-    };
-    let wiki_pages = list_wiki_pages(environment.context)?;
-    let route_catalog = RouteCatalog::load(environment)?;
-    let available_source_versions = source_versions
+    let evaluation = RequestEvaluationSnapshot::capture(
+        environment,
+        input.kind == WorkflowKind::GenerateContent,
+    )?;
+    build_snapshot_from_evaluation(environment, input, &evaluation)
+}
+
+fn build_snapshot_from_evaluation(
+    environment: &WorkflowPreparationEnvironment<'_>,
+    input: &PrepareWorkflowInput,
+    evaluation: &RequestEvaluationSnapshot,
+) -> Result<PreparationSnapshot, BackendError> {
+    let project_access = evaluation.project_access.clone();
+    let available_source_versions = evaluation
+        .source_versions
         .iter()
         .map(|source| WorkflowSourceVersionRef {
             source_id: source.source_id.clone(),
             version_id: source.version_id.clone(),
         })
         .collect();
-    let available_wiki_pages = wiki_pages.clone();
-    let available_routes = route_catalog.available_selections();
-    let default_route =
-        resolve_external_route(input.route_selection.as_ref(), &route_catalog, false);
+    let available_wiki_pages = evaluation.wiki_pages.clone();
+    let available_routes = evaluation.route_catalog.available_selections();
+    let default_route = resolve_external_route(
+        input.route_selection.as_ref(),
+        &evaluation.route_catalog,
+        false,
+    );
     let scope = normalize_scope(
         environment.context,
         &input.kind,
         input.scope.as_ref(),
-        &source_versions,
-        &resolved_sources,
-        &wiki_pages,
+        &evaluation.source_versions,
+        &evaluation.resolved_sources,
+        &evaluation.wiki_pages,
         project_access.trust == WorkflowProjectTrust::Trusted && default_route.route.is_some(),
     )?;
-    let route_resolution = resolve_route(&scope, input.route_selection.as_ref(), &route_catalog);
+    let route_resolution = resolve_route(
+        &scope,
+        input.route_selection.as_ref(),
+        &evaluation.route_catalog,
+    );
     let route = route_resolution.route;
     let output = output_summary(environment.context, &scope)?;
     let git_policy = git_policy(environment.context, &scope)?;
-    let captured_baseline = capture_baseline(environment.context, &scope, &source_versions)?;
+    let captured_baseline = capture_baseline(
+        environment.context,
+        &scope,
+        &evaluation.source_versions,
+        Some(evaluation),
+    )?;
     let mut prerequisites = prerequisites(
         environment.context,
         &scope,
         &project_access,
         &route,
-        &source_versions,
-        &wiki_pages,
+        &evaluation.source_versions,
+        &evaluation.wiki_pages,
         &git_policy,
         route_resolution.prerequisite_action,
         captured_baseline.has_readable_markdown,
@@ -715,7 +910,7 @@ fn build_snapshot(
     )?;
     Ok(PreparationSnapshot {
         project_access,
-        authority_revision: environment.access.authority_revision.clone(),
+        authority_revision: evaluation.authority_revision.clone(),
         scope,
         baseline,
         route,
@@ -775,14 +970,41 @@ impl RouteCatalog {
         let settings = environment
             .settings_service
             .read_settings(environment.context)?;
-        let agents = AgentKind::ALL
+        let default_agent = settings.agent_default;
+        #[cfg(test)]
+        let agent_started = std::time::Instant::now();
+        let detected_agents = std::thread::scope(|scope| {
+            let handles = AgentKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    (
+                        kind,
+                        scope.spawn(move || {
+                            environment
+                                .agent_service
+                                .detect_agent(kind, default_agent == Some(kind))
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|(kind, handle)| {
+                    let info = match handle.join() {
+                        Ok(info) => info,
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    };
+                    (kind, info)
+                })
+                .collect::<Vec<_>>()
+        });
+        #[cfg(test)]
+        add_elapsed(&AGENT_NANOS, agent_started);
+        #[cfg(test)]
+        AGENT_PROBES.with(|count| count.set(count.get() + detected_agents.len()));
+        let agents = detected_agents
             .into_iter()
-            .map(|kind| {
-                #[cfg(test)]
-                AGENT_PROBES.with(|count| count.set(count.get() + 1));
-                let info = environment
-                    .agent_service
-                    .detect_agent(kind, settings.agent_default == Some(kind));
+            .map(|(kind, info)| {
                 let revision = hex_sha256(
                     canonical_json(&(kind, &info.state, &info.version, &info.executable_path))
                         .unwrap_or_default()
@@ -828,7 +1050,7 @@ impl RouteCatalog {
         }
         providers.sort_by_key(|candidate| provider_order(candidate.config.provider));
         Ok(Self {
-            default_agent: settings.agent_default,
+            default_agent,
             agents,
             providers,
         })
@@ -1203,6 +1425,7 @@ fn capture_baseline(
     context: &ProjectContext,
     scope: &WorkflowScope,
     current_sources: &[SourceVersionRef],
+    evaluation: Option<&RequestEvaluationSnapshot>,
 ) -> Result<CapturedBaseline, BackendError> {
     let mut parts = vec![canonical_json(scope).map_err(serialization_error)?];
     let selected = match scope {
@@ -1224,11 +1447,15 @@ fn capture_baseline(
             ));
         }
     }
-    let (files, has_readable_markdown) = baseline_files(context, scope)?;
+    let (files, has_readable_markdown) = baseline_files(context, scope, evaluation)?;
     for relative in &files {
-        #[cfg(test)]
-        BASELINE_HASHES.with(|count| count.set(count.get() + 1));
-        let hash = FileStore.file_hash(context, relative)?;
+        let hash = if let Some(evaluation) = evaluation {
+            evaluation.markdown_file(context, relative)?.hash.clone()
+        } else {
+            #[cfg(test)]
+            BASELINE_HASHES.with(|count| count.set(count.get() + 1));
+            FileStore.file_hash(context, relative)?
+        };
         parts.push(format!("file:{relative}:{hash}"));
     }
     if let WorkflowScope::GenerateContent {
@@ -1245,7 +1472,30 @@ fn capture_baseline(
         };
         let export_service = ExportService::default();
         export_service.validate_workflow_scope(export_type, page_paths)?;
-        parts.extend(export_service.workflow_baseline_entries(context, &files, output_path)?);
+        if let Some(evaluation) = evaluation {
+            let mut resources = files.iter().try_fold(
+                Vec::new(),
+                |mut resources, path| -> Result<_, BackendError> {
+                    resources.extend(
+                        evaluation
+                            .markdown_file(context, path)?
+                            .resource_paths
+                            .iter()
+                            .cloned(),
+                    );
+                    Ok(resources)
+                },
+            )?;
+            resources.sort();
+            resources.dedup();
+            parts.extend(export_service.workflow_baseline_entries_from_resources(
+                context,
+                &resources,
+                output_path,
+            )?);
+        } else {
+            parts.extend(export_service.workflow_baseline_entries(context, &files, output_path)?);
+        }
     }
     parts.sort();
     Ok(CapturedBaseline {
@@ -1263,19 +1513,23 @@ pub fn workflow_baseline_for_scope(
     scope: &WorkflowScope,
 ) -> Result<WorkflowBaselineSummary, BackendError> {
     let current_sources = CompileService::list_source_versions(context)?;
-    Ok(capture_baseline(context, scope, &current_sources)?.summary)
+    Ok(capture_baseline(context, scope, &current_sources, None)?.summary)
 }
 
 fn baseline_files(
     context: &ProjectContext,
     scope: &WorkflowScope,
+    evaluation: Option<&RequestEvaluationSnapshot>,
 ) -> Result<(Vec<String>, bool), BackendError> {
     let (mut files, has_readable_markdown) = match scope {
         WorkflowScope::GenerateContent { page_paths, .. } if !page_paths.is_empty() => {
             (page_paths.clone(), true)
         }
         _ => {
-            let files = list_readable_markdown(context)?;
+            let files = match evaluation {
+                Some(snapshot) => snapshot.readable_markdown(context)?,
+                None => list_markdown_inventory(context)?,
+            };
             let has_readable_markdown = !files.is_empty();
             (files, has_readable_markdown)
         }
@@ -1376,31 +1630,65 @@ fn preparation_fingerprint(
     ))
 }
 
-fn list_wiki_pages(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-    let source_only = context
-        .list_markdown_files_for_roles(&[crate::models::layout::ProjectMarkdownRootRole::Source])?
-        .into_iter()
-        .filter_map(|path| context.to_project_relative(&path).ok())
-        .collect::<HashSet<_>>();
-    let mut pages = context
-        .list_markdown_files_for_roles(&[
-            crate::models::layout::ProjectMarkdownRootRole::Wiki,
-            crate::models::layout::ProjectMarkdownRootRole::Mixed,
-        ])?
-        .into_iter()
-        .filter_map(|path| {
-            let normalized = context.to_project_relative(&path).ok()?;
-            (!source_only.contains(&normalized)).then_some(normalized)
+fn wiki_pages_from_inventory(context: &ProjectContext, inventory: &[String]) -> Vec<String> {
+    use crate::models::layout::ProjectMarkdownRootRole;
+
+    let mut pages = inventory
+        .iter()
+        .filter(|relative| {
+            markdown_inventory_has_role(
+                context,
+                relative,
+                &[
+                    ProjectMarkdownRootRole::Wiki,
+                    ProjectMarkdownRootRole::Mixed,
+                ],
+            ) && !markdown_inventory_has_role(context, relative, &[ProjectMarkdownRootRole::Source])
         })
+        .cloned()
         .collect::<Vec<_>>();
     pages.sort();
     pages.dedup();
-    Ok(pages)
+    pages
 }
 
-fn list_readable_markdown(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
+fn markdown_inventory_has_role(
+    context: &ProjectContext,
+    relative: &str,
+    roles: &[crate::models::layout::ProjectMarkdownRootRole],
+) -> bool {
+    let relative = normalize_project_path(relative);
+    context.layout.markdown_roots.iter().any(|root| {
+        if !roles.contains(&root.role) {
+            return false;
+        }
+        let root_path = normalize_project_path(&root.path);
+        let below_root = if root_path == "." {
+            !relative.contains('/')
+        } else {
+            relative
+                .strip_prefix(&root_path)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        };
+        below_root
+            && !root
+                .exclude
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|excluded| normalize_project_path(excluded))
+                .any(|excluded| {
+                    relative == excluded
+                        || relative
+                            .strip_prefix(&excluded)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+    })
+}
+
+fn list_markdown_inventory(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
     #[cfg(test)]
-    MARKDOWN_ENUMERATIONS.with(|count| count.set(count.get() + 1));
+    MARKDOWN_ROOT_INVENTORIES.with(|count| count.set(count.get() + 1));
     let mut files = context
         .list_markdown_files_for_roles(&[
             crate::models::layout::ProjectMarkdownRootRole::Source,
@@ -1741,6 +2029,10 @@ fn serialization_error(message: String) -> BackendError {
 #[cfg(test)]
 mod batch_zero_cost_tests {
     use super::*;
+    use crate::services::WorkflowService;
+    use crate::tasks::TaskService;
+    use std::collections::VecDeque;
+    use std::sync::{mpsc, Arc, Mutex};
 
     struct DeterministicMissingProcessRunner;
 
@@ -1775,8 +2067,52 @@ mod batch_zero_cost_tests {
         }
     }
 
+    struct ConcurrentProbeRunner {
+        entered: mpsc::Sender<()>,
+        releases: Mutex<VecDeque<mpsc::Receiver<()>>>,
+    }
+
+    impl crate::services::ProcessRunner for ConcurrentProbeRunner {
+        fn find_executable(&self, _command: &str) -> Option<std::path::PathBuf> {
+            let release = self
+                .releases
+                .lock()
+                .expect("probe release lock poisoned")
+                .pop_front()
+                .expect("one release channel per Agent probe");
+            self.entered.send(()).unwrap();
+            release.recv().unwrap();
+            None
+        }
+
+        fn run_with_timeout(
+            &self,
+            _command: &str,
+            _args: &[&str],
+            _timeout: std::time::Duration,
+        ) -> Result<String, BackendError> {
+            panic!("missing-agent fixture must not spawn a process")
+        }
+
+        fn run_capture(
+            &self,
+            _invocation: &crate::services::AgentInvocation,
+        ) -> Result<(String, String), BackendError> {
+            panic!("overview fixture must not capture a process")
+        }
+
+        fn run_task_streaming(
+            &self,
+            _invocation: &crate::services::AgentInvocation,
+            _tasks: &crate::tasks::TaskService,
+            _task_id: &str,
+        ) -> Result<String, BackendError> {
+            panic!("overview fixture must not stream a process")
+        }
+    }
+
     #[test]
-    fn overview_counts_real_route_probe_markdown_and_hash_work_for_scale_fixture() {
+    fn overview_reuses_route_probe_markdown_and_hash_work_for_scale_fixture() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(".app")).unwrap();
         std::fs::create_dir_all(root.path().join("wiki/scale")).unwrap();
@@ -1793,7 +2129,6 @@ mod batch_zero_cost_tests {
         let secrets = SecretService::memory();
         let agents =
             AgentService::with_runner(std::sync::Arc::new(DeterministicMissingProcessRunner));
-        let preferences = WorkflowPreferences::default();
         let environment = WorkflowPreparationEnvironment {
             context: &context,
             access: WorkflowAccessSnapshot {
@@ -1810,19 +2145,299 @@ mod batch_zero_cost_tests {
         };
 
         reset_preparation_costs();
-        let result = overview_prerequisites(&preferences, &environment).unwrap();
+        let service = WorkflowService::default();
+        let tasks = TaskService::default();
+        let result = service
+            .project_overview(
+                &context,
+                environment.access.clone(),
+                &settings,
+                &secrets,
+                &agents,
+                &tasks,
+            )
+            .unwrap();
 
-        assert_eq!(result.len(), 3);
+        assert_eq!(result.rows.len(), 3);
         assert_eq!(AgentKind::ALL.len(), 4, "Batch 0 freezes four Agent kinds");
         assert_eq!(
             preparation_costs(),
             PreparationCostSnapshot {
-                route_catalog_loads: 3,
-                agent_probes: 12,
-                markdown_enumerations: 3,
-                baseline_hashes: 3_000,
+                source_inventories: 1,
+                markdown_root_inventories: 1,
+                route_catalog_loads: 1,
+                agent_probes: 4,
+                baseline_hashes: 1_000,
             }
         );
+
+        service
+            .project_overview(
+                &context,
+                environment.access.clone(),
+                &settings,
+                &secrets,
+                &agents,
+                &tasks,
+            )
+            .unwrap();
+        assert_eq!(
+            preparation_costs(),
+            PreparationCostSnapshot {
+                source_inventories: 2,
+                markdown_root_inventories: 2,
+                route_catalog_loads: 2,
+                agent_probes: 8,
+                baseline_hashes: 2_000,
+            },
+            "request-scoped reuse must not cache content or authority facts across requests"
+        );
+    }
+
+    #[test]
+    fn request_scoped_evaluation_preserves_independent_snapshot_contracts() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        std::fs::write(root.path().join("wiki/page.md"), "# Page\n").unwrap();
+        let context = ProjectContext::new("contract-project", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let secrets = SecretService::memory();
+        let agents = AgentService::with_runner(Arc::new(DeterministicMissingProcessRunner));
+        let environment = WorkflowPreparationEnvironment {
+            context: &context,
+            access: WorkflowAccessSnapshot {
+                trust: WorkflowProjectTrust::Untrusted,
+                trust_kind: None,
+                filesystem_access: WorkflowFilesystemAccess::ReadOnly,
+                persistence: WorkflowPersistenceMode::MemoryOnly,
+                git_state: WorkflowGitState::Unavailable,
+                authority_revision: "contract-authority".into(),
+            },
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        };
+        let evaluation = RequestEvaluationSnapshot::capture(&environment, true).unwrap();
+
+        for kind in [
+            WorkflowKind::UpdateWiki,
+            WorkflowKind::HealthCheck,
+            WorkflowKind::GenerateContent,
+        ] {
+            let input = PrepareWorkflowInput {
+                kind,
+                scope: None,
+                route_selection: None,
+            };
+            let shared = build_snapshot_from_evaluation(&environment, &input, &evaluation).unwrap();
+            let independent = build_snapshot(&environment, &input).unwrap();
+            assert_eq!(shared.project_access, independent.project_access);
+            assert_eq!(shared.scope, independent.scope);
+            assert_eq!(
+                shared.baseline.fingerprint,
+                independent.baseline.fingerprint
+            );
+            assert_eq!(shared.baseline.item_count, independent.baseline.item_count);
+            assert_eq!(shared.route, independent.route);
+            assert_eq!(shared.prerequisites, independent.prerequisites);
+            assert_eq!(shared.output, independent.output);
+            assert_eq!(shared.git_policy, independent.git_policy);
+            assert_eq!(shared.execution_options, independent.execution_options);
+            assert_eq!(
+                shared.preparation_fingerprint,
+                independent.preparation_fingerprint
+            );
+            assert_eq!(
+                shared.available_source_versions,
+                independent.available_source_versions
+            );
+            assert_eq!(
+                shared.available_wiki_pages,
+                independent.available_wiki_pages
+            );
+            assert_eq!(shared.available_routes, independent.available_routes);
+        }
+    }
+
+    #[test]
+    fn overview_starts_all_cold_agent_probes_in_parallel() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        std::fs::write(root.path().join("wiki/page.md"), "# Page\n").unwrap();
+        let context = ProjectContext::new("parallel-probes", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let secrets = SecretService::memory();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut release_senders = Vec::new();
+        let mut release_receivers = VecDeque::new();
+        for _ in AgentKind::ALL {
+            let (release_tx, release_rx) = mpsc::channel();
+            release_senders.push(release_tx);
+            release_receivers.push_back(release_rx);
+        }
+        let agents = AgentService::with_runner(Arc::new(ConcurrentProbeRunner {
+            entered: entered_tx,
+            releases: Mutex::new(release_receivers),
+        }));
+        let worker = std::thread::spawn(move || {
+            WorkflowService::default().project_overview(
+                &context,
+                WorkflowAccessSnapshot {
+                    trust: WorkflowProjectTrust::Untrusted,
+                    trust_kind: None,
+                    filesystem_access: WorkflowFilesystemAccess::ReadOnly,
+                    persistence: WorkflowPersistenceMode::MemoryOnly,
+                    git_state: WorkflowGitState::Unavailable,
+                    authority_revision: "parallel-authority".into(),
+                },
+                &settings,
+                &secrets,
+                &agents,
+                &TaskService::default(),
+            )
+        });
+
+        let all_entered_before_release = (0..AgentKind::ALL.len()).all(|_| {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok()
+        });
+        for release in release_senders {
+            release.send(()).unwrap();
+        }
+        worker.join().unwrap().unwrap();
+        assert!(
+            all_entered_before_release,
+            "all cold Agent probes must start before any one probe completes"
+        );
+    }
+
+    #[test]
+    #[ignore = "local release performance reference for the Batch 5B stop/go gate"]
+    fn overview_release_reference_reports_request_phases() {
+        assert!(
+            !cfg!(debug_assertions),
+            "Batch 5B reference must run with cargo test --release"
+        );
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/scale")).unwrap();
+        for index in 0..1_000 {
+            std::fs::write(
+                root.path().join(format!("wiki/scale/page-{index:04}.md")),
+                format!("# Page {index}\n\n![asset](../assets/shared.png)\n"),
+            )
+            .unwrap();
+        }
+        let context = ProjectContext::new("release-reference", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let secrets = SecretService::memory();
+        let agents = AgentService::default();
+        let service = WorkflowService::default();
+        let tasks = TaskService::default();
+        let access = WorkflowAccessSnapshot {
+            trust: WorkflowProjectTrust::Untrusted,
+            trust_kind: None,
+            filesystem_access: WorkflowFilesystemAccess::ReadOnly,
+            persistence: WorkflowPersistenceMode::MemoryOnly,
+            git_state: WorkflowGitState::Unavailable,
+            authority_revision: "release-reference-authority".into(),
+        };
+        let invoke = || {
+            service
+                .project_overview(
+                    &context,
+                    access.clone(),
+                    &settings,
+                    &secrets,
+                    &agents,
+                    &tasks,
+                )
+                .unwrap()
+        };
+        for _ in 0..5 {
+            reset_preparation_costs();
+            invoke();
+        }
+        let mut total_ms = Vec::with_capacity(50);
+        let mut route_ms = Vec::with_capacity(50);
+        let mut agent_ms = Vec::with_capacity(50);
+        let mut inventory_ms = Vec::with_capacity(50);
+        let mut markdown_ms = Vec::with_capacity(50);
+        for _ in 0..50 {
+            reset_preparation_costs();
+            let started = std::time::Instant::now();
+            invoke();
+            total_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            let timings = preparation_timings();
+            route_ms.push(timings.route_nanos as f64 / 1_000_000.0);
+            agent_ms.push(timings.agent_nanos as f64 / 1_000_000.0);
+            inventory_ms.push(timings.inventory_nanos as f64 / 1_000_000.0);
+            markdown_ms.push(timings.markdown_nanos as f64 / 1_000_000.0);
+        }
+        let total = sample_stats(&total_ms);
+        let route = sample_stats(&route_ms);
+        let agent = sample_stats(&agent_ms);
+        let inventory = sample_stats(&inventory_ms);
+        let markdown = sample_stats(&markdown_ms);
+        let agent_kinds = AgentKind::ALL
+            .iter()
+            .map(|kind| format!("{kind:?}").to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "BATCH5_OVERVIEW_REFERENCE profile=release cache_mode=os_warm_request_fresh agent_kinds={} os={} arch={} parallelism={} samples=50 total_mean_ms={:.3} total_p95_ms={:.3} total_cv={:.4} route_non_agent_mean_ms={:.3} route_non_agent_p95_ms={:.3} agent_mean_ms={:.3} agent_p95_ms={:.3} inventory_mean_ms={:.3} inventory_p95_ms={:.3} markdown_mean_ms={:.3} markdown_p95_ms={:.3}",
+            agent_kinds,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::thread::available_parallelism().map_or(0, |value| value.get()),
+            total.mean,
+            total.p95,
+            total.cv,
+            route.mean,
+            route.p95,
+            agent.mean,
+            agent.p95,
+            inventory.mean,
+            inventory.p95,
+            markdown.mean,
+            markdown.p95,
+        );
+        assert_eq!(preparation_costs().source_inventories, 1);
+        assert_eq!(preparation_costs().markdown_root_inventories, 1);
+        assert_eq!(preparation_costs().route_catalog_loads, 1);
+        assert_eq!(preparation_costs().agent_probes, AgentKind::ALL.len());
+        assert_eq!(preparation_costs().baseline_hashes, 1_000);
+    }
+
+    struct SampleStats {
+        mean: f64,
+        p95: f64,
+        cv: f64,
+    }
+
+    fn sample_stats(samples: &[f64]) -> SampleStats {
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|sample| (sample - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        let mut ordered = samples.to_vec();
+        ordered.sort_by(f64::total_cmp);
+        let p95_index = ((ordered.len() as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(ordered.len() - 1);
+        SampleStats {
+            mean,
+            p95: ordered[p95_index],
+            cv: variance.sqrt() / mean,
+        }
     }
 }
 

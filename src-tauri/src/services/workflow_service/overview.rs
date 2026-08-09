@@ -1,13 +1,12 @@
 use crate::errors::BackendError;
-use crate::models::layout::ProjectMarkdownRootRole;
-use crate::models::paths::ProjectContext;
 use crate::models::workflow::{
     WorkflowDisplayStatus, WorkflowKind, WorkflowOverviewRow, WorkflowOverviewState,
     WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
     WorkflowsOverview, WORKFLOW_SCHEMA_VERSION,
 };
-use crate::services::CompileService;
 use crate::tasks::TaskService;
+
+use super::preparation::WorkflowOverviewEvaluationSnapshot;
 
 #[derive(Default)]
 pub struct WorkflowOverviewService;
@@ -32,31 +31,12 @@ impl WorkflowOverviewService {
         }
     }
 
-    pub fn for_project(
+    pub(super) fn for_project(
         &self,
-        context: &ProjectContext,
         access: WorkflowProjectAccessSummary,
-        prerequisites: &[(WorkflowKind, Option<WorkflowPrerequisite>, String)],
+        evaluation: &WorkflowOverviewEvaluationSnapshot,
         tasks: &TaskService,
     ) -> Result<WorkflowsOverview, BackendError> {
-        let source_versions = CompileService::list_source_versions(context)?;
-        let resolved_sources = if source_versions.is_empty() {
-            Vec::new()
-        } else {
-            CompileService::resolve_source_versions(context, &source_versions)?
-        };
-        let changed_source_count = resolved_sources
-            .iter()
-            .filter(|source| !source.already_consumed)
-            .count();
-        let readable_markdown = !source_versions.is_empty()
-            || !context
-                .list_markdown_files_for_roles(&[
-                    ProjectMarkdownRootRole::Source,
-                    ProjectMarkdownRootRole::Wiki,
-                    ProjectMarkdownRootRole::Mixed,
-                ])?
-                .is_empty();
         let owner_runs = tasks
             .list_workflow_runs()
             .into_iter()
@@ -65,7 +45,8 @@ impl WorkflowOverviewService {
                     && run.identity_revision == access.identity_revision
             })
             .collect::<Vec<_>>();
-        let current_health_baseline = prerequisites
+        let current_health_baseline = evaluation
+            .prerequisites
             .iter()
             .find(|(kind, _, _)| *kind == WorkflowKind::HealthCheck)
             .map(|(_, _, baseline)| baseline.as_str());
@@ -74,9 +55,9 @@ impl WorkflowOverviewService {
                 && run.display_status == WorkflowDisplayStatus::Completed
                 && current_health_baseline == Some(run.baseline_fingerprint.as_str())
         });
-        let recommendation = if source_versions.is_empty() || changed_source_count > 0 {
+        let recommendation = if !evaluation.has_sources || evaluation.changed_source_count > 0 {
             Some(WorkflowKind::UpdateWiki)
-        } else if readable_markdown && !has_current_health {
+        } else if evaluation.has_readable_markdown && !has_current_health {
             Some(WorkflowKind::HealthCheck)
         } else {
             None
@@ -88,9 +69,10 @@ impl WorkflowOverviewService {
                     kind.clone(),
                     &owner_runs,
                     recommendation.as_ref(),
-                    !source_versions.is_empty(),
-                    changed_source_count,
-                    prerequisites
+                    evaluation.has_sources,
+                    evaluation.changed_source_count,
+                    evaluation
+                        .prerequisites
                         .iter()
                         .find(|(candidate, _, _)| *candidate == kind)
                         .and_then(|(_, prerequisite, _)| prerequisite.clone()),

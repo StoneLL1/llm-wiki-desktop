@@ -35,8 +35,8 @@ pub(crate) use persistence::recover_workflow;
 pub use persistence::{project_identity, ProjectWorkflowIdentity};
 pub use preferences::{WorkflowPreference, WorkflowPreferences};
 pub use preparation::{
-    overview_prerequisites, resolve_workflow_persistence_binding, workflow_baseline_for_scope,
-    workflow_stages, PrepareWorkflowInput, ValidatedWorkflowStart, WorkflowAccessSnapshot,
+    resolve_workflow_persistence_binding, workflow_baseline_for_scope, workflow_stages,
+    PrepareWorkflowInput, ValidatedWorkflowStart, WorkflowAccessSnapshot,
     WorkflowPersistenceBinding, WorkflowPreparationEnvironment, WorkflowPreparationService,
 };
 pub use runners::generate_content::{
@@ -544,7 +544,7 @@ impl WorkflowService {
             persistence: access.persistence,
             git_state: access.git_state,
         };
-        let prerequisites = overview_prerequisites(
+        let evaluation = preparation::overview_evaluation_snapshot(
             &self.preferences,
             &WorkflowPreparationEnvironment {
                 context,
@@ -562,7 +562,7 @@ impl WorkflowService {
             },
         )?;
         self.overview
-            .for_project(context, access_summary, &prerequisites, tasks)
+            .for_project(access_summary, &evaluation, tasks)
     }
 }
 

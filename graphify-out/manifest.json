@@ -665,14 +665,14 @@
     "semantic_hash": "cd1c783e0a4b49f3894788fe66b1c981"
   },
   "src-tauri/src/services/export_service.rs": {
-    "mtime": 1785946795.4628582,
-    "ast_hash": "8d44dc31c88ca0c0fb59a3e9e80c2412",
+    "mtime": 1786299610.3916788,
+    "ast_hash": "c7c0fe829dc46d859ab71c008b30c2ba",
     "semantic_hash": ""
   },
   "src-tauri/src/services/file_store.rs": {
-    "mtime": 1785763610.4544528,
-    "ast_hash": "1d29bde34035422847e5c605d8d9ce6a",
-    "semantic_hash": "1d29bde34035422847e5c605d8d9ce6a"
+    "mtime": 1786297187.022098,
+    "ast_hash": "e975f4935c52046536257d81c6663c36",
+    "semantic_hash": ""
   },
   "src-tauri/src/services/git_service.rs": {
     "mtime": 1785946795.4806566,
@@ -1095,13 +1095,13 @@
     "semantic_hash": "17b05965b41b1ef2b99d52ed7d420930"
   },
   "src-tauri/src/services/workflow_service/mod.rs": {
-    "mtime": 1786266505.8777604,
-    "ast_hash": "a27a26b8a7402addcd8ef55125a69526",
+    "mtime": 1786299108.9928424,
+    "ast_hash": "9dcff434901c30a80eb986d288248a04",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/overview.rs": {
-    "mtime": 1785919564.8773649,
-    "ast_hash": "c21b1a81b7e53a522dc8598b236deae0",
+    "mtime": 1786299170.8190413,
+    "ast_hash": "16d6dd7544d1263e7e9326ce767dddd7",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/persistence.rs": {
@@ -1115,8 +1115,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/preparation.rs": {
-    "mtime": 1786257719.1971328,
-    "ast_hash": "719f3512cd7f247bad5159bb609a21e9",
+    "mtime": 1786300267.4884892,
+    "ast_hash": "3a65dff07d5108b3a5ae3eedd71be63b",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/runners/generate_content.rs": {
@@ -1170,8 +1170,8 @@
     "semantic_hash": "b0d95292056ff62aef5ef24a8d2b99e1"
   },
   "src-tauri/src/tasks/task_service.rs": {
-    "mtime": 1786262821.64539,
-    "ast_hash": "cfafe6ba517b10b8dff17e7e53fb6834",
+    "mtime": 1786299783.2251244,
+    "ast_hash": "02a27ddbdd8fd2a2c794dca3fd15b569",
     "semantic_hash": ""
   },
   "src-tauri/src/utils/i18n.rs": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786296448.332368,
-    "ast_hash": "308d414be3e3d71cec3ad99f405447a4",
+    "mtime": 1786301656.0939653,
+    "ast_hash": "ec545a6fe24c1858e021ec514f9ebc83",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786296550.1897473,
-    "ast_hash": "712612588bab52812ce5c9bdeb607ddc",
+    "mtime": 1786301656.660154,
+    "ast_hash": "c3cdd2ee7d26a5d0c68a793dd136ec30",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -4212,6 +4212,11 @@
   "src/components/app/RightContextPanel.test.tsx": {
     "mtime": 1786294728.2152984,
     "ast_hash": "8482c5d30c450a3224009770888fc1ce",
+    "semantic_hash": ""
+  },
+  "docs/qa/workflows-remediation-batch5a-evidence.md": {
+    "mtime": 1786301655.535441,
+    "ast_hash": "6c2b938e608886d961fb64e74570bb4c",
     "semantic_hash": ""
   }
 }

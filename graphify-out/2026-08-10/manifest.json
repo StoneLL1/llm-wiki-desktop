@@ -1290,8 +1290,8 @@
     "semantic_hash": "cc81201c3e179d64fb467a698ebf3f05"
   },
   "src/components/app/RightContextPanel.tsx": {
-    "mtime": 1786088254.7755837,
-    "ast_hash": "c39d4e20c2a73527f5f33cbf7e7bfed8",
+    "mtime": 1786294660.2468858,
+    "ast_hash": "de94a6c93b920d7157f3be02d497419d",
     "semantic_hash": ""
   },
   "src/components/app/RightPanelHeader.tsx": {
@@ -1305,13 +1305,13 @@
     "semantic_hash": "52e8ea1f96cf16e4a2e7ec1c80927ea3"
   },
   "src/components/app/TaskLogDrawer.test.tsx": {
-    "mtime": 1786252562.8833225,
-    "ast_hash": "b809a5a3d11eb972345fa15ea0a5b411",
+    "mtime": 1786293752.3758361,
+    "ast_hash": "9b71a1ceb58fc3f8551efa859cc55a22",
     "semantic_hash": ""
   },
   "src/components/app/TaskLogDrawer.tsx": {
-    "mtime": 1786027584.7383552,
-    "ast_hash": "8fe166642be864ba0494ccc6a87ed46f",
+    "mtime": 1786293811.0090828,
+    "ast_hash": "97374c94668c6abeb0125f111fd4d8f6",
     "semantic_hash": ""
   },
   "src/components/app/Toaster.tsx": {
@@ -2000,13 +2000,13 @@
     "semantic_hash": ""
   },
   "src/features/import/useImportWorkflow.test.tsx": {
-    "mtime": 1786028542.4797316,
-    "ast_hash": "416acb13618f4b1443da8bba49183ec2",
+    "mtime": 1786293977.740385,
+    "ast_hash": "530a3abb67de0816700eaa3ec28f9ba3",
     "semantic_hash": ""
   },
   "src/features/import/useImportWorkflow.ts": {
-    "mtime": 1785958909.1650536,
-    "ast_hash": "252478482aac9c9e03836d73df8c2e04",
+    "mtime": 1786294074.4520733,
+    "ast_hash": "505cef6c122dcb4d431c0e1032c6c0c7",
     "semantic_hash": ""
   },
   "src/features/lint/LintBatchConfirmDialog.tsx": {
@@ -2125,9 +2125,9 @@
     "semantic_hash": "a9b847718c2acd8890c407501c3ffdcf"
   },
   "src/features/settings/BackgroundTaskSettings.tsx": {
-    "mtime": 1783577688.571089,
-    "ast_hash": "505aac1064c6cafd482514b20ae8fc66",
-    "semantic_hash": "505aac1064c6cafd482514b20ae8fc66"
+    "mtime": 1786294643.9167755,
+    "ast_hash": "8a36e2217391e0655693e03ef2aad566",
+    "semantic_hash": ""
   },
   "src/features/settings/BrandMark.test.tsx": {
     "mtime": 1783581464.5297642,
@@ -2175,14 +2175,14 @@
     "semantic_hash": "1c7758b29567b0f519975f085a30f070"
   },
   "src/features/settings/SettingsView.tsx": {
-    "mtime": 1785665613.0027225,
-    "ast_hash": "0065d7254829590507f91baecbd6cf9b",
-    "semantic_hash": "0065d7254829590507f91baecbd6cf9b"
+    "mtime": 1786295018.8412786,
+    "ast_hash": "fc6820209a4d6e4ae48ce0c0163e512c",
+    "semantic_hash": ""
   },
   "src/features/settings/SettingsView.workflow.test.tsx": {
-    "mtime": 1785607571.2625775,
-    "ast_hash": "7f33c6fca105abb8daf429082e858db0",
-    "semantic_hash": "7f33c6fca105abb8daf429082e858db0"
+    "mtime": 1786295050.103479,
+    "ast_hash": "a3341e8d44134c595bac95ccdbdafa76",
+    "semantic_hash": ""
   },
   "src/features/settings/UpdateSettings.tsx": {
     "mtime": 1783577688.5752783,
@@ -2245,13 +2245,13 @@
     "semantic_hash": ""
   },
   "src/features/workflows/useWorkflowsController.test.tsx": {
-    "mtime": 1786290595.6176717,
-    "ast_hash": "b82e0993edf13cee240bfb9e7c8d2c32",
+    "mtime": 1786295915.1335208,
+    "ast_hash": "6285eadcbbd9981eea8182469f69362a",
     "semantic_hash": ""
   },
   "src/features/workflows/useWorkflowsController.ts": {
-    "mtime": 1786290579.2167983,
-    "ast_hash": "145d2647073d2a06a56248eb556184b0",
+    "mtime": 1786294674.0668132,
+    "ast_hash": "4736dd1ebaec4a477bea880dac88561a",
     "semantic_hash": ""
   },
   "src/features/workflows/workflowPresentation.ts": {
@@ -2290,9 +2290,9 @@
     "semantic_hash": "a5bc6b26fc0dbf4180e976a0d2a025af"
   },
   "src/hooks/useProjectStatus.ts": {
-    "mtime": 1782029558.231492,
-    "ast_hash": "7a0378dbc4ef11e10ab16e0cdc23d980",
-    "semantic_hash": "7a0378dbc4ef11e10ab16e0cdc23d980"
+    "mtime": 1786293929.0759,
+    "ast_hash": "f95572fc5e16b7aa8eebc7633855f314",
+    "semantic_hash": ""
   },
   "src/hooks/useResizablePane.test.ts": {
     "mtime": 1784386541.413972,
@@ -2310,8 +2310,8 @@
     "semantic_hash": "709ac51fc1d7e28532b795af4c761e18"
   },
   "src/hooks/useTaskEvents.ts": {
-    "mtime": 1785954888.3296964,
-    "ast_hash": "f10fa28b4bd1ccf57a723a015b79ea78",
+    "mtime": 1786292611.7706072,
+    "ast_hash": "d01c37d9c79ce56bbdbe944a92bdd7da",
     "semantic_hash": ""
   },
   "src/hooks/useTaskLauncher.test.tsx": {
@@ -2330,13 +2330,13 @@
     "semantic_hash": "3926d75255129ed0beb4d4a682469899"
   },
   "src/i18n/locales/en.json": {
-    "mtime": 1786290786.877952,
-    "ast_hash": "d4dffb225bed028c158424f077650288",
+    "mtime": 1786293717.0343344,
+    "ast_hash": "ddf6d53f0490353ec72492c8a58f7d73",
     "semantic_hash": ""
   },
   "src/i18n/locales/zh-CN.json": {
-    "mtime": 1786290787.6699648,
-    "ast_hash": "e53da546978d93187c01b4fa96146272",
+    "mtime": 1786293717.6229038,
+    "ast_hash": "bc6567f3819719ff0a018ef51a918d0a",
     "semantic_hash": ""
   },
   "src/lib/cn.ts": {
@@ -2430,9 +2430,9 @@
     "semantic_hash": "2fb1b6ff5f56f1c57f233ec8f72f25a2"
   },
   "src/services/notifications.ts": {
-    "mtime": 1785740390.520853,
-    "ast_hash": "f96a45bf2d0c3d3d7dd483f0e7d32a63",
-    "semantic_hash": "f96a45bf2d0c3d3d7dd483f0e7d32a63"
+    "mtime": 1786295136.366562,
+    "ast_hash": "9a20fac052cfd16ae11344de11ebe839",
+    "semantic_hash": ""
   },
   "src/services/workflowApi.test.ts": {
     "mtime": 1785738476.3876536,
@@ -2555,13 +2555,13 @@
     "semantic_hash": "274b113007afa44c0635c26660488d6d"
   },
   "src/stores/workflowStore.test.ts": {
-    "mtime": 1786289292.7040706,
-    "ast_hash": "7d9fa3fb25a514a3a13465dc1e1e6bf9",
+    "mtime": 1786293751.3450153,
+    "ast_hash": "b59184876eafb85fb5bfafab631cc567",
     "semantic_hash": ""
   },
   "src/stores/workflowStore.ts": {
-    "mtime": 1786289363.0812938,
-    "ast_hash": "d1bbd54e7875cc062c88196c2c2570c8",
+    "mtime": 1786293659.574777,
+    "ast_hash": "f16e83f5966285fc92290211806fdb36",
     "semantic_hash": ""
   },
   "src/test/app-shell-architecture.test.ts": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786268356.5466413,
-    "ast_hash": "be16bba669e411deafbcf16d65a048c6",
+    "mtime": 1786296448.332368,
+    "ast_hash": "308d414be3e3d71cec3ad99f405447a4",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786268355.9989412,
-    "ast_hash": "83809c5b599b5d6f890a98e5ee1bb18a",
+    "mtime": 1786296550.1897473,
+    "ast_hash": "712612588bab52812ce5c9bdeb607ddc",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -3610,9 +3610,9 @@
     "semantic_hash": "52e4c66779a2b12504195a937f74f765"
   },
   "src/features/workflows/README.md": {
-    "mtime": 1785606917.9423196,
-    "ast_hash": "40f7f1d02e244f1d544ec74e84768300",
-    "semantic_hash": "40f7f1d02e244f1d544ec74e84768300"
+    "mtime": 1786294687.3033512,
+    "ast_hash": "d97dc75b3f7434b6f361715c6620545e",
+    "semantic_hash": ""
   },
   ".claude/launch.json": {
     "mtime": 1784703537.0930753,
@@ -4105,13 +4105,13 @@
     "semantic_hash": ""
   },
   "src/features/workflows/workflowBaselineFixtures.ts": {
-    "mtime": 1786252361.8318057,
-    "ast_hash": "fc376f0793d8b6492695f8d4f6a84783",
+    "mtime": 1786292945.1932316,
+    "ast_hash": "87a5af07ea4bba84150718f2e4e50062",
     "semantic_hash": ""
   },
   "src/services/notificationsBaseline.test.ts": {
-    "mtime": 1786250991.2157555,
-    "ast_hash": "028192d592ebbf7e29a3378de142a765",
+    "mtime": 1786295158.3357759,
+    "ast_hash": "223ac03b1a9de149adaf7fda6cff5f29",
     "semantic_hash": ""
   },
   ".claude/skills/graphify/SKILL.md": {
@@ -4207,6 +4207,11 @@
   "graphify-out/memory/query_20260809_085559_final_batch_2_review_of_launch_revoke_freeze_dispa.md": {
     "mtime": 1786265759.4651835,
     "ast_hash": "ca23933bc2926d9e13d8d54adc70b871",
+    "semantic_hash": ""
+  },
+  "src/components/app/RightContextPanel.test.tsx": {
+    "mtime": 1786294728.2152984,
+    "ast_hash": "8482c5d30c450a3224009770888fc1ce",
     "semantic_hash": ""
   }
 }
