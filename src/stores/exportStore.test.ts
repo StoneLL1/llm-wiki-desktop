@@ -38,6 +38,36 @@ afterEach(() => {
 });
 
 describe("exportStore", () => {
+  it("rolls back owned loading state when an identity commit guard expires", async () => {
+    let resolve!: (records: ExportRecord[]) => void;
+    invokeMock.mockReturnValueOnce(new Promise<ExportRecord[]>((done) => { resolve = done; }));
+    let current = true;
+    const loading = useExportStore.getState().loadExports("p", "/x", () => current);
+    expect(useExportStore.getState().loading).toBe(true);
+    current = false;
+    resolve([record()]);
+    await loading;
+
+    expect(useExportStore.getState()).toMatchObject({ loading: false, records: [] });
+  });
+
+  it("does not inherit loading from an overlapping superseded list request", async () => {
+    let resolveA!: (records: ExportRecord[]) => void;
+    let resolveB!: (records: ExportRecord[]) => void;
+    invokeMock
+      .mockReturnValueOnce(new Promise<ExportRecord[]>((done) => { resolveA = done; }))
+      .mockReturnValueOnce(new Promise<ExportRecord[]>((done) => { resolveB = done; }));
+    let current = true;
+    const first = useExportStore.getState().loadExports("p", "/x", () => current);
+    const second = useExportStore.getState().loadExports("p", "/x", () => current);
+    current = false;
+    resolveA([]);
+    resolveB([]);
+    await Promise.all([first, second]);
+
+    expect(useExportStore.getState().loading).toBe(false);
+  });
+
   it("defaults to inline preview mode and allows switching modes", () => {
     expect(useExportStore.getState().previewMode).toBe("inline");
 

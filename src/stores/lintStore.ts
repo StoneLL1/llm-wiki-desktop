@@ -161,6 +161,8 @@ export interface LintState {
   loadHistory: (request: ListLintHistoryRequest) => Promise<LintHistoryEntry[]>;
   openHistoryReport: (
     request: ReadLintHistoryReportRequest,
+    commitGuard?: () => boolean,
+    preservePendingConfirmations?: boolean,
   ) => Promise<PersistedLintReport | null>;
   loadIgnores: (request: ListLintIgnoresRequest) => Promise<void>;
   addIgnore: (request: AddLintIgnoreRequest) => Promise<boolean>;
@@ -346,7 +348,11 @@ export const useLintStore = create<LintState>((set, get) => ({
     }
   },
 
-  openHistoryReport: async (request) => {
+  openHistoryReport: async (
+    request,
+    commitGuard = () => true,
+    preservePendingConfirmations = false,
+  ) => {
     if (!hasTauri()) return null;
     const current = get();
     if (
@@ -363,10 +369,12 @@ export const useLintStore = create<LintState>((set, get) => ({
       ...(get().fixConfirm ? [get().fixConfirm!.pendingAction.id] : []),
       ...get().batchConfirmations.map((entry) => entry.pendingAction.id),
     ].filter((id, index, ids) => ids.indexOf(id) === index);
+    if (preservePendingConfirmations && pendingActionIds.length > 0) return null;
     if (pendingActionIds.length > 0) {
       const cancelledActionIds: string[] = [];
       try {
         for (const actionId of pendingActionIds) {
+          if (!commitGuard()) return null;
           try {
             await invoke("confirm_pending_action", {
               request: { actionId, status: "cancelled" },
@@ -374,10 +382,11 @@ export const useLintStore = create<LintState>((set, get) => ({
           } catch (error) {
             if (!isTerminalConfirmationError(error)) throw error;
           }
+          if (!commitGuard()) return null;
           cancelledActionIds.push(actionId);
         }
       } catch (error) {
-        if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+        if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !commitGuard()) return null;
         set((state) => ({
           fixConfirm:
             state.fixConfirm && cancelledActionIds.includes(state.fixConfirm.pendingAction.id)
@@ -390,7 +399,7 @@ export const useLintStore = create<LintState>((set, get) => ({
         set({ historyError: errorMessage(error) });
         return null;
       }
-      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !commitGuard()) return null;
       set({ fixConfirm: null, batchConfirmations: [] });
     }
     set({ historyError: null });
@@ -399,7 +408,7 @@ export const useLintStore = create<LintState>((set, get) => ({
         "read_lint_history_report",
         { request },
       );
-      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !commitGuard()) return null;
       set({
         localReport: persisted.localReport ?? null,
         deepReport: persisted.deepReport ?? null,
@@ -420,7 +429,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       });
       return persisted;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !commitGuard()) return null;
       set({ historyError: errorMessage(error) });
       return null;
     }

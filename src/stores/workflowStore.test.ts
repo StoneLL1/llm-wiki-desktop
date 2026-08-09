@@ -83,10 +83,32 @@ describe("workflowStore", () => {
     };
     useWorkflowStore.getState().upsertRun({
       ...run("run-a", "2026-08-01T03:00:00Z"),
+      displayStatus: "waiting_for_confirmation",
+      pendingAction: {
+        id: "action-a",
+        actionType: "batch_rewrite",
+        riskLevel: "high",
+        affectedPaths: ["wiki/a.md"],
+        candidate: null,
+        expiresAt: null,
+        checkpointHash: null,
+      },
       decisionReview,
     });
     useWorkflowStore.getState().replaceRuns([
-      { ...run("run-a", "2026-08-01T04:00:00Z"), displayStatus: "waiting_for_confirmation" },
+      {
+        ...run("run-a", "2026-08-01T04:00:00Z"),
+        displayStatus: "waiting_for_confirmation",
+        pendingAction: {
+          id: "action-a",
+          actionType: "batch_rewrite",
+          riskLevel: "high",
+          affectedPaths: ["wiki/a.md"],
+          candidate: null,
+          expiresAt: null,
+          checkpointHash: null,
+        },
+      },
     ]);
     expect(useWorkflowStore.getState().runs[0]?.decisionReview).toEqual(decisionReview);
   });
@@ -121,6 +143,83 @@ describe("workflowStore", () => {
       selectedTaskId: null,
       surface: "overview",
       historyCursor: null,
+    });
+  });
+
+  it("keeps pending and errors scoped to their owning operations", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const reconcile = useWorkflowStore.getState().beginOperation("overview:reconcile");
+    const prepare = useWorkflowStore.getState().beginOperation("prepare:health_check");
+    useWorkflowStore.getState().failOperation("prepare:health_check", prepare, {
+      summary: "Preparation failed",
+      technicalDetails: "WORKFLOW_PREPARE_FAILED: details",
+    });
+
+    expect(useWorkflowStore.getState().operations).toMatchObject({
+      "overview:reconcile": { pending: true, error: null, requestId: reconcile },
+      "prepare:health_check": {
+        pending: false,
+        error: { summary: "Preparation failed" },
+        requestId: prepare,
+      },
+    });
+    expect(useWorkflowStore.getState().operations["overview:reconcile"]?.error).toBeNull();
+  });
+
+  it("does not let an older operation completion clear a newer request", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const older = useWorkflowStore.getState().beginOperation("prepare:health_check");
+    const newer = useWorkflowStore.getState().beginOperation("prepare:health_check");
+    useWorkflowStore.getState().finishOperation("prepare:health_check", older);
+    expect(useWorkflowStore.getState().operations["prepare:health_check"]).toMatchObject({
+      pending: true,
+      requestId: newer,
+    });
+  });
+
+  it("does not reuse an operation token after the active project changes", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const projectARequest = useWorkflowStore.getState().beginOperation("overview:init");
+    useWorkflowStore.getState().activateProject("project-b\0D:/b");
+    const projectBRequest = useWorkflowStore.getState().beginOperation("overview:init");
+
+    useWorkflowStore.getState().finishOperation("overview:init", projectARequest);
+
+    expect(projectBRequest).toBeGreaterThan(projectARequest);
+    expect(useWorkflowStore.getState().operations["overview:init"]).toMatchObject({
+      pending: true,
+      requestId: projectBRequest,
+    });
+  });
+
+  it("merges an older hydrated review into the newer snapshot for the same action", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const pendingAction = {
+      id: "action-a",
+      actionType: "batch_rewrite" as const,
+      riskLevel: "high" as const,
+      affectedPaths: ["wiki/a.md"],
+      candidate: null,
+      expiresAt: null,
+      checkpointHash: null,
+    };
+    const decisionReview = {
+      reason: "review",
+      counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 },
+      userEditsDetected: false,
+      fileDiffs: [{ path: "wiki/a.md", diff: "+review" }],
+    };
+    useWorkflowStore.getState().upsertRun({
+      ...run("run-a", "2026-08-01T03:00:00Z"),
+      displayStatus: "waiting_for_confirmation",
+      pendingAction,
+    });
+
+    useWorkflowStore.getState().hydrateDecisionReview("run-a", "action-a", decisionReview);
+
+    expect(useWorkflowStore.getState().runs[0]).toMatchObject({
+      updatedAt: "2026-08-01T03:00:00Z",
+      decisionReview,
     });
   });
 });

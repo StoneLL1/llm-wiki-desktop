@@ -46,6 +46,7 @@ const RECENT_PAGE_LIMIT = 8;
 // Project scope rejects cross-project work; this serial also rejects older
 // requests inside the same project, including A -> B -> A navigation.
 let pageRequestEpoch = 0;
+let treeRequestEpoch = 0;
 
 interface WikiState {
   tree: WikiTree | null;
@@ -60,8 +61,8 @@ interface WikiState {
   loadingPage: boolean;
   error: string | null;
   recentPages: RecentPageEntry[];
-  scan: (projectId: string, rootPath: string) => Promise<void>;
-  openPage: (projectId: string, rootPath: string, path: string) => Promise<void>;
+  scan: (projectId: string, rootPath: string, commitGuard?: () => boolean) => Promise<void>;
+  openPage: (projectId: string, rootPath: string, path: string, commitGuard?: () => boolean) => Promise<void>;
   setMode: (mode: WikiMode) => void;
   startEdit: () => void;
   cancelEdit: () => void;
@@ -114,6 +115,15 @@ const initial = {
   recentPages: [] as RecentPageEntry[],
 };
 
+let stablePagePresentation = {
+  loadingPage: initial.loadingPage,
+  selectedPath: initial.selectedPath,
+  mode: initial.mode,
+  saveState: initial.saveState,
+  conflict: initial.conflict,
+  error: initial.error,
+};
+
 export function updateTreeNodeBookmark(
   node: WikiTreeNode,
   path: string,
@@ -133,33 +143,57 @@ export function updateTreeNodeBookmark(
 
 export const useWikiStore = create<WikiState>((set, get) => ({
   ...initial,
-  scan: async (projectId, rootPath) => {
+  scan: async (projectId, rootPath, commitGuard = () => true) => {
     const scope = captureProjectScope();
+    const requestEpoch = ++treeRequestEpoch;
+    const previous = { loadingTree: get().loadingTree, error: get().error };
     set({ loadingTree: true, error: null });
     try {
       const tree = await invoke<WikiTree>("scan_wiki", {
         request: { projectId, projectRootPath: rootPath },
       });
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== treeRequestEpoch) return;
+      if (!commitGuard()) {
+        set({ loadingTree: false, error: previous.loadingTree ? null : previous.error });
+        return;
+      }
       const firstPage = tree.pages[0]?.path ?? null;
       set({ tree, loadingTree: false });
       if (firstPage && !get().selectedPath) {
-        await get().openPage(projectId, rootPath, firstPage);
+        await get().openPage(projectId, rootPath, firstPage, commitGuard);
       }
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || requestEpoch !== treeRequestEpoch) return;
+      if (!commitGuard()) {
+        set({ loadingTree: false, error: previous.loadingTree ? null : previous.error });
+        return;
+      }
       set({ loadingTree: false, error: errorMessage(error) });
     }
   },
-  openPage: async (projectId, rootPath, path) => {
+  openPage: async (projectId, rootPath, path, commitGuard = () => true) => {
     const scope = captureProjectScope();
     const requestEpoch = ++pageRequestEpoch;
+    const previous = {
+      loadingPage: get().loadingPage,
+      selectedPath: get().selectedPath,
+      mode: get().mode,
+      saveState: get().saveState,
+      conflict: get().conflict,
+      error: get().error,
+    };
+    if (!previous.loadingPage) stablePagePresentation = previous;
+    const rollback = stablePagePresentation;
     set({ loadingPage: true, selectedPath: path, mode: "read", saveState: "idle", conflict: null, error: null });
     try {
       const page = await invoke<WikiPageContent>("read_wiki_page", {
         request: { projectId, projectRootPath: rootPath, relativePath: path },
       });
       if (!isProjectScopeCurrent(scope) || requestEpoch !== pageRequestEpoch) return;
+      if (!commitGuard()) {
+        set(rollback);
+        return;
+      }
       set((state) => {
         const entry: RecentPageEntry = { path: page.meta.path, title: page.meta.title };
         const rest = state.recentPages.filter((p) => p.path !== entry.path);
@@ -170,9 +204,29 @@ export const useWikiStore = create<WikiState>((set, get) => ({
           recentPages: [entry, ...rest].slice(0, RECENT_PAGE_LIMIT),
         };
       });
+      stablePagePresentation = {
+        loadingPage: get().loadingPage,
+        selectedPath: get().selectedPath,
+        mode: get().mode,
+        saveState: get().saveState,
+        conflict: get().conflict,
+        error: get().error,
+      };
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || requestEpoch !== pageRequestEpoch) return;
+      if (!commitGuard()) {
+        set(rollback);
+        return;
+      }
       set({ loadingPage: false, error: errorMessage(error) });
+      stablePagePresentation = {
+        loadingPage: get().loadingPage,
+        selectedPath: get().selectedPath,
+        mode: get().mode,
+        saveState: get().saveState,
+        conflict: get().conflict,
+        error: get().error,
+      };
     }
   },
   setMode: (mode) => set({ mode }),
@@ -475,7 +529,16 @@ export const useWikiStore = create<WikiState>((set, get) => ({
     }
   },
   reset: () => {
+    treeRequestEpoch += 1;
     pageRequestEpoch += 1;
+    stablePagePresentation = {
+      loadingPage: initial.loadingPage,
+      selectedPath: initial.selectedPath,
+      mode: initial.mode,
+      saveState: initial.saveState,
+      conflict: initial.conflict,
+      error: initial.error,
+    };
     set({ ...initial });
   },
 }));

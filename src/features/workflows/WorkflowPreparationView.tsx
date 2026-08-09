@@ -2,6 +2,7 @@ import { ArrowLeft, Check, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useWorkflowStore, workflowOperationPending } from "../../stores/workflowStore";
 import type { WorkflowArtifactType, WorkflowPreparation, WorkflowPrerequisiteAction, WorkflowRouteSelection, WorkflowScope } from "../../types/workflow";
 import { workflowKindKey } from "./workflowPresentation";
 
@@ -13,6 +14,10 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
   onReprepare: (scope: WorkflowScope, route: WorkflowRouteSelection | null) => void;
 }) {
   const { t } = useTranslation();
+  const operations = useWorkflowStore((state) => state.operations);
+  const preparePending = workflowOperationPending(operations, `prepare:${preparation.kind}`);
+  const startPending = workflowOperationPending(operations, `start:${preparation.preparationId}`);
+  const prerequisitePending = workflowOperationPending(operations, "prerequisite:project:");
   const [restricted, setRestricted] = useState(false);
   const [remote, setRemote] = useState(false);
   const [scope, setScope] = useState<WorkflowScope>(preparation.scope);
@@ -62,7 +67,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
           <label className="workflow-field">{t("workflows.preparation.outputPath")}<input onChange={(event) => setScope({ ...scope, outputPath: event.target.value || null })} type="text" value={scope.outputPath ?? ""} /></label>
         </>}
         {(preparation.availableRoutes?.length ?? 0) > 0 ? <label className="workflow-field">{t("workflows.preparation.routeOverride")}<select onChange={(event) => setRouteChoice(event.target.value)} value={routeChoice}><option value="auto">{t("workflows.route.auto")}</option>{preparation.availableRoutes?.map((route) => <option key={JSON.stringify(route)} value={JSON.stringify(route)}>{route.kind === "agent" ? `${t("workflows.route.agent")} · ${route.agent}` : `${t("workflows.route.byok")} · ${route.provider}`}</option>)}</select></label> : null}
-        <button className="btn btn--secondary" disabled={!scopeChanged} onClick={() => onReprepare(scope, routeSelection)} type="button">{t("workflows.action.updatePreparation")}</button>
+        <button className="btn btn--secondary" disabled={!scopeChanged || preparePending || startPending} onClick={() => onReprepare(scope, routeSelection)} type="button">{t("workflows.action.updatePreparation")}</button>
       </section>
       <section className="workflow-prerequisites" aria-label={t("workflows.preparation.prerequisites")}>
         <h3>{t("workflows.preparation.prerequisites")}</h3>
@@ -72,14 +77,14 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
           <div className={item.blocking ? "workflow-prerequisite is-blocking" : "workflow-prerequisite"} key={item.code}>
             <ShieldAlert aria-hidden="true" size={14} />
             <span>{t(item.messageKey)}</span>
-            {!acknowledgementActions.includes(item.action) ? <button className="btn btn--ghost btn--sm ml-auto" onClick={() => onPrerequisite(item.action)} type="button">{t("workflows.action.resolve")}</button> : null}
+            {!acknowledgementActions.includes(item.action) ? <button className="btn btn--ghost btn--sm ml-auto" disabled={prerequisitePending} onClick={() => onPrerequisite(item.action)} type="button">{t("workflows.action.resolve")}</button> : null}
           </div>
         ))}
       </section>
       {needsRestricted ? <label className="workflow-confirm"><input checked={restricted} onChange={(event) => setRestricted(event.target.checked)} type="checkbox" />{t("workflows.confirm.restricted")}</label> : null}
       {needsRemote ? <label className="workflow-confirm"><input checked={remote} onChange={(event) => setRemote(event.target.checked)} type="checkbox" />{t("workflows.confirm.remote")}</label> : null}
       <details className="workflow-execution-details"><summary>{t("workflows.preparation.executionDetails")}</summary><dl><dt>{t("workflows.preparation.route")}</dt><dd>{preparation.route ? t(`workflows.route.${preparation.route.kind}`) : t("workflows.route.none")}</dd><dt>{t("workflows.preparation.dataBoundary")}</dt><dd>{t(`workflows.boundary.${preparation.scope.kind}`)}</dd></dl></details>
-      <div className="workflow-actions"><button className="btn btn--primary" disabled={!canStart || scopeChanged} onClick={() => onStart(restricted, remote)} type="button">{preparation.quickRerunEligible ? t("workflows.action.runAgain") : t("workflows.action.start")}</button></div>
+      <div className="workflow-actions"><button className="btn btn--primary" disabled={!canStart || scopeChanged || startPending || preparePending} onClick={() => onStart(restricted, remote)} type="button">{preparation.quickRerunEligible ? t("workflows.action.runAgain") : t("workflows.action.start")}</button></div>
     </div>
   );
 }

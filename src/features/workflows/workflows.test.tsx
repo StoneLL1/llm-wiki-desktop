@@ -116,13 +116,46 @@ describe("Workflows overview", () => {
     };
     useProjectStore.setState({ currentProject: projectSummary });
     useWorkflowStore.getState().activateProject("project-a\0D:/a");
-    useWorkflowStore.setState({ runs: [waiting, completed], selectedTaskId: completed.taskId });
+    useWorkflowStore.setState({ runs: [waiting, completed], selectedTaskId: completed.taskId, surface: "detail" });
 
     render(<WorkflowsRightPanel />);
 
     expect(screen.getByText("selected")).toBeInTheDocument();
     expect(screen.queryByText("waiting-")).not.toBeInTheDocument();
     expect(screen.getByText("workflows.context.selection")).toBeInTheDocument();
+  });
+
+  it("derives preparation and history context from the active surface instead of stale selection", () => {
+    const selected = {
+      schemaVersion: 1, taskId: "stale-selected", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "completed",
+      scope: { kind: "health_check", mode: "local_quick" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
+      stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null, error: null,
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
+    } satisfies WorkflowRun;
+    const prep = {
+      schemaVersion: 1, preparationId: "prep-a", preparationRevision: "prep-revision-a", projectAccess: overview.projectAccess!,
+      kind: "update_wiki", scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] },
+      baseline: { fingerprint: "baseline", capturedAt: "2026-08-01T00:00:00Z", itemCount: 2 }, route: null, prerequisites: [],
+      output: { labelKey: "workflows.output.wiki", location: "wiki", mayChangeWiki: true }, gitPolicy: "required_before_write" as const,
+      requiresScopeConfirmation: false, quickRerunEligible: false,
+    } satisfies WorkflowPreparation;
+    useProjectStore.setState({ currentProject: projectSummary });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({
+      runs: [selected],
+      selectedTaskId: selected.taskId,
+      preparation: prep,
+      surface: "preparation",
+    });
+
+    const view = render(<WorkflowsRightPanel />);
+    expect(screen.getByText("workflows.context.preparation")).toBeInTheDocument();
+    expect(screen.queryByText("stale-se")).not.toBeInTheDocument();
+
+    useWorkflowStore.setState({ surface: "history" });
+    view.rerender(<WorkflowsRightPanel />);
+    expect(screen.getByText("workflows.context.project")).toBeInTheDocument();
+    expect(screen.queryByText("stale-se")).not.toBeInTheDocument();
   });
 
   it("keeps long English context labels and actions keyboard reachable at 200 percent text size", () => {
@@ -160,8 +193,9 @@ describe("Workflows overview", () => {
 
   it("shows an actionable error when the overview request fails", () => {
     const retry = vi.fn();
-    render(<WorkflowsOverviewView overview={null} overviewStatus="error" error="overview unavailable" runs={[]} onRetry={retry} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={null} overviewStatus="error" error={{ summary: "overview unavailable", technicalDetails: "OVERVIEW_FAILED" }} runs={[]} onRetry={retry} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getByRole("alert")).toHaveTextContent("overview unavailable");
+    expect(screen.getByText("OVERVIEW_FAILED")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
     expect(retry).toHaveBeenCalledOnce();
   });
@@ -211,7 +245,14 @@ describe("Workflows overview", () => {
 
   it("keeps an overview load failure visible after switching to history", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
-    useWorkflowStore.setState({ surface: "history", overview: null, overviewStatus: "error", error: "overview unavailable" });
+    useWorkflowStore.setState({
+      surface: "history",
+      overview: null,
+      overviewStatus: "error",
+      operations: {
+        "overview:init": { requestId: 1, pending: false, error: { summary: "overview unavailable", technicalDetails: "OVERVIEW_FAILED" } },
+      },
+    });
 
     render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
 
@@ -222,13 +263,111 @@ describe("Workflows overview", () => {
 
   it("offers refresh when a cached overview refresh fails", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
-    useWorkflowStore.setState({ surface: "overview", overview, overviewStatus: "error", error: "refresh unavailable" });
+    useWorkflowStore.setState({
+      surface: "overview",
+      overview,
+      overviewStatus: "error",
+      operations: {
+        "overview:reconcile": { requestId: 1, pending: false, error: { summary: "refresh unavailable", technicalDetails: "REFRESH_FAILED" } },
+      },
+    });
 
     render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("refresh unavailable");
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.refresh" }));
     expect(controller.refresh).toHaveBeenCalledOnce();
+  });
+
+  it("keeps background reconcile state from blocking or overwriting preparation", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const prep = {
+      schemaVersion: 1,
+      preparationId: "prep-health",
+      preparationRevision: "prep-revision",
+      projectAccess: overview.projectAccess!,
+      kind: "health_check",
+      scope: { kind: "health_check", mode: "local_quick" },
+      baseline: { fingerprint: "baseline", capturedAt: "2026-08-01T00:00:00Z", itemCount: 1 },
+      route: { kind: "local", routeRevision: "local" },
+      prerequisites: [],
+      output: { labelKey: "workflows.output.session", location: null, mayChangeWiki: false },
+      gitPolicy: "not_required" as const,
+      requiresScopeConfirmation: false,
+      quickRerunEligible: false,
+    } satisfies WorkflowPreparation;
+    useWorkflowStore.setState({
+      overview,
+      overviewStatus: "ready",
+      preparation: prep,
+      surface: "preparation",
+      operations: {
+        "overview:reconcile": { requestId: 1, pending: true, error: null },
+        "prepare:update_wiki": { requestId: 2, pending: true, error: null },
+        "prepare:health_check": { requestId: 3, pending: false, error: { summary: "health preparation failed", technicalDetails: "PREP_FAILED" } },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("health preparation failed");
+    expect(screen.queryByText("refresh unavailable")).not.toBeInTheDocument();
+    expect(document.querySelector(".workflows-view")).toHaveAttribute("aria-busy", "false");
+    expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeEnabled();
+  });
+
+  it("retries detail hydration with a targeted open and clears only its error", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const waiting = {
+      schemaVersion: 1, taskId: "waiting-retry", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
+      pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: [], candidate: null, expiresAt: null, checkpointHash: null }, result: null, error: null,
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
+    } satisfies WorkflowRun;
+    useWorkflowStore.setState({
+      overview,
+      overviewStatus: "ready",
+      runs: [waiting],
+      selectedTaskId: waiting.taskId,
+      surface: "detail",
+      operations: {
+        "task:waiting-retry:hydrate:action-a": {
+          requestId: 8,
+          pending: false,
+          error: { summary: "detail unavailable", technicalDetails: "DETAIL_FAILED" },
+        },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
+
+    expect(controller.openRun).toHaveBeenCalledWith(waiting.taskId);
+    expect(controller.refresh).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState().operations["task:waiting-retry:hydrate:action-a"]?.error).toBeNull();
+  });
+
+  it("shows and retries an overview-owned task open failure", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    useWorkflowStore.setState({
+      overview,
+      overviewStatus: "ready",
+      surface: "overview",
+      operations: {
+        "task:failed-open:open": {
+          requestId: 9,
+          pending: false,
+          error: { summary: "task detail unavailable", technicalDetails: "OPEN_FAILED" },
+        },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("task detail unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
+
+    expect(controller.openRun).toHaveBeenCalledWith("failed-open");
+    expect(useWorkflowStore.getState().operations["task:failed-open:open"]?.error).toBeNull();
   });
 
   it("shows complete confirmation evidence and valid queue actions", () => {
@@ -247,6 +386,26 @@ describe("Workflows overview", () => {
     expect(controller.confirm).toHaveBeenCalledWith("waiting-a", "action-a");
   });
 
+  it("keeps confirmation mutations enabled while read-only detail hydration is pending", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const waiting = {
+      schemaVersion: 1, taskId: "waiting-hydrate", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
+      pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/a.md"], candidate: null, expiresAt: null, checkpointHash: null }, result: null, error: null,
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
+    } as WorkflowRun;
+    useWorkflowStore.setState({
+      operations: {
+        "task:waiting-hydrate:hydrate:action-a": { requestId: 1, pending: true, error: null },
+      },
+    });
+
+    render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /workflows.action.applyChanges/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "workflows.action.discard" })).toBeEnabled();
+  });
+
   it("prepares a recommended next workflow without starting it", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const completed = {
@@ -260,6 +419,21 @@ describe("Workflows overview", () => {
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.prepareNext" }));
     expect(controller.prepare).toHaveBeenCalledWith("health_check");
     expect(controller.startPrepared).not.toHaveBeenCalled();
+  });
+
+  it("disables the recommended preparation action while its own request is pending", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const completed = {
+      schemaVersion: 1, taskId: "completed-pending", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "completed",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null,
+      result: { kind: "update_wiki", created: 1, updated: 0, skipped: 0, deleted: 0, conflicted: 0, checkpointHash: null, finalCommit: null, affectedPaths: [] }, error: null,
+      startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
+    } satisfies WorkflowRun;
+    useWorkflowStore.setState({ operations: { "prepare:health_check": { requestId: 1, pending: true, error: null } } });
+
+    render(<WorkflowTaskDetail run={completed} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "workflows.action.prepareNext" })).toBeDisabled();
   });
 
   it("exposes retry choices as a disclosed button group", () => {
