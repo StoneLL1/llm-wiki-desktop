@@ -1165,13 +1165,13 @@
     "semantic_hash": ""
   },
   "src-tauri/src/tasks/task_model.rs": {
-    "mtime": 1785549225.889013,
-    "ast_hash": "b0d95292056ff62aef5ef24a8d2b99e1",
-    "semantic_hash": "b0d95292056ff62aef5ef24a8d2b99e1"
+    "mtime": 1786309090.3213084,
+    "ast_hash": "ec8e2d3c78e33c0f8cd4871c0a7f905a",
+    "semantic_hash": ""
   },
   "src-tauri/src/tasks/task_service.rs": {
-    "mtime": 1786299783.2251244,
-    "ast_hash": "02a27ddbdd8fd2a2c794dca3fd15b569",
+    "mtime": 1786310218.3654177,
+    "ast_hash": "d1c149327dc2c00c31d7f513916187f9",
     "semantic_hash": ""
   },
   "src-tauri/src/utils/i18n.rs": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786305472.407938,
-    "ast_hash": "ca20f8fd4b632b995c67669f1cebde72",
+    "mtime": 1786310575.1948652,
+    "ast_hash": "e0349b453adea15f45a91755da9b09e7",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786306269.9135232,
-    "ast_hash": "71f37c81255be2df89fc916d07ce78b1",
+    "mtime": 1786306440.8533955,
+    "ast_hash": "d50bb4307977485b79915ba712affc44",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -4220,8 +4220,18 @@
     "semantic_hash": ""
   },
   "docs/qa/workflows-remediation-batch5b-evidence.md": {
-    "mtime": 1786306269.2353873,
-    "ast_hash": "18e428b6d064df7cce49dfbca87ebad5",
+    "mtime": 1786306440.1706839,
+    "ast_hash": "d58a1321d2c158746d88979bfa92a3f4",
+    "semantic_hash": ""
+  },
+  "docs/qa/workflows-remediation-batch5c-evidence.md": {
+    "mtime": 1786310561.6566446,
+    "ast_hash": "42ab96f029f526d45fcf9d55d7bb3385",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260809_211103_batch_5c_\u4e2d_workflow_progress_persistence_\u4e0e_barrier.md": {
+    "mtime": 1786309863.1531096,
+    "ast_hash": "4b435c8dec55f10822b634832fd6538f",
     "semantic_hash": ""
   }
 }

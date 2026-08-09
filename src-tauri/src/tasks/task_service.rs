@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::cell::Cell;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -29,6 +32,111 @@ use crate::utils::path_safety::{
 };
 
 const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
+const WORKFLOW_PROGRESS_PERSISTENCE_WINDOW: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct WorkflowPersistenceLane {
+    next_revision: u64,
+    persisted_revision: u64,
+    last_observational_write_ms: Option<u64>,
+    pending_observational_revision: Option<u64>,
+    trailing_flush_scheduled: bool,
+    trailing_flush_generation: u64,
+    pending_error: Option<String>,
+}
+
+struct WorkflowPersistenceClock {
+    started_at: Instant,
+    #[cfg(test)]
+    manual_enabled: AtomicBool,
+    #[cfg(test)]
+    manual_ms: AtomicU64,
+}
+
+impl Default for WorkflowPersistenceClock {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            #[cfg(test)]
+            manual_enabled: AtomicBool::new(false),
+            #[cfg(test)]
+            manual_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+impl WorkflowPersistenceClock {
+    fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if self.manual_enabled.load(Ordering::SeqCst) {
+            return self.manual_ms.load(Ordering::SeqCst);
+        }
+        u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    #[cfg(test)]
+    fn advance(&self, duration: Duration) {
+        self.manual_enabled.store(true, Ordering::SeqCst);
+        self.manual_ms.fetch_add(
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    #[cfg(test)]
+    fn reset(&self) {
+        self.manual_enabled.store(true, Ordering::SeqCst);
+        self.manual_ms.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn is_manual(&self) -> bool {
+        self.manual_enabled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkflowMutationDurability {
+    Barrier,
+    ObservationalProgress,
+}
+
+#[cfg(test)]
+struct PersistenceWriterGate {
+    entered: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+    release: (Mutex<bool>, std::sync::Condvar),
+}
+
+#[cfg(test)]
+impl PersistenceWriterGate {
+    fn new() -> (Self, std::sync::mpsc::Receiver<()>) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        (
+            Self {
+                entered: Mutex::new(Some(entered_tx)),
+                release: (Mutex::new(false), std::sync::Condvar::new()),
+            },
+            entered_rx,
+        )
+    }
+
+    fn block_writer(&self) {
+        if let Some(entered) = self.entered.lock().expect("lock poisoned").take() {
+            let _ = entered.send(());
+        }
+        let (released, ready) = &self.release;
+        let mut released = released.lock().expect("lock poisoned");
+        while !*released {
+            released = ready.wait(released).expect("lock poisoned");
+        }
+    }
+
+    fn release(&self) {
+        let (released, ready) = &self.release;
+        *released.lock().expect("lock poisoned") = true;
+        ready.notify_all();
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -168,24 +276,60 @@ fn validate_task_persistence_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct TaskService {
-    tasks: RwLock<HashMap<String, TaskEntry>>,
-    cancellation: CancellationRegistry,
-    event_bus: RwLock<EventBus>,
-    project_root: RwLock<Option<PathBuf>>,
-    task_roots: RwLock<HashMap<String, PathBuf>>,
-    task_persistence_dirs: RwLock<HashMap<String, PathBuf>>,
+    tasks: Arc<RwLock<HashMap<String, TaskEntry>>>,
+    cancellation: Arc<CancellationRegistry>,
+    event_bus: Arc<RwLock<EventBus>>,
+    project_root: Arc<RwLock<Option<PathBuf>>>,
+    task_roots: Arc<RwLock<HashMap<String, PathBuf>>>,
+    task_persistence_dirs: Arc<RwLock<HashMap<String, PathBuf>>>,
+    workflow_persistence_lanes: Arc<RwLock<HashMap<String, Arc<Mutex<WorkflowPersistenceLane>>>>>,
+    workflow_persistence_clock: Arc<WorkflowPersistenceClock>,
+    #[cfg(test)]
+    injected_persistence_failures: Arc<Mutex<HashMap<String, usize>>>,
+    #[cfg(test)]
+    active_persistence_writers: Arc<Mutex<HashMap<String, usize>>>,
+    #[cfg(test)]
+    peak_persistence_writers: Arc<Mutex<HashMap<String, usize>>>,
+    #[cfg(test)]
+    persistence_writer_gates: Arc<Mutex<HashMap<String, Arc<PersistenceWriterGate>>>>,
+    #[cfg(test)]
+    persistence_writes_with_task_lock: Arc<AtomicU64>,
+    #[cfg(test)]
+    persistence_write_counts: Arc<Mutex<HashMap<String, usize>>>,
+    #[cfg(test)]
+    trailing_flush_notifications: Arc<(Mutex<Vec<(String, u64)>>, std::sync::Condvar)>,
 }
 
 impl Default for TaskService {
     fn default() -> Self {
         Self {
-            tasks: RwLock::new(HashMap::new()),
-            cancellation: CancellationRegistry::new(),
-            event_bus: RwLock::new(EventBus::new_noop()),
-            project_root: RwLock::new(None),
-            task_roots: RwLock::new(HashMap::new()),
-            task_persistence_dirs: RwLock::new(HashMap::new()),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            cancellation: Arc::new(CancellationRegistry::new()),
+            event_bus: Arc::new(RwLock::new(EventBus::new_noop())),
+            project_root: Arc::new(RwLock::new(None)),
+            task_roots: Arc::new(RwLock::new(HashMap::new())),
+            task_persistence_dirs: Arc::new(RwLock::new(HashMap::new())),
+            workflow_persistence_lanes: Arc::new(RwLock::new(HashMap::new())),
+            workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
+            #[cfg(test)]
+            injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            active_persistence_writers: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            peak_persistence_writers: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            persistence_writer_gates: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            persistence_writes_with_task_lock: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            persistence_write_counts: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            trailing_flush_notifications: Arc::new((
+                Mutex::new(Vec::new()),
+                std::sync::Condvar::new(),
+            )),
         }
     }
 }
@@ -193,12 +337,31 @@ impl Default for TaskService {
 impl TaskService {
     pub fn with_event_bus(event_bus: EventBus) -> Self {
         Self {
-            tasks: RwLock::new(HashMap::new()),
-            cancellation: CancellationRegistry::new(),
-            event_bus: RwLock::new(event_bus),
-            project_root: RwLock::new(None),
-            task_roots: RwLock::new(HashMap::new()),
-            task_persistence_dirs: RwLock::new(HashMap::new()),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            cancellation: Arc::new(CancellationRegistry::new()),
+            event_bus: Arc::new(RwLock::new(event_bus)),
+            project_root: Arc::new(RwLock::new(None)),
+            task_roots: Arc::new(RwLock::new(HashMap::new())),
+            task_persistence_dirs: Arc::new(RwLock::new(HashMap::new())),
+            workflow_persistence_lanes: Arc::new(RwLock::new(HashMap::new())),
+            workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
+            #[cfg(test)]
+            injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            active_persistence_writers: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            peak_persistence_writers: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            persistence_writer_gates: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            persistence_writes_with_task_lock: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            persistence_write_counts: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            trailing_flush_notifications: Arc::new((
+                Mutex::new(Vec::new()),
+                std::sync::Condvar::new(),
+            )),
         }
     }
 
@@ -636,8 +799,21 @@ impl TaskService {
         ids: &[String],
         task_state_root: Option<PathBuf>,
     ) -> Result<Vec<(String, WorkflowPersistenceTransition)>, String> {
+        let mut serialized_ids = ids.to_vec();
+        serialized_ids.sort();
+        serialized_ids.dedup();
+        let lanes = serialized_ids
+            .iter()
+            .map(|id| self.workflow_persistence_lane(id))
+            .collect::<Vec<_>>();
+        let mut lane_guards = lanes
+            .iter()
+            .map(|lane| lane.lock().expect("lock poisoned"))
+            .collect::<Vec<_>>();
         let mut task_updates = Vec::new();
         let mut log_events = Vec::new();
+        let mut previous_states = Vec::new();
+        let mut upgrade_ids = Vec::new();
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let mut persistence = self.task_persistence_dirs.write().expect("lock poisoned");
         let mut transitions = Vec::new();
@@ -663,12 +839,13 @@ impl TaskService {
             let entry = tasks
                 .get_mut(&id)
                 .expect("validated workflow target must remain present while locked");
+            let previous = persistence.get(&id);
+            let transition = persistence_transition(previous, task_state_root.as_ref());
+            previous_states.push((id.clone(), entry.clone(), previous.cloned()));
             let workflow = entry
                 .workflow
                 .as_mut()
                 .expect("validated workflow target must retain workflow state while locked");
-            let previous = persistence.get(&id);
-            let transition = persistence_transition(previous, task_state_root.as_ref());
             match task_state_root.as_ref() {
                 Some(root) => {
                     persistence.insert(id.clone(), root.clone());
@@ -678,6 +855,9 @@ impl TaskService {
                     persistence.remove(&id);
                     workflow.persistence = WorkflowPersistenceMode::MemoryOnly;
                 }
+            }
+            if transition == WorkflowPersistenceTransition::UpgradedToPersistent {
+                upgrade_ids.push(id.clone());
             }
             transitions.push((id.clone(), transition));
             let Some((level, message)) = persistence_transition_log(transition) else {
@@ -700,6 +880,132 @@ impl TaskService {
         }
         drop(persistence);
         drop(tasks);
+
+        let mut disk_backups = HashMap::new();
+        for id in &upgrade_ids {
+            let backup = (|| -> Result<(PathBuf, PathBuf, Option<PersistedTaskEntry>), String> {
+                let project_root = self
+                    .task_roots
+                    .read()
+                    .expect("lock poisoned")
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("Workflow task has no project root: {id}"))?;
+                let tasks_dir = task_state_root
+                    .as_ref()
+                    .expect("persistence upgrades require a task-state root")
+                    .clone();
+                let path = tasks_dir.join(format!("{id}.json"));
+                let backup = match std::fs::symlink_metadata(&path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(format!(
+                            "Failed to inspect workflow persistence transition target {}: {error}",
+                            path.display()
+                        ));
+                    }
+                    Ok(_) => {
+                        let safe_dir =
+                            validate_existing_project_directory(&project_root, &tasks_dir)
+                                .map_err(|error| {
+                                    format!(
+                                        "Workflow persistence transition root is unsafe: {error}"
+                                    )
+                                })?;
+                        let safe_path = validate_existing_project_file(&project_root, &path)
+                            .map_err(|error| {
+                                format!("Workflow persistence transition target is unsafe: {error}")
+                            })?;
+                        let bytes = std::fs::read(&safe_path).map_err(|error| {
+                            format!(
+                                "Failed to back up workflow persistence transition target {}: {error}",
+                                safe_path.display()
+                                )
+                            })?;
+                        if safe_path.parent() != Some(safe_dir.as_path())
+                            || safe_path.file_name()
+                                != Some(std::ffi::OsStr::new(&format!("{id}.json")))
+                        {
+                            return Err(format!(
+                                "Workflow persistence transition target does not match its binding: {}",
+                                safe_path.display()
+                            ));
+                        }
+                        let json = String::from_utf8(bytes).map_err(|error| {
+                            format!(
+                                "Workflow persistence transition target is not UTF-8 {}: {error}",
+                                safe_path.display()
+                            )
+                        })?;
+                        let (task, log_lines, activities, workflow) =
+                            parse_persisted_task(&json, id)?;
+                        Some(PersistedTaskEntry {
+                            schema_version: PERSISTED_TASK_SCHEMA_VERSION,
+                            task,
+                            log_lines,
+                            activities,
+                            workflow,
+                        })
+                    }
+                };
+                Ok((project_root, tasks_dir, backup))
+            })();
+            match backup {
+                Ok(backup) => {
+                    disk_backups.insert(id.clone(), backup);
+                }
+                Err(error) => {
+                    self.restore_workflow_rebind_state(&previous_states);
+                    return Err(error);
+                }
+            }
+        }
+
+        let mut written_upgrades: Vec<String> = Vec::new();
+        for id in &upgrade_ids {
+            let lane_index = serialized_ids
+                .binary_search(id)
+                .expect("workflow persistence lane must remain indexed");
+            if let Err(error) =
+                self.persist_current_task_with_lane(id, Some(&mut lane_guards[lane_index]))
+            {
+                let mut rollback_errors = Vec::new();
+                for written_id in &written_upgrades {
+                    let (project_root, tasks_dir, backup) = disk_backups
+                        .get(written_id)
+                        .expect("written upgrade must retain its disk backup");
+                    let rollback = if let Some(previous) = backup {
+                        self.write_persisted_task_snapshot(
+                            project_root,
+                            tasks_dir,
+                            written_id,
+                            previous,
+                        )
+                        .map(|_| ())
+                    } else {
+                        remove_persisted_task_snapshot(project_root, tasks_dir, written_id)
+                    };
+                    if let Err(rollback_error) = rollback {
+                        rollback_errors.push(rollback_error);
+                    }
+                }
+                self.restore_workflow_rebind_state(&previous_states);
+                let rollback_detail = if rollback_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!("; rollback errors: {}", rollback_errors.join(" | "))
+                };
+                return Err(format!("{error}{rollback_detail}"));
+            }
+            written_upgrades.push(id.clone());
+        }
+        for lane in &mut lane_guards {
+            lane.pending_error = None;
+            lane.pending_observational_revision = None;
+            lane.trailing_flush_scheduled = false;
+            lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+        }
+        drop(lane_guards);
         for (project_id, task_id, line) in log_events {
             self.emit(
                 crate::models::task::BackendEventType::TaskLog,
@@ -719,12 +1025,33 @@ impl TaskService {
         Ok(transitions)
     }
 
+    fn restore_workflow_rebind_state(
+        &self,
+        previous_states: &[(String, TaskEntry, Option<PathBuf>)],
+    ) {
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let mut persistence = self.task_persistence_dirs.write().expect("lock poisoned");
+        for (id, entry, previous_dir) in previous_states {
+            tasks.insert(id.clone(), entry.clone());
+            match previous_dir {
+                Some(dir) => {
+                    persistence.insert(id.clone(), dir.clone());
+                }
+                None => {
+                    persistence.remove(id);
+                }
+            }
+        }
+    }
+
     pub(crate) fn record_workflow_persistence_transition(
         &self,
         id: &str,
         was_persistent: bool,
         is_persistent: bool,
     ) -> Result<(), String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let transition = match (was_persistent, is_persistent) {
             (true, false) => WorkflowPersistenceTransition::DowngradedToMemoryOnly,
             (false, true) => WorkflowPersistenceTransition::UpgradedToPersistent,
@@ -737,6 +1064,7 @@ impl TaskService {
         let entry = tasks
             .get_mut(id)
             .ok_or_else(|| format!("Task not found: {id}"))?;
+        let previous_entry = entry.clone();
         let workflow = entry
             .workflow
             .as_mut()
@@ -760,6 +1088,29 @@ impl TaskService {
             .to_run(&entry.task)
             .ok_or_else(|| format!("Workflow task has no project id: {id}"))?;
         drop(tasks);
+        if is_persistent {
+            if self.workflow_persistence_dir(id).is_none() {
+                self.tasks
+                    .write()
+                    .expect("lock poisoned")
+                    .insert(id.to_string(), previous_entry);
+                return Err(format!(
+                    "Workflow persistence transition has no task-state root: {id}"
+                ));
+            }
+            if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+                self.tasks
+                    .write()
+                    .expect("lock poisoned")
+                    .insert(id.to_string(), previous_entry);
+                return Err(error);
+            }
+        } else {
+            lane.pending_observational_revision = None;
+            lane.trailing_flush_scheduled = false;
+            lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+            lane.pending_error = None;
+        }
         self.emit(
             crate::models::task::BackendEventType::TaskLog,
             project_id.clone(),
@@ -852,10 +1203,54 @@ impl TaskService {
         runs
     }
 
+    fn workflow_persistence_lane(&self, id: &str) -> Arc<Mutex<WorkflowPersistenceLane>> {
+        if let Some(lane) = self
+            .workflow_persistence_lanes
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned()
+        {
+            return lane;
+        }
+        self.workflow_persistence_lanes
+            .write()
+            .expect("lock poisoned")
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(WorkflowPersistenceLane::default())))
+            .clone()
+    }
+
+    fn workflow_persistence_lane_if_present(
+        &self,
+        id: &str,
+    ) -> Option<Arc<Mutex<WorkflowPersistenceLane>>> {
+        self.tasks
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .is_some_and(|entry| entry.workflow.is_some())
+            .then(|| self.workflow_persistence_lane(id))
+    }
+
     pub(crate) fn mutate_workflow<F>(&self, id: &str, mutate: F) -> Result<WorkflowRun, String>
     where
         F: FnOnce(&mut BackendTask, &mut WorkflowExecutionState) -> Result<(), String>,
     {
+        self.mutate_workflow_with_durability(id, WorkflowMutationDurability::Barrier, mutate)
+    }
+
+    fn mutate_workflow_with_durability<F>(
+        &self,
+        id: &str,
+        durability: WorkflowMutationDurability,
+        mutate: F,
+    ) -> Result<WorkflowRun, String>
+    where
+        F: FnOnce(&mut BackendTask, &mut WorkflowExecutionState) -> Result<(), String>,
+    {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let project_root = self
             .task_roots
             .read()
@@ -902,19 +1297,8 @@ impl TaskService {
             activities: entry.activities.clone(),
             workflow: entry.workflow.clone(),
         };
-        if let Some(tasks_dir) = persistence_dir {
-            let project_root = project_root
-                .as_deref()
-                .ok_or_else(|| format!("Workflow task has no project root: {id}"))?;
-            let write_result = write_persisted_task(project_root, &tasks_dir, id, &persisted)
-                .map(|path| entry.persisted_path = Some(path));
-            if let Err(error) = write_result {
-                entry.task = previous_task;
-                entry.workflow = previous_workflow;
-                return Err(error);
-            }
-        }
-
+        lane.next_revision = lane.next_revision.saturating_add(1);
+        let revision = lane.next_revision;
         let task = entry.task.clone();
         let run = entry
             .workflow
@@ -922,6 +1306,97 @@ impl TaskService {
             .and_then(|workflow| workflow.to_run(&task))
             .ok_or_else(|| format!("Workflow task has no project: {id}"))?;
         drop(tasks);
+
+        let now_ms = self.workflow_persistence_clock.now_ms();
+        let should_persist = match durability {
+            WorkflowMutationDurability::Barrier => persistence_dir.is_some(),
+            WorkflowMutationDurability::ObservationalProgress => {
+                persistence_dir.is_some()
+                    && lane.last_observational_write_ms.is_none_or(|last| {
+                        now_ms.saturating_sub(last)
+                            >= u64::try_from(WORKFLOW_PROGRESS_PERSISTENCE_WINDOW.as_millis())
+                                .unwrap_or(u64::MAX)
+                    })
+            }
+        };
+        let mut trailing_flush = None;
+        if should_persist {
+            let tasks_dir = persistence_dir
+                .as_deref()
+                .expect("persistence was required only with a task-state root");
+            let project_root = project_root
+                .as_deref()
+                .ok_or_else(|| format!("Workflow task has no project root: {id}"))?;
+            match self.write_persisted_task_snapshot(project_root, tasks_dir, id, &persisted) {
+                Ok(path) => {
+                    lane.persisted_revision = revision;
+                    lane.pending_error = None;
+                    if durability == WorkflowMutationDurability::ObservationalProgress {
+                        lane.last_observational_write_ms = Some(now_ms);
+                        lane.pending_observational_revision = None;
+                        lane.trailing_flush_scheduled = false;
+                        lane.trailing_flush_generation =
+                            lane.trailing_flush_generation.saturating_add(1);
+                    } else {
+                        lane.pending_observational_revision = None;
+                        lane.trailing_flush_scheduled = false;
+                        lane.trailing_flush_generation =
+                            lane.trailing_flush_generation.saturating_add(1);
+                    }
+                    if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                        entry.persisted_path = Some(path);
+                    }
+                }
+                Err(error) if durability == WorkflowMutationDurability::ObservationalProgress => {
+                    // Progress remains a live in-memory fact. The error is retained
+                    // on the task's persistence lane; the next barrier retries the
+                    // latest revision before it can publish any barrier event.
+                    lane.pending_error = Some(error);
+                    lane.pending_observational_revision = Some(revision);
+                    if !lane.trailing_flush_scheduled {
+                        lane.trailing_flush_scheduled = true;
+                        lane.trailing_flush_generation =
+                            lane.trailing_flush_generation.saturating_add(1);
+                        trailing_flush = Some((
+                            WORKFLOW_PROGRESS_PERSISTENCE_WINDOW,
+                            lane.trailing_flush_generation,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    let mut tasks = self.tasks.write().expect("lock poisoned");
+                    let entry = tasks
+                        .get_mut(id)
+                        .ok_or_else(|| format!("Task disappeared during persistence: {id}"))?;
+                    entry.task = previous_task;
+                    entry.workflow = previous_workflow;
+                    lane.pending_error = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        } else if persistence_dir.is_none() {
+            lane.persisted_revision = revision;
+            lane.pending_observational_revision = None;
+            lane.trailing_flush_scheduled = false;
+            lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+            lane.pending_error = None;
+        } else if durability == WorkflowMutationDurability::ObservationalProgress {
+            lane.pending_observational_revision = Some(revision);
+            if !lane.trailing_flush_scheduled {
+                lane.trailing_flush_scheduled = true;
+                let window_ms = u64::try_from(WORKFLOW_PROGRESS_PERSISTENCE_WINDOW.as_millis())
+                    .unwrap_or(u64::MAX);
+                let elapsed_ms = lane
+                    .last_observational_write_ms
+                    .map(|last| now_ms.saturating_sub(last))
+                    .unwrap_or_default();
+                lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+                trailing_flush = Some((
+                    Duration::from_millis(window_ms.saturating_sub(elapsed_ms)),
+                    lane.trailing_flush_generation,
+                ));
+            }
+        }
 
         self.emit(
             crate::models::task::BackendEventType::WorkflowUpdated,
@@ -944,7 +1419,100 @@ impl TaskService {
             Some(id.to_string()),
             task,
         );
+        drop(lane);
+        if let Some((delay, generation)) = trailing_flush {
+            self.schedule_workflow_progress_flush(id.to_string(), delay, generation);
+        }
         Ok(run)
+    }
+
+    fn schedule_workflow_progress_flush(&self, id: String, delay: Duration, generation: u64) {
+        #[cfg(test)]
+        if self.workflow_persistence_clock.is_manual() {
+            return;
+        }
+        let service = self.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                tokio::time::sleep(delay).await;
+                service.flush_pending_workflow_progress(&id, generation);
+            });
+        } else {
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                service.flush_pending_workflow_progress(&id, generation);
+            });
+        }
+    }
+
+    fn flush_pending_workflow_progress(&self, id: &str, generation: u64) {
+        let Some(persistence_lane) = self.workflow_persistence_lane_if_present(id) else {
+            return;
+        };
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        if lane.trailing_flush_generation != generation {
+            return;
+        }
+        let Some(revision) = lane.pending_observational_revision else {
+            lane.trailing_flush_scheduled = false;
+            return;
+        };
+        let project_root = self
+            .task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
+        let persistence_dir = self
+            .task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
+        let persisted = self
+            .tasks
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .map(|entry| PersistedTaskEntry {
+                schema_version: PERSISTED_TASK_SCHEMA_VERSION,
+                task: entry.task.clone(),
+                log_lines: entry.log_lines.clone(),
+                activities: entry.activities.clone(),
+                workflow: entry.workflow.clone(),
+            });
+        let result = match (project_root, persistence_dir, persisted) {
+            (Some(project_root), Some(tasks_dir), Some(persisted)) => {
+                self.write_persisted_task_snapshot(&project_root, &tasks_dir, id, &persisted)
+            }
+            _ => {
+                lane.pending_observational_revision = None;
+                lane.trailing_flush_scheduled = false;
+                return;
+            }
+        };
+        match result {
+            Ok(path) => {
+                lane.persisted_revision = revision;
+                lane.last_observational_write_ms = Some(self.workflow_persistence_clock.now_ms());
+                lane.pending_observational_revision = None;
+                lane.pending_error = None;
+                if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                    entry.persisted_path = Some(path);
+                }
+            }
+            Err(error) => lane.pending_error = Some(error),
+        }
+        lane.trailing_flush_scheduled = false;
+        #[cfg(test)]
+        {
+            let (completed, ready) = &*self.trailing_flush_notifications;
+            completed
+                .lock()
+                .expect("lock poisoned")
+                .push((id.to_string(), generation));
+            ready.notify_all();
+        }
     }
 
     pub fn set_workflow_queue_state(
@@ -1036,22 +1604,26 @@ impl TaskService {
         total: Option<u64>,
     ) -> Result<WorkflowRun, String> {
         let cancellation = self.cancellation.get(id);
-        self.mutate_workflow(id, |task, workflow| {
-            require_running_workflow(task, cancellation.as_ref(), id)?;
-            require_current_stage(workflow, stage_id)?;
-            let stage = workflow
-                .stages
-                .iter_mut()
-                .find(|stage| stage.id == stage_id)
-                .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?;
-            if stage.status != WorkflowStageStatus::Running {
-                return Err(format!("Workflow stage is not running: {stage_id}"));
-            }
-            stage.current_item = current_item;
-            stage.progress =
-                Some(crate::models::workflow::WorkflowCountProgress { current, total });
-            Ok(())
-        })
+        self.mutate_workflow_with_durability(
+            id,
+            WorkflowMutationDurability::ObservationalProgress,
+            |task, workflow| {
+                require_running_workflow(task, cancellation.as_ref(), id)?;
+                require_current_stage(workflow, stage_id)?;
+                let stage = workflow
+                    .stages
+                    .iter_mut()
+                    .find(|stage| stage.id == stage_id)
+                    .ok_or_else(|| format!("Workflow stage not found: {stage_id}"))?;
+                if stage.status != WorkflowStageStatus::Running {
+                    return Err(format!("Workflow stage is not running: {stage_id}"));
+                }
+                stage.current_item = current_item;
+                stage.progress =
+                    Some(crate::models::workflow::WorkflowCountProgress { current, total });
+                Ok(())
+            },
+        )
     }
 
     pub fn complete_workflow_stage(&self, id: &str, stage_id: &str) -> Result<WorkflowRun, String> {
@@ -1530,6 +2102,10 @@ impl TaskService {
     }
 
     pub fn append_log(&self, id: &str, level: LogLevel, message: String) -> Result<(), String> {
+        let persistence_lane = self.workflow_persistence_lane_if_present(id);
+        let mut lane = persistence_lane
+            .as_ref()
+            .map(|lane| lane.lock().expect("lock poisoned"));
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -1548,8 +2124,13 @@ impl TaskService {
 
         drop(tasks);
         use crate::models::task::BackendEventType::TaskLog;
-        self.emit(TaskLog, pid, Some(tid), line);
-        self.persist_current_task(id)?;
+        if lane.is_some() {
+            self.persist_current_task_with_lane(id, lane.as_deref_mut())?;
+            self.emit(TaskLog, pid, Some(tid), line);
+        } else {
+            self.emit(TaskLog, pid, Some(tid), line);
+            self.persist_current_task(id)?;
+        }
 
         Ok(())
     }
@@ -1574,6 +2155,10 @@ impl TaskService {
     /// snapshot. Activity payloads are intentionally bounded and never carry
     /// raw model reasoning, tool arguments, file contents, or command output.
     pub fn emit_activity(&self, id: &str, activity: TaskActivity) {
+        let persistence_lane = self.workflow_persistence_lane_if_present(id);
+        let mut lane = persistence_lane
+            .as_ref()
+            .map(|lane| lane.lock().expect("lock poisoned"));
         let (pid, tid) = {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             let Some(entry) = tasks.get_mut(id) else {
@@ -1589,7 +2174,11 @@ impl TaskService {
             Some(tid),
             activity,
         );
-        let _ = self.persist_current_task(id);
+        if lane.is_some() {
+            let _ = self.persist_current_task_with_lane(id, lane.as_deref_mut());
+        } else {
+            let _ = self.persist_current_task(id);
+        }
     }
 
     /// Emit an ephemeral streaming delta for a generative task (chat answer
@@ -1879,6 +2468,10 @@ impl TaskService {
         id: &str,
         error: crate::errors::BackendError,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane_if_present(id);
+        let mut lane = persistence_lane
+            .as_ref()
+            .map(|lane| lane.lock().expect("lock poisoned"));
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -1889,7 +2482,11 @@ impl TaskService {
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
-        self.persist_current_task(id)?;
+        if lane.is_some() {
+            self.persist_current_task_with_lane(id, lane.as_deref_mut())?;
+        } else {
+            self.persist_current_task(id)?;
+        }
         self.emit(
             crate::models::task::BackendEventType::TaskUpdated,
             pid,
@@ -1946,6 +2543,10 @@ impl TaskService {
             .write()
             .expect("lock poisoned")
             .retain(|id, _| !removed_ids.contains(id));
+        self.workflow_persistence_lanes
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !removed_ids.contains(id));
         removed_count
     }
 
@@ -1998,6 +2599,10 @@ impl TaskService {
                 self.cancellation.remove(id);
             }
         }
+        self.workflow_persistence_lanes
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !matching_ids.contains(id));
         matching_ids.len()
     }
 
@@ -2033,6 +2638,10 @@ impl TaskService {
             .expect("lock poisoned")
             .retain(|id, _| !ids.contains(id));
         self.task_persistence_dirs
+            .write()
+            .expect("lock poisoned")
+            .retain(|id, _| !ids.contains(id));
+        self.workflow_persistence_lanes
             .write()
             .expect("lock poisoned")
             .retain(|id, _| !ids.contains(id));
@@ -2104,6 +2713,171 @@ impl TaskService {
         Ok(())
     }
 
+    fn write_persisted_task_snapshot(
+        &self,
+        project_root: &Path,
+        tasks_dir: &Path,
+        id: &str,
+        persisted: &PersistedTaskEntry,
+    ) -> Result<PathBuf, String> {
+        #[cfg(test)]
+        {
+            *self
+                .persistence_write_counts
+                .lock()
+                .expect("lock poisoned")
+                .entry(id.to_string())
+                .or_default() += 1;
+            if self.tasks.try_write().is_err() {
+                self.persistence_writes_with_task_lock
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            let active = {
+                let mut writers = self
+                    .active_persistence_writers
+                    .lock()
+                    .expect("lock poisoned");
+                let active = writers.entry(id.to_string()).or_default();
+                *active += 1;
+                *active
+            };
+            let mut peaks = self.peak_persistence_writers.lock().expect("lock poisoned");
+            let peak = peaks.entry(id.to_string()).or_default();
+            *peak = (*peak).max(active);
+        }
+        #[cfg(test)]
+        let writer_gate = self
+            .persistence_writer_gates
+            .lock()
+            .expect("lock poisoned")
+            .remove(id);
+        #[cfg(test)]
+        if let Some(gate) = writer_gate {
+            gate.block_writer();
+        }
+        #[cfg(test)]
+        let injected_failure = {
+            let mut failures = self
+                .injected_persistence_failures
+                .lock()
+                .expect("lock poisoned");
+            failures.get_mut(id).is_some_and(|remaining| {
+                if *remaining == 0 {
+                    return false;
+                }
+                *remaining -= 1;
+                true
+            })
+        };
+        #[cfg(not(test))]
+        let injected_failure = false;
+        let result = if injected_failure {
+            Err(format!("Injected task persistence failure: {id}"))
+        } else {
+            write_persisted_task(project_root, tasks_dir, id, persisted)
+        };
+        #[cfg(test)]
+        {
+            let mut writers = self
+                .active_persistence_writers
+                .lock()
+                .expect("lock poisoned");
+            let active = writers
+                .get_mut(id)
+                .expect("writer instrumentation must remain registered");
+            *active = active.saturating_sub(1);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn advance_workflow_persistence_clock(&self, duration: Duration) {
+        self.workflow_persistence_clock.advance(duration);
+    }
+
+    #[cfg(test)]
+    fn reset_workflow_progress_persistence_window(&self, id: &str) {
+        self.workflow_persistence_clock.reset();
+        let lane = self.workflow_persistence_lane(id);
+        let mut lane = lane.lock().expect("lock poisoned");
+        lane.last_observational_write_ms = None;
+        lane.pending_observational_revision = None;
+        lane.trailing_flush_scheduled = false;
+        lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+    }
+
+    #[cfg(test)]
+    fn inject_task_persistence_failures(&self, id: &str, count: usize) {
+        self.injected_persistence_failures
+            .lock()
+            .expect("lock poisoned")
+            .insert(id.to_string(), count);
+    }
+
+    #[cfg(test)]
+    fn gate_next_persistence_write(
+        &self,
+        id: &str,
+    ) -> (Arc<PersistenceWriterGate>, std::sync::mpsc::Receiver<()>) {
+        let (gate, entered) = PersistenceWriterGate::new();
+        let gate = Arc::new(gate);
+        self.persistence_writer_gates
+            .lock()
+            .expect("lock poisoned")
+            .insert(id.to_string(), Arc::clone(&gate));
+        (gate, entered)
+    }
+
+    #[cfg(test)]
+    fn persistence_writer_metrics(&self, id: &str) -> (usize, u64) {
+        let peak = self
+            .peak_persistence_writers
+            .lock()
+            .expect("lock poisoned")
+            .get(id)
+            .copied()
+            .unwrap_or_default();
+        let writes_with_task_lock = self
+            .persistence_writes_with_task_lock
+            .load(Ordering::SeqCst);
+        (peak, writes_with_task_lock)
+    }
+
+    #[cfg(test)]
+    fn persistence_write_count(&self, id: &str) -> usize {
+        self.persistence_write_counts
+            .lock()
+            .expect("lock poisoned")
+            .get(id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn wait_for_trailing_flush(&self, id: &str, timeout: Duration) {
+        let generation = self
+            .workflow_persistence_lane(id)
+            .lock()
+            .expect("lock poisoned")
+            .trailing_flush_generation;
+        let (completed, ready) = &*self.trailing_flush_notifications;
+        let completed = completed.lock().expect("lock poisoned");
+        let (completed, wait) = ready
+            .wait_timeout_while(completed, timeout, |completed| {
+                !completed.iter().any(|(task_id, completed_generation)| {
+                    task_id == id && *completed_generation == generation
+                })
+            })
+            .expect("lock poisoned");
+        assert!(
+            !wait.timed_out()
+                && completed.iter().any(|(task_id, completed_generation)| {
+                    task_id == id && *completed_generation == generation
+                }),
+            "trailing persistence flush did not complete for {id} generation {generation}"
+        );
+    }
+
     fn persist_task_to_dir(
         &self,
         id: &str,
@@ -2134,6 +2908,18 @@ impl TaskService {
     }
 
     fn persist_current_task(&self, id: &str) -> Result<(), String> {
+        let persistence_lane = self.workflow_persistence_lane_if_present(id);
+        let mut lane = persistence_lane
+            .as_ref()
+            .map(|lane| lane.lock().expect("lock poisoned"));
+        self.persist_current_task_with_lane(id, lane.as_deref_mut())
+    }
+
+    fn persist_current_task_with_lane(
+        &self,
+        id: &str,
+        mut lane: Option<&mut WorkflowPersistenceLane>,
+    ) -> Result<(), String> {
         let project_root = self
             .task_roots
             .read()
@@ -2159,10 +2945,28 @@ impl TaskService {
             workflow: entry.workflow.clone(),
         };
         let dir = validate_persistence_dir(&project_root, dir)?;
-        let path = write_persisted_task(&project_root, &dir, id, &persisted)?;
-
         drop(persistence);
         drop(tasks);
+        let revision = lane.as_mut().map(|lane| {
+            lane.next_revision = lane.next_revision.saturating_add(1);
+            lane.next_revision
+        });
+        let path = match self.write_persisted_task_snapshot(&project_root, &dir, id, &persisted) {
+            Ok(path) => path,
+            Err(error) => {
+                if let Some(lane) = lane.as_mut() {
+                    lane.pending_error = Some(error.clone());
+                }
+                return Err(error);
+            }
+        };
+        if let (Some(lane), Some(revision)) = (lane.as_mut(), revision) {
+            lane.persisted_revision = revision;
+            lane.pending_observational_revision = None;
+            lane.trailing_flush_scheduled = false;
+            lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+            lane.pending_error = None;
+        }
         if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
             entry.persisted_path = Some(path);
         }
@@ -2418,6 +3222,43 @@ fn write_persisted_task(
     Ok(path)
 }
 
+fn remove_persisted_task_snapshot(
+    project_root: &Path,
+    persistence_dir: &Path,
+    id: &str,
+) -> Result<(), String> {
+    validate_task_persistence_id(id)?;
+    let persistence_dir = validate_existing_project_directory(project_root, persistence_dir)
+        .map_err(|error| format!("Task persistence rollback path is unsafe: {error}"))?;
+    let path = persistence_dir.join(format!("{id}.json"));
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect rolled-back task {}: {error}",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+    }
+    let path = validate_existing_project_file(project_root, &path)
+        .map_err(|error| format!("Task persistence rollback entry is unsafe: {error}"))?;
+    if path.parent() != Some(persistence_dir.as_path())
+        || path.file_name() != Some(std::ffi::OsStr::new(&format!("{id}.json")))
+    {
+        return Err(format!(
+            "Task persistence rollback entry does not match its binding: {}",
+            path.display()
+        ));
+    }
+    std::fs::remove_file(&path).map_err(|error| {
+        format!(
+            "Failed to remove rolled-back task {}: {error}",
+            path.display()
+        )
+    })
+}
+
 fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> Result<(), String> {
     if workflow.current_stage_id.as_deref() != Some(stage_id) {
         return Err(format!("Workflow stage is not current: {stage_id}"));
@@ -2428,6 +3269,7 @@ fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::confirmation::{PendingActionType, RiskLevel};
     use crate::models::task::BackendEventType;
     use crate::models::workflow::{
         HealthCheckMode, WorkflowExecutionOptions, WorkflowKind, WorkflowRoute, WorkflowScope,
@@ -2723,7 +3565,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_rebind_to_persistent_waits_for_the_next_real_transition() {
+    fn queued_rebind_to_persistent_is_durable_before_it_returns() {
         let root = tempfile::tempdir().unwrap();
         let service = TaskService::default();
         let coordinator = WorkflowCoordinator::default();
@@ -2741,10 +3583,17 @@ mod tests {
                 .unwrap(),
             WorkflowPersistenceTransition::UpgradedToPersistent
         );
-        assert!(!task_path.exists());
-
-        service.start_workflow_stage(&run.task_id, "read").unwrap();
         assert!(task_path.exists());
+        let restarted = TaskService::default();
+        restarted
+            .recover_tasks_from(root.path(), &tasks_root, None)
+            .unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(recovered.persistence, WorkflowPersistenceMode::Persistent);
+        assert_eq!(
+            recovered.persistence_transition,
+            Some(WorkflowPersistenceTransition::UpgradedToPersistent)
+        );
         let rebound = service.get_workflow_run(&run.task_id).unwrap();
         assert_eq!(rebound.persistence, WorkflowPersistenceMode::Persistent);
         assert_eq!(
@@ -2754,6 +3603,32 @@ mod tests {
         assert!(service.get_logs(&run.task_id).unwrap().iter().any(|line| {
             line.level == LogLevel::Info && line.message.contains("newly derived")
         }));
+    }
+
+    #[test]
+    fn queued_rebind_write_failure_keeps_memory_only_state_and_publishes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, events) = make_service();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(&service, workflow_request(root.path(), None))
+                .unwrap(),
+        );
+        events.lock().unwrap().clear();
+        service.inject_task_persistence_failures(&run.task_id, 1);
+        let tasks_root = root.path().join(".app/任务");
+
+        let error = service
+            .rebind_workflow_persistence(&run.task_id, root.path(), Some(tasks_root.clone()))
+            .unwrap_err();
+
+        assert!(error.contains("Injected task persistence failure"));
+        assert!(!tasks_root.join(format!("{}.json", run.task_id)).exists());
+        assert_eq!(service.workflow_persistence_dir(&run.task_id), None);
+        let current = service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(current.persistence, WorkflowPersistenceMode::MemoryOnly);
+        assert_eq!(current.persistence_transition, None);
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2850,7 +3725,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_progress_counts_real_persistence_and_event_bus_work_at_scale() {
+    fn workflow_progress_coalesces_persistence_without_coalescing_live_events() {
         let root = tempfile::tempdir().unwrap();
         let (service, events) = make_service();
         let run = created_workflow(
@@ -2877,7 +3752,12 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(task_costs(), (500, 1_000));
+        let (persistence_writes, event_emissions) = task_costs();
+        assert!(
+            persistence_writes <= 1,
+            "500 progress updates inside one persistence window wrote {persistence_writes} task snapshots"
+        );
+        assert_eq!(event_emissions, 1_000);
         let captured = events.lock().unwrap();
         assert_eq!(captured.len(), 1_000);
         assert_eq!(
@@ -2897,8 +3777,646 @@ mod tests {
     }
 
     #[test]
+    fn workflow_progress_uses_the_250ms_window_and_stage_barrier_flushes_latest_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _) = make_service();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        service.reset_workflow_progress_persistence_window(&run.task_id);
+        reset_task_costs();
+
+        for current in 1..=500 {
+            service
+                .update_workflow_stage_progress(
+                    &run.task_id,
+                    "read",
+                    Some(format!("wiki/规模/页面-{current:04}.md")),
+                    current,
+                    Some(500),
+                )
+                .unwrap();
+            service.advance_workflow_persistence_clock(Duration::from_millis(20));
+        }
+
+        let progress_writes = task_costs().0;
+        assert!(
+            progress_writes <= 41,
+            "10 seconds of progress exceeded the 250ms persistence budget: {progress_writes}"
+        );
+        service
+            .complete_workflow_stage(&run.task_id, "read")
+            .unwrap();
+        assert_eq!(task_costs().0, progress_writes + 1);
+
+        let restarted = TaskService::default();
+        restarted.recover_tasks(root.path()).unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        let stage = recovered
+            .stages
+            .iter()
+            .find(|stage| stage.id == "read")
+            .unwrap();
+        assert_eq!(stage.status, WorkflowStageStatus::Completed);
+        assert_eq!(
+            stage.current_item.as_deref(),
+            Some("wiki/规模/页面-0500.md")
+        );
+        assert_eq!(
+            stage.progress.as_ref().map(|progress| progress.current),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn workflow_progress_trailing_flush_bounds_idle_crash_loss_to_one_window() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _) = make_service();
+        let tasks_root = root.path().join(".app/tasks");
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(tasks_root.clone())),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        service
+            .update_workflow_stage_progress(
+                &run.task_id,
+                "read",
+                Some("wiki/first.md".into()),
+                1,
+                Some(2),
+            )
+            .unwrap();
+        service
+            .update_workflow_stage_progress(
+                &run.task_id,
+                "read",
+                Some("wiki/尾随.md".into()),
+                2,
+                Some(2),
+            )
+            .unwrap();
+
+        service.wait_for_trailing_flush(&run.task_id, Duration::from_secs(2));
+
+        let restarted = TaskService::default();
+        restarted
+            .recover_tasks_from(root.path(), &tasks_root, None)
+            .unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        let stage = recovered
+            .stages
+            .iter()
+            .find(|stage| stage.id == "read")
+            .unwrap();
+        assert_eq!(stage.current_item.as_deref(), Some("wiki/尾随.md"));
+        assert_eq!(
+            stage.progress.as_ref().map(|progress| progress.current),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn generic_workflow_barrier_cancels_the_pending_trailing_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        for current in 1..=2 {
+            service
+                .update_workflow_stage_progress(
+                    &run.task_id,
+                    "read",
+                    Some(format!("wiki/barrier-{current}.md")),
+                    current,
+                    Some(2),
+                )
+                .unwrap();
+        }
+        let persistence_lane = service.workflow_persistence_lane(&run.task_id);
+        let pending_generation = {
+            let lane = persistence_lane.lock().unwrap();
+            assert!(lane.pending_observational_revision.is_some());
+            assert!(lane.trailing_flush_scheduled);
+            lane.trailing_flush_generation
+        };
+        let writes_before_barrier = service.persistence_write_count(&run.task_id);
+
+        service
+            .append_log(
+                &run.task_id,
+                LogLevel::Info,
+                "barrier flushes latest progress".into(),
+            )
+            .unwrap();
+        assert_eq!(
+            service.persistence_write_count(&run.task_id),
+            writes_before_barrier + 1
+        );
+        service.flush_pending_workflow_progress(&run.task_id, pending_generation);
+        assert_eq!(
+            service.persistence_write_count(&run.task_id),
+            writes_before_barrier + 1,
+            "a cancelled trailing generation performed a duplicate write"
+        );
+        let lane = persistence_lane.lock().unwrap();
+        assert!(lane.pending_observational_revision.is_none());
+        assert!(!lane.trailing_flush_scheduled);
+        assert!(lane.persisted_revision <= lane.next_revision);
+    }
+
+    #[test]
+    fn failed_observational_write_is_retried_by_the_next_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, events) = make_service();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        events.lock().unwrap().clear();
+        service.inject_task_persistence_failures(&run.task_id, 1);
+
+        let live = service
+            .update_workflow_stage_progress(
+                &run.task_id,
+                "read",
+                Some("wiki/恢复.md".into()),
+                7,
+                Some(10),
+            )
+            .unwrap();
+        assert_eq!(live.stages[0].progress.as_ref().unwrap().current, 7);
+        assert_eq!(events.lock().unwrap().len(), 2);
+
+        service
+            .complete_workflow_stage(&run.task_id, "read")
+            .unwrap();
+        let restarted = TaskService::default();
+        restarted.recover_tasks(root.path()).unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(recovered.stages[0].status, WorkflowStageStatus::Completed);
+        assert_eq!(
+            recovered.stages[0]
+                .progress
+                .as_ref()
+                .map(|progress| progress.current),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn confirmation_and_cancellation_barriers_persist_the_latest_progress_before_events() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, events) = make_service();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        service.reset_workflow_progress_persistence_window(&run.task_id);
+        service
+            .update_workflow_stage_progress(
+                &run.task_id,
+                "read",
+                Some("wiki/first.md".into()),
+                1,
+                Some(2),
+            )
+            .unwrap();
+        service
+            .update_workflow_stage_progress(
+                &run.task_id,
+                "read",
+                Some("wiki/第二页.md".into()),
+                2,
+                Some(2),
+            )
+            .unwrap();
+        events.lock().unwrap().clear();
+        let pending = WorkflowPendingAction {
+            id: "pending-1".into(),
+            action_type: PendingActionType::BatchRewrite,
+            risk_level: RiskLevel::High,
+            affected_paths: vec!["wiki/第二页.md".into()],
+            candidate: None,
+            expires_at: None,
+            checkpoint_hash: Some("checkpoint".into()),
+        };
+
+        service
+            .wait_workflow_stage(&run.task_id, "read", pending)
+            .unwrap();
+        let task_path = root
+            .path()
+            .join(".app/tasks")
+            .join(format!("{}.json", run.task_id));
+        let json = std::fs::read_to_string(&task_path).unwrap();
+        let (task, _, _, workflow) = parse_persisted_task(&json, &run.task_id).unwrap();
+        let workflow = workflow.unwrap();
+        assert_eq!(task.status, TaskStatus::WaitingForConfirmation);
+        assert_eq!(workflow.pending_action.as_ref().unwrap().id, "pending-1");
+        assert_eq!(workflow.stages[0].progress.as_ref().unwrap().current, 2);
+        assert_eq!(
+            events.lock().unwrap()[0].event_type,
+            BackendEventType::WorkflowUpdated
+        );
+
+        service.request_workflow_cancel(&run.task_id).unwrap();
+        service
+            .finalize_workflow_cancellation(&run.task_id)
+            .unwrap();
+        let json = std::fs::read_to_string(task_path).unwrap();
+        let (task, _, _, workflow) = parse_persisted_task(&json, &run.task_id).unwrap();
+        assert_eq!(task.status, TaskStatus::Cancelled);
+        assert!(workflow.unwrap().pending_action.is_none());
+    }
+
+    #[test]
+    fn terminal_barrier_write_failure_rolls_back_without_publishing_terminal_state() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, events) = make_service();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        service
+            .complete_workflow_stage(&run.task_id, "read")
+            .unwrap();
+        events.lock().unwrap().clear();
+        service.inject_task_persistence_failures(&run.task_id, 1);
+        let result = WorkflowResult::HealthCheck {
+            report_id: Some("report-1".into()),
+            persistent: true,
+            error_count: 0,
+            warning_count: 1,
+            info_count: 2,
+        };
+
+        let error = service
+            .complete_workflow(&run.task_id, result.clone())
+            .unwrap_err();
+        assert!(error.contains("Injected task persistence failure"));
+        let rolled_back = service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            rolled_back.display_status,
+            crate::models::workflow::WorkflowDisplayStatus::Running
+        );
+        assert!(rolled_back.result.is_none());
+        assert!(events.lock().unwrap().is_empty());
+
+        let completed = service.complete_workflow(&run.task_id, result).unwrap();
+        assert_eq!(
+            completed.display_status,
+            crate::models::workflow::WorkflowDisplayStatus::Completed
+        );
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| { event.event_type == BackendEventType::TaskCompleted }));
+    }
+
+    #[test]
+    fn failed_terminal_barrier_rollback_cannot_overwrite_a_concurrent_log() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        service
+            .complete_workflow_stage(&run.task_id, "read")
+            .unwrap();
+        service.inject_task_persistence_failures(&run.task_id, 1);
+        let (writer_gate, writer_entered) = service.gate_next_persistence_write(&run.task_id);
+        let completion_service = service.clone();
+        let completion_id = run.task_id.clone();
+        let completion = std::thread::spawn(move || {
+            completion_service.complete_workflow(
+                &completion_id,
+                WorkflowResult::HealthCheck {
+                    report_id: None,
+                    persistent: true,
+                    error_count: 0,
+                    warning_count: 0,
+                    info_count: 1,
+                },
+            )
+        });
+        writer_entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("terminal writer did not reach the deterministic gate");
+
+        let (log_started_tx, log_started_rx) = std::sync::mpsc::channel();
+        let (log_done_tx, log_done_rx) = std::sync::mpsc::channel();
+        let log_service = service.clone();
+        let log_id = run.task_id.clone();
+        let log_writer = std::thread::spawn(move || {
+            log_started_tx.send(()).unwrap();
+            let result =
+                log_service.append_log(&log_id, LogLevel::Info, "concurrent after rollback".into());
+            log_done_tx.send(()).unwrap();
+            result
+        });
+        log_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(log_done_rx.try_recv().is_err());
+        writer_gate.release();
+
+        let error = completion.join().unwrap().unwrap_err();
+        assert!(error.contains("Injected task persistence failure"));
+        log_writer.join().unwrap().unwrap();
+        log_done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let current = service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            current.display_status,
+            crate::models::workflow::WorkflowDisplayStatus::Running
+        );
+        assert!(current.result.is_none());
+        assert!(service
+            .get_logs(&run.task_id)
+            .unwrap()
+            .iter()
+            .any(|line| line.message == "concurrent after rollback"));
+
+        let restarted = TaskService::default();
+        restarted.recover_tasks(root.path()).unwrap();
+        assert!(restarted
+            .get_logs(&run.task_id)
+            .unwrap()
+            .iter()
+            .any(|line| line.message == "concurrent after rollback"));
+    }
+
+    #[test]
+    fn concurrent_progress_cannot_leave_a_stale_snapshot_after_a_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(TaskService::default());
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        let start = Arc::new(Barrier::new(9));
+        let mut workers = Vec::new();
+        for current in 1..=8 {
+            let service = Arc::clone(&service);
+            let task_id = run.task_id.clone();
+            let start = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                service
+                    .update_workflow_stage_progress(
+                        &task_id,
+                        "read",
+                        Some(format!("wiki/concurrent-{current}.md")),
+                        current,
+                        Some(8),
+                    )
+                    .unwrap();
+            }));
+        }
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        service
+            .complete_workflow_stage(&run.task_id, "read")
+            .unwrap();
+        let expected = service.get_workflow_run(&run.task_id).unwrap().stages[0].clone();
+
+        let restarted = TaskService::default();
+        restarted.recover_tasks(root.path()).unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(recovered.stages[0], expected);
+        assert_eq!(service.persistence_writer_metrics(&run.task_id), (1, 0));
+    }
+
+    #[test]
+    fn paused_progress_writer_serializes_before_newer_stage_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        service.reset_workflow_progress_persistence_window(&run.task_id);
+        let (writer_gate, writer_entered) = service.gate_next_persistence_write(&run.task_id);
+        let progress_service = service.clone();
+        let progress_id = run.task_id.clone();
+        let progress = std::thread::spawn(move || {
+            progress_service.update_workflow_stage_progress(
+                &progress_id,
+                "read",
+                Some("wiki/old-writer.md".into()),
+                1,
+                Some(1),
+            )
+        });
+        writer_entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("progress writer did not reach the deterministic gate");
+
+        let (barrier_started_tx, barrier_started_rx) = std::sync::mpsc::channel();
+        let (barrier_done_tx, barrier_done_rx) = std::sync::mpsc::channel();
+        let barrier_service = service.clone();
+        let barrier_id = run.task_id.clone();
+        let barrier = std::thread::spawn(move || {
+            barrier_started_tx.send(()).unwrap();
+            let result = barrier_service.complete_workflow_stage(&barrier_id, "read");
+            barrier_done_tx.send(()).unwrap();
+            result
+        });
+        barrier_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(barrier_done_rx.try_recv().is_err());
+
+        writer_gate.release();
+        progress.join().unwrap().unwrap();
+        barrier.join().unwrap().unwrap();
+        barrier_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let restarted = TaskService::default();
+        restarted.recover_tasks(root.path()).unwrap();
+        let stage = &restarted.get_workflow_run(&run.task_id).unwrap().stages[0];
+        assert_eq!(stage.status, WorkflowStageStatus::Completed);
+        assert_eq!(stage.current_item.as_deref(), Some("wiki/old-writer.md"));
+        assert_eq!(service.persistence_writer_metrics(&run.task_id), (1, 0));
+    }
+
+    #[test]
+    fn persistence_lanes_do_not_serialize_writers_from_different_projects() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let first = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(
+                        first_root.path(),
+                        Some(first_root.path().join(".app/tasks")),
+                    ),
+                )
+                .unwrap(),
+        );
+        let second = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(
+                        second_root.path(),
+                        Some(second_root.path().join(".app/tasks")),
+                    ),
+                )
+                .unwrap(),
+        );
+        for id in [&first.task_id, &second.task_id] {
+            service.start_workflow_stage(id, "read").unwrap();
+            service.reset_workflow_progress_persistence_window(id);
+        }
+        let (first_gate, first_entered) = service.gate_next_persistence_write(&first.task_id);
+        let (second_gate, second_entered) = service.gate_next_persistence_write(&second.task_id);
+
+        let spawn_progress = |id: String, current_item: &'static str| {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                service.update_workflow_stage_progress(
+                    &id,
+                    "read",
+                    Some(current_item.into()),
+                    1,
+                    Some(1),
+                )
+            })
+        };
+        let first_writer = spawn_progress(first.task_id.clone(), "wiki/first.md");
+        let second_writer = spawn_progress(second.task_id.clone(), "wiki/second.md");
+        first_entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first project writer did not start");
+        second_entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second project writer was serialized behind the first project");
+        first_gate.release();
+        second_gate.release();
+        first_writer.join().unwrap().unwrap();
+        second_writer.join().unwrap().unwrap();
+        assert_eq!(service.persistence_writer_metrics(&first.task_id), (1, 0));
+        assert_eq!(service.persistence_writer_metrics(&second.task_id), (1, 0));
+    }
+
+    #[test]
+    fn persistence_rollback_rejects_a_replaced_parent_alias_before_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let tasks_dir = root.path().join(".app").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::remove_dir(&tasks_dir).unwrap();
+        create_directory_alias(outside.path(), &tasks_dir);
+        let outside_task = outside.path().join("rollback-task.json");
+        std::fs::write(&outside_task, b"outside must survive").unwrap();
+
+        let error =
+            remove_persisted_task_snapshot(root.path(), &tasks_dir, "rollback-task").unwrap_err();
+
+        assert!(error.contains("unsafe"));
+        assert_eq!(
+            std::fs::read(&outside_task).unwrap(),
+            b"outside must survive"
+        );
+        remove_directory_alias(&tasks_dir);
+    }
+
+    #[test]
+    fn workflow_progress_write_budget_is_deterministic_across_ten_fixed_samples() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &service,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..10 {
+            service.reset_workflow_progress_persistence_window(&run.task_id);
+            reset_task_costs();
+            for current in 1..=500 {
+                service
+                    .update_workflow_stage_progress(
+                        &run.task_id,
+                        "read",
+                        Some(format!("wiki/sample-{current:04}.md")),
+                        current,
+                        Some(500),
+                    )
+                    .unwrap();
+                service.advance_workflow_persistence_clock(Duration::from_millis(20));
+            }
+            samples.push(task_costs().0);
+        }
+        assert!(samples.iter().all(|writes| *writes == samples[0]));
+        assert!(
+            samples[0] <= 41,
+            "unexpected persistence samples: {samples:?}"
+        );
+    }
+
+    #[test]
     #[ignore = "local release performance reference for the Batch 5C stop/go gate"]
     fn workflow_progress_release_reference_reports_persistence_share() {
+        const FIXTURES_PER_SAMPLE: usize = 10;
         assert!(
             !cfg!(debug_assertions),
             "Batch 5C reference must run with cargo test --release"
@@ -2915,6 +4433,7 @@ mod tests {
         );
         service.start_workflow_stage(&run.task_id, "read").unwrap();
         let update = || {
+            service.reset_workflow_progress_persistence_window(&run.task_id);
             for current in 1..=500 {
                 service
                     .update_workflow_stage_progress(
@@ -2925,12 +4444,15 @@ mod tests {
                         Some(500),
                     )
                     .unwrap();
+                service.advance_workflow_persistence_clock(Duration::from_millis(20));
             }
         };
         for _ in 0..5 {
             events.lock().unwrap().clear();
             reset_task_costs();
-            update();
+            for _ in 0..FIXTURES_PER_SAMPLE {
+                update();
+            }
         }
         let mut total_ms = Vec::with_capacity(50);
         let mut persistence_ms = Vec::with_capacity(50);
@@ -2938,17 +4460,21 @@ mod tests {
             events.lock().unwrap().clear();
             reset_task_costs();
             let started = std::time::Instant::now();
-            update();
-            total_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
-            persistence_ms.push(task_persistence_nanos() as f64 / 1_000_000.0);
+            for _ in 0..FIXTURES_PER_SAMPLE {
+                update();
+            }
+            total_ms.push(started.elapsed().as_secs_f64() * 1_000.0 / FIXTURES_PER_SAMPLE as f64);
+            persistence_ms
+                .push(task_persistence_nanos() as f64 / 1_000_000.0 / FIXTURES_PER_SAMPLE as f64);
         }
         let total = task_sample_stats(&total_ms);
         let persistence = task_sample_stats(&persistence_ms);
         eprintln!(
-            "BATCH5_PROGRESS_REFERENCE profile=release cache_mode=os_warm storage=tempdir_same_volume os={} arch={} parallelism={} samples=50 updates_per_sample=500 total_mean_ms={:.3} total_p95_ms={:.3} total_cv={:.4} persistence_mean_ms={:.3} persistence_p95_ms={:.3} persistence_share={:.4}",
+            "BATCH5_PROGRESS_REFERENCE profile=release cache_mode=os_warm storage=tempdir_same_volume os={} arch={} parallelism={} samples=50 fixtures_per_sample={} updates_per_fixture=500 total_mean_ms={:.3} total_p95_ms={:.3} total_cv={:.4} persistence_mean_ms={:.3} persistence_p95_ms={:.3} persistence_share={:.4}",
             std::env::consts::OS,
             std::env::consts::ARCH,
             std::thread::available_parallelism().map_or(0, |value| value.get()),
+            FIXTURES_PER_SAMPLE,
             total.mean,
             total.p95,
             total.cv,
@@ -2956,7 +4482,13 @@ mod tests {
             persistence.p95,
             persistence.mean / total.mean,
         );
-        assert_eq!(task_costs(), (500, 1_000));
+        assert!(task_costs().0 <= 41 * FIXTURES_PER_SAMPLE);
+        assert_eq!(task_costs().1, 1_000 * FIXTURES_PER_SAMPLE);
+        assert!(
+            total.cv < 0.15,
+            "release measurement CV was {:.4}",
+            total.cv
+        );
     }
 
     struct TaskSampleStats {

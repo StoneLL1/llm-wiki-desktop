@@ -605,8 +605,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/agent_service.rs": {
-    "mtime": 1786304646.8620715,
-    "ast_hash": "37b0eaa8278d226d73005f1f968e5966",
+    "mtime": 1786306310.4017043,
+    "ast_hash": "f14df0eac8237abd8f6f8fde570a8765",
     "semantic_hash": ""
   },
   "src-tauri/src/services/bookmark_service.rs": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786304987.467757,
-    "ast_hash": "dbf1e741cd94c56d6ca4bbe972ae7237",
+    "mtime": 1786306269.9135232,
+    "ast_hash": "71f37c81255be2df89fc916d07ce78b1",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -4220,8 +4220,8 @@
     "semantic_hash": ""
   },
   "docs/qa/workflows-remediation-batch5b-evidence.md": {
-    "mtime": 1786304986.8010228,
-    "ast_hash": "4fbe5e37f57e4e1fab1eacf14f2b331c",
+    "mtime": 1786306269.2353873,
+    "ast_hash": "18e428b6d064df7cce49dfbca87ebad5",
     "semantic_hash": ""
   }
 }

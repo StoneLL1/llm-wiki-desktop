@@ -188,6 +188,7 @@ balanced
 bang
 bar
 bare
+barrier
 base
 based
 baseline
@@ -406,6 +407,7 @@ codebase
 codes
 codex
 cohort
+cold
 collapse
 collapses
 collapsing
@@ -470,6 +472,7 @@ configured
 confine
 confined
 confirm
+confirmat
 confirmation
 confirmations
 confirmed
@@ -693,9 +696,10 @@ discovered
 discovers
 discovery
 disk
+dispa
+dispatc
 dispatch
 dispatched
-dispatches
 displace
 display
 dispose
@@ -761,6 +765,7 @@ edits
 effect
 effort
 eight
+elapsed
 element
 eligibility
 eligible
@@ -959,6 +964,7 @@ flags
 flat
 flatten
 flight
+flights
 flips
 floor
 flow
@@ -967,6 +973,7 @@ flushes
 fmt
 focus
 focusable
+focused
 fold
 folder
 folds
@@ -982,6 +989,7 @@ forbids
 force
 forceatlas
 forces
+foreign
 forged
 forgery
 forget
@@ -1137,6 +1145,7 @@ identical
 identifier
 identifiers
 identify
+identities
 identity
 idle
 ids
@@ -1155,6 +1164,7 @@ import
 importable
 imports
 improvement
+inactive
 inbound
 incident
 include
@@ -1237,6 +1247,8 @@ into
 invalid
 invalidate
 invalidates
+invalidation
+invariant
 invariants
 invent
 inventing
@@ -1340,6 +1352,7 @@ limits
 line
 linearization
 lines
+lingering
 link
 linkage
 linked
@@ -1471,6 +1484,7 @@ misbound
 misclassified
 mismatch
 mismatched
+misses
 missing
 mistaking
 mixed
@@ -1521,6 +1535,7 @@ named
 names
 namespace
 namespaced
+nanos
 narrow
 native
 nav
@@ -1568,6 +1583,7 @@ notification
 notifications
 notified
 notify
+notifying
 now
 npm
 null
@@ -1711,6 +1727,7 @@ permanently
 permission
 permissions
 permit
+permits
 persist
 persisted
 persistence
@@ -1805,6 +1822,7 @@ preserving
 preset
 presets
 pretty
+prevalidated
 prevents
 preview
 previewed
@@ -1851,6 +1869,8 @@ providers
 provisioning
 prune
 public
+publication
+publish
 published
 publishes
 purpose
@@ -1870,6 +1890,7 @@ quick
 quoted
 quotes
 race
+races
 racing
 radix
 raise
@@ -1975,6 +1996,7 @@ registering
 registers
 registration
 registry
+regression
 regular
 rehype
 reimport
@@ -2137,6 +2159,7 @@ reviewable
 reviewed
 revision
 revival
+reviving
 revocation
 revoke
 revoked
@@ -2156,6 +2179,7 @@ rolls
 root
 rooted
 roots
+rotated
 rotates
 round
 rounds
@@ -2243,6 +2267,7 @@ semantics
 semaphore
 semver
 send
+sender
 sense
 sensevoice
 sensitive
@@ -2380,6 +2405,7 @@ stat
 state
 statement
 states
+stats
 status
 statuses
 stay
@@ -2395,6 +2421,8 @@ steps
 sticky
 still
 stop
+stopped
+stopping
 stops
 storage
 store
@@ -2534,6 +2562,7 @@ timestamped
 timestamps
 timetable
 timing
+timings
 title
 titles
 tmp
@@ -2595,6 +2624,7 @@ truthy
 try
 tsconfig
 tsx
+ttl
 tunnel
 tunneled
 turn
@@ -2616,6 +2646,7 @@ unbuilt
 unc
 unchanged
 unclosed
+unconfirmable
 unconfirmed
 unconsumed
 uncontested
@@ -2727,6 +2758,7 @@ waiting
 waits
 walk
 walks
+warm
 warn
 warning
 warnings
