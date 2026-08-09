@@ -3,6 +3,8 @@ import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useWorkflowStore, workflowOperationPending } from "../../stores/workflowStore";
+import { useProjectStore } from "../../stores/projectStore";
+import { getWorkflowFileDiff } from "../../services/workflowApi";
 import type { WorkflowRun } from "../../types/workflow";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowPipeline } from "./WorkflowPipeline";
@@ -121,10 +123,14 @@ export function WorkflowTaskDetail({
             {run.pendingAction.affectedPaths.map((path) => <li key={path}><code>{path}</code></li>)}
           </ul>
           {run.decisionReview?.fileDiffs.map((file) => (
-            <details key={`${file.path}:${file.diff.length}`} className="workflow-file-diff">
-              <summary><code>{file.path}</code></summary>
-              <pre className="terminal mt-2 overflow-auto whitespace-pre-wrap p-3 text-[11px]">{file.diff}</pre>
-            </details>
+            <LazyWorkflowFileDiff
+              diff={file.diff}
+              fileId={file.fileId ?? null}
+              key={file.fileId ?? `${file.path}:${file.diffBytes ?? file.diff?.length ?? 0}`}
+              path={file.path}
+              pendingActionId={run.pendingAction!.id}
+              run={run}
+            />
           ))}
           <div className="workflow-actions">
             <button className="btn btn--primary" disabled={taskMutationPending} onClick={() => void controller.confirm(run.taskId, run.pendingAction!.id)} type="button">
@@ -203,6 +209,56 @@ export function WorkflowTaskDetail({
       </div>
     </div>
   );
+}
+
+function LazyWorkflowFileDiff({ path, diff, fileId, pendingActionId, run }: {
+  path: string;
+  diff: string | null;
+  fileId: string | null;
+  pendingActionId: string;
+  run: WorkflowRun;
+}) {
+  const { t } = useTranslation();
+  const projectRootPath = useProjectStore((state) => state.currentProject.rootPath);
+  const [open, setOpen] = useState(false);
+  const [content, setContent] = useState<string | null>(diff);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const loadChunk = async (cursor: number | null) => {
+    if (!fileId || loading) return;
+    setLoading(true);
+    setError(false);
+    try {
+      const page = await getWorkflowFileDiff({
+        projectId: run.projectId,
+        projectRootPath,
+        taskId: run.taskId,
+        pendingActionId,
+        fileId,
+        cursor,
+        limitBytes: 64 * 1024,
+      });
+      setContent((current) => cursor === null ? page.diff : `${current ?? ""}${page.diff}`);
+      setNextCursor(page.nextCursor);
+    } catch {
+      setError(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const toggle = () => {
+    const nextOpen = !open;
+    setOpen(nextOpen);
+    if (nextOpen && content === null && fileId) void loadChunk(null);
+  };
+  return <details className="workflow-file-diff" open={open}>
+    <summary onClick={(event) => { event.preventDefault(); toggle(); }}><code>{path}</code></summary>
+    {open && content !== null ? <pre className="terminal mt-2 overflow-auto whitespace-pre-wrap p-3 text-[11px]">{content}</pre> : null}
+    {open && loading ? <p className="workflow-muted" role="status">{t("workflows.diff.loading")}</p> : null}
+    {open && error ? <button className="btn btn--secondary btn--sm" onClick={() => void loadChunk(nextCursor)} type="button">{t("workflows.action.retry")}</button> : null}
+    {open && nextCursor !== null && !loading && !error ? <button className="btn btn--ghost btn--sm" onClick={() => void loadChunk(nextCursor)} type="button">{t("workflows.diff.loadMore")}</button> : null}
+  </details>;
 }
 
 function recommendedWorkflowOperationPending(

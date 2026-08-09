@@ -615,6 +615,7 @@ pub fn run() {
             commands::workflow_commands::start_workflow,
             commands::workflow_commands::list_workflow_runs,
             commands::workflow_commands::get_workflow_run,
+            commands::workflow_commands::get_workflow_file_diff,
             commands::workflow_commands::cancel_workflow_run,
             commands::workflow_commands::undo_cancel_queued_workflow,
             commands::workflow_commands::reorder_queued_workflow,

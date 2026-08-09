@@ -50,13 +50,16 @@ pub use runners::health_check::{
     run_health_check, run_health_check_authorized, run_health_check_with_deep,
     HealthCheckExecutionServices, HealthCheckRunner,
 };
-#[cfg(feature = "gui")]
-pub(crate) use runners::update_wiki::update_wiki_decision_review_for_workflow;
 pub use runners::update_wiki::{
     confirm_update_wiki_review, discard_update_wiki_candidate, persist_update_wiki_review,
     restore_update_wiki_confirmation, run_update_wiki, run_update_wiki_authorized,
     update_wiki_candidate_is_valid, update_wiki_decision_review, UpdateWikiConfirmationFailure,
     UpdateWikiExecutionServices, UpdateWikiRunner,
+};
+#[cfg(feature = "gui")]
+pub(crate) use runners::update_wiki::{
+    update_wiki_decision_review_for_workflow, update_wiki_decision_review_summary_for_workflow,
+    update_wiki_file_diff_for_workflow,
 };
 pub use stage_sink::WorkflowStageSink;
 

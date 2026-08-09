@@ -52,14 +52,16 @@ export function attentionRun(runs: WorkflowRun[]): WorkflowRun | null {
   );
 }
 
-export function groupWorkflowAttempts(runs: WorkflowRun[]): Array<{
+export function groupWorkflowAttempts<T extends Pick<WorkflowRun, "taskId" | "retry">>(runs: T[]): Array<{
   key: string;
-  runs: WorkflowRun[];
+  runs: T[];
 }> {
-  const groups = new Map<string, WorkflowRun[]>();
+  const groups = new Map<string, T[]>();
   for (const run of runs) {
     const key = run.retry?.attemptOf ?? run.taskId;
-    groups.set(key, [...(groups.get(key) ?? []), run]);
+    const attempts = groups.get(key);
+    if (attempts) attempts.push(run);
+    else groups.set(key, [run]);
   }
   return [...groups.entries()].map(([key, attempts]) => ({
     key,

@@ -9,6 +9,9 @@ import type {
   WorkflowPreparation,
   WorkflowProjectRequest,
   WorkflowRun,
+  WorkflowFileDiffPage,
+  WorkflowFileDiffRequest,
+  WorkflowRunHistoryPage,
   WorkflowRunPage,
   WorkflowRunRequest,
   WorkflowStartOutcome,
@@ -35,14 +38,20 @@ export function startWorkflow(
 
 export function listWorkflowRuns(
   request: ListWorkflowRunsRequest,
-): Promise<WorkflowRunPage> {
-  return invoke<WorkflowRunPage>("list_workflow_runs", { request });
+): Promise<WorkflowRunHistoryPage> {
+  return invoke<WorkflowRunHistoryPage>("list_workflow_runs", { request });
 }
 
 export function getWorkflowRun(
   request: WorkflowRunRequest,
 ): Promise<WorkflowRun> {
   return invoke<WorkflowRun>("get_workflow_run", { request });
+}
+
+export function getWorkflowFileDiff(
+  request: WorkflowFileDiffRequest,
+): Promise<WorkflowFileDiffPage> {
+  return invoke<WorkflowFileDiffPage>("get_workflow_file_diff", { request });
 }
 
 export function cancelWorkflowRun(

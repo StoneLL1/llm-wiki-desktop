@@ -11,7 +11,7 @@ fn workflow_schema_version() -> u32 {
     WORKFLOW_SCHEMA_VERSION
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowKind {
     UpdateWiki,
@@ -19,7 +19,7 @@ pub enum WorkflowKind {
     GenerateContent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowDisplayStatus {
     Queued,
@@ -232,8 +232,12 @@ pub struct WorkflowDecisionCounts {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowFileDiff {
+    #[serde(default)]
+    pub file_id: String,
     pub path: String,
-    pub diff: String,
+    #[serde(default)]
+    pub diff_bytes: usize,
+    pub diff: Option<String>,
 }
 
 /// Read-only review data hydrated from the backend-owned confirmation
@@ -513,6 +517,8 @@ pub struct WorkflowsOverview {
     pub schema_version: u32,
     pub project_access: Option<WorkflowProjectAccessSummary>,
     pub rows: Vec<WorkflowOverviewRow>,
+    #[serde(default)]
+    pub recent_runs: Vec<WorkflowRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -527,6 +533,48 @@ pub enum WorkflowStartOutcome {
 pub struct WorkflowRunPage {
     pub runs: Vec<WorkflowRun>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunHistoryPage {
+    pub runs: Vec<WorkflowRunSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunSummary {
+    #[serde(default = "workflow_schema_version")]
+    pub schema_version: u32,
+    pub task_id: String,
+    pub project_id: String,
+    pub canonical_identity_key: String,
+    pub identity_revision: String,
+    pub kind: WorkflowKind,
+    pub display_status: WorkflowDisplayStatus,
+    pub retry: Option<WorkflowRetryLink>,
+    pub started_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+impl From<&WorkflowRun> for WorkflowRunSummary {
+    fn from(run: &WorkflowRun) -> Self {
+        Self {
+            schema_version: run.schema_version,
+            task_id: run.task_id.clone(),
+            project_id: run.project_id.clone(),
+            canonical_identity_key: run.canonical_identity_key.clone(),
+            identity_revision: run.identity_revision.clone(),
+            kind: run.kind.clone(),
+            display_status: run.display_status.clone(),
+            retry: run.retry.clone(),
+            started_at: run.started_at.clone(),
+            updated_at: run.updated_at.clone(),
+            completed_at: run.completed_at.clone(),
+        }
+    }
 }
 
 /// Private persisted execution state attached to one generic task snapshot.

@@ -259,7 +259,12 @@ export interface WorkflowDecisionReview {
     deleted: number;
   };
   userEditsDetected: boolean;
-  fileDiffs: Array<{ path: string; diff: string }>;
+  fileDiffs: Array<{
+    fileId?: string;
+    path: string;
+    diffBytes?: number;
+    diff: string | null;
+  }>;
 }
 
 export interface WorkflowRun {
@@ -315,14 +320,34 @@ export interface WorkflowsOverview {
   schemaVersion: number;
   projectAccess: WorkflowProjectAccessSummary | null;
   rows: WorkflowOverviewRow[];
+  recentRuns?: WorkflowRun[];
 }
 
 export type WorkflowStartOutcome =
   | { kind: "created"; run: WorkflowRun }
   | { kind: "existing"; run: WorkflowRun };
 
+export interface WorkflowRunSummary {
+  schemaVersion: number;
+  taskId: string;
+  projectId: string;
+  canonicalIdentityKey: string;
+  identityRevision: string;
+  kind: WorkflowKind;
+  displayStatus: WorkflowDisplayStatus;
+  retry: WorkflowRetryLink | null;
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
 export interface WorkflowRunPage {
   runs: WorkflowRun[];
+  nextCursor: string | null;
+}
+
+export interface WorkflowRunHistoryPage {
+  runs: WorkflowRunSummary[];
   nextCursor: string | null;
 }
 
@@ -353,6 +378,21 @@ export interface ListWorkflowRunsRequest extends WorkflowProjectRequest {
 
 export interface WorkflowRunRequest extends WorkflowProjectRequest {
   taskId: string;
+}
+
+export interface WorkflowFileDiffRequest extends WorkflowRunRequest {
+  pendingActionId: string;
+  fileId: string;
+  cursor: number | null;
+  limitBytes: number;
+}
+
+export interface WorkflowFileDiffPage {
+  fileId: string;
+  path: string;
+  diff: string;
+  nextCursor: number | null;
+  truncated: boolean;
 }
 
 export interface ReorderQueuedWorkflowRequest extends WorkflowRunRequest {

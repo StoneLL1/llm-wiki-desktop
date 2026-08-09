@@ -435,8 +435,8 @@
     "semantic_hash": "6dd7f2d0ca84a20dc98ee88313a40521"
   },
   "src-tauri/src/commands/workflow_commands.rs": {
-    "mtime": 1786266221.7584736,
-    "ast_hash": "0b4e1fff43a6277ec8e0addba6e69c2a",
+    "mtime": 1786316536.2299237,
+    "ast_hash": "9af930a3d089a161393ba5538eb5b616",
     "semantic_hash": ""
   },
   "src-tauri/src/errors/backend_error.rs": {
@@ -455,8 +455,8 @@
     "semantic_hash": "c5b82eec24ef23273365fc0f223a4eb1"
   },
   "src-tauri/src/lib.rs": {
-    "mtime": 1786266505.2283795,
-    "ast_hash": "4ff019afac08a350367eed9a80e0a234",
+    "mtime": 1786313195.083941,
+    "ast_hash": "d72ec3ce891effb177191afccff6d67b",
     "semantic_hash": ""
   },
   "src-tauri/src/main.rs": {
@@ -600,8 +600,8 @@
     "semantic_hash": "4acedcecf72de8052924f49e6e17b6aa"
   },
   "src-tauri/src/models/workflow.rs": {
-    "mtime": 1786257214.1751852,
-    "ast_hash": "9703c6fecb44f48a1e895492c4bd4a92",
+    "mtime": 1786313134.9883065,
+    "ast_hash": "7080d46261fb444643269f5b91a4fef8",
     "semantic_hash": ""
   },
   "src-tauri/src/services/agent_service.rs": {
@@ -1015,8 +1015,8 @@
     "semantic_hash": "b2c0381a474da0a015eaf47b5a1046b7"
   },
   "src-tauri/src/services/mod.rs": {
-    "mtime": 1786303837.2432418,
-    "ast_hash": "668133fd94dd4a7485c370ceb5be10c3",
+    "mtime": 1786315105.541783,
+    "ast_hash": "23c90d69cde3bb3d7535460555fc9b1f",
     "semantic_hash": ""
   },
   "src-tauri/src/services/project_service.rs": {
@@ -1095,13 +1095,13 @@
     "semantic_hash": "17b05965b41b1ef2b99d52ed7d420930"
   },
   "src-tauri/src/services/workflow_service/mod.rs": {
-    "mtime": 1786299108.9928424,
-    "ast_hash": "9dcff434901c30a80eb986d288248a04",
+    "mtime": 1786315073.4564266,
+    "ast_hash": "4bcbdb84ad5c971584f60ee8f3f13d24",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/overview.rs": {
-    "mtime": 1786299170.8190413,
-    "ast_hash": "16d6dd7544d1263e7e9326ce767dddd7",
+    "mtime": 1786313478.7080326,
+    "ast_hash": "f9970fa221cc16f228f1ce1ae76a88df",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/persistence.rs": {
@@ -1135,8 +1135,8 @@
     "semantic_hash": "4a7207e939bf8fcf12cbf03597d9dcc6"
   },
   "src-tauri/src/services/workflow_service/runners/update_wiki.rs": {
-    "mtime": 1786266505.9331963,
-    "ast_hash": "b6ba8b7c5ba167b449465109e4298fe5",
+    "mtime": 1786315279.0235813,
+    "ast_hash": "e2a47ec232772e7da7edaa72ca79adf8",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/stage_sink.rs": {
@@ -1170,8 +1170,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/tasks/task_service.rs": {
-    "mtime": 1786310218.3654177,
-    "ast_hash": "d1c149327dc2c00c31d7f513916187f9",
+    "mtime": 1786315261.2920654,
+    "ast_hash": "9d4f5c4770ec83da7d408c69f76707fd",
     "semantic_hash": ""
   },
   "src-tauri/src/utils/i18n.rs": {
@@ -1350,13 +1350,13 @@
     "semantic_hash": ""
   },
   "src/components/app/WorkspaceRouter.lazy-error.test.tsx": {
-    "mtime": 1785606331.70078,
-    "ast_hash": "75e0483e5ec181c7b6f3d2a17c0ecb9f",
-    "semantic_hash": "75e0483e5ec181c7b6f3d2a17c0ecb9f"
+    "mtime": 1786314086.0411818,
+    "ast_hash": "a29989476656f681f01e34068c4b5c44",
+    "semantic_hash": ""
   },
   "src/components/app/WorkspaceRouter.test.tsx": {
-    "mtime": 1785923024.6722424,
-    "ast_hash": "41162d80a3b6925b7a7e3745e97e355e",
+    "mtime": 1786314086.6218448,
+    "ast_hash": "626a31af7b3e8220e2b919b999670df7",
     "semantic_hash": ""
   },
   "src/components/app/WorkspaceRouter.tsx": {
@@ -2205,8 +2205,8 @@
     "semantic_hash": "f282a5b37480d338d825c5d520d54fb0"
   },
   "src/features/workflows/WorkflowHistoryView.tsx": {
-    "mtime": 1786289884.0350404,
-    "ast_hash": "c1143b1bffc62ebd377a8db622a85d44",
+    "mtime": 1786312875.9665482,
+    "ast_hash": "ae3c847162bdea381d3c2fd68e930550",
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowPipeline.tsx": {
@@ -2215,8 +2215,8 @@
     "semantic_hash": "54e993bcdaf437ccf1877fc8d8be6ea2"
   },
   "src/features/workflows/WorkflowPreparationView.tsx": {
-    "mtime": 1786289489.1401753,
-    "ast_hash": "b235ef1580fb595f74d497b7a99ead67",
+    "mtime": 1786314950.3560667,
+    "ast_hash": "8c9ef7d47fe6cb582e19e16e92337424",
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowRow.tsx": {
@@ -2225,8 +2225,8 @@
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowTaskDetail.tsx": {
-    "mtime": 1786289858.292484,
-    "ast_hash": "062a405b91a7a5ded64e3c82d52e70cf",
+    "mtime": 1786313232.2945416,
+    "ast_hash": "fd90d7afe29f82e76180e74bfc8d0db3",
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowsOverview.tsx": {
@@ -2240,28 +2240,28 @@
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowsView.tsx": {
-    "mtime": 1786290960.956335,
-    "ast_hash": "aa55896b622536a600c7763da52cdec8",
+    "mtime": 1786312610.0684536,
+    "ast_hash": "c00a5b903ffe12d4e7f1a13d5862da3c",
     "semantic_hash": ""
   },
   "src/features/workflows/useWorkflowsController.test.tsx": {
-    "mtime": 1786295915.1335208,
-    "ast_hash": "6285eadcbbd9981eea8182469f69362a",
+    "mtime": 1786315620.2711635,
+    "ast_hash": "d27a5471a1aaf3a25d467573bf06de25",
     "semantic_hash": ""
   },
   "src/features/workflows/useWorkflowsController.ts": {
-    "mtime": 1786294674.0668132,
-    "ast_hash": "4736dd1ebaec4a477bea880dac88561a",
+    "mtime": 1786315667.1335218,
+    "ast_hash": "d571edafddaaed6dab5729b69c58cc5c",
     "semantic_hash": ""
   },
   "src/features/workflows/workflowPresentation.ts": {
-    "mtime": 1785596917.4622755,
-    "ast_hash": "4b5c6004d1e9b0b582db9f538db845f8",
-    "semantic_hash": "4b5c6004d1e9b0b582db9f538db845f8"
+    "mtime": 1786312875.409555,
+    "ast_hash": "a0aff7e8bff6b4d637bb72e45a48b3c7",
+    "semantic_hash": ""
   },
   "src/features/workflows/workflows.test.tsx": {
-    "mtime": 1786290961.6367593,
-    "ast_hash": "445d54e140c67c78dd22158387b56e4d",
+    "mtime": 1786313817.875659,
+    "ast_hash": "3fa74909c293641f12e74ffc66c76ac8",
     "semantic_hash": ""
   },
   "src/hooks/useAiCapabilities.test.tsx": {
@@ -2330,13 +2330,13 @@
     "semantic_hash": "3926d75255129ed0beb4d4a682469899"
   },
   "src/i18n/locales/en.json": {
-    "mtime": 1786293717.0343344,
-    "ast_hash": "ddf6d53f0490353ec72492c8a58f7d73",
+    "mtime": 1786314964.6203876,
+    "ast_hash": "00af36bbcb4ab98ad86f4fb8b1521615",
     "semantic_hash": ""
   },
   "src/i18n/locales/zh-CN.json": {
-    "mtime": 1786293717.6229038,
-    "ast_hash": "bc6567f3819719ff0a018ef51a918d0a",
+    "mtime": 1786314965.163173,
+    "ast_hash": "286d3ce56b69d48d52d1c729f5c7ae18",
     "semantic_hash": ""
   },
   "src/lib/cn.ts": {
@@ -2435,14 +2435,14 @@
     "semantic_hash": ""
   },
   "src/services/workflowApi.test.ts": {
-    "mtime": 1785738476.3876536,
-    "ast_hash": "5ff033585aa3a2cb0ebd8910a5da8c00",
-    "semantic_hash": "5ff033585aa3a2cb0ebd8910a5da8c00"
+    "mtime": 1786313241.642135,
+    "ast_hash": "f4661bdb1e0c0942dc71ef8bb517165b",
+    "semantic_hash": ""
   },
   "src/services/workflowApi.ts": {
-    "mtime": 1785547405.6755252,
-    "ast_hash": "aaec70aa0ffa3bff335cb0f5f0755ffb",
-    "semantic_hash": "aaec70aa0ffa3bff335cb0f5f0755ffb"
+    "mtime": 1786313231.7419648,
+    "ast_hash": "5efc8b0faa0094d790573a99c5f62723",
+    "semantic_hash": ""
   },
   "src/services/workflowNavigation.test.ts": {
     "mtime": 1786289651.8789153,
@@ -2560,8 +2560,8 @@
     "semantic_hash": ""
   },
   "src/stores/workflowStore.ts": {
-    "mtime": 1786293659.574777,
-    "ast_hash": "f16e83f5966285fc92290211806fdb36",
+    "mtime": 1786315008.5132978,
+    "ast_hash": "b168b852045b4e3f1372a1e50a9ec6f2",
     "semantic_hash": ""
   },
   "src/test/app-shell-architecture.test.ts": {
@@ -2595,8 +2595,8 @@
     "semantic_hash": "0dc60e08a5f11bb4a0b2781dd2973ab8"
   },
   "src/test/workflows-architecture.test.ts": {
-    "mtime": 1786088254.7834144,
-    "ast_hash": "97059065dd8bf34549883f56cd9cc310",
+    "mtime": 1786313409.8295453,
+    "ast_hash": "770773a68acef4ece3bd44249a8a7df1",
     "semantic_hash": ""
   },
   "src/types/agent.ts": {
@@ -2740,9 +2740,9 @@
     "semantic_hash": "35b1ca4a0c6160aaf0ae7dc454e97596"
   },
   "src/types/workflow.ts": {
-    "mtime": 1785676518.4903803,
-    "ast_hash": "9dc3c56be0028a97acf932f85e96978f",
-    "semantic_hash": "9dc3c56be0028a97acf932f85e96978f"
+    "mtime": 1786313231.1773496,
+    "ast_hash": "08dcc20cd6747b0f14d98a6729d0b995",
+    "semantic_hash": ""
   },
   "src/vite-env.d.ts": {
     "mtime": 1783574168.508384,
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786306440.8533955,
-    "ast_hash": "d50bb4307977485b79915ba712affc44",
+    "mtime": 1786317100.008292,
+    "ast_hash": "5d395e7dd984cc2e93a088ddebd1fca0",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -4100,8 +4100,8 @@
     "semantic_hash": ""
   },
   "src/features/workflows/workflowBaselineFixtures.test.tsx": {
-    "mtime": 1786251722.5946283,
-    "ast_hash": "21fe5a31407a3b5fedb56e3d868a9467",
+    "mtime": 1786314804.7943113,
+    "ast_hash": "945fa6306f99adeee25c9e1aea14349b",
     "semantic_hash": ""
   },
   "src/features/workflows/workflowBaselineFixtures.ts": {
@@ -4225,8 +4225,8 @@
     "semantic_hash": ""
   },
   "docs/qa/workflows-remediation-batch5c-evidence.md": {
-    "mtime": 1786310561.6566446,
-    "ast_hash": "42ab96f029f526d45fcf9d55d7bb3385",
+    "mtime": 1786311449.75024,
+    "ast_hash": "7fb04cc482db15919c9c36345ae77e17",
     "semantic_hash": ""
   },
   "graphify-out/memory/query_20260809_211103_batch_5c_\u4e2d_workflow_progress_persistence_\u4e0e_barrier.md": {
